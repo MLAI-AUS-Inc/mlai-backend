@@ -316,6 +316,7 @@ jobs:
           tests.test_health_check \
           tests.test_content_factory_org_config \
           content_factory.tests_website_connections content_factory.tests_website_articles_reliability_database \
+          integrations.tests_github_workflow_permissions \
           content_factory.tests_activation_connections \
           content_factory.tests_website_portable \
           content_factory.tests_website_portable_wire \

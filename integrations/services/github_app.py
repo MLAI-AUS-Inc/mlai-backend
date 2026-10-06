@@ -16,6 +16,21 @@ class GitHubAppTokenError(Exception):
     """Raised when an installation token cannot be minted."""
 
 
+class GitHubWorkflowPermissionRequired(GitHubAppTokenError):
+    """The App or installation has not approved editing workflow files."""
+
+
+class GitHubPermissionLookupUnavailable(GitHubAppTokenError):
+    """Provider permission evidence is temporarily unavailable."""
+
+
+WORKFLOW_PERMISSION_DETAIL = (
+    "The GitHub App owner must review and enable Workflows: Read and write, "
+    "then the repository owner must approve the installation permission update. "
+    "No permissions have been changed automatically."
+)
+
+
 @dataclass(frozen=True)
 class GitHubInstallationToken:
     token: str
@@ -24,6 +39,7 @@ class GitHubInstallationToken:
     repository: str
     permissions: dict[str, str] = field(default_factory=dict)
     token_source: str = "github_app_installation"
+    permission_profile: str = "repository"
 
     def as_content_factory_payload(self, *, domain: str = "") -> dict:
         payload = {
@@ -33,6 +49,7 @@ class GitHubInstallationToken:
             "installation_id": self.installation_id,
             "token_source": self.token_source,
             "source": self.token_source,
+            "permission_profile": self.permission_profile,
         }
         if self.permissions:
             payload["github_permissions"] = dict(self.permissions)
@@ -71,8 +88,10 @@ def _github_app_jwt() -> str:
     return encoded.decode("utf-8") if isinstance(encoded, bytes) else str(encoded)
 
 
-def _cache_key(*, installation_id: str, repository: str, permission_mode: str) -> str:
-    return f"github_app_installation_token:{installation_id}:{repository.lower()}:{permission_mode}"
+def _cache_key(*, installation_id: str, repository: str, permission_mode: str,
+               permission_profile: str = "repository") -> str:
+    key = f"github_app_installation_token:{installation_id}:{repository.lower()}:{permission_mode}"
+    return f"{key}:workflow_files" if permission_profile == "workflow_files" else key
 
 
 def _parse_expires_at(value) -> Optional[datetime]:
@@ -103,6 +122,60 @@ def _normalize_permissions(value) -> dict[str, str]:
     return permissions
 
 
+def _temporary_permission_failure(response) -> bool:
+    headers = getattr(response, "headers", {}) or {}
+    return (response.status_code == 429 or response.status_code >= 500
+            or (response.status_code == 403 and
+                (headers.get("Retry-After") or headers.get("X-RateLimit-Remaining") == "0")))
+
+
+def _workflow_grant_permissions(payload) -> dict[str, str]:
+    if not isinstance(payload, dict) or not isinstance(payload.get("permissions"), dict):
+        raise GitHubPermissionLookupUnavailable("GitHub permission evidence is temporarily unavailable.")
+    permissions = _normalize_permissions(payload["permissions"])
+    if payload.get("suspended_at"):
+        raise GitHubAppTokenError("The selected GitHub installation is suspended.")
+    if any(permissions.get(key) != "write" for key in ("contents", "pull_requests")):
+        raise GitHubAppTokenError("The selected GitHub installation lacks repository write permissions.")
+    if permissions.get("workflows") != "write":
+        raise GitHubWorkflowPermissionRequired(WORKFLOW_PERMISSION_DETAIL)
+    return permissions
+
+
+def _credential_permissions_match(permissions, *, mode, profile) -> bool:
+    required = {"contents": mode, "pull_requests": mode}
+    if profile == "workflow_files":
+        required["workflows"] = "write"
+    return (all(permissions.get(key) == value for key, value in required.items())
+            and all(key in required or (key == "metadata" and value == "read")
+                    for key, value in permissions.items()))
+
+
+def require_installation_workflow_permissions(installation_id: str) -> dict[str, str]:
+    """Read approved App and installation grants without minting credentials."""
+    identifier = str(installation_id or "")
+    if not identifier.isdigit():
+        raise GitHubAppTokenError("The selected GitHub installation identity is invalid.")
+    headers = {"Authorization": f"Bearer {_github_app_jwt()}",
+               "Accept": "application/vnd.github+json", "X-GitHub-Api-Version": "2022-11-28"}
+    installation_permissions = {}
+    for kind, url in (("app", "https://api.github.com/app"),
+                      ("installation", f"https://api.github.com/app/installations/{identifier}")):
+        response = http_requests.get(url, headers=headers, timeout=(3, 20))
+        if _temporary_permission_failure(response):
+            raise GitHubPermissionLookupUnavailable("GitHub permission evidence is temporarily unavailable.")
+        if response.status_code != 200:
+            raise GitHubAppTokenError("The selected GitHub installation could not be verified.")
+        try:
+            payload = response.json()
+        except (TypeError, ValueError) as exc:
+            raise GitHubPermissionLookupUnavailable("GitHub permission evidence is temporarily unavailable.") from exc
+        permissions = _workflow_grant_permissions(payload)
+        if kind == "installation":
+            installation_permissions = permissions
+    return installation_permissions
+
+
 def create_installation_access_token(
     *,
     installation_id: str,
@@ -110,6 +183,7 @@ def create_installation_access_token(
     permission_mode: str = "write",
     use_cache: bool = True,
     repository_id: Optional[int] = None,
+    permission_profile: str = "repository",
 ) -> GitHubInstallationToken:
     """Mint a repository token, preferring immutable identity when supplied."""
     normalized_installation_id = str(installation_id or "").strip()
@@ -119,19 +193,30 @@ def create_installation_access_token(
     if not normalized_repository or "/" not in normalized_repository:
         raise GitHubAppTokenError("GitHub repository must be owner/repo.")
 
+    if not isinstance(permission_profile, str) or permission_profile not in {"repository", "workflow_files"}:
+        raise GitHubAppTokenError("Unknown repository permission profile.")
+    if permission_profile == "workflow_files" and (permission_mode != "write" or repository_id is None):
+        raise GitHubAppTokenError("Workflow credentials require an immutable repository and explicit write mode.")
     mode = "read" if str(permission_mode or "").strip().lower() == "read" else "write"
-    key = _cache_key(installation_id=normalized_installation_id, repository=normalized_repository, permission_mode=mode)
+    key = _cache_key(installation_id=normalized_installation_id, repository=normalized_repository,
+                     permission_mode=mode, permission_profile=permission_profile)
     if repository_id is not None:
         if isinstance(repository_id, bool) or not isinstance(repository_id, int) or repository_id < 1:
             raise GitHubAppTokenError("GitHub repository identity must be a positive integer.")
         key = f"{key}:repository-id:{repository_id}"
+    if permission_profile == "workflow_files":
+        require_installation_workflow_permissions(normalized_installation_id)
     if use_cache:
         cached = cache.get(key)
         if isinstance(cached, dict) and cached.get("github_token"):
             permissions = _normalize_permissions(cached.get("github_permissions") or cached.get("permissions"))
             if not permissions:
                 permissions = _normalize_permissions(cached.get("granted_permissions"))
-            if not permissions:
+            if (cached.get("permission_profile", "repository") != permission_profile
+                    or not _credential_permissions_match(permissions, mode=mode, profile=permission_profile)
+                    or cached.get("installation_id", normalized_installation_id) != normalized_installation_id
+                    or str(cached.get("github_repo", normalized_repository)).casefold() != normalized_repository.casefold()
+                    or cached.get("token_source", "github_app_installation") != "github_app_installation"):
                 cached = None
         if isinstance(cached, dict) and cached.get("github_token"):
             expires_at = _parse_expires_at(cached.get("expires_at"))
@@ -141,6 +226,7 @@ def create_installation_access_token(
                 installation_id=normalized_installation_id,
                 repository=normalized_repository,
                 permissions=permissions,
+                permission_profile=permission_profile,
             )
 
     _owner, repo_name = normalized_repository.split("/", 1)
@@ -154,6 +240,8 @@ def create_installation_access_token(
     if repository_id is not None:
         body.pop("repositories")
         body["repository_ids"] = [repository_id]
+    if permission_profile == "workflow_files":
+        body["permissions"]["workflows"] = "write"
     response = http_requests.post(
         f"https://api.github.com/app/installations/{normalized_installation_id}/access_tokens",
         headers={
@@ -165,6 +253,14 @@ def create_installation_access_token(
         timeout=(3, 20),
     )
     if response.status_code not in {200, 201}:
+        if permission_profile == "workflow_files":
+            if _temporary_permission_failure(response):
+                raise GitHubPermissionLookupUnavailable("GitHub permission evidence is temporarily unavailable.")
+            # A 403 alone cannot prove a missing workflow grant. Re-read the
+            # grants to distinguish a raced approval from repository access.
+            if response.status_code == 403:
+                require_installation_workflow_permissions(normalized_installation_id)
+            raise GitHubAppTokenError("The selected GitHub repository credential could not be issued.")
         try:
             error_payload = response.json()
         except (TypeError, ValueError):
@@ -181,17 +277,34 @@ def create_installation_access_token(
             f"Could not mint GitHub App installation token for {normalized_repository}: "
             f"GitHub returned {response.status_code}.{github_detail}{permission_hint}"
         )
-    payload = response.json()
+    try:
+        payload = response.json()
+    except (TypeError, ValueError) as exc:
+        raise GitHubAppTokenError("GitHub returned an invalid installation credential.") from exc
+    if not isinstance(payload, dict):
+        raise GitHubAppTokenError("GitHub returned an invalid installation credential.")
     token = str(payload.get("token") or "").strip()
     if not token:
         raise GitHubAppTokenError("GitHub App installation token response did not include a token.")
     expires_at = _parse_expires_at(payload.get("expires_at"))
+    permissions = _normalize_permissions(payload.get("permissions"))
+    if permission_profile == "workflow_files" and not _credential_permissions_match(permissions, mode=mode, profile=permission_profile):
+        # A narrowed or raced provider grant must never escape as a usable token.
+        try:
+            http_requests.delete("https://api.github.com/installation/token",
+                                 headers={"Authorization": f"Bearer {token}"}, timeout=(3, 10))
+        except Exception:
+            pass
+        if permissions.get("workflows") != "write" and all(permissions.get(key) == "write" for key in ("contents", "pull_requests")):
+            raise GitHubWorkflowPermissionRequired(WORKFLOW_PERMISSION_DETAIL)
+        raise GitHubAppTokenError("GitHub returned a credential outside the approved repository permission profile.")
     result = GitHubInstallationToken(
         token=token,
         expires_at=expires_at,
         installation_id=normalized_installation_id,
         repository=normalized_repository,
-        permissions=_normalize_permissions(payload.get("permissions")),
+        permissions=permissions,
+        permission_profile=permission_profile,
     )
     if use_cache:
         cache.set(key, result.as_content_factory_payload(), timeout=_token_ttl_seconds(expires_at))

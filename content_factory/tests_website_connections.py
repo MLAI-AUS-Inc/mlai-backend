@@ -780,6 +780,8 @@ class WebsiteCleanupExecutionTests(WebsiteDatabaseFixture, TestCase):
         request.side_effect = [response({'tree': {'sha': 'base-tree'}}), response({'sha': 'cleanup-tree'}), response({'sha': 'b' * 40}), response({'ref': 'created'}), response({'html_url': 'https://github.com/example/site/pull/12'})]
         result = approve_cleanup_proposal(self.config, user=SimpleNamespace(pk=17), data={**self.binding, 'operation_id': str(op.pk), 'source_sha': SHA, 'proposal_digest': 'digest'})
         self.assertEqual(result.state, 'awaiting_merge')
+        self.assertEqual(result.payload['approved_cleanup'], {'source_sha': SHA, 'proposal_digest': 'digest',
+            'deletions': ['integration/support.md'], 'approved_by_user_id': '17'})
         self.assertFalse(result.receipt['default_branch_modified'])
         self.assertEqual(result.receipt['pr_url'], 'https://github.com/example/site/pull/12')
         self.assertEqual(request.call_count, 5)

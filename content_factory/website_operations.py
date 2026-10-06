@@ -78,7 +78,7 @@ def validate_operation(connection, payload, *, worker_cleanup=False, restoration
             raise WebsiteAuthorityError("restoration_scope_mismatch", "Restoration is limited to the owned integration manifest.")
         if payload.get("action") == "restoration":
             approved = op.payload.get("approved_restoration") or {}
-            if not approved or payload.get("plan_digest") != approved.get("plan_digest") or payload.get("expected_base_sha") != approved.get("expected_base_sha"):
+            if not isinstance(approved, dict) or not approved or payload.get("plan_digest") != approved.get("plan_digest") or payload.get("expected_base_sha") != approved.get("expected_base_sha"):
                 raise WebsiteAuthorityError("restoration_approval_required", "Review and approve this exact inverse patch first.")
     elif op.generation != connection.generation:
         raise WebsiteAuthorityError("website_operation_changed", "The operation belongs to a previous connection generation.")
