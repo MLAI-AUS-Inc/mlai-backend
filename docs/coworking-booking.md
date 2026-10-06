@@ -1,5 +1,27 @@
 # Roo coworking booking contract
 
+## Coworking report access from a shared chat
+
+`GET /api/v1/points/coworking/report/` retains existing active admin/partner
+access. It also allows ordinary members requesting inside one configured Slack
+chat. Set `COWORKING_REPORT_SLACK_TEAM_ID` and
+`COWORKING_REPORT_SLACK_CHANNEL_ID` to the same exact workspace/channel pair
+on the backend and Public Roo; empty or malformed configuration disables this
+additional permission. DMs are excluded.
+
+For this additional grant, Roo sends `slack_user_id`, `slack_team_id` and
+`slack_channel_id` from its verified Slack event context, alongside the existing
+`start_date` and `end_date`. The backend trusts this scope only under the strict
+`ROO_API_KEY` credential, rejecting the internal and website credentials for the
+channel grant. The standard report permission remains unchanged for callers
+with existing admin/partner roles. Do not derive the channel from a prompt or
+create partner records for this feature: it grants reports/charts only.
+
+Roll out the backend first, then configure/release Roo. Removing either value
+revokes chat access without changing existing roles. No migration is required.
+Permission tests run with `scripts/test_without_database.py
+roo.tests_coworking_report_access` and block database/network access.
+
 The backend owns coworking capacity, pricing, points charging, and booking
 idempotency. Roo calls `POST /api/v1/points/coworking/book/` with the Slack
 member ID and requested date.

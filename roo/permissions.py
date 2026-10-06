@@ -4,6 +4,7 @@ Provides authorization checks for points system operations.
 """
 from typing import Optional
 from functools import wraps
+import re
 from django.conf import settings
 from .models import PointsAdmin
 
@@ -94,6 +95,25 @@ def can_generate_coworking_reports(slack_id: str) -> bool:
         return True
 
     return _active_admin_with_role_exists(slack_id, COWORKING_REPORT_ROLES)
+
+
+def can_read_coworking_report_in_channel(
+    slack_id: str, slack_team_id: str, slack_channel_id: str,
+) -> bool:
+    """Match the report-only chat grant; callers must also require strict Roo auth.
+
+    Roo supplies this scope from a verified Slack event, never model parameters.
+    Empty or malformed configuration disables the additional grant.
+    """
+    team = str(getattr(settings, 'COWORKING_REPORT_SLACK_TEAM_ID', '') or '').strip()
+    channel = str(getattr(settings, 'COWORKING_REPORT_SLACK_CHANNEL_ID', '') or '').strip()
+    return bool(
+        re.fullmatch(r'T[A-Z0-9]+', team)
+        and re.fullmatch(r'[CG][A-Z0-9]+', channel)
+        and re.fullmatch(r'[UW][A-Z0-9]+', slack_id)
+        and slack_team_id == team
+        and slack_channel_id == channel
+    )
 
 
 def can_export_luma_attendees(slack_id: str) -> bool:
