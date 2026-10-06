@@ -120,7 +120,7 @@ class CIEvidenceIssuerTests(SimpleTestCase):
             if granted.get('checks') != 'read':
                 raise HTTPError('Synthetic private endpoint denies missing Checks read')
             self.assertEqual(url, 'https://api.github.com/repos/' + proof['github_repo'] + '/commits/' + proof['source_sha'] + '/check-runs?per_page=100')
-            return SimpleNamespace(raise_for_status=lambda: None, json=lambda: {'check_runs': [check]})
+            return response(200, {'check_runs': [check]})
         self.get.side_effect = private_provider
         website = SimpleNamespace(installation_id='45', github_repo=proof['github_repo'], repository_id=proof['repository_id'])
         self.assertEqual(read_ci_proof(website, proof), proof)
@@ -143,6 +143,35 @@ class CIEvidenceIssuerTests(SimpleTestCase):
             self.assertNotIn('private-provider-body', str(caught.exception))
         self.post.assert_not_called()
         self.delete.assert_not_called()
+
+    def test_native_provider_denial_transport_and_invalid_schema_after_mint_are_safe(self):
+        from content_factory.website_verification import read_ci_proof
+        from content_factory.website_contract import WebsiteAuthorityError
+        from integrations.http_client import RequestException
+        website = SimpleNamespace(installation_id='45', github_repo='example/private', repository_id=123)
+        cases = [(response(status, {'message': 'private-provider-body'}), 'github_repository_unavailable', 409, False)
+                 for status in (401, 403, 404)]
+        cases += [(response(status, {}), 'github_temporarily_unavailable', 503, True) for status in (429, 500, 503)]
+        cases += [(RequestException('private-transport-detail'), 'github_temporarily_unavailable', 503, True),
+                  (response(200, []), 'github_ci_evidence_unavailable', 503, True),
+                  (response(200, {'check_runs': 'invalid'}), 'github_ci_evidence_unavailable', 503, True),
+                  (response(200, {'check_runs': [{'app': ['invalid']}]}), 'github_ci_evidence_unavailable', 503, True),
+                  (SimpleNamespace(status_code=200, json=lambda: (_ for _ in ()).throw(ValueError('private-json-detail'))),
+                   'github_ci_evidence_unavailable', 503, True)]
+        for failed_reply, code, status, retryable in cases:
+            def provider(url, **kwargs):
+                if url.startswith('https://api.github.com/app'):
+                    return response(200, {'permissions': GRANTS})
+                if isinstance(failed_reply, Exception):
+                    raise failed_reply
+                return failed_reply
+            self.get.side_effect = provider
+            self.delete.reset_mock()
+            with self.subTest(code=code, status=status), self.assertRaises(WebsiteAuthorityError) as caught:
+                read_ci_proof(website, {'source_sha': SHA})
+            self.assertEqual((caught.exception.code, caught.exception.status, caught.exception.retryable), (code, status, retryable))
+            self.assertNotIn('private-', str(caught.exception))
+            self.delete.assert_called_once()
 
 
 @override_settings(ROO_API_KEY='synthetic-test-key', INTERNAL_API_KEY='synthetic-test-key',
@@ -227,7 +256,7 @@ class WebsiteCIEvidenceTests(WebsiteDatabaseFixture, TestCase):
             self.assertEqual(self.post.call_args.kwargs['json']['permissions'], CI_PERMISSIONS)
             value = {'check_runs': [{'head_sha': SHA, 'status': 'completed', 'conclusion': 'success',
                                     'app': {'slug': 'github-actions'}}]} if '/check-runs' in url else {'sha': SHA}
-            return SimpleNamespace(raise_for_status=lambda: None, json=lambda: value)
+            return response(200, value)
         self.get.side_effect = provider
         with patch('content_factory.website_live_fetch.fetch_live_route', return_value=(b'gone', {})):
             result = verify_cleanup_deployment(self.config, data={**self.binding, 'operation_id': str(operation.pk)})
@@ -248,7 +277,7 @@ class WebsiteCIEvidenceTests(WebsiteDatabaseFixture, TestCase):
                 return response(200, {'permissions': GRANTS})
             value = {'check_runs': [{'head_sha': SHA, 'status': 'completed', 'conclusion': 'success',
                                     'app': {'slug': 'github-actions'}}]} if '/check-runs' in url else {'sha': SHA}
-            return SimpleNamespace(raise_for_status=lambda: None, json=lambda: value)
+            return response(200, value)
         def cancelled_route(*args, **kwargs):
             operation.state = 'cancelled'
             operation.save(update_fields=['state', 'updated_at'])
@@ -263,3 +292,38 @@ class WebsiteCIEvidenceTests(WebsiteDatabaseFixture, TestCase):
         self.assertNotEqual(operation.receipt.get('cleanup_complete'), True)
         self.assertEqual(self.post.call_args.kwargs['json']['permissions'], CI_PERMISSIONS)
         self.delete.assert_called_once()
+
+    def test_cleanup_provider_errors_after_mint_never_certify_or_escape_untyped(self):
+        from content_factory.website_cleanup_verification import verify_cleanup_deployment
+        from content_factory.website_contract import WebsiteAuthorityError
+        from integrations.http_client import RequestException
+        operation = WebsiteConnectionOperation.objects.create(connection=self.website, generation=self.website.generation,
+            action='cleanup', state='awaiting_deployment', idempotency_key=str(uuid.uuid4()),
+            receipt={'merge_sha': SHA, 'verification_routes': [{'path': '/articles', 'expected_status': 404}]})
+        failures = [(response(status, {'message': 'private-provider-body'}), 409) for status in (401, 403, 404)]
+        failures += [(response(status, {}), 503) for status in (429, 500)]
+        failures += [(RequestException('private-transport-detail'), 503), (response(200, []), 503),
+                     (response(200, {'check_runs': 'invalid'}), 503),
+                     (SimpleNamespace(status_code=200, json=lambda: (_ for _ in ()).throw(ValueError('private-json-detail'))), 503)]
+        for phase in ('head', 'checks'):
+            for failed_reply, status in failures:
+                def provider(url, **kwargs):
+                    if url.startswith('https://api.github.com/app'):
+                        return response(200, {'permissions': GRANTS})
+                    if '/check-runs' not in url and phase == 'checks':
+                        return response(200, {'sha': SHA})
+                    if isinstance(failed_reply, Exception):
+                        raise failed_reply
+                    return failed_reply
+                self.get.side_effect = provider
+                self.delete.reset_mock()
+                with self.subTest(phase=phase, status=status), patch('content_factory.website_live_fetch.fetch_live_route') as live, \
+                     self.assertRaises(WebsiteAuthorityError) as caught:
+                    verify_cleanup_deployment(self.config, data={**self.binding, 'operation_id': str(operation.pk)})
+                self.assertEqual(caught.exception.status, status)
+                self.assertNotIn('private-', str(caught.exception))
+                operation.refresh_from_db()
+                self.assertEqual(operation.state, 'awaiting_deployment')
+                self.assertNotEqual(operation.receipt.get('cleanup_complete'), True)
+                self.delete.assert_called_once()
+                live.assert_not_called()

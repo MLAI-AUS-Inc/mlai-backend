@@ -302,7 +302,7 @@ class WebsiteVerificationContractTests(SimpleTestCase):
         proof = self.proof()
         check = {"name": CHECK_NAME, "head_sha": proof["source_sha"], "status": "completed", "conclusion": "success",
             "app": {"slug": "github-actions"}, "output": {"summary": "MLAI_ARTICLES_ATTESTATION:" + base64.b64encode(json.dumps(proof).encode()).decode()}}
-        response = MagicMock()
+        response = MagicMock(status_code=200)
         response.json.return_value = {"check_runs": [check]}
         website = SimpleNamespace(installation_id="45", github_repo="example/site", repository_id=123)
         with patch("integrations.services.github_app.create_installation_access_token", return_value=SimpleNamespace(token="synthetic")), \

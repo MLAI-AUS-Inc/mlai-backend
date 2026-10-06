@@ -81,6 +81,40 @@ def mint_ci_evidence_token(*, installation_id, repository, repository_id):
         raise WebsiteAuthorityError("github_repository_unavailable", "GitHub access could not be verified. Reconnect the selected repository.") from exc
 
 
+def read_ci_provider_json(url, *, headers):
+    """Read provider evidence without exposing credential or provider error bodies."""
+    from integrations import http_client
+    from .website_connections import require_unlocked_remote_call
+    require_unlocked_remote_call()
+    try:
+        response = http_client.get(url, headers=headers, timeout=(3, 15))
+    except http_client.RequestException as exc:
+        raise WebsiteAuthorityError("github_temporarily_unavailable", "GitHub CI evidence is temporarily unavailable. Retry shortly.", status=503, retryable=True) from exc
+    provider_headers = getattr(response, "headers", {}) or {}
+    if (response.status_code == 429 or response.status_code >= 500
+            or (response.status_code == 403 and (provider_headers.get("Retry-After") or provider_headers.get("X-RateLimit-Remaining") == "0"))):
+        raise WebsiteAuthorityError("github_temporarily_unavailable", "GitHub CI evidence is temporarily unavailable. Retry shortly.", status=503, retryable=True)
+    if response.status_code != 200:
+        raise WebsiteAuthorityError("github_repository_unavailable", "GitHub CI access could not be verified for the selected repository.")
+    try:
+        payload = response.json()
+    except (ValueError, TypeError) as exc:
+        raise WebsiteAuthorityError("github_ci_evidence_unavailable", "GitHub returned invalid CI evidence. Retry shortly.", status=503, retryable=True) from exc
+    if not isinstance(payload, dict):
+        raise WebsiteAuthorityError("github_ci_evidence_unavailable", "GitHub returned invalid CI evidence. Retry shortly.", status=503, retryable=True)
+    return payload
+
+
+def read_ci_provider_checks(url, *, headers):
+    """Require a bounded provider Checks envelope before inspecting attestation."""
+    payload = read_ci_provider_json(url, headers=headers)
+    rows = payload.get("check_runs")
+    if (not isinstance(rows, list) or len(rows) > 100 or any(not isinstance(row, dict)
+            or not isinstance(row.get("app") or {}, dict) or not isinstance(row.get("output") or {}, dict) for row in rows)):
+        raise WebsiteAuthorityError("github_ci_evidence_unavailable", "GitHub returned invalid CI evidence. Retry shortly.", status=503, retryable=True)
+    return payload
+
+
 def _token_contract(connection, data):
     contract = contract_for(connection)
     target = connection_contract(data).get("connection_target_id")

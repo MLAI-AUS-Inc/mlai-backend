@@ -8,14 +8,14 @@ from django.db import transaction
 from django.utils import timezone
 
 from organizations.models import Organization
-from .website_contract import WebsiteAuthorityError, connection_contract
+from .website_contract import WebsiteAuthorityError, connection_contract, SHA_PATTERN
 from .website_models import WebsiteConnection, WebsiteConnectionOperation
 
 
 def verify_cleanup_deployment(config, *, data):
     """Require merged current source, provider CI and reviewed public-route outcomes."""
     from integrations import http_client
-    from .website_tokens import mint_ci_evidence_token
+    from .website_tokens import mint_ci_evidence_token, read_ci_provider_json, read_ci_provider_checks
     from .website_connections import require_unlocked_remote_call
     from .website_live_fetch import fetch_live_route
     try:
@@ -48,14 +48,14 @@ def verify_cleanup_deployment(config, *, data):
     headers = {"Authorization": f"Bearer {credential.token}", "Accept": "application/vnd.github+json"}
     observations = []
     try:
-        head = http_client.get(f"https://api.github.com/repos/{repo}/commits/{quote(branch, safe='')}", headers=headers, timeout=(3, 15))
-        head.raise_for_status()
-        if not source or head.json().get("sha") != source:
+        head = read_ci_provider_json(f"https://api.github.com/repos/{repo}/commits/{quote(branch, safe='')}", headers=headers)
+        if not isinstance(head.get("sha"), str) or not SHA_PATTERN.fullmatch(head["sha"]):
+            raise WebsiteAuthorityError("github_ci_evidence_unavailable", "GitHub returned invalid CI source evidence. Retry shortly.", status=503, retryable=True)
+        if not source or head.get("sha") != source:
             raise WebsiteAuthorityError("cleanup_source_changed", "Verify the exact merged cleanup source; the selected branch changed.")
-        checks = http_client.get(f"https://api.github.com/repos/{repo}/commits/{source}/check-runs?per_page=100", headers=headers, timeout=(3, 15))
-        checks.raise_for_status()
-        rows = checks.json().get("check_runs", [])
-        if checks.json().get("total_count", len(rows)) != len(rows):
+        checks = read_ci_provider_checks(f"https://api.github.com/repos/{repo}/commits/{source}/check-runs?per_page=100", headers=headers)
+        rows = checks["check_runs"]
+        if checks.get("total_count", len(rows)) != len(rows):
             raise WebsiteAuthorityError("cleanup_build_verification_required", "The repository check inventory exceeds the bounded verification response.")
         if (not any(row.get("head_sha") == source and row.get("conclusion") == "success" and (row.get("app") or {}).get("slug") == "github-actions" for row in rows)
                 or any(row.get("status") != "completed" or row.get("conclusion") not in {"success", "neutral", "skipped"} for row in rows)):
