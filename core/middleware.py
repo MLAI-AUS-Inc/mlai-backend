@@ -40,6 +40,10 @@ class DesktopAuthCorsMiddleware:
         ):
             return self.get_response(request)
 
+        allowed_headers = self._ALLOWED_REQUEST_HEADERS
+        if request.path.startswith("/api/v1/my-startup/"):
+            allowed_headers = allowed_headers | {"idempotency-key"}
+
         is_preflight = request.method == "OPTIONS" and bool(
             request.headers.get("Access-Control-Request-Method")
         )
@@ -55,7 +59,7 @@ class DesktopAuthCorsMiddleware:
                 if item.strip()
             }
             if requested_method not in self._ALLOWED_METHODS or not requested_headers.issubset(
-                self._ALLOWED_REQUEST_HEADERS
+                allowed_headers
             ):
                 return HttpResponse(status=204)
             response = HttpResponse(status=204)
@@ -70,9 +74,7 @@ class DesktopAuthCorsMiddleware:
         response["Access-Control-Allow-Methods"] = (
             "DELETE, GET, HEAD, PATCH, POST, PUT, OPTIONS"
         )
-        response["Access-Control-Allow-Headers"] = (
-            "authorization, content-type, x-request-id"
-        )
+        response["Access-Control-Allow-Headers"] = ", ".join(sorted(allowed_headers))
         response["Access-Control-Expose-Headers"] = "X-Request-ID, Retry-After"
         response["Access-Control-Max-Age"] = "600"
         patch_vary_headers(response, ("Origin",))
