@@ -94,6 +94,8 @@ Portable `content_only` generation deliberately dispatches without repository id
 
 Worker mirrors may include `run_request.editorial_admission.audience.status=approved` and the corresponding offer status. These are catalog observations, not publication approval. The portable guard accepts these exact paths only after the existing editorial snapshot contract validates the admission schema, selection hash, brief, tenant and immutable saved admission. All other approval and repository-authority checks still apply, including inside the admission itself.
 
+Status mirrors omit the backend's `roo_points_*` request fields. Run reconciliation retains this backend-owned billing history, rejects attempts to change recorded values, and drops newly claimed billing fields. Worker observations cannot create authorisation or erase a charge reference. The existing ledger and job billing paths remain authoritative.
+
 All reconciliation actions lease an operation in a short transaction and release it before remote HTTP. A conditional update checks the original claim timestamp afterward. Concurrent offboarding therefore cannot deadlock with the worker's cancellation callback or have an erasure/retention receipt replaced by stale transport results.
 
 

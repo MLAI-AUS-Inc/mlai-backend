@@ -8677,6 +8677,28 @@ def _merge_django_owned_run_result(existing_result, incoming_result):
     return merged
 
 
+def _merge_django_owned_run_request(existing_request, incoming_request):
+    """Retain backend billing history that worker request models do not carry.
+
+    Mirrors cannot replace a recorded charge or introduce new authorisation.
+    This changes request metadata only; the ledger and job billing stay owned by
+    their existing backend paths.
+    """
+    from copy import deepcopy
+    from .editorial_run_state import EditorialRunConflict
+    existing = existing_request if isinstance(existing_request, dict) else {}
+    incoming = incoming_request if isinstance(incoming_request, dict) else {}
+    merged = {key: deepcopy(value) for key, value in incoming.items()
+              if not key.startswith("roo_points_") or key in existing}
+    for key, value in existing.items():
+        if not key.startswith("roo_points_"):
+            continue
+        if key in incoming and incoming[key] != value:
+            raise EditorialRunConflict("Worker snapshots cannot change backend billing history")
+        merged[key] = deepcopy(value)
+    return merged
+
+
 def _content_factory_run_snapshot_unchanged(run: ContentFactoryRun, *, data: dict, step_states: dict) -> bool:
     core_fields = {
         "workflow": data["workflow"],
@@ -8769,6 +8791,7 @@ def _sync_content_factory_run_snapshot(*, run_id: str, data: dict, step_states: 
             # in case another callback created it first. The locking queryset
             # also locks that existing/race-winning row before reconciliation.
             data = merge_editorial_run_snapshot(None, data)
+            data["run_request"] = _merge_django_owned_run_request({}, data.get("run_request"))
             existing_run, created = locked_runs.get_or_create(
                 run_id=run_id,
                 defaults={
@@ -8798,6 +8821,7 @@ def _sync_content_factory_run_snapshot(*, run_id: str, data: dict, step_states: 
             } if existing_run is not None else None,
             data,
         )
+        data["run_request"] = _merge_django_owned_run_request(original_request, data.get("run_request"))
         if existing_run and stale_execution_event(existing_run.result, data, saved_status=existing_run.status):
             existing_run._content_factory_sync_unchanged = True
             return existing_run, False
