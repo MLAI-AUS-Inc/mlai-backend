@@ -332,8 +332,8 @@ class RateCardView(viewsets.ReadOnlyModelViewSet):
     """
     queryset = TaskTemplate.objects.filter(is_active=True)
     serializer_class = TaskTemplateSerializer
-    # Allow either API Key (for Roo/bots) or IsAuthenticated (for frontend users)
-    permission_classes = [HasAPIKey | settings.REST_FRAMEWORK['DEFAULT_PERMISSION_CLASSES'][0]]
+    # Allow Roo service credentials or authenticated browser users.
+    permission_classes = [HasRooApiKey | IsAuthenticated]
 
 
 class StripeWebhookView(APIView):
