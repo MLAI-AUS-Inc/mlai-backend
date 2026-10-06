@@ -40,10 +40,10 @@ def validated_ci_identity(data, provider):
 def read_ci_proof(connection, data):
     """Read only GitHub-owned successful checks at the exact source commit."""
     from integrations import http_client
-    from integrations.services.github_app import create_installation_access_token
+    from .website_tokens import mint_ci_evidence_token
     require_unlocked_remote_call()
-    token = create_installation_access_token(installation_id=connection.installation_id, repository=connection.github_repo,
-        repository_id=connection.repository_id, permission_mode="read", permission_profile="ci_evidence", use_cache=False)
+    token = mint_ci_evidence_token(installation_id=connection.installation_id, repository=connection.github_repo,
+        repository_id=connection.repository_id)
     headers = {"Authorization": f"Bearer {token.token}", "Accept": "application/vnd.github+json"}
     try:
         response = http_client.get(f"https://api.github.com/repos/{connection.github_repo}/commits/{quote(str(data['source_sha']), safe='')}/check-runs?per_page=100",

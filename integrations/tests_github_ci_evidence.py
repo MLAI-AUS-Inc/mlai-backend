@@ -127,6 +127,23 @@ class CIEvidenceIssuerTests(SimpleTestCase):
         self.assertEqual(self.post.call_args.kwargs['json']['permissions'], CI_PERMISSIONS)
         self.delete.assert_called_once()
 
+    def test_direct_provider_consumers_return_typed_safe_errors_without_minting(self):
+        from content_factory.website_tokens import mint_ci_evidence_token
+        from content_factory.website_contract import WebsiteAuthorityError
+        for reply, code, status, retryable in (
+                (response(200, {'permissions': {**GRANTS, 'checks': None}}), 'github_ci_evidence_permission_required', 409, False),
+                (response(503, {}), 'github_temporarily_unavailable', 503, True),
+                (response(401, {'message': 'private-provider-body'}), 'github_repository_unavailable', 409, False)):
+            with self.subTest(code=code), self.assertRaises(WebsiteAuthorityError) as caught:
+                self.get.return_value = reply
+                mint_ci_evidence_token(installation_id='45', repository='example/private', repository_id=123)
+            self.assertEqual(caught.exception.code, code)
+            self.assertEqual(caught.exception.status, status)
+            self.assertEqual(caught.exception.retryable, retryable)
+            self.assertNotIn('private-provider-body', str(caught.exception))
+        self.post.assert_not_called()
+        self.delete.assert_not_called()
+
 
 @override_settings(ROO_API_KEY='synthetic-test-key', INTERNAL_API_KEY='synthetic-test-key',
                    WEBSITE_CONNECTION_WRITE_MODE='enabled',

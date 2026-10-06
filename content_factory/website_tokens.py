@@ -63,6 +63,24 @@ def _ci_evidence_operation(connection, data):
         raise WebsiteAuthorityError("website_operation_changed", "CI evidence belongs to a different run.")
 
 
+def mint_ci_evidence_token(*, installation_id, repository, repository_id):
+    """Issue only CI read credentials after the caller's canonical authority check."""
+    from integrations.services.github_app import (create_installation_access_token, GitHubAppTokenError,
+        GitHubCIEvidencePermissionRequired, CI_EVIDENCE_PERMISSION_DETAIL, GitHubPermissionLookupUnavailable)
+    from integrations.http_client import RequestException
+    from .website_connections import require_unlocked_remote_call
+    require_unlocked_remote_call()
+    try:
+        return create_installation_access_token(installation_id=installation_id, repository=repository,
+            repository_id=repository_id, permission_mode="read", permission_profile="ci_evidence", use_cache=False)
+    except GitHubCIEvidencePermissionRequired as exc:
+        raise WebsiteAuthorityError("github_ci_evidence_permission_required", CI_EVIDENCE_PERMISSION_DETAIL) from exc
+    except (GitHubPermissionLookupUnavailable, RequestException) as exc:
+        raise WebsiteAuthorityError("github_temporarily_unavailable", "GitHub CI evidence is temporarily unavailable. Retry shortly.", status=503, retryable=True) from exc
+    except GitHubAppTokenError as exc:
+        raise WebsiteAuthorityError("github_repository_unavailable", "GitHub access could not be verified. Reconnect the selected repository.") from exc
+
+
 def _token_contract(connection, data):
     contract = contract_for(connection)
     target = connection_contract(data).get("connection_target_id")

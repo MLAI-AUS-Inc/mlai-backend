@@ -15,7 +15,7 @@ from .website_models import WebsiteConnection, WebsiteConnectionOperation
 def verify_cleanup_deployment(config, *, data):
     """Require merged current source, provider CI and reviewed public-route outcomes."""
     from integrations import http_client
-    from integrations.services.github_app import create_installation_access_token
+    from .website_tokens import mint_ci_evidence_token
     from .website_connections import require_unlocked_remote_call
     from .website_live_fetch import fetch_live_route
     try:
@@ -43,8 +43,8 @@ def verify_cleanup_deployment(config, *, data):
         snapshot = (website.generation, website.configuration_version, op.updated_at)
         domain, repo, branch = website.organization.domain, website.github_repo, website.branch
     require_unlocked_remote_call()
-    credential = create_installation_access_token(installation_id=website.installation_id, repository=repo,
-        repository_id=website.repository_id, permission_mode="read", permission_profile="ci_evidence", use_cache=False)
+    credential = mint_ci_evidence_token(installation_id=website.installation_id, repository=repo,
+        repository_id=website.repository_id)
     headers = {"Authorization": f"Bearer {credential.token}", "Accept": "application/vnd.github+json"}
     observations = []
     try:
