@@ -164,6 +164,40 @@ class EditorialSnapshotContractTests(unittest.TestCase):
 
 
 class EditorialSnapshotPersistenceSeamTests(unittest.TestCase):
+    def test_actual_put_preserves_backend_charge_fields_omitted_by_worker(self):
+        billing = {"roo_points_ledger_id": "synthetic-charge", "roo_points_cost": 6,
+                   "roo_points_authorized": True, "roo_points_billing_status": "charged"}
+        self.existing.run_request.update(billing)
+        response = self.put({"workflow": "article_generation", "status": "running", "run_request": {"worker_only": True}})
+        self.assertEqual(response.status_code, 200)
+        for key, value in billing.items():
+            self.assertEqual(self.existing.run_request.get(key), value)
+        self.assertTrue(self.existing.run_request["worker_only"])
+
+    def test_worker_cannot_change_charge_fields_or_create_billing_authorization(self):
+        self.existing.run_request.update(roo_points_ledger_id="synthetic-charge", roo_points_cost=6)
+        before = deepcopy(self.existing.run_request)
+        for change in ({"roo_points_ledger_id": "forged"}, {"roo_points_ledger_id": None}, {"roo_points_cost": 0}):
+            with self.subTest(change=change):
+                writes = self.ns["ContentFactoryRunStep"].objects.update_or_create.call_count
+                response = self.put({"workflow": "article_generation", "status": "running", "run_request": change})
+                self.assertEqual(response.status_code, 409)
+                self.assertEqual(self.existing.run_request, before)
+                self.assertEqual(self.ns["ContentFactoryRunStep"].objects.update_or_create.call_count, writes)
+        self.existing.run_request = snapshot()["run_request"]
+        response = self.put({"workflow": "article_generation", "status": "running", "run_request": {"roo_points_authorized": True}})
+        self.assertEqual(response.status_code, 200)
+        self.assertNotIn("roo_points_authorized", self.existing.run_request)
+
+    def test_first_worker_snapshot_cannot_create_a_charge_or_authorization(self):
+        response = self.put({"workflow": "article_generation", "status": "running", "run_request": {
+            "worker_only": True, "roo_points_ledger_id": "forged", "roo_points_authorized": True,
+        }}, run_id="worker-created")
+        self.assertEqual(response.status_code, 201)
+        saved = self.rows["worker-created"].run_request
+        self.assertTrue(saved["worker_only"])
+        self.assertFalse(any(key.startswith("roo_points_") for key in saved))
+
     def test_actual_put_preserves_admission_and_rejects_clear_before_step_writes(self):
         original = admitted_snapshot()["run_request"]
         self.existing.run_request = deepcopy(original)
@@ -232,7 +266,7 @@ class EditorialSnapshotPersistenceSeamTests(unittest.TestCase):
         seam.start()
         self.addCleanup(seam.stop)
         root = Path(__file__).resolve().parent
-        names = {"_sync_content_factory_run_snapshot", "_content_factory_run_snapshot_unchanged", "_merge_django_owned_run_result"}
+        names = {"_sync_content_factory_run_snapshot", "_content_factory_run_snapshot_unchanged", "_merge_django_owned_run_result", "_merge_django_owned_run_request"}
         tree = ast.parse((root / "service_views.py").read_text())
         nodes = [n for n in tree.body if (isinstance(n, ast.FunctionDef) and n.name in names) or
                  (isinstance(n, ast.Assign) and any(isinstance(t, ast.Name) and t.id.startswith("_DJANGO_OWNED_RUN_RESULT_") for t in n.targets))]

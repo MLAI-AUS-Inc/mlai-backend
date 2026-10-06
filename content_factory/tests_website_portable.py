@@ -73,7 +73,6 @@ class PortableWebsiteDraftTests(TestCase):
         payload = admitted_portable_snapshot()
         payload["domain"] = self.org.domain
         payload["run_request"]["editorial_admission"]["domain"] = self.org.domain
-        payload["run_request"].update(roo_points_ledger_id="synthetic-charge", roo_points_cost=6)
         self.run.run_request.update(roo_points_ledger_id="synthetic-charge", roo_points_cost=6)
         self.run.save(update_fields=["run_request"])
         for state in ("running", "completed"):
