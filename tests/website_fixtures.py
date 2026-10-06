@@ -16,7 +16,7 @@ def certify_live_target_fixture(target):
     target.contract = {**target.contract, "contract_digest": "d" * 64, "live_marker": {"value": "e" * 64}}
     target.save(update_fields=["contract"])
     WebsiteConnectionOperation.objects.create(connection=website, generation=website.generation,
-        action="deployment-verify", state="completed", idempotency_key="synthetic-live-" + target.target_key,
+        action="deployment-verify", state="completed", idempotency_key="synthetic-live-" + str(target.pk),
         payload={"source_sha": website.verified_sha, "target_id": target.target_key},
         receipt={"status": "passed", "source_sha": website.verified_sha,
             "connection_generation": website.generation, "target_id": target.target_key,
