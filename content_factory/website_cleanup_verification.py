@@ -44,7 +44,7 @@ def verify_cleanup_deployment(config, *, data):
         domain, repo, branch = website.organization.domain, website.github_repo, website.branch
     require_unlocked_remote_call()
     credential = create_installation_access_token(installation_id=website.installation_id, repository=repo,
-        repository_id=website.repository_id, permission_mode="read", use_cache=False)
+        repository_id=website.repository_id, permission_mode="read", permission_profile="ci_evidence", use_cache=False)
     headers = {"Authorization": f"Bearer {credential.token}", "Accept": "application/vnd.github+json"}
     observations = []
     try:

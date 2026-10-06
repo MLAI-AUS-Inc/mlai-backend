@@ -52,6 +52,17 @@ def _workflow_permission_denial():
     return WebsiteAuthorityError("github_workflow_permission_required", WORKFLOW_PERMISSION_DETAIL)
 
 
+def _ci_evidence_operation(connection, data):
+    """Keep the CI-only credential bound to the original current operation."""
+    from .website_operations import validate_operation
+    if any(data.get(key) in (None, "") for key in ("operation_id", "operation_attempt", "deletion_epoch")):
+        raise WebsiteAuthorityError("website_operation_required", "CI evidence requires the original operation, attempt and deletion watermark.")
+    operation = validate_operation(connection, data)
+    recorded_run = operation.payload.get("run_id")
+    if recorded_run and recorded_run != (data.get("run_id") or data.get("job_id")):
+        raise WebsiteAuthorityError("website_operation_changed", "CI evidence belongs to a different run.")
+
+
 def _token_contract(connection, data):
     contract = contract_for(connection)
     target = connection_contract(data).get("connection_target_id")
@@ -85,6 +96,8 @@ def issue_website_token(request):
         payload = exc.as_dict()
         if exc.code == "github_workflow_permission_required":
             payload.update(permission_profile="workflow_files", required_permission="workflows:write")
+        elif exc.code == "github_ci_evidence_permission_required":
+            payload.update(permission_profile="ci_evidence", required_permissions=["checks:read", "statuses:read"])
         return Response(payload, status=exc.status)
     except RequestException:
         return Response({"allowed": False, "error": "github_temporarily_unavailable", "code": "github_temporarily_unavailable", "detail": "GitHub could not issue a repository credential. Retry shortly.", "retryable": True}, status=503)
@@ -95,17 +108,20 @@ def issue_website_token(request):
 def mint_website_token(data, *, permission_mode="read", action="read"):
     """Issue and track one ephemeral token under the same lock as revocation."""
     from integrations.services.github_app import (create_installation_access_token, GitHubAppTokenError,
-        GitHubWorkflowPermissionRequired, GitHubPermissionLookupUnavailable, require_installation_workflow_permissions)
+        GitHubWorkflowPermissionRequired, GitHubCIEvidencePermissionRequired, CI_EVIDENCE_PERMISSION_DETAIL,
+        GitHubPermissionLookupUnavailable, require_installation_workflow_permissions)
     from integrations.http_client import RequestException
     if action in {"portable", "worker_cleanup", "cancel_operation"}:
         raise WebsiteAuthorityError("portable_repository_access_denied", "Portable drafts cannot access repository credentials.")
     if permission_mode not in {"read", "write"} or (permission_mode == "write" and action not in {"setup", "publish", "merge", "cleanup", "restoration"}):
         raise WebsiteAuthorityError("invalid_write_action", "Write credentials require an explicit repository mutation action.", status=400)
     profile = data.get("permission_profile", "repository")
-    if not isinstance(profile, str) or profile not in {"repository", "workflow_files"}:
+    if not isinstance(profile, str) or profile not in {"repository", "workflow_files", "ci_evidence"}:
         raise WebsiteAuthorityError("invalid_permission_profile", "Unknown repository permission profile.", status=400)
     if profile == "workflow_files" and (permission_mode != "write" or action not in {"setup", "cleanup", "restoration"}):
         raise WebsiteAuthorityError("invalid_permission_profile", "Workflow files require a setup or approved inverse operation with explicit write mode.", status=400)
+    if profile == "ci_evidence" and (permission_mode != "read" or action != "read"):
+        raise WebsiteAuthorityError("invalid_permission_profile", "CI evidence requires explicit read mode and action.", status=400)
     raw_preflight = data.get("preflight", "0")
     if raw_preflight not in ("0", "1", "false", "true", False, True):
         raise WebsiteAuthorityError("invalid_permission_preflight", "Unknown permission preflight mode.", status=400)
@@ -117,6 +133,8 @@ def mint_website_token(data, *, permission_mode="read", action="read"):
             raise WebsiteAuthorityError("github_verification_required", "Reconnect GitHub to verify repository identity.")
         if profile == "workflow_files":
             _workflow_operation(connection, data, action)
+        elif profile == "ci_evidence":
+            _ci_evidence_operation(connection, data)
         binding = {**dict(data), **contract_for(connection)}
         installation_id, repository, repository_id = connection.installation_id, connection.github_repo, connection.repository_id
     from .website_connections import require_unlocked_remote_call
@@ -133,7 +151,7 @@ def mint_website_token(data, *, permission_mode="read", action="read"):
                         **_token_contract(connection, binding)}
         kwargs = {"installation_id": installation_id, "repository": repository,
                   "repository_id": repository_id, "permission_mode": permission_mode, "use_cache": False}
-        if profile == "workflow_files":
+        if profile != "repository":
             kwargs["permission_profile"] = profile
         token = create_installation_access_token(**kwargs)
     except RequestException as exc:
@@ -142,12 +160,16 @@ def mint_website_token(data, *, permission_mode="read", action="read"):
         raise WebsiteAuthorityError("github_temporarily_unavailable", "GitHub permission evidence is temporarily unavailable. Retry shortly.", status=503, retryable=True) from exc
     except GitHubWorkflowPermissionRequired as exc:
         raise _workflow_permission_denial() from exc
+    except GitHubCIEvidencePermissionRequired as exc:
+        raise WebsiteAuthorityError("github_ci_evidence_permission_required", CI_EVIDENCE_PERMISSION_DETAIL) from exc
     except GitHubAppTokenError as exc:
         raise WebsiteAuthorityError("github_repository_unavailable", "GitHub access could not be verified. Reconnect the selected repository.") from exc
     try:
         with authority_guard(binding, action=action) as connection:
             if profile == "workflow_files":
                 _workflow_operation(connection, binding, action)
+            elif profile == "ci_evidence":
+                _ci_evidence_operation(connection, binding)
             reference = str(uuid.uuid4())
             cache.set(f"website-issued-token:{reference}", token.token, timeout=3600)
             for index in (token_index_key(connection.pk, connection.generation),

@@ -43,7 +43,7 @@ def read_ci_proof(connection, data):
     from integrations.services.github_app import create_installation_access_token
     require_unlocked_remote_call()
     token = create_installation_access_token(installation_id=connection.installation_id, repository=connection.github_repo,
-        repository_id=connection.repository_id, permission_mode="read", use_cache=False)
+        repository_id=connection.repository_id, permission_mode="read", permission_profile="ci_evidence", use_cache=False)
     headers = {"Authorization": f"Bearer {token.token}", "Accept": "application/vnd.github+json"}
     try:
         response = http_client.get(f"https://api.github.com/repos/{connection.github_repo}/commits/{quote(str(data['source_sha']), safe='')}/check-runs?per_page=100",
