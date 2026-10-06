@@ -50,6 +50,7 @@ from .office_manager import (
 from .permissions import (
     can_list_committee_candidate_emails,
     can_generate_coworking_reports,
+    can_read_coworking_report_in_channel,
     is_points_admin,
     is_points_super_admin,
     IdempotencyConflictError,
@@ -1735,7 +1736,7 @@ class CoworkingViewSet(viewsets.ViewSet):
 
     @action(detail=False, methods=['get'])
     def report(self, request):
-        """Points-admin-only active coworking booking report."""
+        """Active booking report for admins/partners or the configured Roo chat."""
         slack_user_id = (request.query_params.get('slack_user_id') or '').strip()
         start_date_param = request.query_params.get('start_date')
         end_date_param = request.query_params.get('end_date')
@@ -1745,7 +1746,15 @@ class CoworkingViewSet(viewsets.ViewSet):
                 {'error': 'slack_user_id is required'},
                 status=status.HTTP_400_BAD_REQUEST,
             )
-        if not can_generate_coworking_reports(slack_user_id):
+        channel_access = (
+            can_read_coworking_report_in_channel(
+                slack_user_id,
+                request.query_params.get('slack_team_id', ''),
+                request.query_params.get('slack_channel_id', ''),
+            )
+            and HasStrictRooApiKey().has_permission(request, self)
+        )
+        if not can_generate_coworking_reports(slack_user_id) and not channel_access:
             return Response(
                 {'error': 'Only Roo Points Admins can generate coworking reports'},
                 status=status.HTTP_403_FORBIDDEN,
