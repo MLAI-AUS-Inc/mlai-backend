@@ -7,6 +7,7 @@ from workflow_runs.models import ContentFactoryRun
 from .models import OrganizationContentConfig, ContentFactoryJob
 from .service_views import ContentFactoryCallbackView, ContentFactoryRunView, ContentFactoryOrgConfigView
 from .website_connections import portable_run_update_allowed
+from .tests_website_portable_wire import admitted_portable_snapshot
 
 
 @override_settings(ROO_API_KEY="synthetic-test-key", INTERNAL_API_KEY="synthetic-test-key")
@@ -67,6 +68,29 @@ class PortableWebsiteDraftTests(TestCase):
     def test_bound_run_cannot_use_portable_exception(self):
         self.run.run_request.update(website_connection_id="fbc09c73-e449-4c43-88ea-385b249a7a20", connection_generation=1)
         self.assertFalse(portable_run_update_allowed(self.run, {"status": "completed"}))
+
+    def test_mirror_records_editorial_admission_then_preserves_it_without_publication_authority(self):
+        payload = admitted_portable_snapshot()
+        payload["domain"] = self.org.domain
+        payload["run_request"]["editorial_admission"]["domain"] = self.org.domain
+        payload["run_request"].update(roo_points_ledger_id="synthetic-charge", roo_points_cost=6)
+        self.run.run_request.update(roo_points_ledger_id="synthetic-charge", roo_points_cost=6)
+        self.run.save(update_fields=["run_request"])
+        for state in ("running", "completed"):
+            response = ContentFactoryRunView.as_view()(self.request("put", {**payload, "status": state}), run_id=self.run.run_id)
+            self.assertEqual(response.status_code, 200, response.data)
+            self.run.refresh_from_db()
+            self.assertEqual(self.run.status, state)
+            self.assertEqual(self.run.run_request["editorial_admission"], payload["run_request"]["editorial_admission"])
+            self.assertEqual(self.run.run_request["roo_points_ledger_id"], "synthetic-charge")
+            self.assertEqual(self.run.run_request["roo_points_cost"], 6)
+        response = ContentFactoryRunView.as_view()(self.request("put", {**payload, "approval_state": "approved"}), run_id=self.run.run_id)
+        self.assertEqual(response.status_code, 409, response.data)
+        self.run.refresh_from_db()
+        self.assertEqual(self.run.status, "completed")
+        self.config.refresh_from_db()
+        self.assertIsNone(self.config.website_connection_id)
+        self.assertEqual(self.config.publish_targets, [])
 
     def test_unconfirmed_saved_default_cannot_receive_portable_worker_updates(self):
         self.run.run_request.pop("delivery_mode_confirmed")

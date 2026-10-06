@@ -17,6 +17,15 @@ from django.test import SimpleTestCase
 from .website_connections import portable_run_update_allowed
 
 
+def admitted_portable_snapshot():
+    """Synthetic, validated catalog observations as emitted by the worker."""
+    from .tests_editorial_snapshot_unit import admitted_snapshot
+    payload = admitted_snapshot()
+    payload["run_request"]["editorial_admission"]["github_repo"] = None
+    payload["run_request"].update(delivery_mode="content_only", delivery_mode_confirmed=True)
+    return payload
+
+
 class PortableWorkerWireTests(SimpleTestCase):
     def setUp(self):
         self.wire = json.loads((Path(__file__).parent / "testdata" / "portable_worker_wire.json").read_text())
@@ -59,3 +68,41 @@ class PortableWorkerWireTests(SimpleTestCase):
     def test_real_payload_does_not_confirm_a_saved_default(self):
         self.run.run_request = {"delivery_mode": "content_only"}
         self.assertFalse(portable_run_update_allowed(self.run, self.wire["snapshot"]))
+
+    def test_approved_editorial_selections_are_not_publication_approval(self):
+        payload = admitted_portable_snapshot()
+        self.run.domain = payload["domain"]
+        for status in ("running", "failed", "completed"):
+            with self.subTest(status=status):
+                self.assertTrue(portable_run_update_allowed(self.run, {**payload, "status": status}))
+        self.run.run_request.update(deepcopy(payload["run_request"]))
+        self.assertTrue(portable_run_update_allowed(self.run, payload))
+
+    def test_editorial_observation_cannot_hide_publishing_or_connection_authority(self):
+        base = admitted_portable_snapshot()
+        self.run.domain = base["domain"]
+        for field, value in (
+            ("approval_state", "approved"), ("status", "published"),
+            ("result", {"status": "approved"}),
+            ("result", {"editorial_admission": {"audience": {"status": "approved"}}}),
+            ("result", {"connectionId": "synthetic-connection"}),
+        ):
+            with self.subTest(field=field, value=value):
+                self.assertFalse(portable_run_update_allowed(self.run, {**base, field: value}))
+        payload = deepcopy(base)
+        payload["run_request"]["editorial_admission"]["github_repo"] = "other/site"
+        self.assertFalse(portable_run_update_allowed(self.run, payload))
+
+    def test_invalid_or_changed_editorial_observation_still_fails_closed(self):
+        base = admitted_portable_snapshot()
+        self.run.domain = base["domain"]
+        for change in ({"selection_sha256": "0" * 64}, {"domain": "other.example"},
+                       {"audience": {"status": "approved"}}, {"connection_id": "synthetic"}):
+            payload = deepcopy(base)
+            payload["run_request"]["editorial_admission"].update(change)
+            with self.subTest(change=change):
+                self.assertFalse(portable_run_update_allowed(self.run, payload))
+        self.run.run_request.update(deepcopy(base["run_request"]))
+        payload = deepcopy(base)
+        payload["run_request"]["editorial_admission"]["checked_at"] = "2026-09-11T01:00:00+00:00"
+        self.assertFalse(portable_run_update_allowed(self.run, payload))
