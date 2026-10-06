@@ -39,6 +39,23 @@ class ArticleReviewTests(SimpleTestCase):
         self.assertEqual(result.status_code, 404)
         remote.assert_not_called()
 
+    @patch('content_factory.article_review_views.views._component_feedback_from_run', return_value={})
+    @patch('content_factory.article_review_views.views._latest_review_ready_component_revision', return_value=SimpleNamespace(run_id='revision-2'))
+    @patch('content_factory.article_review_views.remote_review')
+    def test_saved_export_is_denied_when_owner_has_a_newer_ready_revision(self, remote, latest, feedback):
+        remote.return_value = {'revision': 'saved', 'previewPending': False, 'articleExport': {
+            'version': 1, 'status': 'ready', 'runId': self.run.run_id, 'revision': 'saved',
+            'format': 'markdown', 'markdown': '# Exact saved text', 'metadata': {}, 'media': []}}
+        view = VibeMarketingArticleReviewView()
+        context = object()
+        view._resolve_run = MagicMock(return_value=(context, self.run, None))
+        result = view.get(SimpleNamespace(), self.run.run_id)
+        self.assertEqual(result.data['articleExport']['status'], 'unavailable')
+        self.assertEqual(result.data['articleExport']['reasonCode'], 'revision_superseded')
+        self.assertEqual(result.data['articleExport']['markdown'], '')
+        self.assertEqual(result['Cache-Control'], 'private, no-store')
+        latest.assert_called_once_with(self.run, context)
+
     @patch('content_factory.article_review_views.views._latest_review_ready_component_revision')
     @patch('content_factory.article_review_views.views._run_has_external_publish_evidence', return_value=False)
     @patch('content_factory.article_review_views.remote_review')

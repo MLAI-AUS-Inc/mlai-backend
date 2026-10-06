@@ -8,7 +8,7 @@ from uuid import UUID
 
 
 CONNECTION_FIELDS = ("website_connection_id", "connection_generation", "connection_target_id", "repository_id")
-REPO_ACTIONS = {"portable", "read", "scan", "config_write", "preview", "setup", "publish", "merge", "cleanup"}
+REPO_ACTIONS = {"portable", "read", "scan", "config_write", "preview", "setup", "publish", "merge", "cleanup", "custom_contract"}
 WRITE_ACTIONS = {"setup", "publish", "merge", "cleanup"}
 CAPABILITY_KEYS = ("inventoryReady", "generationReady", "publishingReady", "previewSupported")
 SHA_PATTERN = re.compile(r"^[a-fA-F0-9]{40}(?:[a-fA-F0-9]{24})?$")
@@ -41,7 +41,7 @@ def positive_integer(value, *, name, optional=False):
 def connection_contract(payload):
     """Read the explicit consent tuple; incomplete tuples are never legacy."""
     payload = payload if isinstance(payload, dict) else dict(payload or {})
-    identifier = payload.get("website_connection_id") or payload.get("connectionId")
+    identifier = payload.get("website_connection_id") or payload.get("connection_id") or payload.get("connectionId")
     generation = payload.get("connection_generation", payload.get("connectionGeneration"))
     if not identifier and generation is None:
         if any(payload.get(key) not in (None, "") for key in ("connection_target_id", "connectionTargetId", "repository_id", "repositoryId")):

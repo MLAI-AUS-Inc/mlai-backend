@@ -2,8 +2,11 @@ from django.urls import path
 
 from . import service_views as views
 from .website_views import WebsiteConnectionAuthorizeView, WebsiteMutationView
+from .website_verification import WebsiteCiAttestationView
 
 urlpatterns = [
+    path('connections/ci-attestation', WebsiteCiAttestationView.as_view()),
+    path('connections/ci-attestation/', WebsiteCiAttestationView.as_view()),
     path('connections/authorize', WebsiteConnectionAuthorizeView.as_view(), name='website_connection_authorize'),
     path('connections/authorize/', WebsiteConnectionAuthorizeView.as_view()),
     path('connections/mutations', WebsiteMutationView.as_view(), name='website_connection_mutation'),

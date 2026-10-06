@@ -1,6 +1,6 @@
 from .article_preview_lease import ArticlePreviewLeaseView, ArticlePreviewLeaseProxyView
 from .article_review_views import VibeMarketingArticleReviewView
-from .website_views import WebsiteConnectionView, WebsiteConnectionActionView
+from .website_views import WebsiteConnectionView, WebsiteConnectionActionView, WebsiteConnectionOperationView
 from django.urls import include, path
 
 from .custom_island_views import CustomContentIslandView
@@ -64,6 +64,8 @@ urlpatterns = [
     path("github/repository", VibeMarketingGitHubRepositoryView.as_view(), name="vibe-marketing-github-repository-no-slash"),
     path("website-connection", WebsiteConnectionView.as_view(), name="website-connection"),
     path("website-connection/", WebsiteConnectionView.as_view()),
+    path("website-connection/operations/<uuid:operation_id>", WebsiteConnectionOperationView.as_view()),
+    path("website-connection/operations/<uuid:operation_id>/", WebsiteConnectionOperationView.as_view()),
     path("website-connection/<str:action>", WebsiteConnectionActionView.as_view(), name="website-connection-action"),
     path("website-connection/<str:action>/", WebsiteConnectionActionView.as_view()),
     path("runs/<str:run_id>/article-review/preview-lease", ArticlePreviewLeaseView.as_view()),

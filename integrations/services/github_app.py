@@ -326,6 +326,14 @@ def probe_installation_liveness(installation_id: str) -> str:
         return INSTALLATION_UNKNOWN
 
     if response.status_code in (200, 201):
+        # This liveness-only credential must not remain active after the probe.
+        try:
+            credential = response.json().get("token")
+            if isinstance(credential, str) and credential:
+                http_requests.delete("https://api.github.com/installation/token",
+                    headers={"Authorization": f"Bearer {credential}"}, timeout=(3, 8))
+        except Exception:
+            pass
         return INSTALLATION_LIVE
     if response.status_code in (404, 410):
         return INSTALLATION_DEAD

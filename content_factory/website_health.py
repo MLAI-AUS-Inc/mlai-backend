@@ -41,7 +41,7 @@ def website_connection_health(*, domain=None, now=None, hours=24, row_limit=2000
         configs = configs.filter(organization__domain=domain)
         runs = runs.filter(organization__domain=domain)
     operations = WebsiteConnectionOperation.objects.filter(connection__in=connections)
-    pending = operations.exclude(state__in=["completed", "review_required"])
+    pending = operations.exclude(state__in=["completed", "review_required", "cancelled", "failed", "denied", "deleted"])
     oldest = pending.aggregate(value=Min("created_at"))["value"]
     rows = list(runs.order_by("-created_at").values("status", "result__error_code", "created_at", "updated_at")[:row_limit + 1])
     truncated = len(rows) > row_limit
@@ -65,6 +65,6 @@ def website_connection_health(*, domain=None, now=None, hours=24, row_limit=2000
         "shadowReadiness": {"legacyScaffolded": legacy_ready, "canonicalVerified": canonical_ready, "grantsAuthority": False},
         "inventorySnapshots": WebsiteScanSnapshot.objects.filter(connection__in=connections, created_at__gte=since).exclude(detector_version="github_head").count(),
         "quarantinedTemplates": WebsiteTemplateRevision.objects.filter(connection__in=connections, status="quarantined").count(),
-        "operations": {"pending": pending.count(), "overdue": overdue, "oldestPendingSeconds": max(0, int((now - oldest).total_seconds())) if oldest else None},
+        "operations": {"states": {row["state"]: row["count"] for row in operations.values("state").annotate(count=Count("pk"))}, "pending": pending.count(), "overdue": overdue, "oldestPendingSeconds": max(0, int((now - oldest).total_seconds())) if oldest else None},
         "scans": {**scans, "sampleLimit": row_limit, "truncated": truncated}, "alerts": alerts,
     }

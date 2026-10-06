@@ -1,0 +1,316 @@
+{
+  "version": 2,
+  "companyId": "42",
+  "domain": "example.test",
+  "revision": "83e541dd157240f8704746652866a962ed24feaa375360e1282c6f37af14d842",
+  "connectionId": "b761b209-8673-4843-9a48-90b3177bde26",
+  "connectionGeneration": 3,
+  "configurationRevision": 5,
+  "deletionEpoch": 0,
+  "repository": {
+    "id": 123,
+    "name": "example/site",
+    "branch": "main",
+    "appRoot": "",
+    "sourceSha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "targetId": null,
+    "observedSourceSha": null,
+    "publicRoute": null,
+    "contentPath": null
+  },
+  "policy": {
+    "allowed": false,
+    "reasonCode": "website_writes_paused",
+    "reason": "Website changes are temporarily paused."
+  },
+  "reasonCode": "website_writes_paused",
+  "reason": "Website changes are temporarily paused.",
+  "prerequisites": {
+    "account": {
+      "status": "complete",
+      "reasonCode": "",
+      "reason": "",
+      "verifiedAt": null,
+      "operationId": null
+    },
+    "repository": {
+      "status": "complete",
+      "reasonCode": "",
+      "reason": "",
+      "verifiedAt": null,
+      "operationId": null
+    },
+    "inventory": {
+      "status": "complete",
+      "reasonCode": "",
+      "reason": "",
+      "verifiedAt": null,
+      "operationId": null
+    },
+    "integration": {
+      "status": "blocked",
+      "reasonCode": "website_writes_paused",
+      "reason": "Website changes are temporarily paused.",
+      "verifiedAt": null,
+      "operationId": null
+    },
+    "verification": {
+      "status": "needs_action",
+      "reasonCode": "website_writes_paused",
+      "reason": "Website changes are temporarily paused.",
+      "verifiedAt": null,
+      "operationId": null
+    },
+    "deployment": {
+      "status": "needs_action",
+      "reasonCode": "deployment_verification_required",
+      "reason": "Verify the deployed public articles route.",
+      "verifiedAt": null,
+      "operationId": null
+    }
+  },
+  "steps": [
+    {
+      "id": "startup",
+      "label": "Startup details",
+      "status": "complete",
+      "reasonCode": "",
+      "reason": "",
+      "verifiedAt": null,
+      "operationId": null,
+      "runId": null
+    },
+    {
+      "id": "github",
+      "label": "GitHub access",
+      "status": "complete",
+      "reasonCode": "",
+      "reason": "",
+      "verifiedAt": null,
+      "operationId": null,
+      "runId": null
+    },
+    {
+      "id": "repository",
+      "label": "Website repository",
+      "status": "complete",
+      "reasonCode": "",
+      "reason": "",
+      "verifiedAt": null,
+      "operationId": null,
+      "runId": null
+    },
+    {
+      "id": "scan",
+      "label": "Repository inventory",
+      "status": "complete",
+      "reasonCode": "",
+      "reason": "",
+      "verifiedAt": null,
+      "operationId": null,
+      "runId": null
+    },
+    {
+      "id": "integration",
+      "label": "Articles integration",
+      "status": "blocked",
+      "reasonCode": "website_writes_paused",
+      "reason": "Website changes are temporarily paused.",
+      "verifiedAt": null,
+      "operationId": null,
+      "runId": null
+    },
+    {
+      "id": "preview",
+      "label": "Build and render verification",
+      "status": "needs_action",
+      "reasonCode": "website_writes_paused",
+      "reason": "Website changes are temporarily paused.",
+      "verifiedAt": null,
+      "operationId": null,
+      "runId": null
+    },
+    {
+      "id": "activation",
+      "label": "Live articles route",
+      "status": "needs_action",
+      "reasonCode": "deployment_verification_required",
+      "reason": "Verify the deployed public articles route.",
+      "verifiedAt": null,
+      "operationId": null,
+      "runId": null
+    },
+    {
+      "id": "articles",
+      "label": "Write articles",
+      "status": "needs_action",
+      "reasonCode": "website_writes_paused",
+      "reason": "Website changes are temporarily paused.",
+      "verifiedAt": null,
+      "operationId": null,
+      "runId": null
+    }
+  ],
+  "capabilities": {
+    "canRead": true,
+    "canScan": true,
+    "canPrepare": false,
+    "canPreview": false,
+    "canGeneratePortableDraft": true,
+    "canGenerateArticle": false,
+    "canOpenPublicationPr": false,
+    "canPublishArticle": false,
+    "canMerge": false,
+    "canDisconnect": true,
+    "canPurge": true,
+    "canCleanup": false
+  },
+  "allowedActions": [
+    "verify-access",
+    "github-revoke",
+    "disconnect",
+    "reset",
+    "purge",
+    "reconcile",
+    "custom-contract",
+    "ci-attestation",
+    "scan",
+    "pause"
+  ],
+  "actions": [
+    {
+      "id": "verify-access",
+      "label": "Verify access",
+      "method": "POST",
+      "path": "/api/v1/my-startup/vibe-marketing/website-connection/verify-access",
+      "enabled": true,
+      "reasonCode": "",
+      "requiresConfirmation": false
+    },
+    {
+      "id": "github-revoke",
+      "label": "Github revoke",
+      "method": "POST",
+      "path": "/api/v1/my-startup/vibe-marketing/website-connection/github-revoke",
+      "enabled": true,
+      "reasonCode": "",
+      "requiresConfirmation": true
+    },
+    {
+      "id": "disconnect",
+      "label": "Disconnect",
+      "method": "POST",
+      "path": "/api/v1/my-startup/vibe-marketing/website-connection/disconnect",
+      "enabled": true,
+      "reasonCode": "",
+      "requiresConfirmation": true
+    },
+    {
+      "id": "reset",
+      "label": "Reset",
+      "method": "POST",
+      "path": "/api/v1/my-startup/vibe-marketing/website-connection/reset",
+      "enabled": true,
+      "reasonCode": "",
+      "requiresConfirmation": true
+    },
+    {
+      "id": "purge",
+      "label": "Purge",
+      "method": "POST",
+      "path": "/api/v1/my-startup/vibe-marketing/website-connection/purge",
+      "enabled": true,
+      "reasonCode": "",
+      "requiresConfirmation": true
+    },
+    {
+      "id": "reconcile",
+      "label": "Reconcile",
+      "method": "POST",
+      "path": "/api/v1/my-startup/vibe-marketing/website-connection/reconcile",
+      "enabled": true,
+      "reasonCode": "",
+      "requiresConfirmation": false
+    },
+    {
+      "id": "custom-contract",
+      "label": "Custom contract",
+      "method": "POST",
+      "path": "/api/v1/my-startup/vibe-marketing/website-connection/custom-contract",
+      "enabled": true,
+      "reasonCode": "",
+      "requiresConfirmation": false
+    },
+    {
+      "id": "ci-attestation",
+      "label": "Ci attestation",
+      "method": "POST",
+      "path": "/api/v1/my-startup/vibe-marketing/website-connection/ci-attestation",
+      "enabled": true,
+      "reasonCode": "",
+      "requiresConfirmation": false
+    },
+    {
+      "id": "scan",
+      "label": "Scan",
+      "method": "POST",
+      "path": "/api/v1/my-startup/vibe-marketing/scan",
+      "enabled": true,
+      "reasonCode": "",
+      "requiresConfirmation": false
+    },
+    {
+      "id": "pause",
+      "label": "Pause",
+      "method": "POST",
+      "path": "/api/v1/my-startup/vibe-marketing/website-connection/pause",
+      "enabled": true,
+      "reasonCode": "",
+      "requiresConfirmation": false
+    }
+  ],
+  "nextAction": null,
+  "discovery": {
+    "version": 1,
+    "complete": true,
+    "sourceSha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "candidates": [],
+    "publishReady": false
+  },
+  "operation": null,
+  "sourceRuns": [],
+  "ciSourceRuns": [],
+  "support": {
+    "native": {
+      "available": false,
+      "certified": false,
+      "reasonCode": "adapter_required",
+      "reason": "A verified framework adapter is required."
+    },
+    "portable": {
+      "available": true
+    },
+    "customContract": {
+      "available": true,
+      "certified": false,
+      "reasonCode": "reviewed_contract_required",
+      "generationRequirements": [
+        "reviewed_article_template",
+        "live_artifact_marker"
+      ],
+      "action": "custom-contract",
+      "path": "/api/v1/my-startup/vibe-marketing/website-connection/custom-contract"
+    },
+    "customerCi": {
+      "available": true,
+      "certified": false,
+      "reasonCode": "ci_attestation_required",
+      "action": "ci-attestation",
+      "path": "/api/v1/my-startup/vibe-marketing/website-connection/ci-attestation"
+    },
+    "cms": {
+      "available": false,
+      "reasonCode": "adapter_required"
+    }
+  }
+}

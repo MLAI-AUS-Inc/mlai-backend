@@ -165,6 +165,8 @@ class MyStartupFacadeTests(SimpleTestCase):
         force_authenticate(request, self.user)
         with patch.object(views.websites, "_context", return_value=(Obj(company=self.company), config, None)), \
              patch.object(views.websites, "transition_connection", return_value=operation) as transition, \
+             patch("content_factory.website_journey.journey_for_context", return_value={"version": 2}), \
+             patch("content_factory.website_operations.operation_summary", return_value={"receipt": operation.receipt}), \
              patch.object(views.websites, "summary_for", return_value={"connectionGeneration": 2}) as summary:
             match = resolve("/api/v1/my-startup/vibe-marketing/website-connection/reset")
             response = match.func(request, **match.kwargs)
@@ -200,6 +202,8 @@ class MyStartupFacadeTests(SimpleTestCase):
                     "source_sha": "a" * 40, "proposal_digest": "b" * 64}
         with patch.object(views.websites, "_context", return_value=(Obj(company=self.company), config, None)), \
              patch.object(views.websites, "summary_for", return_value={}), \
+             patch("content_factory.website_journey.journey_for_context", return_value={"version": 2}), \
+             patch("content_factory.website_operations.operation_summary", return_value={"receipt": operation.receipt}), \
              patch.object(views.websites, "transition_connection", return_value=operation) as transition, \
              patch("content_factory.website_reconciliation.approve_cleanup_proposal", return_value=operation) as cleanup:
             self.assertEqual(self.call(views.WebsiteConnectionActionView, method="post", action="cleanup", data=binding).status_code, 200)

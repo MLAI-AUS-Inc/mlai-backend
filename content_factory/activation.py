@@ -157,13 +157,14 @@ def durable_integration_evidence(config, connection, *, now=None):
         return {**base, "reasonCode": "website_publishing_paused" if connection.state == "paused" else "website_disconnected"}
     if not repository_write_policy(connection.organization.domain)["allowed"]:
         return {**base, "reasonCode": "website_writes_paused"}
-    if connection.app_root or any(item.get("code") in {"APPLICATION_ROOT_VERIFICATION_REQUIRED", "SETUP_BRANCH_VERIFICATION_REQUIRED"} for item in connection.blockers):
-        return {**base, "reasonCode": "integration_required"}
-    if not (mapping(connection.capabilities).get("publishingReady") and mapping(connection.capabilities).get("generationReady")):
-        return {**base, "reasonCode": "integration_required"}
     key = str(getattr(config, "default_publish_target_id", "") or "")
     targets = connection.targets.filter(generation=connection.generation)
     target = targets.filter(target_key=key).first() if key else None
+    custom_certified = bool(target and target.adapter == "custom_contract_v1" and mapping(target.capabilities).get("adapterCertified"))
+    if not custom_certified and (connection.app_root or any(item.get("code") in {"APPLICATION_ROOT_VERIFICATION_REQUIRED", "SETUP_BRANCH_VERIFICATION_REQUIRED"} for item in connection.blockers)):
+        return {**base, "reasonCode": "integration_required"}
+    if not (mapping(connection.capabilities).get("publishingReady") and mapping(connection.capabilities).get("generationReady")):
+        return {**base, "reasonCode": "integration_required"}
     if (target is None or not target.verified_at or not mapping(target.capabilities).get("publishingReady")
             or not SHA_PATTERN.fullmatch(connection.verified_sha or "") or target.source_sha != connection.verified_sha
             or not connection.branch):
@@ -183,9 +184,10 @@ def article_capabilities(config, *, domain="", account=None, evidence=None, repo
     evidence = evidence or integration_evidence(config)
     access = repository_access or {}
     repo_selected = bool(str(getattr(config, "github_repo", "") or "").strip())
-    ready = bool(account.get("owned") and evidence.get("verified") and access.get("verified")
+    writable = access.get("writable", access.get("verified"))
+    ready = bool(account.get("owned") and evidence.get("verified") and access.get("verified") and writable
                  and access.get("branch") == evidence.get("branch") and access.get("sha") == evidence.get("sha"))
-    code = "" if ready else "github_required" if not account.get("saved") else "repository_required" if not repo_selected else access.get("reasonCode") or evidence.get("reasonCode") or "github_verification_required"
+    code = "" if ready else "github_required" if not account.get("saved") else "repository_required" if not repo_selected else "github_write_required" if access.get("verified") and not writable else access.get("reasonCode") or evidence.get("reasonCode") or "github_verification_required"
     reasons = {
         "website_disconnected": "Reconnect your website before repository work.", "website_publishing_paused": "Resume website publishing before repository work.",
         "website_writes_paused": "Website changes are temporarily paused.", "repository_changed": "Review the selected website repository.",
@@ -194,6 +196,7 @@ def article_capabilities(config, *, domain="", account=None, evidence=None, repo
         "verification_required": "Verify your articles integration.", "verification_stale": "Check your website integration again.",
         "github_verification_required": "Checking your saved GitHub access.", "github_access_required": "Review GitHub access to your website.",
         "github_unavailable": "GitHub is temporarily unavailable. Try again shortly.",
+        "github_write_required": "Grant repository write access before preparing or publishing articles.",
     }
     route = evidence.get("routePath") or "/articles"
     label = route.strip("/").split("/")[0].replace("-", " ").title() or "Articles"
@@ -201,8 +204,11 @@ def article_capabilities(config, *, domain="", account=None, evidence=None, repo
     return {"version": 1, "canResearch": bool(domain), "canGenerateArticle": ready, "canGeneratePortableDraft": bool(domain), "canPublishArticle": ready,
             "stage": "ready" if ready else "unavailable" if code == "github_unavailable" else "github" if not account.get("saved") or code == "github_access_required" else "repository" if not repo_selected else "verifying" if code in {"verification_required", "verification_stale", "github_verification_required", "github_unavailable"} else "integration",
             "reasonCode": code, "reason": reasons.get(code, "Complete articles setup to start writing."),
-            "githubConnected": bool(account.get("saved")), "accountStatus": "connected" if access.get("verified") else account.get("status", "not_connected"),
+            "githubConnected": bool(account.get("saved")), "accountStatus": "connected" if account.get("verified") or access.get("verified") else account.get("status", "not_connected"),
+            "accountAccessVerified": bool(account.get("verified") or access.get("verified")), "repositoryWriteVerified": bool(access.get("verified") and writable),
             "repositorySelected": repo_selected, "repositoryAccessVerified": bool(access.get("verified")),
+            "repositorySourceSha": access.get("sha") if access.get("verified") else None,
+            "repositoryBranch": access.get("branch") if access.get("verified") else None,
             "integrationVerified": bool(evidence.get("verified")), "routePath": route, "surfaceLabel": label,
             "nextStep": "repository" if not repo_selected or not account.get("saved") or code.startswith("github_") else "articles",
             "verifiedAt": evidence.get("verifiedAt"),
