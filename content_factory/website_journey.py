@@ -21,7 +21,8 @@ def project_journey(*, company_id, domain, website=None, capabilities=None, disc
     discovery = discovery or discovery_snapshot({})
     target_contract = mapping(target.get("contract"))
     proof = mapping(proof)
-    verified = bool(capabilities.get("canGenerateArticle"))
+    authoring_supported = target.get("adapter") != "custom_contract_v1" and target_contract.get("delivery_adapter") != "custom_contract_v1"
+    verified = bool(capabilities.get("canGenerateArticle") and authoring_supported)
     access = bool(capabilities.get("repositoryAccessVerified"))
     account_access = bool(capabilities.get("accountAccessVerified", access))
     write_access = bool(capabilities.get("repositoryWriteVerified", access))
@@ -35,12 +36,15 @@ def project_journey(*, company_id, domain, website=None, capabilities=None, disc
     live_ready = verified and deployed
     reason_code = capabilities.get("reasonCode") or "integration_required"
     reason = capabilities.get("reason") or "Prepare and verify your articles integration."
+    if not authoring_supported:
+        reason_code = "publishing_adapter_required"
+        reason = "The custom build is verified. Connect an article publishing adapter or write a portable draft."
     running = operation and operation.get("state") in {"pending", "running", "verifying", "applying"}
     op_id = operation.get("id") if operation else None
     adapter = target.get("adapter") or target_contract.get("delivery_adapter") or proof.get("verifiedAdapter")
     certified = bool(proof.get("buildVerified", verified))
     custom_certified = bool(certified and adapter == "custom_contract_v1")
-    native_certified = bool(certified and adapter in {"react_article_system", "next_pages_router", "next_app_router", "react_router", "astro_content", "static_markdown", "hook_materialized"})
+    native_certified = bool(certified and adapter in {"react_article_system", "next_pages_router", "next_app_router", "react_router", "astro_content", "static_markdown", "hook_materialized", "react_component", "react_json_collection", "mdx_file", "markdown_file", "hook_bundle", "document_file", "stack_native", "registry_entry", "native_article_composer"})
     native_path = next((path for path in discovery.get("supportPaths", []) if isinstance(path, dict) and path.get("id") == "native"), {})
     current_source = capabilities.get("repositorySourceSha") or website.get("verifiedSha")
     inventory_stale = bool(discovery.get("complete") and current_source and discovery.get("sourceSha") != current_source)
@@ -115,7 +119,7 @@ def project_journey(*, company_id, domain, website=None, capabilities=None, disc
                 "reason": native_path.get("reason") or "A verified framework adapter is required."},
             "portable": {"available": bool(capabilities.get("canGeneratePortableDraft", company_id))},
             "customContract": {"available": bool(website and access), "certified": custom_certified, "reasonCode": "" if custom_certified else "reviewed_contract_required",
-                "generationRequirements": ["reviewed_article_template", "live_artifact_marker"] if not mapping(website.get("capabilities")).get("generationReady") else [],
+                "generationRequirements": ([] if mapping(website.get("capabilities")).get("generationReady") else ["reviewed_article_template", "live_artifact_marker"]) + ([] if authoring_supported else ["registered_publishing_adapter"]),
                 "action": "custom-contract", "path": "/api/v1/my-startup/vibe-marketing/website-connection/custom-contract"},
             "customerCi": {"available": bool(website and access), "certified": False, "reasonCode": "ci_attestation_required",
                 "action": "ci-attestation", "path": "/api/v1/my-startup/vibe-marketing/website-connection/ci-attestation"},
@@ -169,8 +173,14 @@ def journey_for_context(context, config, *, capabilities=None):
     discovery, target, operation, epoch, proof, source_runs, ci_source_runs = None, None, None, 0, {}, [], []
     if connection:
         website["hasMutationHistory"] = connection.repository_mutations.exists()
-        snapshot = connection.scan_snapshots.filter(generation=connection.generation).exclude(detector_version="github_head").order_by("-created_at").first()
-        discovery = discovery_snapshot(snapshot.evidence if snapshot else {})
+        from django.db.models import Q
+        inventory_rows = connection.scan_snapshots.filter(generation=connection.generation).exclude(detector_version="github_head").filter(
+            Q(evidence__repository_inventory__discovery_complete=True) | Q(evidence__repository_discovery__discovery_complete=True)
+            | Q(evidence__scan_summary__repository_inventory__discovery_complete=True) | Q(evidence__scan_summary__repository_discovery__discovery_complete=True)
+            | Q(evidence__scan_complete=True))
+        snapshot = inventory_rows.order_by("-created_at").first()
+        evidence = mapping(snapshot.evidence) if snapshot else {}
+        discovery = discovery_snapshot({**mapping(evidence.get("scan_summary")), **evidence})
         if snapshot:
             discovery["sourceSha"] = snapshot.source_sha
         selected = connection.targets.filter(generation=connection.generation, target_key=config.default_publish_target_id).first() if config.default_publish_target_id else None

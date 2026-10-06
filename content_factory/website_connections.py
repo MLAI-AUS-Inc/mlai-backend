@@ -129,8 +129,13 @@ def summary_for(config, *, company_id=None):
         actions.append("pause" if connection.state == "connected" else "reconnect")
     if connection.repository_mutations.exists():
         actions.append("cleanup")
-    custom_certified = connection.targets.filter(generation=connection.generation, target_key=config.default_publish_target_id,
-        adapter="custom_contract_v1", capabilities__adapterCertified=True, source_sha=connection.verified_sha).exists() if config.default_publish_target_id else False
+    selected = connection.targets.filter(generation=connection.generation, target_key=config.default_publish_target_id).first() if config.default_publish_target_id else None
+    custom_target = bool(selected and selected.adapter == "custom_contract_v1")
+    custom_certified = bool(custom_target and selected.capabilities.get("adapterCertified") and selected.source_sha == connection.verified_sha)
+    if custom_target:
+        # Keep build/preview support while requiring an implemented publisher.
+        capabilities.update(generationReady=False, publishingReady=False)
+        actions = [action for action in actions if action not in {"generate", "publish"}]
     target_blocked = not custom_certified and (connection.app_root or any(item.get("code") in {"APPLICATION_ROOT_VERIFICATION_REQUIRED", "SETUP_BRANCH_VERIFICATION_REQUIRED"} for item in connection.blockers))
     if target_blocked:
         capabilities.update(publishingReady=False, previewSupported=False)
@@ -335,8 +340,14 @@ def authority_guard(data, *, action="read", domain="", github_repo="", require_s
         target = connection.targets.filter(target_key=target_key, generation=connection.generation).first() if target_key else None
         if target_key and target is None:
             raise WebsiteAuthorityError("website_target_changed", "The publishing target changed.")
+        if action in {"publish", "merge"} and target and target.adapter == "custom_contract_v1":
+            raise WebsiteAuthorityError("publishing_adapter_required", "A verified build contract needs an implemented article publishing adapter. Portable drafts remain available.")
         if action in {"publish", "merge"} and (target is None or not target.verified_at or not target.capabilities.get("publishingReady") or target.source_sha != connection.verified_sha):
             raise WebsiteAuthorityError("website_target_verification_required", "Select a verified publishing target.")
+        if action in {"publish", "merge"}:
+            from .activation import live_deployment_verified
+            if not live_deployment_verified(connection, target):
+                raise WebsiteAuthorityError("deployment_verification_required", "Verify the current public articles integration before publishing.")
         heads_token = _verified_heads.set(_verified_heads.get() | {(str(connection.pk), connection.generation, expected)} if needs_head else _verified_heads.get())
         native_token = _verified_native_targets.set(_verified_native_targets.get() | {(str(connection.pk), connection.generation)} if needs_native else _verified_native_targets.get())
         depth_token = _authority_depth.set(_authority_depth.get() + 1)
