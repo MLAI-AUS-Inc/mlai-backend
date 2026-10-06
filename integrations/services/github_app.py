@@ -20,6 +20,10 @@ class GitHubWorkflowPermissionRequired(GitHubAppTokenError):
     """The App or installation has not approved editing workflow files."""
 
 
+class GitHubCIEvidencePermissionRequired(GitHubAppTokenError):
+    """Existing App or installation grants cannot read private CI evidence."""
+
+
 class GitHubPermissionLookupUnavailable(GitHubAppTokenError):
     """Provider permission evidence is temporarily unavailable."""
 
@@ -28,6 +32,10 @@ WORKFLOW_PERMISSION_DETAIL = (
     "The GitHub App owner must review and enable Workflows: Read and write, "
     "then the repository owner must approve the installation permission update. "
     "No permissions have been changed automatically."
+)
+CI_EVIDENCE_PERMISSION_DETAIL = (
+    "The GitHub App and repository installation must permit Checks and Commit statuses read access "
+    "to verify private repository CI evidence. Review the selected GitHub connection."
 )
 
 
@@ -91,7 +99,7 @@ def _github_app_jwt() -> str:
 def _cache_key(*, installation_id: str, repository: str, permission_mode: str,
                permission_profile: str = "repository") -> str:
     key = f"github_app_installation_token:{installation_id}:{repository.lower()}:{permission_mode}"
-    return f"{key}:workflow_files" if permission_profile == "workflow_files" else key
+    return f"{key}:{permission_profile}" if permission_profile != "repository" else key
 
 
 def _parse_expires_at(value) -> Optional[datetime]:
@@ -129,16 +137,19 @@ def _temporary_permission_failure(response) -> bool:
                 (headers.get("Retry-After") or headers.get("X-RateLimit-Remaining") == "0")))
 
 
-def _workflow_grant_permissions(payload) -> dict[str, str]:
+def _profile_grant_permissions(payload, *, profile) -> dict[str, str]:
     if not isinstance(payload, dict) or not isinstance(payload.get("permissions"), dict):
         raise GitHubPermissionLookupUnavailable("GitHub permission evidence is temporarily unavailable.")
     permissions = _normalize_permissions(payload["permissions"])
     if payload.get("suspended_at"):
         raise GitHubAppTokenError("The selected GitHub installation is suspended.")
-    if any(permissions.get(key) != "write" for key in ("contents", "pull_requests")):
-        raise GitHubAppTokenError("The selected GitHub installation lacks repository write permissions.")
-    if permissions.get("workflows") != "write":
+    repository_modes = {"write"} if profile == "workflow_files" else {"read", "write"}
+    if any(permissions.get(key) not in repository_modes for key in ("contents", "pull_requests")):
+        raise GitHubAppTokenError("The selected GitHub installation lacks the required repository permissions.")
+    if profile == "workflow_files" and permissions.get("workflows") != "write":
         raise GitHubWorkflowPermissionRequired(WORKFLOW_PERMISSION_DETAIL)
+    if profile == "ci_evidence" and any(permissions.get(key) not in {"read", "write"} for key in ("checks", "statuses")):
+        raise GitHubCIEvidencePermissionRequired(CI_EVIDENCE_PERMISSION_DETAIL)
     return permissions
 
 
@@ -146,6 +157,8 @@ def _credential_permissions_match(permissions, *, mode, profile) -> bool:
     required = {"contents": mode, "pull_requests": mode}
     if profile == "workflow_files":
         required["workflows"] = "write"
+    elif profile == "ci_evidence":
+        required.update(checks="read", statuses="read")
     return (all(permissions.get(key) == value for key, value in required.items())
             and all(key in required or (key == "metadata" and value == "read")
                     for key, value in permissions.items()))
@@ -153,6 +166,15 @@ def _credential_permissions_match(permissions, *, mode, profile) -> bool:
 
 def require_installation_workflow_permissions(installation_id: str) -> dict[str, str]:
     """Read approved App and installation grants without minting credentials."""
+    return _require_installation_profile_permissions(installation_id, profile="workflow_files")
+
+
+def require_installation_ci_evidence_permissions(installation_id: str) -> dict[str, str]:
+    """Read existing CI grants without changing permissions or minting tokens."""
+    return _require_installation_profile_permissions(installation_id, profile="ci_evidence")
+
+
+def _require_installation_profile_permissions(installation_id, *, profile):
     identifier = str(installation_id or "")
     if not identifier.isdigit():
         raise GitHubAppTokenError("The selected GitHub installation identity is invalid.")
@@ -170,7 +192,7 @@ def require_installation_workflow_permissions(installation_id: str) -> dict[str,
             payload = response.json()
         except (TypeError, ValueError) as exc:
             raise GitHubPermissionLookupUnavailable("GitHub permission evidence is temporarily unavailable.") from exc
-        permissions = _workflow_grant_permissions(payload)
+        permissions = _profile_grant_permissions(payload, profile=profile)
         if kind == "installation":
             installation_permissions = permissions
     return installation_permissions
@@ -193,10 +215,12 @@ def create_installation_access_token(
     if not normalized_repository or "/" not in normalized_repository:
         raise GitHubAppTokenError("GitHub repository must be owner/repo.")
 
-    if not isinstance(permission_profile, str) or permission_profile not in {"repository", "workflow_files"}:
+    if not isinstance(permission_profile, str) or permission_profile not in {"repository", "workflow_files", "ci_evidence"}:
         raise GitHubAppTokenError("Unknown repository permission profile.")
     if permission_profile == "workflow_files" and (permission_mode != "write" or repository_id is None):
         raise GitHubAppTokenError("Workflow credentials require an immutable repository and explicit write mode.")
+    if permission_profile == "ci_evidence" and (permission_mode != "read" or repository_id is None):
+        raise GitHubAppTokenError("CI evidence credentials require an immutable repository and explicit read mode.")
     mode = "read" if str(permission_mode or "").strip().lower() == "read" else "write"
     key = _cache_key(installation_id=normalized_installation_id, repository=normalized_repository,
                      permission_mode=mode, permission_profile=permission_profile)
@@ -206,6 +230,8 @@ def create_installation_access_token(
         key = f"{key}:repository-id:{repository_id}"
     if permission_profile == "workflow_files":
         require_installation_workflow_permissions(normalized_installation_id)
+    elif permission_profile == "ci_evidence":
+        require_installation_ci_evidence_permissions(normalized_installation_id)
     if use_cache:
         cached = cache.get(key)
         if isinstance(cached, dict) and cached.get("github_token"):
@@ -242,6 +268,8 @@ def create_installation_access_token(
         body["repository_ids"] = [repository_id]
     if permission_profile == "workflow_files":
         body["permissions"]["workflows"] = "write"
+    elif permission_profile == "ci_evidence":
+        body["permissions"].update(checks="read", statuses="read")
     response = http_requests.post(
         f"https://api.github.com/app/installations/{normalized_installation_id}/access_tokens",
         headers={
@@ -253,13 +281,13 @@ def create_installation_access_token(
         timeout=(3, 20),
     )
     if response.status_code not in {200, 201}:
-        if permission_profile == "workflow_files":
+        if permission_profile in {"workflow_files", "ci_evidence"}:
             if _temporary_permission_failure(response):
                 raise GitHubPermissionLookupUnavailable("GitHub permission evidence is temporarily unavailable.")
             # A 403 alone cannot prove a missing workflow grant. Re-read the
             # grants to distinguish a raced approval from repository access.
             if response.status_code == 403:
-                require_installation_workflow_permissions(normalized_installation_id)
+                _require_installation_profile_permissions(normalized_installation_id, profile=permission_profile)
             raise GitHubAppTokenError("The selected GitHub repository credential could not be issued.")
         try:
             error_payload = response.json()
@@ -288,15 +316,18 @@ def create_installation_access_token(
         raise GitHubAppTokenError("GitHub App installation token response did not include a token.")
     expires_at = _parse_expires_at(payload.get("expires_at"))
     permissions = _normalize_permissions(payload.get("permissions"))
-    if permission_profile == "workflow_files" and not _credential_permissions_match(permissions, mode=mode, profile=permission_profile):
+    if permission_profile in {"workflow_files", "ci_evidence"} and not _credential_permissions_match(permissions, mode=mode, profile=permission_profile):
         # A narrowed or raced provider grant must never escape as a usable token.
         try:
             http_requests.delete("https://api.github.com/installation/token",
                                  headers={"Authorization": f"Bearer {token}"}, timeout=(3, 10))
         except Exception:
             pass
-        if permissions.get("workflows") != "write" and all(permissions.get(key) == "write" for key in ("contents", "pull_requests")):
+        if permission_profile == "workflow_files" and permissions.get("workflows") != "write" and all(permissions.get(key) == "write" for key in ("contents", "pull_requests")):
             raise GitHubWorkflowPermissionRequired(WORKFLOW_PERMISSION_DETAIL)
+        if (permission_profile == "ci_evidence" and all(permissions.get(key) == "read" for key in ("contents", "pull_requests"))
+                and any(permissions.get(key) not in {"read", "write"} for key in ("checks", "statuses"))):
+            raise GitHubCIEvidencePermissionRequired(CI_EVIDENCE_PERMISSION_DETAIL)
         raise GitHubAppTokenError("GitHub returned a credential outside the approved repository permission profile.")
     result = GitHubInstallationToken(
         token=token,

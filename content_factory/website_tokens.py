@@ -5,7 +5,7 @@ import uuid
 from django.core.cache import cache
 from rest_framework.response import Response
 
-from .website_contract import WebsiteAuthorityError, connection_contract
+from .website_contract import WebsiteAuthorityError, connection_contract, SHA_PATTERN
 from .website_connections import authority_guard, contract_for
 
 
@@ -52,6 +52,97 @@ def _workflow_permission_denial():
     return WebsiteAuthorityError("github_workflow_permission_required", WORKFLOW_PERMISSION_DETAIL)
 
 
+def _ci_evidence_operation(connection, data):
+    """Keep the CI-only credential bound to the original current operation."""
+    from .website_operations import validate_operation
+    if any(data.get(key) in (None, "") for key in ("operation_id", "operation_attempt", "deletion_epoch")):
+        raise WebsiteAuthorityError("website_operation_required", "CI evidence requires the original operation, attempt and deletion watermark.")
+    operation = validate_operation(connection, data)
+    recorded_run = operation.payload.get("run_id")
+    if recorded_run and recorded_run != (data.get("run_id") or data.get("job_id")):
+        raise WebsiteAuthorityError("website_operation_changed", "CI evidence belongs to a different run.")
+
+
+def mint_ci_evidence_token(*, installation_id, repository, repository_id):
+    """Issue only CI read credentials after the caller's canonical authority check."""
+    from integrations.services.github_app import (create_installation_access_token, GitHubAppTokenError,
+        GitHubCIEvidencePermissionRequired, CI_EVIDENCE_PERMISSION_DETAIL, GitHubPermissionLookupUnavailable)
+    from integrations.http_client import RequestException
+    from .website_connections import require_unlocked_remote_call
+    require_unlocked_remote_call()
+    try:
+        return create_installation_access_token(installation_id=installation_id, repository=repository,
+            repository_id=repository_id, permission_mode="read", permission_profile="ci_evidence", use_cache=False)
+    except GitHubCIEvidencePermissionRequired as exc:
+        raise WebsiteAuthorityError("github_ci_evidence_permission_required", CI_EVIDENCE_PERMISSION_DETAIL) from exc
+    except (GitHubPermissionLookupUnavailable, RequestException) as exc:
+        raise WebsiteAuthorityError("github_temporarily_unavailable", "GitHub CI evidence is temporarily unavailable. Retry shortly.", status=503, retryable=True) from exc
+    except GitHubAppTokenError as exc:
+        raise WebsiteAuthorityError("github_repository_unavailable", "GitHub access could not be verified. Reconnect the selected repository.") from exc
+
+
+def read_ci_provider_json(url, *, headers):
+    """Read provider evidence without exposing credential or provider error bodies."""
+    from integrations import http_client
+    from .website_connections import require_unlocked_remote_call
+    require_unlocked_remote_call()
+    try:
+        response = http_client.get(url, headers=headers, timeout=(3, 15))
+    except http_client.RequestException as exc:
+        raise WebsiteAuthorityError("github_temporarily_unavailable", "GitHub CI evidence is temporarily unavailable. Retry shortly.", status=503, retryable=True) from exc
+    provider_headers = getattr(response, "headers", {}) or {}
+    if (response.status_code == 429 or response.status_code >= 500
+            or (response.status_code == 403 and (provider_headers.get("Retry-After") or provider_headers.get("X-RateLimit-Remaining") == "0"))):
+        raise WebsiteAuthorityError("github_temporarily_unavailable", "GitHub CI evidence is temporarily unavailable. Retry shortly.", status=503, retryable=True)
+    if response.status_code != 200:
+        raise WebsiteAuthorityError("github_repository_unavailable", "GitHub CI access could not be verified for the selected repository.")
+    try:
+        payload = response.json()
+    except (ValueError, TypeError) as exc:
+        raise WebsiteAuthorityError("github_ci_evidence_unavailable", "GitHub returned invalid CI evidence. Retry shortly.", status=503, retryable=True) from exc
+    if not isinstance(payload, dict):
+        raise WebsiteAuthorityError("github_ci_evidence_unavailable", "GitHub returned invalid CI evidence. Retry shortly.", status=503, retryable=True)
+    return payload
+
+
+def _valid_ci_check_row(row):
+    if not isinstance(row, dict):
+        return False
+    text_or_null = lambda value: value is None or isinstance(value, str)
+    if any(not text_or_null(row.get(key)) for key in ("name", "head_sha", "status", "conclusion")):
+        return False
+    if row.get("head_sha") is not None and not SHA_PATTERN.fullmatch(row["head_sha"]):
+        return False
+    if row.get("status") not in {None, "queued", "in_progress", "requested", "waiting", "pending", "completed"}:
+        return False
+    if row.get("conclusion") not in {None, "success", "failure", "neutral", "cancelled", "skipped", "timed_out", "action_required", "stale", "startup_failure"}:
+        return False
+    app, output = row.get("app"), row.get("output")
+    if app is not None and (not isinstance(app, dict) or not text_or_null(app.get("slug"))):
+        return False
+    if app is not None and app.get("id") is not None and (type(app["id"]) is not int or app["id"] <= 0):
+        return False
+    if output is not None and (not isinstance(output, dict)
+            or any(not text_or_null(output.get(key)) for key in ("title", "summary", "text"))):
+        return False
+    return True
+
+
+def read_ci_provider_checks(url, *, headers):
+    """Require a bounded provider Checks envelope before inspecting attestation."""
+    payload = read_ci_provider_json(url, headers=headers)
+    rows = payload.get("check_runs")
+    count = payload.get("total_count", len(rows) if isinstance(rows, list) else 0)
+    # A full page may omit later checks; cleanup separately requires the full
+    # inventory, while native attestation can inspect its exact check on this page.
+    valid_count = (type(count) is int and count >= 0 and isinstance(rows, list)
+        and (count == len(rows) or (len(rows) == 100 and count > len(rows))))
+    if (not isinstance(rows, list) or len(rows) > 100 or not valid_count
+            or any(not _valid_ci_check_row(row) for row in rows)):
+        raise WebsiteAuthorityError("github_ci_evidence_unavailable", "GitHub returned invalid CI evidence. Retry shortly.", status=503, retryable=True)
+    return payload
+
+
 def _token_contract(connection, data):
     contract = contract_for(connection)
     target = connection_contract(data).get("connection_target_id")
@@ -85,6 +176,8 @@ def issue_website_token(request):
         payload = exc.as_dict()
         if exc.code == "github_workflow_permission_required":
             payload.update(permission_profile="workflow_files", required_permission="workflows:write")
+        elif exc.code == "github_ci_evidence_permission_required":
+            payload.update(permission_profile="ci_evidence", required_permissions=["checks:read", "statuses:read"])
         return Response(payload, status=exc.status)
     except RequestException:
         return Response({"allowed": False, "error": "github_temporarily_unavailable", "code": "github_temporarily_unavailable", "detail": "GitHub could not issue a repository credential. Retry shortly.", "retryable": True}, status=503)
@@ -95,17 +188,20 @@ def issue_website_token(request):
 def mint_website_token(data, *, permission_mode="read", action="read"):
     """Issue and track one ephemeral token under the same lock as revocation."""
     from integrations.services.github_app import (create_installation_access_token, GitHubAppTokenError,
-        GitHubWorkflowPermissionRequired, GitHubPermissionLookupUnavailable, require_installation_workflow_permissions)
+        GitHubWorkflowPermissionRequired, GitHubCIEvidencePermissionRequired, CI_EVIDENCE_PERMISSION_DETAIL,
+        GitHubPermissionLookupUnavailable, require_installation_workflow_permissions)
     from integrations.http_client import RequestException
     if action in {"portable", "worker_cleanup", "cancel_operation"}:
         raise WebsiteAuthorityError("portable_repository_access_denied", "Portable drafts cannot access repository credentials.")
     if permission_mode not in {"read", "write"} or (permission_mode == "write" and action not in {"setup", "publish", "merge", "cleanup", "restoration"}):
         raise WebsiteAuthorityError("invalid_write_action", "Write credentials require an explicit repository mutation action.", status=400)
     profile = data.get("permission_profile", "repository")
-    if not isinstance(profile, str) or profile not in {"repository", "workflow_files"}:
+    if not isinstance(profile, str) or profile not in {"repository", "workflow_files", "ci_evidence"}:
         raise WebsiteAuthorityError("invalid_permission_profile", "Unknown repository permission profile.", status=400)
     if profile == "workflow_files" and (permission_mode != "write" or action not in {"setup", "cleanup", "restoration"}):
         raise WebsiteAuthorityError("invalid_permission_profile", "Workflow files require a setup or approved inverse operation with explicit write mode.", status=400)
+    if profile == "ci_evidence" and (permission_mode != "read" or action != "read"):
+        raise WebsiteAuthorityError("invalid_permission_profile", "CI evidence requires explicit read mode and action.", status=400)
     raw_preflight = data.get("preflight", "0")
     if raw_preflight not in ("0", "1", "false", "true", False, True):
         raise WebsiteAuthorityError("invalid_permission_preflight", "Unknown permission preflight mode.", status=400)
@@ -117,6 +213,8 @@ def mint_website_token(data, *, permission_mode="read", action="read"):
             raise WebsiteAuthorityError("github_verification_required", "Reconnect GitHub to verify repository identity.")
         if profile == "workflow_files":
             _workflow_operation(connection, data, action)
+        elif profile == "ci_evidence":
+            _ci_evidence_operation(connection, data)
         binding = {**dict(data), **contract_for(connection)}
         installation_id, repository, repository_id = connection.installation_id, connection.github_repo, connection.repository_id
     from .website_connections import require_unlocked_remote_call
@@ -133,7 +231,7 @@ def mint_website_token(data, *, permission_mode="read", action="read"):
                         **_token_contract(connection, binding)}
         kwargs = {"installation_id": installation_id, "repository": repository,
                   "repository_id": repository_id, "permission_mode": permission_mode, "use_cache": False}
-        if profile == "workflow_files":
+        if profile != "repository":
             kwargs["permission_profile"] = profile
         token = create_installation_access_token(**kwargs)
     except RequestException as exc:
@@ -142,12 +240,16 @@ def mint_website_token(data, *, permission_mode="read", action="read"):
         raise WebsiteAuthorityError("github_temporarily_unavailable", "GitHub permission evidence is temporarily unavailable. Retry shortly.", status=503, retryable=True) from exc
     except GitHubWorkflowPermissionRequired as exc:
         raise _workflow_permission_denial() from exc
+    except GitHubCIEvidencePermissionRequired as exc:
+        raise WebsiteAuthorityError("github_ci_evidence_permission_required", CI_EVIDENCE_PERMISSION_DETAIL) from exc
     except GitHubAppTokenError as exc:
         raise WebsiteAuthorityError("github_repository_unavailable", "GitHub access could not be verified. Reconnect the selected repository.") from exc
     try:
         with authority_guard(binding, action=action) as connection:
             if profile == "workflow_files":
                 _workflow_operation(connection, binding, action)
+            elif profile == "ci_evidence":
+                _ci_evidence_operation(connection, binding)
             reference = str(uuid.uuid4())
             cache.set(f"website-issued-token:{reference}", token.token, timeout=3600)
             for index in (token_index_key(connection.pk, connection.generation),

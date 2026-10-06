@@ -40,16 +40,15 @@ def validated_ci_identity(data, provider):
 def read_ci_proof(connection, data):
     """Read only GitHub-owned successful checks at the exact source commit."""
     from integrations import http_client
-    from integrations.services.github_app import create_installation_access_token
+    from .website_tokens import mint_ci_evidence_token, read_ci_provider_checks
     require_unlocked_remote_call()
-    token = create_installation_access_token(installation_id=connection.installation_id, repository=connection.github_repo,
-        repository_id=connection.repository_id, permission_mode="read", use_cache=False)
+    token = mint_ci_evidence_token(installation_id=connection.installation_id, repository=connection.github_repo,
+        repository_id=connection.repository_id)
     headers = {"Authorization": f"Bearer {token.token}", "Accept": "application/vnd.github+json"}
     try:
-        response = http_client.get(f"https://api.github.com/repos/{connection.github_repo}/commits/{quote(str(data['source_sha']), safe='')}/check-runs?per_page=100",
-            headers=headers, timeout=(3, 15))
-        response.raise_for_status()
-        for check in response.json().get("check_runs", []):
+        payload = read_ci_provider_checks(f"https://api.github.com/repos/{connection.github_repo}/commits/{quote(str(data['source_sha']), safe='')}/check-runs?per_page=100",
+            headers=headers)
+        for check in payload["check_runs"]:
             if (check.get("name") != CHECK_NAME or check.get("head_sha") != data["source_sha"] or check.get("status") != "completed"
                     or check.get("conclusion") != "success" or (check.get("app") or {}).get("slug") != "github-actions"):
                 continue

@@ -160,8 +160,8 @@ class WebsiteReliabilityLifecycleTests(WebsiteDatabaseFixture, TestCase):
         fetch.assert_not_called()
         op.receipt["verification_routes"] = [{"path": "/articles", "expected_status": 404}]
         op.save(update_fields=["receipt", "updated_at"])
-        replies = [SimpleNamespace(raise_for_status=lambda: None, json=lambda: {"sha": "a" * 40}),
-            SimpleNamespace(raise_for_status=lambda: None, json=lambda: {"check_runs": [{"head_sha": "a" * 40, "status": "completed", "conclusion": "success", "app": {"slug": "github-actions"}}]})]
+        replies = [SimpleNamespace(status_code=200, json=lambda: {"sha": "a" * 40}),
+            SimpleNamespace(status_code=200, json=lambda: {"check_runs": [{"head_sha": "a" * 40, "status": "completed", "conclusion": "success", "app": {"slug": "github-actions"}}]})]
         with patch("integrations.services.github_app.create_installation_access_token", return_value=SimpleNamespace(token="synthetic")), \
              patch("integrations.http_client.get", side_effect=replies), patch("integrations.http_client.delete"), \
              patch("content_factory.website_live_fetch.fetch_live_route", return_value=(b"gone", {})) as fetch:
