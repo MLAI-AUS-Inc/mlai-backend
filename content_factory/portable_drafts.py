@@ -46,6 +46,25 @@ def portable_run_update_allowed(run, payload, *, event_type=""):
         return False
     if any(payload.get(key) and str(payload[key]) != str(run.run_id) for key in ("run_id", "job_id")):
         return False
+    editorial_status_paths = set()
+    request = payload.get("run_request")
+    if isinstance(request, dict) and request.get("editorial_admission") is not None:
+        from .editorial_run_state import EditorialRunConflict, merge_editorial_run_snapshot
+        try:
+            # Catalog approvals are immutable editorial observations, not a
+            # publication lease. Validate their schema, selection hash, brief,
+            # tenant and any saved admission before distinguishing these paths.
+            merge_editorial_run_snapshot(
+                {"workflow": run.workflow, "domain": run.domain, "run_request": run.run_request},
+                {**payload, "workflow": payload.get("workflow") or run.workflow,
+                 "domain": payload.get("domain") or run.domain},
+            )
+        except EditorialRunConflict:
+            return False
+        editorial_status_paths = {
+            ("run_request", "editorial_admission", kind, "status")
+            for kind in ("audience", "offer")
+        }
     forbidden = REPOSITORY_CONFIG_FIELDS | set(CONNECTION_FIELDS) | {
         "github_token", "github_installation_id", "expected_source_sha", "source_sha", "repo_head_sha", "commit_sha",
         "branch", "branch_name", "head_sha", "pr_url", "pr_number", "pull_request_url", "publish_url",
@@ -55,7 +74,7 @@ def portable_run_update_allowed(run, payload, *, event_type=""):
         "connection_id", "connectionId", "connectionGeneration", "connectionTargetId", "repositoryId",
         "websiteConnectionId", "websiteConnection", "livePreview", "previewUrl", "livePreviewUrl", "prUrl",
     }
-    def safe(value):
+    def safe(value, path=()):
         if isinstance(value, dict):
             for key, item in value.items():
                 normalized_key = re.sub(r"(?<!^)(?=[A-Z])", "_", str(key)).lower()
@@ -67,12 +86,13 @@ def portable_run_update_allowed(run, payload, *, event_type=""):
                     return False
                 if normalized_key == "domain" and item and str(item).lower().strip() != str(run.domain).lower().strip():
                     return False
-                if normalized_key in {"status", "publish_status", "publish_stage", "merge_status", "approval_state"} and item in ("published", "merged", "approved", "auto_approved", "pr_created", "draft_pr_created", "setup_pr_created"):
+                editorial_approval = item == "approved" and path + (key,) in editorial_status_paths
+                if normalized_key in {"status", "publish_status", "publish_stage", "merge_status", "approval_state"} and item in ("published", "merged", "approved", "auto_approved", "pr_created", "draft_pr_created", "setup_pr_created") and not editorial_approval:
                     return False
-                if not safe(item):
+                if not safe(item, path + (key,)):
                     return False
         elif isinstance(value, list):
-            return all(safe(item) for item in value)
+            return all(safe(item, path + (index,)) for index, item in enumerate(value))
         return True
     return safe(payload)
 
