@@ -272,6 +272,7 @@ jobs:
         python manage.py test \
           founder_tools.my_startup.test_database \
           roo.tests_office_manager_channel \
+          roo.tests_rate_card \
           roo.tests_api.TaskViewSetTests \
           roo.tests_api.CoworkingViewSetTests \
           tests.test_coworking_snapshot \
