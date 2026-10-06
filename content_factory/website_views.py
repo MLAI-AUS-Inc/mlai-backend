@@ -11,6 +11,7 @@ from .website_contract import WebsiteAuthorityError, connection_contract, saniti
 from .website_connections import (
     authority_guard, bind_website, contract_for, scoped_run_contract,
     summary_for, transition_connection, owner_operation_scope,
+    run_action_authority,
 )
 
 
@@ -85,7 +86,7 @@ def guarded_owner_operation(action, *, bind_selected=False, run_operation=False,
                     payload.update(domain=context.organization.domain, github_repo=requested_repo)
                 effective_action = action
                 if run_operation and run_action:
-                    effective_action = "merge" if run_action == "merge-publish-pr" else "publish" if run_action in {"approve", "publish-pr", "promote-bundle"} else "setup"
+                    effective_action = run_action_authority(run, run_action)
                 with authority_guard(payload, action=effective_action):
                     if local_only:
                         return method(self, request, *args, **kwargs)

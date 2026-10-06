@@ -88,6 +88,23 @@ class WebsiteJourneyContractTests(SimpleTestCase):
         self.assertTrue(result["support"]["customContract"]["certified"])
         self.assertFalse(result["support"]["native"]["certified"])
 
+    def test_custom_build_proof_cannot_grant_unimplemented_authoring(self):
+        from .article_system import is_directly_publishable_target
+        target = {"adapter": "custom_contract_v1", "contract": {"delivery_adapter": "custom_contract_v1", "publish_capability": "direct"}}
+        result = project_journey(company_id="42", domain="example.test", website={"status": "connected", "capabilities": {"generationReady": True}},
+            target=target, proof={"buildVerified": True}, capabilities={"canGenerateArticle": True})
+        self.assertTrue(result["support"]["customContract"]["certified"])
+        self.assertFalse(result["capabilities"]["canGenerateArticle"])
+        self.assertFalse(result["capabilities"]["canPublishArticle"])
+        self.assertTrue(result["capabilities"]["canGeneratePortableDraft"])
+        self.assertEqual(result["reasonCode"], "publishing_adapter_required")
+        self.assertIn("registered_publishing_adapter", result["support"]["customContract"]["generationRequirements"])
+        self.assertFalse(is_directly_publishable_target(target["contract"]))
+
+    def test_implemented_react_delivery_adapter_is_native_certified(self):
+        result = project_journey(company_id="42", domain="example.test", target={"adapter": "react_component"}, proof={"buildVerified": True})
+        self.assertTrue(result["support"]["native"]["certified"])
+
     def test_discovery_support_paths_preserve_bounded_framework_evidence(self):
         discovery = discovery_snapshot({"repository_discovery": {"discovery_complete": True, "source_sha": "a" * 40,
             "support_level": "supported", "support_paths": [{"id": "native", "status": "available", "reason": "Framework detected", "private_key": "not public"}]}})

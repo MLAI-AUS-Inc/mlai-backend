@@ -8,6 +8,22 @@ from content_factory.website_connections import contract_for
 from content_factory.website_models import WebsiteConnection
 
 
+def certify_live_target_fixture(target):
+    """Persist exact synthetic live evidence without replacing authority guards."""
+    from django.utils import timezone
+    from content_factory.website_models import WebsiteConnectionOperation
+    website = target.connection
+    target.contract = {**target.contract, "contract_digest": "d" * 64, "live_marker": {"value": "e" * 64}}
+    target.save(update_fields=["contract"])
+    WebsiteConnectionOperation.objects.create(connection=website, generation=website.generation,
+        action="deployment-verify", state="completed", idempotency_key="synthetic-live-" + str(target.pk),
+        payload={"source_sha": website.verified_sha, "target_id": target.target_key},
+        receipt={"status": "passed", "source_sha": website.verified_sha,
+            "connection_generation": website.generation, "target_id": target.target_key,
+            "contract_digest": "d" * 64, "artifact_digest": "e" * 64,
+            "public_url": "https://site.example.test/articles", "checked_at": timezone.now().isoformat()})
+
+
 def bind_config_fixture(config, *, repo=None):
     website = WebsiteConnection.objects.create(organization=config.organization,
         github_repo=repo or config.github_repo or 'example/site', repository_id=12345,

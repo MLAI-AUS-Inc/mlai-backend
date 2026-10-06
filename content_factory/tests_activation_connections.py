@@ -124,7 +124,7 @@ class ActivationConnectionTests(TestCase):
         access = {'verified': True, 'branch': 'main', 'sha': SHA}
         caps = article_capabilities(self.config, domain=self.org.domain, account={'saved': True, 'owned': True}, evidence=evidence, repository_access=access)
         self.assertTrue(caps['canGenerateArticle'])
-        self.assertTrue(caps['canPublishArticle'])
+        self.assertFalse(caps['canPublishArticle'])
         for update in ({'state': 'disconnected'}, {'state': 'paused'}, {'generation': 2},
             {'verified_sha': 'b' * 40}, {'last_verified_at': timezone.now() - timedelta(days=8)}, {'app_root': 'apps/site'}):
             original = {key: getattr(website, key) for key in update}
@@ -157,6 +157,7 @@ class ActivationConnectionTests(TestCase):
         with patch('integrations.services.github_app.create_installation_access_token', return_value=credential), \
              patch('content_factory.website_connections.read_repository_native_target', return_value={'id': website.repository_id,
                  'full_name': website.github_repo, 'default_branch': 'main'}), \
+             patch('content_factory.vibe_marketing_views.http_client.delete') as revoke, \
              patch('content_factory.vibe_marketing_views.http_client.get', side_effect=provider) as reads:
             caps = _article_capabilities_for_context(self.context, self.config, latest_runs=[], force=True)
             self.assertTrue(caps['canGenerateArticle'], caps)
@@ -165,6 +166,8 @@ class ActivationConnectionTests(TestCase):
             self.assertFalse(caps['canGenerateArticle'])
             self.assertEqual(caps['reasonCode'], 'verification_stale')
             self.assertEqual(reads.call_count, 4)
+            self.assertTrue(revoke.called)
+            self.assertEqual(revoke.call_args.args[0], "https://api.github.com/installation/token")
 
     def test_legacy_charge_admission_preserves_founder_ownership_for_portable(self):
         from integrations.services.article_generation import ArticleGenerationError, require_article_activation

@@ -143,6 +143,26 @@ def integration_evidence(config, latest_runs=(), *, setup_gate=None, now=None):
     return {**base, "verified": True, "verifiedAt": verified_at.isoformat(), "branch": branch, "sha": sha, "reasonCode": ""}
 
 
+def live_deployment_verified(connection, target, *, now=None):
+    """Require the current target's exact, fresh, authenticated live receipt."""
+    if target is None:
+        return False
+    now = now or timezone.now()
+    contract = mapping(target.contract)
+    marker = mapping(contract.get("live_marker"))
+    if not contract.get("contract_digest") or not marker.get("value"):
+        return False
+    operation = connection.operations.filter(generation=connection.generation, action="deployment-verify", state="completed",
+        payload__source_sha=connection.verified_sha, payload__target_id=target.target_key).order_by("-created_at").first()
+    receipt = mapping(operation.receipt) if operation else {}
+    stamp = parse_datetime(str(receipt.get("checked_at") or ""))
+    return bool(receipt.get("status") == "passed" and receipt.get("source_sha") == connection.verified_sha
+        and receipt.get("connection_generation") == connection.generation and receipt.get("target_id") == target.target_key
+        and receipt.get("contract_digest") == contract["contract_digest"] and receipt.get("artifact_digest") == marker["value"]
+        and receipt.get("public_url") and stamp and not timezone.is_naive(stamp)
+        and now - VERIFICATION_MAX_AGE <= stamp <= now + timedelta(minutes=5))
+
+
 def durable_integration_evidence(config, connection, *, now=None):
     """Use current-generation target proof, never legacy ready flags after binding."""
     from .website_contract import SHA_PATTERN
@@ -160,8 +180,9 @@ def durable_integration_evidence(config, connection, *, now=None):
     key = str(getattr(config, "default_publish_target_id", "") or "")
     targets = connection.targets.filter(generation=connection.generation)
     target = targets.filter(target_key=key).first() if key else None
-    custom_certified = bool(target and target.adapter == "custom_contract_v1" and mapping(target.capabilities).get("adapterCertified"))
-    if not custom_certified and (connection.app_root or any(item.get("code") in {"APPLICATION_ROOT_VERIFICATION_REQUIRED", "SETUP_BRANCH_VERIFICATION_REQUIRED"} for item in connection.blockers)):
+    if target and target.adapter == "custom_contract_v1":
+        return {**base, "reasonCode": "publishing_adapter_required"}
+    if connection.app_root or any(item.get("code") in {"APPLICATION_ROOT_VERIFICATION_REQUIRED", "SETUP_BRANCH_VERIFICATION_REQUIRED"} for item in connection.blockers):
         return {**base, "reasonCode": "integration_required"}
     if not (mapping(connection.capabilities).get("publishingReady") and mapping(connection.capabilities).get("generationReady")):
         return {**base, "reasonCode": "integration_required"}
@@ -175,7 +196,7 @@ def durable_integration_evidence(config, connection, *, now=None):
         return {**base, "reasonCode": "verification_stale"}
     contract = mapping(target.contract)
     route = str(contract.get("route_path") or contract.get("public_path") or str(contract.get("route_template") or "").split("{")[0] or "/articles")
-    return {**base, "verified": True, "routePath": "/" + route.strip("/"), "verifiedAt": verified_at.isoformat(), "reasonCode": ""}
+    return {**base, "verified": True, "publishingVerified": live_deployment_verified(connection, target, now=now), "routePath": "/" + route.strip("/"), "verifiedAt": verified_at.isoformat(), "reasonCode": ""}
 
 
 def article_capabilities(config, *, domain="", account=None, evidence=None, repository_access=None):
@@ -197,13 +218,14 @@ def article_capabilities(config, *, domain="", account=None, evidence=None, repo
         "github_verification_required": "Checking your saved GitHub access.", "github_access_required": "Review GitHub access to your website.",
         "github_unavailable": "GitHub is temporarily unavailable. Try again shortly.",
         "github_write_required": "Grant repository write access before preparing or publishing articles.",
+        "publishing_adapter_required": "The custom build is verified. Connect an article publishing adapter or write a portable draft.",
     }
     route = evidence.get("routePath") or "/articles"
     label = route.strip("/").split("/")[0].replace("-", " ").title() or "Articles"
     unit = get_content_factory_content_island_topic_cost_points(domain)
-    return {"version": 1, "canResearch": bool(domain), "canGenerateArticle": ready, "canGeneratePortableDraft": bool(domain), "canPublishArticle": ready,
+    return {"version": 1, "canResearch": bool(domain), "canGenerateArticle": ready, "canGeneratePortableDraft": bool(domain), "canPublishArticle": bool(ready and evidence.get("publishingVerified", True)),
             "stage": "ready" if ready else "unavailable" if code == "github_unavailable" else "github" if not account.get("saved") or code == "github_access_required" else "repository" if not repo_selected else "verifying" if code in {"verification_required", "verification_stale", "github_verification_required", "github_unavailable"} else "integration",
-            "reasonCode": code, "reason": reasons.get(code, "Complete articles setup to start writing."),
+            "reasonCode": code, "reason": "" if ready else reasons.get(code, "Complete articles setup to start writing."),
             "githubConnected": bool(account.get("saved")), "accountStatus": "connected" if account.get("verified") or access.get("verified") else account.get("status", "not_connected"),
             "accountAccessVerified": bool(account.get("verified") or access.get("verified")), "repositoryWriteVerified": bool(access.get("verified") and writable),
             "repositorySelected": repo_selected, "repositoryAccessVerified": bool(access.get("verified")),

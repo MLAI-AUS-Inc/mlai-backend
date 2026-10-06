@@ -453,6 +453,9 @@ def is_directly_publishable_target(target: Optional[Dict[str, Any]]) -> bool:
         return False
     if is_bundle_only_fallback_target(target):
         return False
+    if target.get("delivery_adapter") == "custom_contract_v1":
+        # Executable build proof does not supply a content authoring adapter.
+        return False
     capability = str(target.get("publish_capability") or "").strip()
     if capability == "direct":
         return True

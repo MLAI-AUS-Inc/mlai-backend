@@ -14,6 +14,31 @@ from .website_operations import reserve_workflow_operation, cancel_operation, de
 
 
 class WebsiteReliabilityLifecycleTests(WebsiteDatabaseFixture, TestCase):
+    def test_linking_verified_target_precedes_live_publication_verification(self):
+        from django.contrib.auth import get_user_model
+        from django.utils import timezone
+        from rest_framework.test import APIClient
+        from founder_tools.models import VibeRaisingProfile, VibeRaisingCompany
+        from .website_models import WebsiteConnectionTarget
+        from .activation import live_deployment_verified
+        user = get_user_model().objects.create(email="link-owner@example.test")
+        profile = VibeRaisingProfile.objects.create(user=user, role="founder")
+        company = VibeRaisingCompany.objects.create(profile=profile, organization=self.org, name="Synthetic", domain=self.org.domain)
+        self.website.authorized_by = user
+        self.website.verified_sha = "a" * 40
+        self.website.save(update_fields=["authorized_by", "verified_sha"])
+        target = WebsiteConnectionTarget.objects.create(connection=self.website, generation=self.website.generation,
+            target_key="native", source_sha="a" * 40, adapter="react_component", verified_at=timezone.now(),
+            capabilities={"publishingReady": True}, contract={"target_id": "native", "route": "/articles/{slug}", "publish_capability": "direct"})
+        client = APIClient()
+        client.force_authenticate(user=user)
+        with patch("content_factory.vibe_marketing_views._article_setup_state", return_value={}):
+            response = client.post("/api/v1/vibe-marketing/article-setup/accept", {**self.binding, "company_id": str(company.pk)}, format="json")
+        self.assertEqual(response.status_code, 200, response.data)
+        self.config.refresh_from_db()
+        self.assertEqual(self.config.default_publish_target_id, "native")
+        self.assertFalse(live_deployment_verified(self.website, target))
+
     def test_cancel_fences_one_operation_and_leaves_unrelated_work(self):
         first, other = {**self.binding, "client_request_id": "one"}, {**self.binding, "client_request_id": "two"}
         op = reserve_workflow_operation(self.website, workflow="article_generation", payload=first)
@@ -221,8 +246,78 @@ class WebsiteReliabilityLifecycleTests(WebsiteDatabaseFixture, TestCase):
         self.assertEqual(live.call_args.kwargs["expected_status"], 404)
         self.config.refresh_from_db()
         journey = journey_for_context(context, self.config, capabilities={"repositoryAccessVerified": True, "canGenerateArticle": True})
-        self.assertTrue(journey["capabilities"]["canPublishArticle"])
+        self.assertFalse(journey["capabilities"]["canPublishArticle"])
+        self.assertEqual(journey["reasonCode"], "publishing_adapter_required")
         self.assertEqual(journey["prerequisites"]["verification"]["status"], "complete")
+
+    def test_configuration_snapshots_cannot_erase_complete_inventory(self):
+        from .website_models import WebsiteScanSnapshot
+        from .website_journey import journey_for_context
+        from django.utils import timezone
+        context = SimpleNamespace(company=SimpleNamespace(pk="42"), organization=self.org)
+        WebsiteScanSnapshot.objects.create(connection=self.website, generation=1, run_id="inventory", source_sha="a" * 40,
+            fingerprint="inventory", evidence={"repository_inventory": {"discovery_complete": True, "source_sha": "a" * 40}})
+        WebsiteScanSnapshot.objects.create(connection=self.website, generation=1, run_id="configure", source_sha="a" * 40,
+            fingerprint="configure", evidence={"publish_targets": [{"target_id": "native"}]})
+        self.website.verified_sha = "a" * 40
+        self.website.save(update_fields=["verified_sha"])
+        journey = journey_for_context(context, self.config, capabilities={"repositorySourceSha": "a" * 40})
+        self.assertEqual(journey["prerequisites"]["inventory"]["status"], "complete")
+        stale = journey_for_context(context, self.config, capabilities={"repositorySourceSha": "b" * 40})
+        self.assertEqual(stale["prerequisites"]["inventory"]["status"], "stale")
+
+    def test_native_authoring_does_not_grant_publication_before_live_proof(self):
+        from .website_models import WebsiteConnectionTarget, WebsiteConnectionOperation
+        from .activation import article_capabilities, live_deployment_verified
+        from django.utils import timezone
+        self.website.verified_sha = "a" * 40
+        self.website.last_verified_at = timezone.now()
+        self.website.save(update_fields=["verified_sha", "last_verified_at"])
+        target = WebsiteConnectionTarget.objects.create(connection=self.website, generation=1, target_key="native", adapter="react_component",
+            source_sha="a" * 40, verified_at=timezone.now(), capabilities={"publishingReady": True},
+            contract={"contract_digest": "d" * 64, "live_marker": {"value": "e" * 64}})
+        self.config.default_publish_target_id = "native"
+        self.config.save(update_fields=["default_publish_target_id"])
+        arguments = {"domain": self.org.domain, "account": {"saved": True, "owned": True},
+            "repository_access": {"verified": True, "writable": True, "branch": "main", "sha": "a" * 40}}
+        caps = article_capabilities(self.config, **arguments)
+        self.assertTrue(caps["canGenerateArticle"])
+        self.assertFalse(caps["canPublishArticle"])
+        with self.assertRaises(WebsiteAuthorityError) as error:
+            with authority_guard({**self.binding, "expected_source_sha": "a" * 40}, action="publish"):
+                pass
+        self.assertEqual(error.exception.code, "deployment_verification_required")
+        receipt = {"status": "passed", "source_sha": "a" * 40, "connection_generation": 1, "target_id": "native",
+            "contract_digest": "d" * 64, "artifact_digest": "e" * 64, "public_url": "https://site.example.test/articles", "checked_at": timezone.now().isoformat()}
+        op = WebsiteConnectionOperation.objects.create(connection=self.website, generation=1, action="deployment-verify", state="completed",
+            idempotency_key="synthetic-live", payload={"source_sha": "a" * 40, "target_id": "native"}, receipt=receipt)
+        self.assertTrue(article_capabilities(self.config, **arguments)["canPublishArticle"])
+        with authority_guard({**self.binding, "expected_source_sha": "a" * 40}, action="publish"):
+            pass
+        op.receipt = {**receipt, "artifact_digest": "f" * 64}
+        op.save(update_fields=["receipt"])
+        self.assertFalse(live_deployment_verified(self.website, target))
+
+    def test_certified_custom_contract_does_not_authorize_repository_authoring(self):
+        from .website_models import WebsiteConnectionTarget
+        from .activation import durable_integration_evidence
+        from .website_connections import summary_for
+        from django.utils import timezone
+        WebsiteConnectionTarget.objects.create(connection=self.website, generation=1, target_key="custom", adapter="custom_contract_v1",
+            source_sha=self.website.verified_sha, verified_at=timezone.now(), contract={"route_path": "/articles"},
+            capabilities={"adapterCertified": True, "publishingReady": True})
+        self.config.default_publish_target_id = "custom"
+        self.config.save(update_fields=["default_publish_target_id"])
+        self.website.capabilities = {"generationReady": True, "publishingReady": True, "previewSupported": True}
+        self.website.save(update_fields=["capabilities"])
+        self.assertEqual(durable_integration_evidence(self.config, self.website)["reasonCode"], "publishing_adapter_required")
+        summary = summary_for(self.config)
+        self.assertFalse(summary["capabilities"]["generationReady"])
+        self.assertFalse(summary["capabilities"]["publishingReady"])
+        with self.assertRaises(WebsiteAuthorityError) as error:
+            with authority_guard(self.binding, action="publish"):
+                pass
+        self.assertEqual(error.exception.code, "publishing_adapter_required")
 
     def test_new_custom_source_retains_only_exact_reverified_generation_marker(self):
         from .website_models import WebsiteConnectionTarget
