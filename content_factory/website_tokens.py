@@ -105,12 +105,26 @@ def read_ci_provider_json(url, *, headers):
     return payload
 
 
+def _valid_ci_check_row(row):
+    if not isinstance(row, dict):
+        return False
+    text_or_null = lambda value: value is None or isinstance(value, str)
+    if any(not text_or_null(row.get(key)) for key in ("name", "head_sha", "status", "conclusion")):
+        return False
+    app, output = row.get("app"), row.get("output")
+    if app is not None and (not isinstance(app, dict) or not text_or_null(app.get("slug"))):
+        return False
+    if output is not None and (not isinstance(output, dict)
+            or any(not text_or_null(output.get(key)) for key in ("title", "summary", "text"))):
+        return False
+    return True
+
+
 def read_ci_provider_checks(url, *, headers):
     """Require a bounded provider Checks envelope before inspecting attestation."""
     payload = read_ci_provider_json(url, headers=headers)
     rows = payload.get("check_runs")
-    if (not isinstance(rows, list) or len(rows) > 100 or any(not isinstance(row, dict)
-            or not isinstance(row.get("app") or {}, dict) or not isinstance(row.get("output") or {}, dict) for row in rows)):
+    if not isinstance(rows, list) or len(rows) > 100 or any(not _valid_ci_check_row(row) for row in rows):
         raise WebsiteAuthorityError("github_ci_evidence_unavailable", "GitHub returned invalid CI evidence. Retry shortly.", status=503, retryable=True)
     return payload
 

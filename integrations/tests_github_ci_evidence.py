@@ -158,6 +158,11 @@ class CIEvidenceIssuerTests(SimpleTestCase):
                   (response(200, {'check_runs': [{'app': ['invalid']}]}), 'github_ci_evidence_unavailable', 503, True),
                   (SimpleNamespace(status_code=200, json=lambda: (_ for _ in ()).throw(ValueError('private-json-detail'))),
                    'github_ci_evidence_unavailable', 503, True)]
+        for malformed in ({'conclusion': []}, {'conclusion': {}}, {'status': []}, {'head_sha': []}, {'name': []},
+                          {'app': {'slug': []}}, {'output': {'summary': {}}}, {'output': {'text': []}}):
+            row = {'name': 'check', 'head_sha': SHA, 'status': 'completed', 'conclusion': 'success',
+                   'app': {'slug': 'github-actions'}, 'output': {}, **malformed}
+            cases.append((response(200, {'check_runs': [row]}), 'github_ci_evidence_unavailable', 503, True))
         for failed_reply, code, status, retryable in cases:
             def provider(url, **kwargs):
                 if url.startswith('https://api.github.com/app'):
@@ -305,6 +310,9 @@ class WebsiteCIEvidenceTests(WebsiteDatabaseFixture, TestCase):
         failures += [(RequestException('private-transport-detail'), 503), (response(200, []), 503),
                      (response(200, {'check_runs': 'invalid'}), 503),
                      (SimpleNamespace(status_code=200, json=lambda: (_ for _ in ()).throw(ValueError('private-json-detail'))), 503)]
+        for malformed in ([], {}):
+            failures.append((response(200, {'check_runs': [{'head_sha': SHA, 'status': 'completed',
+                'conclusion': malformed, 'app': {'slug': 'github-actions'}}]}), 503))
         for phase in ('head', 'checks'):
             for failed_reply, status in failures:
                 def provider(url, **kwargs):
