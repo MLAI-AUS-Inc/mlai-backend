@@ -14,6 +14,31 @@ from .website_operations import reserve_workflow_operation, cancel_operation, de
 
 
 class WebsiteReliabilityLifecycleTests(WebsiteDatabaseFixture, TestCase):
+    def test_linking_verified_target_precedes_live_publication_verification(self):
+        from django.contrib.auth import get_user_model
+        from django.utils import timezone
+        from rest_framework.test import APIClient
+        from founder_tools.models import VibeRaisingProfile, VibeRaisingCompany
+        from .website_models import WebsiteConnectionTarget
+        from .activation import live_deployment_verified
+        user = get_user_model().objects.create(email="link-owner@example.test")
+        profile = VibeRaisingProfile.objects.create(user=user, role="founder")
+        company = VibeRaisingCompany.objects.create(profile=profile, organization=self.org, name="Synthetic", domain=self.org.domain)
+        self.website.authorized_by = user
+        self.website.verified_sha = "a" * 40
+        self.website.save(update_fields=["authorized_by", "verified_sha"])
+        target = WebsiteConnectionTarget.objects.create(connection=self.website, generation=self.website.generation,
+            target_key="native", source_sha="a" * 40, adapter="react_component", verified_at=timezone.now(),
+            capabilities={"publishingReady": True}, contract={"target_id": "native", "route": "/articles/{slug}", "publish_capability": "direct"})
+        client = APIClient()
+        client.force_authenticate(user=user)
+        with patch("content_factory.vibe_marketing_views._article_setup_state", return_value={}):
+            response = client.post("/api/v1/vibe-marketing/article-setup/accept", {**self.binding, "company_id": str(company.pk)}, format="json")
+        self.assertEqual(response.status_code, 200, response.data)
+        self.config.refresh_from_db()
+        self.assertEqual(self.config.default_publish_target_id, "native")
+        self.assertFalse(live_deployment_verified(self.website, target))
+
     def test_cancel_fences_one_operation_and_leaves_unrelated_work(self):
         first, other = {**self.binding, "client_request_id": "one"}, {**self.binding, "client_request_id": "two"}
         op = reserve_workflow_operation(self.website, workflow="article_generation", payload=first)

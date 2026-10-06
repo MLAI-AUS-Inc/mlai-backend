@@ -369,6 +369,17 @@ def scoped_run_contract(run):
     return payload
 
 
+def run_action_authority(run, action):
+    """Derive setup versus article publication from the persisted workflow."""
+    if action == "merge-publish-pr":
+        return "merge"
+    if action in {"approve", "publish-pr", "promote-bundle"}:
+        if run is not None and run.workflow in {"repo_scan", "article_system_setup", "scaffold_articles"}:
+            return "setup"
+        return "publish"
+    return "setup"
+
+
 def guarded_service_write(action, *, only_repository=False, remote_actions=(), portable=False):
     """Fence legacy service handlers without weakening their existing permissions."""
     def decorate(method):
@@ -391,6 +402,10 @@ def guarded_service_write(action, *, only_repository=False, remote_actions=(), p
                 if kwargs.get("action") in {"cancel", "deny"}:
                     return method(self, request, *args, **kwargs)
                 effective_action = "setup" if kwargs.get("action") == "resume" else action
+                if action == "publish" and kwargs.get("run_id") and kwargs.get("action") in {"approve", "publish-pr", "promote-bundle"}:
+                    from workflow_runs.models import ContentFactoryRun
+                    original = ContentFactoryRun.objects.filter(run_id=kwargs["run_id"]).first()
+                    effective_action = run_action_authority(original, kwargs["action"])
                 with authority_guard(payload, action=effective_action) as connection:
                     from workflow_runs.models import ContentFactoryRun
                     run_id = str(kwargs.get("run_id") or payload.get("run_id") or payload.get("job_id") or "")

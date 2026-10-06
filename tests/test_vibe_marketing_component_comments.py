@@ -7,7 +7,7 @@ from django.contrib.auth import get_user_model
 from django.core.cache import cache
 from django.test import TestCase, override_settings
 from django.utils import timezone
-from tests.website_fixtures import WebsiteBoundAPIClient
+from tests.website_fixtures import WebsiteBoundAPIClient, certify_live_target_fixture
 from content_factory.website_connections import contract_for
 from content_factory.website_models import WebsiteConnectionTarget, WebsiteRepositoryMutation
 
@@ -74,13 +74,14 @@ class _PublishRetryApprovalFixture:
         website.save(update_fields=["capabilities", "verified_sha", "authorized_by", "last_verified_at"])
         config.default_publish_target_id = "articles"
         config.save(update_fields=["default_publish_target_id"])
-        WebsiteConnectionTarget.objects.create(
+        target = WebsiteConnectionTarget.objects.create(
             connection=website, target_key="articles", generation=website.generation,
             source_sha=website.verified_sha, capabilities={"publishingReady": True},
             verified_at=timezone.now(), contract={"target_id": "articles", "label": "Articles",
                 "publish_capability": "direct", "route": "/articles/{slug}",
                 "verification": {"status": "passed", "source_sha": website.verified_sha}},
         )
+        certify_live_target_fixture(target)
         WebsiteConnectionTarget.objects.create(
             connection=website, target_key="setup-preview", generation=website.generation,
             source_sha=website.verified_sha, capabilities={"publishingReady": False},
@@ -732,6 +733,7 @@ class VibeMarketingComponentCommentTests(_PublishRetryApprovalFixture, TestCase)
 
     @override_settings(CONTENT_FACTORY_URL="https://content-factory.test", CONTENT_FACTORY_API_KEY="secret-key", IS_LOCAL_ENV=False)
     def test_scan_approval_persists_setup_run_id_and_local_setup_child(self):
+        self._clear_first_time_verification()
         scan_run = self._create_bound_run(
             run_id="repo-scan-awaiting-setup",
             workflow="repo_scan",
@@ -5220,6 +5222,7 @@ class VibeMarketingComponentCommentTests(_PublishRetryApprovalFixture, TestCase)
     @override_settings(CONTENT_FACTORY_URL="https://content-factory.test", CONTENT_FACTORY_API_KEY="secret-key", IS_LOCAL_ENV=False)
     def test_direct_article_system_setup_approve_persists_pr_created_state(self):
         config = self._prepare_articles_setup_gate(status="preview_ready")
+        self._clear_first_time_verification()
         setup_run = self._create_bound_run(
             run_id="setup-direct-approve",
             workflow="article_system_setup",

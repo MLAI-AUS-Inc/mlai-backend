@@ -13507,7 +13507,8 @@ def _call_content_factory_run_action(
         if scoped_run and scoped_run.workflow in REPOSITORY_WORKFLOWS:
             try:
                 saved = scoped_run_contract(scoped_run)
-                operation = "publish" if action in {"approve", "publish-pr", "promote-bundle"} else "setup"
+                from .website_connections import run_action_authority
+                operation = run_action_authority(scoped_run, action)
                 with authority_guard(saved, action=operation):
                     payload.update(connection_contract(saved))
             except WebsiteAuthorityError as exc:
@@ -15701,7 +15702,7 @@ class VibeMarketingArticleSetupAcceptView(APIView):
     Idempotent: re-accepting just re-asserts the target.
     """
 
-    @guarded_owner_operation("publish", local_only=True)
+    @guarded_owner_operation("config_write", local_only=True)
     def post(self, request):
         context, error = _resolve_context_or_response(request)
         if error:

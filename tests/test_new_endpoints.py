@@ -906,8 +906,10 @@ class ContentFactoryCallbackTests(ContentFactoryTestDataMixin, TestCase):
         config = OrganizationContentConfig.objects.get(website_connection=website)
         config.default_publish_target_id = 'native'
         config.save(update_fields=['default_publish_target_id'])
-        WebsiteConnectionTarget.objects.create(connection=website, generation=website.generation,
+        target = WebsiteConnectionTarget.objects.create(connection=website, generation=website.generation,
             target_key='native', source_sha=website.verified_sha, capabilities={'publishingReady': True}, verified_at=timezone.now())
+        from tests.website_fixtures import certify_live_target_fixture
+        certify_live_target_fixture(target)
         provider = patch('content_factory.website_connections.verify_repository_head', return_value=website.verified_sha)
         provider.start()
         self.addCleanup(provider.stop)
