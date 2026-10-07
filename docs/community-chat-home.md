@@ -284,3 +284,26 @@ appear in the response.
 The Australia-wide federation supplies only current totals, so its history
 cannot be reconstructed. Even with `scope=australia`, returned history is
 explicitly `scope=mlai`; clients must label it MLAI-only.
+
+## Private Antiburn tips
+
+`usage/insights/` requires an MLAI account session. Reporter tokens cannot read
+or publish tips, and the leaderboard never includes findings. Syncing is
+separate from local analysis consent and defaults off for existing accounts.
+
+- `GET ?window=today|7d|30d|all` returns `{enabled, timezone, report}`.
+- `PATCH {enabled: boolean}` opts in or out. Opt-out deletes every stored report.
+- `POST {timezone, report}` accepts only fresh, bounded aggregate reports while
+  enabled, for the authenticated caller. The timezone must match the board.
+
+The desktop bundled analyzer reads coding logs locally. Only detector IDs,
+counts, optional numerical estimates, period, revision and computation time are
+synced; prompts, code, transcript text, paths and session IDs are rejected.
+Reports older than 24 hours are hidden; today's report also expires at local
+midnight. These are observations, not billing records or guaranteed savings.
+The most recent uploaded computer's finding is used for each period; findings
+from multiple computers are not added together. Leaving the board deletes tips.
+
+Deploy the approved `community_chat` token-insights schema and API before the
+client release. Older backends leave local desktop tips working and web/mobile
+tips unavailable; the normal usage leaderboard continues to work.

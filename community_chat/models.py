@@ -465,6 +465,10 @@ class TokenUsageAccount(models.Model):
     )
     token_hash = models.CharField(max_length=64, unique=True)
     is_public = models.BooleanField(default=True)
+    # Separate from local analysis consent: existing tips remain local until
+    # the member explicitly opts in to account-private cross-device syncing.
+    insights_enabled = models.BooleanField(default=False)
+    insights_reports = models.JSONField(default=dict, blank=True)
     last_report_at = models.DateTimeField(blank=True, null=True)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
