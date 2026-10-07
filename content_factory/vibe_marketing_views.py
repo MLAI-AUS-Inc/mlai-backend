@@ -13662,9 +13662,6 @@ def _content_factory_action_transport_pending(remote_data):
 def _call_content_factory_component_revision(*, organization, run_id, payload):
     require_unlocked_remote_call()
     original = ContentFactoryRun.objects.filter(run_id=run_id).first()
-    if original and connection_contract(scoped_run_contract(original)):
-        with authority_guard(scoped_run_contract(original), action="read"):
-            payload.update(connection_contract(scoped_run_contract(original)))
     remote_config = _content_factory_remote_config()
     if not remote_config["enabled"]:
         technical_error = _content_factory_unavailable_message(remote_config)
@@ -13679,6 +13676,9 @@ def _call_content_factory_component_revision(*, organization, run_id, payload):
     editorial_error = _refresh_article_editorial_payload(organization=organization, payload=payload)
     if editorial_error is not None:
         return editorial_error  # No POST; retain any submitted batch for explicit retry.
+    if original and connection_contract(scoped_run_contract(original)):
+        from .revision_operations import reserve_revision_operation
+        reserve_revision_operation(original, payload)
     try:
         response = http_client.post(
             f"{remote_config['base_url']}/api/runs/{run_id}/component-revisions",
@@ -17151,6 +17151,11 @@ class VibeMarketingRunCommentsSubmitView(VibeMarketingRunCommentsMixin, APIView)
                 payload=revision_request,
                 remote_data=remote_data,
             )
+            if remote_payload.get("operation_id"):
+                from .website_models import WebsiteConnectionOperation
+                from .website_operations import bind_operation_run
+                operation = WebsiteConnectionOperation.objects.get(pk=remote_payload["operation_id"])
+                bind_operation_run(operation, revision_run)
             revision_result = revision_run.result or {}
             revision_result.update(
                 {
