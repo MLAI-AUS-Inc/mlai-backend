@@ -983,7 +983,8 @@ def _reuse_roo_points_authorization_for_article_job(*, run, payload: dict, domai
         ledger_id = ""
     billing_status = str(run_request.get("roo_points_billing_status") or "").strip()
     from roo.models import Ledger
-    stamp_charge = Ledger.objects.filter(pk=ledger_id, kind="SPEND", source="CONTENT_FACTORY").first() if ledger_id else None
+    # Legacy stamps may be non-numeric; they never authorize spending or crash recovery.
+    stamp_charge = Ledger.objects.filter(pk=int(ledger_id), kind="SPEND", source="CONTENT_FACTORY").first() if ledger_id.isdecimal() and 0 < int(ledger_id) < 2**63 else None
     refunded = billing_status == "refunded" or bool(stamp_charge and Ledger.objects.filter(
         kind="REFUND", source="CONTENT_FACTORY", reference_id=stamp_charge.reference_id).exists())
     if refunded:
@@ -11665,8 +11666,8 @@ def _setup_blocked_response_for_generation(context, config, *, run=None, publish
                         "reasonCode": "repository_changed", "reason": "This draft belongs to a different website repository."}
     if capabilities["canPublishArticle" if publishing else "canGenerateArticle"]:
         return None
-    return Response({"detail": capabilities["reason"], "code": "article_system_setup_blocked",
-                     "reasonCode": capabilities["reasonCode"], "articleCapabilities": capabilities,
+    return Response({"detail": capabilities.get("publishingReason", capabilities["reason"]) if publishing else capabilities["reason"], "code": "article_system_setup_blocked",
+                     "reasonCode": capabilities.get("publishingReasonCode", capabilities["reasonCode"]) if publishing else capabilities["reasonCode"], "articleCapabilities": capabilities,
                      "nextRequiredStep": capabilities["nextStep"]}, status=status.HTTP_409_CONFLICT)
 
 

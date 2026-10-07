@@ -753,3 +753,19 @@ class IncidentBillingReplays(SimpleTestCase):
             self.assertEqual(refund.call_args.kwargs["delta"], 12)
             jobs.return_value.first.return_value = SimpleNamespace(billing_status="refunded", billing_ledger_id=10)
             self.assertIsNone(views._reusable_content_factory_charge_for_run(run))
+
+    def test_invalid_legacy_ledger_stamp_returns_billing_action_without_crashing(self):
+        from . import vibe_marketing_views as views
+        from roo.models import Ledger
+        for stamp in ("ledger-article-original", "-1", "0", "999999999999999999999999999999999999999"):
+            with self.subTest(stamp=stamp):
+                run = SimpleNamespace(run_request={"roo_points_authorized": True,
+                    "roo_points_action": "article_generation", "roo_points_cost": 6,
+                    "roo_points_billing_status": "charged", "roo_points_ledger_id": stamp})
+                with patch.object(Ledger.objects, "filter") as ledgers, \
+                        patch.object(views, "_reusable_content_factory_charge_for_run", return_value=None):
+                    ledgers.return_value.first.return_value = None
+                    result = views._reuse_roo_points_authorization_for_article_job(
+                        run=run, payload={}, domain="paid.example", failure_detail="A paid draft is required.")
+                    self.assertEqual(result.status_code, 409)
+                    self.assertEqual(result.data["code"], "roo_points_billing_required")

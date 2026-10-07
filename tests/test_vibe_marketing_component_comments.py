@@ -537,7 +537,7 @@ class VibeMarketingComponentCommentTests(_PublishRetryApprovalFixture, TestCase)
         scan_run.refresh_from_db()
         self.assertEqual(scan_run.status, ContentFactoryRunStatus.COMPLETED)
         self.assertEqual(scan_run.current_step, "finalize")
-        self.assertIn("content_factory_scan_status_poll_preserved_local_terminal_state", "\n".join(logs.output))
+        self.assertIn("vibe_marketing_repo_scan_status_terminal", "\n".join(logs.output))
 
     def test_awaiting_confirmation_repo_scan_status_ignores_stale_remote_processing(self):
         scan_run = self._create_bound_run(
@@ -2289,6 +2289,8 @@ class VibeMarketingComponentCommentTests(_PublishRetryApprovalFixture, TestCase)
     @override_settings(CONTENT_FACTORY_URL="https://content-factory.test", CONTENT_FACTORY_API_KEY="secret-key", IS_LOCAL_ENV=False)
     def test_submit_component_revision_reuses_original_article_billing_without_balance_gate(self):
         _config, account = self._prepare_billable_vibe_context(balance=0)
+        from roo.models import Ledger
+        charge = Ledger.objects.create(user=self.user, kind="SPEND", source="CONTENT_FACTORY", delta=-6, reference_id="article-original")
         self.run.domain = "example.com"
         self.run.github_repo = "example/site"
         self.run.run_request = {
@@ -2301,7 +2303,7 @@ class VibeMarketingComponentCommentTests(_PublishRetryApprovalFixture, TestCase)
             "roo_points_cost": 6,
             "roo_points_required": 6,
             "roo_points_billing_status": "charged",
-            "roo_points_ledger_id": "ledger-article-original",
+            "roo_points_ledger_id": str(charge.pk),
         }
         self.run.save(update_fields=["domain", "github_repo", "run_request", "updated_at"])
         comment = VibeMarketingComponentComment.objects.create(
@@ -2327,7 +2329,7 @@ class VibeMarketingComponentCommentTests(_PublishRetryApprovalFixture, TestCase)
         self.assertEqual(captured["url"], "https://content-factory.test/api/runs/article-run-comments/component-revisions")
         self.assertEqual(captured["payload"]["roo_points_action"], "article_generation")
         self.assertEqual(captured["payload"]["roo_points_billing_status"], "reused")
-        self.assertEqual(captured["payload"]["roo_points_ledger_id"], "ledger-article-original")
+        self.assertEqual(captured["payload"]["roo_points_ledger_id"], str(charge.pk))
         comment.refresh_from_db()
         self.assertEqual(comment.status, "submitted")
         account.refresh_from_db()
@@ -3420,15 +3422,14 @@ class VibeMarketingComponentCommentTests(_PublishRetryApprovalFixture, TestCase)
             articles_scaffolded=False,
         )
         self.assertFalse(_article_system_is_published(config, {"state": "roo_scaffolded"}))
-        # Accepting/merging the scaffold sets articles_scaffolded — then the
-        # same target counts again.
+        # Deprecated flags and unverified scan targets cannot grant publishing.
         config.articles_scaffolded = True
-        self.assertTrue(_article_system_is_published(config, {"state": "roo_scaffolded"}))
+        self.assertFalse(_article_system_is_published(config, {"state": "roo_scaffolded"}))
         # Targets registered from a scan of a live article system still count
         # without the scaffolded flag.
         config.articles_scaffolded = False
         config.publish_targets = [{"kind": "react_article_system", "source": "scan"}]
-        self.assertTrue(_article_system_is_published(config, {"state": "missing"}))
+        self.assertFalse(_article_system_is_published(config, {"state": "missing"}))
 
     @patch("content_factory.vibe_marketing_views._github_api_request", new=_open_setup_pull_fixture)
     def test_first_time_articles_setup_preview_failed_shows_review_diagnostics(self):
@@ -5724,7 +5725,7 @@ class VibeMarketingComponentCommentTests(_PublishRetryApprovalFixture, TestCase)
             patch(
                 "content_factory.vibe_marketing_views._github_pull_checks_state_lenient",
                 return_value=(
-                    {"state": "open", "merged": False, "head": {"sha": "c" * 40}},
+                    {"state": "open", "merged": False, "head": {"sha": "c" * 40, "ref": "cf/setup-fixture", "repo": {"id": self.client.website_fixture.repository_id, "full_name": self.client.website_fixture.github_repo}}, "base": {"ref": "main", "repo": {"id": self.client.website_fixture.repository_id, "full_name": self.client.website_fixture.github_repo}}},
                     {"ready": True, "state": "success", "message": "Checks are passing."},
                 ),
             ),
@@ -5786,7 +5787,7 @@ class VibeMarketingComponentCommentTests(_PublishRetryApprovalFixture, TestCase)
         setup_run.refresh_from_db()
         self.assertEqual(setup_run.result["merge_status"], "merged")
         config.refresh_from_db()
-        self.assertTrue(config.articles_scaffolded)
+        self.assertFalse(config.articles_scaffolded)
         self.assertEqual(config.article_system["state"], "roo_scaffolded")
         self.assertEqual(bootstrap_response.status_code, 200)
         scaffold = bootstrap_response.data["checks"]["scaffold"]
@@ -5879,7 +5880,7 @@ class VibeMarketingComponentCommentTests(_PublishRetryApprovalFixture, TestCase)
         pending = config.article_system["pending_article_system_setup"]
         self.assertEqual(pending["status"], "merged")
         self.assertEqual(pending["merge_status"], "merged")
-        self.assertTrue(config.articles_scaffolded)
+        self.assertFalse(config.articles_scaffolded)
         self.assertEqual(config.articles_scaffold_pr_url, "https://github.com/MLAI-AUS-Inc/mlai-au/pull/46")
         self.assertEqual(config.article_system["state"], "roo_scaffolded")
 
@@ -5981,6 +5982,8 @@ class VibeMarketingPublishFlowTests(_PublishRetryApprovalFixture, TestCase):
             result={"source_run_id": self.run.run_id, **(result or {})},
         )
         article_result = dict(self.run.result or {})
+        if result and result.get("slug"):
+            article_result["slug"] = result["slug"]
         article_result["publish_child_run_id"] = child.run_id
         article_result["promoted_publish_job_id"] = child.run_id
         self.run.result = article_result
@@ -6095,7 +6098,7 @@ class VibeMarketingPublishFlowTests(_PublishRetryApprovalFixture, TestCase):
             patch(
                 "content_factory.vibe_marketing_views._github_pull_checks_state",
                 return_value=(
-                    {"state": "open", "merged": False, "head": {"sha": "c" * 40, "ref": "cf/publish-fixture"}},
+                    {"state": "open", "merged": False, "head": {"sha": "c" * 40, "ref": "cf/publish-fixture", "repo": {"id": self.client.website_fixture.repository_id, "full_name": self.client.website_fixture.github_repo}}, "base": {"ref": "main", "repo": {"id": self.client.website_fixture.repository_id, "full_name": self.client.website_fixture.github_repo}}},
                     {"ready": True, "state": "success", "message": "Checks are passing."},
                 ),
             ),
@@ -6245,7 +6248,7 @@ class VibeMarketingPublishFlowTests(_PublishRetryApprovalFixture, TestCase):
             patch(
                 "content_factory.vibe_marketing_views._github_pull_checks_state",
                 return_value=(
-                    {"state": "open", "merged": False, "head": {"sha": "c" * 40, "ref": "cf/publish-fixture"}},
+                    {"state": "open", "merged": False, "head": {"sha": "c" * 40, "ref": "cf/publish-fixture", "repo": {"id": self.client.website_fixture.repository_id, "full_name": self.client.website_fixture.github_repo}}, "base": {"ref": "main", "repo": {"id": self.client.website_fixture.repository_id, "full_name": self.client.website_fixture.github_repo}}},
                     {"ready": True, "state": "success", "message": "Checks are passing."},
                 ),
             ),

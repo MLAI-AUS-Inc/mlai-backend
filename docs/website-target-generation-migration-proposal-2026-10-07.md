@@ -1,10 +1,15 @@
 # Website target generation key proposal
 
 Incident 28 required specific migration approval under `AGENTS.md`. On
-2026-10-07 the user approved creation of the exact model/constraint/upsert change
-described below, without applying it. The reviewed migration file is now
-`content_factory/migrations/0044_website_target_generation_key.py`. No migration
-has been applied and no database-backed test or deployment has run.
+2026-10-07 the user first approved creation, then explicitly approved the
+migrations, production rollout and all work required to get these fixes live.
+The reviewed file is `content_factory/migrations/0044_website_target_generation_key.py`.
+Its socket-only disposable PostgreSQL replay passed 163 database tests, exact
+constraint introspection, concurrent upsert races and forward/reverse checks.
+Existing proof rows stayed byte-for-byte identical. Production application is
+approved and gated by the exact pending migration-plan SHA256
+`8f1b763658e2977cfdc3b220cbb5529a813794cf12bdd8f54fd1d208ba43f322`.
+The deployment receipt records actual application separately.
 
 The proposed `0044_website_target_generation_key` depends exactly on
 `("content_factory", "0043_merge_credentials_website")`, the current merge leaf
@@ -43,8 +48,8 @@ weaker contract. This preserves consent without silently reusing an older row.
 
 Review the exact generated migration and its pending dependency graph before
 application approval. Database-backed concurrency, constraint and forward/reverse migration
-checks are still required in an explicitly approved disposable database. This
-proposal does not grant production migration or deployment authority.
+checks passed in the explicitly approved disposable database. Production
+authority comes from the user’s later explicit approval, recorded above.
 
 Rollback requires special care after more than one generation exists for a
 connection/target key. Re-adding the old unique constraint would fail on those

@@ -208,9 +208,9 @@ def article_capabilities(config, *, domain="", account=None, evidence=None, repo
     access = repository_access or {}
     repo_selected = bool(str(getattr(config, "github_repo", "") or "").strip())
     writable = access.get("writable", access.get("verified"))
-    ready = bool(account.get("owned") and evidence.get("verified") and access.get("verified") and writable
+    ready = bool(account.get("owned") and evidence.get("verified") and access.get("verified")
                  and access.get("branch") == evidence.get("branch") and access.get("sha") == evidence.get("sha"))
-    code = "" if ready else "github_required" if not account.get("saved") else "repository_required" if not repo_selected else "github_write_required" if access.get("verified") and not writable else access.get("reasonCode") or evidence.get("reasonCode") or "github_verification_required"
+    code = "" if ready else "github_required" if not account.get("saved") else "repository_required" if not repo_selected else access.get("reasonCode") or evidence.get("reasonCode") or "github_verification_required"
     reasons = {
         "website_disconnected": "Reconnect your website before repository work.", "website_publishing_paused": "Resume website publishing before repository work.",
         "website_writes_paused": "Website changes are temporarily paused.", "repository_changed": "Review the selected website repository.",
@@ -223,10 +223,12 @@ def article_capabilities(config, *, domain="", account=None, evidence=None, repo
         "repository_source_changed": "The repository source changed. Scan and verify the current source.",
         "publishing_adapter_required": "The custom build is verified. Connect an article publishing adapter or write a portable draft.",
     }
+    publishing_code = "github_write_required" if ready and not writable else "live_deployment_verification_required" if ready and not evidence.get("publishingVerified", True) else code
+    publishing_reason = "Verify the current website deployment before publishing." if publishing_code == "live_deployment_verification_required" else reasons.get(publishing_code, "")
     route = evidence.get("routePath") or "/articles"
     label = route.strip("/").split("/")[0].replace("-", " ").title() or "Articles"
     unit = get_content_factory_content_island_topic_cost_points(domain)
-    return {"version": 1, "canResearch": bool(domain), "canGenerateArticle": ready, "canGeneratePortableDraft": bool(domain), "canPublishArticle": bool(ready and evidence.get("publishingVerified", True)),
+    return {"version": 1, "canResearch": bool(domain), "canGenerateArticle": ready, "canGeneratePortableDraft": bool(domain), "canPublishArticle": bool(ready and writable and evidence.get("publishingVerified", True)), "publishingReasonCode": publishing_code, "publishingReason": publishing_reason,
             "stage": "ready" if ready else "unavailable" if code == "github_unavailable" else "github" if not account.get("saved") or code == "github_access_required" else "repository" if not repo_selected else "verifying" if code in {"verification_required", "verification_stale", "github_verification_required", "github_unavailable"} else "integration",
             "reasonCode": code, "reason": "" if ready else reasons.get(code, "Complete articles setup to start writing."),
             "githubConnected": bool(account.get("saved")), "accountStatus": "connected" if account.get("verified") or access.get("verified") else account.get("status", "not_connected"),

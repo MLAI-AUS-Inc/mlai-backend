@@ -307,8 +307,8 @@ class SmartScanTests(TestCase):
         self.assertTrue(response.data['scan_completed'])
         self.assertTrue(response.data['content_research_ready'])
         self.assertFalse(response.data['scan_required'])
-        self.assertEqual(response.data['recommended_next_action'], 'research_article')
-        self.assertTrue(response.data['article_system_ready'])
+        self.assertEqual(response.data['recommended_next_action'], 'scaffold')
+        self.assertFalse(response.data['article_system_ready'])
         self.assertEqual(response.data['article_system']['state'], 'existing')
 
     @patch('integrations.services.github.get_latest_repo_sha')
@@ -371,9 +371,9 @@ class SmartScanTests(TestCase):
             response = view(request, slack_user_id=self.user_id)
 
         self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.data['recommended_next_action'], 'research_article')
-        self.assertTrue(response.data['article_system_ready'])
-        self.assertTrue(response.data['registry_driven_seo_ready'])
+        self.assertEqual(response.data['recommended_next_action'], 'scaffold')
+        self.assertFalse(response.data['article_system_ready'])
+        self.assertFalse(response.data['registry_driven_seo_ready'])
 
     @patch('integrations.services.github.get_latest_repo_sha')
     def test_status_endpoint_uses_scan_summary_article_system_fallback(self, mock_get_sha):
@@ -402,9 +402,9 @@ class SmartScanTests(TestCase):
             response = view(request, slack_user_id=self.user_id)
 
         self.assertEqual(response.status_code, 200)
-        self.assertTrue(response.data['article_system_ready'])
+        self.assertFalse(response.data['article_system_ready'])
         self.assertEqual(response.data['article_system']['state'], 'existing')
-        self.assertEqual(response.data['recommended_next_action'], 'research_article')
+        self.assertEqual(response.data['recommended_next_action'], 'scaffold')
 
     @patch('integrations.services.github.get_latest_repo_sha')
     def test_status_endpoint_token_expired(self, mock_get_sha):
