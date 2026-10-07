@@ -2384,6 +2384,54 @@ class VibeMarketingComponentCommentTests(_PublishRetryApprovalFixture, TestCase)
         self.assertEqual(account.balance, 0)
         self.assertEqual(account.lifetime_spent, 0)
 
+    def test_failed_source_revision_reserves_independent_retry_stable_operation(self):
+        from content_factory.revision_operations import reserve_revision_operation
+        from content_factory.website_models import WebsiteConnectionOperation
+        from content_factory.website_connections import owner_operation_scope, owner_operation_contract
+        website = self.client.website_fixture
+        parent = WebsiteConnectionOperation.objects.create(connection=website, generation=website.generation,
+            action="workflow", state="failed", idempotency_key="failed-parent",
+            payload={"run_id": self.run.run_id, "attempt": 2, "workflow": "article_generation"})
+        self.run.run_request = {**self.website_binding, "operation_id": str(parent.pk),
+                                "operation_attempt": 2, "deletion_epoch": 0}
+        self.run.status = ContentFactoryRunStatus.FAILED
+        self.run.save(update_fields=["run_request", "status", "updated_at"])
+        before = dict(self.run.run_request)
+        request = {"source_run_id": self.run.run_id, "feedback_batch_id": "reviewed-batch",
+                   "requested_run_id": "component-revision-original", "comments": [{"body": "Add the reviewed reference"}]}
+        first, second = dict(request), dict(request)
+        with owner_operation_scope(before):
+            operation = reserve_revision_operation(self.run, first)
+            self.assertEqual(owner_operation_contract(), before)
+            retry = reserve_revision_operation(self.run, second)
+        self.assertEqual(operation.pk, retry.pk)
+        self.assertNotEqual(operation.pk, parent.pk)
+        self.assertEqual(first, second)
+        self.assertEqual(first["operation_attempt"], 1)
+        self.assertTrue(first["requested_run_id"].endswith(operation.pk.hex[:12]))
+        parent.refresh_from_db()
+        self.run.refresh_from_db()
+        self.assertEqual(parent.state, "failed")
+        self.assertEqual(self.run.run_request, before)
+        self.assertEqual(self.run.status, ContentFactoryRunStatus.FAILED)
+
+    def test_cancelled_source_cannot_reserve_revision_operation(self):
+        from content_factory.revision_operations import reserve_revision_operation
+        from content_factory.website_models import WebsiteConnectionOperation
+        from content_factory.website_contract import WebsiteAuthorityError
+        website = self.client.website_fixture
+        parent = WebsiteConnectionOperation.objects.create(connection=website, generation=website.generation,
+            action="workflow", state="cancelled", idempotency_key="cancelled-parent",
+            payload={"run_id": self.run.run_id, "attempt": 1, "workflow": "article_generation"})
+        self.run.run_request = {**self.website_binding, "operation_id": str(parent.pk),
+                                "operation_attempt": 1, "deletion_epoch": 0}
+        self.run.status = ContentFactoryRunStatus.CANCELLED
+        self.run.save(update_fields=["run_request", "status", "updated_at"])
+        count = website.operations.count()
+        with self.assertRaises(WebsiteAuthorityError):
+            reserve_revision_operation(self.run, {"feedback_batch_id": "reviewed", "requested_run_id": "child"})
+        self.assertEqual(website.operations.count(), count)
+
     @override_settings(CONTENT_FACTORY_URL="https://content-factory.test", CONTENT_FACTORY_API_KEY="secret-key", IS_LOCAL_ENV=False)
     def test_submit_component_revision_requires_original_article_billing(self):
         _config, account = self._prepare_billable_vibe_context(balance=0)

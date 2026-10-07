@@ -190,6 +190,15 @@ recordable; current-policy validation belongs before generation/publication effe
 
 ## Component-feedback revisions
 
+Website-bound revisions reserve an independent backend workflow operation keyed
+by the source and feedback batch. They retain the source's exact connection,
+repository and source SHA, but never reuse or revive its completed/failed
+operation. Retries keep the child operation and its namespaced run ID. Cancelled
+sources and revoked consent remain blocked. The worker checks both the readable
+source and the child's current operation before billing verification and durable
+creation, and writes the child inside its own scope. Deploy this contract with
+the matching worker; it adds no migration or new charge.
+
 The revision submission view rechecks the recovered source's organisation and
 domain, extracts only its saved original brief and resolves it against current
 receipt-backed policy. Missing/cross-organisation failed-source recovery is a 404;
