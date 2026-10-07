@@ -105,6 +105,8 @@ All reconciliation actions lease an operation in a short transaction and release
 
 GitHub account liveness probes do not require a selected repository or optional `/user` endpoint. They have bounded cache TTLs and a short probe lease. Repository inventory uses read tokens; setup and publication separately require write permission. Completed readiness cannot bypass that distinction. Ephemeral probe and verification tokens are revoked after use.
 
+Native article preview commits request a fresh repository token with `permission_mode=write`, `action=preview`, the original `run_id` and an immutable `expected_source_sha`. Preview authorization rechecks current repository identity, source, consent and operation fences; it does not require or establish a live publication receipt. The worker limits this temporary scope to Git objects and that run's owned review branch, then restores the original read scope. Preview tokens cannot request the workflow-files or CI-evidence profiles, and publication/merge still require their independent verified target and live deployment receipt.
+
 `websiteJourney.repository.framework` reports the selected contract or discovery
 framework only when its evidence belongs to the current source. Unknown values
 remain null. `proofContract={version:1,requirements:[...]}` supplies the handoff

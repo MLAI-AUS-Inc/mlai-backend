@@ -693,6 +693,62 @@ class WebsiteConcurrentDisconnectTests(WebsiteDatabaseFixture, TransactionTestCa
 
 @override_settings(ROO_API_KEY='synthetic-test-key', INTERNAL_API_KEY='synthetic-test-key')
 class WebsiteServiceBoundaryTests(WebsiteDatabaseFixture, TestCase):
+    def _preview_token_request(self, **changes):
+        from .service_views import ContentFactoryTokenView
+        data = {**self.binding, 'run_id': 'article-preview', 'expected_source_sha': SHA,
+            'permission_mode': 'write', 'action': 'preview', **changes}
+        return ContentFactoryTokenView.as_view()(APIRequestFactory().get('/token', data, HTTP_X_API_KEY='synthetic-test-key'))
+
+    def _preview_token(self):
+        return SimpleNamespace(token='synthetic-preview-token', as_content_factory_payload=lambda **kwargs: {
+            'github_token': 'synthetic-preview-token', 'github_repo': self.website.github_repo,
+            'token_source': 'github_app_installation'})
+
+    @patch('integrations.services.github_app.create_installation_access_token')
+    def test_preview_write_token_does_not_require_publication_receipt(self, mint):
+        self.website.capabilities = {'publishingReady': False, 'generationReady': True}
+        self.website.save(update_fields=['capabilities'])
+        ContentFactoryRun.objects.create(run_id='article-preview', workflow='article_generation',
+            organization=self.org, domain=self.org.domain, github_repo=self.website.github_repo, run_request=self.binding)
+        mint.return_value = self._preview_token()
+        response = self._preview_token_request()
+        self.assertEqual(response.status_code, 200, response.data)
+        self.assertEqual(response.data['permission_mode'], 'write')
+        self.assertEqual(response.data['permission_profile'], 'repository')
+        mint.assert_called_once_with(installation_id='45', repository='example/site', repository_id=123,
+            permission_mode='write', use_cache=False)
+        self.assertEqual(self._preview_token_request(action='publish').status_code, 409)
+        self.assertEqual(mint.call_count, 1)
+
+    @patch('integrations.services.github_app.create_installation_access_token')
+    def test_preview_write_requires_source_and_run_and_forbids_workflow_profile(self, mint):
+        for changes in ({'expected_source_sha': ''}, {'expected_source_sha': 'main'}, {'run_id': ''},
+                {'permission_profile': 'workflow_files'}, {'permission_profile': 'ci_evidence'}):
+            with self.subTest(changes=changes):
+                response = self._preview_token_request(**changes)
+                self.assertEqual(response.status_code, 400, response.data)
+        mint.assert_not_called()
+
+    @patch('integrations.services.github_app.create_installation_access_token')
+    def test_preview_write_rechecks_source_and_disconnection(self, mint):
+        with patch('content_factory.website_connections.verify_repository_head', side_effect=WebsiteAuthorityError(
+                'website_source_changed', 'Source changed.')):
+            self.assertEqual(self._preview_token_request().status_code, 409)
+        transition_connection(self.config, action='disconnect', expected=self.binding)
+        self.assertEqual(self._preview_token_request().status_code, 409)
+        mint.assert_not_called()
+
+    @patch('integrations.http_client.delete')
+    @patch('integrations.services.github_app.create_installation_access_token')
+    def test_preview_token_minted_during_disconnect_is_revoked_before_delivery(self, mint, revoke):
+        def disconnect(**kwargs):
+            transition_connection(self.config, action='disconnect', expected=self.binding)
+            return self._preview_token()
+        mint.side_effect = disconnect
+        response = self._preview_token_request()
+        self.assertEqual(response.status_code, 409, response.data)
+        revoke.assert_called_once()
+
     def _put_config(self, data):
         from .service_views import ContentFactoryOrgConfigView
         return ContentFactoryOrgConfigView.as_view()(APIRequestFactory().put('/org-config', data, format='json', HTTP_X_API_KEY='synthetic-test-key'))
