@@ -247,7 +247,6 @@ def advance_workflow_attempt(run):
             # lock, with a stable identity; never revive removed/finished work.
             if run.status not in {"failed", "blocked", "running", "queued"} or deletion_epoch(website):
                 raise WebsiteAuthorityError("website_operation_required", "A current operation identity is required to resume this run.")
-            from .website_models import WebsiteConnectionOperation
             legacy, _ = WebsiteConnectionOperation.objects.get_or_create(
                 connection=website, generation=website.generation,
                 idempotency_key=f"{website.pk}:legacy-resume:{run.pk}",
