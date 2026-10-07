@@ -406,3 +406,5 @@ the setup gate. Completed draft packages do not grant publishing authority.
 The client may request the exact saved portable preview under current drafting
 permission; repository previews and publication still require their normal
 website authority. No billing, schema or migration behavior changes.
+
+A reviewed discovery topic resolves against its saved, organization-scoped source run. Dashboard keyword deduplication may display an older discovery, but cannot replace the title or source selected in a run. Current decline, written-coverage and keyword availability checks still apply before generation.

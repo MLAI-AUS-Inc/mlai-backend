@@ -3480,7 +3480,7 @@ class VibeMarketingComponentCommentTests(_PublishRetryApprovalFixture, TestCase)
         self.assertFalse(_article_system_is_published(config, {"state": "missing"}))
 
     @patch("content_factory.vibe_marketing_views._github_api_request", new=_open_setup_pull_fixture)
-    def test_first_time_articles_setup_preview_failed_shows_review_diagnostics(self):
+    def test_first_time_articles_setup_preview_failed_shows_build_diagnostics(self):
         self._clear_first_time_verification()
         self._prepare_articles_setup_gate(status="preview_failed")
         self._create_bound_run(
@@ -3512,11 +3512,11 @@ class VibeMarketingComponentCommentTests(_PublishRetryApprovalFixture, TestCase)
         self.assertEqual(response.status_code, 200)
         progress = response.data["workflowProgress"]
         steps = {step["id"]: step for step in progress["steps"]}
-        self.assertEqual(progress["currentStepId"], "review")
-        self.assertEqual(steps["generate"]["status"], "complete")
-        self.assertEqual(steps["review"]["status"], "blocked")
-        self.assertEqual(steps["review"]["primaryAction"]["label"], "Open setup diagnostics")
-        self.assertIn("build logs", steps["review"]["summary"])
+        self.assertEqual(progress["currentStepId"], "generate")
+        self.assertEqual(steps["generate"]["status"], "blocked")
+        self.assertEqual(steps["review"]["status"], "locked")
+        self.assertEqual(steps["generate"]["primaryAction"]["label"], "Open setup diagnostics")
+        self.assertIn("build logs", steps["generate"]["summary"])
         self.assertEqual(steps["publish"]["status"], "locked")
 
     def test_first_time_articles_setup_verification_rescan_unlocks_research(self):

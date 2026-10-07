@@ -16025,11 +16025,44 @@ def _resolve_topic_selection_candidate_by_submission(candidates, *, requested_id
     return matches[0] if len(matches) == 1 else None
 
 
+def _topic_selection_candidates_for_source(organization, source_run_id):
+    """Keep a reviewed discovery's identity when dashboard deduplication picks another run."""
+    source = ContentFactoryRun.objects.filter(
+        organization=organization,
+        domain=organization.domain,
+        run_id=source_run_id,
+        workflow__in=DISCOVERY_WORKFLOWS,
+        status__in=DISCOVERY_TOPIC_CANDIDATE_STATUSES,
+    ).first()
+    if source is None:
+        return []
+    declined = {
+        normalize_topic_feedback_keyword(item.keyword)
+        for item in list_topic_feedback(organization, feedback_type="declined", limit=100)
+    }
+    # Resolve this run before keyword deduplication can replace its title and
+    # source with a historical discovery. Current decline, coverage and keyword
+    # availability checks still apply to the saved candidates.
+    candidates = _enrich_topic_candidates(
+        organization,
+        _topic_candidates_from_runs([source]),
+        declined_keyword_keys=declined,
+    )
+    return _canonicalize_topic_candidate_ids(candidates, namespace="topic")
+
+
 def _resolve_topic_selection_candidate(organization, config, topic_candidate_id, *, submitted=None):
     requested_id = str(topic_candidate_id or "").strip()
     if not requested_id:
         return None
-    candidates = _topic_selection_candidate_pool(organization, config)
+    source_run_id = _submitted_selection_source_run_id(submitted)
+    if source_run_id and requested_id.startswith("topic:run:"):
+        expected_prefix = f"topic:run:{_topic_candidate_id_part(source_run_id, fallback='source')}:"
+        if not requested_id.startswith(expected_prefix):
+            return None
+        candidates = _topic_selection_candidates_for_source(organization, source_run_id)
+    else:
+        candidates = _topic_selection_candidate_pool(organization, config)
     exact_matches = [candidate for candidate in candidates if str(candidate.get("id") or "").strip() == requested_id]
     if len(exact_matches) == 1:
         return exact_matches[0]

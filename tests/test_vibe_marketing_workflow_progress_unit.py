@@ -132,3 +132,67 @@ class ArticleSetupWorkflowProgressTests(TestCase):
                 for key in ("review", "publish"):
                     self.assertEqual(_step(progress, key)["status"], "locked")
                     self.assertIsNone(_step(progress, key)["primaryAction"])
+
+
+class DiscoveryTopicSelectionTests(TestCase):
+    """A reviewed source run survives keyword deduplication without bypassing availability."""
+
+    def resolve(self, *, declined=False, keyword_status=None, source_exists=True, requested_source="fresh-discovery"):
+        from contextlib import ExitStack
+        from content_factory import vibe_marketing_views as views
+
+        organization = SimpleNamespace(pk=7, domain="fixture.example")
+        source = SimpleNamespace(
+            run_id="fresh-discovery", workflow="auto_discovery", status="awaiting_confirmation",
+            run_request={}, result={"topic_candidates": [{
+                "id": "0", "keyword": "team workflows", "title": "A fresh workflow guide",
+                "volume": 1000, "difficulty": 10, "difficulty_source": "dataforseo_labs",
+                "opportunityScore": 100,
+            }]},
+        )
+        keyword = SimpleNamespace(status=keyword_status, written_article_id=None, written_article=None, cooldown_until=None) if keyword_status else None
+        memory = {"keywords": {"team workflows": keyword} if keyword else {},
+                  "written_by_keyword": {}, "written_by_slug": {}}
+        with ExitStack() as stack:
+            query = stack.enter_context(patch.object(views.ContentFactoryRun.objects, "filter"))
+            query.return_value.first.return_value = source if source_exists else None
+            pool = stack.enter_context(patch.object(views, "_topic_selection_candidate_pool", side_effect=AssertionError("Historical keyword merge replaced the reviewed run")))
+            stack.enter_context(patch.object(views, "list_topic_feedback", return_value=[SimpleNamespace(keyword="team workflows")] if declined else []))
+            stack.enter_context(patch.object(views, "_written_topic_memory", return_value=memory))
+            stack.enter_context(patch.object(views, "build_topic_coverage_memory", return_value={}))
+            stack.enter_context(patch.object(views, "match_covered_topic", return_value=None))
+            result = views._resolve_topic_selection_candidate(
+                organization, SimpleNamespace(), f"topic:run:{requested_source}:team-workflows",
+                submitted={"source_run_id": "fresh-discovery", "target_keyword": "team workflows",
+                           "selected_title": "A fresh workflow guide"},
+            )
+            pool.assert_not_called()
+            if requested_source == "fresh-discovery":
+                query.assert_called_once_with(
+                    organization=organization, domain=organization.domain, run_id="fresh-discovery",
+                    workflow__in=views.DISCOVERY_WORKFLOWS, status__in=views.DISCOVERY_TOPIC_CANDIDATE_STATUSES,
+                )
+            else:
+                query.assert_not_called()
+            return result
+
+    def test_fresh_reviewed_title_and_source_survive_historical_keyword_merge(self):
+        selected = self.resolve()
+        self.assertIsNotNone(selected)
+        self.assertEqual(selected["id"], "topic:run:fresh-discovery:team-workflows")
+        self.assertEqual(selected["sourceRunId"], "fresh-discovery")
+        self.assertEqual(selected["title"], "A fresh workflow guide")
+
+    def test_declined_topic_remains_unavailable(self):
+        self.assertIsNone(self.resolve(declined=True))
+
+    def test_active_skipped_or_written_keyword_remains_unavailable(self):
+        for state in ("in_progress", "skipped", "written"):
+            with self.subTest(state=state):
+                self.assertIsNone(self.resolve(keyword_status=state))
+
+    def test_missing_or_other_tenant_source_cannot_fall_back_to_historical_topic(self):
+        self.assertIsNone(self.resolve(source_exists=False))
+
+    def test_requested_source_must_match_reviewed_source(self):
+        self.assertIsNone(self.resolve(requested_source="another-discovery"))
