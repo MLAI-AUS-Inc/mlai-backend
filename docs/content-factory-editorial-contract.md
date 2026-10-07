@@ -388,3 +388,16 @@ Compact run status responses continue to omit article HTML. Nested worker
 artifacts, diagnostics and section issues are projected to the dedicated fields
 when they are the only available source; a different nested value stays in
 `result`.
+
+
+## Portable run progress (7 October 2026)
+
+An individually viewed, durably confirmed `content_only` article without any
+repository or connection binding retains its own draft/review progress even
+when the company has a blocked website setup. This applies after completion
+and on failure as well as while running. The company overview continues to
+show its actual integration state. Unconfirmed, bound and publishing runs keep
+the setup gate. Completed draft packages do not grant publishing authority.
+The client may request the exact saved portable preview under current drafting
+permission; repository previews and publication still require their normal
+website authority. No billing, schema or migration behavior changes.
