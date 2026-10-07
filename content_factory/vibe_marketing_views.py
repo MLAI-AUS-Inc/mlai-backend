@@ -13676,7 +13676,7 @@ def _call_content_factory_component_revision(*, organization, run_id, payload):
     editorial_error = _refresh_article_editorial_payload(organization=organization, payload=payload)
     if editorial_error is not None:
         return editorial_error  # No POST; retain any submitted batch for explicit retry.
-    if original:
+    if original and connection_contract(scoped_run_contract(original)):
         from .revision_operations import reserve_revision_operation
         reserve_revision_operation(original, payload)
     try:
