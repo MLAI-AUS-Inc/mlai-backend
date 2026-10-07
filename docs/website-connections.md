@@ -96,6 +96,14 @@ Worker mirrors may include `run_request.editorial_admission.audience.status=appr
 
 Status mirrors omit the backend's `roo_points_*` request fields. Run reconciliation retains this backend-owned billing history, rejects attempts to change recorded values, and drops newly claimed billing fields. Worker observations cannot create authorisation or erase a charge reference. The existing ledger and job billing paths remain authoritative.
 
+An article blocked on a linked automatic repository scan or setup repair retains
+an active workflow operation while that repair is queued, running or awaiting
+review/merge. The article itself remains blocked. Its children keep the original
+connection, attempt and removal fences; their checkpoints do not replace the
+parent's operation receipt. A failed or unavailable repair makes the operation
+terminal. This projection cannot reopen an already terminal operation, and
+cancelling pending repair work fences both the parent and its known children.
+
 All reconciliation actions lease an operation in a short transaction and release it before remote HTTP. A conditional update checks the original claim timestamp afterward. Concurrent offboarding therefore cannot deadlock with the worker's cancellation callback or have an erasure/retention receipt replaced by stale transport results.
 
 

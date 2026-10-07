@@ -107,7 +107,8 @@ def reserve_portable_dispatch_intent(*, organization, workflow, actor_id, payloa
     key = str(payload.get("client_request_id") or "").strip()
     if not key or workflow not in {"article_generation", "direct_generate", "confirmed_topic"}:
         raise WebsiteAuthorityError("portable_dispatch_intent_changed", "This draft request is no longer current. Start a new reviewed attempt.")
-    intent = {**deepcopy(payload), PORTABLE_DISPATCH_RESERVATION: True, "dispatch_pending_resolution": True}
+    intent = {**deepcopy(payload), PORTABLE_DISPATCH_RESERVATION: True, "dispatch_pending_resolution": True,
+        "roo_points_dispatch_actor_id": actor_id}
     with transaction.atomic():
         run = ContentFactoryRun.objects.select_for_update().filter(
             organization=organization, domain=organization.domain,
@@ -123,7 +124,10 @@ def reserve_portable_dispatch_intent(*, organization, workflow, actor_id, payloa
         saved = run.run_request or {}
         identity_fields = ("client_request_id", "topic", "target_keyword", "source_run_id", "author_id", "editorial_brief")
         if (not key or not original_portable_run(run) or run.organization_id != organization.pk
-                or run.workflow not in {"article_generation", "direct_generate", "confirmed_topic"} or run.slack_user_id != actor_id
+                or run.workflow not in {"article_generation", "direct_generate", "confirmed_topic"}
+                # A worker snapshot may omit its observational Slack identity.
+                # The backend-owned request metadata retains the original actor.
+                or saved.get("roo_points_dispatch_actor_id", run.slack_user_id) != actor_id
                 or (not created and run.run_id == key and (run.status not in {ContentFactoryRunStatus.QUEUED, ContentFactoryRunStatus.BLOCKED}
                     or not saved.get(PORTABLE_DISPATCH_RESERVATION) or not saved.get("dispatch_pending_resolution")))
                 or any(saved.get(field) != payload.get(field) for field in identity_fields)):

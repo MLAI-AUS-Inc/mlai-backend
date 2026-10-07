@@ -179,6 +179,12 @@ class PortableDispatchAdmissionTests(TransactionTestCase):
         self.assertEqual(run.run_id, "remote-draft")
         self.assertEqual(run.status, "running")
         self.assertEqual(ContentFactoryRun.objects.count(), 1)
+        self.assertEqual(run.run_request["roo_points_dispatch_actor_id"], "fixture-actor")
+        from .dispatch_binding import reserve_portable_dispatch_intent
+        from .website_contract import WebsiteAuthorityError
+        with self.assertRaises(WebsiteAuthorityError):
+            reserve_portable_dispatch_intent(organization=self.org, workflow="confirmed_topic",
+                actor_id="different-actor", payload=deepcopy(self.payload))
         self.assertNotIn("dispatch_pending_resolution", run.run_request)
         self.assertNotIn("pending_billing_refund", run.run_request)
 

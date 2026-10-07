@@ -95,6 +95,17 @@ class WebsiteOperationRecoveryTests(SimpleTestCase):
                 operations.bind_operation_run(self.op, self.run)
                 self.assertEqual(self.op.state, state)
 
+    def test_binding_pending_repair_cannot_reopen_a_terminal_operation(self):
+        self.run.status = 'blocked'
+        self.run.workflow = 'article_generation'
+        self.run.result = {'precondition_status': 'precondition_failed', 'repair_status': 'queued', 'scan_run_id': 'child'}
+        with patch.object(authority, 'authority_guard', side_effect=lambda *a, **k: nullcontext()), \
+                patch.object(authority, 'contract_for', return_value=self.binding):
+            for state in operations.TERMINAL_WORKFLOW_STATES:
+                self.op.state = state
+                operations.bind_operation_run(self.op, self.run)
+                self.assertEqual(self.op.state, state)
+
     def test_observation_records_cancel_but_cannot_revive_or_replace_completion(self):
         with patch.object(operations.WebsiteConnectionOperation.objects, "select_for_update") as selected:
             selected.return_value.filter.return_value.first.return_value = self.op
