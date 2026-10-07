@@ -151,6 +151,18 @@ These checks do not close the read-to-charge/read-to-POST race or establish all-
 
 ## Durable worker snapshots and dispatch binding
 
+An explicitly confirmed content-only article saves its original reviewed dispatch
+intent before the queue HTTP request, after the current editorial-policy check.
+The short reservation transaction ends before network I/O. The worker's first
+mirror can bind that token-keyed row to its remote ID only when the saved intent,
+tenant, article workflow, dispatch key and immutable brief agree. Native delivery,
+preview, publication and website configuration remain outside this permission.
+A lost queue response retains an already accepted callback's identity and progress;
+it cannot create a second placeholder, clear failure diagnostics or refund a run
+already acknowledged by its first snapshot. Pending placeholders can accept a late
+first mirror; failed/cancelled reservations cannot be resurrected. No schema change
+is required.
+
 The snapshot writer now preserves a known `run_request` editorial brief and its
 `client_request_id` when an incoming worker observation omits them. Omitted or null
 `run_request` objects are sparse observations, not instructions to clear the brief.

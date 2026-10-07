@@ -86,7 +86,7 @@ from content_factory.authors import (
 from content_factory.contract import CONTENT_FACTORY_REQUEST_SOURCE
 from content_factory.baseline_metrics import baseline_display_metrics
 from content_factory.baseline_ai_evidence import ai_answer_metadata, compact_ai_providers
-from content_factory.dispatch_binding import bind_dispatch_token_run, run_is_dispatch_token_keyed
+from content_factory.dispatch_binding import bind_dispatch_token_run, run_is_dispatch_token_keyed, reserve_portable_dispatch_intent, bind_portable_dispatch_snapshot
 from content_factory.editorial_catalog import article_brief_for_catalog
 from content_factory.google_baseline import collect_verified_google_metrics, google_baseline_connection_status
 from content_factory.run_state import ARTICLE_WORKFLOWS, active_retry_signal, clear_obsolete_active_run_blockers
@@ -13301,6 +13301,7 @@ def _queue_content_factory_run_authorized(*, endpoint, workflow, context, config
         payload["client_request_id"] = dispatch_key
     keyed_dispatch = endpoint in CONTENT_FACTORY_KEYED_DISPATCH_ENDPOINTS
     dispatch_unresolved = False
+    portable_reservation = None
     requires_remote = workflow == "startup_autofill" or _remote_required_for_workflow(workflow)
     if requires_remote and not remote_config["enabled"]:
         technical_error = _content_factory_unavailable_message(remote_config)
@@ -13340,6 +13341,9 @@ def _queue_content_factory_run_authorized(*, endpoint, workflow, context, config
                 editorial_rejection = _refresh_article_editorial_payload(organization=context.organization, payload=payload)
                 if editorial_rejection is not None:
                     break
+                if payload.get("delivery_mode") == "content_only" and payload.get("delivery_mode_confirmed") is True:
+                    portable_reservation = reserve_portable_dispatch_intent(
+                        organization=context.organization, workflow=workflow, actor_id=actor_id, payload=payload)
             try:
                 post_attempted = True
                 response = http_client.post(url, json=payload, headers=_content_factory_headers(), timeout=(3, 10))
@@ -13483,59 +13487,83 @@ def _queue_content_factory_run_authorized(*, endpoint, workflow, context, config
                 # run is provisional until the key lookup proves it either way.
                 dispatch_unresolved = True
 
-    if billing_refund_context and not remote_run_id:
-        if dispatch_unresolved:
-            # The dispatch may have landed (lost response). Refunding now while
-            # the real run starts is the refund-then-ghost bug: withhold the
-            # refund and stash what the deferred refund needs; the poll path
-            # releases it once the key lookup confirms the dispatch is absent.
-            payload["pending_billing_refund"] = {
-                "kind": str(billing_refund_context.get("kind") or ""),
-                "charged_user_id": getattr(billing_refund_context.get("charged_user"), "pk", None),
-                "actor_id": actor_id,
-                "reason": billing_refund_context.get("reason") or "Content Factory queue did not start.",
-                "article_request": {
-                    "client_request_id": dispatch_key,
-                    "domain": context.organization.domain,
-                    "requested_topic_count": payload.get("requested_topic_count", 4),
-                    "topic": str(payload.get("topic") or payload.get("custom_title") or payload.get("target_keyword") or ""),
-                },
-            }
-            logger.warning(
-                "content_factory_dispatch_refund_withheld workflow=%s endpoint=%s client_request_id=%s "
-                "reason=dispatch_outcome_ambiguous",
-                workflow,
-                endpoint,
-                dispatch_key,
-            )
-        else:
-            refund_kwargs = {
-                "charged_user": billing_refund_context.get("charged_user"),
-                "actor_id": actor_id,
-                "article_request": billing_refund_context.get("article_request") or {},
-                "domain": context.organization.domain,
-                "reason": billing_refund_context.get("reason") or "Content Factory queue did not start.",
-            }
-            if billing_refund_context.get("kind") == CONTENT_FACTORY_ACTION_CONTENT_ISLAND_TOPIC_GENERATION:
-                _refund_roo_points_for_content_island_topic_start(**refund_kwargs)
+    with transaction.atomic() if portable_reservation is not None else nullcontext():
+        if portable_reservation is not None:
+            # A first mirror may have bound the original row while the queue reply
+            # was in flight (or lost). Its identity is stronger than transport doubt.
+            portable_reservation = ContentFactoryRun.objects.select_for_update().get(pk=portable_reservation.pk)
+            if portable_reservation.run_id != dispatch_key:
+                remote_run_id = portable_reservation.run_id
+                dispatch_unresolved = False
+                # Keep the callback's progress, result and failure diagnostics.
+                remote_data = {}
+
+        if billing_refund_context and not remote_run_id:
+            if dispatch_unresolved:
+                # The dispatch may have landed (lost response). Refunding now while
+                # the real run starts is the refund-then-ghost bug: withhold the
+                # refund and stash what the deferred refund needs; the poll path
+                # releases it once the key lookup confirms the dispatch is absent.
+                payload["pending_billing_refund"] = {
+                    "kind": str(billing_refund_context.get("kind") or ""),
+                    "charged_user_id": getattr(billing_refund_context.get("charged_user"), "pk", None),
+                    "actor_id": actor_id,
+                    "reason": billing_refund_context.get("reason") or "Content Factory queue did not start.",
+                    "article_request": {
+                        "client_request_id": dispatch_key,
+                        "domain": context.organization.domain,
+                        "requested_topic_count": payload.get("requested_topic_count", 4),
+                        "topic": str(payload.get("topic") or payload.get("custom_title") or payload.get("target_keyword") or ""),
+                    },
+                }
+                logger.warning(
+                    "content_factory_dispatch_refund_withheld workflow=%s endpoint=%s client_request_id=%s "
+                    "reason=dispatch_outcome_ambiguous",
+                    workflow,
+                    endpoint,
+                    dispatch_key,
+                )
             else:
-                _refund_roo_points_for_article_start(**refund_kwargs)
+                refund_kwargs = {
+                    "charged_user": billing_refund_context.get("charged_user"),
+                    "actor_id": actor_id,
+                    "article_request": billing_refund_context.get("article_request") or {},
+                    "domain": context.organization.domain,
+                    "reason": billing_refund_context.get("reason") or "Content Factory queue did not start.",
+                }
+                if billing_refund_context.get("kind") == CONTENT_FACTORY_ACTION_CONTENT_ISLAND_TOPIC_GENERATION:
+                    _refund_roo_points_for_content_island_topic_start(**refund_kwargs)
+                else:
+                    _refund_roo_points_for_article_start(**refund_kwargs)
 
-    if dispatch_unresolved:
-        # Marks the provisional run for poll-time resolution (bind to the real
-        # run, or fail honestly + refund once confirmed absent after a grace
-        # window). Local-only: the POST already happened.
-        payload["dispatch_pending_resolution"] = True
+        if dispatch_unresolved:
+            # Marks the provisional run for poll-time resolution (bind to the real
+            # run, or fail honestly + refund once confirmed absent after a grace
+            # window). Local-only: the POST already happened.
+            payload["dispatch_pending_resolution"] = True
 
-    return _create_local_run(
-        workflow=workflow,
-        domain=context.organization.domain,
-        github_repo="" if payload.get("delivery_mode") == "content_only" else config.github_repo or payload.get("github_repo") or "",
-        actor_id=actor_id,
-        payload=payload,
-        remote_data=remote_data,
-        fallback_run_id=dispatch_key,
-    )
+        if portable_reservation is not None and portable_reservation.run_id == dispatch_key:
+            from .portable_drafts import PORTABLE_DISPATCH_RESERVATION
+            # Keep deferred billing and transport resolution on the reserved row.
+            portable_reservation.run_request = {**portable_reservation.run_request, **payload}
+            if not dispatch_unresolved and not remote_run_id:
+                portable_reservation.run_request.pop(PORTABLE_DISPATCH_RESERVATION, None)
+                portable_reservation.run_request.pop("dispatch_pending_resolution", None)
+            portable_reservation.save(update_fields=["run_request", "updated_at"])
+
+        if remote_run_id and portable_reservation is not None:
+            bind_portable_dispatch_snapshot(remote_run_id=remote_run_id,
+                payload={"domain": context.organization.domain, "workflow": workflow,
+                         "run_id": remote_run_id, "run_request": payload})
+        return _create_local_run(
+            workflow=workflow,
+            domain=context.organization.domain,
+            github_repo="" if payload.get("delivery_mode") == "content_only" else config.github_repo or payload.get("github_repo") or "",
+            actor_id=actor_id,
+            payload=payload,
+            remote_data=remote_data,
+            fallback_run_id=remote_run_id or dispatch_key,
+        )
 
 
 def _run_start_payload(run):

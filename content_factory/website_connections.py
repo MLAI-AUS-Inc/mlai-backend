@@ -401,6 +401,9 @@ def guarded_service_write(action, *, only_repository=False, remote_actions=(), p
                 run_id = str(payload.get("run_id") or payload.get("job_id") or "")
                 with transaction.atomic():
                     original = ContentFactoryRun.objects.select_for_update().filter(run_id=run_id).first() if run_id else None
+                    if original is None and run_id:
+                        from .dispatch_binding import bind_portable_dispatch_snapshot
+                        original = bind_portable_dispatch_snapshot(remote_run_id=run_id, payload=payload)
                     if portable_run_update_allowed(original, payload, event_type=str(payload.get("event_type") or payload.get("event") or "")):
                         return method(self, request, *args, **kwargs)
             if only_repository and not needs_repository_authority(payload):

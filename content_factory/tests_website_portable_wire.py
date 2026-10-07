@@ -15,6 +15,7 @@ from types import SimpleNamespace
 from django.test import SimpleTestCase
 
 from .website_connections import portable_run_update_allowed
+from .portable_drafts import PORTABLE_DISPATCH_RESERVATION, portable_dispatch_snapshot_allowed
 
 
 def admitted_portable_snapshot():
@@ -106,3 +107,43 @@ class PortableWorkerWireTests(SimpleTestCase):
         payload = deepcopy(base)
         payload["run_request"]["editorial_admission"]["checked_at"] = "2026-09-11T01:00:00+00:00"
         self.assertFalse(portable_run_update_allowed(self.run, payload))
+
+class PortableDispatchIntentTests(SimpleTestCase):
+    def setUp(self):
+        self.payload = admitted_portable_snapshot()
+        self.payload.update(run_id="remote-draft", workflow="confirmed_topic", status="queued")
+        self.payload["run_request"].update(client_request_id="draft-dispatch", topic="A reviewed topic")
+        saved = deepcopy(self.payload["run_request"])
+        saved.pop("editorial_admission")
+        saved.update({PORTABLE_DISPATCH_RESERVATION: True, "dispatch_pending_resolution": True})
+        self.run = SimpleNamespace(run_id="draft-dispatch", domain=self.payload["domain"],
+            workflow="confirmed_topic", github_repo="", status="queued", run_request=saved)
+
+    def test_first_mirror_binds_only_backend_reserved_original_intent(self):
+        self.assertTrue(portable_dispatch_snapshot_allowed(self.run, "remote-draft", self.payload))
+        self.run.status = "blocked"  # A lost queue response remains pending.
+        self.assertTrue(portable_dispatch_snapshot_allowed(self.run, "remote-draft", self.payload))
+        for field in (PORTABLE_DISPATCH_RESERVATION, "dispatch_pending_resolution", "delivery_mode_confirmed"):
+            saved = deepcopy(self.run.run_request)
+            self.run.run_request.pop(field)
+            self.assertFalse(portable_dispatch_snapshot_allowed(self.run, "remote-draft", self.payload))
+            self.run.run_request = saved
+        self.run.status = "failed"
+        self.assertFalse(portable_dispatch_snapshot_allowed(self.run, "remote-draft", self.payload))
+
+    def test_first_mirror_cannot_change_review_or_tenant_or_gain_website_authority(self):
+        changes = [
+            {"domain": "other.example.test"}, {"workflow": "site_scan"}, {"run_id": "other-run"},
+            {"client_request_id": "other-key"}, {"event_type": "preview_ready"},
+            {"result": {"preview_url": "https://preview.invalid"}},
+            {"run_request": {**self.payload["run_request"], "client_request_id": "other-key"}},
+            {"run_request": {**self.payload["run_request"], "topic": "Unreviewed topic"}},
+            {"run_request": {**self.payload["run_request"], "delivery_mode": "publish_code"}},
+        ]
+        changed_brief = deepcopy(self.payload["run_request"])
+        changed_brief.pop("editorial_admission")
+        changed_brief["editorial_brief"]["reader_task"] = "An unreviewed task"
+        changes.append({"run_request": changed_brief})
+        for change in changes:
+            with self.subTest(change=change):
+                self.assertFalse(portable_dispatch_snapshot_allowed(self.run, "remote-draft", {**self.payload, **change}))

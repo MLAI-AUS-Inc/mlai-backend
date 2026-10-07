@@ -1,6 +1,7 @@
 """Pure portable-draft intent and snapshot validation, without repository authority."""
 
 import re
+from types import SimpleNamespace
 
 from .website_contract import CONNECTION_FIELDS, WebsiteAuthorityError, connection_contract
 
@@ -21,6 +22,40 @@ PORTABLE_CALLBACK_EVENTS = frozenset({
 })
 PORTABLE_WORKFLOWS = frozenset({"article_generation", "direct_generate", "confirmed_topic", "article_revision", "component_revision"})
 PORTABLE_RUN_CONTROLS = frozenset({"resume", "cancel", "deny", "revise", "regenerate-image", "regenerate-images", "preview"})
+
+PORTABLE_DISPATCH_RESERVATION = "portable_dispatch_intent_reserved"
+
+
+def portable_dispatch_snapshot_allowed(run, remote_run_id, payload):
+    """Bind a first snapshot only to a current, backend-reserved draft intent."""
+    saved = getattr(run, "run_request", None)
+    incoming = payload.get("run_request") if isinstance(payload, dict) else None
+    if not isinstance(saved, dict) or not isinstance(incoming, dict):
+        return False
+    key = str(saved.get("client_request_id") or "").strip()
+    if (not key or key != str(getattr(run, "run_id", ""))
+            or not saved.get(PORTABLE_DISPATCH_RESERVATION)
+            or getattr(run, "status", "") not in {"queued", "blocked"}
+            or not saved.get("dispatch_pending_resolution")
+            or incoming.get("client_request_id") != key
+            or (payload.get("client_request_id") and payload["client_request_id"] != key)
+            or not remote_run_id or remote_run_id == key):
+        return False
+    for field in ("topic", "target_keyword", "source_run_id", "author_id"):
+        if field in incoming and incoming[field] != saved.get(field):
+            return False
+    from .editorial_run_state import EditorialRunConflict, merge_editorial_run_snapshot
+    try:
+        merge_editorial_run_snapshot(
+            {"workflow": run.workflow, "domain": run.domain, "run_request": saved},
+            {**payload, "workflow": payload.get("workflow") or run.workflow,
+             "domain": payload.get("domain") or run.domain},
+        )
+    except EditorialRunConflict:
+        return False
+    target = SimpleNamespace(run_id=remote_run_id, domain=run.domain, workflow=run.workflow,
+                             github_repo=run.github_repo, run_request=saved)
+    return portable_run_update_allowed(target, payload, event_type=str(payload.get("event_type") or payload.get("event") or ""))
 
 
 def portable_run_control_allowed(run, action, payload):
