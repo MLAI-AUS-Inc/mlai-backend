@@ -102,3 +102,33 @@ class ArticleRunWorkflowProgressTests(TestCase):
         self.assertEqual(_step(progress, "baseline")["status"], "ready")
         self.assertEqual(_step(progress, "generate")["status"], "blocked")
         self.assertEqual(progress["currentStepId"], "generate")
+
+
+class ArticleSetupWorkflowProgressTests(TestCase):
+    def test_failed_setup_stays_at_build_until_a_reviewable_preview_exists(self):
+        for setup_status in ("failed", "blocked", "preview_failed"):
+            with self.subTest(setup_status=setup_status):
+                checks = {
+                    key: {"passed": True}
+                    for key in ("websiteProfile", "baseline", "github")
+                }
+                checks["scaffold"] = {
+                    "passed": False,
+                    "setupBlocked": True,
+                    "setupRunId": "failed-setup",
+                    "setupStatus": setup_status,
+                }
+                with patch(
+                    "content_factory.vibe_marketing_views._workflow_progress_context",
+                    return_value=(None, None, [], checks),
+                ):
+                    progress = _workflow_progress(topic_candidates=[])
+                build = _step(progress, "generate")
+                self.assertEqual(build["status"], "blocked")
+                self.assertEqual(build["runId"], "failed-setup")
+                self.assertEqual(build["primaryAction"]["label"], "Open setup diagnostics")
+                self.assertIn("failed-setup", build["primaryAction"]["href"])
+                self.assertEqual(progress["currentStepId"], "generate")
+                for key in ("review", "publish"):
+                    self.assertEqual(_step(progress, key)["status"], "locked")
+                    self.assertIsNone(_step(progress, key)["primaryAction"])

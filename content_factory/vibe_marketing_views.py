@@ -9949,11 +9949,11 @@ def _workflow_progress(*, context=None, run=None, latest_runs=None, checks=None,
             summary_by_id["review"] = "Only a fallback setup preview is available; exact preview must be fixed before approval."
             action_by_id["review"] = _workflow_step_action("Open setup diagnostics", href=setup_run_url, variant="secondary")
         elif setup_status in {"preview_failed", "failed", "blocked"}:
-            status_by_id["generate"] = "complete"
-            status_by_id["review"] = "blocked"
+            status_by_id["generate"] = "blocked"
+            status_by_id["review"] = "locked"
             status_by_id["publish"] = "locked"
-            summary_by_id["review"] = "Hosted setup preview failed. Open diagnostics, inspect the build logs, then retry."
-            action_by_id["review"] = _workflow_step_action("Open setup diagnostics", href=setup_run_url, variant="secondary")
+            summary_by_id["generate"] = "Articles setup build failed. Open diagnostics to review the failure and start a new reviewed attempt."
+            action_by_id["generate"] = _workflow_step_action("Open setup diagnostics", href=setup_run_url, variant="secondary")
         elif setup_status == "publishing":
             # Native GitHub auto-merge is armed: the PR merges on its own once required
             # checks pass, with nothing for the founder to do. That IS running — but the
