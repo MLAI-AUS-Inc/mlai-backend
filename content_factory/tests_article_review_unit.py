@@ -188,3 +188,47 @@ class FeedbackOutcomeTests(SimpleTestCase):
         run = SimpleNamespace(run_id='child', workflow='article_revision', result={})
         self.assertEqual(check_approval_comments(run, {}).status_code, 409)
         self.assertIsNone(check_approval_comments(run, {'waivedComments':[{'id':'one', 'body':'Preserve it'}]}))
+
+
+class PreviewRefreshAttemptTests(SimpleTestCase):
+    def exercise(self, *, snapshot=None, denial=None):
+        run = SimpleNamespace(run_id='saved-article', status='blocked', workflow='article_revision',
+            domain='example.test', github_repo='owner/site', run_request={
+                'delivery_mode': 'content_only', 'website_connection_id': str(uuid.uuid4()),
+                'connection_generation': 1, 'operation_id': str(uuid.uuid4()),
+                'operation_attempt': 2, 'deletion_epoch': 0})
+        snapshot = snapshot if snapshot is not None else {'revision': 'canonical-copy', 'previewPending': True, 'refreshError': 'Retry preview'}
+        responses = [SimpleNamespace(status_code=200, json=lambda: snapshot),
+                     SimpleNamespace(status_code=200, json=lambda: {'revision': 'canonical-copy', 'previewPending': True})]
+        with patch('content_factory.article_review_views.views.authority_guard', side_effect=denial or (lambda *args, **kwargs: nullcontext())), \
+             patch('content_factory.article_review_views.views._content_factory_remote_config', return_value={'enabled': True, 'base_url': 'https://factory.test'}), \
+             patch('content_factory.article_review_views.views._content_factory_headers', return_value={'X-API-Key': 'synthetic'}), \
+             patch('content_factory.article_review_views.views.http_client.request', side_effect=responses) as request, \
+             patch('content_factory.website_operations.advance_workflow_attempt', return_value={
+                 'operation_id': run.run_request['operation_id'], 'operation_attempt': 3, 'deletion_epoch': 0}) as advance:
+            result = remote_review(run, payload={'action': 'refresh'})
+        return result, run, request, advance
+
+    def test_failed_saved_refresh_reserves_original_operation_before_dispatch(self):
+        result, run, request, advance = self.exercise()
+        advance.assert_called_once_with(run)
+        self.assertEqual([call.args[0] for call in request.call_args_list], ['GET', 'POST'])
+        payload = request.call_args.kwargs['json']
+        self.assertEqual(payload['operation_attempt'], 3)
+        self.assertEqual(payload['operation_id'], run.run_request['operation_id'])
+        self.assertEqual(payload['website_connection_id'], run.run_request['website_connection_id'])
+        self.assertEqual(payload['expectedRevision'], 'canonical-copy')
+        self.assertEqual(result['revision'], 'canonical-copy')
+
+    def test_ready_refresh_is_a_noop_without_an_operation_attempt(self):
+        result, run, request, advance = self.exercise(snapshot={'revision': 'saved', 'previewPending': False})
+        advance.assert_not_called()
+        self.assertEqual(request.call_count, 1)
+        self.assertEqual(result['revision'], 'saved')
+
+    def test_revoked_connection_cannot_reserve_or_dispatch_refresh(self):
+        from .website_contract import WebsiteAuthorityError
+        result, run, request, advance = self.exercise(denial=WebsiteAuthorityError('website_connection_changed', 'Reload the website.'))
+        self.assertEqual(result.status_code, 409)
+        advance.assert_not_called()
+        request.assert_not_called()

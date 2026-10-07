@@ -431,3 +431,10 @@ website authority. No billing, schema or migration behavior changes.
 A reviewed discovery topic resolves against its saved, organization-scoped source run. Dashboard keyword deduplication may display an older discovery, but cannot replace the title or source selected in a run. Current decline, written-coverage and keyword availability checks still apply before generation.
 
 Polling a non-resumable failed article with no delivered copy releases its in-progress keyword for a newly reviewed attempt. This also reconciles older failed runs. The keyword row is locked, and another active, resumable or delivered run with the same keyword retains the reservation. Written articles and other organizations are never changed.
+
+A failed or blocked saved article's owner preview refresh checks the canonical
+review first, then reserves a new attempt of its original website operation.
+The worker authenticates that attempt against the backend, advances the active
+execution generation before registering saved artifacts, and checks the same
+review revision again. Ready/no-op refreshes consume no attempt. This rebuilds
+saved copy; it does not grant publication approval or change the source binding.

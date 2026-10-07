@@ -21,6 +21,18 @@ def remote_review(run, *, payload=None):
             if binding or original.get("delivery_mode") != "content_only":
                 with views.authority_guard(original, action="read"):
                     pass
+                if (binding and payload.get("action") == "refresh"
+                        and run.status in {"failed", "blocked"}):
+                    # Inspect before reserving: a completed/no-op refresh must
+                    # not consume an attempt. Recheck the same revision remotely.
+                    snapshot = remote_review(run)
+                    if isinstance(snapshot, Response):
+                        return snapshot
+                    if not snapshot.get("previewPending") or not snapshot.get("refreshError"):
+                        return snapshot
+                    from .website_operations import advance_workflow_attempt
+                    attempt = advance_workflow_attempt(run)
+                    payload = {**payload, **attempt, "expectedRevision": snapshot["revision"]}
                 payload = {**payload, **binding}
         except views.WebsiteAuthorityError as exc:
             return Response(exc.as_dict(), status=exc.status)
