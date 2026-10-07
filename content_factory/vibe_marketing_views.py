@@ -27,6 +27,7 @@ from .website_connections import (
     owner_operation_contract, owner_write_guard, guarded_local_run_write, require_unlocked_remote_call,
 )
 from .website_views import guarded_owner_operation
+from .portable_drafts import original_portable_run
 from io import BytesIO
 from datetime import timedelta, timezone as datetime_timezone
 from urllib.parse import parse_qsl, quote, urlencode, urlsplit
@@ -920,8 +921,15 @@ def _reusable_content_factory_charge_for_run(run) -> Optional[int]:
             continue
         billing_status = str(getattr(job, "billing_status", "") or "").strip()
         ledger_id = getattr(job, "billing_ledger_id", None)
+        if billing_status == "refunded":
+            return None
+        job_crid = str(getattr(job, "client_request_id", "") or "").strip()
+        if job_crid and Ledger.objects.filter(source="CONTENT_FACTORY", kind="REFUND", reference_id=job_crid).exists():
+            return None
         if billing_status in {"charged", "reused"} and ledger_id:
-            return int(ledger_id)
+            charge = Ledger.objects.filter(pk=ledger_id, kind="SPEND", source="CONTENT_FACTORY").first()
+            if charge and not Ledger.objects.filter(kind="REFUND", source="CONTENT_FACTORY", reference_id=charge.reference_id).exists():
+                return int(ledger_id)
         source_job_id = str(getattr(job, "billing_source_job_id", "") or "").strip()
         if source_job_id and source_job_id not in seen:
             queue.append(source_job_id)
@@ -974,12 +982,18 @@ def _reuse_roo_points_authorization_for_article_job(*, run, payload: dict, domai
         required_points = get_content_factory_ai_agent_required_points(domain)
         ledger_id = ""
     billing_status = str(run_request.get("roo_points_billing_status") or "").strip()
+    from roo.models import Ledger
+    stamp_charge = Ledger.objects.filter(pk=ledger_id, kind="SPEND", source="CONTENT_FACTORY").first() if ledger_id else None
+    refunded = billing_status == "refunded" or bool(stamp_charge and Ledger.objects.filter(
+        kind="REFUND", source="CONTENT_FACTORY", reference_id=stamp_charge.reference_id).exists())
+    if refunded:
+        return Response({"detail": "This article payment was refunded. Start a new paid draft.", "code": "roo_points_billing_refunded"}, status=409)
     web_authorized = (
         authorized
         and action == CONTENT_FACTORY_ACTION_ARTICLE_GENERATION
         and cost_points >= get_content_factory_article_cost_points(domain)
         and billing_status in {"charged", "reused", "free"}
-        and ledger_id
+        and ledger_id and stamp_charge is not None
     )
 
     if not web_authorized:
@@ -1458,13 +1472,29 @@ def _run_belongs_to_context(run, context) -> bool:
     return normalize_company_domain(run.domain) == normalize_company_domain(context.organization.domain)
 
 
-def _latest_runs_for_org(organization, limit=6):
-    return list(
-        ContentFactoryRun.objects.filter(domain=organization.domain, workflow__in=VIBE_MARKETING_WORKFLOWS)
-        .exclude(status=ContentFactoryRunStatus.CANCELLED)
-        .prefetch_related("steps")
-        .order_by("-updated_at")[:limit]
-    )
+def _latest_runs_for_org(organization, limit=24):
+    rows = ContentFactoryRun.objects.filter(domain=organization.domain, workflow__in=VIBE_MARKETING_WORKFLOWS).exclude(status=ContentFactoryRunStatus.CANCELLED)
+    config = _get_config(organization)
+    connection = getattr(config, "website_connection", None)
+    if connection:
+        from django.db.models import Q
+        rows = rows.filter(~Q(workflow__in=REPOSITORY_WORKFLOWS)
+            | Q(run_request__website_connection_id=str(connection.pk), run_request__connection_generation=connection.generation)
+            | Q(run_request__delivery_mode="content_only", run_request__website_connection_id__isnull=True))
+    rows = rows.prefetch_related("steps").order_by("-updated_at")
+    candidates = list(rows[:max(limit * 4, 48)])
+    # Current setup and scan observations must survive a busy article history.
+    # Select them before applying the ordinary recent-run display window.
+    retained = []
+    for workflows in (SCAN_WORKFLOWS, {"article_system_setup"}):
+        selected = next((run for run in rows.filter(workflow__in=workflows)[:48]
+            if not article_setup_reset_ignores_run(config, run)), None)
+        if selected is not None:
+            retained.append(selected)
+    retained_ids = {run.run_id for run in retained}
+    ordinary = [run for run in candidates if run.run_id not in retained_ids and not article_setup_reset_ignores_run(config, run)]
+    return sorted(retained + ordinary[:max(limit - len(retained), 0)], key=lambda run: run.updated_at, reverse=True)
+
 
 
 def _recent_discovery_topic_runs_for_org(organization, limit=RECENT_DISCOVERY_TOPIC_RUN_LIMIT):
@@ -3147,35 +3177,17 @@ def _article_system_setup_status_is_merged(*, setup_status="", merge_status="") 
 
 
 def _article_generation_ready_for_config(config, latest_runs=None, article_system=None) -> bool:
-    if not config:
-        return False
-    article_system = article_system if isinstance(article_system, dict) else resolve_article_system(config)
-    if bool(getattr(config, "articles_scaffolded", False)):
-        return True
-    if _article_system_is_published(config, article_system):
-        return True
-
-    pending = _pending_article_system_setup_from_config(config)
-    pending_status = str(pending.get("setupStatus") or pending.get("setup_status") or pending.get("status") or "").strip()
-    pending_merge_status = str(pending.get("mergeStatus") or pending.get("merge_status") or "").strip()
-    if _article_system_setup_status_is_merged(setup_status=pending_status, merge_status=pending_merge_status):
-        return True
-
-    pending_setup_run_id = str(pending.get("setupRunId") or pending.get("setup_run_id") or "").strip()
-    setup_run = _latest_article_system_setup_run(latest_runs or [], setup_run_id=pending_setup_run_id)
-    if setup_run:
-        setup_meta = _setup_metadata_from_run(setup_run)
-        if _article_system_setup_status_is_merged(
-            setup_status=setup_meta.get("setupStatus"),
-            merge_status=setup_meta.get("mergeStatus"),
-        ):
-            return True
-    return False
+    """Use current target proof; historical scaffold flags grant no readiness."""
+    return bool(config and integration_evidence(config, latest_runs or []).get("verified"))
 
 
 def _has_completed_article_flow(organization, latest_runs=None, config=None):
     if config is not None and _article_generation_ready_for_config(config, latest_runs):
         return True
+    if config is not None:
+        latest_runs = [row for row in latest_runs or [] if not article_setup_reset_ignores_run(config, row)]
+        if getattr(config, "website_connection_id", None):
+            return False
     return _article_generation_history_exists(organization, latest_runs)
 
 
@@ -5577,9 +5589,6 @@ def _mark_pending_article_system_setup_merged(config, *, run=None, result=None, 
     clear_article_setup_reset_markers(article_system)
     update_fields = ["article_system"]
     config.article_system = sanitize_json_for_postgres(article_system)
-    if not config.articles_scaffolded:
-        config.articles_scaffolded = True
-        update_fields.append("articles_scaffolded")
     if pr_url and config.articles_scaffold_pr_url != pr_url:
         config.articles_scaffold_pr_url = pr_url
         update_fields.append("articles_scaffold_pr_url")
@@ -6065,6 +6074,8 @@ def _attempt_setup_publish_merge_authorized(*, run, context):
     }
     merge_error = ""
     try:
+        from .website_connections import record_publish_merge_intent
+        record_publish_merge_intent(run, pull, pr_number, action="setup")
         merged = _github_api_request(
             "PUT",
             f"/repos/{repo}/pulls/{pr_number}/merge",
@@ -6532,6 +6543,7 @@ def _check_and_merge_publish_pr(*, run, context):
             result = dict(run.result or {})
             result["merge_status"] = "merged"
             result["checks_status"] = "merged"
+            result["merge_response"] = {"merged": True, "sha": pull.get("merge_commit_sha")}
             result.pop("merge_blocked_reason", None)
             result.pop("publish_auto_merge_state", None)
             run.result = result
@@ -6549,8 +6561,9 @@ def _check_and_merge_publish_pr(*, run, context):
                 "detail": checks.get("message") or "Publish PR checks are not ready.",
                 "checks": checks,
             }
-        from .website_connections import validate_publish_merge_source
+        from .website_connections import validate_publish_merge_source, record_publish_merge_intent
         validate_publish_merge_source(run, (pull.get("head") or {}).get("sha"), (pull.get("head") or {}).get("ref"))
+        record_publish_merge_intent(run, pull, pr_number)
         merge_payload = {
             "sha": (pull.get("head") or {}).get("sha"),
             "commit_title": f"Publish Content Factory article from {run.run_id}",
@@ -7567,6 +7580,7 @@ PUBLISH_MERGE_EVIDENCE_RESULT_KEYS = (
     "merge_blocked_reason",
     "merged_at",
     "merge_response",
+    "publish_merge_intent",
     "publish_auto_merge",
     "publish_auto_merge_state",
     "publish_auto_merge_started_at",
@@ -7593,7 +7607,9 @@ DJANGO_OWNED_ARTICLE_RESULT_PREFIXES = (
 
 def _merge_django_owned_article_result(local_result, remote_result):
     local = _run_mapping(local_result)
-    merged = dict(_run_mapping(remote_result))
+    backend_merge_keys = {"publish_merge_intent", "merge_response", "merge_status", "merged_at"}
+    merged = {key: value for key, value in _run_mapping(remote_result).items()
+        if key not in backend_merge_keys or key in local}
     remote_quality = _run_mapping(merged.get("article_preview_quality"))
     remote_quality_status = str(remote_quality.get("status") or "").strip().lower()
     for key, value in local.items():
@@ -7613,7 +7629,7 @@ def _merge_django_owned_article_result(local_result, remote_result):
         )
         if not django_owned:
             continue
-        if merged.get(key) in (None, "", {}, []) and value not in (None, "", {}, []):
+        if key in backend_merge_keys or (merged.get(key) in (None, "", {}, []) and value not in (None, "", {}, [])):
             merged[key] = value
     return merged
 
@@ -8081,13 +8097,16 @@ def _ensure_local_publish_child_from_known_id(
     child_run_id = str(child_run_id or "").strip()
     if not child_run_id or not source_run:
         return None
+    config = _get_config(context.organization)
+    from .incident_guards import publish_child_binding
+    binding = publish_child_binding(config, source_run, payload or {}, remote_data or {})
     child = ContentFactoryRun.objects.filter(run_id=child_run_id).prefetch_related("steps").first()
     if child:
+        publish_child_binding(config, child, payload or {}, remote_data or {})
         return child if _run_belongs_to_context(child, context) else None
-
-    config = _get_config(context.organization)
     publish_payload = {
         **(payload or {}),
+        **binding,
         "source_run_id": source_run.run_id,
         "delivery_mode": "publish_code",
         "delivery_mode_confirmed": True,
@@ -8252,11 +8271,31 @@ def _recover_publish_child_for_run(run, *, request, context):
         return None
     publish_source_run = _accepted_component_revision_for_publish(run, context) or run
     known_child_id = _publish_child_run_id_for_run(run) or _publish_child_run_id_for_run(publish_source_run)
+    def binding_allowed(child=None):
+        from .incident_guards import publish_child_binding
+        try:
+            config = _get_config(context.organization)
+            publish_child_binding(config, publish_source_run, {}, {})
+            if child is not None:
+                publish_child_binding(config, child, {}, {})
+            return True
+        except WebsiteAuthorityError as exc:
+            run.result = {**(run.result or {}), "approval_blocker": {"code": exc.code, "message": str(exc), "retryable": False},
+                "publish_handoff_pending": False, "publish_handoff_status": "blocked", "publish_child_status": "blocked", "publish_auto_merge_state": "blocked"}
+            run.save(update_fields=["result", "updated_at"])
+            if child is not None:
+                child.result = {**(child.result or {}), "approval_blocker": {"code": exc.code, "message": str(exc), "retryable": False}, "publish_auto_merge_state": "blocked"}
+                child.save(update_fields=["result", "updated_at"])
+            return False
+    if (known_child_id or _publish_handoff_pending_for_run(run) or _publish_handoff_pending_for_run(publish_source_run)) and not binding_allowed():
+        return None
     if known_child_id:
         child = ContentFactoryRun.objects.filter(run_id=known_child_id).prefetch_related("steps").first()
         if child is not None and not _run_belongs_to_context(child, context):
             child = None
         if child is not None:
+            if not binding_allowed(child):
+                return None
             _attach_publish_child_to_run(run, child.run_id)
             if publish_source_run.pk != run.pk:
                 _attach_publish_child_to_run(publish_source_run, child.run_id)
@@ -8298,6 +8337,8 @@ def _recover_publish_child_for_run(run, *, request, context):
     for child_id in candidate_ids:
         child = ContentFactoryRun.objects.filter(run_id=child_id).prefetch_related("steps").first()
         if child is not None and _run_belongs_to_context(child, context):
+            if not binding_allowed(child):
+                return None
             _attach_publish_child_to_run(run, child.run_id)
             if publish_source_run.pk != run.pk:
                 _attach_publish_child_to_run(publish_source_run, child.run_id)
@@ -9267,45 +9308,9 @@ def _article_system_has_publish_path(config, article_system: dict) -> bool:
 
 
 def _article_system_is_published(config, article_system: dict) -> bool:
-    state = str(article_system.get("state") or "").strip()
-    if state in ARTICLE_SYSTEM_PUBLISHED_STATES:
-        if state in ARTICLE_SYSTEM_DETECTION_ONLY_STATES:
-            # The reset watermark lives on the *stored* article_system; the
-            # normalized ``article_system`` passed in has dropped the non-template
-            # marker keys, so read it off the config field directly.
-            stored_article_system = getattr(config, "article_system", None) if config else None
-            if article_setup_reset_marker(stored_article_system) and not bool(
-                getattr(config, "articles_scaffolded", False)
-            ):
-                # The founder explicitly reset this setup. A detection verdict alone
-                # must not re-complete the wizard; they exit by building a scaffold
-                # or explicitly adopting the detected system (both clear the markers).
-                return False
-            return _article_system_has_publish_path(config, article_system)
-        return True
-    if state == "roo_scaffolded" and bool(getattr(config, "articles_scaffolded", False)):
-        return True
-    targets = [
-        target
-        for target in (getattr(config, "publish_targets", None) or [])
-        if isinstance(target, dict)
-    ]
-    if not targets:
-        return False
-    if bool(getattr(config, "articles_scaffolded", False)):
-        return True
-    # Content Factory registers a publish target synthesized from the scaffold's
-    # setup cache while the setup run is still awaiting approval (the target's
-    # surface doesn't exist on the default branch until the setup PR merges).
-    # Those targets must not count as a published article system on their own;
-    # approval/merge sets articles_scaffolded, which re-enables the fallback.
-    # Bundle-only fallbacks don't count either — same reasoning as
-    # _article_system_has_publish_path: they mean publish is NOT configured.
-    return any(
-        str(target.get("source") or "") != "scaffold_cache"
-        and not is_bundle_only_fallback_target(target)
-        for target in targets
-    )
+    """Project publication from accepted target and deployment evidence only."""
+    evidence = integration_evidence(config) if config else {}
+    return bool(evidence.get("verified") and evidence.get("publishingVerified", True))
 
 
 def _article_system_publish_targets_provisional(config) -> bool:
@@ -9475,7 +9480,7 @@ def _article_system_setup_gate(config, latest_runs, article_system: dict) -> dic
     setup_merged = bool(
         _article_system_setup_status_is_merged(setup_status=setup_status, merge_status=merge_status)
     )
-    generation_ready = bool(_article_generation_ready_for_config(config, latest_runs, article_system) or setup_merged)
+    generation_ready = bool(_article_generation_ready_for_config(config, latest_runs, article_system))
     completed_with_pending_verification = bool(
         meta.get("rescanRunId") and not verification_published
     )
@@ -9858,6 +9863,11 @@ def _workflow_progress(*, context=None, run=None, latest_runs=None, checks=None,
         run_by_id["publish"] = article_run.run_id
         action_by_id["publish"] = _workflow_step_action("Publish article", href=_run_url(article_run), intent="promote-bundle")
         summary_by_id["publish"] = "Create the publish PR; it merges to main once checks pass."
+    elif content_package_ready and article_run and original_portable_run(article_run):
+        status_by_id["publish"] = "locked"
+        href_by_id["publish"] = _run_url(article_run)
+        action_by_id.pop("publish", None)
+        summary_by_id["publish"] = "Portable draft saved. Export or continue editing your article."
     elif content_package_ready:
         status_by_id["publish"] = "blocked"
         href_by_id["publish"] = "/founder-tools/marketing/settings"
@@ -10826,7 +10836,7 @@ def _profile_checks(organization, config, latest_runs=None, baseline_snapshot=No
     if generation_ready:
         setup_gate["setupBlocked"] = False
         setup_gate["generationReady"] = True
-    article_system_setup_ready = bool((setup_gate.get("published") or generation_ready) and not setup_gate.get("setupBlocked"))
+    article_system_setup_ready = bool((generation_ready if getattr(config, "website_connection_id", None) else setup_gate.get("published") or generation_ready) and not setup_gate.get("setupBlocked"))
     setup_pr_merged = bool(setup_gate.get("setupMerged"))
     # Bound integrations carry their own current-generation template/build proof.
     # The old MLAI component catalog applies only to unbound legacy scaffolds.
@@ -11130,6 +11140,20 @@ def _overlay_live_bootstrap_fields(payload, *, context, request):
             state["generationReady"] = capabilities["canGenerateArticle"]
             state["scaffoldConnected"] = capabilities["canGenerateArticle"]
             state["setupMerged"] = capabilities["canGenerateArticle"]
+            state["published"] = capabilities["canPublishArticle"]
+            state["generation_ready"] = capabilities["canGenerateArticle"]
+    checks = payload.get("checks") or {}
+    payload["guidedSteps"], payload["currentGuidedStep"] = _guided_steps(checks)
+    payload["recommendedNextAction"] = _recommended_next_action(checks)
+    runs = _latest_runs_for_org(context.organization, limit=24)
+    payload["workflowProgress"] = _workflow_progress(context=context, latest_runs=runs,
+        checks=checks, topic_candidates=payload.get("topicCandidates") or [])
+    by_id = {run.run_id: run for run in runs}
+    for serialized in payload.get("latestRuns") or []:
+        row = by_id.get(serialized.get("runId"))
+        if row:
+            serialized["workflowProgress"] = _workflow_progress(context=context, run=row,
+                latest_runs=runs, checks=checks, topic_candidates=payload.get("topicCandidates") or [])
     return payload
 
 
@@ -11538,16 +11562,26 @@ def _github_account_for_context(context, config, *, force=False):
 def _verify_github_repository_access(context, config, *, force=False):
     """Verify inventory reads independently from write authorization and rollout."""
     repo = str(getattr(config, "github_repo", "") or "").strip()
-    if not repo or not _github_account_for_context(context, config).get("owned"):
+    if not repo:
         return {"verified": False, "reasonCode": "github_access_required"}
     connection = getattr(config, "website_connection", None)
     fingerprint = hashlib.sha256(str((context.profile.user.pk, context.organization.pk, repo,
-        (str(connection.pk), connection.generation, connection.repository_id, connection.installation_id) if connection else None,
+        (str(connection.pk), connection.generation, connection.repository_id, connection.installation_id,
+            connection.state, connection.configuration_version, connection.verified_sha) if connection else None,
         config.connected_slack_user_id, config.github_installation_id,
         config.github_token_encrypted, config.github_token_expires_at)).encode()).hexdigest()
     key = "articles-repository-access-v1:" + fingerprint
+    # The context is created for one authenticated request. A forced admission
+    # probe stays fresh across repeated projections within that same request.
+    request_cache = context.__dict__.setdefault("_website_repository_probes", {}) if hasattr(context, "__dict__") else {}
+    prior = request_cache.get(key)
+    if prior and (not force or prior["fresh"]):
+        return dict(prior["result"])
+    if not _github_account_for_context(context, config).get("owned"):
+        return {"verified": False, "reasonCode": "github_access_required"}
     cached = None if force else cache.get(key)
     if isinstance(cached, dict):
+        request_cache[key] = {"result": dict(cached), "fresh": False}
         return cached
     result = {"verified": False, "reasonCode": "github_unavailable"}
     try:
@@ -11571,9 +11605,9 @@ def _verify_github_repository_access(context, config, *, force=False):
             writable = bool(_run_mapping(payload.get("permissions")).get("push"))
             if source == "github_app_installation":
                 try:
-                    write_credential = create_installation_access_token(installation_id=connection.installation_id,
-                        repository=repo, repository_id=connection.repository_id, permission_mode="write", use_cache=False)
-                    writable = True
+                    from integrations.services.github_app import require_installation_repository_permissions
+                    permissions = require_installation_repository_permissions(connection.installation_id)
+                    writable = permissions.get("contents") == "write" and permissions.get("pull_requests") == "write"
                 except GitHubAppTokenError:
                     writable = False
             if str(payload.get("full_name") or "").lower() == repo.lower() and branch:
@@ -11594,13 +11628,14 @@ def _verify_github_repository_access(context, config, *, force=False):
     except (http_client.RequestException, TypeError, ValueError):
         pass
     finally:
-        for probe in (locals().get("credential"), locals().get("write_credential")):
+        for probe in (locals().get("credential"),):
             if probe is not None:
                 try:
                     http_client.delete("https://api.github.com/installation/token", headers={"Authorization": f"Bearer {probe.token}"}, timeout=(3, 8))
                 except http_client.RequestException:
                     pass
     cache.set(key, result, 60 if result.get("verified") else 15)
+    request_cache[key] = {"result": dict(result), "fresh": True}
     return result
 
 
@@ -12552,7 +12587,8 @@ def _create_local_run_authorized(*, workflow, domain, github_repo="", actor_id="
             "status": _normalize_remote_run_status(remote_data.get("status")),
             "current_step": remote_data.get("current_step") or remote_data.get("step") or "queued",
             "run_request": payload or {},
-            "result": _run_result_from_remote(remote_data),
+            "result": _merge_django_owned_article_result({}, _run_result_from_remote(remote_data)) if (
+                workflow in ARTICLE_WORKFLOWS or workflow in {"article_system_setup", "publish_article", "article_publish"}) else _run_result_from_remote(remote_data),
             "error": str(remote_data.get("error") or ""),
         },
     )
@@ -12568,7 +12604,8 @@ def _create_local_run_authorized(*, workflow, domain, github_repo="", actor_id="
             run.current_step = remote_data.get("current_step") or remote_data.get("step") or run.current_step or "queued"
             remote_result = _run_result_from_remote(remote_data)
             if remote_result:
-                run.result = remote_result
+                run.result = _merge_django_owned_article_result(run.result, remote_result) if (
+                    run.workflow in ARTICLE_WORKFLOWS or run.workflow in {"article_system_setup", "publish_article", "article_publish"}) else remote_result
             run.error = str(remote_data.get("error") or "")
             update_fields.extend(["status", "current_step", "result", "error"])
         run.save(update_fields=list(dict.fromkeys(update_fields)))
@@ -12845,7 +12882,7 @@ def _sync_local_run_from_remote_locked(run, remote_data):
             run.result or {}, result,
             allow_retry=remote_current_retry_attempt or remote_active_retry_attempt,
         )
-        if run.workflow in ARTICLE_WORKFLOWS:
+        if run.workflow in ARTICLE_WORKFLOWS or run.workflow in {"article_system_setup", "publish_article", "article_publish"}:
             # Review lineage and publish/merge evidence are written locally,
             # so Content Factory status polling must not erase them.
             result = _merge_django_owned_article_result(run.result, result)
@@ -13536,6 +13573,10 @@ def _call_content_factory_run_action(
                 and not portable_run_control_allowed(scoped_run, action, payload)):
             try:
                 saved = scoped_run_contract(scoped_run)
+                if action == "resume":
+                    from .website_operations import advance_workflow_attempt
+                    payload.update(advance_workflow_attempt(scoped_run))
+                    saved = scoped_run_contract(scoped_run)
                 from .website_connections import run_action_authority
                 operation = run_action_authority(scoped_run, action)
                 with authority_guard(saved, action=operation):
@@ -15752,17 +15793,11 @@ class VibeMarketingArticleSetupAcceptView(APIView):
 
 
 class VibeMarketingArticleSetupDisconnectView(APIView):
-    """Lightweight UNLINK: drop the publish target so delivery falls back to content-only,
-    but KEEP the scaffold + scan so the user can re-link with one click (Accept).
-
-    Distinct from the full reset (which tears down scan/scaffold state). A
-    ``publish_disconnected_at`` watermark is set so a routine scan does not silently re-link;
-    accepting again clears it.
-    """
+    """Disconnect the current website, fence active work and revoke its authority."""
 
     def post(self, request):
         from .website_views import WebsiteConnectionActionView
-        return WebsiteConnectionActionView().post(request, "pause")
+        return WebsiteConnectionActionView().post(request, "disconnect")
 
 
 
@@ -17567,6 +17602,12 @@ class VibeMarketingRunControlView(APIView):
         )
         if auto_merge_requested:
             payload["auto_merge"] = True
+        if action in {"promote-bundle", "publish-pr", "approve", "merge-publish-pr"} and run.workflow in ARTICLE_WORKFLOWS:
+            from .incident_guards import publish_child_binding
+            try:
+                payload.update(publish_child_binding(_get_config(context.organization), run, payload, {}))
+            except WebsiteAuthorityError as exc:
+                return Response(exc.as_dict(), status=exc.status)
 
         if action == "cancel":
             if run.workflow in SCAN_WORKFLOWS:
@@ -17957,7 +17998,7 @@ class VibeMarketingRunControlView(APIView):
                     revised_run = _create_local_run(
                         workflow="article_generation",
                         domain=context.organization.domain,
-                        github_repo=config.github_repo or run.github_repo or "",
+                        github_repo="" if original_portable_run(run) else config.github_repo or run.github_repo or "",
                         actor_id=founder_actor_id_for_user(request.user),
                         payload=payload,
                         remote_data=remote_data,

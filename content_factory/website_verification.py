@@ -119,7 +119,8 @@ def record_ci_attestation(data, *, owner_review=False):
             website.configuration_version += 1
         website.verified_sha, website.last_verified_at = proof["source_sha"], timezone.now()
         website.blockers = [row for row in website.blockers if row.get("code") != "repository_source_changed"]
-        website.capabilities = {**website.capabilities, "publishingReady": website.state == "connected", "previewSupported": True}
+        website.capabilities = {**website.capabilities, "publishingReady": website.state == "connected" and not custom_verified,
+            "generationReady": website.state == "connected" and not custom_verified, "previewSupported": True}
         website.save(update_fields=["verified_sha", "last_verified_at", "configuration_version", "blockers", "capabilities", "updated_at"])
         op, _ = WebsiteConnectionOperation.objects.update_or_create(idempotency_key=f"{website.pk}:ci:{data['evidence_digest']}", defaults={
             "connection": website, "generation": website.generation, "action": "ci-verify", "state": "completed", "payload": dict(data), "receipt": receipt})
@@ -215,3 +216,43 @@ class WebsiteCiAttestationView(APIView):
             return Response(operation.receipt)
         except WebsiteAuthorityError as exc:
             return Response(exc.as_dict(), status=exc.status)
+
+
+def discover_source_attestation(website, target, source_sha):
+    """Read a sealed provider proof for an automatically observed source change."""
+    from integrations import http_client
+    from .website_tokens import mint_ci_evidence_token, read_ci_provider_checks
+    from .website_operations import deletion_epoch
+    require_unlocked_remote_call()
+    credential = mint_ci_evidence_token(installation_id=website.installation_id,
+        repository=website.github_repo, repository_id=website.repository_id)
+    headers = {"Authorization": f"Bearer {credential.token}", "Accept": "application/vnd.github+json"}
+    try:
+        payload = read_ci_provider_checks(f"https://api.github.com/repos/{website.github_repo}/commits/{quote(source_sha, safe='')}/check-runs?per_page=100", headers=headers)
+        for check in payload["check_runs"]:
+            if (check.get("name") != CHECK_NAME or check.get("head_sha") != source_sha
+                    or check.get("status") != "completed" or check.get("conclusion") != "success"
+                    or (check.get("app") or {}).get("slug") != "github-actions"):
+                continue
+            output = check.get("output") or {}
+            match = MARKER.search(str(output.get("summary") or "") + "\n" + str(output.get("text") or ""))
+            if not match:
+                continue
+            try:
+                provider = json.loads(base64.b64decode(match.group(1), validate=True))
+            except (ValueError, TypeError):
+                continue
+            expected = {**provider, **contract_for(website), "github_repo": website.github_repo,
+                "source_sha": source_sha, "target_id": target.target_key,
+                "contract_digest": target.contract.get("contract_digest"), "deletion_epoch": deletion_epoch(website)}
+            validated_ci_identity(expected, provider)
+            origin = website.operations.filter(pk=provider["operation_id"], generation=website.generation).first()
+            if origin is None or provider["operation_attempt"] != origin.payload.get("attempt", 1):
+                raise WebsiteAuthorityError("website_operation_changed", "The source proof belongs to an older attempt.")
+            return {**provider, "run_id": origin.payload.get("run_id") or ""}
+        raise WebsiteAuthorityError("ci_attestation_required", "Waiting for native CI proof at the observed source.", retryable=True)
+    finally:
+        try:
+            http_client.delete("https://api.github.com/installation/token", headers=headers, timeout=(3, 8))
+        except Exception:
+            pass

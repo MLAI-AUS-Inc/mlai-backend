@@ -69,6 +69,8 @@ class WebsiteJourneyContractTests(SimpleTestCase):
         self.assertFalse(build_proof_fresh(connection, target, {"repositorySourceSha": "b" * 40}, now=now))
         target.verified_at, target.updated_at = None, now
         target.contract = {"verification": {"status": "preview_verified"}}
+        self.assertFalse(build_proof_fresh(connection, target, {}, now=now))
+        target.contract["verification"]["checked_at"] = now.isoformat()
         self.assertTrue(build_proof_fresh(connection, target, {}, now=now))
 
     def test_observed_new_head_marks_inventory_stale_independently(self):

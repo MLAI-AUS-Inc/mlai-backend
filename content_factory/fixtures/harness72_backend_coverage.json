@@ -1,0 +1,511 @@
+{
+  "schema_version": 1,
+  "repository": "mlai-backend",
+  "checkout": "/Users/samdonegan/Documents/Code/mlai-backend-worktrees/harness-72-fixes",
+  "date": "2026-10-07",
+  "scope": "Backend contributions; cross-repository completion is combined by root.",
+  "migration": {
+    "creation_approved": true,
+    "applied": false,
+    "file": "content_factory/migrations/0044_website_target_generation_key.py",
+    "proposal": "docs/website-target-generation-migration-proposal-2026-10-07.md",
+    "dependency": [
+      "content_factory",
+      "0043_merge_credentials_website"
+    ]
+  },
+  "validation": {
+    "runner": "scripts/test_without_database.py",
+    "database_access": false,
+    "network_access": false,
+    "model_spend": false,
+    "model_consistency": "dummy-engine system check and makemigrations --check --dry-run pass",
+    "broad_regressions_passed": 317,
+    "final_billing_regression_tests_passed": 44,
+    "final_broad_recheck": "passed",
+    "diff_whitespace_check": "passed",
+    "python_compile_check": "passed",
+    "final_merge_race_replay_tests": 7
+  },
+  "incidents": [
+    {
+      "incident": 17,
+      "status": "implemented",
+      "changed_functions": [
+        "portable_drafts.original_portable_run",
+        "vibe_marketing_views.VibeMarketingRunControlView",
+        "integrations.services.article_generation.trigger_article_generation"
+      ],
+      "test_modules": [
+        "content_factory.tests_portable_run_controls_unit",
+        "content_factory.tests_portable_workflow_progress_unit"
+      ],
+      "implementation": "Portable revision children retain their saved content-only authority and omit repository dispatch context; worker lineage/prompt changes are covered in content-factory.",
+      "remaining": []
+    },
+    {
+      "incident": 18,
+      "status": "implemented",
+      "changed_functions": [
+        "reconciliation._adopt_remote_payload",
+        "article_preview_lease.ArticlePreviewLeaseView.post",
+        "article_preview_lease.ArticlePreviewLeaseProxyView._resolve_run",
+        "vibe_marketing_views.VibeMarketingRunControlView",
+        "service_views.ContentFactoryRunView"
+      ],
+      "test_modules": [
+        "content_factory.tests_incident_guards_unit",
+        "content_factory.tests_portable_run_controls_unit"
+      ],
+      "implementation": "Portable reconciliation and signed preview grants bypass repository authority only for the immutable original portable request, with intent and revision fences.",
+      "remaining": []
+    },
+    {
+      "incident": 19,
+      "status": "implemented",
+      "changed_functions": [
+        "vibe_marketing_views._workflow_progress"
+      ],
+      "test_modules": [
+        "content_factory.tests_portable_workflow_progress_unit"
+      ],
+      "implementation": "Failed portable runs retain saved-draft recovery and do not acquire website setup links.",
+      "remaining": []
+    },
+    {
+      "incident": 20,
+      "status": "implemented",
+      "changed_functions": [
+        "website_connections.run_action_authority",
+        "website_connections.dispatch_contract",
+        "integrations.services.article_generation.trigger_article_generation"
+      ],
+      "test_modules": [
+        "content_factory.tests_activation_unit",
+        "content_factory.tests_portable_run_controls_unit"
+      ],
+      "implementation": "Drafting read authority is separate from publishing authority; dispatch carries the current pinned verified source. Worker credential action selection is implemented in content-factory.",
+      "remaining": []
+    },
+    {
+      "incident": 21,
+      "status": "implemented",
+      "changed_functions": [
+        "vibe_marketing_views._verify_github_repository_access",
+        "integrations.services.github_app.require_installation_repository_permissions"
+      ],
+      "test_modules": [
+        "content_factory.tests_incident_guards_unit",
+        "content_factory.tests_activation_unit"
+      ],
+      "implementation": "Probe mints only a read token, reads installation grants, and reuses credential-free metadata within a request; broker code preservation is implemented in content-factory.",
+      "remaining": []
+    },
+    {
+      "incident": 24,
+      "status": "implemented",
+      "changed_functions": [
+        "incident_guards.target_update_allowed",
+        "website_connections.record_scan_evidence"
+      ],
+      "test_modules": [
+        "content_factory.tests_incident_guards_unit"
+      ],
+      "implementation": "Exact-generation/source certified targets survive missing or weaker inventory proof; changes require accepted equal/newer timestamped proof.",
+      "remaining": []
+    },
+    {
+      "incident": 25,
+      "status": "implemented",
+      "changed_functions": [
+        "incident_guards.protect_certified_config",
+        "service_views.ContentFactoryOrgConfigView"
+      ],
+      "test_modules": [
+        "content_factory.tests_incident_guards_unit"
+      ],
+      "implementation": "Config PUT cannot drop a certified target or displace the certified default with a generic contract absent newer accepted proof.",
+      "remaining": []
+    },
+    {
+      "incident": 26,
+      "status": "implemented",
+      "changed_functions": [
+        "website_connections.summary_for",
+        "website_connections.record_scan_evidence",
+        "website_journey.build_proof_fresh"
+      ],
+      "test_modules": [
+        "content_factory.tests_incident_guards_unit",
+        "content_factory.tests_website_connections.WebsiteContractTests"
+      ],
+      "implementation": "Observed, scanned and verified SHAs stay distinct; verification freshness uses explicit accepted proof time, preserved on repeated inventory writes.",
+      "remaining": []
+    },
+    {
+      "incident": 27,
+      "status": "implemented",
+      "changed_functions": [
+        "website_reconciliation.handle_website_github_event",
+        "website_reconciliation._process_source_reverification",
+        "website_verification.discover_source_attestation",
+        "website_verification.record_ci_attestation",
+        "vibe_marketing_views._check_and_merge_publish_pr",
+        "website_connections.record_publish_merge_intent",
+        "website_reconciliation._find_owned_merge",
+        "website_reconciliation._merge_intent_matches",
+        "vibe_marketing_views._attempt_setup_publish_merge_authorized",
+        "service_views._merge_django_owned_run_result",
+        "vibe_marketing_views._merge_django_owned_article_result"
+      ],
+      "test_modules": [
+        "content_factory.tests_incident_guards_unit",
+        "integrations.tests_github_ci_evidence.CIEvidenceIssuerTests"
+      ],
+      "implementation": "Article/setup merges save backend-only intent before GitHub PUT. Exact current connection/generation and authenticated merged PR identity recognize pushes before the response receipt is saved; late receipts are rechecked before scan dispatch. Owned merges retain capabilities pending sealed CI/live verification, and unrelated pushes revoke publishing and require a fresh scan. All callback/status/dispatch projections protect merge intent and receipts from worker introduction or replacement.",
+      "remaining": [
+        "Native live lifecycle still awaits rollout and a production replay."
+      ]
+    },
+    {
+      "incident": 28,
+      "status": "pending_external_validation",
+      "changed_functions": [
+        "website_models.WebsiteConnectionTarget.Meta",
+        "migrations.0044_website_target_generation_key",
+        "website_connections.record_scan_evidence",
+        "website_support.promote_custom_target"
+      ],
+      "test_modules": [
+        "content_factory.tests_incident_guards_unit",
+        "scripts/test_without_database.py --check-models"
+      ],
+      "implementation": "User specifically approved creation only. Constraint now includes generation, upsert lookup does too, and migration depends on0043 with no data rewrite.",
+      "remaining": [
+        "Migration has not been applied. DB-backed forward/reverse and concurrent generation tests require separately approved disposable migration execution.",
+        "Production migration/deployment is not authorized."
+      ]
+    },
+    {
+      "incident": 29,
+      "status": "implemented",
+      "changed_functions": [
+        "service_views._merge_django_owned_run_result",
+        "service_views._merge_django_owned_run_request"
+      ],
+      "test_modules": [
+        "content_factory.tests_incident_guards_unit",
+        "content_factory.tests_editorial_snapshot_unit"
+      ],
+      "implementation": "Workers cannot alter/drop backend approval, revocation, billing authorization or image ledger receipts; backend merge intent/response/status/time cannot be introduced or replaced by callbacks, status polls or dispatch projections.",
+      "remaining": []
+    },
+    {
+      "incident": 30,
+      "status": "implemented",
+      "changed_functions": [
+        "website_connections.transition_connection",
+        "website_operations.validate_operation",
+        "website_operations.advance_workflow_attempt",
+        "website_operations.observe_workflow_status",
+        "run_state.stale_execution_event"
+      ],
+      "test_modules": [
+        "content_factory.tests_incident_guards_unit",
+        "content_factory.tests_website_articles_reliability_unit"
+      ],
+      "implementation": "Every nonterminal old generation operation is cancelled; terminal callbacks are allowlisted; resume advances attempt once; completed/unversioned run state is fenced.",
+      "remaining": []
+    },
+    {
+      "incident": 31,
+      "status": "implemented",
+      "changed_functions": [
+        "website_reconciliation.process_website_connection_operations",
+        "vibe_marketing_views.VibeMarketingArticleSetupDisconnectView"
+      ],
+      "test_modules": [
+        "content_factory.tests_website_articles_reliability_unit"
+      ],
+      "implementation": "Preview-stop404 produces a confirmed absence receipt; legacy disconnect invokes a real disconnect.",
+      "remaining": []
+    },
+    {
+      "incident": 32,
+      "status": "implemented",
+      "changed_functions": [
+        "vibe_marketing_views._latest_runs_for_org",
+        "vibe_marketing_views._has_completed_article_flow",
+        "vibe_marketing_views._article_system_setup_gate"
+      ],
+      "test_modules": [
+        "content_factory.tests_incident_guards_unit",
+        "content_factory.tests_website_articles_reliability_unit"
+      ],
+      "implementation": "History is scoped to current generation/reset authority before windowing, with current scan/setup retained through busy article history.",
+      "remaining": []
+    },
+    {
+      "incident": 33,
+      "status": "implemented",
+      "test_modules": [
+        "content_factory.tests_incident_guards_unit"
+      ],
+      "implementation": "Backend ownership/receipt audit replay proves original files and later customer edits are preserved. Worker restoration replay belongs to content-factory.",
+      "remaining": [],
+      "audited_functions": [
+        "website_contract.cleanup_plan",
+        "website_reconciliation._cleanup_proposal",
+        "website_reconciliation.approve_cleanup_proposal"
+      ],
+      "changed_functions": [
+        "tests_incident_guards_unit.IncidentAuthorityReplays.test_cleanup_never_deletes_original_file_or_later_customer_edits"
+      ]
+    },
+    {
+      "incident": 35,
+      "status": "implemented",
+      "changed_functions": [
+        "service_views._sync_generation_callback_to_run",
+        "service_views.ContentFactoryCallbackView",
+        "website_connections.record_denied_terminal_callback",
+        "integrations.services.article_generation._handle_status_failure"
+      ],
+      "test_modules": [
+        "content_factory.tests_incident_guards_unit",
+        "content_factory.tests_website_articles_reliability_unit"
+      ],
+      "implementation": "Coded failures persist as result.failure/error_code with UNCLASSIFIED fallback; denied current-attempt terminal/completion callbacks stamp safe terminal state while obsolete/completed runs remain fenced.",
+      "remaining": []
+    },
+    {
+      "incident": 37,
+      "status": "implemented",
+      "changed_functions": [
+        "service_views._sync_article_system_setup_callback_to_run"
+      ],
+      "test_modules": [
+        "content_factory.tests_website_articles_reliability_unit"
+      ],
+      "implementation": "New attempt clears stale browser repair diagnostics; a newer typed failure replaces the old cause.",
+      "remaining": []
+    },
+    {
+      "incident": 38,
+      "status": "implemented",
+      "changed_functions": [
+        "article_review_views.remote_review"
+      ],
+      "test_modules": [
+        "content_factory.tests_incident_guards_unit",
+        "content_factory.tests_article_review_unit"
+      ],
+      "implementation": "Facade retains typed code/failure/action/revision/error details. Typed export rejection implementation belongs to content-factory.",
+      "remaining": []
+    },
+    {
+      "incident": 39,
+      "status": "implemented",
+      "changed_functions": [
+        "website_contract.template_validation",
+        "incident_guards.safe_template_seed",
+        "service_views.ContentFactoryOrgConfigView"
+      ],
+      "test_modules": [
+        "content_factory.tests_incident_guards_unit",
+        "content_factory.tests_website_connections.WebsiteContractTests"
+      ],
+      "implementation": "Canonical envelope regex covers union of backend/worker labels at heading levels1\u20136; rejected seed bodies are withheld with validation status.",
+      "remaining": []
+    },
+    {
+      "incident": 45,
+      "status": "implemented",
+      "changed_functions": [
+        "vibe_marketing_views._overlay_live_bootstrap_fields",
+        "vibe_marketing_views._article_system_setup_gate"
+      ],
+      "test_modules": [
+        "content_factory.tests_website_articles_reliability_unit",
+        "content_factory.tests_activation_unit"
+      ],
+      "implementation": "Guided steps, next action, setup published state and workflow progress are recomputed after live capabilities overlay.",
+      "remaining": []
+    },
+    {
+      "incident": 46,
+      "status": "implemented",
+      "changed_functions": [
+        "vibe_marketing_views._mark_pending_article_system_setup_merged",
+        "vibe_marketing_views._article_generation_ready_for_config",
+        "vibe_marketing_views._article_system_is_published",
+        "service_views.ContentFactoryCallbackView",
+        "integrations.api_views"
+      ],
+      "test_modules": [
+        "content_factory.tests_incident_guards_unit",
+        "content_factory.tests_activation_unit"
+      ],
+      "implementation": "Removed legacy articles_scaffolded=True writers and replaced readiness/Slack gating with current accepted integration and live-deployment proof.",
+      "remaining": []
+    },
+    {
+      "incident": 47,
+      "status": "implemented",
+      "changed_functions": [
+        "service_views._mark_article_system_setup_generation_ready_for_domain",
+        "service_views.ContentFactoryCallbackView"
+      ],
+      "test_modules": [
+        "content_factory.tests_activation_unit",
+        "content_factory.tests_website_articles_reliability_unit"
+      ],
+      "implementation": "Backend cannot turn scan-derived setup completion into legacy native readiness. Worker shortcut proof gate belongs to content-factory.",
+      "remaining": []
+    },
+    {
+      "incident": 48,
+      "status": "implemented",
+      "changed_functions": [
+        "activation.article_capabilities",
+        "website_connections.record_scan_evidence",
+        "website_contract.CAPABILITY_KEYS",
+        "website_support.configure_custom_generation",
+        "website_verification.record_ci_attestation"
+      ],
+      "test_modules": [
+        "content_factory.tests_activation_unit",
+        "content_factory.tests_website_connections.WebsiteContractTests"
+      ],
+      "implementation": "templatesValid is independent; native generation uses current verified target evidence, publishing additionally needs current live receipt.",
+      "remaining": []
+    },
+    {
+      "incident": 49,
+      "status": "implemented",
+      "changed_functions": [
+        "service_views.ContentFactoryCallbackView",
+        "integrations.services.article_generation.require_article_activation"
+      ],
+      "test_modules": [
+        "content_factory.tests_activation_unit",
+        "content_factory.tests_incident_guards_unit"
+      ],
+      "implementation": "Slack completion copy and queued article dispatch depend on accepted native capabilities; inventory-only scans offer portable recovery.",
+      "remaining": []
+    },
+    {
+      "incident": 50,
+      "status": "implemented",
+      "changed_functions": [
+        "website_journey.project_journey",
+        "website_journey.journey_for_context",
+        "website_discovery.discovery_snapshot"
+      ],
+      "test_modules": [
+        "content_factory.tests_website_connections.WebsiteSetupProjectionTests"
+      ],
+      "implementation": "Journey exposes current-source repository.framework and proofContract requirements for Chat handoff text.",
+      "remaining": []
+    },
+    {
+      "incident": 54,
+      "status": "implemented",
+      "changed_functions": [
+        "website_support.promote_custom_target",
+        "website_support.configure_custom_generation",
+        "website_journey.project_journey",
+        "website_verification.record_ci_attestation"
+      ],
+      "test_modules": [
+        "content_factory.tests_website_connections.WebsiteSetupProjectionTests",
+        "content_factory.tests_activation_unit"
+      ],
+      "implementation": "Custom target is labelled build-proof-only and cannot grant native generation/publishing without an article delivery adapter.",
+      "remaining": []
+    },
+    {
+      "incident": 62,
+      "status": "implemented",
+      "changed_functions": [
+        "article_review_views.VibeMarketingArticleReviewView.post"
+      ],
+      "test_modules": [
+        "content_factory.tests_incident_guards_unit",
+        "content_factory.tests_article_review_unit"
+      ],
+      "implementation": "editTextBatch forwards the exact expectedRevision, operationId and edits[{fieldId,value}] protocol.",
+      "remaining": []
+    },
+    {
+      "incident": 68,
+      "status": "implemented",
+      "changed_functions": [
+        "integrations.services.article_generation._refund_content_factory_request",
+        "vibe_marketing_views._reusable_content_factory_charge_for_run",
+        "vibe_marketing_views._reuse_roo_points_authorization_for_article_job"
+      ],
+      "test_modules": [
+        "content_factory.tests_incident_guards_unit",
+        "content_factory.tests_research_automation_billing_unit"
+      ],
+      "implementation": "Refund marks job and durable run unauthorized/refunded; original spend/refund ledger rows are checked before reuse.",
+      "remaining": []
+    },
+    {
+      "incident": 69,
+      "status": "implemented",
+      "changed_functions": [
+        "incident_guards.delivered_content",
+        "service_views.ContentFactoryCallbackView",
+        "article_review_billing.image_regeneration_cost",
+        "article_review_billing.reserve_image_charge",
+        "article_review_billing.settle_image_charge",
+        "article_review_billing.reconcile_image_charges",
+        "article_review_views.VibeMarketingArticleReviewView"
+      ],
+      "test_modules": [
+        "content_factory.tests_incident_guards_unit",
+        "content_factory.tests_article_review_unit"
+      ],
+      "implementation": "Conservative no-delivery refund policy covers internal/budget/editorial/provider/drift failures. Image regeneration uses explicit configured quote, exact company/run/operation ownership and existing Roo ledger, with definite async failure refund to original payer exactly once.",
+      "remaining": [
+        "Paid image pricing must be explicitly configured; absent price fails closed. MLAI existing free-domain quote is0."
+      ]
+    },
+    {
+      "incident": 70,
+      "status": "pending_external_validation",
+      "changed_functions": [
+        "website_reconciliation._process_source_reverification",
+        "website_verification.record_ci_attestation",
+        "website_verification.verify_live_deployment",
+        "integrations.services.article_generation.require_article_activation"
+      ],
+      "test_modules": [
+        "content_factory.tests_incident_guards_unit.IncidentIntegratedReplays.test_owned_merge_live_receipt_allows_second_article_admission_without_rescan"
+      ],
+      "implementation": "Model-free lifecycle replay executes owned merge \u2192 authenticated CI attestation \u2192 live receipt \u2192 second article admission without a rescan.",
+      "remaining": [
+        "No production publish/merge/customer deployment or second production article has been executed by this backend agent.",
+        "Root selected MLAI run78adafe1-092a-4d0f-8112-5841c44dd57a; its hosted preview is currently blocked."
+      ]
+    },
+    {
+      "incident": 72,
+      "status": "implemented",
+      "changed_functions": [
+        "incident_guards.publish_child_binding",
+        "vibe_marketing_views._ensure_local_publish_child_from_known_id",
+        "vibe_marketing_views._recover_publish_child_for_run",
+        "vibe_marketing_views.VibeMarketingRunControlView"
+      ],
+      "test_modules": [
+        "content_factory.tests_incident_guards_unit",
+        "content_factory.tests_article_publish_approval_unit"
+      ],
+      "implementation": "Before dispatch/adoption/recovery, publishing child must match original current connection/generation/repository, verified source SHA, verified target contract, saved slug and route. Wrong-repository old draft remains blocked.",
+      "remaining": []
+    }
+  ]
+}

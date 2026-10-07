@@ -955,6 +955,14 @@ def _refund_content_factory_request(
         billing_amount=cost_points,
         billing_ledger_id=ledger.id,
     )
+    from django.db.models import Q
+    from workflow_runs.models import ContentFactoryRun
+    runs = ContentFactoryRun.objects.filter(domain=resolved_domain).filter(
+        Q(run_request__client_request_id=client_request_id) | Q(run_request__roo_points_ledger_id=str(original.id)))
+    for run in runs:
+        run.run_request = {**(run.run_request or {}), "roo_points_billing_status": "refunded",
+            "roo_points_authorized": False, "roo_points_refund_ledger_id": str(ledger.id)}
+        run.save(update_fields=["run_request", "updated_at"])
     return ledger
 
 
@@ -1252,7 +1260,11 @@ def maybe_auto_refund_terminal_failure(
     # fallback for that signal. Either path requires an actually-charged job below.
     resolved_error_code = str(error_code or "").strip().upper()
     research_paid = (getattr(job, "request_meta", {}) or {}).get("roo_points_action") == CONTENT_FACTORY_ACTION_CONTENT_ISLAND_TOPIC_GENERATION
-    if not research_paid and not bool(refundable) and resolved_error_code not in AUTO_REFUND_ERROR_CODES:
+    from content_factory.incident_guards import NO_DELIVERY_REFUND_CODES, delivered_content
+    from workflow_runs.models import ContentFactoryRun
+    run = ContentFactoryRun.objects.filter(run_id=job.job_id).first() if resolved_error_code in NO_DELIVERY_REFUND_CODES and getattr(job, "job_id", None) else None
+    no_value_failure = resolved_error_code in NO_DELIVERY_REFUND_CODES and run is not None and not delivered_content(run)
+    if not research_paid and not bool(refundable) and not no_value_failure and resolved_error_code not in AUTO_REFUND_ERROR_CODES:
         return False, 0
 
     client_request_id = str(getattr(job, "client_request_id", "") or "").strip()
@@ -2135,8 +2147,10 @@ def trigger_article_generation(
     selected_delivery_mode, _ = resolve_article_delivery_mode(article_request=article_request, config=config)
     if topic and selected_delivery_mode != "content_only":
         article_request.update(dispatch_contract(resolved_domain, article_request, action="read"))
-    elif config and config.website_connection_id and config.website_connection.state in {"connected", "paused"}:
+    elif not topic and config and config.website_connection_id and config.website_connection.state in {"connected", "paused"}:
         article_request.update(contract_for(config.website_connection))
+    if topic and selected_delivery_mode == "content_only":
+        existing_artifacts = {key: value for key, value in existing_artifacts.items() if key in {"brand_name", "company_context"}}
 
     # Retrieve competitors and seed_keywords early for Auto-Write or Payload
     competitors = []
@@ -2295,6 +2309,8 @@ def trigger_article_generation(
         payload["requested_by_slack_user_id"] = requested_by_slack_user_id
     if github_repo:
         payload["github_repo"] = github_repo
+    if delivery_mode == "content_only":
+        payload.pop("github_repo", None)
     if delivery_mode is not None:
         payload["delivery_mode"] = delivery_mode
         payload["delivery_mode_confirmed"] = delivery_mode_confirmed
@@ -2345,6 +2361,8 @@ def trigger_article_generation(
 
     from content_factory.website_contract import connection_contract
     payload.update(connection_contract(article_request))
+    if article_request.get("expected_source_sha") and delivery_mode != "content_only":
+        payload["expected_source_sha"] = article_request["expected_source_sha"]
     try:
         response = _post_content_factory_queue_request(
             generate_endpoint,
@@ -2456,7 +2474,7 @@ def _handle_status_failure(job_id: str, result: dict):
         return
 
     error_message = result.get('error') or result.get('error_message') or 'Unknown error'
-    error_code = str(result.get("error_code") or "INTERNAL_ERROR")
+    error_code = str(result.get("error_code") or (result.get("failure") or {}).get("code") or "UNCLASSIFIED")
     job.status = 'error'
     job.error_message = f"[{error_code}] {error_message}"
     job.save(update_fields=['status', 'error_message', 'updated_at'])

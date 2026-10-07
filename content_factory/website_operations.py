@@ -55,6 +55,16 @@ def validate_operation(connection, payload, *, worker_cleanup=False, restoration
         raise WebsiteAuthorityError("website_operation_changed", "The operation attempt or deletion watermark changed.")
     if op.state in {"cancelled", "deleted", "denied"} and not cancellation:
         raise WebsiteAuthorityError("website_operation_cancelled", "This operation was cancelled.")
+    if op.state in {"completed", "failed", "blocked"} and not (worker_cleanup or restoration or cancellation):
+        incoming_status = payload.get("status")
+        event = payload.get("event_type") or payload.get("event")
+        terminal_events = {
+            "completed": {"article_complete", "generation_pr_opened", "publish_bundle_ready", "scan_complete", "article_system_setup_complete", "article_system_setup_completed", "scaffold_complete", "article_review_ready", "content_ready"},
+            "failed": {"generation_failed", "error", "article_system_setup_failed"},
+            "blocked": {"generation_blocked"},
+        }
+        if (incoming_status and incoming_status != op.state) or (event and event not in terminal_events[op.state]):
+            raise WebsiteAuthorityError("website_operation_terminal", "This operation is terminal. Start a new reviewed attempt.")
     if cancellation:
         if (op.action != "workflow" or op.state != "cancelled" or op.generation != connection.generation
                 or str(payload.get("connection_generation")) != str(connection.generation) or not run_id or run_id != op.payload.get("run_id")):
@@ -190,3 +200,65 @@ def cancel_operation(config, *, data, idempotency_key):
                 "stop_preview_run_ids": run_ids, "cancelled_operation_id": str(op.pk), "previous_generation": connection.generation},
             "receipt": dict(op.receipt)})
         return followup
+
+
+def observe_workflow_status(run, payload=None):
+    """Acknowledge an accepted worker observation for the current attempt only."""
+    request = run.run_request or {}
+    identifier = request.get("operation_id")
+    if not identifier:
+        return
+    op = WebsiteConnectionOperation.objects.select_for_update().filter(pk=identifier, action="workflow").first()
+    if (op is None or op.generation != request.get("connection_generation")
+            or str(op.connection_id) != request.get("website_connection_id")
+            or op.payload.get("run_id") != run.run_id
+            or op.payload.get("attempt", 1) != request.get("operation_attempt", 1)
+            or op.state in {"cancelled", "deleted", "denied"}):
+        return
+    state = str(run.status)
+    if op.payload.get("resume_pending") and state in {"failed", "blocked"}:
+        from .run_state import execution_version
+        incoming = payload if isinstance(payload, dict) else {}
+        incoming_request = incoming.get("run_request") if isinstance(incoming.get("run_request"), dict) else {}
+        attempt = incoming.get("operation_attempt", incoming_request.get("operation_attempt"))
+        version = execution_version(run.result or {})
+        baseline = op.payload.get("resume_execution_version")
+        if attempt != op.payload.get("attempt") and (not version or not baseline or tuple(version) <= tuple(baseline)):
+            return
+    if state not in {"completed", "failed", "blocked"}:
+        state = "running"
+    if op.state in {"completed", "failed", "blocked"} and state != op.state:
+        return
+    op.state = state
+    op.payload = {**op.payload, "resume_pending": False}
+    op.receipt = {**(op.receipt or {}), "status": state, "run_id": run.run_id, "remote_outcome_unknown": False}
+    op.save(update_fields=["state", "payload", "receipt", "updated_at"])
+
+
+def advance_workflow_attempt(run):
+    """Fence a resumed worker attempt before dispatch, retaining charge identity."""
+    from .website_connections import authority_guard, scoped_run_contract, contract_for, extend_owner_operation_contract
+    binding = scoped_run_contract(run)
+    with authority_guard(binding, action="read") as website:
+        identifier = binding.get("operation_id")
+        if not identifier:
+            raise WebsiteAuthorityError("website_operation_required", "Reload this run before resuming it.")
+        op = WebsiteConnectionOperation.objects.select_for_update().get(pk=identifier, connection=website)
+        if op.state == "completed":
+            raise WebsiteAuthorityError("website_operation_terminal", "Completed website work cannot be resumed.")
+        if op.state not in {"failed", "blocked", "running", "pending"}:
+            raise WebsiteAuthorityError("website_operation_cancelled", "This operation cannot be resumed.")
+        previous_attempt = int(op.payload.get("attempt", 1))
+        # Retransmission of an ambiguous resume uses the same reserved attempt.
+        request_attempt = int((run.run_request or {}).get("operation_attempt", 1))
+        if not (op.payload.get("resume_pending") and op.state in {"pending", "running"} and request_attempt == previous_attempt):
+            from .run_state import execution_version
+            op.payload = {**op.payload, "attempt": previous_attempt + 1, "resume_pending": True,
+                "resume_execution_version": execution_version(run.result or {})}
+        op.state = "running"
+        op.save(update_fields=["payload", "state", "updated_at"])
+        fields = {"operation_id": str(op.pk), "operation_attempt": op.payload["attempt"], "deletion_epoch": deletion_epoch(website)}
+        run.run_request = {**(run.run_request or {}), **contract_for(website), **fields}
+        run.save(update_fields=["run_request", "updated_at"])
+        extend_owner_operation_contract(fields)
+        return fields

@@ -16,7 +16,8 @@
     "targetId": null,
     "observedSourceSha": null,
     "publicRoute": null,
-    "contentPath": null
+    "contentPath": null,
+    "framework": null
   },
   "policy": {
     "allowed": false,
@@ -312,5 +313,17 @@
       "available": false,
       "reasonCode": "adapter_required"
     }
+  },
+  "proofContract": {
+    "version": 1,
+    "requirements": [
+      "pinned_source_sha",
+      "safe_publish_target",
+      "build_proof",
+      "browser_proof",
+      "workflows_permission",
+      "ci_artifact_digest",
+      "live_verification"
+    ]
   }
 }

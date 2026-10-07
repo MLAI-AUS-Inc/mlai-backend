@@ -28,11 +28,13 @@ def execution_version(payload):
 def stale_execution_event(saved, incoming, *, saved_status=""):
     current, received = execution_version(saved), execution_version(incoming)
     if current is None:
-        return False
+        return saved_status in {"completed", "cancelled", "denied"} and incoming.get("status") not in (None, "", saved_status)
     if received is None or received < current:
         return True
+    if saved_status == "completed" and incoming.get("status") not in (None, "", "completed"):
+        return True
     # Cancellation/denial is authoritative within an execution generation.
-    if saved_status in {"cancelled", "denied"} and received[0] <= current[0]:
+    if saved_status in {"completed", "cancelled", "denied"} and received[0] <= current[0]:
         return incoming.get("status") != saved_status
     return False
 

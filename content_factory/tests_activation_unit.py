@@ -218,6 +218,8 @@ class ActivationScopeAndProbeTests(SimpleTestCase):
             "published": True, "mergedAt": merged})["verified"])
 
     def probe(self, responses, *, source="github_oauth_user_token"):
+        # Each helper call models a separate authenticated HTTP request.
+        self.context.__dict__.pop("_website_repository_probes", None)
         store = Mock()
         store.get.return_value = None
         with patch.object(views, "cache", store), \

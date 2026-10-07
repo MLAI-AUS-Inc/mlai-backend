@@ -487,6 +487,7 @@ class ContentFactoryOrgConfigView(APIView):
                 })
                 article_component_library.append(_entry)
 
+        from .incident_guards import safe_template_seed
         response_data = {
             'org_id': org.id,
             'org_name': org.name,
@@ -497,9 +498,11 @@ class ContentFactoryOrgConfigView(APIView):
             'default_timezone': config.default_timezone if config else "",
             'daily_discovery_enabled': config.daily_discovery_enabled if config else False,
             'daily_discovery_priority': config.daily_discovery_priority if config else 0,
-            'article_template': config.article_template if config else None,
-            'design_guide': config.design_guide if config else None,
-            'resource_prompt': config.resource_prompt if config else None,
+            'article_template': safe_template_seed(config.article_template)[0] if config else None,
+            'design_guide': safe_template_seed(config.design_guide)[0] if config else None,
+            'resource_prompt': safe_template_seed(config.resource_prompt)[0] if config else None,
+            'template_status': {field: safe_template_seed(getattr(config, field))[1]
+                for field in ('article_template', 'design_guide', 'resource_prompt')} if config else {},
             'company_context': config.company_context if config else None,
             'github_repo': config.github_repo if config else None,
             'article_delivery_mode': config.article_delivery_mode if config else None,
@@ -845,6 +848,8 @@ class ContentFactoryOrgConfigView(APIView):
             current_strategy = current_config.pillar_strategy if current_config else {}
             if 'pillar_strategy' in defaults:
                 defaults['pillar_strategy'] = merge_strategy(current_strategy, defaults['pillar_strategy'])
+            from .incident_guards import protect_certified_config
+            defaults = protect_certified_config(current_config, defaults, sha=scan_head_sha)
             config, config_created = OrganizationContentConfig.objects.update_or_create(
                 organization=org, defaults=defaults,
             )
@@ -2291,7 +2296,8 @@ def _sync_generation_callback_to_run(*, data: dict, run_status: str, step_status
     ).strip()
     workflow = str(data.get("workflow") or "direct_generate").strip() or "direct_generate"
     error_message = str(data.get("error") or data.get("error_message") or "").strip()
-    error_code = str(data.get("error_code") or "").strip()
+    failure = data.get("failure") if isinstance(data.get("failure"), dict) else {}
+    error_code = str(data.get("error_code") or failure.get("code") or ("UNCLASSIFIED" if run_status in {"failed", "blocked"} else "")).strip()
     existing_run = ContentFactoryRun.objects.filter(run_id=run_id).first()
     emitted_at = _callback_event_emitted_at(data)
     if not data.get("_execution_version_validated") and _callback_event_is_stale(existing_run=existing_run, emitted_at=emitted_at):
@@ -2308,6 +2314,10 @@ def _sync_generation_callback_to_run(*, data: dict, run_status: str, step_status
     # only when the field is absent (older content-factory that predates this signal).
     remote_resume_available = data.get("resume_available")
     resume_available = True if remote_resume_available is None else bool(remote_resume_available)
+    if error_code.upper() in {"RUN_BUDGET_EXHAUSTED", "ONBOARDING_MODEL_BUDGET_EXHAUSTED", "SETUP_ATTEMPT_CAP_REACHED"}:
+        resume_available = False
+        failure = {**failure, "code": error_code, "retryable": False,
+            "next_action": "inspect_usage_and_explicitly_raise_limit" if "BUDGET" in error_code.upper() else "write_portable_draft"}
     result = dict((existing_run.result if existing_run else None) or {})
     result.update(
         {
@@ -2325,6 +2335,8 @@ def _sync_generation_callback_to_run(*, data: dict, run_status: str, step_status
             "rerunnable_step": data.get("rerunnable_step"),
         }
     )
+    if failure:
+        result["failure"] = failure
     diagnostics = data.get("diagnostics")
     if isinstance(diagnostics, dict):
         result["diagnostics"] = diagnostics
@@ -2681,9 +2693,6 @@ def _mark_article_system_setup_generation_ready_for_domain(domain: str, *, pr_ur
         clear_article_setup_reset_markers(article_system)
         update_fields = ["article_system"]
         config.article_system = sanitize_json_for_postgres(article_system)
-        if not config.articles_scaffolded:
-            config.articles_scaffolded = True
-            update_fields.append("articles_scaffolded")
         if pr_url and config.articles_scaffold_pr_url != pr_url:
             config.articles_scaffold_pr_url = pr_url
             update_fields.append("articles_scaffold_pr_url")
@@ -2852,6 +2861,15 @@ def _sync_article_system_setup_callback_to_run(*, data: dict, event_type: str) -
         or result.get("directory_quality_gates")
         or result.get("directoryQualityGates")
     )
+    new_attempt = int(data.get("resume_generation") or data.get("generation") or 0) > int(result.get("resume_generation") or result.get("generation") or 0)
+    if new_attempt:
+        for source in (setup_payload, result):
+            source.pop("directory_browser_repair", None)
+            source.pop("directoryBrowserRepair", None)
+    latest_failure = data.get("failure") if isinstance(data.get("failure"), dict) else {}
+    if latest_failure.get("code") and not (data.get("directory_browser_repair") or data.get("directoryBrowserRepair")):
+        data = {**data, "directory_browser_repair": {"status": "rejected", "code": latest_failure["code"],
+            "message": latest_failure.get("message") or data.get("error") or "", "source": "current_failure"}}
     directory_browser_repair = (
         data.get("directory_browser_repair")
         or data.get("directoryBrowserRepair")
@@ -5686,9 +5704,6 @@ class ContentFactoryCallbackView(APIView):
                 if pending_setup:
                     if verification_published:
                         merged_article_system.pop('pending_article_system_setup', None)
-                        if not config.articles_scaffolded:
-                            config.articles_scaffolded = True
-                            update_fields.append('articles_scaffolded')
                         if pending_setup.get('prUrl') or pending_setup.get('pr_url'):
                             config.articles_scaffold_pr_url = pending_setup.get('prUrl') or pending_setup.get('pr_url')
                             update_fields.append('articles_scaffold_pr_url')
@@ -5719,6 +5734,9 @@ class ContentFactoryCallbackView(APIView):
                     existing_default_id=config.default_publish_target_id,
                     article_system=merged_article_system,
                 )
+                from .incident_guards import protect_certified_config
+                protected = protect_certified_config(config, {"publish_targets": persist_targets, "default_publish_target_id": persist_default_id})
+                persist_targets, persist_default_id = protected["publish_targets"], protected.get("default_publish_target_id", persist_default_id)
                 if persist_targets != (config.publish_targets or []):
                     config.publish_targets = persist_targets
                     update_fields.append('publish_targets')
@@ -5741,9 +5759,6 @@ class ContentFactoryCallbackView(APIView):
                 next_article_system = dict(config.article_system or {})
                 if pending_setup and is_setup_verification_scan and publish_targets:
                     next_article_system.pop('pending_article_system_setup', None)
-                    if not config.articles_scaffolded:
-                        config.articles_scaffolded = True
-                        update_fields.append('articles_scaffolded')
                 if scan_state:
                     next_article_system['scan'] = {
                         **dict(next_article_system.get('scan') or {}),
@@ -5761,6 +5776,9 @@ class ContentFactoryCallbackView(APIView):
                     existing_default_id=config.default_publish_target_id,
                     article_system=next_article_system,
                 )
+                from .incident_guards import protect_certified_config
+                protected = protect_certified_config(config, {"publish_targets": persist_targets, "default_publish_target_id": persist_default_id})
+                persist_targets, persist_default_id = protected["publish_targets"], protected.get("default_publish_target_id", persist_default_id)
                 if persist_targets != (config.publish_targets or []):
                     config.publish_targets = persist_targets
                     update_fields.append('publish_targets')
@@ -5783,7 +5801,9 @@ class ContentFactoryCallbackView(APIView):
             pass
 
         article_system_state = article_system.get('state', 'missing')
-        destination_summary = _scan_destination_summary(article_system, publish_targets)
+        from .activation import integration_evidence
+        scan_can_generate = bool(locals().get('config') and integration_evidence(config).get('verified'))
+        destination_summary = _scan_destination_summary(article_system, publish_targets) if scan_can_generate else None
         blocks = None
 
         if not slack_user_id:
@@ -5995,10 +6015,8 @@ class ContentFactoryCallbackView(APIView):
                 else:
                     fallback_text = (
                         f"✅ *Scan complete for {domain}!*\n\n"
-                        f"I've analysed your codebase and I'm ready to help. "
-                        f"You can now ask me to create blog pages or other content.\n\n"
-                        f"To get started, say:\n"
-                        f"  `@Roo write me an article about [topic]`"
+                        f"Repository inventory is saved. Verify the article integration before native website generation. "
+                        f"You can research topics or write a portable draft now."
                     )
                     blocks = None
 
@@ -6037,7 +6055,7 @@ class ContentFactoryCallbackView(APIView):
         run_id = data.get('run_id') or job_id
         workflow = data.get('workflow') or 'unknown'
         error_message = data.get('error', data.get('error_message', 'Unknown error'))
-        error_code = data.get('error_code', 'INTERNAL_ERROR')
+        error_code = data.get('error_code') or (data.get('failure') or {}).get('code') or 'UNCLASSIFIED'
         domain = data.get('domain', '')
         slack_user_id = data.get('slack_user_id', '')
         diagnostics = _normalize_discovery_diagnostics(data.get('diagnostics'))
@@ -6485,7 +6503,6 @@ class ContentFactoryCallbackView(APIView):
                 )
                 next_article_system.pop('pending_article_system_setup', None)
                 config.article_system = next_article_system
-                config.articles_scaffolded = True
             else:
                 pending = dict(article_system_payload.get('pending_article_system_setup') or {})
                 pending.update(
@@ -8635,11 +8652,15 @@ _DJANGO_OWNED_RUN_RESULT_KEYS = frozenset(
         "refunded_points",
         "article_admission_notice",
         "article_system_review_comments",
+        "article_image_billing",
+        "article_review_approval",
+        "approval_blocker",
         "daily_automation_channel_warning",
         "latest_article_system_revision_response",
         "merge_blocked_reason",
         "merge_response",
         "merge_status",
+        "publish_merge_intent",
         "merged_at",
         "pr_number",
         "pr_url",
@@ -8660,25 +8681,27 @@ def _merge_django_owned_run_result(existing_result, incoming_result):
     Content Factory sends authoritative snapshots for its own result fields. Django
     augments those snapshots with review lineage, publish-child, and merge state.
     Replacing the whole JSON object on every PUT silently severed revision chains;
-    preserve only the known Django-owned keys when the incoming snapshot omits them.
-    Explicit incoming values remain authoritative.
+    preserve known Django-owned keys when the incoming snapshot omits them.
+    Approval and billing receipts remain authoritative even when reflected back.
     """
 
     existing = existing_result if isinstance(existing_result, dict) else {}
-    merged = dict(incoming_result) if isinstance(incoming_result, dict) else {}
+    incoming = incoming_result if isinstance(incoming_result, dict) else {}
+    backend_merge_keys = {"publish_merge_intent", "merge_response", "merge_status", "merged_at"}
+    merged = {key: value for key, value in incoming.items() if key not in backend_merge_keys or key in existing}
     for key, value in existing.items():
         django_owned = key in _DJANGO_OWNED_RUN_RESULT_KEYS or key.startswith(
             _DJANGO_OWNED_RUN_RESULT_PREFIXES
         )
         if not django_owned:
             continue
-        if merged.get(key) in (None, "", {}, []) and value not in (None, "", {}, []):
+        if key in backend_merge_keys | {"article_review_approval", "approval_blocker", "article_image_billing"} or (merged.get(key) in (None, "", {}, []) and value not in (None, "", {}, [])):
             merged[key] = value
     return merged
 
 
 def _merge_django_owned_run_request(existing_request, incoming_request):
-    """Retain backend billing history that worker request models do not carry.
+    """Retain backend billing and approval history across worker snapshots.
 
     Mirrors cannot replace a recorded charge or introduce new authorisation.
     This changes request metadata only; the ledger and job billing stay owned by
@@ -8689,12 +8712,12 @@ def _merge_django_owned_run_request(existing_request, incoming_request):
     existing = existing_request if isinstance(existing_request, dict) else {}
     incoming = incoming_request if isinstance(incoming_request, dict) else {}
     merged = {key: deepcopy(value) for key, value in incoming.items()
-              if not key.startswith("roo_points_") or key in existing}
+              if not (key.startswith("roo_points_") or key in {"article_publish_approval_receipt", "article_publish_approval_revoked"}) or key in existing}
     for key, value in existing.items():
-        if not key.startswith("roo_points_"):
+        if not (key.startswith("roo_points_") or key in {"article_publish_approval_receipt", "article_publish_approval_revoked"}):
             continue
         if key in incoming and incoming[key] != value:
-            raise EditorialRunConflict("Worker snapshots cannot change backend billing history")
+            raise EditorialRunConflict("Worker snapshots cannot change backend billing or approval history")
         merged[key] = deepcopy(value)
     return merged
 
@@ -8828,11 +8851,10 @@ def _sync_content_factory_run_snapshot(*, run_id: str, data: dict, step_states: 
         active_snapshot = str(data.get("status") or "").strip().lower() in DURABLE_ACTIVE_RUN_STATUSES
         if active_snapshot:
             data["error"] = ""
-        if existing_run is not None:
-            data["result"] = _merge_django_owned_run_result(
-                existing_run.result,
-                data.get("result"),
-            )
+        data["result"] = _merge_django_owned_run_result(
+            existing_run.result if existing_run is not None else {},
+            data.get("result"),
+        )
         if existing_run is not None and existing_run.workflow == "startup_monthly_update":
             # Worker checkpoints cannot replace source receipts, approval inputs,
             # connector authority or founder choices with a stale local copy.
@@ -9016,7 +9038,7 @@ class ContentFactoryRunView(APIView):
                 break
             except EditorialRunConflict as exc:
                 return Response(
-                    {"error": "editorial_run_conflict", "detail": str(exc), "run_id": run_id},
+                    {"error": "editorial_run_conflict", "code": "editorial_run_conflict", "detail": str(exc), "run_id": run_id},
                     status=status.HTTP_409_CONFLICT,
                 )
             except OperationalError as exc:

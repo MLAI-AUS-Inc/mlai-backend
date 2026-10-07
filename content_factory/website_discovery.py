@@ -48,6 +48,8 @@ def discovery_snapshot(value):
         "repositoryId": inventory.get("repository_id") or payload.get("repository_id"),
         "branch": inventory.get("branch") or payload.get("default_branch") or payload.get("branch") or "",
         "appRoot": inventory.get("app_root") or payload.get("app_root") or "",
+        "framework": inventory.get("detected_framework") or inventory.get("framework")
+            or payload.get("detected_framework") or payload.get("framework") or normalized.get("framework"),
         "resolution": resolution, "candidates": candidates, "publishReady": False,
         "supportLevel": str(normalized.get("support_level") or "unsupported")[:100], "supportPaths": support_paths}
 

@@ -184,7 +184,9 @@ def durable_integration_evidence(config, connection, *, now=None):
         return {**base, "reasonCode": "publishing_adapter_required"}
     if connection.app_root or any(item.get("code") in {"APPLICATION_ROOT_VERIFICATION_REQUIRED", "SETUP_BRANCH_VERIFICATION_REQUIRED"} for item in connection.blockers):
         return {**base, "reasonCode": "integration_required"}
-    if not (mapping(connection.capabilities).get("publishingReady") and mapping(connection.capabilities).get("generationReady")):
+    if any(item.get("code") == "repository_source_changed" for item in connection.blockers):
+        return {**base, "reasonCode": "repository_source_changed"}
+    if not mapping(connection.capabilities).get("publishingReady"):
         return {**base, "reasonCode": "integration_required"}
     if (target is None or not target.verified_at or not mapping(target.capabilities).get("publishingReady")
             or not SHA_PATTERN.fullmatch(connection.verified_sha or "") or target.source_sha != connection.verified_sha
@@ -218,6 +220,7 @@ def article_capabilities(config, *, domain="", account=None, evidence=None, repo
         "github_verification_required": "Checking your saved GitHub access.", "github_access_required": "Review GitHub access to your website.",
         "github_unavailable": "GitHub is temporarily unavailable. Try again shortly.",
         "github_write_required": "Grant repository write access before preparing or publishing articles.",
+        "repository_source_changed": "The repository source changed. Scan and verify the current source.",
         "publishing_adapter_required": "The custom build is verified. Connect an article publishing adapter or write a portable draft.",
     }
     route = evidence.get("routePath") or "/articles"

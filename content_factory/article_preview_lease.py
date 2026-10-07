@@ -13,6 +13,8 @@ from rest_framework.views import APIView
 from . import vibe_marketing_views as views
 from .website_connections import authority_guard
 from .website_contract import WebsiteAuthorityError, connection_contract
+from .portable_drafts import original_portable_run
+from .website_contract import evidence_digest
 
 SALT = "article-preview-read-only-v1"
 LIFETIME = 900
@@ -29,8 +31,11 @@ class ArticlePreviewLeaseView(APIView):
         run = views.get_object_or_404(views.ContentFactoryRun, run_id=run_id)
         if not views._run_belongs_to_context(run, context):
             return Response({"detail": "Run not found."}, status=404)
+        portable = original_portable_run(run)
         token = signing.dumps({"run": run.run_id, "organization": context.organization.id,
-                               "domain": context.organization.domain, **connection_contract(run.run_request or {})}, salt=SALT, compress=True)
+                               "domain": context.organization.domain, "portable": portable,
+                               "intent_digest": evidence_digest({key: (run.run_request or {}).get(key) for key in ("delivery_mode", "delivery_mode_confirmed", "source_run_id")}) if portable else None,
+                               **connection_contract(run.run_request or {})}, salt=SALT, compress=True)
         prefix = f"/api/v1/vibe-marketing/article-preview/{quote(token, safe='')}/{quote(run.run_id, safe='')}/"
         return Response({"url": request.build_absolute_uri(prefix), "expiresIn": LIFETIME},
                         headers={"Cache-Control": "no-store"})
@@ -54,6 +59,10 @@ class ArticlePreviewLeaseProxyView(views.VibeMarketingRunLivePreviewProxyView):
         context = SimpleNamespace(organization=SimpleNamespace(id=grant["organization"], domain=grant["domain"]))
         if not views._run_belongs_to_context(run, context):
             return None, None, Response({"detail": "Preview not found."}, status=404)
+        if grant.get("portable") is True:
+            if not original_portable_run(run) or grant.get("intent_digest") != evidence_digest({key: (run.run_request or {}).get(key) for key in ("delivery_mode", "delivery_mode_confirmed", "source_run_id")}):
+                return None, None, Response({"code": "portable_preview_changed", "detail": "Preview access expired."}, status=409)
+            return context, run, None
         try:
             with authority_guard(grant, action="read"):
                 if connection_contract(grant) != connection_contract(run.run_request or {}):

@@ -182,14 +182,17 @@ def _adopt_remote_payload(run: ContentFactoryRun, payload: dict) -> str:
         step_states = {}
     from .website_connections import authority_guard, needs_repository_authority, scoped_run_contract
     from .website_contract import WebsiteAuthorityError, connection_contract
-    if needs_repository_authority({"workflow": run.workflow}):
+    from .portable_drafts import portable_run_update_allowed
+    if needs_repository_authority({"workflow": run.workflow}) and not portable_run_update_allowed(run, sync_payload):
         try:
             original = scoped_run_contract(run)
             with authority_guard(original, action="read"):
                 binding = connection_contract(original)
                 sync_payload.update(binding)
                 sync_payload["run_request"] = {**(run.run_request or {}), **(sync_payload.get("run_request") or {}), **binding}
-                _sync_content_factory_run_snapshot(run_id=run.run_id, data=sync_payload, step_states=step_states)
+                observed, _ = _sync_content_factory_run_snapshot(run_id=run.run_id, data=sync_payload, step_states=step_states)
+                from .website_operations import observe_workflow_status
+                observe_workflow_status(observed, sync_payload)
         except WebsiteAuthorityError:
             run.refresh_from_db()
             return run.status

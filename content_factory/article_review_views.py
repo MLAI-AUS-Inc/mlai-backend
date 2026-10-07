@@ -37,7 +37,9 @@ def remote_review(run, *, payload=None):
     except (views.http_client.RequestException, ValueError):
         return Response({"detail": "Article editing could not connect. Your input has been kept; retry."}, status=502)
     if response.status_code not in (200, 202):
-        return Response({"detail": data.get("detail", "The article changed. Reload and try again.")},
+        data = data if isinstance(data, dict) else {}
+        failure = {key: data[key] for key in ("code", "error_code", "reasonCode", "retryable", "next_action", "failure", "errors", "revision") if key in data}
+        return Response({**failure, "detail": data.get("detail") or data.get("error") or "The article changed. Reload and try again."},
                         status=response.status_code if response.status_code in (400, 404, 409, 422, 503) else 502)
     return data
 
@@ -52,8 +54,11 @@ class VibeMarketingArticleReviewView(views.VibeMarketingRunCommentsMixin, APIVie
         result = remote_review(run)
         if isinstance(result, Response):
             return result
+        from .article_review_billing import reconcile_image_charges
+        reconcile_image_charges(user=request.user, run=run, snapshot=result)
         latest = views._latest_review_ready_component_revision(run, context)
-        response = Response({**result, "componentFeedback": views._component_feedback_from_run(run),
+        from .article_review_billing import image_regeneration_cost
+        response = Response({**result, "imageRegenerationCostPoints": image_regeneration_cost(context.organization.domain), "componentFeedback": views._component_feedback_from_run(run),
             "articleExport": article_export(result, run_id=run.run_id, latest_run_id=latest.run_id if latest else None)})
         response["Cache-Control"] = "private, no-store"
         return response
@@ -71,7 +76,7 @@ class VibeMarketingArticleReviewView(views.VibeMarketingRunCommentsMixin, APIVie
             return Response({"detail": "A newer draft is ready. Open that revision before editing.",
                              "latestRunId": latest.run_id}, status=409)
         payload = dict(request.data)
-        if payload.get("action") not in {"editText", "regenerateImage", "chooseImage", "refresh", "undo", "discardImage", "allowAI"}:
+        if payload.get("action") not in {"editText", "editTextBatch", "regenerateImage", "chooseImage", "refresh", "undo", "discardImage", "allowAI"}:
             return Response({"detail": "Unknown article operation."}, status=400)
         if payload.get("action") == "regenerateImage":
             billing_error = views._reuse_roo_points_authorization_for_article_job(
@@ -80,7 +85,18 @@ class VibeMarketingArticleReviewView(views.VibeMarketingRunCommentsMixin, APIVie
             )
             if billing_error is not None:
                 return billing_error
+        receipt = None
+        if payload.get("action") == "regenerateImage":
+            from .article_review_billing import reserve_image_charge
+            receipt, error = reserve_image_charge(user=request.user, context=context, run=run, payload=payload)
+            if error is not None:
+                return error
         result = remote_review(run, payload=payload)
+        if receipt is not None:
+            from .article_review_billing import settle_image_charge
+            rejected = isinstance(result, Response) and result.status_code in {400, 404, 409, 422}
+            pending = isinstance(result, Response) and not rejected
+            settle_image_charge(user=request.user, run=run, receipt=receipt, rejected=rejected, pending=pending)
         return result if isinstance(result, Response) else Response(result)
 
 
