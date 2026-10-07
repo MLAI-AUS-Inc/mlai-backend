@@ -6642,6 +6642,47 @@ def _release_cancelled_article_keyword(organization, run):
     return keyword
 
 
+def _release_failed_article_keyword(organization, run):
+    """Free an undelivered terminal topic without releasing another run's claim."""
+    from .incident_guards import delivered_content
+
+    if (run.workflow not in RESTARTABLE_ARTICLE_WORKFLOWS
+            or run.status != ContentFactoryRunStatus.FAILED
+            or run.domain != organization.domain
+            or getattr(run, "organization_id", None) not in (None, organization.pk)
+            or run.resume_available or delivered_content(run)):
+        return None
+    keyword_key = _normalize_keyword_memory(_article_keyword_from_run(run))
+    if not keyword_key:
+        return None
+    with transaction.atomic():
+        keyword = ResearchedKeyword.objects.select_for_update().filter(
+            organization=organization, keyword_normalized=keyword_key,
+            status=KeywordStatus.IN_PROGRESS,
+        ).first()
+        if not keyword or keyword.written_article_id:
+            return None
+        # A late failure/poll must not release a newer draft, a resumable run,
+        # or saved delivery. Legacy runs still use this tenant's unique domain.
+        siblings = ContentFactoryRun.objects.filter(
+            domain=organization.domain, workflow__in=ARTICLE_WORKFLOWS,
+        ).exclude(pk=run.pk).exclude(
+            status__in=[ContentFactoryRunStatus.CANCELLED, ContentFactoryRunStatus.DENIED],
+        )
+        for sibling in siblings:
+            if getattr(sibling, "organization_id", None) not in (None, organization.pk):
+                continue
+            if _normalize_keyword_memory(_article_keyword_from_run(sibling)) != keyword_key:
+                continue
+            if (sibling.status != ContentFactoryRunStatus.FAILED
+                    or sibling.resume_available or delivered_content(sibling)):
+                return None
+        keyword.status = KeywordStatus.PENDING
+        keyword.status_changed_at = timezone.now()
+        keyword.save(update_fields=["status", "status_changed_at"])
+        return keyword
+
+
 def _cancel_local_article_system_setup_run(*, run, organization, remote_data=None):
     remote_data = remote_data if isinstance(remote_data, dict) else {}
     now = timezone.now()
@@ -16648,6 +16689,7 @@ class VibeMarketingRunView(APIView):
                 run = ContentFactoryRun.objects.prefetch_related("steps").get(pk=refreshed_run.pk)
         from .island_research import refund_empty_or_failed_research
         refund_empty_or_failed_research(run)
+        _release_failed_article_keyword(context.organization, run)
         payload = _serialize_run(run, context=context, mode=view)
         if (run.run_request or {}).get("island_research_brief") and _run_pending_remote_dispatch(run):
             payload["status"] = "queued"

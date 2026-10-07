@@ -1,8 +1,9 @@
 """Run-page workflow projection regressions without a database or migration."""
 
+from contextlib import nullcontext
 from types import SimpleNamespace
 from unittest import TestCase
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from content_factory.vibe_marketing_views import _workflow_progress
 
@@ -196,3 +197,72 @@ class DiscoveryTopicSelectionTests(TestCase):
 
     def test_requested_source_must_match_reviewed_source(self):
         self.assertIsNone(self.resolve(requested_source="another-discovery"))
+
+
+class FailedArticleKeywordReleaseTests(TestCase):
+    def run_record(self, **changes):
+        return SimpleNamespace(**{
+            "pk": 1, "organization_id": 7, "workflow": "article_generation", "status": "failed",
+            "domain": "publisher.example",
+            "resume_available": False, "run_request": {"target_keyword": "team workflows"},
+            "result": {"failure": {"code": "EDITORIAL_REJECTED"}}, "acceptance_summary": {},
+            "steps": SimpleNamespace(all=lambda: []),
+            **changes,
+        })
+
+    def release(self, *, run=None, siblings=(), written=False):
+        from content_factory import vibe_marketing_views as views
+        organization = SimpleNamespace(pk=7, domain="publisher.example")
+        keyword = SimpleNamespace(status="in_progress", written_article_id=9 if written else None, save=Mock())
+        with patch.object(views.transaction, "atomic", side_effect=lambda: nullcontext()), \
+                patch.object(views.ResearchedKeyword.objects, "select_for_update") as keywords, \
+                patch.object(views.ContentFactoryRun.objects, "filter") as runs:
+            keywords.return_value.filter.return_value.first.return_value = keyword
+            runs.return_value.exclude.return_value.exclude.return_value = siblings
+            released = views._release_failed_article_keyword(organization, run or self.run_record())
+            if released is not None:
+                keywords.return_value.filter.assert_called_once_with(
+                    organization=organization, keyword_normalized="team workflows", status="in_progress",
+                )
+                runs.assert_called_once_with(domain=organization.domain, workflow__in=views.ARTICLE_WORKFLOWS)
+        return released, keyword
+
+    def test_terminal_undelivered_failure_frees_topic_for_a_reviewed_attempt(self):
+        released, keyword = self.release()
+        self.assertIs(released, keyword)
+        self.assertEqual(keyword.status, "pending")
+        keyword.save.assert_called_once_with(update_fields=["status", "status_changed_at"])
+
+    def test_active_resumable_or_delivered_run_keeps_its_topic(self):
+        for changes in ({"status": "running"}, {"resume_available": True},
+                        {"result": {"markdown": "Saved draft"}},
+                        {"acceptance_summary": {"content_packaged": True}}, {"workflow": "auto_discovery"}):
+            with self.subTest(changes=changes):
+                released, keyword = self.release(run=self.run_record(**changes))
+                self.assertIsNone(released)
+                keyword.save.assert_not_called()
+
+    def test_late_failure_cannot_release_another_active_or_reviewable_claim(self):
+        for changes in ({"status": "queued"}, {"resume_available": True},
+                        {"result": {"markdown": "Saved copy"}}, {"status": "approval_required"}):
+            with self.subTest(changes=changes):
+                released, keyword = self.release(siblings=[self.run_record(pk=2, **changes)])
+                self.assertIsNone(released)
+                keyword.save.assert_not_called()
+
+    def test_written_keyword_stays_reserved(self):
+        released, keyword = self.release(written=True)
+        self.assertIsNone(released)
+        keyword.save.assert_not_called()
+
+    def test_unrelated_and_terminal_siblings_do_not_hold_failed_topic(self):
+        siblings = [self.run_record(pk=2), self.run_record(pk=3, status="running",
+                    run_request={"target_keyword": "another topic"})]
+        self.assertIsNotNone(self.release(siblings=siblings)[0])
+
+    def test_another_tenant_cannot_hold_this_tenant_topic(self):
+        self.assertIsNotNone(self.release(siblings=[self.run_record(pk=2, organization_id=8, status="running")])[0])
+
+    def test_wrong_tenant_or_domain_failure_cannot_release_a_topic(self):
+        for changes in ({"organization_id": 8}, {"domain": "another.example"}):
+            self.assertIsNone(self.release(run=self.run_record(**changes))[0])
