@@ -757,7 +757,7 @@ class IncidentBillingReplays(SimpleTestCase):
     def test_invalid_legacy_ledger_stamp_returns_billing_action_without_crashing(self):
         from . import vibe_marketing_views as views
         from roo.models import Ledger
-        for stamp in ("ledger-article-original", "-1", "0", "999999999999999999999999999999999999999"):
+        for stamp in ("ledger-article-original", "-1", "0", "999999999999999999999999999999999999999", "9" * 5000):
             with self.subTest(stamp=stamp):
                 run = SimpleNamespace(run_request={"roo_points_authorized": True,
                     "roo_points_action": "article_generation", "roo_points_cost": 6,
