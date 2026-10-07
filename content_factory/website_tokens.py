@@ -168,7 +168,7 @@ def issue_website_token(request):
     action = str(data.get("action") or "read")
     if action in {"portable", "worker_cleanup", "cancel_operation"}:
         return Response({"error": "portable_repository_access_denied"}, status=409)
-    if mode == "write" and action not in {"setup", "publish", "merge", "cleanup", "restoration"}:
+    if mode == "write" and action not in {"setup", "preview", "publish", "merge", "cleanup", "restoration"}:
         return Response({"error": "invalid_write_action"}, status=400)
     try:
         return Response(mint_website_token(data, permission_mode=mode, action=action))
@@ -193,8 +193,12 @@ def mint_website_token(data, *, permission_mode="read", action="read"):
     from integrations.http_client import RequestException
     if action in {"portable", "worker_cleanup", "cancel_operation"}:
         raise WebsiteAuthorityError("portable_repository_access_denied", "Portable drafts cannot access repository credentials.")
-    if permission_mode not in {"read", "write"} or (permission_mode == "write" and action not in {"setup", "publish", "merge", "cleanup", "restoration"}):
+    if permission_mode not in {"read", "write"} or (permission_mode == "write" and action not in {"setup", "preview", "publish", "merge", "cleanup", "restoration"}):
         raise WebsiteAuthorityError("invalid_write_action", "Write credentials require an explicit repository mutation action.", status=400)
+    if permission_mode == "write" and action == "preview":
+        from .website_contract import SHA_PATTERN
+        if not data.get("run_id") or not SHA_PATTERN.fullmatch(str(data.get("expected_source_sha") or "")):
+            raise WebsiteAuthorityError("preview_source_required", "Preview writes require this run and its immutable source commit.", status=400)
     profile = data.get("permission_profile", "repository")
     if not isinstance(profile, str) or profile not in {"repository", "workflow_files", "ci_evidence"}:
         raise WebsiteAuthorityError("invalid_permission_profile", "Unknown repository permission profile.", status=400)
