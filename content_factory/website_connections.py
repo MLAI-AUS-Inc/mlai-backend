@@ -644,7 +644,9 @@ def transition_connection(config, *, action, expected, idempotency_key="", verif
                     "setup_run_ids": list(connection.repository_mutations.exclude(run_id="").values_list("run_id", flat=True)), "attempt": 1},
                 receipt={"status": "proposal_requested", "requires_review": True, "repository_modified": False})
         old_generation = connection.generation
-        connection.operations.filter(generation=old_generation).exclude(state__in=["completed", "failed", "blocked", "cancelled", "deleted", "denied"]).update(
+        connection.operations.filter(generation=old_generation).exclude(
+            action__in=["disconnect", "revoke", "purge", "cancel-operation"]
+        ).exclude(state__in=["completed", "failed", "blocked", "cancelled", "deleted", "denied"]).update(
             state="cancelled", receipt={"status": "authority_revoked", "repository_modified": False}, updated_at=timezone.now())
         connection.generation += 1
         connection.configuration_version += 1

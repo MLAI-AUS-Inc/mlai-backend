@@ -319,7 +319,7 @@ class WebsiteReliabilityLifecycleTests(WebsiteDatabaseFixture, TestCase):
                 pass
         self.assertEqual(error.exception.code, "publishing_adapter_required")
 
-    def test_new_custom_source_retains_only_exact_reverified_generation_marker(self):
+    def test_new_custom_source_retains_exact_marker_without_granting_native_authoring(self):
         from .website_models import WebsiteConnectionTarget
         from .website_support import promote_custom_target
         from django.utils import timezone
@@ -332,7 +332,7 @@ class WebsiteReliabilityLifecycleTests(WebsiteDatabaseFixture, TestCase):
         proof = {"target_id": "custom", "source_sha": "b" * 40, "contract_digest": "d" * 64, "artifact_digest": "e" * 64}
         promote_custom_target(self.website, contract=contract, proof=proof)
         self.website.refresh_from_db()
-        self.assertTrue(self.website.capabilities["generationReady"])
+        self.assertFalse(self.website.capabilities["generationReady"])
         self.assertEqual(WebsiteConnectionTarget.objects.get(connection=self.website, target_key="custom").contract["live_marker"], marker)
         promote_custom_target(self.website, contract=contract, proof={**proof, "source_sha": "c" * 40, "artifact_digest": "f" * 64})
         self.website.refresh_from_db()

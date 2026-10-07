@@ -242,7 +242,19 @@ def advance_workflow_attempt(run):
     with authority_guard(binding, action="read") as website:
         identifier = binding.get("operation_id")
         if not identifier:
-            raise WebsiteAuthorityError("website_operation_required", "Reload this run before resuming it.")
+            # Older saved runs have consent identity but predate the operation
+            # ledger. Upgrade only an eligible run under the current consent
+            # lock, with a stable identity; never revive removed/finished work.
+            if run.status not in {"failed", "blocked", "running", "queued"} or deletion_epoch(website):
+                raise WebsiteAuthorityError("website_operation_required", "A current operation identity is required to resume this run.")
+            from .website_models import WebsiteConnectionOperation
+            legacy, _ = WebsiteConnectionOperation.objects.get_or_create(
+                connection=website, generation=website.generation,
+                idempotency_key=f"{website.pk}:legacy-resume:{run.pk}",
+                defaults={"action": "workflow", "state": "failed",
+                    "payload": {"workflow": run.workflow, "run_id": run.run_id, "attempt": 1, "deletion_epoch": 0}},
+            )
+            identifier = legacy.pk
         op = WebsiteConnectionOperation.objects.select_for_update().get(pk=identifier, connection=website)
         if op.state == "completed":
             raise WebsiteAuthorityError("website_operation_terminal", "Completed website work cannot be resumed.")
