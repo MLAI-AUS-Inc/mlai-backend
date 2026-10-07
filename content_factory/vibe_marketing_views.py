@@ -6642,6 +6642,47 @@ def _release_cancelled_article_keyword(organization, run):
     return keyword
 
 
+def _release_failed_article_keyword(organization, run):
+    """Free an undelivered terminal topic without releasing another run's claim."""
+    from .incident_guards import delivered_content
+
+    if (run.workflow not in RESTARTABLE_ARTICLE_WORKFLOWS
+            or run.status != ContentFactoryRunStatus.FAILED
+            or run.domain != organization.domain
+            or getattr(run, "organization_id", None) not in (None, organization.pk)
+            or run.resume_available or delivered_content(run)):
+        return None
+    keyword_key = _normalize_keyword_memory(_article_keyword_from_run(run))
+    if not keyword_key:
+        return None
+    with transaction.atomic():
+        keyword = ResearchedKeyword.objects.select_for_update().filter(
+            organization=organization, keyword_normalized=keyword_key,
+            status=KeywordStatus.IN_PROGRESS,
+        ).first()
+        if not keyword or keyword.written_article_id:
+            return None
+        # A late failure/poll must not release a newer draft, a resumable run,
+        # or saved delivery. Legacy runs still use this tenant's unique domain.
+        siblings = ContentFactoryRun.objects.filter(
+            domain=organization.domain, workflow__in=ARTICLE_WORKFLOWS,
+        ).exclude(pk=run.pk).exclude(
+            status__in=[ContentFactoryRunStatus.CANCELLED, ContentFactoryRunStatus.DENIED],
+        )
+        for sibling in siblings:
+            if getattr(sibling, "organization_id", None) not in (None, organization.pk):
+                continue
+            if _normalize_keyword_memory(_article_keyword_from_run(sibling)) != keyword_key:
+                continue
+            if (sibling.status != ContentFactoryRunStatus.FAILED
+                    or sibling.resume_available or delivered_content(sibling)):
+                return None
+        keyword.status = KeywordStatus.PENDING
+        keyword.status_changed_at = timezone.now()
+        keyword.save(update_fields=["status", "status_changed_at"])
+        return keyword
+
+
 def _cancel_local_article_system_setup_run(*, run, organization, remote_data=None):
     remote_data = remote_data if isinstance(remote_data, dict) else {}
     now = timezone.now()
@@ -9949,11 +9990,11 @@ def _workflow_progress(*, context=None, run=None, latest_runs=None, checks=None,
             summary_by_id["review"] = "Only a fallback setup preview is available; exact preview must be fixed before approval."
             action_by_id["review"] = _workflow_step_action("Open setup diagnostics", href=setup_run_url, variant="secondary")
         elif setup_status in {"preview_failed", "failed", "blocked"}:
-            status_by_id["generate"] = "complete"
-            status_by_id["review"] = "blocked"
+            status_by_id["generate"] = "blocked"
+            status_by_id["review"] = "locked"
             status_by_id["publish"] = "locked"
-            summary_by_id["review"] = "Hosted setup preview failed. Open diagnostics, inspect the build logs, then retry."
-            action_by_id["review"] = _workflow_step_action("Open setup diagnostics", href=setup_run_url, variant="secondary")
+            summary_by_id["generate"] = "Articles setup build failed. Open diagnostics to review the failure and start a new reviewed attempt."
+            action_by_id["generate"] = _workflow_step_action("Open setup diagnostics", href=setup_run_url, variant="secondary")
         elif setup_status == "publishing":
             # Native GitHub auto-merge is armed: the PR merges on its own once required
             # checks pass, with nothing for the founder to do. That IS running — but the
@@ -16025,11 +16066,44 @@ def _resolve_topic_selection_candidate_by_submission(candidates, *, requested_id
     return matches[0] if len(matches) == 1 else None
 
 
+def _topic_selection_candidates_for_source(organization, source_run_id):
+    """Keep a reviewed discovery's identity when dashboard deduplication picks another run."""
+    source = ContentFactoryRun.objects.filter(
+        organization=organization,
+        domain=organization.domain,
+        run_id=source_run_id,
+        workflow__in=DISCOVERY_WORKFLOWS,
+        status__in=DISCOVERY_TOPIC_CANDIDATE_STATUSES,
+    ).first()
+    if source is None:
+        return []
+    declined = {
+        normalize_topic_feedback_keyword(item.keyword)
+        for item in list_topic_feedback(organization, feedback_type="declined", limit=100)
+    }
+    # Resolve this run before keyword deduplication can replace its title and
+    # source with a historical discovery. Current decline, coverage and keyword
+    # availability checks still apply to the saved candidates.
+    candidates = _enrich_topic_candidates(
+        organization,
+        _topic_candidates_from_runs([source]),
+        declined_keyword_keys=declined,
+    )
+    return _canonicalize_topic_candidate_ids(candidates, namespace="topic")
+
+
 def _resolve_topic_selection_candidate(organization, config, topic_candidate_id, *, submitted=None):
     requested_id = str(topic_candidate_id or "").strip()
     if not requested_id:
         return None
-    candidates = _topic_selection_candidate_pool(organization, config)
+    source_run_id = _submitted_selection_source_run_id(submitted)
+    if source_run_id and requested_id.startswith("topic:run:"):
+        expected_prefix = f"topic:run:{_topic_candidate_id_part(source_run_id, fallback='source')}:"
+        if not requested_id.startswith(expected_prefix):
+            return None
+        candidates = _topic_selection_candidates_for_source(organization, source_run_id)
+    else:
+        candidates = _topic_selection_candidate_pool(organization, config)
     exact_matches = [candidate for candidate in candidates if str(candidate.get("id") or "").strip() == requested_id]
     if len(exact_matches) == 1:
         return exact_matches[0]
@@ -16615,6 +16689,7 @@ class VibeMarketingRunView(APIView):
                 run = ContentFactoryRun.objects.prefetch_related("steps").get(pk=refreshed_run.pk)
         from .island_research import refund_empty_or_failed_research
         refund_empty_or_failed_research(run)
+        _release_failed_article_keyword(context.organization, run)
         payload = _serialize_run(run, context=context, mode=view)
         if (run.run_request or {}).get("island_research_brief") and _run_pending_remote_dispatch(run):
             payload["status"] = "queued"

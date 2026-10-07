@@ -312,7 +312,13 @@ def authority_guard(data, *, action="read", domain="", github_repo="", require_s
     targets = payload.get("publish_targets") if isinstance(payload.get("publish_targets"), list) else []
     target_promotion = action == "config_write" and any(isinstance(item, dict) and (item.get("verification") or {}).get("status") in {"passed", "verified", "preview_verified"} for item in targets)
     needs_native = action in {"setup", "publish", "merge", "preview"} or target_promotion
-    needs_head = needs_head or target_promotion
+    # Partial checkpoints can retain an accepted publishing proof even when
+    # they omit publish_targets. Recheck that proof's source outside the lock;
+    # inventory without accepted proof does not promote publication readiness.
+    retains_publication_proof = action == "config_write" and bool(expected) and candidate.targets.filter(
+        generation=candidate.generation, source_sha=expected, verified_at__isnull=False,
+        capabilities__publishingReady=True).exists()
+    needs_head = needs_head or target_promotion or retains_publication_proof
     if needs_native or needs_head:
         require_unlocked_remote_call()
     if needs_native:

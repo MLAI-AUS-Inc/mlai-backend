@@ -372,6 +372,11 @@ WrittenArticle attribution is resolved from the exact tenant-owned saved writing
 
 ## Article run workflow progress
 
+For a blocked articles setup with `setupStatus=failed`, `blocked`, or
+`preview_failed`, the Build step stays blocked. Review and Publish stay locked
+until a reviewable setup exists. The Build diagnostics action opens the saved
+failure; its text does not promise retry or resume of a terminal attempt.
+
 `workflowProgress.currentStepId` on a specific article run points to that run's current generation, review, revision, or publication action. An incomplete organization baseline remains `ready` in `steps` and in the organization setup wizard; it does not replace the article action in the run-page header. A packaged draft with `article_preview_quality.status=blocking_findings` has a blocked Publish step linked to review. While that quality check is queued, running, or retrying transient findings, Publish is locked. Passed or advisory quality findings retain the normal publishing path. Existing PR or publication evidence remains authoritative for a publish run already in progress or complete.
 
 Once an approved article's publish child is running or publication evidence exists, the Review/Revise stage reports complete and has no old acceptance action, even if the selected revision has no feedback batch of its own. The Publish stage continues to report its actual running, ready, blocked or completed state.
@@ -410,3 +415,7 @@ the setup gate. Completed draft packages do not grant publishing authority.
 The client may request the exact saved portable preview under current drafting
 permission; repository previews and publication still require their normal
 website authority. No billing, schema or migration behavior changes.
+
+A reviewed discovery topic resolves against its saved, organization-scoped source run. Dashboard keyword deduplication may display an older discovery, but cannot replace the title or source selected in a run. Current decline, written-coverage and keyword availability checks still apply before generation.
+
+Polling a non-resumable failed article with no delivered copy releases its in-progress keyword for a newly reviewed attempt. This also reconciles older failed runs. The keyword row is locked, and another active, resumable or delivered run with the same keyword retains the reservation. Written articles and other organizations are never changed.

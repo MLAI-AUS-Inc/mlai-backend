@@ -75,14 +75,16 @@ class PortableWorkflowProgressTests(SimpleTestCase):
         ):
             with self.subTest(request=request, repo=repo):
                 _, steps = self.run_progress(request=request, bound_repo=repo)
-                self.assertEqual(steps["review"]["status"], "blocked")
-                self.assertEqual(steps["review"]["runId"], "separate-website-setup")
+                self.assertEqual(steps["generate"]["status"], "blocked")
+                self.assertEqual(steps["generate"]["runId"], "separate-website-setup")
+                self.assertEqual(steps["review"]["status"], "locked")
                 self.assertEqual(steps["package"]["status"], "locked")
 
     def test_company_overview_keeps_real_setup_failure_despite_portable_history(self):
         _, steps = self.run_progress(scoped=False)
-        self.assertEqual(steps["review"]["status"], "blocked")
-        self.assertEqual(steps["review"]["runId"], "separate-website-setup")
+        self.assertEqual(steps["generate"]["status"], "blocked")
+        self.assertEqual(steps["generate"]["runId"], "separate-website-setup")
+        self.assertEqual(steps["review"]["status"], "locked")
 
 
 class PortablePreviewTests(SimpleTestCase):
