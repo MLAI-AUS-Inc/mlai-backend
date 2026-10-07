@@ -6,6 +6,7 @@ credentials, workers or network clients. ORM/HTTP/billing seams are controlled
 fixtures, so these tests do not prove persistence, SQL races or real billing.
 """
 import ast
+from contextlib import nullcontext
 from copy import deepcopy
 from datetime import datetime, timedelta, timezone as dt_timezone
 from pathlib import Path
@@ -164,7 +165,9 @@ class ArticleDispatchControlFlowTests(unittest.TestCase):
             "_remote_required_for_workflow": lambda workflow: True, "_mint_dispatch_client_request_id": lambda workflow: "fixture-key",
             "_content_factory_headers": lambda: {}, "_lookup_content_factory_dispatch_by_key": self.lookup,
             "_process_pending_dispatch_refund": self.refund_pending, "bind_dispatch_token_run": self.bind_existing,
-            "sanitize_json_for_postgres": lambda value: value,
+            "reserve_portable_dispatch_intent": Mock(return_value=None),
+            "bind_portable_dispatch_snapshot": Mock(return_value=None),
+            "sanitize_json_for_postgres": lambda value: value, "nullcontext": nullcontext,
             "_content_factory_diagnostics": lambda *args, **kwargs: {},
             "_create_local_run": self.local, "http_client": self.http,
             "_refund_roo_points_for_article_start": self.refund, "_refund_roo_points_for_content_island_topic_start": Mock(),

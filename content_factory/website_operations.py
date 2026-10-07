@@ -17,6 +17,26 @@ def _workflow_state(status):
     return status if status in TERMINAL_WORKFLOW_STATES else "running"
 
 
+def workflow_operation_state(run):
+    """Keep an article operation active while its linked setup repair is pending.
+
+    The article stays blocked for the reader. Its scan/setup children share the
+    original operation fence and must finish before that operation is terminal.
+    This projection never reopens an already terminal operation.
+    """
+    result = run.result if isinstance(run.result, dict) else {}
+    pending_repair = result.get("repair_status") in {
+        "queued", "running", "setup_queued", "awaiting_approval",
+        "awaiting_confirmation", "awaiting_merge",
+    }
+    child_id = result.get("scan_run_id") or result.get("repair_run_id")
+    if (run.status == "blocked" and getattr(run, "workflow", "") in {"article_generation", "direct_generate", "confirmed_topic"}
+            and result.get("precondition_status") == "precondition_failed"
+            and pending_repair and isinstance(child_id, str) and child_id and child_id != run.run_id):
+        return "running"
+    return _workflow_state(run.status)
+
+
 def deletion_epoch(connection):
     """Return the retained erasure watermark; reconnect never resets it."""
     return max((int(row.get("deletion_epoch", 0)) for row in (connection.blockers or []) if isinstance(row, dict)), default=0)
@@ -134,7 +154,7 @@ def reserve_workflow_operation(connection, *, workflow, payload):
                             or saved.get("connection_generation") != connection.generation
                             or saved.get("operation_attempt", 1) != candidate.payload.get("attempt", 1)):
                         raise WebsiteAuthorityError("website_operation_changed", "Refresh the saved setup before starting another attempt.")
-                    candidate.state = _workflow_state(run.status)
+                    candidate.state = workflow_operation_state(run)
                     candidate.receipt = {**(candidate.receipt or {}), "status": candidate.state,
                         "run_id": run.run_id, "remote_outcome_unknown": False}
                     candidate.save(update_fields=["state", "receipt", "updated_at"])
@@ -166,7 +186,10 @@ def bind_operation_run(operation, run):
         with authority_guard(binding, action="read"):
             operation.refresh_from_db()
             operation.payload = {**operation.payload, "run_id": run.run_id}
-            operation.state = _workflow_state(run.status)
+            state = workflow_operation_state(run)
+            if operation.state in TERMINAL_WORKFLOW_STATES and state == "running":
+                state = operation.state
+            operation.state = state
             operation.receipt = {"status": operation.state, "run_id": run.run_id, "repository_modified": None, "remote_outcome_unknown": True}
             operation.save(update_fields=["payload", "state", "receipt", "updated_at"])
     except WebsiteAuthorityError:
@@ -196,7 +219,7 @@ def operation_summary(op):
         from workflow_runs.models import ContentFactoryRun
         run = ContentFactoryRun.objects.filter(run_id=op.payload["run_id"]).first()
         if run and run.status in {"completed", "failed", "cancelled", "denied", "blocked"}:
-            state = _workflow_state(run.status)
+            state = workflow_operation_state(run)
     return {"id": str(op.pk), "action": op.action, "state": state, "attempt": op.payload.get("attempt", 1),
         "runId": op.payload.get("run_id"), "updatedAt": op.updated_at.isoformat(), "receipt": op.receipt}
 
@@ -221,7 +244,7 @@ def cancel_operation(config, *, data, idempotency_key):
         if op.state in {"completed", "failed", "denied", "deleted"}:
             raise WebsiteAuthorityError("website_operation_terminal", "This operation has finished. Review its recorded effects or prepare a removal proposal.")
         run = ContentFactoryRun.objects.filter(run_id=op.payload.get("run_id"), organization=connection.organization).first()
-        if run and run.status in {"completed", "failed", "denied", "blocked"}:
+        if run and workflow_operation_state(run) in {"completed", "failed", "denied", "blocked"}:
             raise WebsiteAuthorityError("website_operation_terminal", "The worker has finished this operation. Review its recorded effects.")
         effects = list(connection.repository_mutations.filter(run_id=op.payload.get("run_id", "")).values("pr_url", "branch", "head_sha", "status"))
         op.state = "cancelled"
@@ -260,7 +283,7 @@ def observe_workflow_status(run, payload=None):
         baseline = op.payload.get("resume_execution_version")
         if attempt != op.payload.get("attempt") and (not version or not baseline or tuple(version) <= tuple(baseline)):
             return
-    state = _workflow_state(state)
+    state = workflow_operation_state(run)
     if op.state == "completed" and state != op.state:
         return
     if op.state in {"failed", "blocked"} and state != op.state and state not in {"cancelled", "denied"}:

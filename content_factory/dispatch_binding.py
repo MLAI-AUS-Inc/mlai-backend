@@ -57,6 +57,12 @@ def bind_dispatch_token_run(*, client_request_id, remote_run_id):
                 return None
             existing_real = ContentFactoryRun.objects.select_for_update().filter(run_id=real).first()
             if existing_real is not None:
+                real_org = getattr(existing_real, "organization_id", None)
+                token_org = getattr(token_run, "organization_id", None)
+                if ((real_org is not None and token_org is not None and real_org != token_org)
+                        or (existing_real.domain and token_run.domain
+                            and existing_real.domain.lower().strip() != token_run.domain.lower().strip())):
+                    return None
                 _merge_provisional_into_real(token_run, existing_real)
                 token_run.delete()
                 logger.warning(
@@ -92,6 +98,66 @@ def bind_dispatch_token_run(*, client_request_id, remote_run_id):
             exc_info=True,
         )
         return None
+
+
+def reserve_portable_dispatch_intent(*, organization, workflow, actor_id, payload):
+    """Persist admitted draft intent before a worker can mirror its first status."""
+    from .portable_drafts import PORTABLE_DISPATCH_RESERVATION, original_portable_run
+    from .website_contract import WebsiteAuthorityError
+    key = str(payload.get("client_request_id") or "").strip()
+    if not key or workflow not in {"article_generation", "direct_generate", "confirmed_topic"}:
+        raise WebsiteAuthorityError("portable_dispatch_intent_changed", "This draft request is no longer current. Start a new reviewed attempt.")
+    intent = {**deepcopy(payload), PORTABLE_DISPATCH_RESERVATION: True, "dispatch_pending_resolution": True,
+        "roo_points_dispatch_actor_id": actor_id}
+    with transaction.atomic():
+        run = ContentFactoryRun.objects.select_for_update().filter(
+            organization=organization, domain=organization.domain,
+            run_request__client_request_id=key,
+        ).exclude(run_id=key).first()
+        created = False
+        if run is None:
+            run, created = ContentFactoryRun.objects.select_for_update().get_or_create(run_id=key, defaults={
+                "organization": organization, "domain": organization.domain, "workflow": workflow,
+                "slack_user_id": actor_id, "github_repo": "", "status": ContentFactoryRunStatus.QUEUED,
+                "current_step": "queued", "run_request": intent,
+            })
+        saved = run.run_request or {}
+        identity_fields = ("client_request_id", "topic", "target_keyword", "source_run_id", "author_id", "editorial_brief")
+        if (not key or not original_portable_run(run) or run.organization_id != organization.pk
+                or run.workflow not in {"article_generation", "direct_generate", "confirmed_topic"}
+                # A worker snapshot may omit its observational Slack identity.
+                # The backend-owned request metadata retains the original actor.
+                or saved.get("roo_points_dispatch_actor_id", run.slack_user_id) != actor_id
+                or (not created and run.run_id == key and (run.status not in {ContentFactoryRunStatus.QUEUED, ContentFactoryRunStatus.BLOCKED}
+                    or not saved.get(PORTABLE_DISPATCH_RESERVATION) or not saved.get("dispatch_pending_resolution")))
+                or any(saved.get(field) != payload.get(field) for field in identity_fields)):
+            raise WebsiteAuthorityError("portable_dispatch_intent_changed", "This draft request is no longer current. Start a new reviewed attempt.")
+    return run
+
+
+def bind_portable_dispatch_snapshot(*, remote_run_id, payload):
+    """Adopt a worker identity only after validating its reserved portable scope."""
+    from .portable_drafts import PORTABLE_DISPATCH_RESERVATION, portable_dispatch_snapshot_allowed, portable_run_update_allowed
+    request = payload.get("run_request") if isinstance(payload, dict) else None
+    key = str(request.get("client_request_id") or "").strip() if isinstance(request, dict) else ""
+    if not key:
+        return None
+    with transaction.atomic():
+        original = ContentFactoryRun.objects.select_for_update().filter(run_id=key).first()
+        if not portable_dispatch_snapshot_allowed(original, remote_run_id, payload):
+            return None
+        existing = ContentFactoryRun.objects.select_for_update().filter(run_id=remote_run_id).first()
+        if existing is not None and (existing.organization_id != original.organization_id
+                or not portable_run_update_allowed(existing, payload)):
+            return None
+        bound = bind_dispatch_token_run(client_request_id=key, remote_run_id=remote_run_id)
+        if bound is not None:
+            bound.run_request = dict(bound.run_request or {})
+            bound.run_request.pop(PORTABLE_DISPATCH_RESERVATION, None)
+            bound.run_request.pop("dispatch_pending_resolution", None)
+            bound.run_request.pop("pending_billing_refund", None)
+            bound.save(update_fields=["run_request", "updated_at"])
+        return bound
 
 
 def _merge_provisional_into_real(token_run, real_run) -> None:

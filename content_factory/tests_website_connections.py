@@ -26,6 +26,29 @@ SHA = 'a' * 40
 
 
 class WebsiteContractTests(SimpleTestCase):
+    def test_pending_article_repair_is_active_without_reclassifying_terminal_failures(self):
+        from .website_operations import workflow_operation_state
+        run = SimpleNamespace(run_id='article-parent', workflow='article_generation', status='blocked',
+            result={'precondition_status': 'precondition_failed', 'repair_status': 'queued', 'scan_run_id': 'repair-child'})
+        for phase in ('queued', 'running', 'setup_queued', 'awaiting_approval', 'awaiting_confirmation', 'awaiting_merge'):
+            run.result['repair_status'] = phase
+            self.assertEqual(workflow_operation_state(run), 'running')
+        for phase in ('failed', 'auth_required', 'manual_blocked', 'not_started', 'verification_required', ''):
+            run.result['repair_status'] = phase
+            self.assertEqual(workflow_operation_state(run), 'blocked')
+        run.result['repair_status'] = 'queued'
+        for status in ('cancelled', 'denied', 'failed', 'completed'):
+            run.status = status
+            self.assertEqual(workflow_operation_state(run), status)
+        run.status = 'blocked'
+        for change in ({'scan_run_id': ''}, {'scan_run_id': run.run_id}, {'precondition_status': 'other'}):
+            original = dict(run.result)
+            run.result.update(change)
+            self.assertEqual(workflow_operation_state(run), 'blocked')
+            run.result = original
+        run.workflow = 'repo_scan'
+        self.assertEqual(workflow_operation_state(run), 'blocked')
+
     def test_setup_revision_uses_original_run_consent_before_charge_or_feedback(self):
         from .vibe_marketing_views import VibeMarketingArticleSystemRevisionsView
         original = {'website_connection_id': str(uuid.uuid4()), 'connection_generation': 1}
@@ -305,6 +328,44 @@ class WebsiteDatabaseFixture:
 
 @override_settings(ROO_API_KEY='synthetic-test-key', INTERNAL_API_KEY='synthetic-test-key')
 class WebsiteLifecycleTests(WebsiteDatabaseFixture, TestCase):
+    def test_pending_repair_keeps_child_checkpoints_authorized_then_fences_failure_or_cancel(self):
+        from .website_operations import bind_operation_run, observe_workflow_status, validate_operation, cancel_operation
+        for outcome in ('failed', 'cancelled'):
+            with self.subTest(outcome=outcome):
+                operation = WebsiteConnectionOperation.objects.create(connection=self.website,
+                    generation=self.website.generation, action='workflow', state='running',
+                    idempotency_key=f'repair:{outcome}', payload={'workflow': 'article_generation', 'attempt': 1})
+                binding = {**self.binding, 'operation_id': str(operation.pk), 'operation_attempt': 1, 'deletion_epoch': 0}
+                parent = ContentFactoryRun.objects.create(run_id=f'article-{outcome}', organization=self.org,
+                    domain=self.org.domain, github_repo=self.website.github_repo, workflow='article_generation',
+                    status='blocked', run_request=binding,
+                    result={'precondition_status': 'precondition_failed', 'repair_status': 'queued',
+                        'scan_run_id': f'scan-{outcome}'})
+                bind_operation_run(operation, parent)
+                operation.refresh_from_db()
+                self.assertEqual(operation.state, 'running')
+                child = ContentFactoryRun.objects.create(run_id=f'scan-{outcome}', organization=self.org,
+                    domain=self.org.domain, github_repo=self.website.github_repo, workflow='repo_scan',
+                    status='running', run_request=binding)
+                checkpoint = {**binding, 'run_id': child.run_id, 'status': 'running'}
+                self.assertEqual(validate_operation(self.website, checkpoint).pk, operation.pk)
+                observe_workflow_status(child, checkpoint)
+                operation.refresh_from_db()
+                self.assertEqual(operation.payload['run_id'], parent.run_id)
+                self.assertEqual(operation.state, 'running')
+                if outcome == 'failed':
+                    parent.result['repair_status'] = 'failed'
+                    parent.save(update_fields=['result'])
+                    observe_workflow_status(parent, {'status': 'blocked'})
+                else:
+                    cancel_operation(self.config, data=binding, idempotency_key=f'cancel-{outcome}')
+                    child.refresh_from_db()
+                    self.assertEqual(child.status, 'cancelled')
+                with self.assertRaises(WebsiteAuthorityError):
+                    validate_operation(self.website, checkpoint)
+                operation.refresh_from_db()
+                self.assertEqual(operation.state, 'blocked' if outcome == 'failed' else 'cancelled')
+
     def test_legacy_scaffold_late_response_cannot_create_active_child_after_disconnect(self):
         from types import SimpleNamespace
         from integrations.services.github import decide_scan_scaffold
