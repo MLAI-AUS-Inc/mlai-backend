@@ -17284,6 +17284,16 @@ class VibeMarketingRunLivePreviewView(APIView):
                 request.data.get("local_repo_path") or request.data.get("localRepoPath") or ""
             ),
         }
+        if payload["force"] and not _portable_article_preview_run(run):
+            from .website_models import WebsiteConnectionOperation
+            from .website_operations import advance_workflow_attempt
+            operation_id = scoped_run_contract(run).get("operation_id")
+            if operation_id and WebsiteConnectionOperation.objects.filter(
+                pk=operation_id, state__in={"failed", "blocked"},
+            ).exists():
+                # An explicit preview retry is a new reviewed attempt, without
+                # replaying drafting, changing the source or charging again.
+                advance_workflow_attempt(run)
         payload.update(_live_preview_github_token_payload(run))
         remote_data = _call_content_factory_live_preview(run_id=run_id, method="POST", payload=payload)
         run = self._persist_preview(run, remote_data)

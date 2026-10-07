@@ -107,6 +107,16 @@ GitHub account liveness probes do not require a selected repository or optional 
 
 Native article preview commits request a fresh repository token with `permission_mode=write`, `action=preview`, the original `run_id` and an immutable `expected_source_sha`. Preview authorization rechecks current repository identity, source, consent and operation fences; it does not require or establish a live publication receipt. The worker limits this temporary scope to Git objects and that run's owned review branch, then restores the original read scope. Preview tokens cannot request the workflow-files or CI-evidence profiles, and publication/merge still require their independent verified target and live deployment receipt.
 
+Mutation ledger `status=proposed|applied` records a Git effect and never transitions
+the originating workflow operation. A preview retry can reconcile the same owned
+patch after a failed build without reviving that workflow. Current consent, source,
+operation attempt and revocation fences still apply; workflow callbacks continue
+to validate their own terminal status and event allow-list.
+An owner-forced preview retry advances a failed or blocked original operation
+attempt before dispatch. The worker authenticates the new attempt against the
+backend's retained original request; it preserves source, consent and charge
+identity. Completed, cancelled or removed workflows cannot use this to resume.
+
 `websiteJourney.repository.framework` reports the selected contract or discovery
 framework only when its evidence belongs to the current source. Unknown values
 remain null. `proofContract={version:1,requirements:[...]}` supplies the handoff
