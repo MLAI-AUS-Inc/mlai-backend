@@ -52,7 +52,8 @@ def merge_reliability_fields(result, payload):
     return merged
 
 
-def reliability_presentation(result):
+def reliability_presentation(result, *, status=""):
+    """Project recovery controls from authoritative terminal and failure state."""
     result = result if isinstance(result, dict) else {}
     failure = result.get("failure") or {}
     recovery = result.get("recovery") or {}
@@ -60,6 +61,8 @@ def reliability_presentation(result):
     if failure:
         fields.update(errorCode=failure.get("code"), nextAction=failure.get("next_action"),
                       requiresUserAction=failure.get("requires_user_action"))
+    if (status or result.get("status")) in {"completed", "cancelled", "canceled", "denied"} or failure.get("retryable") is False or result.get("retryable") is False:
+        fields.update(resumeAvailable=False, retryAvailable=False)
     if recovery.get("state") == "pending":
         fields.update(resumeAvailable=False, retryAvailable=False, requiresUserAction=False,
                       nextAction="automatic_retry")

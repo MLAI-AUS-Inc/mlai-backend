@@ -2314,6 +2314,8 @@ def _sync_generation_callback_to_run(*, data: dict, run_status: str, step_status
     # only when the field is absent (older content-factory that predates this signal).
     remote_resume_available = data.get("resume_available")
     resume_available = True if remote_resume_available is None else bool(remote_resume_available)
+    if failure.get("retryable") is False or data.get("retryable") is False or run_status in {"completed", "cancelled", "denied"}:
+        resume_available = False
     if error_code.upper() in {"RUN_BUDGET_EXHAUSTED", "ONBOARDING_MODEL_BUDGET_EXHAUSTED", "SETUP_ATTEMPT_CAP_REACHED"}:
         resume_available = False
         failure = {**failure, "code": error_code, "retryable": False,
@@ -8965,7 +8967,7 @@ class ContentFactoryRunView(APIView):
             return Response({"error": "Run not found"}, status=status.HTTP_404_NOT_FOUND)
         return Response(_serialize_content_factory_run(run), status=status.HTTP_200_OK)
 
-    @guarded_service_write("config_write", only_repository=True, portable=True)
+    @guarded_service_write("config_write", only_repository=True, portable=True, cancellation_receipts=True)
     def put(self, request, run_id: str):
         existing_run = ContentFactoryRun.objects.filter(run_id=run_id).first()
         payload = sanitize_json_for_postgres(dict(request.data))

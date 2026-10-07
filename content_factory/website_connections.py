@@ -289,10 +289,10 @@ def authority_guard(data, *, action="read", domain="", github_repo="", require_s
     revision = payload.get("configuration_revision")
     if revision is not None and str(revision) != str(candidate.configuration_version):
         raise WebsiteAuthorityError("website_configuration_changed", "Refresh the reviewed website configuration.")
-    cleanup = action in {"worker_cleanup", "restoration", "restoration_read", "cancel_operation"}
+    cleanup = action in {"worker_cleanup", "restoration", "restoration_read", "cancel_operation", "cancel_receipt"}
     if cleanup:
         validate_operation(candidate, {**payload, "action": action}, worker_cleanup=action == "worker_cleanup",
-            restoration=action in {"restoration", "restoration_read"}, cancellation=action == "cancel_operation")
+            restoration=action in {"restoration", "restoration_read"}, cancellation=action == "cancel_operation", cancellation_receipt=action == "cancel_receipt")
         if domain.casefold() != candidate.organization.domain.casefold() or (github_repo and github_repo.casefold() != candidate.github_repo.casefold()):
             raise WebsiteAuthorityError("worker_cleanup_scope_mismatch", "Cleanup does not belong to this company and repository.")
     else:
@@ -327,7 +327,7 @@ def authority_guard(data, *, action="read", domain="", github_repo="", require_s
             raise WebsiteAuthorityError("website_connection_changed", "Website authority changed during verification. Refresh and retry.", retryable=True)
         if cleanup:
             validate_operation(connection, {**payload, "action": action}, worker_cleanup=action == "worker_cleanup",
-                restoration=action in {"restoration", "restoration_read"}, cancellation=action == "cancel_operation")
+                restoration=action in {"restoration", "restoration_read"}, cancellation=action == "cancel_operation", cancellation_receipt=action == "cancel_receipt")
         else:
             validate_authority(connection, payload, action=action, domain=domain, github_repo=github_repo)
             validate_operation(connection, payload)
@@ -381,7 +381,7 @@ def run_action_authority(run, action):
     return "setup"
 
 
-def guarded_service_write(action, *, only_repository=False, remote_actions=(), portable=False):
+def guarded_service_write(action, *, only_repository=False, remote_actions=(), portable=False, cancellation_receipts=False):
     """Fence legacy service handlers without weakening their existing permissions."""
     def decorate(method):
         @wraps(method)
@@ -403,6 +403,10 @@ def guarded_service_write(action, *, only_repository=False, remote_actions=(), p
                 if kwargs.get("action") in {"cancel", "deny"}:
                     return method(self, request, *args, **kwargs)
                 effective_action = "setup" if kwargs.get("action") == "resume" else action
+                if cancellation_receipts and payload.get("status") == "cancelled" and not payload.get("event_type") and not payload.get("event"):
+                    if REPOSITORY_CONFIG_FIELDS.intersection(payload):
+                        raise WebsiteAuthorityError("cancellation_scope_mismatch", "Cancellation receipts cannot update website configuration.")
+                    effective_action = "cancel_receipt"
                 if action == "publish" and kwargs.get("run_id") and kwargs.get("action") in {"approve", "publish-pr", "promote-bundle"}:
                     from workflow_runs.models import ContentFactoryRun
                     original = ContentFactoryRun.objects.filter(run_id=kwargs["run_id"]).first()
@@ -417,7 +421,7 @@ def guarded_service_write(action, *, only_repository=False, remote_actions=(), p
                         saved_contract = connection_contract(existing_run.run_request or {})
                         if not saved_contract or any(saved_contract.get(key) != value for key, value in connection_contract(payload).items() if key in {"website_connection_id", "connection_generation", "repository_id"}):
                             raise WebsiteAuthorityError("website_run_changed", "This run was not dispatched for the current website connection.")
-                    if action == "config_write":
+                    if action == "config_write" and effective_action != "cancel_receipt":
                         if REPOSITORY_CONFIG_FIELDS.intersection(payload):
                             source_payload = {**payload, **(payload.get("repository_inventory") if isinstance(payload.get("repository_inventory"), dict) else {})}
                             check_source_identity(connection, source_payload, required=True)
@@ -426,7 +430,7 @@ def guarded_service_write(action, *, only_repository=False, remote_actions=(), p
                         response = method(self, request, *args, **kwargs)
                     else:
                         response = None
-                    if action == "config_write" and response is not None and response.status_code < 300:
+                    if action == "config_write" and effective_action != "cancel_receipt" and response is not None and response.status_code < 300:
                         record_scan_evidence(connection, payload)
                         if run_id:
                             run = ContentFactoryRun.objects.filter(run_id=run_id).first()

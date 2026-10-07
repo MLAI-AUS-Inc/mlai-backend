@@ -11,6 +11,18 @@ from workflow_runs.serializers import ContentFactoryRunSyncSerializer
 
 
 class ReliabilityContractTests(unittest.TestCase):
+    def test_explicit_retry_denial_overrides_saved_resume_flags(self):
+        for result in [{"failure": {"retryable": False}}, {"retryable": False}]:
+            rendered = reliability_presentation({**result, "resume_available": True, "retry_available": True}, status="failed")
+            self.assertFalse(rendered["resumeAvailable"])
+            self.assertFalse(rendered["retryAvailable"])
+
+    def test_terminal_lifecycle_overrides_historical_recovery_flags(self):
+        for status in ["completed", "cancelled", "denied"]:
+            rendered = reliability_presentation({"resume_available": True, "retry_available": True}, status=status)
+            self.assertFalse(rendered["resumeAvailable"])
+            self.assertFalse(rendered["retryAvailable"])
+
     def test_live_body_requires_exact_content_and_canonical_identity(self):
         from content_factory.article_live_evidence import compare_live_body
         body = "<article><h1>Requirements</h1><p>" + "The cost is AUD 50 and it is not guaranteed. " * 5 + "</p></article>"
