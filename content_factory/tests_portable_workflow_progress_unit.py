@@ -83,3 +83,84 @@ class PortableWorkflowProgressTests(SimpleTestCase):
         _, steps = self.run_progress(scoped=False)
         self.assertEqual(steps["review"]["status"], "blocked")
         self.assertEqual(steps["review"]["runId"], "separate-website-setup")
+
+
+class PortablePreviewTests(SimpleTestCase):
+    def setUp(self):
+        self.run = SimpleNamespace(
+            pk=1, run_id="synthetic-draft", domain="publisher.example", github_repo="",
+            workflow="article_generation", status="completed",
+            run_request={"delivery_mode": "content_only", "delivery_mode_confirmed": True},
+            result={},
+        )
+
+    def artifacts(self, package=True, manifest=True):
+        stack = ExitStack()
+        stack.enter_context(patch.object(views, "_content_package_from_run", return_value={"contentPackaged": package}))
+        stack.enter_context(patch.object(views, "_component_manifest_from_run", return_value={"components": [{"id": "title"}]} if manifest else None))
+        return stack
+
+    def test_private_portable_preview_never_mints_repository_authority(self):
+        with self.artifacts(), patch.object(views, "scoped_run_contract", side_effect=AssertionError("No repository authority")):
+            self.assertEqual(views._live_preview_github_token_payload(self.run), {})
+
+    def test_incomplete_bound_unconfirmed_and_nonarticle_runs_keep_normal_authority_guard(self):
+        for changes, intent in (
+            ({"status": "running"}, {}),
+            ({"github_repo": "owner/site"}, {}),
+            ({"workflow": "article_system_setup"}, {}),
+            ({}, {"delivery_mode_confirmed": False}),
+            ({}, {"website_connection_id": "connection"}),
+        ):
+            with self.subTest(changes=changes, intent=intent):
+                run = SimpleNamespace(**{**vars(self.run), **changes, "run_request": {**self.run.run_request, **intent}})
+                with self.artifacts(), patch.object(views, "scoped_run_contract", side_effect=views.WebsiteAuthorityError("connection_required", "Reconnect.")) as authority:
+                    with self.assertRaises(views.WebsiteAuthorityError):
+                        views._live_preview_github_token_payload(run)
+                    authority.assert_called_once_with(run)
+        for package, manifest in ((False, True), (True, False)):
+            with self.artifacts(package, manifest), patch.object(views, "scoped_run_contract", side_effect=views.WebsiteAuthorityError("connection_required", "Reconnect.")):
+                with self.assertRaises(views.WebsiteAuthorityError):
+                    views._live_preview_github_token_payload(self.run)
+
+    def test_actual_preview_post_cannot_forward_local_checkout_or_credentials_for_portable_copy(self):
+        request = SimpleNamespace(data={"force": True, "localRepoPath": "/private/checkout", "github_token": "untrusted"})
+        view = views.VibeMarketingRunLivePreviewView()
+        from . import website_views
+        with self.artifacts(), patch.object(website_views, "_context", return_value=(object(), None, None)), \
+                patch.object(views.ContentFactoryRun.objects, "filter") as runs, \
+                patch.object(views, "_run_belongs_to_context", return_value=True), \
+                patch.object(view, "_resolve_run", return_value=(object(), self.run, None)), \
+                patch.object(views, "scoped_run_contract", side_effect=AssertionError("No repository authority")), \
+                patch.object(views, "_call_content_factory_live_preview", return_value={"available": True}) as dispatch, \
+                patch.object(view, "_persist_preview", return_value=self.run), \
+                patch.object(views, "_serialize_run", return_value={"runId": self.run.run_id}):
+            runs.return_value.first.return_value = self.run
+            result = view.post(request, self.run.run_id)
+        self.assertEqual(result.status_code, 200)
+        dispatch.assert_called_once_with(run_id=self.run.run_id, method="POST", payload={"force": True, "local_repo_path": ""})
+
+    def test_automatic_private_preview_retains_the_exact_run_and_uses_no_repository_authority(self):
+        with self.artifacts(), patch.object(views, "scoped_run_contract", side_effect=AssertionError("No repository authority")), \
+                patch.object(views, "_article_preview_should_refresh", return_value=False), \
+                patch.object(views, "_article_preview_should_auto_prepare", return_value=True), \
+                patch.object(views, "_call_content_factory_live_preview", return_value={"available": True}) as dispatch, \
+                patch.object(views, "_persist_live_preview_payload", return_value=self.run):
+            self.assertIs(views._ensure_article_live_preview(self.run), self.run)
+        dispatch.assert_called_once_with(run_id=self.run.run_id, method="POST", payload={"force": False})
+
+
+    def test_foreign_portable_preview_cannot_dispatch_or_resolve_saved_artifacts(self):
+        from . import website_views
+        request = SimpleNamespace(data={})
+        view = views.VibeMarketingRunLivePreviewView()
+        with patch.object(website_views, "_context", return_value=(object(), None, None)), \
+                patch.object(views.ContentFactoryRun.objects, "filter") as runs, \
+                patch.object(views, "_run_belongs_to_context", return_value=False), \
+                patch.object(view, "_resolve_run") as resolve, \
+                patch.object(views, "_call_content_factory_live_preview") as dispatch:
+            runs.return_value.first.return_value = self.run
+            result = view.post(request, self.run.run_id)
+        self.assertEqual(result.status_code, 404)
+        resolve.assert_not_called()
+        dispatch.assert_not_called()

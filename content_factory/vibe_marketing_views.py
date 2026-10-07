@@ -4636,7 +4636,25 @@ def _github_token_for_repo_operation(*, domain: str, github_repo: str, permissio
 
 
 
+def _portable_article_preview_run(run):
+    """Identify completed unbound copy that can use the private portable renderer."""
+    from .portable_drafts import original_portable_run
+    package = _content_package_from_run(run)
+    return bool(
+        run.workflow in ARTICLE_WORKFLOWS
+        and run.status == ContentFactoryRunStatus.COMPLETED
+        and original_portable_run(run)
+        and not str(run.github_repo or "").strip()
+        and package and package.get("contentPackaged")
+        and _component_manifest_from_run(run)
+    )
+
+
 def _live_preview_github_token_payload(run):
+    if _portable_article_preview_run(run):
+        # The portable renderer uses only this run's reviewed saved artifacts.
+        # Never mint repository credentials or grant website authority here.
+        return {}
     # Workers obtain ephemeral credentials from the broker using saved consent.
     with authority_guard(scoped_run_contract(run), action="preview"):
         return scoped_run_contract(run)
@@ -4645,8 +4663,7 @@ def _live_preview_github_token_payload(run):
 
 def _ensure_article_live_preview(run):
     try:
-        with authority_guard(scoped_run_contract(run), action="preview"):
-            pass
+        preview_authority = _live_preview_github_token_payload(run)
     except WebsiteAuthorityError:
         # Historical draft/status reads remain useful after disconnect; only
         # starting or refreshing the repository preview requires live consent.
@@ -4664,7 +4681,7 @@ def _ensure_article_live_preview(run):
     payload = _call_content_factory_live_preview(
         run_id=run.run_id,
         method="POST",
-        payload={"force": False, **_live_preview_github_token_payload(run)},
+        payload={"force": False, **preview_authority},
     )
     if isinstance(payload, dict) and payload.get("error"):
         logger.warning(
@@ -17227,7 +17244,9 @@ class VibeMarketingRunLivePreviewView(APIView):
             return error_response
         payload = {
             "force": _bool_from_request(request.data.get("force")),
-            "local_repo_path": request.data.get("local_repo_path") or request.data.get("localRepoPath") or "",
+            "local_repo_path": "" if _portable_article_preview_run(run) else (
+                request.data.get("local_repo_path") or request.data.get("localRepoPath") or ""
+            ),
         }
         payload.update(_live_preview_github_token_payload(run))
         remote_data = _call_content_factory_live_preview(run_id=run_id, method="POST", payload=payload)
