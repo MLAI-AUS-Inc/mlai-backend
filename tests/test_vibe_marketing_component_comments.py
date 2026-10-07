@@ -3564,7 +3564,8 @@ class VibeMarketingComponentCommentTests(_PublishRetryApprovalFixture, TestCase)
         self.assertEqual(steps["generate"]["status"], "blocked")
         self.assertEqual(steps["review"]["status"], "locked")
         self.assertEqual(steps["generate"]["primaryAction"]["label"], "Open setup diagnostics")
-        self.assertIn("build logs", steps["generate"]["summary"])
+        self.assertIn("Open diagnostics", steps["generate"]["summary"])
+        self.assertIn("new reviewed attempt", steps["generate"]["summary"])
         self.assertEqual(steps["publish"]["status"], "locked")
 
     def test_first_time_articles_setup_verification_rescan_unlocks_research(self):

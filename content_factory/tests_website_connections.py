@@ -750,6 +750,60 @@ class WebsiteConcurrentDisconnectTests(WebsiteDatabaseFixture, TransactionTestCa
 
 
 @override_settings(ROO_API_KEY='synthetic-test-key', INTERNAL_API_KEY='synthetic-test-key')
+class WebsiteCheckpointSourceTests(WebsiteDatabaseFixture, TransactionTestCase):
+    def setUp(self):
+        super().setUp()
+        record_scan_evidence(self.website, {'source_sha': SHA, 'publish_targets': [{
+            'target_id': 'native', 'publish_capability': 'direct',
+            'verification': {'status': 'passed', 'source_sha': SHA, 'preview_capable': True},
+        }]})
+
+    def _checkpoint(self, **changes):
+        from .service_views import ContentFactoryOrgConfigView
+        data = {**self.binding, 'repo_head_sha': SHA,
+            'repo_execution_contract': {'framework': 'nextjs', 'source_sha': SHA}, **changes}
+        return ContentFactoryOrgConfigView.as_view()(APIRequestFactory().put(
+            '/org-config', data, format='json', HTTP_X_API_KEY='synthetic-test-key'))
+
+    def test_source_checkpoint_preserves_accepted_proof_and_verifies_outside_transaction(self):
+        proof = self.website.targets.get(target_key='native')
+        def verify(current, sha):
+            self.assertFalse(connection.in_atomic_block)
+            self.assertEqual(current.pk, self.website.pk)
+            self.assertEqual(sha, SHA)
+            return sha
+        with patch('content_factory.website_connections.verify_repository_head', side_effect=verify) as head:
+            response = self._checkpoint()
+        self.assertEqual(response.status_code, 200, response.data)
+        head.assert_called_once()
+        self.config.refresh_from_db()
+        self.website.refresh_from_db()
+        retained = self.website.targets.get(target_key='native')
+        self.assertEqual(retained.contract, proof.contract)
+        self.assertEqual(retained.verified_at, proof.verified_at)
+        self.assertEqual(self.website.verified_sha, SHA)
+        self.assertTrue(self.website.capabilities['publishingReady'])
+        self.assertEqual(self.config.repo_execution_contract['framework'], 'nextjs')
+        self.assertEqual(self.config.article_template, '# Article\nTemplate')
+        self.assertEqual(self.config.design_guide, '# Design\nGuide')
+
+    def test_changed_provider_source_rejects_checkpoint_without_partial_writes(self):
+        before = deepcopy(self.config.repo_execution_contract)
+        snapshot_count = self.website.scan_snapshots.count()
+        with patch('content_factory.website_connections.verify_repository_head',
+                side_effect=WebsiteAuthorityError('website_source_changed', 'Source changed.')) as head:
+            response = self._checkpoint()
+        self.assertEqual(response.status_code, 409, response.data)
+        head.assert_called_once()
+        self.config.refresh_from_db()
+        self.website.refresh_from_db()
+        self.assertEqual(self.config.repo_execution_contract, before)
+        self.assertEqual(self.website.scan_snapshots.count(), snapshot_count)
+        self.assertEqual(self.website.verified_sha, SHA)
+        self.assertTrue(self.website.targets.get(target_key='native').capabilities['publishingReady'])
+
+
+@override_settings(ROO_API_KEY='synthetic-test-key', INTERNAL_API_KEY='synthetic-test-key')
 class WebsiteServiceBoundaryTests(WebsiteDatabaseFixture, TestCase):
     def _preview_token_request(self, **changes):
         from .service_views import ContentFactoryTokenView

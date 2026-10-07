@@ -312,7 +312,10 @@ def authority_guard(data, *, action="read", domain="", github_repo="", require_s
     targets = payload.get("publish_targets") if isinstance(payload.get("publish_targets"), list) else []
     target_promotion = action == "config_write" and any(isinstance(item, dict) and (item.get("verification") or {}).get("status") in {"passed", "verified", "preview_verified"} for item in targets)
     needs_native = action in {"setup", "publish", "merge", "preview"} or target_promotion
-    needs_head = needs_head or target_promotion
+    # Source-bearing checkpoints can retain an already accepted publishing
+    # proof even when they omit publish_targets. Verify that source before
+    # record_scan_evidence enters the write transaction, just as for new proof.
+    needs_head = needs_head or target_promotion or (action == "config_write" and bool(expected))
     if needs_native or needs_head:
         require_unlocked_remote_call()
     if needs_native:
