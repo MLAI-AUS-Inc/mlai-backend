@@ -9642,8 +9642,15 @@ def _workflow_progress(*, context=None, run=None, latest_runs=None, checks=None,
     scaffold_check = checks.get("scaffold", {})
     # Once this exact article run is actively orchestrating, a stale org-level
     # setup verdict must not turn its run page back into the setup wizard.
-    active_run_scoped_article = bool(run_scoped_article and run.status in RUNNING_RUN_STATUSES)
-    setup_blocked = bool(scaffold_check.get("setupBlocked")) and not active_run_scoped_article
+    from .portable_drafts import original_portable_run
+    independent_article_progress = bool(
+        run_scoped_article
+        and (
+            run.status in RUNNING_RUN_STATUSES
+            or (original_portable_run(run) and not str(run.github_repo or "").strip())
+        )
+    )
+    setup_blocked = bool(scaffold_check.get("setupBlocked")) and not independent_article_progress
     setup_merged = bool(scaffold_check.get("setupMerged"))
     generation_ready = bool(scaffold_check.get("generationReady"))
 
