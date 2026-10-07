@@ -1460,6 +1460,54 @@ class VibeMarketingComponentCommentTests(_PublishRetryApprovalFixture, TestCase)
         )
         self.assertEqual(response.data["livePreview"]["status"], "failed")
 
+    def test_failed_native_preview_retry_advances_original_attempt_without_redrafting(self):
+        from content_factory.website_models import WebsiteConnectionOperation
+        for state in ("failed", "blocked"):
+            with self.subTest(state=state):
+                website = self.client.website_fixture
+                operation = WebsiteConnectionOperation.objects.create(connection=website,
+                    generation=website.generation, action="workflow", state=state,
+                    idempotency_key=f"preview-retry:{state}",
+                    payload={"workflow": self.run.workflow, "run_id": self.run.run_id, "attempt": 1})
+                original = {**self.website_binding, "operation_id": str(operation.pk),
+                    "operation_attempt": 1, "deletion_epoch": 0, "roo_points_stamp_id": "saved-charge"}
+                self.run.run_request = original
+                self.run.status = state
+                self.run.save(update_fields=["run_request", "status", "updated_at"])
+                with patch("content_factory.vibe_marketing_views._call_content_factory_live_preview",
+                    return_value={"status": "building", "available": False}) as preview_call:
+                    response = self.client.post(f"/api/v1/vibe-marketing/runs/{self.run.run_id}/live-preview",
+                        {"force": True}, format="json")
+                self.assertEqual(response.status_code, 200, response.data)
+                operation.refresh_from_db()
+                self.run.refresh_from_db()
+                self.assertEqual(operation.state, "running")
+                self.assertEqual(operation.payload["attempt"], 2)
+                self.assertEqual(self.run.run_request, {**original, "operation_attempt": 2})
+                forwarded = preview_call.call_args.kwargs["payload"]
+                self.assertTrue(forwarded["force"])
+                self.assertEqual(forwarded["operation_id"], str(operation.pk))
+                self.assertEqual(forwarded["operation_attempt"], 2)
+                self.assertEqual(forwarded["expected_source_sha"], original["expected_source_sha"])
+
+    def test_cancelled_preview_retry_cannot_advance_or_dispatch(self):
+        from content_factory.website_models import WebsiteConnectionOperation
+        website = self.client.website_fixture
+        operation = WebsiteConnectionOperation.objects.create(connection=website,
+            generation=website.generation, action="workflow", state="cancelled",
+            idempotency_key="cancelled-preview-retry", payload={"attempt": 1, "run_id": self.run.run_id})
+        self.run.run_request = {**self.website_binding, "operation_id": str(operation.pk),
+            "operation_attempt": 1, "deletion_epoch": 0}
+        self.run.save(update_fields=["run_request", "updated_at"])
+        with patch("content_factory.vibe_marketing_views._call_content_factory_live_preview") as preview_call:
+            response = self.client.post(f"/api/v1/vibe-marketing/runs/{self.run.run_id}/live-preview",
+                {"force": True}, format="json")
+        self.assertEqual(response.status_code, 409)
+        self.assertEqual(response.data["code"], "website_operation_cancelled")
+        preview_call.assert_not_called()
+        operation.refresh_from_db()
+        self.assertEqual(operation.payload["attempt"], 1)
+
     def test_article_system_live_preview_failure_blocks_setup_run(self):
         setup_run = self._create_bound_run(
             run_id="article-system-preview-failed",

@@ -624,6 +624,64 @@ class WebsiteLifecycleTests(WebsiteDatabaseFixture, TestCase):
         self.assertEqual(post({**payload, 'status': 'proposed'}).status_code, 200)
         self.assertEqual(WebsiteRepositoryMutation.objects.get().status, 'applied')
 
+    def _fenced_mutation_payload(self, state):
+        operation = WebsiteConnectionOperation.objects.create(connection=self.website,
+            generation=self.website.generation, action='workflow', state=state,
+            idempotency_key=f'preview-ledger:{state}',
+            payload={'workflow': 'article_generation', 'attempt': 1, 'run_id': f'preview-ledger-{state}'})
+        binding = {**self.binding, 'operation_id': str(operation.pk), 'operation_attempt': 1,
+            'deletion_epoch': 0}
+        run = ContentFactoryRun.objects.create(run_id=operation.payload['run_id'],
+            workflow='article_generation', domain=self.org.domain, organization=self.org,
+            github_repo=self.website.github_repo, run_request=binding, status=state)
+        return operation, {**binding, 'run_id': run.run_id, 'mutation_id': f'preview-patch:{state}',
+            'base_sha': SHA, 'expected_source_sha': SHA,
+            'branch': f'cf-review/{run.run_id}', 'status': 'proposed',
+            'files': [{'path': 'content/new.md', 'ownership': 'created', 'after_sha256': 'b' * 64}]}
+
+    def _post_mutation(self, payload):
+        return WebsiteMutationView.as_view()(APIRequestFactory().post('/mutations', payload,
+            format='json', HTTP_X_API_KEY='synthetic-test-key'))
+
+    def test_preview_ledger_states_do_not_transition_terminal_workflows(self):
+        for state in ('failed', 'blocked', 'completed'):
+            with self.subTest(state=state):
+                operation, payload = self._fenced_mutation_payload(state)
+                response = self._post_mutation(payload)
+                self.assertEqual(response.status_code, 201, response.data)
+                response = self._post_mutation({**payload, 'status': 'applied', 'head_sha': 'c' * 40})
+                self.assertEqual(response.status_code, 200, response.data)
+                response = self._post_mutation(payload)
+                self.assertEqual(response.status_code, 200, response.data)
+                row = WebsiteRepositoryMutation.objects.get(pk=response.data['id'])
+                self.assertEqual(row.status, 'applied')
+                self.assertEqual(row.head_sha, 'c' * 40)
+                operation.refresh_from_db()
+                self.assertEqual(operation.state, state)
+
+    def test_mutation_ledger_still_rejects_cancelled_and_superseded_attempts(self):
+        for state in ('cancelled', 'failed'):
+            with self.subTest(state=state):
+                operation, payload = self._fenced_mutation_payload(state)
+                if state == 'failed':
+                    operation.payload = {**operation.payload, 'attempt': 2}
+                    operation.save(update_fields=['payload'])
+                response = self._post_mutation(payload)
+                self.assertEqual(response.status_code, 409)
+                self.assertEqual(response.data['code'],
+                    'website_operation_cancelled' if state == 'cancelled' else 'website_operation_changed')
+        self.assertFalse(WebsiteRepositoryMutation.objects.exists())
+
+    def test_terminal_workflow_callback_is_still_rejected_after_ledger_receipt(self):
+        operation, payload = self._fenced_mutation_payload('failed')
+        self.assertEqual(self._post_mutation(payload).status_code, 201)
+        with self.assertRaises(WebsiteAuthorityError) as error:
+            with authority_guard({**payload, 'status': 'completed', 'event_type': 'article_review_ready'}, action='read'):
+                self.fail('A late callback cannot revive a failed workflow.')
+        self.assertEqual(error.exception.code, 'website_operation_terminal')
+        operation.refresh_from_db()
+        self.assertEqual(operation.state, 'failed')
+
     @patch('content_factory.website_tokens.revoke_generation_tokens', return_value={'revoked': 1, 'pending': 0})
     @patch('content_factory.vibe_marketing_views._content_factory_remote_config', return_value={'enabled': True, 'base_url': 'https://worker.example.test'})
     @patch('integrations.http_client.post')

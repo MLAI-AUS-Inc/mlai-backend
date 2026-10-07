@@ -250,6 +250,10 @@ class WebsiteMutationView(APIView):
         data = sanitized_evidence(dict(request.data))
         try:
             authority = {**data, "expected_source_sha": data.get("expected_source_sha") or data.get("base_sha")}
+            # Ledger state describes a Git effect, not a workflow callback.
+            # Preserve it in the receipt without treating proposed/applied as
+            # a request to transition the original workflow operation.
+            authority.pop("status", None)
             mutation_id = str(data.get("mutation_id") or data.get("operation_id") or "").strip()
             if not data.get("mutation_id"):
                 # Historical operation_id was a patch hash. Preserve that key
