@@ -151,6 +151,26 @@ removed by the founder facade.
 
 ## Verification boundary
 
+Website setup recovery keeps terminal runs and their operation ledger consistent.
+A cancelled or denied dispatch response cannot reopen an operation. Starting a
+new reviewed setup reconciles a stale active operation only when its saved run
+matches the company, connection generation and operation attempt, then retains
+the new request identity. Duplicate requests for an in-flight setup retain the
+original identity.
+
+The durable run PUT accepts cancellation receipts for the exact saved workflow
+attempt, including an already cancelled run. That receipt can update run history
+and operation status, but cannot write website configuration, revive work or
+change a completed operation. Current setup preview failure callbacks remain
+valid after the corresponding terminal snapshot; old attempts and generations
+are rejected. An explicit `retryable: false` failure or a completed, cancelled or
+denied lifecycle suppresses Resume and Retry controls in run serialization.
+
+The recovery regressions run without a database or network:
+`python scripts/test_without_database.py
+content_factory.tests_website_operation_recovery_unit
+content_factory.test_reliability_contract`.
+
 Run `.venv/bin/python scripts/test_without_database.py
 content_factory.tests_activation_unit content_factory.tests_island_research_unit
 content_factory.tests_editorial_dispatch_unit

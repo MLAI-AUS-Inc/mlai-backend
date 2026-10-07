@@ -10,6 +10,11 @@ from .website_models import WebsiteConnectionOperation
 
 
 OPERATION_FIELDS = ("operation_id", "operation_attempt", "deletion_epoch")
+TERMINAL_WORKFLOW_STATES = {"completed", "failed", "blocked", "cancelled", "denied"}
+
+
+def _workflow_state(status):
+    return status if status in TERMINAL_WORKFLOW_STATES else "running"
 
 
 def deletion_epoch(connection):
@@ -17,11 +22,11 @@ def deletion_epoch(connection):
     return max((int(row.get("deletion_epoch", 0)) for row in (connection.blockers or []) if isinstance(row, dict)), default=0)
 
 
-def validate_operation(connection, payload, *, worker_cleanup=False, restoration=False, cancellation=False):
+def validate_operation(connection, payload, *, worker_cleanup=False, restoration=False, cancellation=False, cancellation_receipt=False):
     """Deny cancelled/deleted work, including legacy callbacks with a run ID."""
     from workflow_runs.models import ContentFactoryRun
     run_id = str(payload.get("run_id") or payload.get("job_id") or "")
-    if run_id and not worker_cleanup and not restoration and not cancellation:
+    if run_id and not worker_cleanup and not restoration and not cancellation and not cancellation_receipt:
         run = ContentFactoryRun.objects.filter(run_id=run_id).first()
         if run and (run.organization_id != connection.organization_id or run.status in {"cancelled", "denied"}):
             raise WebsiteAuthorityError("website_operation_cancelled", "This operation was cancelled or belongs to another company.")
@@ -32,7 +37,7 @@ def validate_operation(connection, payload, *, worker_cleanup=False, restoration
         payload = {**saved, **payload}
     identifier = payload.get("operation_id")
     if not identifier:
-        if worker_cleanup or restoration or cancellation or (deletion_epoch(connection) and run_id):
+        if worker_cleanup or restoration or cancellation or cancellation_receipt or (deletion_epoch(connection) and run_id):
             raise WebsiteAuthorityError("website_operation_required", "A current operation identity is required after removal.")
         return None
     try:
@@ -53,19 +58,26 @@ def validate_operation(connection, payload, *, worker_cleanup=False, restoration
         raise WebsiteAuthorityError("website_operation_changed", "The operation attempt and deletion watermark must be integers.") from exc
     if attempt < 1 or attempt != op.payload.get("attempt", 1) or epoch != deletion_epoch(connection):
         raise WebsiteAuthorityError("website_operation_changed", "The operation attempt or deletion watermark changed.")
-    if op.state in {"cancelled", "deleted", "denied"} and not cancellation:
+    if op.state in {"cancelled", "deleted", "denied"} and not (cancellation or cancellation_receipt):
         raise WebsiteAuthorityError("website_operation_cancelled", "This operation was cancelled.")
-    if op.state in {"completed", "failed", "blocked"} and not (worker_cleanup or restoration or cancellation):
+    if op.state in {"completed", "failed", "blocked"} and not (worker_cleanup or restoration or cancellation or cancellation_receipt):
         incoming_status = payload.get("status")
         event = payload.get("event_type") or payload.get("event")
         terminal_events = {
             "completed": {"article_complete", "generation_pr_opened", "publish_bundle_ready", "scan_complete", "article_system_setup_complete", "article_system_setup_completed", "scaffold_complete", "article_review_ready", "content_ready"},
-            "failed": {"generation_failed", "error", "article_system_setup_failed"},
-            "blocked": {"generation_blocked"},
+            "failed": {"generation_failed", "error", "article_system_setup_failed", "article_system_setup_preview_failed"},
+            "blocked": {"generation_blocked", "article_system_setup_failed", "article_system_setup_preview_failed"},
         }
-        if (incoming_status and incoming_status != op.state) or (event and event not in terminal_events[op.state]):
+        setup_failure = event in {"article_system_setup_failed", "article_system_setup_preview_failed"}
+        same_failure = setup_failure and op.state in {"failed", "blocked"} and incoming_status in {"failed", "blocked"}
+        if (incoming_status and incoming_status != op.state and not same_failure) or (event and event not in terminal_events[op.state]):
             raise WebsiteAuthorityError("website_operation_terminal", "This operation is terminal. Start a new reviewed attempt.")
-    if cancellation:
+    if cancellation_receipt:
+        if (op.action != "workflow" or op.state not in {"pending", "running", "failed", "blocked", "cancelled"}
+                or op.generation != connection.generation or str(payload.get("connection_generation")) != str(connection.generation)
+                or payload.get("status") != "cancelled" or not run_id or run_id != op.payload.get("run_id")):
+            raise WebsiteAuthorityError("cancellation_scope_mismatch", "A cancellation receipt must match the saved workflow attempt.")
+    elif cancellation:
         if (op.action != "workflow" or op.state != "cancelled" or op.generation != connection.generation
                 or str(payload.get("connection_generation")) != str(connection.generation) or not run_id or run_id != op.payload.get("run_id")):
             raise WebsiteAuthorityError("cancellation_scope_mismatch", "Cancellation is limited to the already-fenced operation.")
@@ -104,8 +116,31 @@ def reserve_workflow_operation(connection, *, workflow, payload):
         "client_request_id", "idempotency_key", "roo_points_gate", "roo_points_authorized", "operation_id", "operation_attempt", "deletion_epoch"}})
     key = f"{connection.pk}:workflow:{payload['client_request_id']}"
     with authority_guard(payload, action="read"):
-        active = connection.operations.filter(generation=connection.generation, action="workflow", state__in=["running", "pending"],
-            payload__request_digest=digest).first() if workflow in {"repo_scan", "content_factory_scan", "article_system_setup"} else None
+        active = None
+        if workflow in {"repo_scan", "content_factory_scan", "article_system_setup"}:
+            from workflow_runs.models import ContentFactoryRun
+            candidates = connection.operations.select_for_update().filter(
+                generation=connection.generation, action="workflow", state__in=["running", "pending"],
+                payload__request_digest=digest,
+            )
+            for candidate in candidates:
+                run = ContentFactoryRun.objects.select_for_update().filter(
+                    run_id=candidate.payload.get("run_id"), organization_id=connection.organization_id,
+                ).first() if candidate.payload.get("run_id") else None
+                if run and run.status in TERMINAL_WORKFLOW_STATES:
+                    saved = run.run_request or {}
+                    if (saved.get("operation_id") != str(candidate.pk)
+                            or saved.get("website_connection_id") != str(connection.pk)
+                            or saved.get("connection_generation") != connection.generation
+                            or saved.get("operation_attempt", 1) != candidate.payload.get("attempt", 1)):
+                        raise WebsiteAuthorityError("website_operation_changed", "Refresh the saved setup before starting another attempt.")
+                    candidate.state = _workflow_state(run.status)
+                    candidate.receipt = {**(candidate.receipt or {}), "status": candidate.state,
+                        "run_id": run.run_id, "remote_outcome_unknown": False}
+                    candidate.save(update_fields=["state", "receipt", "updated_at"])
+                    continue
+                active = candidate
+                break
         if active:
             key = active.idempotency_key
             payload["client_request_id"] = active.payload["client_request_id"]
@@ -131,7 +166,7 @@ def bind_operation_run(operation, run):
         with authority_guard(binding, action="read"):
             operation.refresh_from_db()
             operation.payload = {**operation.payload, "run_id": run.run_id}
-            operation.state = "completed" if run.status == "completed" else "failed" if run.status in {"failed", "blocked"} else "running"
+            operation.state = _workflow_state(run.status)
             operation.receipt = {"status": operation.state, "run_id": run.run_id, "repository_modified": None, "remote_outcome_unknown": True}
             operation.save(update_fields=["payload", "state", "receipt", "updated_at"])
     except WebsiteAuthorityError:
@@ -157,11 +192,11 @@ def bind_operation_run(operation, run):
 def operation_summary(op):
     """Public receipt without internal provider credentials or source bodies."""
     state = op.state
-    if op.action == "workflow" and state == "running" and op.payload.get("run_id"):
+    if op.action == "workflow" and state in {"running", "pending"} and op.payload.get("run_id"):
         from workflow_runs.models import ContentFactoryRun
         run = ContentFactoryRun.objects.filter(run_id=op.payload["run_id"]).first()
         if run and run.status in {"completed", "failed", "cancelled", "denied", "blocked"}:
-            state = "failed" if run.status == "blocked" else run.status
+            state = _workflow_state(run.status)
     return {"id": str(op.pk), "action": op.action, "state": state, "attempt": op.payload.get("attempt", 1),
         "runId": op.payload.get("run_id"), "updatedAt": op.updated_at.isoformat(), "receipt": op.receipt}
 
@@ -225,9 +260,10 @@ def observe_workflow_status(run, payload=None):
         baseline = op.payload.get("resume_execution_version")
         if attempt != op.payload.get("attempt") and (not version or not baseline or tuple(version) <= tuple(baseline)):
             return
-    if state not in {"completed", "failed", "blocked"}:
-        state = "running"
-    if op.state in {"completed", "failed", "blocked"} and state != op.state:
+    state = _workflow_state(state)
+    if op.state == "completed" and state != op.state:
+        return
+    if op.state in {"failed", "blocked"} and state != op.state and state not in {"cancelled", "denied"}:
         return
     op.state = state
     op.payload = {**op.payload, "resume_pending": False}

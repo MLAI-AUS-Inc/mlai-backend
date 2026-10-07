@@ -10712,7 +10712,7 @@ def _serialize_run(
                 context=context, run=run, latest_runs=latest_runs, checks=checks, topic_candidates=topic_candidates
             ),
             "result": _strip_missing_setup_run_refs(_compact_result_for_run(run)),
-            **reliability_presentation(result),
+            **reliability_presentation(result, status=run.status),
         }
     content_package = _content_package_from_run(run)
     artifacts = _nested_run_result_value(result, "artifacts") or []
@@ -10788,7 +10788,7 @@ def _serialize_run(
             context=context, run=run, latest_runs=latest_runs, checks=checks, topic_candidates=topic_candidates
         ),
         "result": _strip_missing_setup_run_refs(response_result),
-        **reliability_presentation(result),
+        **reliability_presentation(result, status=run.status),
     }
 
 
