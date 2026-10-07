@@ -15,6 +15,92 @@ from .website_contract import cleanup_plan, safe_repository_path, evidence_diges
 from .website_models import WebsiteConnection, WebsiteConnectionOperation, WebsiteScanSnapshot
 
 
+def _merge_connection_identity(website):
+    """Fence authenticated merge observations to the currently selected source."""
+    return (str(website.pk), website.generation, website.repository_id,
+        website.github_repo.casefold(), website.branch, website.state,
+        website.installation_id, website.configuration_version)
+
+
+def _merge_intent_matches(website, run, pull, source_sha):
+    """Accept only a merged GitHub PR matching our saved pre-merge intent."""
+    intent = (run.result or {}).get("publish_merge_intent") or {}
+    request = run.run_request or {}
+    head, base = pull.get("head") or {}, pull.get("base") or {}
+    if not (intent.get("website_connection_id") == str(website.pk)
+            and intent.get("connection_generation") == website.generation
+            and intent.get("repository_id") == website.repository_id
+            and intent.get("run_id") == run.run_id
+            and str(intent.get("github_repo") or "").casefold() == website.github_repo.casefold()
+            and intent.get("source_sha") == website.verified_sha
+            and intent.get("base_branch") == website.branch
+            and request.get("website_connection_id") == str(website.pk)
+            and request.get("connection_generation") == website.generation
+            and run.github_repo.casefold() == website.github_repo.casefold()
+            and pull.get("merged") is True and pull.get("merge_commit_sha") == source_sha
+            and pull.get("number") == intent.get("pr_number")
+            and base.get("ref") == website.branch
+            and head.get("sha") == intent.get("head_sha")
+            and head.get("ref") == intent.get("head_branch")):
+        return False
+    return all((side.get("repo") or {}).get("id") == website.repository_id
+        and str((side.get("repo") or {}).get("full_name") or "").casefold() == website.github_repo.casefold()
+        for side in (head, base))
+
+
+def _find_owned_merge(website, organization_id, source_sha):
+    """Resolve webhook races with read-only authenticated PR evidence, outside locks."""
+    from workflow_runs.models import ContentFactoryRun
+    from .website_connections import authority_guard, require_unlocked_remote_call
+    from integrations import http_client
+    from integrations.services.github_app import create_installation_access_token
+    rows = ContentFactoryRun.objects.filter(organization_id=organization_id,
+        github_repo__iexact=website.github_repo,
+        run_request__website_connection_id=str(website.pk), run_request__connection_generation=website.generation)
+    saved = rows.filter(result__merge_status="merged", result__merge_response__sha=source_sha).first()
+    identity = _merge_connection_identity(website)
+    if saved:
+        return {"run_id": saved.run_id, "connection_identity": identity}
+    candidates = rows.filter(result__publish_merge_intent__website_connection_id=str(website.pk),
+        result__publish_merge_intent__connection_generation=website.generation,
+        result__publish_merge_intent__repository_id=website.repository_id,
+        result__publish_merge_intent__source_sha=website.verified_sha).order_by("-updated_at")[:10]
+    for run in candidates:
+        intent = (run.result or {}).get("publish_merge_intent") or {}
+        number = intent.get("pr_number")
+        if not isinstance(number, int) or isinstance(number, bool) or number <= 0:
+            continue
+        credential = None
+        headers = {}
+        try:
+            binding = {**contract_for(website), "domain": website.organization.domain, "github_repo": website.github_repo}
+            with authority_guard(binding, action="read"):
+                pass
+            require_unlocked_remote_call()
+            credential = create_installation_access_token(installation_id=website.installation_id,
+                repository=website.github_repo, repository_id=website.repository_id, permission_mode="read", use_cache=False)
+            headers = {"Authorization": f"Bearer {credential.token}", "Accept": "application/vnd.github+json"}
+            response = http_client.get(f"https://api.github.com/repos/{website.github_repo}/pulls/{number}",
+                headers=headers, timeout=(3, 15))
+            response.raise_for_status()
+            pull = response.json()
+            if not isinstance(pull, dict) or not _merge_intent_matches(website, run, pull, source_sha):
+                continue
+            with authority_guard(binding, action="read") as current:
+                if _merge_connection_identity(current) == identity:
+                    return {"run_id": run.run_id, "connection_identity": identity}
+        except Exception:
+            # Unavailable or ambiguous PR evidence remains an external source change.
+            continue
+        finally:
+            if credential:
+                try:
+                    http_client.delete("https://api.github.com/installation/token", headers=headers, timeout=(3, 10))
+                except Exception:
+                    pass
+    return None
+
+
 def revoke_installation(installation_id, *, repository_ids=None, reason="github_authorization_revoked"):
     """Revoke exact GitHub identities; an install/reinstall event never reconnects."""
     rows = OrganizationContentConfig.objects.filter(website_connection__installation_id=str(installation_id),
@@ -57,17 +143,31 @@ def handle_website_github_event(event_type, payload):
             website = config.website_connection
             if payload.get("ref") != f"refs/heads/{website.branch}" or website.verified_sha == source_sha:
                 continue
+            owned_merge = _find_owned_merge(website, config.organization_id, source_sha)
             from organizations.models import Organization
             with transaction.atomic():
                 Organization.objects.select_for_update().get(pk=config.organization_id)
                 website = WebsiteConnection.objects.select_for_update().get(pk=website.pk)
+                if (website.state not in {"connected", "paused"} or website.repository_id != repo["id"]
+                        or payload.get("ref") != f"refs/heads/{website.branch}" or website.verified_sha == source_sha):
+                    continue
+                if owned_merge and owned_merge["connection_identity"] != _merge_connection_identity(website):
+                    owned_merge = None
                 _, created = WebsiteScanSnapshot.objects.get_or_create(connection=website, generation=website.generation,
                     run_id=f"github-head:{source_sha}", fingerprint=evidence_digest({"source_sha": source_sha}),
                     defaults={"source_sha": source_sha, "detector_version": "github_head", "evidence": {"source": "github_push", "branch": website.branch}})
                 if created:
                     website.configuration_version += 1
-                    website.capabilities = {**website.capabilities, "publishingReady": False, "previewSupported": False}
-                    website.blockers = [item for item in website.blockers if item.get("code") != "repository_source_changed"] + [{"code": "repository_source_changed", "message": "The repository changed. Verify the current source before publishing.", "source_sha": source_sha}]
+                    if not owned_merge:
+                        website.capabilities = {**website.capabilities, "publishingReady": False, "previewSupported": False}
+                    WebsiteConnectionOperation.objects.get_or_create(
+                        idempotency_key=f"{website.pk}:source-reverify:{website.generation}:{source_sha}", defaults={
+                            "connection": website, "generation": website.generation, "action": "source-reverify",
+                            "payload": {"source_sha": source_sha, "target_id": config.default_publish_target_id,
+                                "owned_merge_run_id": owned_merge["run_id"] if owned_merge else "", "scan_required": not bool(owned_merge)},
+                            "receipt": {"status": "verification_queued", "repository_modified": False}})
+                    if not owned_merge:
+                        website.blockers = [item for item in website.blockers if item.get("code") != "repository_source_changed"] + [{"code": "repository_source_changed", "message": "The repository changed. Scan and verify the current source before publishing.", "source_sha": source_sha}]
                     website.save(update_fields=["configuration_version", "capabilities", "blockers", "updated_at"])
                     result["invalidated"] += 1
     else:
@@ -242,6 +342,12 @@ def process_website_connection_operations(*, limit=20, now=None, connection_id=N
     reconcile_support_verifications(limit=limit, connection_id=connection_id)
     monitor_cleanup_pull_requests(limit=limit, connection_id=connection_id)
     for identifier in ids:
+        if WebsiteConnectionOperation.objects.filter(pk=identifier, action="source-reverify").exists():
+            outcome = _process_source_reverification(identifier, now)
+            if outcome is not None:
+                result["processed"] += 1
+                result["pending" if outcome == "pending" else "completed"] += 1
+            continue
         if WebsiteConnectionOperation.objects.filter(pk=identifier, action="worker_followup").exists():
             outcome = _process_worker_followup(identifier, now)
             if outcome is not None:
@@ -310,8 +416,10 @@ def process_website_connection_operations(*, limit=20, now=None, connection_id=N
                         body = response.json()
                     except (ValueError, AttributeError):
                         body = {}
-                    confirmed = response.status_code == 204 or (response.status_code == 200 and isinstance(body, dict)
+                    confirmed = response.status_code in {204, 404} or (response.status_code == 200 and isinstance(body, dict)
                         and body.get("cleanup_success") is True and body.get("cleanup_pending") is not True and body.get("cleanupPending") is not True)
+                    if response.status_code == 404:
+                        op.receipt.setdefault("preview_absent_run_ids", []).append(run_id)
                     if not confirmed:
                         preview_pending.append(run_id)
                 pending_merges = disable_pending_native_auto_merge(op.connection, op.payload.get("disable_auto_merge_prs", []))
@@ -526,3 +634,74 @@ def approve_cleanup_proposal(config, *, user, data):
             http_client.delete('https://api.github.com/installation/token', headers=headers, timeout=(3, 10))
         except Exception:
             pass
+
+
+def _process_source_reverification(identifier, now):
+    """Re-scan external changes and then authenticate current CI/live proof."""
+    from .website_connections import authority_guard, require_unlocked_remote_call
+    from .website_contract import WebsiteAuthorityError
+    from .website_verification import discover_source_attestation, record_ci_attestation, verify_live_deployment
+    from .vibe_marketing_views import _content_factory_remote_config, _content_factory_headers, _create_local_run
+    from .website_operations import reserve_workflow_operation, bind_operation_run
+    from integrations import http_client
+    with transaction.atomic():
+        op = WebsiteConnectionOperation.objects.select_for_update().select_related("connection__organization").filter(pk=identifier, state="pending").first()
+        if op is None or op.next_attempt_at and op.next_attempt_at > now:
+            return None
+        op.attempts += 1
+        attempt = op.attempts
+        op.next_attempt_at = now + timedelta(minutes=5)
+        op.save(update_fields=["attempts", "next_attempt_at", "updated_at"])
+    binding = {**contract_for(op.connection), "domain": op.connection.organization.domain,
+        "connection_generation": getattr(op, "generation", op.connection.generation),
+        "github_repo": op.connection.github_repo, "expected_source_sha": op.payload["source_sha"]}
+    state, receipt = "pending", dict(op.receipt)
+    try:
+        with authority_guard(binding, action="read") as website:
+            target = website.targets.filter(generation=website.generation, target_key=op.payload.get("target_id")).first()
+        if op.payload.get("scan_required") and not receipt.get("scan_run_id"):
+            owned_merge = _find_owned_merge(website, website.organization_id, op.payload["source_sha"])
+            if owned_merge:
+                with authority_guard(binding, action="read") as current:
+                    if owned_merge["connection_identity"] != _merge_connection_identity(current):
+                        raise WebsiteAuthorityError("website_connection_changed", "Website authority changed during merge verification.", retryable=True)
+                    updated_payload = {**op.payload, "owned_merge_run_id": owned_merge["run_id"], "scan_required": False}
+                    changed = WebsiteConnectionOperation.objects.filter(pk=identifier, attempts=attempt,
+                        state="pending", generation=current.generation).update(payload=updated_payload, updated_at=timezone.now())
+                    if changed != 1:
+                        raise WebsiteAuthorityError("website_operation_cancelled", "The source verification operation changed.")
+                    op.payload = updated_payload
+        if op.payload.get("scan_required") and not receipt.get("scan_run_id"):
+            require_unlocked_remote_call()
+            remote = _content_factory_remote_config()
+            if not remote["enabled"]:
+                raise WebsiteAuthorityError("source_reverification_unavailable", "Repository scanning is unavailable.", retryable=True)
+            scan_payload = {**binding, "client_request_id": f"source-rescan:{op.pk}", "force_refresh": True}
+            scan_op = reserve_workflow_operation(website, workflow="repo_scan", payload=scan_payload)
+            response = http_client.post(f"{remote['base_url']}/api/runs/scan", json=scan_payload,
+                headers=_content_factory_headers(), timeout=(3, 30))
+            response.raise_for_status()
+            remote_run = response.json()
+            if not remote_run.get("run_id"):
+                raise WebsiteAuthorityError("source_reverification_unavailable", "The scan dispatch could not be confirmed.", retryable=True)
+            run = _create_local_run(workflow="repo_scan", domain=website.organization.domain,
+                github_repo=website.github_repo, payload=scan_payload, remote_data=remote_run)
+            bind_operation_run(scan_op, run)
+            receipt["scan_run_id"] = run.run_id
+        if target is None:
+            raise WebsiteAuthorityError("verified_target_required", "Waiting for a current verified publishing target.", retryable=True)
+        proof = discover_source_attestation(website, target, op.payload["source_sha"])
+        ci = record_ci_attestation(proof)
+        config = OrganizationContentConfig.objects.get(website_connection=website)
+        deployment = verify_live_deployment(config, data=ci.receipt)
+        state, receipt = "completed", {**receipt, "status": "verified", "source_sha": op.payload["source_sha"],
+            "ci_operation_id": str(ci.pk), "deployment_operation_id": str(deployment.pk), "repository_modified": False}
+    except WebsiteAuthorityError as exc:
+        receipt.update(status="verification_pending", code=exc.code, retryable=exc.retryable)
+        if exc.code in {"website_disconnected", "website_connection_changed", "website_operation_cancelled"}:
+            state = "cancelled"
+    except Exception:
+        receipt.update(status="verification_pending", code="source_reverification_unavailable", retryable=True)
+    WebsiteConnectionOperation.objects.filter(pk=identifier, attempts=attempt, state="pending").update(
+        state=state, receipt=receipt, next_attempt_at=now + timedelta(seconds=min(3600, 15 * 2 ** min(attempt, 8))), updated_at=timezone.now())
+    return state

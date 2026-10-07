@@ -270,7 +270,7 @@ def configure_custom_generation(config, *, binding, contract, generation, operat
         config.save(update_fields=[*bodies, "updated_at"])
         target.contract = {**target.contract, "live_marker": marker}
         target.save(update_fields=["contract", "updated_at"])
-        website.capabilities = {**website.capabilities, "generationReady": True}
+        website.capabilities = {**website.capabilities, "templatesValid": True, "generationReady": False}
         website.configuration_version += 1
         website.save(update_fields=["capabilities", "configuration_version", "updated_at"])
         if operation is not None:
@@ -305,15 +305,18 @@ def promote_custom_target(website, *, contract, proof):
     target_id = proof["target_id"]
     previous = WebsiteConnectionTarget.objects.filter(connection=website, target_key=target_id, generation=website.generation).first()
     target_contract = custom_target_contract(contract=contract, proof=proof, previous=previous.contract if previous else None)
-    WebsiteConnectionTarget.objects.update_or_create(connection=website, target_key=target_id, defaults={"generation": website.generation,
+    from .incident_guards import target_update_allowed, proof_stamp
+    if not target_update_allowed(previous, target_contract, generation=website.generation, sha=proof["source_sha"]):
+        raise WebsiteAuthorityError("website_target_verification_required", "A weaker custom contract cannot replace the accepted target proof.")
+    accepted_at = previous.verified_at if previous and previous.contract == target_contract else proof_stamp(proof) or timezone.now()
+    WebsiteConnectionTarget.objects.update_or_create(connection=website, target_key=target_id, generation=website.generation, defaults={
         "adapter": "custom_contract_v1", "adapter_version": "1", "source_sha": proof["source_sha"], "contract": target_contract,
-        "capabilities": {"publishingReady": True, "adapterCertified": True}, "verified_at": timezone.now()})
+        "capabilities": {"publishingReady": False, "adapterCertified": True}, "verified_at": accepted_at})
     config = OrganizationContentConfig.objects.get(website_connection=website)
     config.publish_targets, config.default_publish_target_id = [target_contract], target_id
     config.save(update_fields=["publish_targets", "default_publish_target_id", "updated_at"])
-    website.capabilities = {**website.capabilities, "publishingReady": website.state == "connected", "previewSupported": True,
-        "generationReady": website.capabilities.get("generationReady") is True and bool(target_contract.get("live_marker"))}
-    website.last_verified_at = timezone.now()
+    website.capabilities = {**website.capabilities, "publishingReady": False, "previewSupported": True, "generationReady": False}
+    website.last_verified_at = accepted_at
     website.save(update_fields=["capabilities", "last_verified_at", "updated_at"])
 
 

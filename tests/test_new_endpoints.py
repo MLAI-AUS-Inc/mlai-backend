@@ -521,7 +521,7 @@ class EndpointTests(ContentFactoryTestDataMixin, TestCase):
         args, _kwargs = mock_post.call_args
         self.assertIn('/api/runs/scan-run-approval-1/approve', args[0])
 
-    def test_github_scaffold_returns_existing_preview_when_already_scaffolded(self):
+    def test_github_scaffold_rejects_legacy_flag_without_verified_integration(self):
         organization = Organization.objects.create(name="Bird Psychology", domain="birdpsychology.com.au")
         OrganizationContentConfig.objects.create(
             organization=organization,
@@ -540,10 +540,8 @@ class EndpointTests(ContentFactoryTestDataMixin, TestCase):
             format='json',
         )
 
-        self.assertEqual(response.status_code, status.HTTP_200_OK)
-        self.assertEqual(response.data["status"], "already_scaffolded")
-        self.assertEqual(response.data["pr_url"], "https://github.com/acme/site/pull/1")
-        self.assertEqual(response.data["preview_url"], "https://preview.example.com/articles")
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertNotEqual(response.data.get("status"), "already_scaffolded")
 
     def test_channel_activity_endpoints(self):
         # Setup: Link user to Slack ID
@@ -2013,7 +2011,7 @@ class ContentFactoryCallbackTests(ContentFactoryTestDataMixin, TestCase):
         self.assertEqual(pending["fallbackPreviewUrl"], "https://fallback.example/articles")
 
     @patch('integrations.services.slack.SlackService.send_dm')
-    def test_article_system_setup_completed_unlocks_before_verification_scan(self, mock_send_dm):
+    def test_article_system_setup_completed_preserves_legacy_flag_before_verification_scan(self, mock_send_dm):
         organization = Organization.objects.create(name="MLAI", domain="mlai.au")
         config = OrganizationContentConfig.objects.create(
             organization=organization,
@@ -2051,7 +2049,7 @@ class ContentFactoryCallbackTests(ContentFactoryTestDataMixin, TestCase):
         self.assertEqual(pending["merge_status"], "merged")
         self.assertTrue(pending["generationReady"])
         self.assertEqual(pending["rescan_run_id"], "verify-setup-complete")
-        self.assertTrue(config.articles_scaffolded)
+        self.assertFalse(config.articles_scaffolded)
         self.assertEqual(config.articles_scaffold_pr_url, "https://github.com/MLAI-AUS-Inc/mlai-au/pull/9")
         self.assertEqual(config.article_system["state"], "roo_scaffolded")
 
@@ -2074,7 +2072,7 @@ class ContentFactoryCallbackTests(ContentFactoryTestDataMixin, TestCase):
         self.assertEqual(scan_response.status_code, status.HTTP_200_OK)
         config.refresh_from_db()
         self.assertNotIn("pending_article_system_setup", config.article_system)
-        self.assertTrue(config.articles_scaffolded)
+        self.assertFalse(config.articles_scaffolded)
         self.assertEqual(config.article_system["state"], "existing")
 
     @patch('integrations.services.slack.SlackService.send_dm')
@@ -2694,9 +2692,9 @@ class ContentFactoryCallbackTests(ContentFactoryTestDataMixin, TestCase):
 
         mock_send_dm.assert_called_once()
         message = mock_send_dm.call_args[0][1]
-        self.assertIn("registry-driven SEO system", message)
-        self.assertIn("shared/lib/seo/public-pages.ts", message)
-        self.assertIn("typed registry entries", message)
+        self.assertIn("Repository inventory is saved", message)
+        self.assertIn("Verify the article integration", message)
+        self.assertIn("portable draft", message)
 
     @patch('integrations.services.slack.SlackService.send_dm')
     def test_scan_complete_persists_registry_target_without_article_system_payload(self, mock_send_dm):
@@ -2753,9 +2751,9 @@ class ContentFactoryCallbackTests(ContentFactoryTestDataMixin, TestCase):
 
         mock_send_dm.assert_called_once()
         message = mock_send_dm.call_args[0][1]
-        self.assertIn("registry-driven SEO system", message)
-        self.assertIn("not safe to patch automatically yet", message)
-        self.assertIn("route field is ambiguous", message)
+        self.assertIn("Repository inventory is saved", message)
+        self.assertIn("Verify the article integration", message)
+        self.assertIn("portable draft", message)
 
     @patch('integrations.services.slack.SlackService.send_dm')
     def test_generation_failed_auto_discovery_no_opportunities_mentions_research_scope(self, mock_send_dm):

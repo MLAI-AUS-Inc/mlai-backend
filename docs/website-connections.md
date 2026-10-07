@@ -55,7 +55,7 @@ The existing scheduled-discovery process runs `process_website_connection_operat
 
 Direct article PR merges require an applied ownership receipt for the same publishing run, connection generation, branch and exact live PR head, then send that SHA as GitHub's compare-and-swap condition. Setup merges require the exact verified preview commit. External PR pushes cannot inherit an earlier approval just because checks pass.
 
-Verified GitHub installation deletion/suspension, repository removal, transfer, rename, archive and deletion revoke selected connections. Default-branch pushes retain consent generation, advance configuration version, record observed source identity and revoke publication readiness. Source-bearing config writes and publication authorization reject stale `expected_source_sha`; readiness promotion also verifies the current GitHub branch SHA. Templates are retained. Duplicate push receipts are idempotent. The existing installation reconciliation sweep also revokes after confirmed installation loss; inconclusive API failures do not grant or revive access.
+Verified GitHub installation deletion/suspension, repository removal, transfer, rename, archive and deletion revoke selected connections. Default-branch pushes retain consent generation, advance configuration version and record observed source identity. Authenticated owned merges retain existing capabilities while current-source verification runs; other pushes revoke publication readiness and require a rescan. Source-bearing config writes and publication authorization reject stale `expected_source_sha`; readiness promotion also verifies the current GitHub branch SHA. Templates are retained. Duplicate push receipts are idempotent. The existing installation reconciliation sweep also revokes after confirmed installation loss; inconclusive API failures do not grant or revive access.
 
 `python manage.py repair_website_connections --domain example.test` is read-only and prints identity/digest findings without template bodies. `--apply` is a separate operational repair: it creates disconnected legacy records and archives invalid template envelopes. It never guesses extracted template content, enables publication or edits GitHub. Use it only after reviewing the dry run and receiving environment-specific approval.
 
@@ -105,7 +105,47 @@ All reconciliation actions lease an operation in a short transaction and release
 
 GitHub account liveness probes do not require a selected repository or optional `/user` endpoint. They have bounded cache TTLs and a short probe lease. Repository inventory uses read tokens; setup and publication separately require write permission. Completed readiness cannot bypass that distinction. Ephemeral probe and verification tokens are revoked after use.
 
+`websiteJourney.repository.framework` reports the selected contract or discovery
+framework only when its evidence belongs to the current source. Unknown values
+remain null. `proofContract={version:1,requirements:[...]}` supplies the handoff
+acceptance requirements: `pinned_source_sha`, `safe_publish_target`, `build_proof`,
+`browser_proof`, `workflows_permission`, `ci_artifact_digest`, and
+`live_verification`. Inventory alone never satisfies this contract.
+
+Website capabilities expose `templatesValid` separately from accepted native
+generation and publication proof. Native article generation needs current target
+build/browser proof and read authority; publication additionally needs the exact
+live marker receipt. `generationReady` remains a compatibility projection of
+native readiness. The legacy `articles_scaffolded` database flag grants no
+readiness and is not set by completion/scan callbacks. Slack's compatibility
+fields are derived from accepted verification evidence.
+
 Every new workflow reserves a durable operation before dispatch. Worker authority includes `operation_id`, `operation_attempt`, `deletion_epoch` and the connection tuple. A repeated active logical scan/setup restores the persisted dispatch identity even after a client reload; the same request key with different inputs returns `operation_key_conflict`. Cancellation fences exactly the reviewed attempt before transport and retains known or uncertain remote effects. It never claims an accepted Git mutation was undone. Purge retains its tombstone across reconnect/reset/readiness updates so late callbacks cannot restore deleted evidence.
+
+Resume reserves a new operation attempt before transport. Repeating an ambiguous
+resume retains that attempt; accepted worker observation closes the reservation
+so a later failed generation can reserve another. Terminal operations accept
+only matching terminal observations and bounded receipt/read operations. Website
+lifecycle changes cancel every nonterminal operation, including applying,
+verifying, source reverification and review/merge/deployment waits. A denied
+terminal callback for a still-current attempt records `result.failure` with the
+original typed code or authority denial and disables Resume; it cannot change
+configuration, restore a completed run, or revive an obsolete generation.
+
+Default-branch pushes matching a recorded owned merge retain certified readiness
+and queue durable `source-reverify` work. Before the merge request, the backend
+saves the approved PR number, repository, connection generation, base branch and
+exact owned head commit in protected `publish_merge_intent`. A webhook arriving
+before the merge response is saved may use an authenticated read of that same
+merged PR; its merge SHA, repository IDs, branches and head must match. Reads
+occur outside authority locks and the original connection is fenced again before
+persistence. The reconciler checks for a late merge receipt before dispatching
+an inventory scan. Other pushes report
+`repository_source_changed` and additionally queue a fresh inventory scan. The
+reconciler authenticates current-source provider CI and observes listing/detail/
+unknown-slug deployment routes before enabling the new source. A failed or
+missing proof remains pending with its typed reason; inventory timestamps cannot
+refresh accepted verification time.
 
 Provider verification is two-phase: snapshot scope, release database locks, read GitHub or the worker, then lock and compare the original scope before persistence. Cleanup applies only a reviewed inverse or unchanged exclusively owned historical files. Original source bytes remain in the worker until restoration is reviewed. Shared/customer-edited files and retained published-content dependencies prevent unsafe restoration. Opening a removal PR yields `awaiting_merge`; observed merge yields `awaiting_deployment`. `verify-cleanup` completes only when the current selected branch equals the recorded merge SHA, GitHub Actions checks succeeded, and reviewed `verification_routes` prove exclusive routes return 404 or restored routes carry the original artifact digest. Historical integrations without such provenance remain pending with an explicit reason.
 
@@ -125,10 +165,48 @@ After current custom build/CI proof, `phase=configure` may add `generation={revi
 
 Owner GET `runs/{run_id}/article-review` returns `articleExport={version:1,status:"ready"|"unavailable",runId,revision,format:"markdown",markdown,metadata,media,reasonCode?}`. Export comes from the current canonical saved article snapshot, including protected direct edits; internal run results/prompts are never a fallback. The facade requires the owned run, exact saved revision and no pending preview or newer ready revision. Unknown or missing versions fail closed. Metadata is limited to `title`, `slug`, `description`, and credential-free HTTPS `canonical_url`; media contains only credential-free HTTPS `url`, `alt`, `caption`. The read response is private and not cached. Export is read-only and does not grant repository publication or require a connected website.
 
+POST on that same owner endpoint accepts atomic text saves:
+
+```json
+{"action":"editTextBatch","expectedRevision":"<saved revision>","operationId":"<stable operation>","edits":[{"fieldId":"<binding>","value":"Exact replacement copy"}]}
+```
+
+The facade forwards field IDs, revision and operation identity without changing
+them. Worker denials retain `code`, `error_code`, `reasonCode`, `retryable`,
+`next_action`, `failure`, `errors` and `revision` when supplied.
+
+GET also returns `imageRegenerationCostPoints`: an integer including zero, or
+null when paid image pricing is unavailable. Paid pricing uses
+`CONTENT_FACTORY_IMAGE_REGENERATION_COST_POINTS`; no default paid amount is
+invented. The existing MLAI free-domain policy yields zero. Clients must display
+and submit that exact quote before POST
+`{action:"regenerateImage",fieldId,instruction,expectedRevision,operationId,expectedCostPoints}`.
+Quote drift or absence returns typed 409 `roo_points_quote_changed`; unavailable
+pricing returns `image_regeneration_quote_unavailable`. One exact company/run/
+operation consumes one existing Roo ledger charge, bound to its original payer.
+Another member replaying that operation gets `image_operation_owner_conflict`
+before spending. Changed inputs under the same identity return
+`image_operation_conflict`. Definite rejection refunds the
+original debit; ambiguous transport acceptance retains a pending debit. Owner
+GET reconciles the exact asynchronous candidate: a failed candidate refunds its
+original payer exactly once, while queued/running candidates remain pending.
+A refunded receipt cannot be changed back to accepted and cannot be reused.
+
+Original confirmed unbound content-only drafts, their comment revisions,
+reconciliation and signed private-preview leases need no repository credentials.
+They retain review/export links on failure and offer no setup or publication
+action. Publishing children require the current verified repository, generation,
+source SHA and the exact saved slug/route contract. Older repository-bound drafts
+remain reviewable but return `website_repository_changed`,
+`website_source_changed` or `capture_target_mismatch` before a publishing child
+is bound. A refunded original draft payment also denies regeneration/restart;
+no-delivery internal, budget, editorial or source-drift failures refund the
+recorded charge without refunding a saved deliverable.
+
 `github-revoke` has an account-wide reviewed flow. `phase=plan` returns `githubRevocation.planDigest`, affected owned companies and provider instructions. `phase=apply` requires that exact `plan_digest`, `approved=true` and an idempotency key. It fences all reviewed owned bindings, cancels their work/schedules and clears only this user's saved installation/OAuth credentials. Other users sharing an installation ID are preserved. Local completion does not claim provider uninstall; the receipt retains `provider_cleanup_pending` and GitHub installation/OAuth settings links. Website disconnect remains company-scoped and preserves global account access.
 
 ## Recovery evidence and release gates
 
 Use owner `reconcile` to retry current scoped outbox work and poll custom verification. GET `website-connection/operations/{id}` returns only the selected company's receipt. The read-only `report_website_connections --check` identifies overdue operations and failed scans; cancelled/denied/deleted rows are terminal, and awaiting merge/deploy remains visible. `repair_website_connections` is read-only unless explicitly approved with `--apply`. No repair command silently revives consent.
 
-Release gates are: matching backend/worker/client contract tests; disposable PostgreSQL concurrency and exact historical migration replay; reviewed automatic CI artifacts and route marker; source/build/browser checks; current public-route deployment receipt; then a separately approved production rollout/canary. Local migration approval, source tests and an opened cleanup PR do not satisfy production migration/deployment or verified removal. No new migrations are introduced by the reliability changes.
+Release gates are: matching backend/worker/client contract tests; disposable PostgreSQL concurrency and exact historical migration replay; reviewed automatic CI artifacts and route marker; source/build/browser checks; current public-route deployment receipt; then a separately approved production rollout/canary. Local migration approval, source tests and an opened cleanup PR do not satisfy production migration/deployment or verified removal. The specifically approved `0044_website_target_generation_key` and its model/upserts have been created; applying it and database-backed migration/concurrency tests remain separate approval gates. See the [generation-key proposal](website-target-generation-migration-proposal-2026-10-07.md) for exact scope and rollback considerations.

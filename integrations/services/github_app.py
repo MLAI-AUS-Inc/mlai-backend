@@ -169,6 +169,11 @@ def require_installation_workflow_permissions(installation_id: str) -> dict[str,
     return _require_installation_profile_permissions(installation_id, profile="workflow_files")
 
 
+def require_installation_repository_permissions(installation_id: str) -> dict[str, str]:
+    """Read existing App and installation repository grants without minting writes."""
+    return _require_installation_profile_permissions(installation_id, profile="repository")
+
+
 def require_installation_ci_evidence_permissions(installation_id: str) -> dict[str, str]:
     """Read existing CI grants without changing permissions or minting tokens."""
     return _require_installation_profile_permissions(installation_id, profile="ci_evidence")

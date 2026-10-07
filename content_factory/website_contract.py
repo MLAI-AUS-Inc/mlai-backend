@@ -10,9 +10,9 @@ from uuid import UUID
 CONNECTION_FIELDS = ("website_connection_id", "connection_generation", "connection_target_id", "repository_id")
 REPO_ACTIONS = {"portable", "read", "scan", "config_write", "preview", "setup", "publish", "merge", "cleanup", "custom_contract"}
 WRITE_ACTIONS = {"setup", "publish", "merge", "cleanup"}
-CAPABILITY_KEYS = ("inventoryReady", "generationReady", "publishingReady", "previewSupported")
+CAPABILITY_KEYS = ("inventoryReady", "templatesValid", "generationReady", "publishingReady", "previewSupported")
 SHA_PATTERN = re.compile(r"^[a-fA-F0-9]{40}(?:[a-fA-F0-9]{24})?$")
-TEMPLATE_WRAPPERS = re.compile(r"(?im)^\s*#{1,6}\s+(?:EXISTING ARTIFACT|REPOSITORY CONTEXT|GENERATION INSTRUCTIONS|UPDATE INSTRUCTIONS)\s*$")
+TEMPLATE_WRAPPERS = re.compile(r"(?mi)^#{1,6}\s+(?:EXISTING ARTIFACT|BASE TEMPLATE|CODEBASE CONTEXT|ARTIFACT TO ADAPT|REPOSITORY CONTEXT|GENERATION INSTRUCTIONS|UPDATE INSTRUCTIONS)\s*$")
 SECRET_KEYS = {"github_token", "github_access_token", "github_refresh_token", "access_token", "refresh_token", "authorization", "api_key", "private_key", "password"}
 
 

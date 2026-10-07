@@ -163,6 +163,9 @@ class ActivationConnectionTests(TestCase):
             caps = _article_capabilities_for_context(self.context, self.config, latest_runs=[], force=True)
             self.assertTrue(caps['canGenerateArticle'], caps)
             changed[0] = True
+            # A new HTTP request gets a fresh context; repeated projections within
+            # one request deliberately reuse the same provider proof.
+            self.context.__dict__.pop("_website_repository_probes", None)
             caps = _article_capabilities_for_context(self.context, self.config, latest_runs=[], force=True)
             self.assertFalse(caps['canGenerateArticle'])
             self.assertEqual(caps['reasonCode'], 'verification_stale')

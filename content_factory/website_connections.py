@@ -149,6 +149,7 @@ def summary_for(config, *, company_id=None):
         "appRoot": connection.app_root, "branch": connection.branch, "siteUrl": connection.site_url,
         "status": connection.state, "capabilities": capabilities, "allowedActions": actions,
         "blockers": connection.blockers, "verifiedSha": connection.verified_sha or None,
+        "scannedSha": getattr(config, "last_scanned_sha", "") or None, "observedSha": observed_source_sha(connection) or None,
         "configurationVersion": connection.configuration_version,
     }
 
@@ -434,13 +435,18 @@ def guarded_service_write(action, *, only_repository=False, remote_actions=(), p
                                     **{key: payload[key] for key in ("operation_id", "operation_attempt", "deletion_epoch") if key in payload}}
                                 run.save(update_fields=["run_request", "updated_at"])
                     if response is not None:
+                        if response.status_code < 300 and existing_run and request.method != "GET" and (existing_run.run_request or {}).get("operation_id"):
+                            from .website_operations import observe_workflow_status
+                            existing_run.refresh_from_db()
+                            observe_workflow_status(existing_run, payload)
                         return response
                 # These actions synchronously call the worker, which calls our
                 # authority/token/config APIs back. Release every row lock first.
                 with owner_operation_scope(payload):
                     return method(self, request, *args, **kwargs)
             except WebsiteAuthorityError as exc:
-                return Response(exc.as_dict(), status=exc.status)
+                recorded = record_denied_terminal_callback(payload, exc)
+                return Response({**exc.as_dict(), "terminal_failure_recorded": recorded}, status=exc.status)
         return wrapped
     return decorate
 
@@ -638,7 +644,9 @@ def transition_connection(config, *, action, expected, idempotency_key="", verif
                     "setup_run_ids": list(connection.repository_mutations.exclude(run_id="").values_list("run_id", flat=True)), "attempt": 1},
                 receipt={"status": "proposal_requested", "requires_review": True, "repository_modified": False})
         old_generation = connection.generation
-        connection.operations.filter(action__in=["worker_followup", "workflow"], generation=old_generation, state__in=["pending", "running"]).update(
+        connection.operations.filter(generation=old_generation).exclude(
+            action__in=["disconnect", "revoke", "purge", "cancel-operation"]
+        ).exclude(state__in=["completed", "failed", "blocked", "cancelled", "deleted", "denied"]).update(
             state="cancelled", receipt={"status": "authority_revoked", "repository_modified": False}, updated_at=timezone.now())
         connection.generation += 1
         connection.configuration_version += 1
@@ -814,13 +822,23 @@ def record_scan_evidence(connection, data):
             verified |= bool(ready and target.get("publish_capability") in {"direct", "hook"})
             preview_ready = native_allowed and proof.get("status") == "preview_verified" and proof.get("base_sha") == sha and bool(SHA_PATTERN.fullmatch(str(proof.get("source_sha") or "")))
             preview |= bool((ready or preview_ready) and proof.get("preview_capable"))
-            previous = connection.targets.filter(target_key=str(target["target_id"]), generation=connection.generation, source_sha=sha).first()
+            previous = connection.targets.filter(target_key=str(target["target_id"]), generation=connection.generation).first()
+            from .incident_guards import target_update_allowed, proof_stamp
+            if not target_update_allowed(previous, target, generation=connection.generation, sha=sha):
+                verified |= bool(previous.capabilities.get("publishingReady"))
+                preview |= bool((previous.contract.get("verification") or {}).get("preview_capable"))
+                continue
             custom_certified = bool(previous and previous.adapter == "custom_contract_v1" and previous.capabilities.get("adapterCertified")
                 and previous.contract.get("contract_digest") == target.get("contract_digest"))
-            WebsiteConnectionTarget.objects.update_or_create(connection=connection, target_key=str(target["target_id"]), defaults={
-                "generation": connection.generation, "adapter": str(target.get("delivery_adapter") or ""),
+            WebsiteConnectionTarget.objects.update_or_create(connection=connection, target_key=str(target["target_id"]), generation=connection.generation, defaults={
+                "adapter": str(target.get("delivery_adapter") or ""),
                 "adapter_version": str(target.get("adapter_version") or ""), "source_sha": sha, "contract": target,
-                "capabilities": {"publishingReady": bool(ready), "adapterCertified": custom_certified}, "verified_at": timezone.now() if ready else None})
+                "capabilities": {"publishingReady": bool(ready), "adapterCertified": custom_certified}, "verified_at": (previous.verified_at if previous and previous.source_sha == sha and evidence_digest(previous.contract) == evidence_digest(target) else proof_stamp(proof) or timezone.now()) if ready or preview_ready else None})
+        # Absence from a scan is not revocation of an accepted proof.
+        accepted_targets = connection.targets.filter(generation=connection.generation, source_sha=sha, verified_at__isnull=False)
+        for accepted in accepted_targets:
+            verified |= bool(accepted.capabilities.get("publishingReady"))
+            preview |= bool((accepted.contract.get("verification") or {}).get("preview_capable"))
         if verified:
             check_source_identity(connection, {"source_sha": sha}, required=True)
             if (str(connection.pk), connection.generation, sha) not in _verified_heads.get():
@@ -832,8 +850,15 @@ def record_scan_evidence(connection, data):
             caps["publishingReady"] = verified and connection.state == "connected"
             caps["previewSupported"] = preview
         connection.capabilities = caps
-        connection.verified_sha = sha
-        connection.last_verified_at = timezone.now()
+        if verified:
+            connection.verified_sha = sha
+            stamps = [row.verified_at for row in connection.targets.filter(generation=connection.generation, source_sha=sha, verified_at__isnull=False)]
+            connection.last_verified_at = max(stamps) if stamps else connection.last_verified_at
+        elif preview:
+            # Preview proof binds the base without certifying publication.
+            connection.verified_sha = sha
+            if connection.last_verified_at is None:
+                connection.last_verified_at = timezone.now()
     for purpose in ("article_template", "design_guide", "resource_prompt"):
         body = data.get(purpose)
         if body is None:
@@ -845,7 +870,8 @@ def record_scan_evidence(connection, data):
             "status": "validated" if validation["valid"] else "quarantined", "body": body, "validation": validation})
     config = OrganizationContentConfig.objects.get(website_connection=connection)
     caps = dict(connection.capabilities or {})
-    caps["generationReady"] = all(template_validation(getattr(config, field))["valid"] for field in ("article_template", "design_guide"))
+    caps["templatesValid"] = all(template_validation(getattr(config, field))["valid"] for field in ("article_template", "design_guide"))
+    caps["generationReady"] = bool(caps.get("publishingReady"))
     connection.capabilities = caps
     connection.save(update_fields=["capabilities", "verified_sha", "last_verified_at", "blockers", "updated_at"])
 
@@ -883,8 +909,12 @@ def dispatch_contract(domain, payload, *, action="read", source_run_id=""):
         supplied = connection_contract(payload)
         binding = dict(payload) if supplied else contract_for(config.website_connection)
     binding = {**binding, "domain": domain, "github_repo": payload.get("github_repo") or binding.get("github_repo")}
-    with authority_guard(binding, action=action):
-        return connection_contract(binding)
+    with authority_guard(binding, action=action) as website:
+        result = connection_contract(binding)
+        expected_sha = binding.get("expected_source_sha") or (website.verified_sha if not source_run_id else "")
+        if expected_sha:
+            result["expected_source_sha"] = expected_sha
+        return result
 
 
 
@@ -921,6 +951,30 @@ def validate_publish_merge_source(run, head_sha, branch):
     ).exists()
     if not owned:
         raise WebsiteAuthorityError("publish_commit_unverified", "The publication pull request changed or its exact commit has no applied ownership receipt. Review and regenerate it before merging.")
+
+
+def record_publish_merge_intent(run, pull, pr_number, *, action="merge"):
+    """Save the approved PR identity before GitHub can emit its merge webhook."""
+    from workflow_runs.models import ContentFactoryRun
+    binding = scoped_run_contract(run)
+    head, base = pull.get("head") or {}, pull.get("base") or {}
+    with authority_guard(binding, action=action) as website:
+        for side in (head, base):
+            repo = side.get("repo") or {}
+            if (repo.get("id") != website.repository_id
+                    or str(repo.get("full_name") or "").casefold() != website.github_repo.casefold()):
+                raise WebsiteAuthorityError("publish_commit_unverified", "The publication PR does not belong to the current repository.")
+        if base.get("ref") != website.branch:
+            raise WebsiteAuthorityError("publish_commit_unverified", "The publication PR targets a different branch.")
+        intent = {**contract_for(website), "run_id": run.run_id, "pr_number": pr_number,
+            "github_repo": website.github_repo, "base_branch": website.branch,
+            "source_sha": website.verified_sha, "head_sha": head.get("sha"), "head_branch": head.get("ref"),
+            "operation_id": binding.get("operation_id"), "recorded_at": timezone.now().isoformat()}
+        locked = ContentFactoryRun.objects.select_for_update().get(pk=run.pk)
+        locked.result = {**dict(locked.result or {}), "publish_merge_intent": intent}
+        locked.save(update_fields=["result", "updated_at"])
+        run.result = locked.result
+    return intent
 
 
 def guarded_backend_run_action(action):
@@ -971,3 +1025,57 @@ def record_backend_provider_outcome(identifier, *, accepted, payload):
         op.receipt = {**op.receipt, "provider_outcome": receipt, "remote_outcome_unknown": not accepted,
             "repository_modified": True if accepted else None, "cancellation_undoes_remote_writes": False}
         op.save(update_fields=["receipt", "updated_at"])
+
+
+def record_denied_terminal_callback(payload, denial):
+    """Persist a current fenced terminal failure even when its callback is denied.
+
+    This narrow observation grants no website capability, config write or worker
+    revival. Old consent, old attempts and completed runs remain immutable.
+    """
+    event = str(payload.get("event_type") or payload.get("event") or "")
+    terminal_event = event in {"generation_failed", "generation_blocked", "error", "article_system_setup_failed",
+        "generation_pr_opened", "article_complete", "article_system_setup_complete", "article_system_setup_completed",
+        "scan_complete", "scaffold_complete", "publish_bundle_ready", "content_ready", "article_system_setup_preview_failed"}
+    terminal_snapshot = not event and payload.get("status") in {"failed", "blocked", "completed"}
+    if denial.retryable or not (terminal_event or terminal_snapshot):
+        return False
+    from .website_operations import validate_operation
+    from .run_state import stale_execution_event, merge_reliability_fields
+    from workflow_runs.models import ContentFactoryRun
+    run_id = str(payload.get("run_id") or payload.get("job_id") or "")
+    try:
+        received = connection_contract(payload)
+    except WebsiteAuthorityError:
+        return False
+    if not received or not run_id:
+        return False
+    candidate = ContentFactoryRun.objects.filter(run_id=run_id).first()
+    if candidate is None:
+        return False
+    with transaction.atomic():
+        Organization.objects.select_for_update().get(pk=candidate.organization_id)
+        website = WebsiteConnection.objects.select_for_update().filter(pk=received["website_connection_id"],
+            organization_id=candidate.organization_id).first()
+        run = ContentFactoryRun.objects.select_for_update().get(pk=candidate.pk)
+        if website is None or website.generation != received["connection_generation"] or website.state not in {"connected", "paused"}:
+            return False
+        original = connection_contract(run.run_request or {})
+        if not original or any(original.get(key) != value for key, value in received.items()) or run.status in {"completed", "cancelled", "denied"}:
+            return False
+        try:
+            if stale_execution_event(run.result or {}, payload, saved_status=run.status):
+                return False
+            validate_operation(website, {**(run.run_request or {}), **payload})
+        except (WebsiteAuthorityError, ValueError):
+            return False
+        failure = payload.get("failure") if isinstance(payload.get("failure"), dict) else {}
+        failure = {**failure, "code": failure.get("code") or payload.get("error_code") or denial.code,
+            "callback_denial_code": denial.code, "retryable": False}
+        run.result = {**merge_reliability_fields(run.result or {}, payload), "failure": failure,
+            "error_code": failure["code"], "callback_rejection": {"code": denial.code, "detail": str(denial)}}
+        run.status = "blocked" if event == "generation_blocked" or payload.get("status") == "blocked" else "failed"
+        run.resume_available = False
+        run.error = str(payload.get("error") or payload.get("error_message") or str(denial))
+        run.save(update_fields=["result", "status", "resume_available", "error", "updated_at"])
+        return True

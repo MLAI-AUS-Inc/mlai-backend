@@ -20,7 +20,7 @@ PORTABLE_CALLBACK_EVENTS = frozenset({
     "article_admission_attention", "error",
 })
 PORTABLE_WORKFLOWS = frozenset({"article_generation", "direct_generate", "confirmed_topic", "article_revision", "component_revision"})
-PORTABLE_RUN_CONTROLS = frozenset({"resume", "cancel", "deny", "revise", "regenerate-image", "regenerate-images"})
+PORTABLE_RUN_CONTROLS = frozenset({"resume", "cancel", "deny", "revise", "regenerate-image", "regenerate-images", "preview"})
 
 
 def portable_run_control_allowed(run, action, payload):

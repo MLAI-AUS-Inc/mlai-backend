@@ -36,18 +36,22 @@ def _derive_connection_state(config) -> str:
 
 
 def _serialize_connected_domain(config) -> dict:
+    from content_factory.activation import integration_evidence
     article_system = resolve_article_system(config)
     registry_target = best_registry_driven_publish_target(getattr(config, "publish_targets", None), article_system)
-    registry_ready = registry_target_publish_ready(registry_target)
+    generation_ready = integration_evidence(config).get("verified") is True
+    registry_ready = generation_ready and registry_target_publish_ready(registry_target)
     connection_state = _derive_connection_state(config)
     return {
         "domain": config.organization.domain,
         "github_repo": config.github_repo,
         "article_delivery_mode": getattr(config, "article_delivery_mode", None),
         "scanned": bool(config.scan_summary),
-        "articles_scaffolded": config.articles_scaffolded,
+        "articles_scaffolded": generation_ready,
         "article_system": article_system,
-        "article_system_ready": article_system_ready(article_system) or registry_ready,
+        "article_system_ready": generation_ready,
+        "can_generate_article": generation_ready,
+        "can_generate_portable_draft": True,
         "registry_driven_seo_ready": registry_ready,
         "publish_targets": config.publish_targets or [],
         "default_publish_target_id": config.default_publish_target_id,
@@ -326,11 +330,12 @@ class GithubTokenIdentityView(APIView):
                     scan_completed = bool(config.scan_summary)
                     if not scan_completed:
                         scan_completed = GeneratedComponent.objects.filter(organization=org).exists()
-                    articles_scaffolded = bool(config.articles_scaffolded)
+                    from content_factory.activation import integration_evidence
+                    articles_scaffolded = integration_evidence(config).get("verified") is True
                     article_system = resolve_article_system(config)
                     registry_target = best_registry_driven_publish_target(config.publish_targets, article_system)
-                    registry_driven_seo_ready = registry_target_publish_ready(registry_target)
-                    article_system_ready_flag = article_system_ready(article_system) or registry_driven_seo_ready
+                    registry_driven_seo_ready = articles_scaffolded and registry_target_publish_ready(registry_target)
+                    article_system_ready_flag = articles_scaffolded
                     last_scanned_at = getattr(config, "last_scanned_at", None) or last_scanned_at
                     last_scanned_sha = getattr(config, "last_scanned_sha", None) or last_scanned_sha
             elif requires_domain_selection:
@@ -350,9 +355,7 @@ class GithubTokenIdentityView(APIView):
         elif access_revoked or (requested_domain and domain_info.get("domain_connected") is False):
             recommended_next_action = "connect_github"
         else:
-            recommended_next_action = derive_recommended_next_action(scan_completed, article_system)
-            if registry_driven_seo_ready and recommended_next_action == "scaffold":
-                recommended_next_action = "research_article"
+            recommended_next_action = "research_article" if article_system_ready_flag else "scaffold" if scan_completed else "scan"
 
         response_data = {
             "slack_user_id": slack_user_id,
@@ -376,6 +379,8 @@ class GithubTokenIdentityView(APIView):
             "articles_scaffolded": articles_scaffolded,
             "article_system": article_system,
             "article_system_ready": article_system_ready_flag,
+            "can_generate_article": article_system_ready_flag,
+            "can_generate_portable_draft": bool(active_domain),
             "registry_driven_seo_ready": registry_driven_seo_ready,
             "publish_targets": getattr(active_config, "publish_targets", []) if active_config else [],
             "default_publish_target_id": getattr(active_config, "default_publish_target_id", None) if active_config else None,
@@ -837,7 +842,8 @@ class GithubScaffoldView(APIView):
                 "hint": "Scan the codebase first.",
             }, status=status.HTTP_412_PRECONDITION_FAILED)
 
-        if config.articles_scaffolded:
+        from content_factory.activation import integration_evidence
+        if integration_evidence(config).get("verified") is True:
             return Response({
                 "status": "already_scaffolded",
                 "message": f"Articles directory already exists for {normalized_domain}",

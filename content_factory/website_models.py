@@ -64,7 +64,7 @@ class WebsiteConnectionTarget(models.Model):
 
     class Meta:
         db_table = "content_factory_website_target"
-        constraints = [models.UniqueConstraint(fields=["connection", "target_key"], name="cf_web_target_key_unique")]
+        constraints = [models.UniqueConstraint(fields=["connection", "generation", "target_key"], name="cf_web_target_generation_unique")]
 
 
 class WebsiteScanSnapshot(models.Model):

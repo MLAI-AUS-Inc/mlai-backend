@@ -53,8 +53,8 @@ class PortableWorkflowProgressTests(SimpleTestCase):
             self.assertEqual(steps[name]["runId"], "synthetic-draft")
             self.assertIn("synthetic-draft", steps[name]["href"])
             self.assertNotIn("setup", steps[name]["summary"].lower())
-        self.assertEqual(steps["publish"]["status"], "blocked")
-        self.assertEqual(steps["publish"]["primaryAction"]["label"], "Configure publishing")
+        self.assertEqual(steps["publish"]["status"], "locked")
+        self.assertIsNone(steps["publish"]["primaryAction"])
         self.assertEqual(steps["automation"]["status"], "locked")
 
     def test_failed_original_portable_run_keeps_its_own_failure(self):

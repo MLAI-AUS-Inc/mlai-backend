@@ -218,6 +218,8 @@ class ActivationScopeAndProbeTests(SimpleTestCase):
             "published": True, "mergedAt": merged})["verified"])
 
     def probe(self, responses, *, source="github_oauth_user_token"):
+        # Each helper call models a separate authenticated HTTP request.
+        self.context.__dict__.pop("_website_repository_probes", None)
         store = Mock()
         store.get.return_value = None
         with patch.object(views, "cache", store), \
@@ -254,8 +256,9 @@ class ActivationScopeAndProbeTests(SimpleTestCase):
         self.assertTrue(result["verified"])
         self.assertFalse(result["writable"])
         caps = article_capabilities(self.cfg, account={"owned": True, "saved": True}, evidence={"verified": True, "branch": "main", "sha": "abc123"}, repository_access=result)
-        self.assertFalse(caps["canGenerateArticle"])
-        self.assertEqual(caps["reasonCode"], "github_write_required")
+        self.assertTrue(caps["canGenerateArticle"])
+        self.assertFalse(caps["canPublishArticle"])
+        self.assertEqual(caps["publishingReasonCode"], "github_write_required")
 
     def test_outage_and_revoked_access_are_actionable_even_if_setup_missing(self):
         result, _, _ = self.probe([views.http_client.RequestException("synthetic outage")])

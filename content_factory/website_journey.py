@@ -38,7 +38,7 @@ def project_journey(*, company_id, domain, website=None, capabilities=None, disc
     reason = capabilities.get("reason") or "Prepare and verify your articles integration."
     if not authoring_supported:
         reason_code = "publishing_adapter_required"
-        reason = "The custom build is verified. Connect an article publishing adapter or write a portable draft."
+        reason = "Build proof only; articles stay portable until a publishing adapter is connected."
     running = operation and operation.get("state") in {"pending", "running", "verifying", "applying"}
     op_id = operation.get("id") if operation else None
     adapter = target.get("adapter") or target_contract.get("delivery_adapter") or proof.get("verifiedAdapter")
@@ -100,10 +100,13 @@ def project_journey(*, company_id, domain, website=None, capabilities=None, disc
         "appRoot": website.get("appRoot", ""), "sourceSha": website.get("verifiedSha") or discovery.get("sourceSha"), "targetId": target.get("key"),
         "observedSourceSha": capabilities.get("repositorySourceSha"),
         "publicRoute": target_contract.get("route_path") or target_contract.get("public_path") or None,
+        "framework": ((target_contract.get("framework") or target_contract.get("detected_framework")) if target.get("sourceSha", website.get("verifiedSha")) == current_source else None)
+            or (discovery.get("framework") if discovery.get("sourceSha") == current_source else None),
         "contentPath": target_contract.get("content_path") or target_contract.get("content_dir") or None}
     return {"version": 2, "companyId": str(company_id), "domain": domain,
         "revision": evidence_digest({"website": website, "capabilities": capabilities, "discovery": discovery, "operation": operation}),
         "connectionId": website.get("connectionId"), "connectionGeneration": website.get("connectionGeneration"),
+        "proofContract": {"version": 1, "requirements": ["pinned_source_sha", "safe_publish_target", "build_proof", "browser_proof", "workflows_permission", "ci_artifact_digest", "live_verification"]},
         "configurationRevision": website.get("configurationVersion", 0), "deletionEpoch": epoch, "repository": repository,
         "policy": {"allowed": write_allowed, "reasonCode": "" if write_allowed else reason_code, "reason": "" if write_allowed else reason},
         "reasonCode": "" if verified else reason_code, "reason": "" if verified else reason,
@@ -119,7 +122,7 @@ def project_journey(*, company_id, domain, website=None, capabilities=None, disc
                 "reason": native_path.get("reason") or "A verified framework adapter is required."},
             "portable": {"available": bool(capabilities.get("canGeneratePortableDraft", company_id))},
             "customContract": {"available": bool(website and access), "certified": custom_certified, "reasonCode": "" if custom_certified else "reviewed_contract_required",
-                "generationRequirements": ([] if mapping(website.get("capabilities")).get("generationReady") else ["reviewed_article_template", "live_artifact_marker"]) + ([] if authoring_supported else ["registered_publishing_adapter"]),
+                "generationRequirements": ([] if mapping(website.get("capabilities")).get("templatesValid") else ["reviewed_article_template", "live_artifact_marker"]) + ([] if authoring_supported else ["registered_publishing_adapter"]),
                 "action": "custom-contract", "path": "/api/v1/my-startup/vibe-marketing/website-connection/custom-contract"},
             "customerCi": {"available": bool(website and access), "certified": False, "reasonCode": "ci_attestation_required",
                 "action": "ci-attestation", "path": "/api/v1/my-startup/vibe-marketing/website-connection/ci-attestation"},
@@ -157,7 +160,8 @@ def build_proof_fresh(connection, target, capabilities, *, now=None):
     if not target_stamp and mapping(mapping(target.contract).get("verification")).get("status") == "preview_verified":
         # A reviewed PR preview has build/browser proof but intentionally has
         # no publication verified_at until that source reaches the main branch.
-        target_stamp = target.updated_at
+        from .incident_guards import proof_stamp
+        target_stamp = proof_stamp(mapping(target.contract).get("verification"))
     return all(stamp and now - VERIFICATION_MAX_AGE <= stamp <= now + timedelta(minutes=5)
         for stamp in (target_stamp, connection.last_verified_at))
 
@@ -190,7 +194,7 @@ def journey_for_context(context, config, *, capabilities=None):
         if deployment and selected and (deployment.receipt.get("artifact_digest") != mapping(selected.contract.get("live_marker")).get("value")
                 or deployment.receipt.get("contract_digest") != selected.contract.get("contract_digest")):
             deployment = None
-        target = {"key": selected.target_key, "adapter": selected.adapter, "contract": selected.contract, "deployment_receipt": deployment.receipt if deployment else {}} if selected else None
+        target = {"key": selected.target_key, "sourceSha": selected.source_sha, "adapter": selected.adapter, "contract": selected.contract, "deployment_receipt": deployment.receipt if deployment else {}} if selected else None
         preview_proof = mapping(mapping(preview_target.contract).get("verification")) if preview_target else {}
         prepared = bool(preview_target and preview_target.source_sha == connection.verified_sha and preview_proof.get("status") in {"passed", "verified", "preview_verified"})
         fresh = prepared and build_proof_fresh(connection, preview_target, capabilities)

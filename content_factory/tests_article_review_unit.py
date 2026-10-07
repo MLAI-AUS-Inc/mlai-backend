@@ -47,9 +47,9 @@ class ArticleReviewTests(SimpleTestCase):
             'version': 1, 'status': 'ready', 'runId': self.run.run_id, 'revision': 'saved',
             'format': 'markdown', 'markdown': '# Exact saved text', 'metadata': {}, 'media': []}}
         view = VibeMarketingArticleReviewView()
-        context = object()
+        context = SimpleNamespace(organization=SimpleNamespace(domain=self.run.domain))
         view._resolve_run = MagicMock(return_value=(context, self.run, None))
-        result = view.get(SimpleNamespace(), self.run.run_id)
+        result = view.get(SimpleNamespace(user=SimpleNamespace(pk=1)), self.run.run_id)
         self.assertEqual(result.data['articleExport']['status'], 'unavailable')
         self.assertEqual(result.data['articleExport']['reasonCode'], 'revision_superseded')
         self.assertEqual(result.data['articleExport']['markdown'], '')
