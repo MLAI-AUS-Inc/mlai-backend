@@ -521,6 +521,7 @@ REST_FRAMEWORK = {
         'token_usage_history': os.getenv('TOKEN_USAGE_HISTORY_RATE', '20/minute'),
         'token_usage_token': os.getenv('TOKEN_USAGE_TOKEN_RATE', '10/minute'),
         'token_usage_leaderboard': os.getenv('TOKEN_USAGE_LEADERBOARD_RATE', '60/minute'),
+        'token_usage_insights': os.getenv('TOKEN_USAGE_INSIGHTS_RATE', '120/minute'),
         'community_chat_home': os.getenv('COMMUNITY_CHAT_HOME_RATE', '60/minute'),
         'community_chat_slack_delete': os.getenv(
             'COMMUNITY_CHAT_SLACK_DELETE_RATE', '20/minute'

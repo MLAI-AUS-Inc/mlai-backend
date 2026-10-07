@@ -34,6 +34,7 @@ from .coding_views import (
     CodingTurnTicketRefreshView,
 )
 from .home_views import CommunityHomeView
+from .insight_views import TokenInsightsView
 from .coworking_views import CoworkingTodayView
 from .slack_action_views import SlackMessageActionView
 from .slack_views import SlackDmMirrorView, SlackDmStartView, SlackOwnerConversationOpenView, SlackOwnerConversationView, SlackUserDirectoryView
@@ -46,6 +47,7 @@ from .usage_views import (
 
 
 urlpatterns = [
+    path("usage/insights/", TokenInsightsView.as_view(), name="community_chat_token_insights"),
     path("account-bans/", AccountBanView.as_view(), name="community_chat_account_bans"),
     path("account-bans/<int:ban_id>/", AccountBanView.as_view(), name="community_chat_account_ban"),
     path("apple-iap/", AppleIapView.as_view(), name="community_chat_apple_iap"),

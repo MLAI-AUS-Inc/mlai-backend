@@ -360,6 +360,7 @@ jobs:
           community_chat.tests.test_slack_open_requests \
           community_chat.tests.test_slack_channel_refresh \
           community_chat.tests.test_token_usage \
+          community_chat.tests.test_token_insights \
           community_chat.tests.test_token_agent_leaderboard \
           community_chat.tests.test_token_agent_history \
           community_chat.tests.test_tokenmaxer_federation \
