@@ -151,6 +151,7 @@ def bind_portable_dispatch_snapshot(*, remote_run_id, payload):
             bound.run_request = dict(bound.run_request or {})
             bound.run_request.pop(PORTABLE_DISPATCH_RESERVATION, None)
             bound.run_request.pop("dispatch_pending_resolution", None)
+            bound.run_request.pop("pending_billing_refund", None)
             bound.save(update_fields=["run_request", "updated_at"])
         return bound
 

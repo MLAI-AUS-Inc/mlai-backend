@@ -129,15 +129,19 @@ class PortableDispatchAdmissionTests(TransactionTestCase):
     def queue(self, post):
         from . import vibe_marketing_views as views
         with patch.object(views, "founder_actor_id_for_user", return_value="fixture-actor"), \
-             patch.object(views, "_content_factory_remote_config", return_value={"enabled": True, "base_url": "https://worker.invalid"}), \
+             patch.object(views, "_content_factory_remote_config", return_value={"enabled": True, "base_url": "https://worker.invalid", "api_key_configured": True, "is_local_env": True}), \
              patch.object(views, "_content_factory_headers", return_value={}), \
              patch.object(views, "_lookup_content_factory_dispatch_by_key", return_value=("pending", {})), \
+             patch.object(views, "_refund_roo_points_for_article_start") as refund, \
              patch.object(views, "http_client") as http:
             from requests import RequestException
             http.RequestException = RequestException
             http.post.side_effect = post
             run = views._queue_content_factory_run(endpoint="article", workflow="confirmed_topic",
-                context=self.context, config=self.config, payload=deepcopy(self.payload))
+                context=self.context, config=self.config, payload=deepcopy(self.payload),
+                billing_refund_context={"kind": "article_generation", "charged_user": SimpleNamespace(pk=42),
+                    "article_request": {"client_request_id": "draft-dispatch"}, "reason": "Synthetic queue failure"})
+            refund.assert_not_called()
         self.assertLessEqual(http.post.call_count, 2)
         return run
 
@@ -185,6 +189,7 @@ class PortableDispatchAdmissionTests(TransactionTestCase):
         run = self.queue(post)
         self.assertEqual(run.run_id, "draft-dispatch")
         self.assertEqual(run.status, "blocked")
+        self.assertEqual(run.run_request["pending_billing_refund"]["charged_user_id"], 42)
         ContentFactoryJob.objects.create(job_id=run.run_id, domain=self.org.domain, client_request_id=run.run_id)
         response = self.mirror()
         self.assertEqual(response.status_code, 200, response.data)
@@ -193,6 +198,7 @@ class PortableDispatchAdmissionTests(TransactionTestCase):
         self.assertEqual(run.status, "running")
         self.assertEqual(ContentFactoryRun.objects.count(), 1)
         self.assertEqual(ContentFactoryJob.objects.get().job_id, "remote-draft")
+        self.assertNotIn("pending_billing_refund", run.run_request)
 
     def test_forged_first_snapshot_cannot_bind_unreserved_or_changed_intent(self):
         from .dispatch_binding import reserve_portable_dispatch_intent
