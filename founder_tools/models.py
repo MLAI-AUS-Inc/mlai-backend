@@ -66,7 +66,8 @@ class VibeRaisingCompany(models.Model):
     # against the Australian Business Register. Null means never verified.
     abr_verified_at = models.DateTimeField(blank=True, null=True)
     location = models.CharField(max_length=255, blank=True, default="")
-    avatar_url = models.URLField(blank=True, null=True)
+    # Firebase download URLs include the encoded object path and access token.
+    avatar_url = models.URLField(max_length=2048, blank=True, null=True)
     default_audience_visibility = models.JSONField(default=default_audience_visibility, blank=True)
     registered = models.BooleanField(default=False)
     created_at = models.DateTimeField(auto_now_add=True)

@@ -109,6 +109,17 @@ class ProfileFieldsTests(SimpleTestCase):
 
 
 class LogoImagesTests(SimpleTestCase):
+    def test_firebase_download_url_fits_company_field_without_truncation(self):
+        from founder_tools.models import VibeRaisingCompany
+        field = VibeRaisingCompany._meta.get_field("avatar_url")
+        url = (
+            "https://firebasestorage.googleapis.com/v0/b/mlai-main-website.firebasestorage.app/o/"
+            f"company-avatars%2F{uuid4()}%2F{uuid4().hex}.png?alt=media&token={uuid4()}"
+        )
+        self.assertGreater(len(url), 200)
+        self.assertEqual(field.max_length, 2048)
+        self.assertEqual(field.clean(url, None), url)
+
     def image_upload(self, *, size=(32, 16), color=(255, 0, 0, 128)):
         output = BytesIO()
         Image.new("RGBA", size, color).save(output, format="PNG")

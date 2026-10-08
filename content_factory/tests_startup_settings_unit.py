@@ -149,6 +149,20 @@ class LogoAndBootstrapTests(SimpleTestCase):
             self.assertEqual(view.delete(Obj(user=self.user)).status_code, 200)
         save.assert_called_once_with(self.company, self.user, "")
 
+    def test_database_save_failure_returns_retryable_json_for_upload_and_removal(self):
+        from django.db import DataError
+        view = views.VibeMarketingCompanyAvatarView()
+        with patch.object(view, "_company", return_value=(self.company, None)), \
+             patch("founder_tools.profile_fields.save_company_branding", side_effect=DataError("synthetic failure")), \
+             patch("core.firebase_utils.upload_file_to_storage", return_value="synthetic-logo-url"), \
+             self.assertLogs(views.logger, level="ERROR"):
+            for method in (view.post, view.delete):
+                response = method(Obj(user=self.user, FILES={"avatar": self.upload()}))
+                self.assertEqual(response.status_code, 503)
+                self.assertEqual(response.data["code"], "company_logo_save_failed")
+                self.assertIn("Please try again", response.data["detail"])
+        self.assertEqual(self.company.avatar_url, "old")
+
     def test_bootstrap_resolves_requested_company_before_domainless_branch(self):
         selected = Obj(domain="")
         with patch.object(views, "_resolve_profile_company_or_response", return_value=(Obj(), selected, None)) as resolve, \
