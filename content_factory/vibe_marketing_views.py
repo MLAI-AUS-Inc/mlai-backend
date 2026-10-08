@@ -8161,7 +8161,7 @@ def _ensure_local_publish_child_from_known_id(
     binding = publish_child_binding(config, source_run, payload or {}, remote_data or {})
     child = ContentFactoryRun.objects.filter(run_id=child_run_id).prefetch_related("steps").first()
     if child:
-        publish_child_binding(config, child, payload or {}, remote_data or {})
+        publish_child_binding(config, child, payload or {}, remote_data or {}, reviewed_source=source_run)
         return child if _run_belongs_to_context(child, context) else None
     publish_payload = {
         **(payload or {}),
@@ -8341,7 +8341,7 @@ def _recover_publish_child_for_run(run, *, request, context):
             config = _get_config(context.organization)
             publish_child_binding(config, publish_source_run, {}, {})
             if child is not None:
-                publish_child_binding(config, child, {}, {})
+                publish_child_binding(config, child, {}, {}, reviewed_source=publish_source_run)
             return True
         except WebsiteAuthorityError as exc:
             run.result = {**(run.result or {}), "approval_blocker": {"code": exc.code, "message": str(exc), "retryable": False},
@@ -18129,8 +18129,7 @@ class VibeMarketingRunControlView(APIView):
             action=action,
             payload=payload,
             workflow=remote_run.workflow,
-            # Article approval durably initializes a publish child before its
-            # acknowledgement. Wait for that response so its exact-review
+            # Wait for the worker's durable publication acknowledgement so its exact-review
             # receipt is saved, including an explicit worker rejection.
             timeout=(3, 45) if approval_requires_receipt else (
                 (3, 20) if action in {"promote-bundle", "publish-pr"} else (3, 15)

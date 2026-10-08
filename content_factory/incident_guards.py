@@ -96,7 +96,7 @@ def delivered_content(run):
             ("article", "content", "markdown", "pr_url", "publish_url", "live_url")))
 
 
-def publish_child_binding(config, source_run, payload, remote_data):
+def publish_child_binding(config, source_run, payload, remote_data, *, reviewed_source=None):
     """A publishing child inherits the current verified contract and original scope."""
     from .website_contract import connection_contract
     connection = getattr(config, "website_connection", None)
@@ -134,6 +134,21 @@ def publish_child_binding(config, source_run, payload, remote_data):
     acceptance = getattr(source_run, "acceptance_summary", None) or {}
     evidence = acceptance.get("evidence_summary") if isinstance(acceptance.get("evidence_summary"), dict) else {}
     slug = package.get("slug") or article_meta.get("slug") or evidence.get("content_package_slug") or source.get("slug") or source.get("article_slug") or article.get("slug") or request.get("article_slug") or request.get("slug")
+    if reviewed_source is not None:
+        reviewed_request = getattr(reviewed_source, "run_request", None) or {}
+        scope_fields = ("expected_source_sha", "operation_id", "operation_attempt", "deletion_epoch")
+        if (request.get("source_run_id") != getattr(reviewed_source, "run_id", None)
+                or connection_contract(reviewed_request) != original
+                or any(request.get(key) != reviewed_request.get(key) for key in scope_fields)
+                or getattr(source_run, "organization_id", None) != getattr(reviewed_source, "organization_id", None)):
+            raise WebsiteAuthorityError("website_source_changed", "The publishing child does not match its reviewed source and original scope.")
+        # Restored children receive article metadata after their first callback.
+        # The reviewed parent remains authoritative for this exact child only.
+        reviewed_binding = publish_child_binding(config, reviewed_source, payload, remote_data)
+        reviewed_slug = reviewed_binding["article_slug"]
+        if slug and slug != reviewed_slug:
+            raise WebsiteAuthorityError("capture_target_mismatch", "The publishing child slug differs from the saved draft.")
+        slug = reviewed_slug
     route = remote_data.get("route_path") or remote_data.get("public_path")
     template = str(target.contract.get("route_template") or "")
     if "{slug}" in template and (not isinstance(slug, str) or not slug.strip()):

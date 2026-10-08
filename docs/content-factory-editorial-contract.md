@@ -4,10 +4,27 @@ Local implementation: 10–11 September 2026. This document describes code, not 
 
 The founder frontend calls the authenticated `/api/v1/vibe-marketing` views. The backend owns organisation access, billing, approved editorial policy and dispatch. Content Factory owns model selection, research, repository changes, previews and release checks.
 
-Article approval waits up to 45 seconds for the worker to acknowledge durable
-publish-child initialization. The exact hosted review is checked again before
+Article approval waits up to 45 seconds for the worker's durable publication
+acknowledgement. It may acknowledge an initialized child or a sealed displayed
+revision queued for background restoration. The exact hosted review is checked again before
 saving its approval receipt. Worker rejections and transport failures retain
 the review gate; a timeout does not authorize a publishing retry.
+
+A publish child's initial status callback can precede its restored article
+metadata. Its saved parent supplies the confirmed slug only when the source
+run ID, organisation and original connection, source and operation scope match
+exactly. The parent still passes current target verification; conflicting child
+or remote slugs and routes are rejected. Independent drafts require their own
+saved slug. This observation does not change either run's consent or request.
+
+An initialized publish child can continue or resume its original attempt after
+the reviewed source operation completes only when that source has the matching
+owner approval receipt, identifies this exact child and retains the same native
+delivery intent and connection/source/operation scope. The source operation
+stays completed, and resuming this child does not replace its consent or advance
+the shared operation attempt. Missing or changed approval, unrelated children,
+portable drafts and cancelled or failed source operations retain the terminal
+gate.
 
 ## Component review updates (8 October 2026)
 
