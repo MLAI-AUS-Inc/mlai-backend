@@ -12075,7 +12075,7 @@ def _parse_remote_datetime(value):
 
 
 def _run_result_from_remote(remote_data):
-    from .run_state import merge_reliability_fields
+    from content_factory.run_state import merge_reliability_fields
 
     if not isinstance(remote_data, dict):
         return {}
