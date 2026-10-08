@@ -104,6 +104,12 @@ parent's operation receipt. A failed or unavailable repair makes the operation
 terminal. This projection cannot reopen an already terminal operation, and
 cancelling pending repair work fences both the parent and its known children.
 
+Recovery through a dispatch key acknowledges the existing run identity only.
+Its minimal receipt cannot replace saved worker status, repair lineage, evidence
+or errors. If callbacks have not yet created the local run, recovery creates a
+queued projection until a full authenticated worker snapshot arrives. Billing
+still binds to the original dispatch; existing terminal runs remain terminal.
+
 All reconciliation actions lease an operation in a short transaction and release it before remote HTTP. A conditional update checks the original claim timestamp afterward. Concurrent offboarding therefore cannot deadlock with the worker's cancellation callback or have an erasure/retention receipt replaced by stale transport results.
 
 

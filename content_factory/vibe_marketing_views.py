@@ -12613,6 +12613,11 @@ def _create_local_run(*, workflow, domain, github_repo="", actor_id="", payload=
 def _create_local_run_authorized(*, workflow, domain, github_repo="", actor_id="", payload=None, remote_data=None, fallback_run_id=""):
     remote_data = sanitize_json_for_postgres(remote_data or {})
     payload = sanitize_json_for_postgres(payload or {})
+    # A dispatch-key lookup acknowledges identity after a lost response. It is
+    # not a worker snapshot: its status omits linked repair/evidence fields and
+    # can already lag callbacks. Never replace those callbacks with this receipt.
+    recovered_by_key = remote_data.get("dispatch_recovered_by_key") is True
+    projection = {} if recovered_by_key else remote_data
     run_id = str(remote_data.get("run_id") or remote_data.get("job_id") or remote_data.get("task_id") or "")
     if not run_id:
         # Key the provisional record by the dispatch token (client_request_id)
@@ -12626,12 +12631,12 @@ def _create_local_run_authorized(*, workflow, domain, github_repo="", actor_id="
             "domain": domain,
             "github_repo": github_repo or "",
             "slack_user_id": actor_id,
-            "status": _normalize_remote_run_status(remote_data.get("status")),
-            "current_step": remote_data.get("current_step") or remote_data.get("step") or "queued",
+            "status": _normalize_remote_run_status(projection.get("status")),
+            "current_step": projection.get("current_step") or projection.get("step") or "queued",
             "run_request": payload or {},
-            "result": _merge_django_owned_article_result({}, _run_result_from_remote(remote_data)) if (
-                workflow in ARTICLE_WORKFLOWS or workflow in {"article_system_setup", "publish_article", "article_publish"}) else _run_result_from_remote(remote_data),
-            "error": str(remote_data.get("error") or ""),
+            "result": _merge_django_owned_article_result({}, _run_result_from_remote(projection)) if (
+                workflow in ARTICLE_WORKFLOWS or workflow in {"article_system_setup", "publish_article", "article_publish"}) else _run_result_from_remote(projection),
+            "error": str(projection.get("error") or ""),
         },
     )
     if not _created:
@@ -12641,7 +12646,7 @@ def _create_local_run_authorized(*, workflow, domain, github_repo="", actor_id="
         run.slack_user_id = run.slack_user_id or actor_id
         run.run_request = run.run_request or payload or {}
         update_fields = ["workflow", "domain", "github_repo", "slack_user_id", "run_request", "updated_at"]
-        if remote_data:
+        if projection:
             run.status = _normalize_remote_run_status(remote_data.get("status") or run.status)
             run.current_step = remote_data.get("current_step") or remote_data.get("step") or run.current_step or "queued"
             remote_result = _run_result_from_remote(remote_data)
