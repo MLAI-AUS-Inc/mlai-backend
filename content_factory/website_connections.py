@@ -4,6 +4,7 @@ from contextlib import contextmanager, nullcontext
 from contextvars import ContextVar
 from functools import wraps
 import hashlib
+import logging
 import re
 import uuid
 
@@ -24,6 +25,8 @@ from .website_contract import (
     validate_authority,
 )
 from .portable_drafts import REPOSITORY_CONFIG_FIELDS, portable_run_update_allowed
+
+logger = logging.getLogger(__name__)
 
 
 REPOSITORY_WORKFLOWS = frozenset({
@@ -81,6 +84,114 @@ def guarded_local_run_write(method):
                 raise
             if run is not None and getattr(run, "pk", None):
                 run.refresh_from_db()
+            return run
+    return wrapped
+
+
+def read_setup_merge_pull(connection, number):
+    """Read a historical setup PR with the original repository's read scope."""
+    from integrations import http_client
+    from integrations.services.github_app import create_installation_access_token
+    try:
+        credential = create_installation_access_token(installation_id=connection.installation_id,
+            repository=connection.github_repo, repository_id=connection.repository_id, permission_mode="read")
+        response = http_client.get(f"https://api.github.com/repos/{connection.github_repo}/pulls/{number}",
+            headers={"Authorization": f"Bearer {credential.token}", "Accept": "application/vnd.github+json"}, timeout=(3, 15))
+        response.raise_for_status()
+        return response.json()
+    except Exception as exc:
+        raise WebsiteAuthorityError("github_source_unavailable", "GitHub could not verify the setup merge. Retry when GitHub is available.", status=503, retryable=True) from exc
+
+
+@contextmanager
+def setup_merge_observation_guard(run):
+    """Fence provider-proven merge metadata without promoting source readiness.
+
+    Merging changes the source pinned by the setup run. Only this historical
+    observation omits that source pin; the saved request and every mutation,
+    generation and integration-verification guard retain their original pin.
+    """
+    from .website_contract import SHA_PATTERN
+    original = scoped_run_contract(run)
+    if not connection_contract(original):
+        if OrganizationContentConfig.objects.filter(organization__domain__iexact=run.domain,
+                website_connection__isnull=False).exists():
+            raise WebsiteAuthorityError("website_connection_required", "This setup has no original website consent.")
+        yield None
+        return
+    if run.workflow != "article_system_setup":
+        raise WebsiteAuthorityError("setup_merge_observation_required", "Only setup merge metadata can be observed.")
+    result = run.result or {}
+    setup = result.get("article_system_setup") or {}
+    url = str(result.get("pr_url") or result.get("prUrl") or setup.get("pr_url") or setup.get("prUrl") or "")
+    match = re.fullmatch(r"https://github\.com/([^/]+/[^/]+)/pull/([1-9][0-9]*)", url)
+    if not match or match[1].casefold() != run.github_repo.casefold():
+        raise WebsiteAuthorityError("setup_merge_identity_changed", "The saved setup PR does not match this repository.")
+    number = int(match[2])
+    if any(str(value) != str(number) for value in (
+            result.get("pr_number"), result.get("prNumber"), setup.get("pr_number"), setup.get("prNumber")) if value not in (None, "")):
+        raise WebsiteAuthorityError("setup_merge_identity_changed", "The saved setup PR number changed.")
+    # Build an explicit metadata scope, never flatten nested source aliases back
+    # into it or replace the saved connection with today's selected connection.
+    keys = {*CONNECTION_FIELDS, "connection_id", "connectionId", "connectionGeneration",
+        "repositoryId", "connectionTargetId", "domain", "github_repo", "app_root", "branch",
+        "configuration_revision", "operation_id", "operation_attempt", "deletion_epoch", "actor_id"}
+    payload = {key: value for key, value in original.items() if key in keys}
+    payload["run_id"] = run.run_id
+    request_digest = evidence_digest(run.run_request or {})
+    with authority_guard(payload, action="read") as connection:
+        if any(str(original.get(key, "")) != str(getattr(connection, key)) for key in ("app_root", "branch")):
+            raise WebsiteAuthorityError("website_repository_changed", "The saved application or branch changed.")
+        snapshot = (connection.generation, connection.configuration_version, connection.state,
+            connection.installation_id, connection.authorized_by_id)
+    require_unlocked_remote_call()
+    pull = read_setup_merge_pull(connection, number)
+    if not isinstance(pull, dict):
+        raise WebsiteAuthorityError("setup_merge_identity_changed", "GitHub did not return a setup PR receipt.")
+    base = pull.get("base") or {}
+    head = pull.get("head") or {}
+    if not isinstance(base, dict) or not isinstance(head, dict):
+        raise WebsiteAuthorityError("setup_merge_identity_changed", "GitHub did not return the setup repository identity.")
+    repositories = [base.get("repo") or {}, head.get("repo") or {}]
+    if (pull.get("merged") is not True or pull.get("number") != number
+            or str(pull.get("html_url") or "").casefold() != url.casefold()
+            or not SHA_PATTERN.fullmatch(str(pull.get("merge_commit_sha") or ""))
+            or not SHA_PATTERN.fullmatch(str(head.get("sha") or ""))
+            or base.get("ref") != connection.branch
+            or any(not isinstance(repo, dict) or repo.get("id") != connection.repository_id
+                or str(repo.get("full_name") or "").casefold() != connection.github_repo.casefold() for repo in repositories)):
+        raise WebsiteAuthorityError("setup_merge_identity_changed", "GitHub did not confirm this repository's saved setup merge.")
+    receipt = {"number": number, "merged": True, "html_url": url,
+        "merge_commit_sha": pull["merge_commit_sha"], "head_sha": head["sha"],
+        "repository_id": connection.repository_id, "base_ref": base["ref"]}
+    with authority_guard(payload, action="read") as current:
+        if snapshot != (current.generation, current.configuration_version, current.state,
+                current.installation_id, current.authorized_by_id):
+            raise WebsiteAuthorityError("website_connection_changed", "Website authority changed while observing the merge.")
+        from workflow_runs.models import ContentFactoryRun
+        locked = ContentFactoryRun.objects.select_for_update().get(pk=run.pk)
+        if (evidence_digest(locked.run_request or {}) != request_digest
+                or evidence_digest(locked.result or {}) != evidence_digest(result)):
+            raise WebsiteAuthorityError("website_run_changed", "The saved setup changed while observing the merge.", retryable=True)
+        run.refresh_from_db()
+        yield receipt
+
+
+def guarded_setup_merge_observation(method):
+    """Limit source-independent persistence to verified setup merge metadata."""
+    @wraps(method)
+    def wrapped(*args, **kwargs):
+        run = kwargs.get("run") or args[0]
+        try:
+            with setup_merge_observation_guard(run) as receipt:
+                if receipt is not None and method.__name__ == "_apply_setup_merge_result":
+                    kwargs["merge_response"] = {"source": "github_pr_status", "pull": receipt}
+                return method(*args, **kwargs)
+        except WebsiteAuthorityError as exc:
+            logger.info("setup_merge_observation_denied run_id=%s code=%s", run.run_id, exc.code)
+            if owner_operation_contract():
+                raise
+            run.refresh_from_db()
             return run
     return wrapped
 

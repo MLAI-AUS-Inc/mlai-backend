@@ -25,6 +25,7 @@ from .website_connections import (
     REPOSITORY_WORKFLOWS, authority_guard, bind_website, contract_for,
     scoped_run_contract, summary_for as website_summary, transition_connection,
     owner_operation_contract, owner_write_guard, guarded_local_run_write, require_unlocked_remote_call,
+    guarded_setup_merge_observation,
 )
 from .website_views import guarded_owner_operation
 from .portable_drafts import original_portable_run
@@ -5522,6 +5523,10 @@ def _mark_pending_article_system_setup_merged(config, *, run=None, result=None, 
         return
     article_system = dict(config.article_system or {})
     pending = dict(article_system.get("pending_article_system_setup") or {})
+    scoped = bool(run is not None and connection_contract(scoped_run_contract(run)))
+    pending_run_id = str(pending.get("setupRunId") or pending.get("setup_run_id") or "")
+    if scoped and pending_run_id and pending_run_id != run.run_id:
+        return
     result = _run_mapping(result)
     setup = _run_mapping(result.get("article_system_setup"))
     setup_run_id = str(
@@ -5571,18 +5576,18 @@ def _mark_pending_article_system_setup_merged(config, *, run=None, result=None, 
     pending["setup_current_step"] = "merged"
     pending["updatedAt"] = timezone.now().isoformat()
     pending["updated_at"] = pending["updatedAt"]
-    pending["generationReady"] = True
-    pending["generation_ready"] = True
+    pending["generationReady"] = not scoped
+    pending["generation_ready"] = not scoped
     article_system["pending_article_system_setup"] = pending
-    article_system["generationReady"] = True
-    article_system["generation_ready"] = True
-    article_system.setdefault("generationReadySource", "setup_pr_merged")
-    article_system.setdefault("generation_ready_source", "setup_pr_merged")
+    article_system["generationReady"] = not scoped
+    article_system["generation_ready"] = not scoped
+    article_system["generationReadySource"] = "verification_required" if scoped else "setup_pr_merged"
+    article_system["generation_ready_source"] = article_system["generationReadySource"]
     article_system.setdefault("generationReadyAt", pending["updatedAt"])
     article_system.setdefault("generation_ready_at", pending["updated_at"])
     existing_state = str(article_system.get("state") or "").strip()
-    if existing_state not in ARTICLE_SYSTEM_PUBLISHED_STATES and existing_state != "roo_scaffolded":
-        article_system["state"] = "roo_scaffolded"
+    if scoped or (existing_state not in ARTICLE_SYSTEM_PUBLISHED_STATES and existing_state != "roo_scaffolded"):
+        article_system["state"] = "setup_merged" if scoped else "roo_scaffolded"
         article_system["source"] = article_system.get("source") or "setup_pr_merge"
         article_system["confidence"] = article_system.get("confidence") or "high"
 
@@ -5595,9 +5600,10 @@ def _mark_pending_article_system_setup_merged(config, *, run=None, result=None, 
         update_fields.append("articles_scaffold_pr_url")
     update_fields.append("updated_at")
     config.save(update_fields=update_fields)
-    # Self-register the durable publish target from the built scaffold so a merged scaffold is
-    # immediately publishable (no manual Accept). No-op when there's no scaffold cache to link.
-    _link_built_scaffold_publish_target(config)
+    # A scoped merge receipt is historical metadata. Only fresh integration
+    # verification may promote a target for the newly merged source.
+    if not scoped:
+        _link_built_scaffold_publish_target(config)
 
 
 def _mark_pending_article_system_setup_pr_created(config, *, run, result):
@@ -5676,7 +5682,7 @@ def _setup_blocked_article_run_ids(run):
     return run_ids
 
 
-@guarded_local_run_write
+@guarded_setup_merge_observation
 def _persist_setup_merged_verification(run, metadata):
     result = dict(run.result or {})
     setup = dict(result.get("article_system_setup") or {})
@@ -5836,7 +5842,7 @@ def _maybe_verify_merged_setup_for_blocked_articles(*, run, context, force=False
     return _persist_setup_merged_verification(run, metadata)
 
 
-@guarded_local_run_write
+@guarded_setup_merge_observation
 def _apply_setup_merge_result(*, run, context, checks_status="success", merge_response=None):
     config = _get_config(context.organization)
     result = dict(run.result or {})
@@ -6412,6 +6418,7 @@ def _refresh_pending_article_system_setup_pr_status(
         if (
             not explicit_pending_mismatch
             and not bool(getattr(config, "articles_scaffolded", False))
+            and not config.website_connection_id
         ):
             _mark_pending_article_system_setup_merged(
                 config,
@@ -6428,6 +6435,10 @@ def _refresh_pending_article_system_setup_pr_status(
                 )
                 return setup_run, True
         return setup_run or run, False
+
+    # A scoped website cannot borrow today's consent to update an unbound run.
+    if config.website_connection_id and (setup_run is None or not connection_contract(scoped_run_contract(setup_run))):
+        return run, False
 
     pr_url = str(
         pending.get("prUrl")

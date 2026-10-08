@@ -270,6 +270,9 @@ jobs:
           content_factory.tests_topic_metrics_unit \
           integrations.tests_slack_content
 
+    - name: Check setup merge observation without database access
+      run: python scripts/test_without_database.py content_factory.tests_setup_merge_observation_unit
+
     - name: Check article draft review contracts without database access
       run: python scripts/test_article_review.py
 
@@ -318,7 +321,7 @@ jobs:
           tests.test_linear_deployment_wiring \
           tests.test_health_check \
           tests.test_content_factory_org_config \
-          content_factory.tests_website_connections content_factory.tests_website_articles_reliability_database \
+          content_factory.tests_website_connections content_factory.tests_setup_merge content_factory.tests_website_articles_reliability_database \
           integrations.tests_github_workflow_permissions \
           integrations.tests_github_ci_evidence \
           content_factory.tests_activation_connections \
