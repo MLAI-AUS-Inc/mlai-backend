@@ -119,6 +119,12 @@ state version, so refreshing an approved article cannot erase its exact-preview
 approval fence. Stale snapshots remain rejected and a new generation needs a
 new approval.
 
+Pull reconciliation preserves the domain, repository and actor recorded by the
+original dispatch when a worker status response omits those model fields. It
+can restore a previously cleared repository column from that saved request
+after the original authority guard passes. Conflicting incoming identities and
+stale snapshots cannot replace the saved identity.
+
 Recovery through a dispatch key acknowledges the existing run identity only.
 Its minimal receipt cannot replace saved worker status, repair lineage, evidence
 or errors. If callbacks have not yet created the local run, recovery creates a

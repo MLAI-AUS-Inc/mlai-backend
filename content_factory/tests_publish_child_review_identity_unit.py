@@ -11,6 +11,80 @@ from .incident_guards import publish_child_binding
 from .website_contract import WebsiteAuthorityError
 
 
+class ReconciledRunIdentityTests(SimpleTestCase):
+    def setUp(self):
+        from .tests_editorial_snapshot_unit import EditorialSnapshotPersistenceSeamTests
+        self.fixture = EditorialSnapshotPersistenceSeamTests("runTest")
+        self.fixture.setUp()
+        self.addCleanup(self.fixture.doCleanups)
+        self.run = self.fixture.existing
+        self.run.github_repo = "fixture/site"
+        self.run.slack_user_id = "fixture-actor"
+        self.run.run_request.update(domain=self.run.domain, github_repo=self.run.github_repo,
+            slack_user_id=self.run.slack_user_id, website_connection_id=str(uuid4()), connection_generation=3,
+            repository_id=42, operation_id="original-operation", operation_attempt=8, deletion_epoch=0)
+        self.run.result.update(generation=1, state_version=10)
+        self.run.refresh_from_db = Mock()
+        self.original = deepcopy(self.run.run_request)
+        self.snapshot = {"workflow": self.run.workflow, "status": "running", "generation": 1,
+                         "state_version": 11, "result": {"message": "Worker checkpoint"}}
+
+    def reconcile(self, snapshot, *, denial=None):
+        from importlib import import_module
+        reconciliation = import_module("content_factory.reconciliation")
+        service_views = import_module("content_factory.service_views")
+        website_connections = import_module("content_factory.website_connections")
+        website_operations = import_module("content_factory.website_operations")
+        guard = (lambda *a, **kw: nullcontext()) if denial is None else Mock(side_effect=denial)
+        with patch.object(website_connections, "authority_guard", side_effect=guard), \
+                patch.object(website_operations, "observe_workflow_status"), \
+                patch.object(service_views, "_sync_content_factory_run_snapshot",
+                             side_effect=self.fixture.ns["_sync_content_factory_run_snapshot"]) as sync:
+            result = reconciliation._adopt_remote_payload(self.run, snapshot)
+            self.synced = sync.called
+            return result
+
+    def test_sparse_remote_status_keeps_repository_domain_and_actor_through_real_snapshot_sync(self):
+        self.reconcile(self.snapshot)
+        self.assertEqual((self.run.github_repo, self.run.domain, self.run.slack_user_id),
+                         ("fixture/site", "example.test", "fixture-actor"))
+        self.assertEqual(self.run.run_request, self.original)
+        self.assertEqual(self.run.result["state_version"], 11)
+
+    def test_previously_cleared_model_column_recovers_only_from_the_saved_request(self):
+        self.run.github_repo = ""
+        self.reconcile({**self.snapshot, "github_repo": "", "domain": ""})
+        self.assertEqual(self.run.github_repo, self.original["github_repo"])
+        self.assertEqual(self.run.run_request, self.original)
+
+    def test_conflicting_top_level_or_nested_identity_cannot_replace_original(self):
+        for change in ({"github_repo": "other/site"}, {"domain": "other.example"},
+                       {"run_request": {"github_repo": "other/site"}},
+                       {"run_request": {"domain": "other.example"}}):
+            with self.subTest(change=change):
+                self.reconcile({**self.snapshot, **change})
+                self.assertFalse(self.synced)
+                self.assertEqual(self.run.github_repo, "fixture/site")
+                self.assertEqual(self.run.run_request, self.original)
+
+    def test_revoked_authority_and_stale_snapshots_cannot_repair_history(self):
+        self.run.github_repo = ""
+        self.reconcile(self.snapshot, denial=WebsiteAuthorityError("website_connection_changed", "Changed"))
+        self.assertFalse(self.synced)
+        self.assertEqual(self.run.github_repo, "")
+        self.reconcile({**self.snapshot, "state_version": 9})
+        self.assertEqual(self.run.github_repo, "")
+        self.assertEqual(self.run.run_request, self.original)
+
+    def test_missing_original_repository_does_not_borrow_a_current_selection(self):
+        self.run.github_repo = ""
+        self.run.run_request.pop("github_repo")
+        before = deepcopy(self.run.run_request)
+        self.reconcile(self.snapshot)
+        self.assertEqual(self.run.github_repo, "")
+        self.assertEqual(self.run.run_request, before)
+
+
 class ReviewedArticleStatusPollTests(SimpleTestCase):
     def setUp(self):
         from .tests_article_publish_approval_unit import _review_run
