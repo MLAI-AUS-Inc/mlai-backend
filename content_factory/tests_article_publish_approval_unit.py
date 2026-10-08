@@ -37,6 +37,65 @@ def _review_run():
 
 
 class ArticlePublishApprovalReceiptTests(SimpleTestCase):
+    def test_late_worker_approval_records_receipt_and_rejection_keeps_review_gate(self):
+        for rejected in (False, True):
+            with self.subTest(rejected=rejected):
+                run = _review_run()
+                run.pk = 1
+                run.workflow = "article_generation"
+                run.save = MagicMock()
+                run.refresh_from_db = MagicMock()
+                child = SimpleNamespace(run_id="publish-child-1")
+                request = SimpleNamespace(data={}, user=SimpleNamespace(pk=1))
+
+                def remote_approve(**kwargs):
+                    # Model the observed 31-second acknowledgement without a
+                    # wall-clock sleep or network/database access.
+                    if kwargs["timeout"][1] < 31:
+                        return {"error": "Worker acknowledgement timed out."}
+                    if rejected:
+                        return {"content_factory_status_code": 409, "error": "Review expired."}
+                    return {"run_id": child.run_id, "status": "queued"}
+
+                def sync_child(**kwargs):
+                    run.approval_state = "approved"
+                    return child
+
+                with (
+                    patch("content_factory.article_review_views.check_approval_comments", return_value=None),
+                    patch("content_factory.article_review_views.record_review_approval") as accept_feedback,
+                    patch("content_factory.vibe_marketing_views._resolve_context_or_response", return_value=(SimpleNamespace(organization=object()), None)),
+                    patch("content_factory.vibe_marketing_views._get_config", return_value=object()),
+                    patch("content_factory.vibe_marketing_views._setup_blocked_response_for_generation", return_value=None),
+                    patch("content_factory.incident_guards.publish_child_binding", return_value={}),
+                    patch("content_factory.vibe_marketing_views.get_object_or_404", return_value=run),
+                    patch("content_factory.vibe_marketing_views._run_belongs_to_context", return_value=True),
+                    patch("content_factory.vibe_marketing_views._latest_review_ready_component_revision", return_value=None),
+                    patch("content_factory.vibe_marketing_views.founder_actor_id_for_user", return_value="founder-1"),
+                    patch("content_factory.vibe_marketing_views.transaction.atomic", return_value=nullcontext()),
+                    patch("content_factory.vibe_marketing_views.ContentFactoryRun.objects.select_for_update") as lock,
+                    patch("content_factory.vibe_marketing_views._call_content_factory_run_action", side_effect=remote_approve),
+                    patch("content_factory.vibe_marketing_views._sync_publish_child_from_control_response", side_effect=sync_child) as sync,
+                    patch("content_factory.vibe_marketing_views._serialize_run", return_value={"runId": child.run_id}),
+                ):
+                    lock.return_value.get.return_value = run
+                    response = VibeMarketingRunControlView.post.__wrapped__(
+                        VibeMarketingRunControlView(), request, run.run_id, "approve",
+                    )
+
+                self.assertTrue(run.run_request[RECEIPT_REQUIRED_KEY])
+                if rejected:
+                    self.assertEqual(response.status_code, 409)
+                    self.assertEqual(run.approval_state, "approval_required")
+                    self.assertNotIn(RECEIPT_KEY, run.run_request)
+                    sync.assert_not_called()
+                    accept_feedback.assert_not_called()
+                else:
+                    self.assertEqual(response.status_code, 202)
+                    self.assertTrue(article_publish_approval_receipt_matches(run))
+                    self.assertTrue(_article_publish_retry_authorized(run))
+                    accept_feedback.assert_called_once()
+
     def test_passing_preview_does_not_authorize_direct_promotion(self):
         run = _review_run()
         self.assertFalse(_article_publish_retry_authorized(run))
