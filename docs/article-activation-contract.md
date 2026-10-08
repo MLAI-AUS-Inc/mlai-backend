@@ -166,6 +166,14 @@ valid after the corresponding terminal snapshot; old attempts and generations
 are rejected. An explicit `retryable: false` failure or a completed, cancelled or
 denied lifecycle suppresses Resume and Retry controls in run serialization.
 
+The narrow exception is a worker-approved writing repair: a blocked or failed
+article generation run at `assemble_article` with `EDITORIAL_REJECTED`, an
+`explicit_action` failure policy, and the durable `resume_available` flag.
+Summary, status and full responses preserve Resume for that unapproved article
+while keeping generic Retry disabled. Result-level historical flags do not grant
+this exception; Content Factory revalidates the saved editorial proof and the
+original repository authority when Resume is requested.
+
 The recovery regressions run without a database or network:
 `python scripts/test_without_database.py
 content_factory.tests_website_operation_recovery_unit

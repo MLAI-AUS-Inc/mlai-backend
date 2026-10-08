@@ -12,6 +12,32 @@ from content_factory import vibe_marketing_views as views
 
 
 class SectionIssueContractTests(SimpleTestCase):
+    def test_approved_writing_repair_is_visible_in_all_run_response_modes(self):
+        now = datetime.now(timezone.utc)
+        run = SimpleNamespace(run_id="writing-repair", workflow="confirmed_topic", domain="example.test", github_repo="fixture/repo",
+            status="blocked", current_step="assemble_article", approval_state="not_required", resume_available=True,
+            created_at=now, updated_at=now, step_order=[], steps=SimpleNamespace(order_by=lambda *args: [], all=lambda: []),
+            result={"retryable": False, "failure": {"code": "EDITORIAL_REJECTED", "step": "assemble_article",
+                    "retryable": False, "retry_policy": "explicit_action"}}, run_request={},
+            acceptance_summary={}, verification_summary={}, error="")
+        with (
+            patch.object(views, "_run_source_run_id", return_value=""),
+            patch.object(views, "_article_restart_available", return_value=False),
+            patch.object(views, "_article_setup_state", return_value={}),
+            patch.object(views, "_workflow_progress", return_value={}),
+            patch.object(views, "_content_package_from_run", return_value=None),
+            patch.object(views, "_component_feedback_from_run", return_value={}),
+            patch.object(views, "_run_content_island_payload", return_value=None),
+        ):
+            for mode in ("summary", "status", "full"):
+                with self.subTest(mode=mode):
+                    projected = views._serialize_run(run, mode=mode)
+                    self.assertTrue(projected["resumeAvailable"])
+                    self.assertFalse(projected["retryAvailable"])
+                    run.resume_available = False
+                    self.assertFalse(views._serialize_run(run, mode=mode)["resumeAvailable"])
+                    run.resume_available = True
+
     def test_saved_delivery_confirmation_is_projected_only_from_original_input(self):
         now = datetime.now(timezone.utc)
         run = SimpleNamespace(run_id="portable-summary", workflow="island_refresh", domain="example.test", github_repo="",
