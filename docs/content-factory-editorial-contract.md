@@ -529,3 +529,14 @@ The worker authenticates that attempt against the backend, advances the active
 execution generation before registering saved artifacts, and checks the same
 review revision again. Ready/no-op refreshes consume no attempt. This rebuilds
 saved copy; it does not grant publication approval or change the source binding.
+
+
+### Original publishing control scope
+
+Approval and publish handoffs send the original run's saved website identity to
+its worker control endpoint, including the absence of optional repository or
+target identity fields. The current publishing target is still verified before
+handoff and retained separately as the publishing target contract. It must not
+be added to the parent run's consent tuple: the worker correctly rejects that
+as a connection-generation mismatch. Controls preserve explicit original
+identity fields and leave the saved request unchanged.
