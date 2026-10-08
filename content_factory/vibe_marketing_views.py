@@ -12181,6 +12181,15 @@ def _run_result_from_remote(remote_data):
             merged[key] = remote_data.get(key)
     if not merged and remote_data:
         merged = dict(remote_data)
+    if str(remote_data.get("status") or merged.get("status") or "").lower() == "setup_pr_create_failed":
+        # Failure wins over the previous preview_ready phase in the nested
+        # setup object, including historical snapshots received by status polls.
+        merged.update(status="setup_pr_create_failed", setup_status="setup_pr_create_failed",
+                      setupStatus="setup_pr_create_failed")
+        setup = dict(merged.get("article_system_setup") or {})
+        setup.update(status="setup_pr_create_failed", setup_status="setup_pr_create_failed",
+                     setupStatus="setup_pr_create_failed")
+        merged["article_system_setup"] = setup
     for key in ("review_draft_html", "reviewDraftHtml"):
         value = merged.get(key)
         if isinstance(value, str) and len(value) > MAX_REVIEW_DRAFT_HTML_CHARS:
@@ -17668,6 +17677,38 @@ def _article_publish_approval_receipt_failure(run):
     )
 
 
+def _project_setup_pr_creation_failure(run, config, remote_data):
+    """Retain approved preview evidence while exposing failed PR creation."""
+    detail = str(remote_data.get("error") or remote_data.get("message")
+                 or "The setup PR could not be created. Review the failure before starting a new attempt.")
+    result = {**dict(run.result or {}), **_run_result_from_remote(remote_data)}
+    setup = dict(result.get("article_system_setup") or {})
+    failure = {"status": "setup_pr_create_failed", "setup_status": "setup_pr_create_failed",
+               "setupStatus": "setup_pr_create_failed", "current_step": "create_pull_request",
+               "currentStep": "create_pull_request", "error": detail, "message": detail}
+    setup.update(failure)
+    result.update(failure)
+    result["article_system_setup"] = setup
+    result["latest_control_response"] = remote_data
+    run.result = result
+    run.status = ContentFactoryRunStatus.BLOCKED
+    run.current_step = "create_pull_request"
+    run.approval_state = ContentFactoryApprovalState.APPROVED
+    run.resume_available = False
+    run.error = detail
+    run.save(update_fields=["result", "status", "current_step", "approval_state", "resume_available", "error", "updated_at"])
+    if config:
+        article_system = dict(config.article_system or {})
+        pending = dict(article_system.get("pending_article_system_setup") or {})
+        pending_run_id = str(pending.get("setupRunId") or pending.get("setup_run_id") or "")
+        if pending_run_id == run.run_id:
+            pending.update(failure)
+            article_system["pending_article_system_setup"] = pending
+            config.article_system = article_system
+            config.save(update_fields=["article_system", "updated_at"])
+    return detail
+
+
 class VibeMarketingRunControlView(APIView):
     @guarded_owner_operation("setup", run_operation=True)
     def post(self, request, run_id, action):
@@ -18017,6 +18058,13 @@ class VibeMarketingRunControlView(APIView):
             if remote_run.pk != run.pk:
                 remote_run.refresh_from_db()
             remote_status_code = int(remote_data.get("content_factory_status_code") or 0)
+            if (action == "approve" and run.workflow == "article_system_setup"
+                    and remote_data.get("status") == "setup_pr_create_failed"):
+                detail = _project_setup_pr_creation_failure(
+                    run, _get_config(context.organization), remote_data,
+                )
+                return Response({"detail": detail, "error": detail, "runId": run.run_id},
+                                status=status.HTTP_409_CONFLICT)
             if action != "approve" and (
                 remote_status_code >= 400 or remote_data.get("allowed") is False
                 or (remote_data.get("error") and not (
@@ -18492,6 +18540,7 @@ def _normalize_remote_run_status(value):
         "precondition_failed": ContentFactoryRunStatus.BLOCKED,
         "preview_failed": ContentFactoryRunStatus.BLOCKED,
         "fallback_ready": ContentFactoryRunStatus.BLOCKED,
+        "setup_pr_create_failed": ContentFactoryRunStatus.BLOCKED,
         "setup_pr_created": ContentFactoryRunStatus.COMPLETED,
         "pr_created": ContentFactoryRunStatus.COMPLETED,
         "merged": ContentFactoryRunStatus.COMPLETED,

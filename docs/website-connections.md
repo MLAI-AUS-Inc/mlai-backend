@@ -104,6 +104,12 @@ parent's operation receipt. A failed or unavailable repair makes the operation
 terminal. This projection cannot reopen an already terminal operation, and
 cancelling pending repair work fences both the parent and its known children.
 
+Setup approval that reports `setup_pr_create_failed` remains blocked with its
+error and approved preview evidence retained. The browser receives a conflict
+response instead of a successful queued acknowledgement. A status poll also
+normalizes that failure over stale nested `preview_ready` metadata; neither path
+creates a PR or reopens the website operation.
+
 Recovery through a dispatch key acknowledges the existing run identity only.
 Its minimal receipt cannot replace saved worker status, repair lineage, evidence
 or errors. If callbacks have not yet created the local run, recovery creates a
