@@ -188,6 +188,19 @@ def _adopt_remote_payload(run: ContentFactoryRun, payload: dict) -> str:
             original = scoped_run_contract(run)
             with authority_guard(original, action="read"):
                 binding = connection_contract(original)
+                # Worker status responses omit these model columns. Retain
+                # the original authorized identity, including recovery after
+                # an older sparse projection cleared the denormalized column.
+                for key in ("domain", "github_repo"):
+                    saved = str(original.get(key) or getattr(run, key, "") or "")
+                    remote_request = sync_payload.get("run_request")
+                    for observation in (sync_payload, remote_request if isinstance(remote_request, dict) else {}):
+                        observed = str(observation.get(key) or "")
+                        if observed and observed.casefold() != saved.casefold():
+                            raise WebsiteAuthorityError("website_scope_mismatch", "The worker snapshot does not match the saved website identity.")
+                    sync_payload[key] = saved
+                if not sync_payload.get("slack_user_id"):
+                    sync_payload["slack_user_id"] = original.get("slack_user_id") or run.slack_user_id
                 sync_payload.update(binding)
                 sync_payload["run_request"] = {**(run.run_request or {}), **(sync_payload.get("run_request") or {}), **binding}
                 observed, _ = _sync_content_factory_run_snapshot(run_id=run.run_id, data=sync_payload, step_states=step_states)
