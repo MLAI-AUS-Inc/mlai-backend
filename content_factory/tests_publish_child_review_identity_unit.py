@@ -99,3 +99,99 @@ class PublishChildReviewIdentityTests(SimpleTestCase):
             )
         self.assertIs(acknowledged, self.child)
         create.assert_not_called()
+
+
+class ApprovedPublishChildOperationTests(SimpleTestCase):
+    def setUp(self):
+        from .tests_article_publish_approval_unit import _review_run
+        from .article_publish_approval import RECEIPT_KEY, make_article_publish_approval_receipt
+        self.connection = SimpleNamespace(pk=uuid4(), organization_id=7, generation=3,
+                                         github_repo="fixture/site", blockers=[], operations=Mock())
+        self.op = SimpleNamespace(pk=uuid4(), state="completed", action="workflow", generation=3,
+                                  payload={"run_id": "review-source", "attempt": 8}, save=Mock())
+        self.connection.operations.filter.return_value.first.return_value = self.op
+        self.source = _review_run()
+        self.source.run_id = "review-source"
+        self.source.organization_id = 7
+        self.source.github_repo = self.connection.github_repo
+        self.source.workflow = "article_generation"
+        self.source.status = "completed"
+        self.source.approval_state = "approved"
+        self.source.run_request = {
+            "website_connection_id": str(self.connection.pk), "connection_generation": 3,
+            "expected_source_sha": "a" * 40, "operation_id": str(self.op.pk),
+            "operation_attempt": 8, "deletion_epoch": 0,
+            "delivery_mode": "review_draft", "delivery_mode_confirmed": True,
+        }
+        self.source.result["publish_child_run_id"] = "publish-child"
+        self.source.run_request[RECEIPT_KEY] = make_article_publish_approval_receipt(self.source, actor_id="fixture-owner")
+        self.child = SimpleNamespace(
+            run_id="publish-child", organization_id=7, github_repo=self.connection.github_repo,
+            workflow="direct_generate", status="queued", result={}, save=Mock(),
+            run_request={**self.source.run_request, "source_run_id": self.source.run_id,
+                         "delivery_mode": "publish_code", "delivery_mode_confirmed": True},
+        )
+        self.child.run_request.pop(RECEIPT_KEY)
+
+    def _validate(self, run=None, **payload):
+        from workflow_runs.models import ContentFactoryRun
+        from .website_operations import validate_operation
+        with patch.object(ContentFactoryRun.objects, "filter") as runs:
+            runs.return_value.first.side_effect = [run or self.child, self.source]
+            return validate_operation(self.connection, {
+                **self.child.run_request, "run_id": self.child.run_id, "status": "running", **payload,
+            })
+
+    def test_explicitly_approved_child_checkpoint_keeps_source_operation_completed(self):
+        original = deepcopy(self.op.payload)
+        self.assertIs(self._validate(), self.op)
+        self.assertEqual(self.op.state, "completed")
+        self.assertEqual(self.op.payload, original)
+        self.op.save.assert_not_called()
+
+    def test_missing_or_changed_review_receipt_never_authorizes_a_child(self):
+        from .article_publish_approval import RECEIPT_KEY
+        for mutation in ["missing", "new_review", "wrong_child", "portable", "old_source"]:
+            with self.subTest(mutation=mutation):
+                request, result = deepcopy((self.source.run_request, self.source.result))
+                if mutation == "missing": self.source.run_request.pop(RECEIPT_KEY)
+                elif mutation == "new_review": self.source.result["article_preview_quality"]["inputs_sha256"] = "c" * 64
+                elif mutation == "wrong_child": self.source.result["publish_child_run_id"] = "another-child"
+                elif mutation == "portable": self.source.run_request["delivery_mode"] = "content_only"
+                else: self.source.run_request["expected_source_sha"] = "b" * 40
+                with self.assertRaises(WebsiteAuthorityError): self._validate()
+                self.source.run_request, self.source.result = request, result
+
+    def test_changed_saved_child_scope_and_cancelled_or_failed_operations_stay_denied(self):
+        for mutation in ["operation", "target", "source", "cancelled", "failed"]:
+            with self.subTest(mutation=mutation):
+                request = deepcopy(self.child.run_request)
+                if mutation == "operation": self.child.run_request["operation_attempt"] = 9
+                elif mutation == "target": self.child.run_request["connection_target_id"] = "replacement-target"
+                elif mutation == "source": self.child.run_request["source_run_id"] = "another-source"
+                else: self.op.state = mutation
+                with self.assertRaises(WebsiteAuthorityError): self._validate()
+                self.child.run_request, self.op.state = request, "completed"
+
+    def test_owner_resume_of_approved_child_preserves_original_attempt_and_consent(self):
+        from contextlib import contextmanager
+        from workflow_runs.models import ContentFactoryRun
+        from . import website_operations as operations, website_connections as authority
+        @contextmanager
+        def guard(*args, **kwargs):
+            yield self.connection
+        request, operation = deepcopy((self.child.run_request, self.op.payload))
+        with patch.object(authority, "authority_guard", side_effect=guard), \
+                patch.object(authority, "extend_owner_operation_contract") as extend, \
+                patch.object(ContentFactoryRun.objects, "filter") as runs, \
+                patch.object(operations.WebsiteConnectionOperation.objects, "select_for_update") as locked:
+            runs.return_value.first.return_value = self.source
+            locked.return_value.get.return_value = self.op
+            fields = operations.advance_workflow_attempt(self.child)
+        self.assertEqual(fields, {key: request[key] for key in operations.OPERATION_FIELDS})
+        extend.assert_called_once_with(fields)
+        self.assertEqual(self.child.run_request, request)
+        self.assertEqual(self.op.payload, operation)
+        self.assertEqual(self.op.state, "completed")
+        self.child.save.assert_not_called()
+        self.op.save.assert_not_called()

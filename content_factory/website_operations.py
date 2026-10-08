@@ -42,9 +42,46 @@ def deletion_epoch(connection):
     return max((int(row.get("deletion_epoch", 0)) for row in (connection.blockers or []) if isinstance(row, dict)), default=0)
 
 
+def _approved_publish_child_continuation(connection, operation, run):
+    """Recognize an explicitly approved child without reopening its source operation."""
+    from workflow_runs.models import ContentFactoryRun
+    from .article_publish_approval import article_publish_approval_receipt_matches
+    if (run is None or operation.state != "completed" or getattr(operation, "action", None) != "workflow"
+            or getattr(run, "workflow", None) not in {"article_generation", "direct_generate", "confirmed_topic"}):
+        return False
+    request = run.run_request or {}
+    source_id = request.get("source_run_id")
+    if (not source_id or source_id == run.run_id or source_id != operation.payload.get("run_id")
+            or request.get("delivery_mode") != "publish_code" or request.get("delivery_mode_confirmed") is not True):
+        return False
+    source = ContentFactoryRun.objects.filter(run_id=source_id, organization_id=connection.organization_id).first()
+    if (source is None or source.workflow not in {"article_generation", "direct_generate", "confirmed_topic"}
+            or source.status != "completed" or not article_publish_approval_receipt_matches(source)):
+        return False
+    source_request = source.run_request or {}
+    source_result = source.result or {}
+    source_contract = connection_contract(source_request)
+    known_child = source_result.get("publish_child_run_id") or source_result.get("promoted_publish_job_id")
+    return bool(
+        known_child == run.run_id and run.organization_id == source.organization_id
+        and run.github_repo == source.github_repo == connection.github_repo
+        and source_request.get("delivery_mode") == "review_draft"
+        and source_request.get("delivery_mode_confirmed") is True
+        and source_request.get("operation_id") == str(operation.pk)
+        and source_request.get("operation_attempt") == operation.payload.get("attempt", 1)
+        and source_request.get("deletion_epoch", 0) == deletion_epoch(connection)
+        and source_contract.get("website_connection_id") == str(connection.pk)
+        and source_contract.get("connection_generation") == connection.generation
+        and bool(source_request.get("expected_source_sha"))
+        and connection_contract(request) == source_contract
+        and all(request.get(key) == source_request.get(key) for key in (*OPERATION_FIELDS, "expected_source_sha"))
+    )
+
+
 def validate_operation(connection, payload, *, worker_cleanup=False, restoration=False, cancellation=False, cancellation_receipt=False):
     """Deny cancelled/deleted work, including legacy callbacks with a run ID."""
     from workflow_runs.models import ContentFactoryRun
+    run = None
     run_id = str(payload.get("run_id") or payload.get("job_id") or "")
     if run_id and not worker_cleanup and not restoration and not cancellation and not cancellation_receipt:
         run = ContentFactoryRun.objects.filter(run_id=run_id).first()
@@ -94,7 +131,8 @@ def validate_operation(connection, payload, *, worker_cleanup=False, restoration
         if op.state == "completed" and event == "article_system_setup_revision_ready":
             from .article_review_callbacks import processed_setup_review_replay
             review_replay = processed_setup_review_replay(payload, child_id=run_id)
-        if not review_replay and ((incoming_status and incoming_status != op.state and not same_failure) or (event and event not in terminal_events[op.state])):
+        publish_continuation = _approved_publish_child_continuation(connection, op, run)
+        if not review_replay and not publish_continuation and ((incoming_status and incoming_status != op.state and not same_failure) or (event and event not in terminal_events[op.state])):
             raise WebsiteAuthorityError("website_operation_terminal", "This operation is terminal. Start a new reviewed attempt.")
     if cancellation_receipt:
         if (op.action != "workflow" or op.state not in {"pending", "running", "failed", "blocked", "cancelled"}
@@ -319,6 +357,10 @@ def advance_workflow_attempt(run):
             identifier = legacy.pk
         op = WebsiteConnectionOperation.objects.select_for_update().get(pk=identifier, connection=website)
         if op.state == "completed":
+            if _approved_publish_child_continuation(website, op, run):
+                fields = {key: run.run_request[key] for key in OPERATION_FIELDS}
+                extend_owner_operation_contract(fields)
+                return fields
             raise WebsiteAuthorityError("website_operation_terminal", "Completed website work cannot be resumed.")
         if op.state not in {"failed", "blocked", "running", "pending"}:
             raise WebsiteAuthorityError("website_operation_cancelled", "This operation cannot be resumed.")

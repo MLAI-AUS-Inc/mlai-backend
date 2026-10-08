@@ -16,6 +16,15 @@ exactly. The parent still passes current target verification; conflicting child
 or remote slugs and routes are rejected. Independent drafts require their own
 saved slug. This observation does not change either run's consent or request.
 
+An initialized publish child can continue or resume its original attempt after
+the reviewed source operation completes only when that source has the matching
+owner approval receipt, identifies this exact child and retains the same native
+delivery intent and connection/source/operation scope. The source operation
+stays completed, and resuming this child does not replace its consent or advance
+the shared operation attempt. Missing or changed approval, unrelated children,
+portable drafts and cancelled or failed source operations retain the terminal
+gate.
+
 ## Component review updates (8 October 2026)
 
 The company-scoped `runs/:runId/article-review` route supports both article
