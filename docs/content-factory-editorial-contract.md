@@ -65,6 +65,12 @@ continues to own the APPLIED comment status.
 The `article-review/preview-lease` route issues a run/company-bound, 15-minute
 GET-only preview grant. Its proxy rejects path traversal, strips response
 cookies and redirects, uses `no-referrer`, and sandboxes generated scripts.
+The startup response-link adapter preserves the grant's registered
+`/api/v1/vibe-marketing/article-preview/` route and its token, asset paths and
+resource query exactly. This capability proxy has no startup API alias; rewriting
+it under `/api/v1/my-startup/` produces a 404 and prevents the review iframe from
+loading. The existing lease issuer still checks startup/run ownership, and the
+grant proxy retains expiry, connection and operation checks.
 
 Validation uses `scripts/test_without_database.py` with
 `content_factory.tests_article_review_update_unit`,
