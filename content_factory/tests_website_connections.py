@@ -335,7 +335,7 @@ class WebsiteLifecycleTests(WebsiteDatabaseFixture, TestCase):
         self.website.verified_sha = SHA
         self.website.save(update_fields=['verified_sha'])
         WebsiteScanSnapshot.objects.create(connection=self.website, generation=self.website.generation,
-            run_id='new-head', source_sha='b' * 40, fingerprint='new-head')
+            run_id='new-head', source_sha='b' * 40, detector_version='github_head', fingerprint='new-head')
         operation = WebsiteConnectionOperation.objects.create(connection=self.website,
             generation=self.website.generation, action='workflow', state='completed',
             idempotency_key='merge-observation', payload={'attempt': 1})

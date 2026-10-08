@@ -2,15 +2,18 @@
 
 The setup PR merge token is scoped to contents+pull_requests only, so reading the PR's
 commit-status / check-runs 403s with "Resource not accessible by integration". The merge
-must no longer hard-fail on that: it tolerates the checks-read gap, tries a direct squash
-merge (works on an unprotected main), then falls back to GitHub native auto-merge — the
-same robustness as article-generation publish. Plus hands-off auto-publish for orgs that
-opt into auto_publish.
+tolerates the checks-read gap under current persisted consent and tries a direct
+squash merge, with GitHub still enforcing protection. A protected PR remains
+reviewable and requires an explicit retry; pending native auto-merge cannot obey a
+later disconnect. Org auto-publish opt-in does not change these authority fences.
 """
 from types import SimpleNamespace
 from unittest import mock
 
 from django.test import TestCase
+
+from content_factory.website_connections import contract_for
+from content_factory.website_models import WebsiteConnection, WebsiteConnectionTarget
 
 from content_factory import vibe_marketing_views as views
 from content_factory.models import OrganizationContentConfig
@@ -24,19 +27,39 @@ PERMISSION_ERROR = "Resource not accessible by integration"
 
 
 def _open_pull(merged=False, node_id="PR_node_1"):
-    return {"merged": merged, "state": "open", "head": {"sha": "abc123"}, "node_id": node_id}
+    return {"merged": merged, "state": "closed" if merged else "open", "number": PR,
+        "html_url": PR_URL, "merge_commit_sha": "b" * 40 if merged else None,
+        "head": {"sha": "c" * 40, "ref": "cf/setup", "repo": {"id": 12345, "full_name": REPO}},
+        "base": {"ref": "main", "repo": {"id": 12345, "full_name": REPO}}, "node_id": node_id}
 
 
 class SetupMergeBase(TestCase):
     def setUp(self):
         self.org = Organization.objects.create(domain="theproductbus.com", name="TPB")
         self.config = OrganizationContentConfig.objects.create(organization=self.org, github_repo=REPO)
+        self.website = WebsiteConnection.objects.create(organization=self.org, github_repo=REPO,
+            repository_id=12345, installation_id="123", branch="main", verified_sha="a" * 40)
+        self.config.website_connection = self.website
+        self.config.save(update_fields=["website_connection"])
+        WebsiteConnectionTarget.objects.create(connection=self.website, generation=self.website.generation,
+            target_key="setup-preview", source_sha="a" * 40, contract={"verification": {
+                "status": "preview_verified", "source_sha": "c" * 40, "base_sha": "a" * 40}})
+        self.binding = {**contract_for(self.website), "expected_source_sha": "a" * 40}
+        for patcher in (
+            mock.patch("content_factory.website_connections.verify_repository_head", return_value="a" * 40),
+            mock.patch("content_factory.website_connections.read_repository_native_target", return_value={"id": 12345, "full_name": REPO, "default_branch": "main"}),
+            mock.patch("content_factory.website_connections.read_setup_merge_pull", side_effect=lambda connection, number: _open_pull(merged=True)),
+        ):
+            patcher.start()
+            self.addCleanup(patcher.stop)
         self.context = SimpleNamespace(organization=self.org)
         self.run = self._setup_run()
 
     def _setup_run(self, run_id="setup-1", status="pr_created"):
         return ContentFactoryRun.objects.create(
             domain=self.org.domain,
+            organization=self.org,
+            run_request=self.binding,
             run_id=run_id,
             workflow="article_system_setup",
             github_repo=REPO,
@@ -106,7 +129,7 @@ class AttemptSetupPublishMergeTests(SetupMergeBase):
         self.run.refresh_from_db()
         self.assertEqual(self.run.result["article_system_setup"]["checks_status"], "success")
 
-    def test_direct_merge_failure_falls_back_to_native_auto_merge(self):
+    def test_direct_merge_failure_requires_explicit_retry_without_native_auto_merge(self):
         def fake_api(method, path, *, token=None, body=None, expected=(200,)):
             if method == "GET" and path.endswith(f"/pulls/{PR}"):
                 return _open_pull()
@@ -121,11 +144,11 @@ class AttemptSetupPublishMergeTests(SetupMergeBase):
         ), mock.patch.object(views, "_enable_native_auto_merge", return_value={"status": "enabled", "message": "ok"}) as auto:
             outcome = views._attempt_setup_publish_merge(run=self.run, context=self.context)
 
-        self.assertEqual(outcome["outcome"], "auto_merge_pending")
-        auto.assert_called_once()
+        self.assertEqual(outcome["outcome"], "manual_required")
+        auto.assert_not_called()
         self.run.refresh_from_db()
-        self.assertEqual(self.run.result["merge_status"], "publishing")
-        self.assertTrue(self.run.result["article_system_setup"]["native_auto_merge_enabled"])
+        self.assertEqual(self.run.result["merge_status"], "manual_merge_required")
+        self.assertFalse(self.run.result["article_system_setup"].get("native_auto_merge_enabled", False))
 
     def test_native_auto_merge_unavailable_surfaces_manual(self):
         def fake_api(method, path, *, token=None, body=None, expected=(200,)):
@@ -152,7 +175,7 @@ class AttemptSetupPublishMergeTests(SetupMergeBase):
     def test_already_merged_pr_short_circuits_without_merge_call(self):
         def fake_api(method, path, *, token=None, body=None, expected=(200,)):
             if method == "GET" and path.endswith(f"/pulls/{PR}"):
-                return {"merged": True, "state": "closed"}
+                return _open_pull(merged=True)
             if method == "PUT":
                 raise AssertionError("merge must not be attempted for an already-merged PR")
             raise AssertionError(f"unexpected {method} {path}")
