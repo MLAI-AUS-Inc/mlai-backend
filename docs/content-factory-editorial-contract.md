@@ -541,7 +541,7 @@ The client may request the exact saved portable preview under current drafting
 permission; repository previews and publication still require their normal
 website authority. No billing, schema or migration behavior changes.
 
-A reviewed discovery topic resolves against its saved, organization-scoped source run. Dashboard keyword deduplication may display an older discovery, but cannot replace the title or source selected in a run. Current decline, written-coverage and keyword availability checks still apply before generation.
+A reviewed discovery topic resolves against its saved, organization-scoped source run. The latest eligible custom-idea discovery keeps its title and source during dashboard keyword merging, and its available candidates precede historical island ideas before the compact response limit is applied. An older island cannot retag or replace that explicitly requested idea. Current decline, written-coverage and keyword availability checks still apply before generation.
 
 Polling a non-resumable failed article with no delivered copy releases its in-progress keyword for a newly reviewed attempt. This also reconciles older failed runs. The keyword row is locked, and another active, resumable or delivered run with the same keyword retains the reservation. Written articles and other organizations are never changed.
 
