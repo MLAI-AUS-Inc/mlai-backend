@@ -30,6 +30,10 @@ ROUTES = (
     ("vibe-marketing/lookups/locations", views.LocationsView),
     ("vibe-marketing/lookups/abns", views.AbnsView),
     ("vibe-marketing/runs/<str:run_id>", views.RunView),
+    ("vibe-marketing/runs/<str:run_id>/article-review", views.ArticleReviewView),
+    ("vibe-marketing/runs/<str:run_id>/article-review/preview-lease", views.ArticlePreviewView),
+    ("vibe-marketing/runs/<str:run_id>/comments", views.ArticleCommentsView),
+    ("vibe-marketing/runs/<str:run_id>/comments/<uuid:comment_id>", views.ArticleCommentView),
     ("vibe-marketing/runs/<str:run_id>/cancel", views.CancelRunView),
 )
 

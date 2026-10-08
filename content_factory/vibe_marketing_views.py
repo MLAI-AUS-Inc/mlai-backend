@@ -12596,7 +12596,7 @@ def _remote_response_write_guard(remote_data, *, workflow, binding=None):
         raise
 
 
-def _create_local_run(*, workflow, domain, github_repo="", actor_id="", payload=None, remote_data=None, fallback_run_id=""):
+def _create_local_run(*, workflow, domain, github_repo="", actor_id="", payload=None, remote_data=None, fallback_run_id="", preserve_existing=False):
     """Project an accepted dispatch only while its original consent is current.
 
     A response racing disconnect is retained as cancelled history and queued for
@@ -12604,7 +12604,7 @@ def _create_local_run(*, workflow, domain, github_repo="", actor_id="", payload=
     """
     payload = dict(payload or {})
     kwargs = dict(workflow=workflow, domain=domain, github_repo=github_repo,
-        actor_id=actor_id, payload=payload, remote_data=remote_data, fallback_run_id=fallback_run_id)
+        actor_id=actor_id, payload=payload, remote_data=remote_data, fallback_run_id=fallback_run_id, preserve_existing=preserve_existing)
     try:
         with owner_write_guard(payload):
             return _create_local_run_authorized(**kwargs)
@@ -12642,8 +12642,7 @@ def _create_local_run(*, workflow, domain, github_repo="", actor_id="", payload=
                     })
             return run
 
-
-def _create_local_run_authorized(*, workflow, domain, github_repo="", actor_id="", payload=None, remote_data=None, fallback_run_id=""):
+def _create_local_run_authorized(*, workflow, domain, github_repo="", actor_id="", payload=None, remote_data=None, fallback_run_id="", preserve_existing=False):
     remote_data = sanitize_json_for_postgres(remote_data or {})
     payload = sanitize_json_for_postgres(payload or {})
     # A dispatch-key lookup acknowledges identity after a lost response. It is
@@ -12679,7 +12678,7 @@ def _create_local_run_authorized(*, workflow, domain, github_repo="", actor_id="
         run.slack_user_id = run.slack_user_id or actor_id
         run.run_request = run.run_request or payload or {}
         update_fields = ["workflow", "domain", "github_repo", "slack_user_id", "run_request", "updated_at"]
-        if projection:
+        if projection and not preserve_existing:
             run.status = _normalize_remote_run_status(remote_data.get("status") or run.status)
             run.current_step = remote_data.get("current_step") or remote_data.get("step") or run.current_step or "queued"
             remote_result = _run_result_from_remote(remote_data)
@@ -12698,7 +12697,6 @@ def _create_local_run_authorized(*, workflow, domain, github_repo="", actor_id="
     _persist_web_article_billing_to_job(run, payload)
     _merge_job_billing_into_run_request(run)
     return run
-
 
 def _call_content_factory_run_status(run_id, *, workflow="", include_review_draft=False):
     require_unlocked_remote_call()
@@ -17001,15 +16999,19 @@ class VibeMarketingRunCommentsMixin:
         run = get_object_or_404(queryset, run_id=run_id)
         if not _run_belongs_to_context(run, context):
             return None, None, Response({"detail": "Run not found."}, status=status.HTTP_404_NOT_FOUND)
-        if request.method not in {"GET", "HEAD"} and ((run.result or {}).get("article_review_approval") or _run_has_external_publish_evidence(run)):
+        setup_review = run.workflow == "article_system_setup" and getattr(self, "allows_setup_review_updates", False)
+        accepted_retry = (getattr(self, "allows_accepted_update_retries", False)
+            and request.data.get("action") in {"applyUpdate", "applyReview"}
+            and (((run.result or {}).get("article_review_updates") or {}).get(request.data.get("operationId")) or {}).get("status") == "accepted")
+        if request.method not in {"GET", "HEAD"} and not setup_review and ((run.result or {}).get("article_review_approval") or _run_has_external_publish_evidence(run)):
             return None, None, Response({"detail": "This article is already approved. Create a new revision to change it."}, status=409)
-        if request.method not in {"GET", "HEAD"} and _latest_review_ready_component_revision(run, context) is not None:
+        if request.method not in {"GET", "HEAD"} and not accepted_retry and _latest_review_ready_component_revision(run, context) is not None:
             return None, None, Response({"detail": "A newer draft is ready. Open that revision before adding feedback."}, status=409)
         return context, run, None
 
-
 @method_decorator(transaction.atomic, name="dispatch")
 class VibeMarketingRunCommentsView(VibeMarketingRunCommentsMixin, APIView):
+    allows_setup_review_updates = True
     def get(self, request, run_id):
         _context, run, error_response = self._resolve_run(request, run_id)
         if error_response is not None:
@@ -17028,17 +17030,22 @@ class VibeMarketingRunCommentsView(VibeMarketingRunCommentsMixin, APIView):
             return Response({"detail": "Choose an article component before adding a comment."}, status=status.HTTP_400_BAD_REQUEST)
         if not payload["body"]:
             return Response({"detail": "Comment text is required."}, status=status.HTTP_400_BAD_REQUEST)
-        operation_id = str(request.data.get("operationId") or "")
+        operation_id = request.data.get("operationId") or request.data.get("operation_id")
         if operation_id:
-            if len(operation_id) > 100:
-                return Response({"detail": "Invalid operation identity."}, status=400)
-            existing = VibeMarketingComponentComment.objects.filter(run=run, context__operationId=operation_id).first()
-            if existing:
-                if existing.body != payload["body"] or existing.component_id != payload["component_id"]:
-                    return Response({"detail": "This operation was already used for a different comment."}, status=409)
-                return Response(_serialize_component_comment(existing))
+            if not isinstance(operation_id, str) or not re.fullmatch(r"[\w-]{8,100}", operation_id):
+                return Response({"detail": "A valid comment operation identity is required."}, status=status.HTTP_400_BAD_REQUEST)
             payload["context"] = {**payload.get("context", {}), "operationId": operation_id}
-        if (run.result or {}).get("article_review_approval") or _run_has_external_publish_evidence(run):
+            # The unique primary key closes the concurrent retry race without a
+            # new column or migration. Include run and actor in its namespace.
+            identity = uuid.uuid5(uuid.NAMESPACE_URL, f"review-comment:{run.run_id}:{request.user.pk}:{operation_id}")
+            comment, created = VibeMarketingComponentComment.objects.get_or_create(
+                id=identity, defaults={"run": run, "actor": request.user, **payload},
+            )
+            if not created and any(getattr(comment, key) != value for key, value in payload.items()):
+                return Response({"detail": "This comment request identity was used for different feedback."}, status=status.HTTP_409_CONFLICT)
+            return Response(_serialize_component_comment(comment),
+                            status=status.HTTP_201_CREATED if created else status.HTTP_200_OK)
+        if run.workflow != "article_system_setup" and ((run.result or {}).get("article_review_approval") or _run_has_external_publish_evidence(run)):
             return Response({"detail": "This article is already approved. Start a new revision to comment."}, status=409)
         comment = VibeMarketingComponentComment.objects.create(
             run=run,
@@ -17047,14 +17054,14 @@ class VibeMarketingRunCommentsView(VibeMarketingRunCommentsMixin, APIView):
         )
         return Response(_serialize_component_comment(comment), status=status.HTTP_201_CREATED)
 
-
 @method_decorator(transaction.atomic, name="dispatch")
 class VibeMarketingRunCommentDetailView(VibeMarketingRunCommentsMixin, APIView):
+    allows_setup_review_updates = True
     def patch(self, request, run_id, comment_id):
         _context, run, error_response = self._resolve_run(request, run_id)
         if error_response is not None:
             return error_response
-        comment = VibeMarketingComponentComment.objects.filter(id=comment_id, run=run).first()
+        comment = VibeMarketingComponentComment.objects.select_for_update().filter(id=comment_id, run=run).first()
         if comment is None:
             comment = VibeMarketingComponentComment.objects.filter(run=run, context__sourceCommentId=str(comment_id)).first()
         if comment is None:
@@ -17078,6 +17085,15 @@ class VibeMarketingRunCommentDetailView(VibeMarketingRunCommentsMixin, APIView):
         action_error = _component_comment_action_error(request.data or {}, payload)
         if action_error:
             return Response({"detail": action_error}, status=status.HTTP_400_BAD_REQUEST)
+        for key, aliases in {
+            "component_id": ("componentId", "component_id"),
+            "component_type": ("componentType", "component_type"),
+            "component_label": ("componentLabel", "component_label"),
+            "source_section_id": ("sourceSectionId", "source_section_id"),
+            "selector": ("selector",),
+        }.items():
+            if not any(alias in (request.data or {}) for alias in aliases):
+                payload[key] = getattr(comment, key)
         if not _request_includes_comment_anchor(request.data or {}):
             payload["anchor"] = comment.anchor or {}
         if not _request_includes_comment_context(request.data or {}):
@@ -17101,12 +17117,11 @@ class VibeMarketingRunCommentDetailView(VibeMarketingRunCommentsMixin, APIView):
             "updated_at",
         ])
         return Response(_serialize_component_comment(comment), status=status.HTTP_200_OK)
-
     def delete(self, request, run_id, comment_id):
         _context, run, error_response = self._resolve_run(request, run_id)
         if error_response is not None:
             return error_response
-        comment = VibeMarketingComponentComment.objects.filter(id=comment_id, run=run).first()
+        comment = VibeMarketingComponentComment.objects.select_for_update().filter(id=comment_id, run=run).first()
         if comment is None:
             comment = VibeMarketingComponentComment.objects.filter(run=run, context__sourceCommentId=str(comment_id)).first()
         if comment is None:
@@ -17124,7 +17139,6 @@ class VibeMarketingRunCommentDetailView(VibeMarketingRunCommentsMixin, APIView):
         else:
             comment.delete()
         return Response(_component_feedback_from_run(run), status=status.HTTP_200_OK)
-
 
 class VibeMarketingRunCommentsSubmitView(VibeMarketingRunCommentsMixin, APIView):
     @guarded_owner_operation("read", run_operation=True)

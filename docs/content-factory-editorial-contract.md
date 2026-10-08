@@ -4,6 +4,77 @@ Local implementation: 10–11 September 2026. This document describes code, not 
 
 The founder frontend calls the authenticated `/api/v1/vibe-marketing` views. The backend owns organisation access, billing, approved editorial policy and dispatch. Content Factory owns model selection, research, repository changes, previews and release checks.
 
+## Component review updates (8 October 2026)
+
+The company-scoped `runs/:runId/article-review` route supports both article
+drafts and article-system setup previews. The Chat alias requires an explicit
+owned startup and a revocable Chat account session. GET returns the worker's
+canonical fields and revision; POST accepts `action: "applyUpdate"`, a stable
+`operationId`, `expectedRevision`, `textEdits` containing `fieldId`,
+`originalValue` and `value`, and `commentIds` identifying persisted comments.
+Caller-supplied comment bodies and worker authorization fields are discarded.
+
+Selected comments are frozen under their existing row locks and sent as one
+stable feedback batch. Definitive worker rejections restore newly claimed draft
+comments; uncertain transport failures retain the batch for an idempotent
+retry. Accepted operations are recorded in the run's existing JSON result and
+cannot be reused for different changes. Dispatch results merge into a freshly
+locked source row so callbacks and concurrent operation history survive; retries
+return an accepted child even after it becomes the newest ready review.
+The submitted ledger, latest batch and immutable wire comment payload are saved
+before worker dispatch. A retry reuses that payload even if an earlier callback
+has added outcome context to the saved comment rows.
+Text-only updates do not invoke the AI
+points gate. Comment revisions retain the existing editorial and Roo gates.
+Completed setup runs can start an update for a separate review branch; this
+API does not authorize publication or mutate the customer's production branch.
+The worker owns targeted regeneration and replay of manual text intent.
+
+The Chat facade also exposes existing comment create, edit and delete handlers.
+Comment creation accepts a stable operation identity and uses a deterministic
+UUID primary key to prevent concurrent retries from creating duplicate pins.
+Comment PATCH and DELETE lock the selected draft row against batch submission;
+partial PATCH retains its target and saved anchor. New setup revision callbacks
+carry a review operation marker, source setup ID and canonical comment outcomes.
+Only that source batch's comment IDs receive saved outcome context. Source and
+child batch metadata records completion while the original setup's approved,
+completed and merged state stays intact. The existing explicit acceptance flow
+continues to own the APPLIED comment status.
+The `article-review/preview-lease` route issues a run/company-bound, 15-minute
+GET-only preview grant. Its proxy rejects path traversal, strips response
+cookies and redirects, uses `no-referrer`, and sandboxes generated scripts.
+
+Validation uses `scripts/test_without_database.py` with
+`content_factory.tests_article_review_update_unit`,
+`content_factory.tests_article_review_compat_unit` and the original review,
+Chat-facade and portable-control tests. These tests prohibit database
+and network access; they verify controller scoping, update contracts, retry
+handling and grants, without establishing real SQL locking or worker execution.
+No migration or deployment is included. Release branches already containing
+website connection authority, portable draft, image billing or export controls
+must merge these changes into those controls. Replacing those modules with the
+older main-checkout adapter would discard unrelated production protections.
+
+The verified production-compatible patch is based on
+`codex/preserve-merged-bootstrap` at `679db13b37e218c674591a0e07024000a3b45bf2`.
+Its bound updates reserve a fresh workflow operation under the source's original
+website consent, retain that operation on retries, and bind the returned child.
+The child request and callback carry the new connection/operation fence and
+`client_request_id`. They do not reuse the completed setup operation. Existing
+portable preview validation, image billing, export and unresolved-feedback
+approval checks remain in the compatibility implementation.
+
+Only operations that create a revision child reserve a new website fence. Same-run
+article text edits retain their original immutable execution identity. A definitive
+rejection after an earlier uncertain attempt restores the selected comments from
+that same submitted batch, including comments claimed by the first attempt.
+
+A revision-ready callback is durably recorded with its exact event ID and payload
+digest. After the child is approved or completed, an identical already processed
+event can be acknowledged under its original connection and operation fences,
+without invoking state handlers or writing scan/run projections. Changed source,
+batch, payload, event or execution identity remains rejected.
+
 ## Observing an articles setup merge
 
 Refreshing a scoped setup PR records a historical merge receipt only after a
