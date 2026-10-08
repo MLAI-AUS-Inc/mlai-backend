@@ -7,6 +7,8 @@ from rest_framework.exceptions import NotFound, ValidationError
 from rest_framework.permissions import IsAuthenticated
 
 from founder_tools.my_startup.api import MyStartupAuthentication, MyStartupViewMixin
+from content_factory.article_review_views import VibeMarketingArticleReviewView
+from content_factory.article_preview_lease import ArticlePreviewLeaseView
 from content_factory import vibe_marketing_views as marketing
 from content_factory import notification_channel_views as notifications
 from content_factory import website_views as websites
@@ -214,3 +216,22 @@ class SourcesStatusView(MyStartupAccess, ConnectorSourcesStatusView):
         delegate = SourcesView()
         delegate.company = self.company
         return delegate.get(request)
+
+
+class ArticleReviewView(MyStartupAccess, VibeMarketingArticleReviewView):
+    """Use the same explicit startup selection for preview review updates."""
+
+
+
+class ArticlePreviewView(MyStartupAccess, ArticlePreviewLeaseView):
+    """Acquire a short-lived preview grant for the explicitly selected startup."""
+
+
+
+class ArticleCommentsView(MyStartupAccess, marketing.VibeMarketingRunCommentsView):
+    """Create and read persisted comments through the existing review controller."""
+
+
+
+class ArticleCommentView(MyStartupAccess, marketing.VibeMarketingRunCommentDetailView):
+    """Update or delete a draft comment within the selected startup."""

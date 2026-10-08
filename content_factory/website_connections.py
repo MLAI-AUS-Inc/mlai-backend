@@ -541,6 +541,11 @@ def guarded_service_write(action, *, only_repository=False, remote_actions=(), p
                         saved_contract = connection_contract(existing_run.run_request or {})
                         if not saved_contract or any(saved_contract.get(key) != value for key, value in connection_contract(payload).items() if key in {"website_connection_id", "connection_generation", "repository_id"}):
                             raise WebsiteAuthorityError("website_run_changed", "This run was not dispatched for the current website connection.")
+                    if action == "config_write" and existing_run and payload.get("review_update_operation_id"):
+                        from .article_review_callbacks import processed_setup_review_replay
+                        if processed_setup_review_replay(payload, child_id=run_id):
+                            return Response({"status": "duplicate", "job_id": run_id,
+                                "event_id": payload["event_id"]}, status=200)
                     if action == "config_write" and effective_action != "cancel_receipt":
                         if REPOSITORY_CONFIG_FIELDS.intersection(payload):
                             source_payload = {**payload, **(payload.get("repository_inventory") if isinstance(payload.get("repository_inventory"), dict) else {})}

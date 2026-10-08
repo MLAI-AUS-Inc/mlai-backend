@@ -3866,7 +3866,10 @@ class ContentFactoryCallbackView(APIView):
             'article_system_setup_pr_created',
             'article_system_setup_manual_merge_required',
         }:
-            _sync_article_system_setup_callback_to_run(data=data, event_type=event_type)
+            synced_run = _sync_article_system_setup_callback_to_run(data=data, event_type=event_type)
+            if event_type == 'article_system_setup_revision_ready' and data.get('review_update_operation_id'):
+                from content_factory.article_review_callbacks import reconcile_setup_review_outcomes
+                reconcile_setup_review_outcomes(data, synced_run)
             return Response(
                 {'status': 'received', 'message': f'{event_type} callback processed', 'job_id': job_id},
                 status=status.HTTP_200_OK,

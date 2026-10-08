@@ -90,7 +90,11 @@ def validate_operation(connection, payload, *, worker_cleanup=False, restoration
         }
         setup_failure = event in {"article_system_setup_failed", "article_system_setup_preview_failed"}
         same_failure = setup_failure and op.state in {"failed", "blocked"} and incoming_status in {"failed", "blocked"}
-        if (incoming_status and incoming_status != op.state and not same_failure) or (event and event not in terminal_events[op.state]):
+        review_replay = False
+        if op.state == "completed" and event == "article_system_setup_revision_ready":
+            from .article_review_callbacks import processed_setup_review_replay
+            review_replay = processed_setup_review_replay(payload, child_id=run_id)
+        if not review_replay and ((incoming_status and incoming_status != op.state and not same_failure) or (event and event not in terminal_events[op.state])):
             raise WebsiteAuthorityError("website_operation_terminal", "This operation is terminal. Start a new reviewed attempt.")
     if cancellation_receipt:
         if (op.action != "workflow" or op.state not in {"pending", "running", "failed", "blocked", "cancelled"}

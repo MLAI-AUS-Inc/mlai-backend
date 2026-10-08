@@ -267,6 +267,8 @@ jobs:
           community_chat.tests.test_slack_message_actions \
           content_analytics.tests_article_health_evidence_unit \
           content_factory.tests_article_review_unit \
+          content_factory.tests_article_review_update_unit \
+          content_factory.tests_article_review_compat_unit \
           content_factory.tests_baseline_metrics_unit \
           content_factory.tests_topic_metrics_unit \
           integrations.tests_slack_content

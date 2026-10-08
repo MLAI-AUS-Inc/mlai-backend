@@ -1,6 +1,7 @@
 """Short-lived read-only preview grants for clients without browser cookies."""
 from types import SimpleNamespace
-from urllib.parse import quote
+from urllib.parse import quote, unquote
+import re
 
 from django.core import signing
 from django.http import HttpResponse
@@ -18,6 +19,21 @@ from .website_contract import evidence_digest
 
 SALT = "article-preview-read-only-v1"
 LIFETIME = 900
+
+
+def safe_preview_path(path):
+    """Reject traversal before the granted run's service URL is constructed."""
+    decoded = str(path or "")
+    for _ in range(8):
+        next_path = unquote(decoded)
+        if next_path == decoded:
+            break
+        decoded = next_path
+    else:
+        return False
+    return not (decoded.startswith("/") or "\\" in decoded or "\x00" in decoded
+                or any(part in {".", ".."} for part in decoded.split("/")))
+
 
 
 class ArticlePreviewLeaseView(APIView):
@@ -72,6 +88,8 @@ class ArticlePreviewLeaseProxyView(views.VibeMarketingRunLivePreviewProxyView):
         return context, run, None
 
     def get(self, request, run_id, token, proxy_path=""):
+        if not safe_preview_path(proxy_path):
+            return Response({"detail": "Preview not found."}, status=404)
         response = (views.VibeMarketingRunLivePreviewResourceView._proxy(self, request, run_id)
                     if proxy_path == "__resource" else self._proxy(request, run_id, proxy_path))
         if isinstance(response, HttpResponse):
