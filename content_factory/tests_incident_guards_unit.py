@@ -20,6 +20,90 @@ from .article_preview_lease import ArticlePreviewLeaseProxyView, SALT
 from .website_contract import evidence_digest
 
 
+class DispatchKeyRecoveryReplays(SimpleTestCase):
+    def setUp(self):
+        self.run = SimpleNamespace(
+            run_id="article-parent", workflow="confirmed_topic", domain="fixture.test",
+            github_repo="fixture/site", slack_user_id="fixture-actor", status="blocked",
+            current_step="blocked", error="Waiting for the repository scan",
+            run_request={"client_request_id": "fixture-key"}, save=Mock(),
+            result={"precondition_status": "precondition_failed", "repair_status": "queued",
+                    "scan_run_id": "repair-child", "repair_run_id": "repair-child",
+                    "next_action": "monitor_repair", "requires_user_action": False},
+        )
+        self.receipt = {"run_id": self.run.run_id, "status": "blocked",
+                        "client_request_id": "fixture-key", "dispatch_recovered_by_key": True}
+
+    def _project(self, receipt, *, created=False):
+        from . import vibe_marketing_views as views
+        from workflow_runs.models import ContentFactoryRun
+        def get_or_create(**kwargs):
+            if created:
+                return ContentFactoryRun(run_id=kwargs["run_id"], **kwargs["defaults"]), True
+            return self.run, False
+        with patch.object(views.ContentFactoryRun.objects, "get_or_create", side_effect=get_or_create), \
+                patch.object(views, "_persist_web_article_billing_to_job") as bill, \
+                patch.object(views, "_merge_job_billing_into_run_request"):
+            projected = views._create_local_run_authorized(
+                workflow="article_generation", domain="fixture.test", remote_data=receipt,
+                payload={"client_request_id": "fixture-key"})
+        bill.assert_called_once()
+        return projected
+
+    def test_lost_response_keeps_pending_repair_and_child_checkpoint_authorized(self):
+        from . import website_connections as authority, website_operations as operations
+        from workflow_runs.models import ContentFactoryRun
+        before = deepcopy(self.run.result)
+        projected = self._project(self.receipt)
+        self.assertEqual(projected.result, before)
+        self.assertEqual(projected.error, "Waiting for the repository scan")
+        website = SimpleNamespace(pk=uuid.uuid4(), organization_id=42, generation=1,
+                                  blockers=[], operations=Mock())
+        operation = SimpleNamespace(pk=uuid.uuid4(), connection=website, generation=1,
+                                    state="running", action="workflow", payload={"attempt": 1},
+                                    receipt={}, refresh_from_db=Mock(), save=Mock())
+        binding = {"website_connection_id": str(website.pk), "connection_generation": 1,
+                   "operation_id": str(operation.pk), "operation_attempt": 1, "deletion_epoch": 0}
+        with patch.object(authority, "authority_guard", side_effect=lambda *a, **k: nullcontext()), \
+                patch.object(authority, "contract_for", return_value=binding):
+            operations.bind_operation_run(operation, projected)
+        self.assertEqual(operation.state, "running")
+        child = SimpleNamespace(organization_id=42, status="running", run_request=binding)
+        website.operations.filter.return_value.first.return_value = operation
+        with patch.object(ContentFactoryRun.objects, "filter") as runs:
+            runs.return_value.first.return_value = child
+            self.assertIs(operations.validate_operation(website, {
+                **binding, "run_id": "repair-child", "status": "running"}), operation)
+
+    def test_stale_key_receipt_preserves_progress_and_terminal_history(self):
+        for status in ["running", "ready", "completed", "failed", "blocked", "cancelled", "denied"]:
+            with self.subTest(status=status):
+                self.run.status, self.run.current_step = status, "saved-stage"
+                self.run.result = {"saved_evidence": {"revision": "current"}}
+                self.run.error = "Saved error"
+                projected = self._project(self.receipt)
+                self.assertEqual((projected.status, projected.current_step, projected.error),
+                                 (status, "saved-stage", "Saved error"))
+                self.assertEqual(projected.result, {"saved_evidence": {"revision": "current"}})
+
+    def test_key_receipt_without_callback_waits_for_full_snapshot(self):
+        for status in ["blocked", "failed", "completed"]:
+            with self.subTest(status=status):
+                projected = self._project({**self.receipt, "status": status}, created=True)
+                self.assertEqual(projected.status, "queued")
+                self.assertEqual(projected.current_step, "queued")
+                self.assertEqual(projected.result, {})
+                self.assertEqual(projected.run_request["client_request_id"], "fixture-key")
+
+    def test_full_snapshot_still_projects_actual_failure(self):
+        projected = self._project({"run_id": self.run.run_id, "status": "failed",
+                                   "current_step": "scan_structure", "error": "Actual failure",
+                                   "result": {"repair_status": "failed"}})
+        self.assertEqual(projected.status, "failed")
+        self.assertEqual(projected.error, "Actual failure")
+        self.assertEqual(projected.result["repair_status"], "failed")
+
+
 class IncidentAuthorityReplays(SimpleTestCase):
     def setUp(self):
         self.now = timezone.now()
