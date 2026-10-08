@@ -4,6 +4,26 @@ Local implementation: 10–11 September 2026. This document describes code, not 
 
 The founder frontend calls the authenticated `/api/v1/vibe-marketing` views. The backend owns organisation access, billing, approved editorial policy and dispatch. Content Factory owns model selection, research, repository changes, previews and release checks.
 
+## Observing an articles setup merge
+
+Refreshing a scoped setup PR records a historical merge receipt only after a
+fresh GitHub read confirms the saved PR number, immutable base/head repository,
+selected base branch and exact merge/head commits. The original connection,
+generation, application root and operation attempt are checked before the read
+and again before persistence. Cancellation, disconnection and replacement
+consent still deny persistence.
+
+This metadata observation does not require the pre-merge source to remain the
+current branch head: merging the setup necessarily changes it. It leaves the
+saved run request unchanged and does not promote generation or publication
+readiness, select a cached target, or resume blocked articles. The normal scan
+and integration verification must validate the current source before those
+actions become available. All generation and repository mutation guards retain
+their existing exact-source checks. This change introduces no migration.
+
+Background merge observations without an authenticated owner retain the merge
+receipt and require owner review before blocked-parent continuation.
+
 ## Startup profile drafts (3 October 2026)
 
 `POST /api/v1/vibe-marketing/autofill` accepts `draftMode: true` (or

@@ -328,6 +328,81 @@ class WebsiteDatabaseFixture:
 
 @override_settings(ROO_API_KEY='synthetic-test-key', INTERNAL_API_KEY='synthetic-test-key')
 class WebsiteLifecycleTests(WebsiteDatabaseFixture, TestCase):
+    def test_source_change_can_record_setup_merge_without_promoting_readiness(self):
+        from . import vibe_marketing_views as marketing
+        from .website_connections import owner_write_guard, scoped_run_contract
+        from .website_models import WebsiteScanSnapshot
+        self.website.verified_sha = SHA
+        self.website.save(update_fields=['verified_sha'])
+        WebsiteScanSnapshot.objects.create(connection=self.website, generation=self.website.generation,
+            run_id='new-head', source_sha='b' * 40, detector_version='github_head', fingerprint='new-head')
+        operation = WebsiteConnectionOperation.objects.create(connection=self.website,
+            generation=self.website.generation, action='workflow', state='completed',
+            idempotency_key='merge-observation', payload={'attempt': 1})
+        request = {**self.binding, 'source_sha': SHA, 'expected_source_sha': SHA,
+            'operation_id': str(operation.pk), 'operation_attempt': 1, 'deletion_epoch': 0}
+        run = ContentFactoryRun.objects.create(run_id='merged-setup', organization=self.org,
+            domain=self.org.domain, github_repo=self.website.github_repo, workflow='article_system_setup',
+            status='completed', current_step='create_pull_request', run_request=request,
+            result={'pr_url': 'https://github.com/example/site/pull/37', 'pr_number': 37,
+                'merge_status': 'not_merged', 'article_system_setup': {'status': 'pr_created'}})
+        pull = {'merged': True, 'number': 37, 'html_url': run.result['pr_url'], 'merge_commit_sha': 'b' * 40,
+            'base': {'ref': 'main', 'repo': {'id': 123, 'full_name': 'example/site'}},
+            'head': {'sha': 'c' * 40, 'repo': {'id': 123, 'full_name': 'example/site'}}}
+        with patch('content_factory.website_connections.verify_repository_head',
+                side_effect=WebsiteAuthorityError('website_source_changed', 'Verify current source')):
+            with self.assertRaises(WebsiteAuthorityError):
+                with owner_write_guard(scoped_run_contract(run)):
+                    self.fail('Original-source writes must still fail')
+            with patch('content_factory.website_connections.read_setup_merge_pull', return_value=pull), \
+                    patch.object(marketing, '_link_built_scaffold_publish_target') as promote:
+                marketing._apply_setup_merge_result(run=run, context=SimpleNamespace(organization=self.org))
+                marketing._persist_setup_merged_verification(run, {'status': 'verification_required'})
+                promote.assert_not_called()
+        run.refresh_from_db()
+        self.config.refresh_from_db()
+        self.website.refresh_from_db()
+        self.assertEqual(run.result['merge_status'], 'merged')
+        self.assertEqual(run.result['merge_response']['pull']['merge_commit_sha'], 'b' * 40)
+        self.assertEqual(run.result['merged_setup_verification']['status'], 'verification_required')
+        self.assertEqual(run.run_request, request)
+        self.assertEqual(self.website.verified_sha, SHA)
+        self.assertEqual(self.config.publish_targets, [{'target_id': 'native'}])
+        self.assertFalse(self.config.article_system.get('generationReady'))
+        self.assertFalse(self.config.article_system['pending_article_system_setup'].get('generationReady'))
+        self.assertFalse(self.config.articles_scaffolded)
+        # A later observation also cannot reset independently verified state.
+        self.config.article_system.update(generationReady=True, state='verified')
+        self.config.save(update_fields=['article_system'])
+        with patch('content_factory.website_connections.read_setup_merge_pull', return_value=pull):
+            marketing._apply_setup_merge_result(run=run, context=SimpleNamespace(organization=self.org))
+        self.config.refresh_from_db()
+        self.assertTrue(self.config.article_system['generationReady'])
+        self.assertEqual(self.config.article_system['state'], 'verified')
+
+    def test_setup_merge_observation_rechecks_cancel_after_github_read(self):
+        from . import vibe_marketing_views as marketing
+        from .website_connections import owner_operation_scope
+        operation = WebsiteConnectionOperation.objects.create(connection=self.website,
+            generation=self.website.generation, action='workflow', state='completed',
+            idempotency_key='cancel-merge-observation', payload={'attempt': 1})
+        request = {**self.binding, 'source_sha': SHA, 'operation_id': str(operation.pk), 'operation_attempt': 1, 'deletion_epoch': 0}
+        run = ContentFactoryRun.objects.create(run_id='cancelled-merge-observation', organization=self.org,
+            domain=self.org.domain, github_repo=self.website.github_repo, workflow='article_system_setup',
+            status='completed', run_request=request, result={'pr_url': 'https://github.com/example/site/pull/37'})
+        def merged_then_cancelled(*args):
+            operation.state = 'cancelled'
+            operation.save(update_fields=['state'])
+            return {'merged': True, 'number': 37, 'html_url': run.result['pr_url'], 'merge_commit_sha': 'b' * 40,
+                'base': {'ref': 'main', 'repo': {'id': 123, 'full_name': 'example/site'}},
+                'head': {'sha': 'c' * 40, 'repo': {'id': 123, 'full_name': 'example/site'}}}
+        with patch('content_factory.website_connections.read_setup_merge_pull', side_effect=merged_then_cancelled), \
+                owner_operation_scope(request), self.assertRaises(WebsiteAuthorityError) as caught:
+            marketing._apply_setup_merge_result(run=run, context=SimpleNamespace(organization=self.org))
+        self.assertEqual(caught.exception.code, 'website_operation_cancelled')
+        run.refresh_from_db()
+        self.assertNotIn('merge_status', run.result)
+
     def test_pending_repair_keeps_child_checkpoints_authorized_then_fences_failure_or_cancel(self):
         from .website_operations import bind_operation_run, observe_workflow_status, validate_operation, cancel_operation
         for outcome in ('failed', 'cancelled'):

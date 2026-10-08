@@ -270,8 +270,26 @@ jobs:
           content_factory.tests_topic_metrics_unit \
           integrations.tests_slack_content
 
+    - name: Check setup merge observation without database access
+      run: python scripts/test_without_database.py content_factory.tests_setup_merge_observation_unit
+
     - name: Check article draft review contracts without database access
       run: python scripts/test_article_review.py
+
+    - name: Run setup merge regression tests
+      run: |
+        python manage.py test \
+          content_factory.tests_website_connections.WebsiteLifecycleTests \
+          content_factory.tests_setup_merge \
+          tests.test_vibe_marketing_component_comments.VibeMarketingComponentCommentTests.test_setup_merge_asks_content_factory_to_verify_blocked_article_parents \
+          tests.test_vibe_marketing_component_comments.VibeMarketingComponentCommentTests.test_setup_merge_without_local_parent_ids_defers_to_content_factory_lineage \
+          tests.test_vibe_marketing_component_comments.VibeMarketingComponentCommentTests.test_setup_merge_verification_acceptance_is_idempotent \
+          tests.test_vibe_marketing_component_comments.VibeMarketingComponentCommentTests.test_setup_merge_verification_transport_failure_retries_on_later_refresh \
+          tests.test_vibe_marketing_component_comments.VibeMarketingComponentCommentTests.test_late_parent_poll_retries_setup_after_benign_no_parent_skip \
+          tests.test_vibe_marketing_component_comments.VibeMarketingComponentCommentTests.test_nonbenign_setup_parent_skip_is_projected_to_blocked_article \
+          tests.test_vibe_marketing_component_comments.VibeMarketingComponentCommentTests.test_refresh_setup_pr_status_detects_manual_github_merge_without_rescan \
+          tests.test_vibe_marketing_component_comments.VibeMarketingComponentCommentTests.test_merge_setup_pr_marks_setup_merged_and_daily_ready \
+          --noinput --verbosity=2 --failfast
 
     - name: Run targeted Django tests
       run: |
@@ -318,7 +336,7 @@ jobs:
           tests.test_linear_deployment_wiring \
           tests.test_health_check \
           tests.test_content_factory_org_config \
-          content_factory.tests_website_connections content_factory.tests_website_articles_reliability_database \
+          content_factory.tests_website_connections content_factory.tests_setup_merge content_factory.tests_website_articles_reliability_database \
           integrations.tests_github_workflow_permissions \
           integrations.tests_github_ci_evidence \
           content_factory.tests_activation_connections \

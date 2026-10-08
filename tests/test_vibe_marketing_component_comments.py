@@ -105,6 +105,17 @@ class _PublishRetryApprovalFixture:
         tokens = patch("integrations.services.github_app.create_installation_access_token", return_value=credential)
         tokens.start()
         self.addCleanup(tokens.stop)
+        # Substitute only GitHub transport, retaining receipt/authority validation.
+        merge_receipt = patch("content_factory.website_connections.read_setup_merge_pull",
+            side_effect=lambda connection, number: {
+                "number": number, "merged": True,
+                "html_url": f"https://github.com/{connection.github_repo}/pull/{number}",
+                "merge_commit_sha": "b" * 40,
+                "base": {"ref": connection.branch, "repo": {"id": connection.repository_id, "full_name": connection.github_repo}},
+                "head": {"sha": "c" * 40, "repo": {"id": connection.repository_id, "full_name": connection.github_repo}},
+            })
+        merge_receipt.start()
+        self.addCleanup(merge_receipt.stop)
         # The real activation gate still reads current-generation target proof.
         # Provider transport is synthetic; fresh-head behavior is covered by
         # tests_activation_connections and tests_activation_unit.
@@ -5870,6 +5881,13 @@ class VibeMarketingComponentCommentTests(_PublishRetryApprovalFixture, TestCase)
         )
         article_calls = []
 
+        config.article_system["pending_article_system_setup"].update(
+            setup_run_id="setup-manual-refresh", setupRunId="setup-manual-refresh",
+            pr_url="https://github.com/MLAI-AUS-Inc/mlai-au/pull/48",
+            prUrl="https://github.com/MLAI-AUS-Inc/mlai-au/pull/48",
+        )
+        config.save(update_fields=["article_system"])
+
         with (
             patch("content_factory.vibe_marketing_views._github_token_for_repo_operation", return_value=("github-token", "test")),
             patch("content_factory.vibe_marketing_views._github_api_request", return_value={"number": 48, "merged": True}),
@@ -5885,7 +5903,7 @@ class VibeMarketingComponentCommentTests(_PublishRetryApprovalFixture, TestCase)
         self.assertEqual(setup_run.result["merge_status"], "merged")
         config.refresh_from_db()
         self.assertFalse(config.articles_scaffolded)
-        self.assertEqual(config.article_system["state"], "roo_scaffolded")
+        self.assertEqual(config.article_system["state"], "missing")
         self.assertEqual(bootstrap_response.status_code, 200)
         scaffold = bootstrap_response.data["checks"]["scaffold"]
         self.assertFalse(scaffold["setupBlocked"])
@@ -5954,12 +5972,19 @@ class VibeMarketingComponentCommentTests(_PublishRetryApprovalFixture, TestCase)
             },
         )
 
+        config.article_system["pending_article_system_setup"].update(
+            setup_run_id="setup-merge-success", setupRunId="setup-merge-success",
+            pr_url="https://github.com/MLAI-AUS-Inc/mlai-au/pull/46",
+            prUrl="https://github.com/MLAI-AUS-Inc/mlai-au/pull/46",
+        )
+        config.save(update_fields=["article_system"])
+
         with (
             patch("content_factory.vibe_marketing_views._github_token_for_repo_operation", return_value=("github-token", "test")),
             patch(
-                "content_factory.vibe_marketing_views._github_pull_checks_state",
+                "content_factory.vibe_marketing_views._github_pull_checks_state_lenient",
                 return_value=(
-                    {"state": "open", "merged": False, "head": {"sha": "c" * 40}},
+                    {"state": "open", "merged": False, "head": {"sha": "c" * 40, "ref": "cf/setup-fixture", "repo": {"id": self.client.website_fixture.repository_id, "full_name": self.client.website_fixture.github_repo}}, "base": {"ref": "main", "repo": {"id": self.client.website_fixture.repository_id, "full_name": self.client.website_fixture.github_repo}}},
                     {"ready": True, "state": "success", "message": "Checks are passing."},
                 ),
             ),
@@ -5979,7 +6004,7 @@ class VibeMarketingComponentCommentTests(_PublishRetryApprovalFixture, TestCase)
         self.assertEqual(pending["merge_status"], "merged")
         self.assertFalse(config.articles_scaffolded)
         self.assertEqual(config.articles_scaffold_pr_url, "https://github.com/MLAI-AUS-Inc/mlai-au/pull/46")
-        self.assertEqual(config.article_system["state"], "roo_scaffolded")
+        self.assertEqual(config.article_system["state"], "missing")
 
         with patch("content_factory.vibe_marketing_views.google_baseline_connection_status", return_value={}):
             bootstrap_response = self.client.get("/api/v1/vibe-marketing/bootstrap/")
