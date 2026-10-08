@@ -114,6 +114,11 @@ receive the same canonical failure in their response projection. This read does
 not rewrite their history, and a newer control receipt or an existing PR keeps
 its current state. Recovery still starts through the reviewed setup boundary.
 
+Status polling retains the worker's authoritative execution generation and
+state version, so refreshing an approved article cannot erase its exact-preview
+approval fence. Stale snapshots remain rejected and a new generation needs a
+new approval.
+
 Recovery through a dispatch key acknowledges the existing run identity only.
 Its minimal receipt cannot replace saved worker status, repair lineage, evidence
 or errors. If callbacks have not yet created the local run, recovery creates a

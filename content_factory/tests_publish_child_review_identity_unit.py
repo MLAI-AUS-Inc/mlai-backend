@@ -1,5 +1,6 @@
 """Replay publish-child callbacks without a database or external services."""
 from copy import deepcopy
+from contextlib import nullcontext
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 from uuid import uuid4
@@ -8,6 +9,72 @@ from django.test import SimpleTestCase
 
 from .incident_guards import publish_child_binding
 from .website_contract import WebsiteAuthorityError
+
+
+class ReviewedArticleStatusPollTests(SimpleTestCase):
+    def setUp(self):
+        from .tests_article_publish_approval_unit import _review_run
+        from .article_publish_approval import RECEIPT_KEY, make_article_publish_approval_receipt
+        self.run = _review_run()
+        self.run.status = "completed"
+        self.run.approval_state = "approved"
+        self.run.result.update(generation=7, state_version=40)
+        self.run.run_request[RECEIPT_KEY] = make_article_publish_approval_receipt(self.run, actor_id="fixture-owner")
+        self.run.pk = 1
+        self.run.workflow = "direct_generate"
+        self.run.current_step = "await_review"
+        self.run.artifact_root = "fixture-artifacts"
+        self.run.step_order = []
+        self.run.acceptance_summary = {}
+        self.run.verification_summary = {}
+        self.run.resume_available = False
+        self.run.error = ""
+        self.run.save = Mock()
+        self.run.refresh_from_db = Mock()
+        result = deepcopy(self.run.result)
+        result.pop("generation")
+        result.pop("state_version")
+        self.snapshot = {"status": "completed", "generation": 7, "state_version": 41, "result": result}
+
+    def poll(self, snapshot):
+        from . import vibe_marketing_views as views
+        with patch.object(views, "authority_guard", side_effect=lambda *a, **kw: nullcontext()), \
+                patch.object(views, "scoped_run_contract", return_value={}), \
+                patch.object(views.transaction, "atomic", side_effect=lambda: nullcontext()), \
+                patch.object(views.ContentFactoryRun.objects, "select_for_update") as rows, \
+                patch.object(views, "_sync_steps_from_remote"), \
+                patch.object(views, "_persist_completed_article_memory_if_possible"):
+            rows.return_value.get.return_value = self.run
+            return views._sync_local_run_from_remote(self.run, snapshot)
+
+    def test_full_poll_keeps_approval_and_uses_authoritative_execution_envelope(self):
+        from .article_publish_approval import RECEIPT_KEY, article_publish_approval_receipt_matches
+        receipt = deepcopy(self.run.run_request[RECEIPT_KEY])
+        for nested in ({}, {"generation": 0, "state_version": 1}):
+            with self.subTest(nested=nested):
+                self.poll({**self.snapshot, "result": {**self.snapshot["result"], **nested}})
+                self.assertEqual(self.run.result["generation"], 7)
+                self.assertEqual(self.run.result["state_version"], 41)
+                self.assertTrue(article_publish_approval_receipt_matches(self.run))
+                self.assertEqual(self.run.run_request[RECEIPT_KEY], receipt)
+
+    def test_stale_and_unversioned_polls_do_not_replace_review(self):
+        before = deepcopy(self.run.result)
+        for snapshot in ({**self.snapshot, "generation": 6}, {**self.snapshot, "state_version": 39},
+                         {"status": "completed", "result": self.snapshot["result"]}):
+            with self.subTest(snapshot_version=(snapshot.get("generation"), snapshot.get("state_version"))):
+                self.poll(snapshot)
+                self.assertEqual(self.run.result, before)
+                self.run.save.assert_not_called()
+
+    def test_new_generation_invalidates_previous_approval_and_malformed_fence_cannot_write(self):
+        from .article_publish_approval import article_publish_approval_receipt_matches
+        with self.assertRaises(ValueError):
+            self.poll({**self.snapshot, "generation": True})
+        self.run.save.assert_not_called()
+        self.poll({**self.snapshot, "generation": 8})
+        self.assertEqual(self.run.result["generation"], 8)
+        self.assertFalse(article_publish_approval_receipt_matches(self.run))
 
 
 class PublishChildReviewIdentityTests(SimpleTestCase):
