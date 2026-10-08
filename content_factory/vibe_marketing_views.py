@@ -12075,6 +12075,8 @@ def _parse_remote_datetime(value):
 
 
 def _run_result_from_remote(remote_data):
+    from .run_state import merge_reliability_fields
+
     if not isinstance(remote_data, dict):
         return {}
     result = remote_data.get("result")
@@ -12225,7 +12227,10 @@ def _run_result_from_remote(remote_data):
             merged.pop(key, None)
             merged["review_draft_actions_available"] = False
             merged["reviewDraftActionsAvailable"] = False
-    return merged
+    # The execution envelope is authoritative even when the worker's nested
+    # result omits it. Polling must retain the same fence as service callbacks,
+    # including the generation bound into an exact-preview approval receipt.
+    return merge_reliability_fields(merged, remote_data)
 
 
 def _preview_payload_from_result(result):
