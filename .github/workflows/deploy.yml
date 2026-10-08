@@ -254,7 +254,8 @@ jobs:
           integrations.tests_read_coverage \
           integrations.tests_slack_shared_conversation_policy \
           tests.test_daily_research_policy_unit \
-          tests.test_vibe_marketing_bootstrap_performance
+          tests.test_vibe_marketing_bootstrap_performance \
+          tests.test_bootstrap_setup_merge_fact
 
     - name: Check chat background retries and preview failure caches without database access
       run: python scripts/test_without_database.py integrations.tests_community_bridge_backoff community_chat.tests.test_preview_failure_cache

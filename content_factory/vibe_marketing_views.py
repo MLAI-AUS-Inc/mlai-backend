@@ -11203,7 +11203,9 @@ def _overlay_live_bootstrap_fields(payload, *, context, request):
         if isinstance(state, dict):
             state["generationReady"] = capabilities["canGenerateArticle"]
             state["scaffoldConnected"] = capabilities["canGenerateArticle"]
-            state["setupMerged"] = capabilities["canGenerateArticle"]
+            # Merge history is a fact, independent of current source proof or
+            # this user's publication authority. Recovery needs it when blocked.
+            state["setupMerged"] = state.get("setupMerged") is True
             state["published"] = capabilities["canPublishArticle"]
             state["generation_ready"] = capabilities["canGenerateArticle"]
     checks = payload.get("checks") or {}
