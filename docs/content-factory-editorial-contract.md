@@ -9,6 +9,13 @@ publish-child initialization. The exact hosted review is checked again before
 saving its approval receipt. Worker rejections and transport failures retain
 the review gate; a timeout does not authorize a publishing retry.
 
+A publish child's initial status callback can precede its restored article
+metadata. Its saved parent supplies the confirmed slug only when the source
+run ID, organisation and original connection, source and operation scope match
+exactly. The parent still passes current target verification; conflicting child
+or remote slugs and routes are rejected. Independent drafts require their own
+saved slug. This observation does not change either run's consent or request.
+
 ## Component review updates (8 October 2026)
 
 The company-scoped `runs/:runId/article-review` route supports both article
