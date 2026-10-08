@@ -368,9 +368,17 @@ class WebsiteLifecycleTests(WebsiteDatabaseFixture, TestCase):
         self.assertEqual(run.run_request, request)
         self.assertEqual(self.website.verified_sha, SHA)
         self.assertEqual(self.config.publish_targets, [{'target_id': 'native'}])
-        self.assertFalse(self.config.article_system['generationReady'])
-        self.assertFalse(self.config.article_system['pending_article_system_setup']['generationReady'])
+        self.assertFalse(self.config.article_system.get('generationReady'))
+        self.assertFalse(self.config.article_system['pending_article_system_setup'].get('generationReady'))
         self.assertFalse(self.config.articles_scaffolded)
+        # A later observation also cannot reset independently verified state.
+        self.config.article_system.update(generationReady=True, state='verified')
+        self.config.save(update_fields=['article_system'])
+        with patch('content_factory.website_connections.read_setup_merge_pull', return_value=pull):
+            marketing._apply_setup_merge_result(run=run, context=SimpleNamespace(organization=self.org))
+        self.config.refresh_from_db()
+        self.assertTrue(self.config.article_system['generationReady'])
+        self.assertEqual(self.config.article_system['state'], 'verified')
 
     def test_setup_merge_observation_rechecks_cancel_after_github_read(self):
         from . import vibe_marketing_views as marketing

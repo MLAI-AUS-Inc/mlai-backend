@@ -5576,23 +5576,22 @@ def _mark_pending_article_system_setup_merged(config, *, run=None, result=None, 
     pending["setup_current_step"] = "merged"
     pending["updatedAt"] = timezone.now().isoformat()
     pending["updated_at"] = pending["updatedAt"]
-    pending["generationReady"] = not scoped
-    pending["generation_ready"] = not scoped
     article_system["pending_article_system_setup"] = pending
-    article_system["generationReady"] = not scoped
-    article_system["generation_ready"] = not scoped
-    article_system["generationReadySource"] = "verification_required" if scoped else "setup_pr_merged"
-    article_system["generation_ready_source"] = article_system["generationReadySource"]
-    article_system.setdefault("generationReadyAt", pending["updatedAt"])
-    article_system.setdefault("generation_ready_at", pending["updated_at"])
-    existing_state = str(article_system.get("state") or "").strip()
-    if scoped or (existing_state not in ARTICLE_SYSTEM_PUBLISHED_STATES and existing_state != "roo_scaffolded"):
-        article_system["state"] = "setup_merged" if scoped else "roo_scaffolded"
-        article_system["source"] = article_system.get("source") or "setup_pr_merge"
-        article_system["confidence"] = article_system.get("confidence") or "high"
-
-    # A merged setup is an explicit exit from any prior reset — drop the watermark.
-    clear_article_setup_reset_markers(article_system)
+    if not scoped:
+        pending["generationReady"] = True
+        pending["generation_ready"] = True
+        article_system["generationReady"] = True
+        article_system["generation_ready"] = True
+        article_system.setdefault("generationReadySource", "setup_pr_merged")
+        article_system.setdefault("generation_ready_source", "setup_pr_merged")
+        article_system.setdefault("generationReadyAt", pending["updatedAt"])
+        article_system.setdefault("generation_ready_at", pending["updated_at"])
+        existing_state = str(article_system.get("state") or "").strip()
+        if existing_state not in ARTICLE_SYSTEM_PUBLISHED_STATES and existing_state != "roo_scaffolded":
+            article_system["state"] = "roo_scaffolded"
+            article_system["source"] = article_system.get("source") or "setup_pr_merge"
+            article_system["confidence"] = article_system.get("confidence") or "high"
+        clear_article_setup_reset_markers(article_system)
     update_fields = ["article_system"]
     config.article_system = sanitize_json_for_postgres(article_system)
     if pr_url and config.articles_scaffold_pr_url != pr_url:
