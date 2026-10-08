@@ -219,6 +219,18 @@ class StartupContractTests(TestCase):
             query["next"], [ORIGIN + "/my-startup/create?step=baseline&company_id=one"]
         )
 
+    def test_private_preview_grants_keep_the_registered_capability_route(self):
+        prefix = "/api/v1/vibe-marketing/article-preview/signed%3Atoken/run-a/"
+        for suffix in ("", "assets/app.js", "__resource?url=https%3A%2F%2Fimages.test%2Fphoto"):
+            for origin in ("", "https://api.mlai.au"):
+                url = origin + prefix + suffix
+                with self.subTest(url=url):
+                    self.assertEqual(rewrite_url(url, company_id="company-a"), url)
+                    self.assertEqual(
+                        rewrite_payload({"url": url}, company_id="company-a"),
+                        {"url": url},
+                    )
+
     def test_oauth_returns_reject_lookalikes_and_escapes(self):
         for value in [
             "//evil.test",

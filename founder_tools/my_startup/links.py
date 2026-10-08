@@ -97,6 +97,10 @@ def rewrite_url(value, *, company_id=""):
         or f"{parsed.scheme}://{parsed.netloc}" not in known_origins
     ):
         return value
+    if parsed.path.startswith("/api/v1/vibe-marketing/article-preview/"):
+        # Signed GET-only grants use their registered capability proxy. There
+        # is no account-authenticated startup alias for this route or its assets.
+        return value
     path = page_path(parsed.path)
     scheme, netloc = parsed.scheme, parsed.netloc
     if path:
