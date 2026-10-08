@@ -5724,7 +5724,14 @@ def _maybe_verify_merged_setup_for_blocked_articles(*, run, context, force=False
     # This legacy worker operation also resumes historical parents. Its HTTP
     # endpoint ignores request JSON, so it cannot be used as a verify-only scan.
     # First verify with the existing inventory/rescan flow; only then continue.
-    blocked = _setup_blocked_response_for_generation(context, _get_config(context.organization), run=run)
+    if getattr(getattr(context, "profile", None), "user", None) is None:
+        # Background merge observations have no authenticated owner context.
+        # Preserve merge truth, but do not invent one for parent continuation.
+        blocked = Response({"reasonCode": "website_owner_review_required",
+            "detail": "Verify the current articles integration as the website owner before continuing."},
+            status=status.HTTP_409_CONFLICT)
+    else:
+        blocked = _setup_blocked_response_for_generation(context, _get_config(context.organization), run=run)
     if blocked is not None:
         metadata = {"accepted": False, "pending": False, "retryable": True,
             "status": "verification_required", "reasonCode": blocked.data.get("reasonCode"),

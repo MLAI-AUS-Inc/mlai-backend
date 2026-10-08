@@ -113,3 +113,18 @@ class SetupMergeObservationUnitTests(SimpleTestCase):
                     self.observe()
                 for key, value in previous.items():
                     setattr(self.run, key, value)
+
+    def test_background_merge_observation_requires_owner_review_without_starting_parents(self):
+        from . import vibe_marketing_views as marketing
+        with patch.object(marketing, "_persist_setup_merged_verification", side_effect=lambda run, metadata: metadata), \
+                patch.object(marketing, "_setup_blocked_response_for_generation") as readiness, \
+                patch.object(marketing, "_call_content_factory_run_action") as continuation:
+            metadata = marketing._maybe_verify_merged_setup_for_blocked_articles(
+                run=self.run, context=SimpleNamespace(organization=SimpleNamespace(pk=1)))
+        self.assertEqual(metadata["status"], "verification_required")
+        self.assertEqual(metadata["reasonCode"], "website_owner_review_required")
+        self.assertFalse(metadata["accepted"])
+        self.assertFalse(metadata["pending"])
+        self.assertTrue(metadata["retryable"])
+        readiness.assert_not_called()
+        continuation.assert_not_called()

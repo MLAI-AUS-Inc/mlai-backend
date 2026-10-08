@@ -21,6 +21,9 @@ and integration verification must validate the current source before those
 actions become available. All generation and repository mutation guards retain
 their existing exact-source checks. This change introduces no migration.
 
+Background merge observations without an authenticated owner retain the merge
+receipt and require owner review before blocked-parent continuation.
+
 ## Startup profile drafts (3 October 2026)
 
 `POST /api/v1/vibe-marketing/autofill` accepts `draftMode: true` (or
