@@ -129,6 +129,14 @@ All reconciliation actions lease an operation in a short transaction and release
 
 GitHub account liveness probes do not require a selected repository or optional `/user` endpoint. They have bounded cache TTLs and a short probe lease. Repository inventory uses read tokens; setup and publication separately require write permission. Completed readiness cannot bypass that distinction. Ephemeral probe and verification tokens are revoked after use.
 
+Bootstrap `articleSetupState.setupMerged` and its snake-case alias retain the
+server-observed merge fact when source verification expires or access changes.
+They do not grant generation or publication permission: `generationReady`,
+`scaffoldConnected`, `published` and the journey capabilities are recomputed
+from current authority and proof on every response. A missing merge fact stays
+false even when generation is allowed. The fresh reviewed setup action uses the
+merge fact together with current write policy, inventory and operation fences.
+
 Native article preview commits request a fresh repository token with `permission_mode=write`, `action=preview`, the original `run_id` and an immutable `expected_source_sha`. Preview authorization rechecks current repository identity, source, consent and operation fences; it does not require or establish a live publication receipt. The worker limits this temporary scope to Git objects and that run's owned review branch, then restores the original read scope. Preview tokens cannot request the workflow-files or CI-evidence profiles, and publication/merge still require their independent verified target and live deployment receipt.
 
 Mutation ledger `status=proposed|applied` records a Git effect and never transitions
