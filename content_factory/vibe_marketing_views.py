@@ -14396,7 +14396,6 @@ class VibeMarketingCompanyAvatarView(APIView):
         if not avatar_file:
             return Response({"detail": "Upload a logo image."}, status=400)
         from founder_tools.logo_images import encode_company_logo
-        from founder_tools.profile_fields import save_company_branding
         try:
             output = encode_company_logo(avatar_file)
         except ValueError as exc:
@@ -14414,16 +14413,23 @@ class VibeMarketingCompanyAvatarView(APIView):
         except Exception:
             logger.exception("company_avatar_upload_failed company_id=%s user_id=%s", company.id, request.user.id)
             return Response({"detail": "Logo upload failed. Please try again."}, status=502)
-        save_company_branding(company, request.user, avatar_url)
+        return self._save_branding(company, request.user, avatar_url)
+
+    def _save_branding(self, company, user, avatar_url):
+        from founder_tools.profile_fields import save_company_branding
+        try:
+            save_company_branding(company, user, avatar_url)
+        except DatabaseError:
+            logger.exception("company_avatar_save_failed company_id=%s user_id=%s", company.id, user.id)
+            return Response({"detail": "The logo could not be saved. Please try again.",
+                             "code": "company_logo_save_failed"}, status=503)
         return self._response(company)
 
     def delete(self, request):
         company, error = self._company(request)
         if error:
             return error
-        from founder_tools.profile_fields import save_company_branding
-        save_company_branding(company, request.user, "")
-        return self._response(company)
+        return self._save_branding(company, request.user, "")
 
 
 class VibeMarketingTopicFeedbackView(APIView):

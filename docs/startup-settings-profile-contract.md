@@ -1,6 +1,6 @@
 # Startup settings, research drafts, and branding
 
-Implemented locally on 2026-10-05. This contract describes source behavior, not a deployed service. No database migration is introduced.
+Implemented locally on 2026-10-05. This contract describes source behavior, not a deployed service. The logo correction on 2026-10-08 requires `founder_tools.0011_company_avatar_url_length`.
 
 ## Chat API boundary
 
@@ -46,6 +46,8 @@ Company profile research does not debit Roo points in this API: the start respon
 
 Clients recommend a square image of at least 512 × 512 pixels and provide crop/zoom review. The server validates PNG/JPEG/WebP content, still images only, at most 10 MiB, 40 million pixels, and 16,384 pixels per side. It applies orientation, preserves alpha, and creates a transparent 512 × 512 PNG. Each upload uses a unique versioned storage path. Storage failure leaves the saved logo unchanged; removal clears the canonical pointer and returns clients to initials. Database failures roll back pointers; old or unreferenced storage objects are not deleted by this endpoint.
 
+Firebase download URLs include the encoded object path and download token and exceed Django's default 200-character URL field limit. `VibeRaisingCompany.avatar_url` and its database column allow 2,048 characters after `0011_company_avatar_url_length`; preserve the full URL, including its token. The migration widens only this existing column and preserves nullability and existing values. Database failures during upload or removal return JSON HTTP 503 with `code: company_logo_save_failed` and retry guidance. Apply this migration through the approved backend release before expecting existing Chat clients to upload logos successfully. Creation and disposable local testing were explicitly approved; production application requires separate approval.
+
 Only the established organization owner can set canonical branding. Own-company serialization falls back to its own legacy avatar until canonical metadata exists. An explicit empty canonical logo prevents an old avatar from reappearing. Pulse/community update DTOs read `startup.avatarUrl` from explicitly established organization metadata; they never choose an arbitrary founder's company logo. Historical updates use current startup branding.
 
 ## GitHub selection
@@ -58,6 +60,8 @@ Only the established organization owner can set canonical branding. Own-company 
 
 Focused `unittest`/`SimpleTestCase` suites run through `scripts/test_without_database.py`, which removes environment credentials and rejects network/database access. Tests cover sparse/empty profile fields, optional-field round-trip, provisional promotion/retry, research non-persistence, explicit scope/authentication, repository validation/invalidation, canonical removal, alpha/limits, storage failure, and existing activation/editorial/Chat connection behavior.
 
-These checks do not prove SQL rollback/locking against a live database, Firebase upload, GitHub authorization, worker execution, or deployed routing. The final combined isolated run passed 198 tests. No migrations, database-backed tests, live provider calls or deployment were performed for this change. Client companion: [Chat PR #357](https://github.com/MLAI-AUS-Inc/mlai-chat/pull/357).
+The original profile/settings verification passed 198 isolated tests without migrations, database-backed tests, live provider calls or deployment. Client companion: [Chat PR #357](https://github.com/MLAI-AUS-Inc/mlai-chat/pull/357).
+
+The 8 October logo correction separately passes 49 database/network-blocked tests and the model/migration dry-run. With explicit approval, `scripts/test_company_logo_postgres.py` creates a disposable local PostgreSQL cluster, reproduces the old 200-character failure, applies only `0011_company_avatar_url_length`, and verifies existing URLs, complete long URL persistence, rollback and removal. This narrow database regression does not prove organization locking, Firebase upload, GitHub authorization, worker execution or deployed routing. No production migration or deployment was performed.
 
 Repository replacements use `bind_website` and unlinking disconnects the current `WebsiteConnection` generation. This preserves the existing authority checks and invalidates work for superseded connections. Shared GitHub authorization is retained. Settings responses are serialized after the atomic save commits, preserving worker reconciliation without a database lock.
