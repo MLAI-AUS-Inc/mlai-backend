@@ -18129,7 +18129,12 @@ class VibeMarketingRunControlView(APIView):
             action=action,
             payload=payload,
             workflow=remote_run.workflow,
-            timeout=(3, 20) if action in {"promote-bundle", "publish-pr"} else (3, 15),
+            # Article approval durably initializes a publish child before its
+            # acknowledgement. Wait for that response so its exact-review
+            # receipt is saved, including an explicit worker rejection.
+            timeout=(3, 45) if approval_requires_receipt else (
+                (3, 20) if action in {"promote-bundle", "publish-pr"} else (3, 15)
+            ),
             transport_errors_are_pending=action in {"promote-bundle", "publish-pr"},
         )
 

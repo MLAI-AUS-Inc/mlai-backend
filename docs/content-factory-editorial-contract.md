@@ -4,6 +4,11 @@ Local implementation: 10–11 September 2026. This document describes code, not 
 
 The founder frontend calls the authenticated `/api/v1/vibe-marketing` views. The backend owns organisation access, billing, approved editorial policy and dispatch. Content Factory owns model selection, research, repository changes, previews and release checks.
 
+Article approval waits up to 45 seconds for the worker to acknowledge durable
+publish-child initialization. The exact hosted review is checked again before
+saving its approval receipt. Worker rejections and transport failures retain
+the review gate; a timeout does not authorize a publishing retry.
+
 ## Component review updates (8 October 2026)
 
 The company-scoped `runs/:runId/article-review` route supports both article
