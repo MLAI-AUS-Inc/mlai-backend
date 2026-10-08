@@ -540,3 +540,7 @@ handoff and retained separately as the publishing target contract. It must not
 be added to the parent run's consent tuple: the worker correctly rejects that
 as a connection-generation mismatch. Controls preserve explicit original
 identity fields and leave the saved request unchanged.
+The backend's publishing-child mirror copies the same identity as the worker's
+source-derived child request. It retains the verified publishing target as
+separate metadata, so the mirrored child can pass the same scope checks during
+status reads, callbacks and later controls.

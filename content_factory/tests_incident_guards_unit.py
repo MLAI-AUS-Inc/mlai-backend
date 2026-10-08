@@ -143,6 +143,35 @@ class OriginalPublishControlScopeReplays(SimpleTestCase):
         self.assertEqual(guard.call_args.args[0], saved)
 
 
+    def test_publish_child_mirror_keeps_the_scope_the_worker_copies_from_its_parent(self):
+        from . import vibe_marketing_views as views
+        from .website_contract import CONNECTION_FIELDS, connection_contract
+        for optional in ({}, {"connection_target_id": "original-target", "repository_id": 321}):
+            with self.subTest(optional=optional):
+                saved = {"website_connection_id": str(uuid.uuid4()), "connection_generation": 3,
+                         "domain": "fixture.test", "github_repo": "fixture/site", **optional}
+                source = SimpleNamespace(run_id="source-article", run_request=saved,
+                                         domain="fixture.test", github_repo="fixture/site")
+                binding = {**saved, "connection_target_id": "current-target", "repository_id": 987,
+                           "publish_target_id": "current-target", "publish_target": {"target_id": "current-target"}}
+                with patch.object(views, "_get_config", return_value=SimpleNamespace(github_repo="fixture/site")), \
+                        patch("content_factory.incident_guards.publish_child_binding", return_value=binding), \
+                        patch.object(views.ContentFactoryRun.objects, "filter") as runs, \
+                        patch.object(views, "_create_local_run", return_value=object()) as create:
+                    runs.return_value.prefetch_related.return_value.first.return_value = None
+                    views._ensure_local_publish_child_from_known_id(
+                        child_run_id="publish-child", source_run=source,
+                        request=SimpleNamespace(user=SimpleNamespace(pk=42)),
+                        context=SimpleNamespace(organization=SimpleNamespace(domain="fixture.test")))
+                child_request = create.call_args.kwargs["payload"]
+                self.assertEqual({k: child_request[k] for k in CONNECTION_FIELDS if k in child_request},
+                                 connection_contract(saved))
+                self.assertEqual(child_request["publish_target_id"], "current-target")
+                self.assertEqual(child_request["publish_target"], {"target_id": "current-target"})
+                self.assertEqual(child_request["delivery_mode"], "publish_code")
+                self.assertEqual(child_request["source_run_id"], source.run_id)
+
+
 class IncidentAuthorityReplays(SimpleTestCase):
     def setUp(self):
         self.now = timezone.now()

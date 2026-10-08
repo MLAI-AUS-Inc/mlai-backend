@@ -8170,6 +8170,11 @@ def _ensure_local_publish_child_from_known_id(
         "delivery_mode": "publish_code",
         "delivery_mode_confirmed": True,
     }
+    # The worker creates this child by copying the source request. Mirror that
+    # exact identity rather than adding today's optional consent fields.
+    for key in CONNECTION_FIELDS:
+        publish_payload.pop(key, None)
+    publish_payload.update(connection_contract(scoped_run_contract(source_run)))
     if review_source_run_id:
         publish_payload["review_source_run_id"] = review_source_run_id
     child_remote_data = {
