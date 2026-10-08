@@ -2625,7 +2625,7 @@ def _prefer_numeric_metric(existing, candidate, key):
     return existing_value if _safe_number(existing_value) >= _safe_number(candidate_value) else candidate_value
 
 
-def _merge_topic_candidate(existing, candidate):
+def _merge_topic_candidate(existing, candidate, *, preferred_source_run_id=None):
     difficulty, difficulty_source = _prefer_topic_difficulty(existing, candidate)
     existing_has_island = _candidate_has_content_island_metadata(existing)
     candidate_has_island = _candidate_has_content_island_metadata(candidate)
@@ -2633,7 +2633,11 @@ def _merge_topic_candidate(existing, candidate):
     candidate_is_run_candidate = bool(candidate.get("sourceRunId"))
     candidate_values = _candidate_non_empty_items(candidate)
 
-    if existing_has_island and not candidate_has_island:
+    if preferred_source_run_id and existing.get("sourceRunId") == preferred_source_run_id:
+        merged = dict(existing)
+    elif preferred_source_run_id and candidate.get("sourceRunId") == preferred_source_run_id:
+        merged = dict(candidate)
+    elif existing_has_island and not candidate_has_island:
         merged = {**candidate_values, **existing}
     elif existing_has_island and candidate_has_island:
         merged = {**candidate_values, **existing}
@@ -2738,6 +2742,7 @@ def _topic_candidates_from_runs(
 ):
     run_candidates = []
     island_order = {}
+    preferred_source_run_id = None
     for run in runs:
         if run.workflow not in DISCOVERY_WORKFLOWS:
             continue
@@ -2761,6 +2766,10 @@ def _topic_candidates_from_runs(
                 quality_candidates = [min(candidates, key=_topic_candidate_sort_key)]
             candidates = quality_candidates
         if candidates:
+            if preferred_source_run_id is None and _is_custom_topic_run(run):
+                # Runs arrive newest first. An explicitly researched idea must
+                # remain selectable before the compact dashboard truncates it.
+                preferred_source_run_id = run.run_id
             for candidate in candidates:
                 island_key = _topic_candidate_island_key(candidate)
                 if island_key and island_key not in island_order:
@@ -2768,6 +2777,8 @@ def _topic_candidates_from_runs(
             run_candidates.extend(candidates)
     if organization is None:
         ordered_run_candidates = _balanced_topic_candidate_order(run_candidates, island_order)
+        if preferred_source_run_id:
+            ordered_run_candidates.sort(key=lambda item: item.get("sourceRunId") != preferred_source_run_id)
         return ordered_run_candidates[:limit] if limit else ordered_run_candidates
 
     declined_keyword_keys = declined_keyword_keys or set()
@@ -2793,11 +2804,14 @@ def _topic_candidates_from_runs(
             continue
         existing = merged.get(key)
         if existing:
-            merged[key] = _merge_topic_candidate(existing, candidate)
+            merged[key] = _merge_topic_candidate(existing, candidate,
+                preferred_source_run_id=preferred_source_run_id)
         else:
             merged[key] = candidate
 
     sorted_candidates = _balanced_topic_candidate_order(merged.values(), island_order)
+    if preferred_source_run_id:
+        sorted_candidates.sort(key=lambda item: item.get("sourceRunId") != preferred_source_run_id)
     return sorted_candidates[:limit] if limit else sorted_candidates
 
 

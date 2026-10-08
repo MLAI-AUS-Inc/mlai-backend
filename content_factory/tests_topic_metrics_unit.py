@@ -152,6 +152,46 @@ class TopicMetricsAPIUnitTests(unittest.TestCase):
         self.service = service_views
         self.views = vibe_marketing_views
 
+    def test_latest_custom_research_survives_compact_limit_and_historical_island_merge(self):
+        custom = SimpleNamespace(run_id="custom-new", workflow="auto_discovery", status="awaiting_confirmation",
+            run_request={"custom_topic_title": "AI workflow handoff checklist"}, result={"topic_candidates": [
+                {"keyword": "ai automation", "title": "Hand over an AI workflow pilot", "volume": 100,
+                 "difficulty": 20, "opportunityScore": 500}]})
+        old = SimpleNamespace(run_id="island-old", workflow="auto_discovery", status="awaiting_confirmation",
+            run_request={"content_island_slug": "ai-community", "content_island_name": "AI community"},
+            result={"topic_candidates": [
+                {"keyword": "ai automation", "title": "An older automation introduction", "volume": 100,
+                 "difficulty": 20, "opportunityScore": 500},
+                *[{"keyword": f"island topic {i}", "title": f"Older island idea {i}", "volume": 100,
+                   "difficulty": 20, "opportunityScore": 9000-i} for i in range(8)]]})
+        memory = {"keywords": {}, "written_by_keyword": {}, "written_by_slug": {}}
+        with patch.object(self.views, "_stored_keyword_topic_candidates", return_value=[]), \
+             patch.object(self.views, "match_covered_topic", return_value=None):
+            candidates = self.views._topic_candidates_from_runs([custom, old], organization=object(), limit=8,
+                coverage_memory=[], written_memory=memory)
+        self.assertEqual(len(candidates), 8)
+        self.assertEqual(candidates[0]["title"], "Hand over an AI workflow pilot")
+        self.assertEqual(candidates[0]["sourceRunId"], "custom-new")
+        self.assertFalse(candidates[0].get("pillarSlug"))
+
+    def test_custom_research_priority_keeps_current_availability_filters(self):
+        run = SimpleNamespace(run_id="custom", workflow="auto_discovery", status="awaiting_confirmation",
+            run_request={"custom_topic_title": "An explicit idea"}, result={"topic_candidates": [
+                {"keyword": "declined", "title": "Declined idea", "volume": 100, "difficulty": 20},
+                {"keyword": "written", "title": "Written idea", "volume": 100, "difficulty": 20},
+                {"keyword": "covered", "title": "Covered idea", "volume": 100, "difficulty": 20},
+                {"keyword": "available", "title": "Available idea", "volume": 100, "difficulty": 20}]})
+        keyword = SimpleNamespace(status="written", written_article_id=None, written_article=None, cooldown_until=None)
+        memory = {"keywords": {"written": keyword}, "written_by_keyword": {}, "written_by_slug": {}}
+        with patch.object(self.views, "_stored_keyword_topic_candidates", return_value=[]), \
+             patch.object(self.views, "match_covered_topic", side_effect=lambda **kw:
+                 SimpleNamespace(article=None, reason="covered", match_type="exact", confidence=1)
+                 if kw.get("keyword") == "covered" else None), \
+             patch.object(self.views, "_apply_topic_coverage_to_candidate", side_effect=lambda c, _: c):
+            candidates = self.views._topic_candidates_from_runs([run], organization=object(), limit=8,
+                declined_keyword_keys={"declined"}, coverage_memory=[], written_memory=memory)
+        self.assertEqual([c["keyword"] for c in candidates], ["available"])
+
     def test_discovery_option_preserves_zero_and_reads_nested_velocity(self):
         option = {"keyword": "example", "difficulty": 0, "difficulty_source": "dataforseo_bulk", "ai_search_volume": 0,
                   "velocity_data": {"daily_volumes": months([10, 10, 10, 10, 10, 10]), "velocity_score": 0,
