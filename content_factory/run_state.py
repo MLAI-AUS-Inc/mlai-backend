@@ -52,7 +52,7 @@ def merge_reliability_fields(result, payload):
     return merged
 
 
-def reliability_presentation(result, *, status=""):
+def reliability_presentation(result, *, status="", workflow="", current_step="", resume_available=False, approval_state=""):
     """Project recovery controls from authoritative terminal and failure state."""
     result = result if isinstance(result, dict) else {}
     failure = result.get("failure") or {}
@@ -61,8 +61,23 @@ def reliability_presentation(result, *, status=""):
     if failure:
         fields.update(errorCode=failure.get("code"), nextAction=failure.get("next_action"),
                       requiresUserAction=failure.get("requires_user_action"))
-    if (status or result.get("status")) in {"completed", "cancelled", "canceled", "denied"} or failure.get("retryable") is False or result.get("retryable") is False:
+    effective_status = status or result.get("status")
+    assembly_repair = (
+        effective_status in {"failed", "blocked", "blocked_verification"}
+        and workflow in {"article_generation", "direct_generate", "confirmed_topic"}
+        and current_step == "assemble_article" and approval_state != "approved"
+        and resume_available is True
+        and failure.get("code") == "EDITORIAL_REJECTED"
+        and failure.get("step") == "assemble_article"
+        and failure.get("retry_policy") == "explicit_action"
+    )
+    if effective_status in {"completed", "cancelled", "canceled", "denied"} or failure.get("retryable") is False or result.get("retryable") is False:
         fields.update(resumeAvailable=False, retryAvailable=False)
+    if assembly_repair:
+        # The worker validates the saved editorial evidence before setting the
+        # durable run flag and rechecks original authority on Resume. Preserve
+        # that explicit writing repair without advertising a generic retry.
+        fields.update(resumeAvailable=True, retryAvailable=False)
     if recovery.get("state") == "pending":
         fields.update(resumeAvailable=False, retryAvailable=False, requiresUserAction=False,
                       nextAction="automatic_retry")

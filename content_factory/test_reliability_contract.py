@@ -11,6 +11,26 @@ from workflow_runs.serializers import ContentFactoryRunSyncSerializer
 
 
 class ReliabilityContractTests(unittest.TestCase):
+    def test_server_approved_assembly_repair_survives_failed_attempt_presentation(self):
+        result = {"retryable": False, "failure": {"code": "EDITORIAL_REJECTED", "step": "assemble_article",
+                  "retry_policy": "explicit_action", "retryable": False}}
+        context = dict(status="blocked", workflow="confirmed_topic", current_step="assemble_article",
+                       resume_available=True, approval_state="not_required")
+        rendered = reliability_presentation(result, **context)
+        self.assertTrue(rendered["resumeAvailable"])
+        self.assertFalse(rendered["retryAvailable"])
+        for change in [{"resume_available": False}, {"current_step": "package_content_delivery"},
+                       {"workflow": "article_system_setup"}, {"approval_state": "approved"},
+                       {"status": "cancelled"}, {"status": "completed"}, {"status": "denied"}]:
+            with self.subTest(change=change):
+                self.assertFalse(reliability_presentation(result, **{**context, **change})["resumeAvailable"])
+        for change in [{"code": "EXPORT_EDITORIAL_REJECTED"}, {"step": "render_article"}, {"retry_policy": "never"}]:
+            changed = {**result, "failure": {**result["failure"], **change}}
+            self.assertFalse(reliability_presentation(changed, **context)["resumeAvailable"])
+        self.assertFalse(reliability_presentation({**result, "recovery": {"state": "pending"}}, **context)["resumeAvailable"])
+        # Result-level historical flags never authorize this exception.
+        self.assertFalse(reliability_presentation({**result, "resume_available": True}, status="blocked")["resumeAvailable"])
+
     def test_explicit_retry_denial_overrides_saved_resume_flags(self):
         for result in [{"failure": {"retryable": False}}, {"retryable": False}]:
             rendered = reliability_presentation({**result, "resume_available": True, "retry_available": True}, status="failed")
