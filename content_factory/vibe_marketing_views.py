@@ -20,7 +20,7 @@ import uuid
 import time
 from contextlib import contextmanager, nullcontext
 
-from .website_contract import WebsiteAuthorityError, connection_contract
+from .website_contract import CONNECTION_FIELDS, WebsiteAuthorityError, connection_contract
 from .website_connections import (
     REPOSITORY_WORKFLOWS, authority_guard, bind_website, contract_for,
     scoped_run_contract, summary_for as website_summary, transition_connection,
@@ -8170,6 +8170,11 @@ def _ensure_local_publish_child_from_known_id(
         "delivery_mode": "publish_code",
         "delivery_mode_confirmed": True,
     }
+    # The worker creates this child by copying the source request. Mirror that
+    # exact identity rather than adding today's optional consent fields.
+    for key in CONNECTION_FIELDS:
+        publish_payload.pop(key, None)
+    publish_payload.update(connection_contract(scoped_run_contract(source_run)))
     if review_source_run_id:
         publish_payload["review_source_run_id"] = review_source_run_id
     child_remote_data = {
@@ -13686,6 +13691,11 @@ def _call_content_factory_run_action(
                 from .website_connections import run_action_authority
                 operation = run_action_authority(scoped_run, action)
                 with authority_guard(saved, action=operation):
+                    # Control the original run under exactly its saved scope.
+                    # A verified publishing target belongs to the child contract;
+                    # adding an absent optional identity here changes the parent.
+                    for key in CONNECTION_FIELDS:
+                        payload.pop(key, None)
                     payload.update(connection_contract(saved))
             except WebsiteAuthorityError as exc:
                 return {**exc.as_dict(), "status": "blocked", "content_factory_status_code": exc.status}
