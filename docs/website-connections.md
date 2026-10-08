@@ -109,6 +109,10 @@ error and approved preview evidence retained. The browser receives a conflict
 response instead of a successful queued acknowledgement. A status poll also
 normalizes that failure over stale nested `preview_ready` metadata; neither path
 creates a PR or reopens the website operation.
+Older approved runs whose recorded PR failure was masked by preview polling
+receive the same canonical failure in their response projection. This read does
+not rewrite their history, and a newer control receipt or an existing PR keeps
+its current state. Recovery still starts through the reviewed setup boundary.
 
 Recovery through a dispatch key acknowledges the existing run identity only.
 Its minimal receipt cannot replace saved worker status, repair lineage, evidence

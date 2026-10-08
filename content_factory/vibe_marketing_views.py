@@ -10638,6 +10638,7 @@ def _serialize_run(
     run, *, context=None, latest_runs=None, checks=None, mode="full",
     topic_candidates=None, precomputed_article_setup_state=None,
 ):
+    run = _setup_pr_creation_failure_view(run)
     compact = mode in {"summary", "status"}
     original_request = _run_mapping(run.run_request)
     original_mode = str(original_request.get("delivery_mode") or original_request.get("deliveryMode") or "")
@@ -17677,8 +17678,8 @@ def _article_publish_approval_receipt_failure(run):
     )
 
 
-def _project_setup_pr_creation_failure(run, config, remote_data):
-    """Retain approved preview evidence while exposing failed PR creation."""
+def _setup_pr_creation_failure_result(run, remote_data):
+    """Build the canonical failure without changing persistence or authority."""
     detail = str(remote_data.get("error") or remote_data.get("message")
                  or "The setup PR could not be created. Review the failure before starting a new attempt.")
     result = {**dict(run.result or {}), **_run_result_from_remote(remote_data)}
@@ -17690,6 +17691,32 @@ def _project_setup_pr_creation_failure(run, config, remote_data):
     result.update(failure)
     result["article_system_setup"] = setup
     result["latest_control_response"] = remote_data
+    return detail, result, failure
+
+
+def _setup_pr_creation_failure_view(run):
+    """Expose a recorded approved PR failure masked by older preview polling."""
+    result = _run_mapping(run.result)
+    control = _run_mapping(result.get("latest_control_response"))
+    setup = _run_mapping(result.get("article_system_setup"))
+    if (run.workflow != "article_system_setup"
+            or run.approval_state != ContentFactoryApprovalState.APPROVED
+            or control.get("status") != "setup_pr_create_failed"
+            or any(source.get(key) for source in (result, setup)
+                   for key in ("pr_url", "prUrl", "pr_number", "prNumber"))):
+        return run
+    projected = copy.copy(run)
+    detail, projected.result, _ = _setup_pr_creation_failure_result(run, control)
+    projected.status = ContentFactoryRunStatus.BLOCKED
+    projected.current_step = "create_pull_request"
+    projected.resume_available = False
+    projected.error = detail
+    return projected
+
+
+def _project_setup_pr_creation_failure(run, config, remote_data):
+    """Retain approved preview evidence while exposing failed PR creation."""
+    detail, result, failure = _setup_pr_creation_failure_result(run, remote_data)
     run.result = result
     run.status = ContentFactoryRunStatus.BLOCKED
     run.current_step = "create_pull_request"

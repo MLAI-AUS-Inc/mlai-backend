@@ -61,3 +61,37 @@ class SetupPrFailureTests(SimpleTestCase):
         views._project_setup_pr_creation_failure(run, config, {"status": "setup_pr_create_failed"})
         self.assertEqual(config.article_system["pending_article_system_setup"]["status"], "running")
         config.save.assert_not_called()
+
+    def test_legacy_failed_approval_is_projected_without_rewriting_history(self):
+        run = SimpleNamespace(workflow="article_system_setup", status="queued", current_step="await_review",
+            approval_state="approved", resume_available=True, error="",
+            result={"status": "preview_ready", "article_system_setup": {"status": "preview_ready"},
+                    "live_preview": {"previewUrl": "https://preview.example/stories"},
+                    "latest_control_response": {"status": "setup_pr_create_failed",
+                                                "message": "Repository branch changed"}}, save=Mock())
+        before = deepcopy(run.result)
+        projected = views._setup_pr_creation_failure_view(run)
+        self.assertIsNot(projected, run)
+        self.assertEqual((projected.status, projected.current_step), ("blocked", "create_pull_request"))
+        self.assertFalse(projected.resume_available)
+        self.assertEqual(projected.result["setup_status"], "setup_pr_create_failed")
+        self.assertEqual(projected.result["live_preview"]["previewUrl"], "https://preview.example/stories")
+        self.assertEqual(run.result, before)
+        self.assertEqual((run.status, run.current_step), ("queued", "await_review"))
+        run.save.assert_not_called()
+
+    def test_created_pr_cannot_be_hidden_by_an_older_failed_control(self):
+        for scope in ("result", "setup"):
+            with self.subTest(scope=scope):
+                result = {"latest_control_response": {"status": "setup_pr_create_failed"}}
+                target = result if scope == "result" else result.setdefault("article_system_setup", {})
+                target["pr_url"] = "https://github.com/owner/site/pull/1"
+                run = SimpleNamespace(workflow="article_system_setup", approval_state="approved", result=result)
+                self.assertIs(views._setup_pr_creation_failure_view(run), run)
+
+    def test_new_control_or_unapproved_state_does_not_restore_old_failure(self):
+        for control_status, approval in (("queued", "approved"), ("setup_pr_create_failed", "approval_required")):
+            with self.subTest(control_status=control_status, approval=approval):
+                run = SimpleNamespace(workflow="article_system_setup", approval_state=approval,
+                    result={"latest_control_response": {"status": control_status}})
+                self.assertIs(views._setup_pr_creation_failure_view(run), run)
