@@ -148,7 +148,7 @@ jobs:
           content_factory.tests_hosted_quality_issues_unit
 
     - name: Check website journey and lifecycle contracts without database access
-      run: python scripts/test_without_database.py content_factory.tests_website_articles_reliability_unit content_factory.tests_portable_run_controls_unit content_factory.tests_portable_workflow_progress_unit content_factory.tests_incident_guards_unit content_factory.tests_publish_child_review_identity_unit content_factory.tests_website_operation_recovery_unit content_factory.tests_setup_pr_failure_unit content_factory.test_reliability_contract content_factory.tests_private_preview_document_unit
+      run: python scripts/test_without_database.py content_factory.tests_website_articles_reliability_unit content_factory.tests_portable_run_controls_unit content_factory.tests_portable_workflow_progress_unit content_factory.tests_incident_guards_unit content_factory.tests_publish_child_review_identity_unit content_factory.tests_website_operation_recovery_unit content_factory.tests_setup_pr_failure_unit content_factory.tests_setup_merge_verification_unit content_factory.test_reliability_contract content_factory.tests_private_preview_document_unit
 
     - name: Check migrations are committed
       run: python manage.py makemigrations --check --dry-run

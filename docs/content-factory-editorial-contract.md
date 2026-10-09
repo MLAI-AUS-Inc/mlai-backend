@@ -111,6 +111,15 @@ batch, payload, event or execution identity remains rejected.
 
 ## Observing an articles setup merge
 
+First-time articles setup can be published before a website publishing target is
+registered. The merge validator accepts the approved setup run's worker receipt
+only when the current retry generation, exact preview commit, PR head, pinned
+source and every directory quality gate agree. It rechecks the selected repository
+head against that pinned source. It retains current connection and operation
+checks and does not promote publishing readiness; native integration verification
+after the merge still owns that promotion. Changed commits, incomplete checks,
+manual quality overrides and stale retry receipts remain blocked.
+
 Refreshing a scoped setup PR records a historical merge receipt only after a
 fresh GitHub read confirms the saved PR number, immutable base/head repository,
 selected base branch and exact merge/head commits. The original connection,
