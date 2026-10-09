@@ -1047,6 +1047,47 @@ def dispatch_contract(domain, payload, *, action="read", source_run_id=""):
 
 
 
+def _verified_setup_run_base(run, head_sha, website):
+    """Read the worker's exact approved setup proof before a target exists."""
+    from .website_contract import SHA_PATTERN
+    saved = scoped_run_contract(run)
+    result = run.result if isinstance(run.result, dict) else {}
+    setup = result.get("article_system_setup") or {}
+    gates = result.get("directory_quality_gates") or {}
+    proof = result.get("directory_quality_verification") or {}
+    preview = result.get("live_preview") or result.get("livePreview") or {}
+    if not all(isinstance(item, dict) for item in (setup, gates, proof, preview)):
+        return ""
+    base_sha = str(saved.get("expected_source_sha") or "")
+    generation = result.get("resume_generation")
+    if (
+        run.workflow != "article_system_setup"
+        or run.status != "completed" or run.approval_state != "approved"
+        or result.get("status") != "setup_pr_created" or setup.get("status") != "pr_created"
+        or setup.get("setup_run_id") != run.run_id
+        or not SHA_PATTERN.fullmatch(base_sha)
+        or (website.verified_sha and website.verified_sha != base_sha)
+        or result.get("source_sha") != base_sha or setup.get("source_sha") != base_sha
+        or result.get("branch_commit_sha") != head_sha or setup.get("branch_commit_sha") != head_sha
+        or preview.get("exactRender") is not True or preview.get("commitSha") != head_sha
+        or proof.get("status") != "passed" or proof.get("commit_sha") != head_sha
+        or proof.get("preview_identity") != f"commit:{head_sha}"
+        or not proof.get("task_id") or not proof.get("completed_at")
+        or type(generation) is not int or generation < 0
+        or type(proof.get("resume_generation")) is not int or type(setup.get("resume_generation")) is not int
+        or proof.get("resume_generation") != generation or setup.get("resume_generation") != generation
+        or gates.get("status") != "passed"
+        or any(gates.get(key) is not True for key in (
+            "dependency_validation", "static_policy", "local_build", "dom_slot_compliance",
+            "publish_surface", "browser", "visual_style",
+        ))
+        or gates.get("local_build_skipped") is not False
+        or result.get("manual_quality_gate_override") or setup.get("manual_quality_gate_override")
+    ):
+        return ""
+    return base_sha
+
+
 def validate_setup_merge_source(run, head_sha):
     """Only merge the precise setup commit whose preview was verified."""
     from .website_contract import SHA_PATTERN
@@ -1054,11 +1095,19 @@ def validate_setup_merge_source(run, head_sha):
     if not binding or not SHA_PATTERN.fullmatch(str(head_sha or "")):
         raise WebsiteAuthorityError("setup_verification_required", "Verify this setup pull request before publishing.")
     website = WebsiteConnection.objects.get(pk=binding["website_connection_id"])
+    validate_authority(website, scoped_run_contract(run), action="setup", domain=run.domain, github_repo=run.github_repo)
     for target in website.targets.filter(generation=binding["connection_generation"]):
         proof = target.contract.get("verification") or {}
         if proof.get("status") == "preview_verified" and proof.get("source_sha") == head_sha and proof.get("base_sha") == website.verified_sha:
             verify_repository_head(website, website.verified_sha)
             return
+    # First-time scaffolds have no accepted publishing target until the setup
+    # is merged and the native integration is verified. Their approved worker
+    # receipt proves the exact PR head without promoting publishing readiness.
+    base_sha = _verified_setup_run_base(run, head_sha, website)
+    if base_sha:
+        verify_repository_head(website, base_sha)
+        return
     raise WebsiteAuthorityError("setup_verification_required", "The setup pull request changed or its exact preview has not passed verification.")
 
 
