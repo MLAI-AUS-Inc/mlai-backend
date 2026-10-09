@@ -39,6 +39,14 @@ blockers. Tokens are neither returned nor stored in the capability cache.
 
 ## Integration evidence and admission
 
+Repository scan completion may arrive after the durable run snapshot has already
+marked its website operation `completed`. The worker's `scan_complete` callback
+uses `status: success`; the operation fence treats that specific callback value
+as the same completed outcome. It still checks the original company, operation
+attempt and deletion watermark, rejects cancelled or failed operations and late
+progress events, and does not reopen the run. Accepting the completion receipt
+updates scan metadata; it does not grant generation or publishing readiness.
+
 A completed scan must carry an explicit ready verdict, the selected repository,
 its default branch/head, a timestamp no older than seven days, and the same
 safe direct publish target currently selected in configuration. The scan's
