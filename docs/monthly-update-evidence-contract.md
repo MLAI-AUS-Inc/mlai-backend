@@ -108,3 +108,20 @@ page is omitted. Later Linear project status/description is omitted while any
 available in-month issue or project-update evidence remains usable. This does
 not reconstruct provider history that was never retained. No new database
 schema or migration is needed for these boundaries.
+
+## Curation continuity context (9 October 2026)
+
+The internal curation-context endpoint projects each prior update to `id`,
+`month`, `title`, `updateDate`, `narrativePeriod`, `published_at`, `revisionId`,
+`revisionHash`, and `rendered_markdown`. The date-based path uses the published
+revision, preserving the existing six-publication selection and chronology.
+The legacy monthly-slot path retains its existing selection and current revision.
+No archived `evidenceSnapshot`, raw source text, charts, or arbitrary nested memo
+fields enter this continuity projection. Full evidence stays in the revision,
+owner/editor, and exact-revision verification contracts.
+
+Valley also applies this allowlist when talking to an older backend. It pins
+the projected history in the run checkpoint, budgets the complete request, and
+does not automatically replay a context-limit failure. This change requires no
+database schema migration. The new serializer and endpoint-composition tests
+run through `scripts/test_without_database.py` and are assigned to CI.
