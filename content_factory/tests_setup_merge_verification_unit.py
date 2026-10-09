@@ -187,7 +187,7 @@ class SetupSourceReverificationUnitTests(SimpleTestCase):
         import uuid
         self.website = SimpleNamespace(pk=uuid.uuid4(), generation=2, repository_id=123,
             github_repo="example/site", app_root="", branch="main", state="connected",
-            installation_id="456", configuration_version=3,
+            installation_id="456", configuration_version=3, authorized_by=SimpleNamespace(pk=8),
             organization=SimpleNamespace(domain="example.test"), targets=Mock())
         self.config = SimpleNamespace(default_publish_target_id=None)
         self.target = None
@@ -198,7 +198,7 @@ class SetupSourceReverificationUnitTests(SimpleTestCase):
                 "owned_merge_run_id": "setup-1"}, receipt={}, attempts=0,
             next_attempt_at=None, save=Mock())
 
-    def process(self, *, now=None):
+    def process(self, *, now=None, points_error=None):
         from . import website_reconciliation as reconciliation, website_operations as operations
         from . import website_verification as verification
         with ExitStack() as stack:
@@ -214,6 +214,9 @@ class SetupSourceReverificationUnitTests(SimpleTestCase):
             stack.enter_context(patch("content_factory.vibe_marketing_views._content_factory_remote_config",
                 return_value={"enabled": True, "base_url": "https://worker.example.test"}))
             stack.enter_context(patch("content_factory.vibe_marketing_views._content_factory_headers", return_value={}))
+            points = stack.enter_context(patch("content_factory.vibe_marketing_views._require_roo_points_for_ai_agent",
+                return_value=(points_error, 6)))
+            actor = stack.enter_context(patch("content_factory.vibe_marketing_views.founder_actor_id_for_user", return_value="mlai_user:8"))
             create = stack.enter_context(patch("content_factory.vibe_marketing_views._create_local_run",
                 return_value=SimpleNamespace(run_id="current-source-scan")))
             reserve = stack.enter_context(patch.object(operations, "reserve_workflow_operation"))
@@ -228,7 +231,8 @@ class SetupSourceReverificationUnitTests(SimpleTestCase):
                 return_value=SimpleNamespace(pk="live-1")))
             result = reconciliation._process_source_reverification(self.op.pk, now or timezone.now())
         return SimpleNamespace(result=result, receipt=stored.return_value.update.call_args.kwargs["receipt"],
-            reserve=reserve, bind=bind, post=post, create=create, discover=discover, ci=ci, live=live, owned=owned)
+            reserve=reserve, bind=bind, post=post, create=create, discover=discover, ci=ci, live=live, owned=owned,
+            points=points, actor=actor)
 
     def test_owned_first_setup_without_target_dispatches_current_source_scan_once(self):
         observed = self.process()
@@ -241,6 +245,17 @@ class SetupSourceReverificationUnitTests(SimpleTestCase):
         self.assertEqual(payload["website_connection_id"], str(self.website.pk))
         self.assertEqual(payload["connection_generation"], 2)
         self.assertIs(payload["force_refresh"], True)
+        from .contract import CONTENT_FACTORY_REQUEST_SOURCE
+        self.assertEqual(payload["request_source"], CONTENT_FACTORY_REQUEST_SOURCE)
+        self.assertEqual(payload["slack_user_id"], "mlai_user:8")
+        self.assertEqual(payload["scan_purpose"], "setup")
+        for key in ("scaffold_if_missing", "auto_setup_preview", "generate_components"):
+            self.assertIs(payload[key], False)
+        self.assertIs(payload["roo_points_authorized"], True)
+        self.assertEqual(payload["roo_points_action"], "repo_scan")
+        self.assertEqual(payload["roo_points_cost"], 0)
+        observed.points.assert_called_once_with(self.website.authorized_by, domain="example.test", action="repo_scan")
+        observed.actor.assert_called_once_with(self.website.authorized_by)
         observed.reserve.assert_called_once()
         self.assertEqual(observed.reserve.call_args.kwargs["workflow"], "repo_scan")
         observed.bind.assert_called_once()
@@ -271,3 +286,19 @@ class SetupSourceReverificationUnitTests(SimpleTestCase):
         observed.ci.assert_called_once_with({"source_sha": "b" * 40})
         observed.live.assert_called_once_with(self.config, data={"source_sha": "b" * 40})
         self.assertTrue(all(call.kwargs["generation"] == 2 for call in self.website.targets.filter.call_args_list))
+
+    def test_owner_and_current_points_gate_are_required_before_dispatch(self):
+        for missing in ("owner", "points"):
+            with self.subTest(missing=missing):
+                self.setUp()
+                if missing == "owner":
+                    self.website.authorized_by = None
+                observed = self.process(points_error=object() if missing == "points" else None)
+                self.assertEqual(observed.result, "pending")
+                self.assertEqual(observed.receipt["code"],
+                    "website_owner_review_required" if missing == "owner" else "roo_points_required")
+                observed.post.assert_not_called()
+                observed.reserve.assert_not_called()
+                observed.bind.assert_not_called()
+                observed.ci.assert_not_called()
+                observed.live.assert_not_called()

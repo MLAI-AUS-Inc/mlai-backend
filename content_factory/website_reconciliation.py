@@ -641,7 +641,9 @@ def _process_source_reverification(identifier, now):
     from .website_connections import authority_guard, require_unlocked_remote_call
     from .website_contract import WebsiteAuthorityError
     from .website_verification import discover_source_attestation, record_ci_attestation, verify_live_deployment
-    from .vibe_marketing_views import _content_factory_remote_config, _content_factory_headers, _create_local_run
+    from .vibe_marketing_views import (_content_factory_remote_config, _content_factory_headers, _create_local_run,
+        _require_roo_points_for_ai_agent, _mark_roo_points_gate_authorized, founder_actor_id_for_user)
+    from .contract import CONTENT_FACTORY_REQUEST_SOURCE
     from .website_operations import reserve_workflow_operation, bind_operation_run
     from integrations import http_client
     with transaction.atomic():
@@ -686,7 +688,19 @@ def _process_source_reverification(identifier, now):
             remote = _content_factory_remote_config()
             if not remote["enabled"]:
                 raise WebsiteAuthorityError("source_reverification_unavailable", "Repository scanning is unavailable.", retryable=True)
-            scan_payload = {**binding, "client_request_id": f"source-rescan:{op.pk}", "force_refresh": True}
+            owner = website.authorized_by
+            if owner is None:
+                raise WebsiteAuthorityError("website_owner_review_required", "The website owner must verify the current integration.", retryable=True)
+            points_error, balance = _require_roo_points_for_ai_agent(owner,
+                domain=website.organization.domain, action="repo_scan")
+            if points_error is not None:
+                raise WebsiteAuthorityError("roo_points_required", "The website owner needs sufficient Roo points to verify this integration.", retryable=True)
+            scan_payload = {**binding, "client_request_id": f"source-rescan:{op.pk}", "force_refresh": True,
+                "request_source": CONTENT_FACTORY_REQUEST_SOURCE, "slack_user_id": founder_actor_id_for_user(owner),
+                "scan_purpose": "setup", "scaffold_if_missing": False,
+                "auto_setup_preview": False, "generate_components": False}
+            _mark_roo_points_gate_authorized(scan_payload, domain=website.organization.domain,
+                action="repo_scan", current_balance=balance)
             scan_op = reserve_workflow_operation(website, workflow="repo_scan", payload=scan_payload)
             response = http_client.post(f"{remote['base_url']}/api/runs/scan", json=scan_payload,
                 headers=_content_factory_headers(), timeout=(3, 30))

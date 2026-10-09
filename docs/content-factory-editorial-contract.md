@@ -140,6 +140,9 @@ duplicate dispatches. After that scan discovers the current default target,
 reconciliation authenticates its CI proof and verifies the live deployment;
 merge ownership alone does not skip this first integration check. Owned article
 merges with an existing target retain their scan-free verification path.
+The rescan uses the connection's current owner and points gate, with zero scan
+cost. It performs full integration inspection with scaffold and component writes
+disabled; a route-only inventory cannot certify a publishing target.
 
 This metadata observation does not require the pre-merge source to remain the
 current branch head: merging the setup necessarily changes it. It leaves the
