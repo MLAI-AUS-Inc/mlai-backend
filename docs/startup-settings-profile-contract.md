@@ -40,6 +40,12 @@ Company profile research does not debit Roo points in this API: the start respon
 
 `GET vibe-marketing/runs/{runId}/?view=status` retains run/company scope checks. The shared cancellation action does **not** support `startup_autofill`; clients must label a local polling stop as **Stop waiting**, discard late results, and not claim the server stopped research.
 
+The Chat cancellation facade passes the run ID and `cancel` action by name to
+the shared run controller, so its recovery path remains available after the
+repository source changes. Authentication, explicit company ownership, run
+ownership and external publication evidence checks still apply. Cancellation
+does not grant setup, preview or publishing authority for the changed source.
+
 ## Logo upload/removal
 
 `POST vibe-marketing/company/avatar/` accepts multipart `avatar`; `DELETE` clears the logo and requires the explicit company ID in the query. Both return `company.avatarUrl` and `company.avatar_url` plus company identity. They do not imply a profile save.

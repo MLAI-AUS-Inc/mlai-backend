@@ -172,7 +172,7 @@ class RunView(MyStartupAccess, marketing.VibeMarketingRunView):
 
 class CancelRunView(MyStartupAccess, marketing.VibeMarketingRunControlView):
     def post(self, request, run_id):
-        return super().post(request, run_id, "cancel")
+        return super().post(request, run_id=run_id, action="cancel")
 
 
 class NotificationChannelsView(MyStartupAccess, notifications.VibeMarketingNotificationChannelsView):
