@@ -3945,6 +3945,7 @@ def _rewrite_live_preview_payload_for_browser(run_id, payload):
 
 
 _LIVE_PREVIEW_PROXY_ASSET_PREFIXES = (
+    "_next/",
     "@react-router/",
     "@vite/",
     "@id/",
