@@ -181,6 +181,62 @@ class IncidentAuthorityReplays(SimpleTestCase):
         self.previous = SimpleNamespace(generation=3, source_sha=self.sha, verified_at=self.now,
             adapter="react_component", contract=self.target, target_key="featured", capabilities={"publishingReady": True})
 
+    def test_completed_scan_accepts_success_callback_without_reopening_operation(self):
+        from . import website_operations as operations
+        from workflow_runs.models import ContentFactoryRun
+        identifier = uuid.uuid4()
+        binding = {"operation_id": str(identifier), "operation_attempt": 2, "deletion_epoch": 0}
+        run = SimpleNamespace(run_id="finished-scan", workflow="repo_scan", organization_id=30,
+            status="completed", run_request=binding, result={})
+        op = SimpleNamespace(pk=identifier, state="completed", payload={"attempt": 2}, generation=3)
+        manager = Mock(); manager.filter.return_value.first.return_value = op
+        website = SimpleNamespace(organization_id=30, operations=manager, blockers=[], generation=3)
+        with patch.object(ContentFactoryRun.objects, "filter") as runs:
+            runs.return_value.first.return_value = run
+            for event_key, status in [("event_type", "success"), ("event", "success"), ("event_type", "completed")]:
+                with self.subTest(event_key=event_key, status=status):
+                    self.assertIs(operations.validate_operation(website, {
+                        **binding, "run_id": run.run_id, event_key: "scan_complete", "status": status,
+                    }), op)
+                    self.assertEqual((op.state, run.status), ("completed", "completed"))
+
+    def test_scan_success_alias_cannot_revive_or_change_a_fenced_operation(self):
+        from . import website_operations as operations
+        from workflow_runs.models import ContentFactoryRun
+        identifier = uuid.uuid4()
+        binding = {"operation_id": str(identifier), "operation_attempt": 2, "deletion_epoch": 0}
+        run = SimpleNamespace(run_id="finished-scan", workflow="repo_scan", organization_id=30,
+            status="completed", run_request=binding, result={})
+        op = SimpleNamespace(pk=identifier, state="completed", payload={"attempt": 2}, generation=3)
+        manager = Mock(); manager.filter.return_value.first.return_value = op
+        website = SimpleNamespace(organization_id=30, operations=manager, blockers=[], generation=3)
+        payload = {**binding, "run_id": run.run_id, "event_type": "scan_complete", "status": "success"}
+        cases = [
+            ("failed", {}, "website_operation_terminal"),
+            ("blocked", {}, "website_operation_terminal"),
+            ("cancelled", {}, "website_operation_cancelled"),
+            ("deleted", {}, "website_operation_cancelled"),
+            ("denied", {}, "website_operation_cancelled"),
+            ("completed", {"operation_attempt": 1}, "website_operation_changed"),
+            ("completed", {"deletion_epoch": 1}, "website_operation_changed"),
+            ("completed", {"event_type": "scan_progress"}, "website_operation_terminal"),
+            ("completed", {"event_type": ""}, "website_operation_terminal"),
+            ("completed", {"status": "running"}, "website_operation_terminal"),
+        ]
+        with patch.object(ContentFactoryRun.objects, "filter") as runs:
+            runs.return_value.first.return_value = run
+            for state, changes, expected in cases:
+                with self.subTest(state=state, changes=changes):
+                    op.state = state
+                    with self.assertRaises(WebsiteAuthorityError) as error:
+                        operations.validate_operation(website, {**payload, **changes})
+                    self.assertEqual(error.exception.code, expected)
+            op.state = "completed"
+            run.organization_id = 31
+            with self.assertRaises(WebsiteAuthorityError) as error:
+                operations.validate_operation(website, payload)
+            self.assertEqual(error.exception.code, "website_operation_cancelled")
+
     def test_verified_target_survives_empty_scan_and_weaker_same_key(self):
         for candidate in ({"target_id": "featured"}, {**self.target, "verification": {}},
                 {**self.target, "delivery_adapter": "bundle_only"}):

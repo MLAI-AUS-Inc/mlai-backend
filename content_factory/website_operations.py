@@ -120,6 +120,11 @@ def validate_operation(connection, payload, *, worker_cleanup=False, restoration
     if op.state in {"completed", "failed", "blocked"} and not (worker_cleanup or restoration or cancellation or cancellation_receipt):
         incoming_status = payload.get("status")
         event = payload.get("event_type") or payload.get("event")
+        # Scan callbacks use "success" after the durable snapshot has already
+        # completed the operation. This is the same terminal outcome, not a
+        # request to reopen it; other events and states keep their strict fence.
+        if event == "scan_complete" and incoming_status == "success":
+            incoming_status = "completed"
         terminal_events = {
             "completed": {"article_complete", "generation_pr_opened", "publish_bundle_ready", "scan_complete", "article_system_setup_complete", "article_system_setup_completed", "scaffold_complete", "article_review_ready", "content_ready"},
             "failed": {"generation_failed", "error", "article_system_setup_failed", "article_system_setup_preview_failed"},
