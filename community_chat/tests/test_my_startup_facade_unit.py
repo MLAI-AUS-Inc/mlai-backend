@@ -10,6 +10,7 @@ from rest_framework.test import APIRequestFactory, force_authenticate
 
 from community_chat import my_startup_views as views
 from content_factory.website_contract import WebsiteAuthorityError
+from workflow_runs.models import ContentFactoryRun
 from founder_tools.my_startup.api import MyStartupAuthentication
 from community_chat.throttles import StartupScopedThrottle
 
@@ -88,7 +89,37 @@ class MyStartupFacadeTests(SimpleTestCase):
         with patch.object(views.marketing.VibeMarketingRunControlView, "post", return_value=Response({"status": "cancelling"})) as control:
             response = self.call(views.CancelRunView, method="post", run_id="run-1")
         self.assertEqual(response.status_code, 200)
-        self.assertEqual(control.call_args.args[1:], ("run-1", "cancel"))
+        self.assertEqual(control.call_args.kwargs, {"run_id": "run-1", "action": "cancel"})
+
+    def test_cancel_failed_setup_after_source_change_retains_run_ownership(self):
+        context = Obj(organization=self.company.organization, company=self.company)
+        run = Obj(pk=9, run_id="failed-setup", workflow="article_system_setup")
+        for owned, published, expected in ((True, False, 202), (False, False, 404), (True, True, 409)):
+            with self.subTest(owned=owned, published=published), \
+                    patch.object(views.websites, "_context", return_value=(context, None, None)), \
+                    patch.object(views.websites, "authority_guard", side_effect=WebsiteAuthorityError(
+                        "website_source_changed", "The repository changed since this verification.")) as source_guard, \
+                    patch.object(ContentFactoryRun.objects, "filter") as runs, \
+                    patch.object(ContentFactoryRun.objects, "prefetch_related") as refreshed, \
+                    patch.object(views.marketing, "_resolve_context_or_response", return_value=(context, None)), \
+                    patch.object(views.marketing, "get_object_or_404", return_value=run), \
+                    patch.object(views.marketing, "_run_belongs_to_context", return_value=owned), \
+                    patch.object(views.marketing, "founder_actor_id_for_user", return_value="founder"), \
+                    patch.object(views.marketing, "_run_has_external_publish_evidence", return_value=published), \
+                    patch.object(views.marketing, "_call_content_factory_run_action", return_value={"status": "cancelled"}) as dispatch, \
+                    patch.object(views.marketing, "_cancel_local_article_system_setup_run", return_value=run) as cancel, \
+                    patch.object(views.marketing, "_serialize_run", return_value={"status": "cancelled"}):
+                runs.return_value.first.return_value = run
+                refreshed.return_value.get.return_value = run
+                response = self.call(views.CancelRunView, method="post", run_id=run.run_id)
+                self.assertEqual(response.status_code, expected)
+                source_guard.assert_not_called()
+                if expected == 202:
+                    self.assertEqual(dispatch.call_args.kwargs["action"], "cancel")
+                    cancel.assert_called_once()
+                else:
+                    dispatch.assert_not_called()
+                    cancel.assert_not_called()
 
     def test_github_reuses_account_and_replaces_raw_oauth_with_chat_handoff(self):
         with patch.object(views.marketing.VibeMarketingGitHubConnectView, "post", return_value=Response({"status": "auth_required", "auth_url": "raw-oauth"})), \
