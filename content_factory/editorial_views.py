@@ -1,4 +1,6 @@
 """Owner-reviewed editorial policy, isolated from general organisation updates."""
+from functools import partial
+
 from django.core.exceptions import ValidationError as DjangoValidationError
 from django.db import transaction
 from django.utils import timezone
@@ -11,9 +13,10 @@ from founder_tools.services import get_founder_company_context
 from organizations.models import Organization
 from .models import OrganizationContentConfig
 from .editorial_catalog import (
-    EDIT_FIELDS, CatalogConflict, approve_catalog, review_payload, update_catalog,
+    EDIT_FIELDS, OFFER_PAGE_CHECKS_KEY, CatalogConflict, approve_catalog, review_payload, update_catalog,
 )
 from .editorial_catalog_save import activate_saved_entries
+from .offer_page_checks import offer_page_check_payload, prepare_offer_page_checks, start_offer_page_checks
 
 
 def _lock_catalog_owner(context, user_id, organization):
@@ -75,10 +78,20 @@ def mutate_catalog_response(
                 )
             # Validate the exact response before making any persistent change.
             response = review_payload(updated)
+            # Advisory only: scheduling cannot fail the save, and page/model IO
+            # starts after commit, outside these locks.
+            updated, pending_checks = prepare_offer_page_checks(
+                strategy, updated, organization_id=org.pk, domain=org.domain, now=timezone.now(),
+            )
             if updated != strategy:
                 OrganizationContentConfig.objects.update_or_create(
                     organization=org, defaults={"pillar_strategy": updated},
                 )
+            if pending_checks:
+                transaction.on_commit(
+                    partial(start_offer_page_checks, org.pk, org.domain, pending_checks), robust=True,
+                )
+        response[OFFER_PAGE_CHECKS_KEY] = offer_page_check_payload(updated)
         return Response(response)
     except (PermissionError, VibeRaisingProfile.DoesNotExist):
         return Response({"error": "Only company founders can review this catalog"}, status=403)
@@ -128,7 +141,9 @@ class EditorialCatalogView(APIView):
             return error
         config = OrganizationContentConfig.objects.filter(organization=context.organization).first()
         try:
-            payload = review_payload(config.pillar_strategy if config else {})
+            strategy = config.pillar_strategy if config else {}
+            payload = review_payload(strategy)
+            payload[OFFER_PAGE_CHECKS_KEY] = offer_page_check_payload(strategy)
             if request.query_params.get("include_suggestions") == "1":
                 payload["research_suggestions"] = latest_profile_suggestions(context.organization)
             return Response(payload)

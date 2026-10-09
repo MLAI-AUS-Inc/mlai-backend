@@ -472,3 +472,76 @@ class EditorialCatalogAPIUnitTests(unittest.TestCase):
         self.assertEqual(result.status_code, 200, result.data)
         self.assertEqual(self.state, original)
         self.config_model.objects.update_or_create.assert_not_called()
+
+    def owner_offer_save(self):
+        self.state = {}
+        edit = edit_payload(draft_catalog())
+        edit['expected_editorial_catalog_version'] = 0
+        edit['activate_entries'] = [
+            {'kind': 'audience', 'id': 'BUILDER', 'version': 1},
+            {'kind': 'offer', 'id': 'studio', 'version': 1},
+        ]
+        return self.request('put', edit)
+
+    def test_offer_save_schedules_its_page_check_after_commit_in_the_same_write(self):
+        from . import offer_page_checks
+        with patch.object(offer_page_checks, 'checks_enabled', return_value=True), \
+                patch.object(self.views.transaction, 'on_commit') as on_commit:
+            result = self.owner_offer_save()
+        self.assertEqual(result.status_code, 200, result.data)
+        self.assertEqual(self.calls.count('write'), 1)
+        self.assertEqual(result.data['editorial_catalog_version'], 1)
+        self.assertEqual(result.data['cta_options'][0]['status'], 'approved')
+        record = self.state['offer_page_checks']['studio']
+        self.assertEqual((record['status'], record['page_url']), ('pending', 'https://example.com/studio'))
+        self.assertEqual(result.data['offer_page_checks']['studio']['status'], 'pending')
+        # Page and model IO wait for the commit and run outside the owner locks.
+        on_commit.assert_called_once()
+        self.assertIs(on_commit.call_args.kwargs['robust'], True)
+        callback = on_commit.call_args.args[0]
+        self.assertIs(callback.func, offer_page_checks.start_offer_page_checks)
+        self.assertEqual(callback.args[:2], ('org-1', 'example.com'))
+        self.assertEqual([offer['check_id'] for offer in callback.args[2]], [record['check_id']])
+
+    def test_offer_check_scheduling_faults_never_block_the_save(self):
+        from . import offer_page_checks
+        with patch.object(offer_page_checks, 'checks_enabled', return_value=True), \
+                patch.object(offer_page_checks, 'offers_due', side_effect=RuntimeError('bug')), \
+                patch.object(self.views.transaction, 'on_commit') as on_commit, \
+                self.assertLogs(offer_page_checks.logger, 'ERROR'):
+            result = self.owner_offer_save()
+        self.assertEqual(result.status_code, 200, result.data)
+        self.assertEqual(result.data['cta_options'][0]['status'], 'approved')
+        self.assertEqual(result.data['offer_page_checks'], {})
+        self.assertNotIn('offer_page_checks', self.state)
+        on_commit.assert_not_called()
+
+    def test_unchanged_offers_are_not_rechecked_on_a_noop_save(self):
+        from . import offer_page_checks
+        self.state = approved_catalog()
+        edit = {**edit_payload(self.state), 'activate_entries': [{'kind': 'offer', 'id': 'studio', 'version': 1}]}
+        with patch.object(offer_page_checks, 'checks_enabled', return_value=True), \
+                patch.object(self.views.transaction, 'on_commit') as on_commit:
+            result = self.request('put', edit)
+        self.assertEqual(result.status_code, 200, result.data)
+        self.config_model.objects.update_or_create.assert_not_called()
+        on_commit.assert_not_called()
+
+    def test_review_returns_findings_for_the_current_offer_copy(self):
+        from . import offer_page_checks
+        strategy, _ = offer_page_checks.mark_pending(
+            self.state, offer_page_checks.offers_due({}, self.state), domain='example.com',
+            requested_at=offer_page_checks.datetime.now(offer_page_checks.timezone.utc),
+        )
+        strategy['offer_page_checks']['studio'].update(status='checked', findings=[{
+            'sentence': 'Apply for consideration',
+            'message': 'Your offer mentions an application; the linked page shows none.',
+        }])
+        self.state = strategy
+        review = self.request('get')
+        self.assertEqual(review.status_code, 200, review.data)
+        check = review.data['offer_page_checks']['studio']
+        self.assertEqual(check['status'], 'checked')
+        self.assertEqual(check['findings'][0]['message'],
+                         'Your offer mentions an application; the linked page shows none.')
+        self.assertNotIn('check_id', check)

@@ -140,6 +140,7 @@ jobs:
           content_factory.tests_customer_profile_flow_unit \
           content_factory.tests_editorial_catalog_unit \
           content_factory.tests_editorial_catalog_api_unit \
+          content_factory.tests_offer_page_checks_unit \
           content_factory.tests_editorial_dispatch_unit \
           content_factory.tests_editorial_snapshot_unit \
           content_factory.tests_editorial_revision_unit \

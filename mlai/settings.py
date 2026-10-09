@@ -2197,6 +2197,11 @@ COMMUNITY_CHAT_ROO_SLACK_USER_ID = os.getenv("COMMUNITY_CHAT_ROO_SLACK_USER_ID",
 STARTUP_UPDATE_COVER_IMAGE_MODEL = os.getenv("STARTUP_UPDATE_COVER_IMAGE_MODEL", "gpt-image-2.5-flare")
 STARTUP_UPDATE_COVER_PROMPT_MODEL = os.getenv("STARTUP_UPDATE_COVER_PROMPT_MODEL", "gpt-6-astra")
 
+# Advisory check that saved article offers match their linked page (uses
+# OPENAI_API_KEY). Findings are warnings in the owner UI and never block saves.
+OFFER_PAGE_CHECK_ENABLED = _env_is_true("OFFER_PAGE_CHECK_ENABLED", True)
+OFFER_PAGE_CHECK_MODEL = os.getenv("OFFER_PAGE_CHECK_MODEL", "gpt-5.6-luna")
+
 # Enable after Chat startup routes and Roo link-origin configuration are deployed.
 ROO_FOUNDER_LINK_CHAT_ENABLED = _env_is_true("ROO_FOUNDER_LINK_CHAT_ENABLED", False)
 
