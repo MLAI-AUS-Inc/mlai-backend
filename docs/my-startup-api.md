@@ -6,6 +6,16 @@ The allowlist is `founder_tools/my_startup/registry.py`; its `urls.py` copies on
 
 Company identity is explicit in frontend queries. The existing business views still enforce ownership. Private preview resources additionally encode the company in `/api/v1/my-startup/companies/<uuid>/vibe-marketing/runs/<run-id>/live-preview/…`, so iframe subresources keep their company scope without custom headers. Conflicting query scope is rejected. Responses and handoff material use private/no-store and no-referrer policies.
 
+Article review clients can obtain a 15-minute, run- and company-bound read-only
+grant at the existing preview-lease endpoint. Its URL stays under the registered
+`/api/v1/vibe-marketing/article-preview/` route and includes `cfInspector=1`.
+For server-rendered article documents the grant preserves the rendered article,
+styles, media, structured data and comment inspector while removing the site's
+hydration and analytics scripts. This prevents client routing at the capability
+path and storage errors in the opaque-origin sandbox. The sandbox continues to
+allow scripts without granting same-origin access. Text updates and approval
+still require the separate authenticated owner operations.
+
 ## Additional endpoints
 
 ### Request budgets
