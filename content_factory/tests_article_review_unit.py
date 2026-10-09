@@ -149,6 +149,48 @@ class ArticleReviewTests(SimpleTestCase):
         self.assertEqual(result['Cache-Control'], 'private, no-store')
 
 
+    @patch.object(ArticlePreviewLeaseProxyView, '_proxy')
+    def test_next_setup_assets_stay_inside_the_scoped_preview_lease(self, proxy):
+        from . import vibe_marketing_views as views
+
+        body = (
+            '<link rel="stylesheet" href="/_next/static/chunks/site.css">'
+            '<script src="/_next/static/chunks/site.js"></script>'
+            '<img src="/_next/image?url=%2Fbrand%2Flogo.png&amp;w=64&amp;q=75">'
+            '<a href="/articles/example-article">Example</a>'
+        ).encode()
+        rewritten = views._rewrite_live_preview_proxy_body('article-1', body, 'text/html')
+        proxy.return_value = HttpResponse(rewritten, content_type='text/html')
+        result = ArticlePreviewLeaseProxyView().get(
+            RequestFactory().get('/preview'), 'article-1', token='synthetic-grant',
+        )
+        prefix = b'/api/v1/vibe-marketing/article-preview/synthetic-grant/article-1/'
+        for asset in (b'_next/static/chunks/site.css', b'_next/static/chunks/site.js',
+                      b'_next/image?url=%2Fbrand%2Flogo.png'):
+            self.assertIn(prefix + asset, result.content)
+        self.assertIn(b'href="/articles/example-article"', result.content)
+        self.assertNotIn(b'/live-preview/proxy/', result.content)
+        self.assertIn('sandbox allow-scripts', result['Content-Security-Policy'])
+        self.assertEqual(result['Referrer-Policy'], 'no-referrer')
+
+    def test_next_css_fonts_imports_and_images_use_the_same_run_proxy(self):
+        from . import vibe_marketing_views as views
+
+        body = (b'@import "/_next/static/chunks/layout.css";'
+                b'@font-face{src:url(/_next/static/media/font.woff2)}'
+                b'.hero{background:url("/_next/static/media/hero.webp")}'
+                b'.outside{background:url("/unrelated/path")}')
+        rewritten = views._rewrite_live_preview_proxy_body('article-1', body, 'text/css')
+        prefix = b'/api/v1/vibe-marketing/runs/article-1/live-preview/proxy/'
+        for asset in (b'_next/static/chunks/layout.css', b'_next/static/media/font.woff2',
+                      b'_next/static/media/hero.webp'):
+            self.assertIn(prefix + asset, rewritten)
+        self.assertIn(b'url("/unrelated/path")', rewritten)
+        self.assertEqual(
+            views._rewrite_live_preview_proxy_body('article-1', rewritten, 'text/css'), rewritten,
+        )
+
+
 class FeedbackOutcomeTests(SimpleTestCase):
     def source_comment(self, **overrides):
         values = dict(id='one', component_id='paragraph', component_type='text', component_label='Paragraph', source_section_id='', selector='', anchor={}, context={}, body='Change it', status='submitted', batch_id='batch', created_at=None, updated_at=None, actor=None)

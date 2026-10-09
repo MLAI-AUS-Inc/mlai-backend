@@ -28,6 +28,12 @@ gate.
 
 ## Component review updates (8 October 2026)
 
+Next.js private previews route `/_next/` stylesheet, script, image-optimizer and
+font URLs through the same run-scoped preview proxy and lease as the document.
+CSS imports and `url()` references retain that scope. Public article navigation
+paths remain unchanged. This preserves the existing lease ownership, expiry and
+opaque-origin sandbox; it does not establish a deployed preview result.
+
 The company-scoped `runs/:runId/article-review` route supports both article
 drafts and article-system setup previews. The Chat alias requires an explicit
 owned startup and a revocable Chat account session. GET returns the worker's
