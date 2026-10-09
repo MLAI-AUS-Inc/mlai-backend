@@ -3972,19 +3972,17 @@ class StartupUpdateCurationContextView(APIView):
             return cancelled_response
         _update_run_step(run, step_key="candidate_curation")
         current_month = get_startup_update_run_target_month(run)
+        from startup_updates.curation_context import prior_update_context
         prior_updates = []
         if (run.run_request or {}).get("update_date"):
-            from startup_updates.update_identity import previous_publications, identity_payload
-            from startup_updates.revisions import revision_payload
+            from startup_updates.update_identity import previous_publications
             for draft, memo, _ in previous_publications(organization, run.run_request["update_id"], date.fromisoformat(run.run_request["update_date"]))[:6]:
-                prior_updates.append({**_serialize_draft(draft), **identity_payload(draft, memo),
-                    **(revision_payload(draft.published_revision) if draft.published_revision_id else {}),
-                    "structured_memo": memo, "rendered_markdown": draft.published_revision.rendered_markdown if draft.published_revision_id else draft.rendered_markdown})
+                prior_updates.append(prior_update_context(draft, published=True))
         else:
             draft_queryset = organization.monthly_update_drafts.monthly_slots().order_by("-month", "-updated_at")
             if current_month is not None:
                 draft_queryset = draft_queryset.filter(month__lt=current_month)
-            prior_updates = [_serialize_draft(draft) for draft in draft_queryset[:6]]
+            prior_updates = [prior_update_context(draft) for draft in draft_queryset[:6]]
         return Response(
             {
                 "run": _serialize_run(run, request),

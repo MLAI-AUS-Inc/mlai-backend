@@ -130,6 +130,8 @@ jobs:
           startup_updates.tests_month_scope \
           startup_updates.tests_monthly_groups \
           startup_updates.tests_covers \
+          startup_updates.tests_curation_context_unit \
+          startup_updates.tests_curation_context_api_unit \
           startup_updates.tests_update_identity.GenerationDateCompatibilityTests
 
     - name: Run no-database editorial contract checks
