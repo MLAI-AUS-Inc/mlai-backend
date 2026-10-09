@@ -659,7 +659,16 @@ def _process_source_reverification(identifier, now):
     try:
         with authority_guard(binding, action="read") as website:
             target = website.targets.filter(generation=website.generation, target_key=op.payload.get("target_id")).first()
-        if op.payload.get("scan_required") and not receipt.get("scan_run_id"):
+            if target is None and not op.payload.get("target_id") and receipt.get("scan_run_id"):
+                config = OrganizationContentConfig.objects.get(website_connection=website)
+                if config.default_publish_target_id:
+                    target = website.targets.filter(generation=website.generation,
+                        target_key=config.default_publish_target_id).first()
+        # First-time scaffold merges have no publishing target yet. Their owned
+        # merge receipt proves provenance, but cannot replace the inventory scan
+        # that discovers the newly committed integration.
+        scan_required = bool(op.payload.get("scan_required") or target is None)
+        if scan_required and target is not None and not receipt.get("scan_run_id"):
             owned_merge = _find_owned_merge(website, website.organization_id, op.payload["source_sha"])
             if owned_merge:
                 with authority_guard(binding, action="read") as current:
@@ -671,7 +680,8 @@ def _process_source_reverification(identifier, now):
                     if changed != 1:
                         raise WebsiteAuthorityError("website_operation_cancelled", "The source verification operation changed.")
                     op.payload = updated_payload
-        if op.payload.get("scan_required") and not receipt.get("scan_run_id"):
+                    scan_required = False
+        if scan_required and not receipt.get("scan_run_id"):
             require_unlocked_remote_call()
             remote = _content_factory_remote_config()
             if not remote["enabled"]:
