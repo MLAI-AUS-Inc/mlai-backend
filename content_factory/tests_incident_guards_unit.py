@@ -307,6 +307,22 @@ class IncidentAuthorityReplays(SimpleTestCase):
         with self.assertRaises(ValueError):
             service_views._merge_django_owned_run_request(original, {"article_publish_approval_receipt": {"revision": "old"}})
 
+    def test_worker_snapshot_retains_the_review_dispatch_ledger_during_confirmation(self):
+        entry = {"requestHash": "a" * 64, "status": "submitted", "revisionRunId": None,
+                 "commentIds": ["saved-comment"], "remoteComments": [{"body": "Saved request"}],
+                 "dispatchContract": {"operation_id": "owned-operation", "operation_attempt": 1}}
+        existing = {"article_review_updates": {"saved-update": entry},
+                    "component_feedback_latest_batch": {"id": "saved-update", "status": "submitted"}}
+        before = deepcopy(existing)
+        for incoming in ({"status": "review_ready"}, {"article_review_updates": {}},
+                         {"article_review_updates": {"saved-update": {"status": "accepted", "requestHash": "b" * 64}}}):
+            merged = service_views._merge_django_owned_run_result(existing, incoming)
+            self.assertEqual(merged["article_review_updates"], existing["article_review_updates"])
+            self.assertEqual(merged["component_feedback_latest_batch"], existing["component_feedback_latest_batch"])
+        self.assertEqual(existing, before)
+        self.assertNotIn("article_review_updates", service_views._merge_django_owned_run_result({},
+                         {"article_review_updates": {"forged": {"status": "accepted"}}}))
+
     def test_wrong_repository_old_draft_cannot_create_a_publish_child(self):
         connection = SimpleNamespace(pk=uuid.uuid4(), generation=3, github_repo="current/site", repository_id=42)
         config = SimpleNamespace(website_connection=connection)

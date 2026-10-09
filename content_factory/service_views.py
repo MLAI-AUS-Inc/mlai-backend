@@ -8659,6 +8659,7 @@ _DJANGO_OWNED_RUN_RESULT_KEYS = frozenset(
         "article_system_review_comments",
         "article_image_billing",
         "article_review_approval",
+        "article_review_updates",
         "approval_blocker",
         "daily_automation_channel_warning",
         "latest_article_system_revision_response",
@@ -8692,7 +8693,7 @@ def _merge_django_owned_run_result(existing_result, incoming_result):
 
     existing = existing_result if isinstance(existing_result, dict) else {}
     incoming = incoming_result if isinstance(incoming_result, dict) else {}
-    backend_merge_keys = {"publish_merge_intent", "merge_response", "merge_status", "merged_at"}
+    backend_merge_keys = {"publish_merge_intent", "merge_response", "merge_status", "merged_at", "article_review_updates"}
     merged = {key: value for key, value in incoming.items() if key not in backend_merge_keys or key in existing}
     for key, value in existing.items():
         django_owned = key in _DJANGO_OWNED_RUN_RESULT_KEYS or key.startswith(

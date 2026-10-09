@@ -52,6 +52,9 @@ return an accepted child even after it becomes the newest ready review.
 The submitted ledger, latest batch and immutable wire comment payload are saved
 before worker dispatch. A retry reuses that payload even if an earlier callback
 has added outcome context to the saved comment rows.
+Worker status synchronization preserves the backend-owned review dispatch ledger,
+including unconfirmed submissions and their exact wire payload. Worker snapshots
+cannot create, erase or replace that ledger while a request awaits acknowledgement.
 Text-only updates do not invoke the AI
 points gate. Comment revisions retain the existing editorial and Roo gates.
 Completed setup runs can start an update for a separate review branch; this

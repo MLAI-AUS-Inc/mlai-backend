@@ -67,16 +67,16 @@ def reliability_presentation(result, *, status="", workflow="", current_step="",
         and workflow in {"article_generation", "direct_generate", "confirmed_topic"}
         and current_step == "assemble_article" and approval_state != "approved"
         and resume_available is True
-        and failure.get("code") == "EDITORIAL_REJECTED"
+        and failure.get("code") in {"EDITORIAL_REJECTED", "READER_TASK_REJECTED"}
         and failure.get("step") == "assemble_article"
         and failure.get("retry_policy") == "explicit_action"
     )
     if effective_status in {"completed", "cancelled", "canceled", "denied"} or failure.get("retryable") is False or result.get("retryable") is False:
         fields.update(resumeAvailable=False, retryAvailable=False)
     if assembly_repair:
-        # The worker validates the saved editorial evidence before setting the
+        # The worker validates the saved review evidence before setting the
         # durable run flag and rechecks original authority on Resume. Preserve
-        # that explicit writing repair without advertising a generic retry.
+        # that explicit review repair without advertising a generic retry.
         fields.update(resumeAvailable=True, retryAvailable=False)
     if recovery.get("state") == "pending":
         fields.update(resumeAvailable=False, retryAvailable=False, requiresUserAction=False,

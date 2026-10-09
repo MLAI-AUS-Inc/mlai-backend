@@ -29,14 +29,16 @@ class SectionIssueContractTests(SimpleTestCase):
             patch.object(views, "_component_feedback_from_run", return_value={}),
             patch.object(views, "_run_content_island_payload", return_value=None),
         ):
-            for mode in ("summary", "status", "full"):
-                with self.subTest(mode=mode):
-                    projected = views._serialize_run(run, mode=mode)
-                    self.assertTrue(projected["resumeAvailable"])
-                    self.assertFalse(projected["retryAvailable"])
-                    run.resume_available = False
-                    self.assertFalse(views._serialize_run(run, mode=mode)["resumeAvailable"])
-                    run.resume_available = True
+            for code in ("EDITORIAL_REJECTED", "READER_TASK_REJECTED"):
+                run.result["failure"]["code"] = code
+                for mode in ("summary", "status", "full"):
+                    with self.subTest(code=code, mode=mode):
+                        projected = views._serialize_run(run, mode=mode)
+                        self.assertTrue(projected["resumeAvailable"])
+                        self.assertFalse(projected["retryAvailable"])
+                        run.resume_available = False
+                        self.assertFalse(views._serialize_run(run, mode=mode)["resumeAvailable"])
+                        run.resume_available = True
 
     def test_saved_delivery_confirmation_is_projected_only_from_original_input(self):
         now = datetime.now(timezone.utc)
