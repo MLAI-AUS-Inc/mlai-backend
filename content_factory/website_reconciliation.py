@@ -641,7 +641,9 @@ def _process_source_reverification(identifier, now):
     from .website_connections import authority_guard, require_unlocked_remote_call
     from .website_contract import WebsiteAuthorityError
     from .website_verification import discover_source_attestation, record_ci_attestation, verify_live_deployment
-    from .vibe_marketing_views import _content_factory_remote_config, _content_factory_headers, _create_local_run
+    from .vibe_marketing_views import (_content_factory_remote_config, _content_factory_headers, _create_local_run,
+        _require_roo_points_for_ai_agent, _mark_roo_points_gate_authorized, founder_actor_id_for_user)
+    from .contract import CONTENT_FACTORY_REQUEST_SOURCE
     from .website_operations import reserve_workflow_operation, bind_operation_run
     from integrations import http_client
     with transaction.atomic():
@@ -659,7 +661,16 @@ def _process_source_reverification(identifier, now):
     try:
         with authority_guard(binding, action="read") as website:
             target = website.targets.filter(generation=website.generation, target_key=op.payload.get("target_id")).first()
-        if op.payload.get("scan_required") and not receipt.get("scan_run_id"):
+            if target is None and not op.payload.get("target_id") and receipt.get("scan_run_id"):
+                config = OrganizationContentConfig.objects.get(website_connection=website)
+                if config.default_publish_target_id:
+                    target = website.targets.filter(generation=website.generation,
+                        target_key=config.default_publish_target_id).first()
+        # First-time scaffold merges have no publishing target yet. Their owned
+        # merge receipt proves provenance, but cannot replace the inventory scan
+        # that discovers the newly committed integration.
+        scan_required = bool(op.payload.get("scan_required") or target is None)
+        if scan_required and target is not None and not receipt.get("scan_run_id"):
             owned_merge = _find_owned_merge(website, website.organization_id, op.payload["source_sha"])
             if owned_merge:
                 with authority_guard(binding, action="read") as current:
@@ -671,12 +682,25 @@ def _process_source_reverification(identifier, now):
                     if changed != 1:
                         raise WebsiteAuthorityError("website_operation_cancelled", "The source verification operation changed.")
                     op.payload = updated_payload
-        if op.payload.get("scan_required") and not receipt.get("scan_run_id"):
+                    scan_required = False
+        if scan_required and not receipt.get("scan_run_id"):
             require_unlocked_remote_call()
             remote = _content_factory_remote_config()
             if not remote["enabled"]:
                 raise WebsiteAuthorityError("source_reverification_unavailable", "Repository scanning is unavailable.", retryable=True)
-            scan_payload = {**binding, "client_request_id": f"source-rescan:{op.pk}", "force_refresh": True}
+            owner = website.authorized_by
+            if owner is None:
+                raise WebsiteAuthorityError("website_owner_review_required", "The website owner must verify the current integration.", retryable=True)
+            points_error, balance = _require_roo_points_for_ai_agent(owner,
+                domain=website.organization.domain, action="repo_scan")
+            if points_error is not None:
+                raise WebsiteAuthorityError("roo_points_required", "The website owner needs sufficient Roo points to verify this integration.", retryable=True)
+            scan_payload = {**binding, "client_request_id": f"source-rescan:{op.pk}", "force_refresh": True,
+                "request_source": CONTENT_FACTORY_REQUEST_SOURCE, "slack_user_id": founder_actor_id_for_user(owner),
+                "scan_purpose": "setup", "scaffold_if_missing": False,
+                "auto_setup_preview": False, "generate_components": False}
+            _mark_roo_points_gate_authorized(scan_payload, domain=website.organization.domain,
+                action="repo_scan", current_balance=balance)
             scan_op = reserve_workflow_operation(website, workflow="repo_scan", payload=scan_payload)
             response = http_client.post(f"{remote['base_url']}/api/runs/scan", json=scan_payload,
                 headers=_content_factory_headers(), timeout=(3, 30))

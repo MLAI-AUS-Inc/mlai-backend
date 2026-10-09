@@ -127,6 +127,23 @@ generation, application root and operation attempt are checked before the read
 and again before persistence. Cancellation, disconnection and replacement
 consent still deny persistence.
 
+Later worker checkpoints retain Django's confirmed merge observation in the
+nested setup view when its setup-run identity matches. A pre-merge PR-created
+snapshot cannot make the same setup appear unmerged again. This projection
+preserves worker build/quality history and does not promote generation or
+publishing readiness; current native integration verification still owns those
+decisions.
+
+An owned scaffold merge without a current publishing target still dispatches an
+idempotent scan of the exact merged source. The saved scan receipt prevents
+duplicate dispatches. After that scan discovers the current default target,
+reconciliation authenticates its CI proof and verifies the live deployment;
+merge ownership alone does not skip this first integration check. Owned article
+merges with an existing target retain their scan-free verification path.
+The rescan uses the connection's current owner and points gate, with zero scan
+cost. It performs full integration inspection with scaffold and component writes
+disabled; a route-only inventory cannot certify a publishing target.
+
 This metadata observation does not require the pre-merge source to remain the
 current branch head: merging the setup necessarily changes it. It leaves the
 saved run request unchanged and does not promote generation or publication

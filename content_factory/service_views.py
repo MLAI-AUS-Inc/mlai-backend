@@ -8702,6 +8702,19 @@ def _merge_django_owned_run_result(existing_result, incoming_result):
             continue
         if key in backend_merge_keys | {"article_review_approval", "approval_blocker", "article_image_billing"} or (merged.get(key) in (None, "", {}, []) and value not in (None, "", {}, [])):
             merged[key] = value
+    saved_setup = existing.get("article_system_setup")
+    incoming_setup = merged.get("article_system_setup")
+    if (existing.get("merge_status") == "merged" and existing.get("merged_at")
+            and isinstance(saved_setup, dict) and isinstance(incoming_setup, dict)):
+        setup_id = saved_setup.get("setup_run_id") or saved_setup.get("setupRunId")
+        incoming_id = incoming_setup.get("setup_run_id") or incoming_setup.get("setupRunId")
+        if setup_id and incoming_id == setup_id:
+            # The worker's PR-created checkpoint predates Django's GitHub merge
+            # observation. Keep that history consistent in the nested UI view,
+            # without promoting integration or publishing readiness.
+            merged["article_system_setup"] = {**incoming_setup,
+                "merge_status": "merged", "mergeStatus": "merged",
+                "merged_at": existing["merged_at"]}
     return merged
 
 
