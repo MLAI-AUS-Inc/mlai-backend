@@ -3,6 +3,8 @@ from types import SimpleNamespace
 from urllib.parse import quote, unquote
 import re
 
+from bs4 import BeautifulSoup
+
 from django.core import signing
 from django.http import HttpResponse
 from django.utils.decorators import method_decorator
@@ -19,6 +21,33 @@ from .website_contract import evidence_digest
 
 SALT = "article-preview-read-only-v1"
 LIFETIME = 900
+
+
+def read_only_article_document(body):
+    """Keep server-rendered article markup and its inspector without hydration.
+
+    Site routers see the capability path rather than their original route, and
+    site storage is unavailable in the opaque-origin sandbox. Only SSR article
+    documents use this mode; other preview documents retain their existing path.
+    """
+    try:
+        text = body.decode("utf-8")
+    except UnicodeDecodeError:
+        return body
+    document = BeautifulSoup(text, "html.parser")
+    if document.find("article") is None:
+        return body
+    for script in document.find_all("script"):
+        inert_type = str(script.get("type") or "").strip().lower()
+        if (script.get("data-content-factory-inspector") == "true" and not script.get("src")):
+            continue
+        if inert_type not in {"application/ld+json", "application/json"}:
+            script.decompose()
+    for element in document.find_all(True):
+        for attribute in list(element.attrs):
+            if attribute.lower().startswith("on"):
+                del element.attrs[attribute]
+    return str(document).encode("utf-8")
 
 
 def safe_preview_path(path):
@@ -53,7 +82,7 @@ class ArticlePreviewLeaseView(APIView):
                                "intent_digest": evidence_digest({key: (run.run_request or {}).get(key) for key in ("delivery_mode", "delivery_mode_confirmed", "source_run_id")}) if portable else None,
                                **connection_contract(run.run_request or {})}, salt=SALT, compress=True)
         prefix = f"/api/v1/vibe-marketing/article-preview/{quote(token, safe='')}/{quote(run.run_id, safe='')}/"
-        return Response({"url": request.build_absolute_uri(prefix), "expiresIn": LIFETIME},
+        return Response({"url": request.build_absolute_uri(prefix + "?cfInspector=1"), "expiresIn": LIFETIME},
                         headers={"Cache-Control": "no-store"})
 
 
@@ -99,6 +128,8 @@ class ArticlePreviewLeaseProxyView(views.VibeMarketingRunLivePreviewProxyView):
             ):
                 prefix = f"/api/v1/vibe-marketing/article-preview/{quote(token, safe='')}/{quote(run_id, safe='')}/"
                 body = response.content
+                if "text/html" in content_type.lower():
+                    body = read_only_article_document(body)
                 for original in (f"/api/v1/vibe-marketing/runs/{run_id}/live-preview/proxy/",
                                  f"/api/v1/my-startup/vibe-marketing/runs/{run_id}/live-preview/proxy/"):
                     body = body.replace(original.encode(), prefix.encode())
