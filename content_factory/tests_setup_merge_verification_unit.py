@@ -201,6 +201,8 @@ class SetupSourceReverificationUnitTests(SimpleTestCase):
     def process(self, *, now=None, points_error=None):
         from . import website_reconciliation as reconciliation, website_operations as operations
         from . import website_verification as verification
+        # Load decorated view dependencies before replacing the shared transaction seam.
+        from . import vibe_marketing_views  # noqa: F401
         with ExitStack() as stack:
             stack.enter_context(patch.object(reconciliation.transaction, "atomic", side_effect=lambda: nullcontext()))
             claimed = stack.enter_context(patch.object(reconciliation.WebsiteConnectionOperation.objects, "select_for_update"))
