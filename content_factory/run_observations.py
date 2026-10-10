@@ -20,6 +20,7 @@ AUTHORITY_FIELDS = REPOSITORY_CONFIG_FIELDS | set(CONNECTION_FIELDS) | SECRET_KE
     "publication_approved", "publish_approved", "approved_by", "approved_at",
     "client_request_id",
     "github_repo",
+    "delivery_mode", "delivery_mode_confirmed", "resolved_delivery_mode", "publish_resolution",
 }
 
 

@@ -519,11 +519,13 @@ def guarded_service_write(action, *, only_repository=False, remote_actions=(), p
                         return method(self, request, *args, **kwargs)
             if only_repository and not needs_repository_authority(payload):
                 return method(self, request, *args, **kwargs)
+            cancellation_receipt_attempt = (cancellation_receipts and payload.get("status") == "cancelled"
+                and not payload.get("event_type") and not payload.get("event"))
             try:
                 if kwargs.get("action") in {"cancel", "deny"}:
                     return method(self, request, *args, **kwargs)
                 effective_action = "setup" if kwargs.get("action") == "resume" else action
-                if cancellation_receipts and payload.get("status") == "cancelled" and not payload.get("event_type") and not payload.get("event"):
+                if cancellation_receipt_attempt:
                     if REPOSITORY_CONFIG_FIELDS.intersection(payload):
                         raise WebsiteAuthorityError("cancellation_scope_mismatch", "Cancellation receipts cannot update website configuration.")
                     effective_action = "cancel_receipt"
@@ -576,7 +578,10 @@ def guarded_service_write(action, *, only_repository=False, remote_actions=(), p
                 with owner_operation_scope(payload):
                     return method(self, request, *args, **kwargs)
             except WebsiteAuthorityError as exc:
-                if observation_fallback and exc.code not in {
+                # Cancellation is a control receipt, including while the
+                # revoking transaction is still uncommitted. Missing operation
+                # proof cannot be converted into an accepted progress snapshot.
+                if observation_fallback and not cancellation_receipt_attempt and exc.code not in {
                     "run_cancelled", "website_operation_cancelled", "website_data_deleted", "website_connection_deleted",
                 }:
                     from .run_observations import observation_payload, proven_run

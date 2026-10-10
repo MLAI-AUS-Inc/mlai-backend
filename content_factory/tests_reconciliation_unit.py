@@ -148,15 +148,13 @@ class SplitRunRecoveryTests(SimpleTestCase):
         self.assertFalse(reconciliation.fixed_failure_can_redrive("unknown_failure", "99.0.0"))
 
     def test_refund_completion_merges_latest_result_after_io(self):
-        from roo.models import Ledger
         run = self.fake_run()
         run.pk, run.domain = 1, "fixture.test"
         run.result = {"reconciliation_refund_pending": True}
         latest = SimpleNamespace(result={"reconciliation_refund_pending": True, "worker_receipt": "later"}, save=Mock())
         with patch.object(reconciliation.transaction, "atomic", side_effect=lambda: nullcontext()), \
-                patch.object(Ledger.objects, "filter") as ledger, \
+                patch("content_factory.billing_lineage.original_article_spend_for_run", return_value=None), \
                 patch.object(reconciliation.ContentFactoryRun.objects, "select_for_update") as runs:
-            ledger.return_value.select_related.return_value.first.return_value = None
             runs.return_value.filter.return_value.first.return_value = latest
             reconciliation._refund_failed_run(run, reason="test")
         self.assertEqual(latest.result["worker_receipt"], "later")

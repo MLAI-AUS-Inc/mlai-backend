@@ -255,6 +255,196 @@ class OneClickPersistenceTests(OneClickBillingFixture, TestCase):
         self.assertEqual(Ledger.objects.filter(kind='REFUND').count(), 1)
         self.assertEqual(self.balance(self.payer), 20_000_000)
 
+    def paid_source(self):
+        payload = self.payload()
+        self.charge(payload)
+        return ContentFactoryRun.objects.create(run_id='original-paid-source', organization=self.org,
+            domain=self.org.domain, github_repo=self.website.github_repo, workflow='article_generation',
+            status='failed', run_request=payload)
+
+    def test_company_funded_terminal_failure_refunds_the_ledger_payer_after_opt_out(self):
+        from .models import ContentFactoryJob
+        from integrations.services.article_generation import maybe_auto_refund_terminal_failure
+        source = self.paid_source()
+        job = ContentFactoryJob.objects.create(job_id=source.run_id, domain=self.org.domain,
+            slack_user_id=self.actor, client_request_id=source.run_request['client_request_id'],
+            billing_status='charged', billing_amount=6, billing_ledger=self.spend(),
+            request_meta={**source.run_request, 'requested_by_slack_user_id': self.actor,
+                'user_email': self.requester.email})
+        self.org.billing_user = None
+        self.org.save(update_fields=['billing_user'])
+        self.assertEqual(maybe_auto_refund_terminal_failure(job, error_code='WORKER_RECOVERY_EXHAUSTED',
+            error_message='No draft delivered', refundable=True), (True, 6))
+        job.refresh_from_db()
+        self.assertEqual(job.billing_status, 'refunded')
+        self.assertEqual(maybe_auto_refund_terminal_failure(job, error_code='WORKER_RECOVERY_EXHAUSTED',
+            error_message='No draft delivered', refundable=True), (False, 0))
+        refund = Ledger.objects.get(kind='REFUND')
+        self.assertEqual(refund.user_id, self.payer.pk)
+        self.assertEqual(refund.created_by_slack_id, self.actor)
+        self.assertEqual(self.balance(self.payer), 20_000_000)
+        self.assertFalse(Ledger.objects.filter(user=self.requester).exists())
+
+    def test_terminal_refund_failure_is_retried_by_sweep_with_original_payer(self):
+        from .models import ContentFactoryJob
+        from .reconciliation import run_content_factory_reconciliation_sweep
+        from integrations.services.article_generation import _handle_status_failure
+        source = self.paid_source()
+        job = ContentFactoryJob.objects.create(job_id=source.run_id, domain=self.org.domain,
+            slack_user_id=self.actor, status='researching',
+            client_request_id=source.run_request['client_request_id'], billing_status='charged',
+            billing_amount=6, billing_ledger=self.spend(), request_meta=source.run_request)
+        self.org.billing_user = None
+        self.org.save(update_fields=['billing_user'])
+        def unavailable_credit(**kwargs):
+            ContentFactoryRun.objects.filter(pk=source.pk).update(status='cancelled',
+                result={'worker_receipt': 'newer', 'reconciliation_refund_pending': True})
+            raise RuntimeError('Synthetic transient refund service failure')
+        with patch.object(PointsService, 'refund', side_effect=unavailable_credit), \
+                patch('integrations.services.slack.SlackService.send_dm'):
+            _handle_status_failure(job.job_id, {'error_code': 'RUN_BUDGET_EXHAUSTED', 'error': 'No draft delivered'})
+        job.refresh_from_db()
+        source.refresh_from_db()
+        self.assertEqual(job.status, 'error')
+        self.assertEqual(job.billing_status, 'charged')
+        self.assertTrue(source.result['reconciliation_refund_pending'])
+        self.assertEqual(source.result['article_terminal_refund']['status'], 'pending')
+        self.assertFalse(Ledger.objects.filter(kind='REFUND').exists())
+        # A repeat poll exits early; the durable scheduler owns the refund now.
+        _handle_status_failure(job.job_id, {'error_code': 'RUN_BUDGET_EXHAUSTED'})
+        self.org.billing_user = self.requester
+        self.org.save(update_fields=['billing_user'])
+        with patch('integrations.http_client.post') as dispatch:
+            run_content_factory_reconciliation_sweep(now=timezone.now() + timedelta(minutes=10))
+            run_content_factory_reconciliation_sweep(now=timezone.now() + timedelta(minutes=20))
+        dispatch.assert_not_called()
+        source.refresh_from_db()
+        job.refresh_from_db()
+        self.assertEqual(source.status, 'cancelled')
+        self.assertEqual(source.result['worker_receipt'], 'newer')
+        self.assertFalse(source.result['reconciliation_refund_pending'])
+        self.assertEqual(source.result['article_terminal_refund']['status'], 'refunded')
+        self.assertEqual(job.billing_status, 'refunded')
+        self.assertEqual(self.balance(self.payer), 20_000_000)
+        self.assertFalse(Ledger.objects.filter(user=self.requester).exists())
+        self.assertEqual(Ledger.objects.filter(kind='REFUND').count(), 1)
+
+    def test_terminal_refund_with_mismatched_charge_stays_pending_in_sweep(self):
+        from .models import ContentFactoryJob
+        from .reconciliation import run_content_factory_reconciliation_sweep
+        from integrations.services.article_generation import maybe_auto_refund_terminal_failure
+        source = self.paid_source()
+        source.run_request = {**source.run_request, 'roo_points_billing_user_id': self.requester.pk}
+        source.save(update_fields=['run_request'])
+        job = ContentFactoryJob.objects.create(job_id=source.run_id, domain=self.org.domain,
+            slack_user_id=self.actor, client_request_id=source.run_request['client_request_id'],
+            billing_status='charged', billing_amount=6, billing_ledger=self.spend(), request_meta=source.run_request)
+        self.assertEqual(maybe_auto_refund_terminal_failure(job, error_code='WORKER_RECOVERY_EXHAUSTED',
+            error_message='No draft delivered', refundable=True), (False, 0))
+        source.refresh_from_db()
+        self.assertTrue(source.result['reconciliation_refund_pending'])
+        run_content_factory_reconciliation_sweep(now=timezone.now() + timedelta(minutes=10))
+        source.refresh_from_db()
+        self.assertTrue(source.result['reconciliation_refund_pending'])
+        self.assertEqual(source.result['article_terminal_refund']['status'], 'pending')
+        self.assertFalse(Ledger.objects.filter(kind='REFUND').exists())
+        self.assertEqual(self.balance(self.payer), 14_000_000)
+
+    def test_terminal_paid_job_without_run_payment_metadata_stays_pending(self):
+        from .models import ContentFactoryJob
+        from .reconciliation import run_content_factory_reconciliation_sweep
+        from integrations.services.article_generation import maybe_auto_refund_terminal_failure
+        source = self.paid_source()
+        source.run_request = dict(self.binding)
+        source.save(update_fields=['run_request'])
+        job = ContentFactoryJob.objects.create(job_id=source.run_id, domain=self.org.domain,
+            slack_user_id=self.actor, client_request_id='unresolved-charge',
+            billing_status='charged', billing_amount=6, request_meta={})
+        self.assertEqual(maybe_auto_refund_terminal_failure(job, error_code='RUN_BUDGET_EXHAUSTED',
+            error_message='No draft delivered', refundable=True), (False, 0))
+        source.refresh_from_db()
+        self.assertTrue(source.result['reconciliation_refund_pending'])
+        run_content_factory_reconciliation_sweep(now=timezone.now() + timedelta(minutes=10))
+        source.refresh_from_db()
+        self.assertTrue(source.result['reconciliation_refund_pending'])
+        self.assertEqual(source.result['article_terminal_refund']['status'], 'pending')
+        self.assertFalse(Ledger.objects.filter(kind='REFUND').exists())
+        self.assertEqual(self.balance(self.payer), 14_000_000)
+
+    def test_disconnect_reused_child_refunds_original_charge_once_after_opt_out(self):
+        source = self.paid_source()
+        child = ContentFactoryRun.objects.create(run_id='restarted-child', organization=self.org,
+            domain=self.org.domain, github_repo=self.website.github_repo, workflow='article_generation',
+            status='running', run_request={**source.run_request, 'client_request_id': 'fresh-restart-key',
+                'roo_points_billing_status': 'reused', 'original_billing_source_run_id': source.run_id})
+        self.org.billing_user = None
+        self.org.save(update_fields=['billing_user'])
+        op = start_disconnect(self.config, user=self.requester, data=self.binding)
+        self.assertTrue(refund_cancelled_runs(op))
+        self.assertIn(child.run_id, op.receipt['refunded_run_ids'])
+        # Re-read an unsaved receipt, simulating a crash after the ledger credit.
+        op.refresh_from_db()
+        self.assertTrue(refund_cancelled_runs(op))
+        self.assertEqual(Ledger.objects.filter(kind='REFUND').count(), 1)
+        refund = Ledger.objects.get(kind='REFUND')
+        self.assertEqual(refund.user_id, self.payer.pk)
+        self.assertEqual(refund.refund_of_id, self.spend().pk)
+        self.assertEqual(refund.idempotency_key, 'content_factory:refund:synthetic-article')
+        self.assertEqual(self.balance(self.payer), 20_000_000)
+        child.refresh_from_db()
+        self.assertEqual(child.run_request['client_request_id'], 'fresh-restart-key')
+        self.assertEqual(child.run_request['roo_points_billing_status'], 'refunded')
+
+    def test_disconnect_paid_unresolved_charge_remains_pending(self):
+        run = ContentFactoryRun.objects.create(run_id='missing-paid-child', organization=self.org,
+            domain=self.org.domain, github_repo=self.website.github_repo, workflow='article_generation',
+            status='running', run_request={**self.binding, 'client_request_id': 'missing-charge',
+                'roo_points_cost': 6, 'roo_points_billing_status': 'charged'})
+        op = start_disconnect(self.config, user=self.requester, data=self.binding)
+        self.assertFalse(refund_cancelled_runs(op))
+        self.assertEqual(op.receipt['refund_pending_run_ids'], [run.run_id])
+        self.assertNotIn(run.run_id, op.receipt['refunded_run_ids'])
+        self.assertFalse(Ledger.objects.filter(kind='REFUND').exists())
+
+    def test_paid_refund_without_original_spend_is_retryable_and_free_refund_is_empty(self):
+        from integrations.services.article_generation import ArticleGenerationError, refund_content_factory_request_for_user
+        kwargs = dict(user=self.payer, actor_id=self.actor, resolved_domain=self.org.domain, reason='Queue refused')
+        with self.assertRaises(ArticleGenerationError):
+            refund_content_factory_request_for_user(article_request={'client_request_id': 'missing-paid',
+                'roo_points_cost': 6, 'roo_points_billing_status': 'charged'}, **kwargs)
+        self.assertIsNone(refund_content_factory_request_for_user(article_request={'client_request_id': 'free-setup',
+            'roo_points_cost': 0, 'roo_points_billing_status': 'free'}, **kwargs))
+        self.assertFalse(Ledger.objects.filter(kind='REFUND').exists())
+
+    def test_foreign_or_mismatched_reused_charge_cannot_credit_a_payer(self):
+        from organizations.models import Organization
+        source = self.paid_source()
+        foreign_org = Organization.objects.create(domain='foreign.synthetic.example.test', name='Foreign synthetic')
+        foreign = get_user_model().objects.create_user(email='foreign@synthetic.example.test')
+        PointsService.credit_purchased_topup(user=foreign, delta=10, description='Synthetic funding', idempotency_key='foreign-funding')
+        ledger, _ = PointsService.spend(user=foreign, delta=6, source='CONTENT_FACTORY', description='Synthetic foreign draft',
+            created_by_slack_id='synthetic', idempotency_key='content_factory:charge:foreign-key',
+            reference_type='CONTENT_FACTORY', reference_id='foreign-key')
+        foreign_run = ContentFactoryRun.objects.create(run_id='foreign-source', organization=foreign_org,
+            domain=foreign_org.domain, workflow='article_generation', status='failed',
+            run_request={'client_request_id': 'foreign-key', 'roo_points_ledger_id': str(ledger.pk)})
+        children = []
+        for index, metadata in enumerate((
+                {'roo_points_ledger_id': str(ledger.pk), 'original_billing_source_run_id': source.run_id},
+                {'roo_points_ledger_id': str(ledger.pk), 'original_billing_source_run_id': foreign_run.run_id},
+                {'roo_points_billing_user_id': self.requester.pk, 'original_billing_source_run_id': source.run_id})):
+            children.append(ContentFactoryRun.objects.create(run_id=f'forged-child-{index}', organization=self.org,
+                domain=self.org.domain, github_repo=self.website.github_repo, workflow='article_generation', status='running',
+                run_request={**source.run_request, 'client_request_id': f'forged-restart-{index}',
+                    'roo_points_billing_status': 'reused', **metadata}))
+        op = start_disconnect(self.config, user=self.requester, data=self.binding)
+        self.assertFalse(refund_cancelled_runs(op))
+        self.assertEqual(set(op.receipt['refund_pending_run_ids']), {child.run_id for child in children})
+        self.assertFalse(op.receipt['refunded_run_ids'])
+        self.assertFalse(Ledger.objects.filter(kind='REFUND').exists())
+        self.assertEqual(self.balance(foreign), 4_000_000)
+        self.assertEqual(self.balance(self.payer), 14_000_000)
+
 
 class OneClickTransactionTests(OneClickBillingFixture, TransactionTestCase):
     def setUp(self):

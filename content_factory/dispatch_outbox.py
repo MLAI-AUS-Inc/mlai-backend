@@ -151,7 +151,7 @@ def process_dispatch_outbox(*, limit=20, now=None):
     now = now or timezone.now()
     due = ContentFactoryDispatchOutbox.objects.filter(state__in=["pending", "delivering", "refund_pending", "awaiting_resolution"],
         next_attempt_at__lte=now).order_by("next_attempt_at")
-    result = {"processed": 0, "delivered": 0, "pending": 0, "failed": 0}
+    result = {"status": "completed", "processed": 0, "delivered": 0, "pending": 0, "failed": 0}
     for identifier in list(due.values_list("pk", flat=True)[:max(1, min(limit, 100))]):
         with transaction.atomic():
             row = ContentFactoryDispatchOutbox.objects.select_for_update().select_related("organization").get(pk=identifier)

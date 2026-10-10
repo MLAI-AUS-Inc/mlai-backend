@@ -622,6 +622,19 @@ class ArticleDispatchControlFlowTests(unittest.TestCase):
 
 
 class AtomicArticleChargeTests(unittest.TestCase):
+    def test_empty_outbox_tick_satisfies_the_actual_scheduler_contract(self):
+        from unittest.mock import patch
+        from core.scheduling import run_runners
+        from .dispatch_outbox import ContentFactoryDispatchOutbox, process_dispatch_outbox
+        due = Mock()
+        due.order_by.return_value = due
+        due.values_list.return_value = []
+        with patch.object(ContentFactoryDispatchOutbox.objects, 'filter', return_value=due):
+            results, failures = run_runners((('article_dispatch_outbox', process_dispatch_outbox),))
+        self.assertEqual(failures, [])
+        self.assertEqual(results['article_dispatch_outbox']['status'], 'completed')
+        self.assertEqual(results['article_dispatch_outbox']['processed'], 0)
+
     def test_provider_admission_precedes_shared_charge_outbox_transaction(self):
         from contextlib import contextmanager
         from unittest.mock import patch

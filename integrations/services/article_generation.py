@@ -955,6 +955,12 @@ def _refund_content_factory_request(
         idempotency_key=f"content_factory:charge:{client_request_id}").first()
     amount = -int(getattr(original, "delta_microroo", 0) or 0) if original else 0
     if amount <= 0 or amount % 1_000_000:
+        from content_factory.billing_lineage import paid_article_request
+        if paid_article_request(article_request):
+            error = ArticleGenerationError("The original article spend could not be verified. Its refund remains pending.")
+            error.code = "content_factory_refund_pending"
+            error.retryable = True
+            raise error
         return None
     # Refund the recorded charge and its allocation, even if today's price is
     # different. A job's billing flag alone never authorizes a credit.
@@ -1040,6 +1046,11 @@ def _get_content_factory_user_for_job(job):
 
     UserModel = get_user_model()
     request_meta = getattr(job, "request_meta", {}) or {}
+    if getattr(job, "billing_ledger_id", None) or request_meta.get("roo_points_ledger_id") or (
+            getattr(job, "billing_status", "") in {CONTENT_FACTORY_BILLING_STATUS_CHARGED, CONTENT_FACTORY_BILLING_STATUS_REUSED}):
+        from content_factory.billing_lineage import original_spend_for_job
+        charge = original_spend_for_job(job)
+        return charge.user if charge else None
     actor_ids = (
         request_meta.get("requested_by_slack_user_id"),
         getattr(job, "slack_user_id", ""),
@@ -1267,6 +1278,29 @@ def _serialize_existing_confirm_child_job(job, *, source_run_id: Optional[str]) 
     return payload
 
 
+def _record_terminal_article_refund(job, *, status, error_code, ledger=None):
+    """Keep article credits retryable without replacing a newer run receipt."""
+    from django.db import transaction
+    from workflow_runs.models import ContentFactoryRun
+    job_id = str(getattr(job, 'job_id', '') or '')
+    domain = normalize_domain(getattr(job, 'domain', '') or '')
+    if not job_id or not domain:
+        return
+    with transaction.atomic():
+        current = ContentFactoryRun.objects.select_for_update().filter(run_id=job_id, domain__iexact=domain).first()
+        if current is None:
+            return
+        result = dict(current.result or {})
+        saved = result.get('article_terminal_refund')
+        receipt = dict(saved) if isinstance(saved, dict) else {}
+        receipt.update(status=status, paid_obligation=True, job_id=job_id, error_code=str(error_code or '')[:100])
+        if ledger is not None:
+            receipt['refund_ledger_id'] = str(ledger.pk)
+        current.result = {**result, 'article_terminal_refund': receipt,
+            'reconciliation_refund_pending': status == 'pending'}
+        current.save(update_fields=['result', 'updated_at'])
+
+
 def maybe_auto_refund_terminal_failure(
     job,
     *,
@@ -1289,6 +1323,16 @@ def maybe_auto_refund_terminal_failure(
     if not research_paid and not bool(refundable) and not no_value_failure and resolved_error_code not in AUTO_REFUND_ERROR_CODES:
         return False, 0
 
+    # The status handler records the terminal job before attempting its credit.
+    # Persist the owned run's pending receipt first so a failed payer/ledger
+    # lookup or refund survives that handler's "already error" early exit.
+    paid_article = not research_paid and (getattr(job, 'billing_status', '') in {
+        CONTENT_FACTORY_BILLING_STATUS_CHARGED, CONTENT_FACTORY_BILLING_STATUS_REUSED}
+        or getattr(job, 'billing_ledger_id', None)
+        or (getattr(job, 'request_meta', {}) or {}).get('roo_points_ledger_id'))
+    if paid_article:
+        _record_terminal_article_refund(job, status='pending', error_code=resolved_error_code)
+
     client_request_id = str(getattr(job, "client_request_id", "") or "").strip()
     if not client_request_id:
         return False, 0
@@ -1302,8 +1346,19 @@ def maybe_auto_refund_terminal_failure(
     if getattr(billed_job, "billing_status", "") != CONTENT_FACTORY_BILLING_STATUS_CHARGED:
         return False, 0
 
-    user = _get_content_factory_user_for_job(billed_job)
+    if not research_paid and not paid_article:
+        _record_terminal_article_refund(job, status='pending', error_code=resolved_error_code)
+    try:
+        user = _get_content_factory_user_for_job(billed_job)
+    except Exception:
+        if research_paid:
+            raise
+        _record_terminal_article_refund(job, status='pending', error_code=resolved_error_code)
+        logger.warning('content_factory_terminal_refund_pending job_id=%s reason=payer_unavailable', getattr(job, 'job_id', ''))
+        return False, 0
     if not user:
+        if not research_paid:
+            _record_terminal_article_refund(job, status='pending', error_code=resolved_error_code)
         logger.warning(
             "Unable to auto-refund Content Factory failure for %s: no user resolved",
             client_request_id,
@@ -1325,15 +1380,23 @@ def maybe_auto_refund_terminal_failure(
         billed_job.save(update_fields=["billing_status", "updated_at"])
         return True, refund_points
     refund_reason = str(error_message or resolved_error_code or "deterministic failure").strip()
-    refund_ledger = _refund_content_factory_request(
-        user=user,
-        slack_user_id=getattr(billed_job, "slack_user_id", "") or getattr(job, "slack_user_id", ""),
-        article_request=request_meta,
-        resolved_domain=resolved_domain,
-        reason=refund_reason,
-    )
+    try:
+        refund_ledger = _refund_content_factory_request(
+            user=user,
+            slack_user_id=getattr(billed_job, "slack_user_id", "") or getattr(job, "slack_user_id", ""),
+            article_request=request_meta,
+            resolved_domain=resolved_domain,
+            reason=refund_reason,
+        )
+    except Exception:
+        # A newer callback can land during the credit attempt. Re-merge the
+        # pending receipt under a fresh lock and preserve its current status.
+        _record_terminal_article_refund(job, status='pending', error_code=resolved_error_code)
+        logger.warning('content_factory_terminal_refund_pending job_id=%s reason=credit_unavailable', getattr(job, 'job_id', ''))
+        return False, 0
     if refund_ledger is None:
         return False, 0
+    _record_terminal_article_refund(job, status='refunded', error_code=resolved_error_code, ledger=refund_ledger)
     return True, int(refund_ledger.delta_microroo or 0) // 1_000_000
 
 

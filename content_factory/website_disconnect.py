@@ -80,9 +80,9 @@ def _fence_disconnect(op):
 
 def refund_cancelled_runs(op):
     """Refund the actual recorded payer, retaining the requesting founder in audit."""
-    from roo.models import Ledger
     from workflow_runs.models import ContentFactoryRun
     from integrations.services.article_generation import refund_content_factory_request_for_user
+    from .billing_lineage import ARTICLE_CHARGE_PREFIX, original_article_spend_for_run, paid_article_request
     refunded = set(op.receipt.get("refunded_run_ids") or [])
     pending = []
     for run in ContentFactoryRun.objects.filter(organization_id=op.connection.organization_id,
@@ -90,25 +90,22 @@ def refund_cancelled_runs(op):
         if run.run_id in refunded:
             continue
         request = run.run_request or {}
-        key = request.get("client_request_id")
-        if not key:
-            # A setup/scan is free. A historical charge without request identity
-            # stays explicitly pending for reconciliation instead of guessed.
-            if request.get("roo_points_cost"):
-                pending.append(run.run_id)
-            else:
-                refunded.add(run.run_id)
-            continue
-        ledger = Ledger.objects.filter(idempotency_key=f"content_factory:charge:{key}", kind="SPEND",
-            source="CONTENT_FACTORY").select_related("user").first()
+        ledger = original_article_spend_for_run(run)
         if ledger and ledger.user:
             try:
-                refund_content_factory_request_for_user(user=ledger.user,
-                    actor_id=ledger.created_by_slack_id or "", article_request=request,
+                original_request = {**request, "client_request_id": ledger.idempotency_key.removeprefix(ARTICLE_CHARGE_PREFIX)}
+                refund = refund_content_factory_request_for_user(user=ledger.user,
+                    actor_id=ledger.created_by_slack_id or "", article_request=original_request,
                     resolved_domain=op.connection.organization.domain, reason="Website disconnected before article completion.")
+                if refund is None:
+                    pending.append(run.run_id)
+                    continue
             except Exception:
                 pending.append(run.run_id)
                 continue
+        elif paid_article_request(request):
+            pending.append(run.run_id)
+            continue
         refunded.add(run.run_id)
     op.receipt.update(refunded_run_ids=sorted(refunded), refund_pending_run_ids=pending)
     return not pending

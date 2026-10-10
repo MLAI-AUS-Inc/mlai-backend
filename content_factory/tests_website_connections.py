@@ -1023,6 +1023,23 @@ class WebsiteServiceBoundaryTests(WebsiteDatabaseFixture, TestCase):
         self.assertEqual(self.config.article_template, '# Article\nTemplate')
         self.assertEqual(self.website.scan_snapshots.count(), 1)
 
+    def test_unproven_native_cancellation_cannot_fall_back_to_observation(self):
+        from .service_views import ContentFactoryRunView
+        run = ContentFactoryRun.objects.create(run_id='unproven-cancel-receipt', workflow='article_generation',
+            domain=self.org.domain, organization=self.org, github_repo=self.website.github_repo,
+            run_request=self.binding, status='running')
+        for extra in ({}, {'article_template': '# Untrusted template'}):
+            with self.subTest(extra=extra):
+                data = {**self.binding, 'workflow': 'article_generation', 'status': 'cancelled', **extra}
+                response = ContentFactoryRunView.as_view()(APIRequestFactory().put('/run/cancel', data,
+                    format='json', HTTP_X_API_KEY='synthetic-test-key'), run_id=run.run_id)
+                self.assertEqual(response.status_code, 409, response.data)
+                self.assertEqual(response.data['code'],
+                    'cancellation_scope_mismatch' if extra else 'website_operation_required')
+                run.refresh_from_db()
+                self.assertEqual(run.status, 'running')
+                self.assertNotIn('authority_refusals', run.result or {})
+
     def test_late_sync_cannot_restore_cancelled_run(self):
         from .service_views import ContentFactoryRunView
         ContentFactoryRun.objects.create(run_id='late', workflow='article_generation', domain=self.org.domain,

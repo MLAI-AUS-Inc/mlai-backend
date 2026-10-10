@@ -71,7 +71,7 @@ The reconciliation sweep probes article work stale for ten minutes, adopts termi
 
 The implementation adds `organizations.0003_organization_billing_user` (one nullable `SET_NULL` user foreign key) and `content_factory.0045_content_dispatch_outbox` (one idempotent delivery table and due-state index). On 11 October 2026 the user explicitly approved applying those two migrations, including existing dependencies, in disposable CI/test databases. Their unchanged 363-migration graph has been applied in isolated SQLite and temporary PostgreSQL tests. This approval excludes production schema application and deployment. Database-free contract tests and migration drift inspection do not grant either approval.
 
-Disposable validation passed 130 SQLite tests (four PostgreSQL-only skips) and all 29 targeted PostgreSQL tests. Thirteen new regressions cover real spend/outbox rollback, original-payer refund retry, lost-response adoption, same-key replay and transaction races with Disconnect and parallel delivery. Both engines verified the outbox table, billing-user column and approved migration hashes. Test environments excluded dotenv and external sockets; the private PostgreSQL cluster used only a Unix socket and was removed after validation. The 1,283 guarded tests, model drift and CI assignment checks also passed. Full remote CI results remain separate receipts on [backend #983](https://github.com/MLAI-AUS-Inc/mlai-backend/pull/983).
+Final disposable validation passed 346 SQLite tests (four PostgreSQL-only skips) and all 346 PostgreSQL tests. Twenty-two new database regressions cover real spend/outbox rollback, original-payer and reused-lineage refunds, delayed terminal credit retries, missing payment proof, lost-response adoption, same-key replay and transaction races with Disconnect and parallel delivery. The ten real loopback HTTP/PostgreSQL callback tests also passed, including cancellation during offboarding without deadlock or replacing erasure receipts. Both engines verified the unchanged 363-migration graph, outbox table, billing-user column and approved migration hashes. Test environments excluded dotenv and external network; PostgreSQL used a private Unix socket with TCP disabled, and clusters/databases were removed. Callback validation allowed only 127.0.0.1 HTTP. The 1,284 database-free test executions, model drift and CI assignment checks also passed. Full remote CI results remain separate receipts on [backend #983](https://github.com/MLAI-AUS-Inc/mlai-backend/pull/983).
 
 After separately approved production schema application, deploy the backend receiver APIs for observations/current bindings. Then deploy Content Factory 2.1.0 or newer and confirm its authenticated runtime health version before enabling the recovery ladder, followed by the Chat one-click UI. The sweep stays passive for heartbeat-orphaned jobs until the worker confirms that minimum version; unavailable health or older workers cannot trigger recovery exhaustion/refunds. The new backend requires the outbox table and billing column; do not release its code ahead of approved schema. Run fixture-only public API acceptance with a dedicated test wallet before any separately approved real-site canary or production repair. No canary, production migration, Slack message or deployment is implied by local implementation validation.
 
@@ -121,6 +121,16 @@ Portable `content_only` generation deliberately dispatches without repository id
 Worker mirrors may include `run_request.editorial_admission.audience.status=approved` and the corresponding offer status. These are catalog observations, not publication approval. The portable guard accepts these exact paths only after the existing editorial snapshot contract validates the admission schema, selection hash, brief, tenant and immutable saved admission. All other approval and repository-authority checks still apply, including inside the admission itself.
 
 Status mirrors omit the backend's `roo_points_*` request fields. Run reconciliation retains this backend-owned billing history, rejects attempts to change recorded values, and drops newly claimed billing fields. Worker observations cannot create authorisation or erase a charge reference. The existing ledger and job billing paths remain authoritative.
+
+Observation-only mirrors also retain the original delivery mode and publication
+resolution. A cancellation receipt requires its operation proof even while a
+disconnect transaction is still committing; a missing operation or attempted
+configuration write cannot fall back to an accepted progress observation.
+Terminal paid failures persist refund retry receipts before accessing the payer
+or credit service. The scheduled sweep resolves only verified original-company
+payment lineage, credits the original payer once, and merges the fresh result
+without changing newer cancellation or cleanup history. Missing payment proof
+keeps the known paid obligation pending.
 
 An article blocked on a linked automatic repository scan or setup repair retains
 an active workflow operation while that repair is queued, running or awaiting

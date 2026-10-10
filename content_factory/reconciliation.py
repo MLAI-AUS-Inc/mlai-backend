@@ -573,26 +573,33 @@ def recover_stalled_run(run, *, base_url, headers, now):
 
 
 def _refund_failed_run(run, *, reason):
-    from roo.models import Ledger
+    from .billing_lineage import ARTICLE_CHARGE_PREFIX, original_article_spend_for_run, paid_article_request
     from integrations.services.article_generation import refund_content_factory_request_for_user
     request = run.run_request or {}
-    key = request.get("client_request_id")
-    ledger_id = request.get("roo_points_ledger_id")
-    ledger = Ledger.objects.filter(pk=ledger_id, source="CONTENT_FACTORY", kind="SPEND").select_related("user").first() if str(ledger_id or "").isdigit() else None
-    if ledger is None and key:
-        ledger = Ledger.objects.filter(idempotency_key=f"content_factory:charge:{key}", source="CONTENT_FACTORY", kind="SPEND").select_related("user").first()
+    terminal_receipt = (run.result or {}).get("article_terminal_refund")
+    paid_obligation = isinstance(terminal_receipt, dict) and terminal_receipt.get("paid_obligation") is True
+    ledger = original_article_spend_for_run(run)
+    refund = None
     if ledger and ledger.user:
-        request = {**request, "client_request_id": ledger.idempotency_key.removeprefix("content_factory:charge:")}
-        refund_content_factory_request_for_user(user=ledger.user, actor_id=ledger.created_by_slack_id or "",
+        request = {**request, "client_request_id": ledger.idempotency_key.removeprefix(ARTICLE_CHARGE_PREFIX)}
+        refund = refund_content_factory_request_for_user(user=ledger.user, actor_id=ledger.created_by_slack_id or "",
             article_request=request, resolved_domain=run.domain, reason=reason)
-    elif request.get("roo_points_cost"):
+        if refund is None:
+            raise ValueError("The recorded spend's refund could not be verified.")
+    elif paid_article_request(request) or paid_obligation:
         raise ValueError("The recorded spend could not be resolved for refund.")
     # Refund I/O may overlap a worker receipt. Merge the fresh result under a
     # brief lock rather than replacing it with our pre-refund snapshot.
     with transaction.atomic():
         current = ContentFactoryRun.objects.select_for_update().filter(pk=run.pk).first()
         if current:
-            current.result = {**(current.result or {}), "reconciliation_refund_pending": False}
+            result = dict(current.result or {})
+            if isinstance(result.get("article_terminal_refund"), dict):
+                result["article_terminal_refund"] = {**result["article_terminal_refund"],
+                    "status": "refunded" if refund else "not_required"}
+                if refund:
+                    result["article_terminal_refund"]["refund_ledger_id"] = str(refund.pk)
+            current.result = {**result, "reconciliation_refund_pending": False}
             current.save(update_fields=["result"])
 
 

@@ -90,7 +90,13 @@ class PortableWorkerWireTests(SimpleTestCase):
         ):
             with self.subTest(field=field, value=value):
                 self.assertFalse(portable_run_update_allowed(self.run, {**base, field: value}))
-        payload = deepcopy(base)
+        # An unchanged admission may retain its former repository as history;
+        # it does not give the portable draft a publishing capability.
+        historical = deepcopy(base)
+        historical["run_request"]["editorial_admission"]["github_repo"] = "former/site"
+        self.run.run_request.update(deepcopy(historical["run_request"]))
+        self.assertTrue(portable_run_update_allowed(self.run, historical))
+        payload = deepcopy(historical)
         payload["run_request"]["editorial_admission"]["github_repo"] = "other/site"
         self.assertFalse(portable_run_update_allowed(self.run, payload))
 
