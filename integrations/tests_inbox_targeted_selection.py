@@ -62,3 +62,7 @@ class TargetedSelectionTests(SimpleTestCase):
         self.cursor = {priority.KEY: {'known': {'until': self.now + 300, 'reason': 'own_message'}}}
         self.assertEqual(self.choose().slack_id, 'known')
         self.assertTrue(self.states['known']['is_unread'])
+
+    def test_selected_possible_work_gets_foreground_provider_admission(self):
+        from integrations.services.message_sync.read_state import refresh_request_priority
+        self.assertEqual(refresh_request_priority(self.targets[1], self.states['possible'], {}, now=self.now), 'foreground')
