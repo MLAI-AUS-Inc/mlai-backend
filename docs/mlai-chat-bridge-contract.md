@@ -876,6 +876,17 @@ polling and read receipts. No new schema migration is needed.
 
 ### Read freshness and device continuity
 
+`MESSAGE_SYNC_TARGETED_READ_POLLING=false` preserves the current scheduler.
+When opted in after inbox client rollout, successful countable public deliveries
+also advance the mapped room’s existing `latest_source_activity`. Inbound
+deliveries use the Slack source timestamp; MLAI-originated deliveries use the
+confirmed Slack destination link. Replies without broadcast, edits, deletions,
+reactions and failed deliveries do not advance it. The hook runs after commit
+and revalidates the mapping under the existing state-to-mapping lock order.
+Private targets retain their existing confirmed `latest_synced_ts` signal.
+No owner cursor, unread count, access grant or new schema is fabricated.
+
+
 Visible-chat requests enqueue bounded metadata-only hints for the background
 worker; they do not call Slack. New authorized Slack message activity and known
 unreads receive priority. Three priority turns alternate with one oldest-first

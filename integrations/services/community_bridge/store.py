@@ -2,6 +2,7 @@ import logging
 import re
 from datetime import timedelta
 from typing import Optional
+from functools import partial
 
 from django.conf import settings
 from django.db import IntegrityError, connection, transaction
@@ -392,6 +393,8 @@ def complete_create_delivery(
         delivery.last_error = ""
         delivery.save(update_fields=["lease_token", "lease_expires_at", "status", "completed_at", "locked_at", "last_error", "updated_at"])
         _wake_waiting_child_deliveries(delivery)
+        from integrations.services.message_sync.read_activity import record_public_delivery
+        transaction.on_commit(partial(record_public_delivery, delivery.id), robust=True)
 
 
 def complete_delivery(*, delivery_id: int, wake_waiting_children: bool = False) -> None:
@@ -408,6 +411,8 @@ def complete_delivery(*, delivery_id: int, wake_waiting_children: bool = False) 
         )
         if wake_waiting_children:
             _wake_waiting_child_deliveries(CommunityBridgeDelivery.objects.get(id=delivery_id))
+        from integrations.services.message_sync.read_activity import record_public_delivery
+        transaction.on_commit(partial(record_public_delivery, delivery_id), robust=True)
 
 
 @transaction.atomic
