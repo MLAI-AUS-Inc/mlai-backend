@@ -83,7 +83,7 @@ jobs:
       run: python scripts/check_test_assignment.py
 
     - name: Run isolated refactor checks without database access
-      run: python scripts/test_without_database.py tests.test_refactor_unit tests.test_refactor_django_unit tests.test_refactor_migration_inventory roo.test_event_ticket_price
+      run: python scripts/test_without_database.py content_factory.tests_run_sync_authority_unit content_factory.tests_current_connection_unit tests.test_refactor_unit tests.test_refactor_django_unit tests.test_refactor_migration_inventory roo.test_event_ticket_price
 
     - name: Check coworking report channel permissions without database access
       run: python scripts/test_without_database.py roo.tests_coworking_report_access
@@ -141,7 +141,6 @@ jobs:
           content_factory.tests_editorial_catalog_unit \
           content_factory.tests_editorial_catalog_api_unit \
           content_factory.tests_offer_page_checks_unit \
-          content_factory.tests_editorial_dispatch_unit \
           content_factory.tests_editorial_snapshot_unit \
           content_factory.tests_editorial_revision_unit \
           content_factory.tests_article_admission_notice_unit \
@@ -149,7 +148,7 @@ jobs:
           content_factory.tests_hosted_quality_issues_unit
 
     - name: Check website journey and lifecycle contracts without database access
-      run: python scripts/test_without_database.py content_factory.tests_website_articles_reliability_unit content_factory.tests_portable_run_controls_unit content_factory.tests_portable_workflow_progress_unit content_factory.tests_incident_guards_unit content_factory.tests_publish_child_review_identity_unit content_factory.tests_website_operation_recovery_unit content_factory.tests_setup_pr_failure_unit content_factory.tests_setup_merge_verification_unit content_factory.test_reliability_contract content_factory.tests_private_preview_document_unit
+      run: python scripts/test_without_database.py content_factory.tests_one_click_operations_unit content_factory.tests_reconciliation_unit content_factory.tests_website_articles_reliability_unit content_factory.tests_portable_run_controls_unit content_factory.tests_portable_workflow_progress_unit content_factory.tests_incident_guards_unit content_factory.tests_publish_child_review_identity_unit content_factory.tests_website_operation_recovery_unit content_factory.tests_setup_pr_failure_unit content_factory.tests_setup_merge_verification_unit content_factory.test_reliability_contract content_factory.tests_private_preview_document_unit content_factory.tests_editorial_dispatch_unit
 
     - name: Check migrations are committed
       run: python manage.py makemigrations --check --dry-run
@@ -272,6 +271,7 @@ jobs:
           content_factory.tests_article_review_unit \
           content_factory.tests_article_review_update_unit \
           content_factory.tests_article_review_compat_unit \
+          content_factory.tests_section_issues_unit \
           content_factory.tests_baseline_metrics_unit \
           content_factory.tests_topic_metrics_unit \
           integrations.tests_slack_content

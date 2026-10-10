@@ -72,6 +72,8 @@ def project_journey(*, company_id, domain, website=None, capabilities=None, disc
         allowed.append("github-revoke")
     if website:
         allowed += ["disconnect", "reset", "purge", "reconcile", "github-revoke"]
+        if connected and write_access and write_allowed:
+            allowed.append("prepare")
         if access:
             allowed += ["custom-contract", "ci-attestation"]
         allowed += ["scan", "pause"] if connected else ["reconnect"]
@@ -108,6 +110,7 @@ def project_journey(*, company_id, domain, website=None, capabilities=None, disc
         "connectionId": website.get("connectionId"), "connectionGeneration": website.get("connectionGeneration"),
         "proofContract": {"version": 1, "requirements": ["pinned_source_sha", "safe_publish_target", "build_proof", "browser_proof", "workflows_permission", "ci_artifact_digest", "live_verification"]},
         "configurationRevision": website.get("configurationVersion", 0), "deletionEpoch": epoch, "repository": repository,
+        "pricing": {"setupPoints": 0, "requiredPoints": 0, "free": True},
         "policy": {"allowed": write_allowed, "reasonCode": "" if write_allowed else reason_code, "reason": "" if write_allowed else reason},
         "reasonCode": "" if verified else reason_code, "reason": "" if verified else reason,
         "prerequisites": prerequisites, "steps": steps,
@@ -204,7 +207,8 @@ def journey_for_context(context, config, *, capabilities=None):
         if cleanup:
             proof.update(cleanupAwaitingDeployment=True, cleanupOperationId=str(cleanup.pk))
         proof["reviewedMergeReady"] = connection.repository_mutations.filter(generation=connection.generation, status="applied").exclude(head_sha="").exists() and bool(connection.capabilities.get("previewSupported"))
-        latest = connection.operations.filter(generation=connection.generation).order_by("-created_at").first()
+        composite = connection.operations.filter(generation=connection.generation, action__in=["prepare", "disconnect"]).exclude(state="cancelled").order_by("-created_at").first()
+        latest = composite or connection.operations.filter(generation=connection.generation).order_by("-created_at").first()
         operation = operation_summary(latest) if latest else None
         epoch = deletion_epoch(connection)
         from workflow_runs.models import ContentFactoryRun

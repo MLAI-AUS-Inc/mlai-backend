@@ -139,6 +139,7 @@ def handle_website_github_event(event_type, payload):
             result["ignored"] = True
             return result
         result["invalidated"] = 0
+        prepare_wakes = []
         for config in OrganizationContentConfig.objects.filter(website_connection__repository_id=repo["id"], website_connection__state__in=["connected", "paused"]).select_related("website_connection__organization"):
             website = config.website_connection
             if payload.get("ref") != f"refs/heads/{website.branch}" or website.verified_sha == source_sha:
@@ -170,6 +171,12 @@ def handle_website_github_event(event_type, payload):
                         website.blockers = [item for item in website.blockers if item.get("code") != "repository_source_changed"] + [{"code": "repository_source_changed", "message": "The repository changed. Scan and verify the current source before publishing.", "source_sha": source_sha}]
                     website.save(update_fields=["configuration_version", "capabilities", "blockers", "updated_at"])
                     result["invalidated"] += 1
+                    prepare_wakes.append((website.pk, config.organization_id))
+        # Run no provider calls while the webhook transaction owns authority
+        # locks. Both MLAI merges and customer pushes resume the same journey.
+        for identifier, organization_id in prepare_wakes:
+            from .website_prepare import wake_prepare_for_source
+            wake_prepare_for_source(identifier, organization_id=organization_id)
     else:
         result["ignored"] = True
     return result
@@ -183,6 +190,19 @@ def _cleanup_proposal(operation):
     token = create_installation_access_token(installation_id=connection.installation_id,
         repository=connection.github_repo, repository_id=connection.repository_id, permission_mode="read", use_cache=False)
     headers = {"Authorization": f"Bearer {token.token}", "Accept": "application/vnd.github+json"}
+    try:
+        return _read_cleanup_proposal(operation, headers=headers)
+    finally:
+        try:
+            http_client.delete("https://api.github.com/installation/token", headers=headers, timeout=(3, 10))
+        except Exception:
+            pass
+
+
+def _read_cleanup_proposal(operation, *, headers):
+    """Read a bounded ledger manifest while the scoped temporary token is live."""
+    from integrations import http_client
+    connection = operation.connection
     repo_url = f"https://api.github.com/repos/{connection.github_repo}"
     head = http_client.get(f"{repo_url}/commits/{quote(connection.branch, safe='')}", headers=headers, timeout=(3, 15))
     head.raise_for_status()
@@ -218,6 +238,8 @@ def _cleanup_proposal(operation):
             current[path] = "unverified"
         else:
             current[path] = hashlib.sha256(base64.b64decode(value["content"])).hexdigest()
+            if entry.get("after_blob_sha") and entry["after_blob_sha"] != value.get("sha"):
+                current[path] = "modified_blob"
     from .models import WrittenArticle
     retained_paths = unproven_paths + list(WrittenArticle.objects.filter(organization=connection.organization).exclude(content_path="").values_list("content_path", flat=True))
     plan = cleanup_plan(files, current, retained_paths=retained_paths)
@@ -333,7 +355,8 @@ def process_website_connection_operations(*, limit=20, now=None, connection_id=N
     from .vibe_marketing_views import _content_factory_remote_config, _content_factory_headers
     from .website_tokens import revoke_generation_tokens
     now = now or timezone.now()
-    due = WebsiteConnectionOperation.objects.filter(Q(next_attempt_at__isnull=True) | Q(next_attempt_at__lte=now), state="pending").exclude(action="workflow")
+    due = WebsiteConnectionOperation.objects.filter(Q(next_attempt_at__isnull=True) | Q(next_attempt_at__lte=now),
+        Q(state="pending") | Q(action="prepare", state="running")).exclude(action="workflow")
     if connection_id:
         due = due.filter(connection_id=connection_id)
     ids = list(due.order_by("next_attempt_at").values_list("id", flat=True)[:limit])
@@ -342,6 +365,13 @@ def process_website_connection_operations(*, limit=20, now=None, connection_id=N
     reconcile_support_verifications(limit=limit, connection_id=connection_id)
     monitor_cleanup_pull_requests(limit=limit, connection_id=connection_id)
     for identifier in ids:
+        if WebsiteConnectionOperation.objects.filter(pk=identifier, action="prepare").exists():
+            from .website_prepare import advance_prepare
+            operation = advance_prepare(identifier, now=now)
+            if operation is not None:
+                result["processed"] += 1
+                result["completed" if operation.state == "completed" else "pending"] += 1
+            continue
         if WebsiteConnectionOperation.objects.filter(pk=identifier, action="source-reverify").exists():
             outcome = _process_source_reverification(identifier, now)
             if outcome is not None:
@@ -370,12 +400,18 @@ def process_website_connection_operations(*, limit=20, now=None, connection_id=N
             claimed_at = op.updated_at
         from .website_connections import require_unlocked_remote_call
         require_unlocked_remote_call()
+        before_cleanup = evidence_digest({"payload": op.payload, "completed_steps": op.receipt.get("completed_steps", []),
+            "refunded_run_ids": op.receipt.get("refunded_run_ids", []), "closed_mutation_ids": op.receipt.get("closed_mutation_ids", []),
+            "tokens": op.receipt.get("tokens", {})})
         try:
             if op.action == "cleanup":
                 from .website_restoration import worker_restoration
                 op.receipt = worker_restoration(op) or _cleanup_proposal(op)
                 op.state = "review_required"
             else:
+                if op.action == "disconnect" and "remove_setup" in op.payload:
+                    from .website_disconnect import advance_disconnect_steps
+                    advance_disconnect_steps(op)
                 token_scope = f"operation:{op.payload['cancelled_operation_id']}" if op.action == "cancel-operation" else op.payload.get("previous_generation")
                 tokens = revoke_generation_tokens(op.connection_id, token_scope)
                 cancel_ids = op.payload.get("cancel_run_ids", [])
@@ -453,6 +489,8 @@ def process_website_connection_operations(*, limit=20, now=None, connection_id=N
                         worker_pending = True
                     op.receipt["remote_cleanup_pending"] |= worker_pending
                     op.receipt["deletion_epoch"] = op.payload["deletion_epoch"]
+                if op.action == "disconnect":
+                    op.receipt["remote_cleanup_pending"] |= bool(op.receipt.get("disconnect_steps_pending"))
                 if not op.receipt["remote_cleanup_pending"]:
                     op.state = "completed"
                     op.receipt["status"] = "completed"
@@ -460,6 +498,12 @@ def process_website_connection_operations(*, limit=20, now=None, connection_id=N
             # No transport messages can accidentally include credentials or source bodies.
             op.receipt = {**op.receipt, "last_error": "remote_reconciliation_unavailable"}
         op.next_attempt_at = now + timedelta(seconds=min(3600, 15 * 2 ** min(op.attempts, 8)))
+        if op.action == "disconnect" and "remove_setup" in op.payload:
+            from .website_disconnect import disconnect_retry_policy
+            after_cleanup = evidence_digest({"payload": op.payload, "completed_steps": op.receipt.get("completed_steps", []),
+                "refunded_run_ids": op.receipt.get("refunded_run_ids", []), "closed_mutation_ids": op.receipt.get("closed_mutation_ids", []),
+                "tokens": op.receipt.get("tokens", {})})
+            disconnect_retry_policy(op, now=now, progressed=before_cleanup != after_cleanup)
         applied = WebsiteConnectionOperation.objects.filter(pk=op.pk, state="pending", attempts=op.attempts,
             updated_at=claimed_at).update(receipt=op.receipt, payload=op.payload, state=op.state,
                 next_attempt_at=op.next_attempt_at, updated_at=timezone.now())
@@ -584,7 +628,7 @@ def approve_cleanup_proposal(config, *, user, data):
     if not deletions:
         raise WebsiteAuthorityError('cleanup_no_owned_files', 'No unchanged, exclusively owned files can be removed automatically.')
     token = create_installation_access_token(installation_id=metadata['installation_id'], repository=website.github_repo, repository_id=website.repository_id,
-        permission_mode='write', use_cache=False)
+        permission_mode='write', permission_profile='workflow_files' if '.github/workflows/mlai-articles-verification.yml' in deletions else 'repository', use_cache=False)
     headers = {'Authorization': f'Bearer {token.token}', 'Accept': 'application/vnd.github+json'}
     base = f'https://api.github.com/repos/{website.github_repo}'
     def request(method, path, body=None):
@@ -609,9 +653,16 @@ def approve_cleanup_proposal(config, *, user, data):
         existing_prs = http_client.get(base + '/pulls', params={'head': website.github_repo.split('/')[0] + ':' + branch, 'state': 'all'}, headers=headers, timeout=(3, 15))
         existing_prs.raise_for_status()
         prs = existing_prs.json()
+        skipped = [f"- `{row['path']}`: {row['reason'].replace('_', ' ')}" for row in fresh.get('conflicts', [])]
+        retained = [f"- `{path}`" for path in fresh.get('retained', [])]
+        body = 'Removes only unchanged files recorded as exclusively created by MLAI. The default branch is changed only if you review and merge this pull request.'
+        if skipped:
+            body += '\n\nSkipped customer-edited or shared files:\n' + '\n'.join(skipped)
+        if retained:
+            body += '\n\nRetained article content and dependencies:\n' + '\n'.join(retained)
         pr = prs[0] if prs else request('POST', '/pulls', {'title': 'Remove reviewed MLAI website integration files',
             'head': branch, 'base': website.branch,
-            'body': 'Removes only unchanged files recorded as exclusively created by MLAI. Shared files, modified files, and retained dependencies are preserved. Review this pull request before merging.'})
+            'body': body})
         op.state = 'awaiting_merge'
         op.receipt = {**fresh, 'status': 'pull_request_opened', 'pr_url': pr['html_url'], 'branch': branch,
             'head_sha': commit['sha'], 'repository_modified': True, 'default_branch_modified': False, 'approved_by_user_id': str(user.pk)}

@@ -755,12 +755,21 @@ def _charge_content_factory_user(
     created_by_slack_id: str,
     article_request: dict,
     resolved_domain: str,
+    prevalidated_admission: bool = False,
 ):
     from content_factory.models import ContentFactoryJob
     from roo.permissions import InsufficientBalanceError
     from roo.services import PointsService
 
-    require_article_activation(domain=resolved_domain, actor_id=created_by_slack_id, user=user, article_request=article_request)
+    if not prevalidated_admission:
+        require_article_activation(domain=resolved_domain, actor_id=created_by_slack_id, user=user, article_request=article_request)
+    from content_factory.company_billing import resolve_content_billing_user
+    requester = user
+    try:
+        user = resolve_content_billing_user(requester, resolved_domain)
+    except ValueError as exc:
+        raise ArticleGenerationError(str(exc)) from exc
+    article_request.update(roo_points_requested_by_user_id=requester.pk, roo_points_billing_user_id=user.pk)
     client_request_id = _get_client_request_id(article_request)
     cost_points = get_content_factory_article_cost_points(resolved_domain)
     _require_expected_cost(article_request, cost_points)
@@ -785,7 +794,7 @@ def _charge_content_factory_user(
             user=user,
             delta=cost_points,
             source=CONTENT_FACTORY_LEDGER_SOURCE,
-            description=_build_content_factory_charge_description(resolved_domain, article_request),
+            description=_build_content_factory_charge_description(resolved_domain, article_request) + f" (requested by account {requester.pk})",
             created_by_slack_id=created_by_slack_id,
             idempotency_key=f"content_factory:charge:{client_request_id}",
             reference_type="CONTENT_FACTORY",
@@ -799,6 +808,8 @@ def _charge_content_factory_user(
                 current_balance=_content_factory_balance_for_user(user),
                 required_points=get_content_factory_ai_agent_required_points(resolved_domain),
                 cost_points=cost_points,
+                account_email=requester.email,
+                billing_email=user.email,
             )
         )
 
@@ -835,6 +846,7 @@ def charge_content_factory_request_for_user(
     actor_id: str,
     article_request: dict,
     resolved_domain: str,
+    prevalidated_admission: bool = False,
 ):
     _validate_authenticated_content_factory_actor(user=user, actor_id=actor_id)
     return _charge_content_factory_user(
@@ -842,6 +854,7 @@ def charge_content_factory_request_for_user(
         created_by_slack_id=actor_id,
         article_request=article_request,
         resolved_domain=resolved_domain,
+        prevalidated_admission=prevalidated_admission,
     )
 
 

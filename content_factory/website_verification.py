@@ -124,6 +124,8 @@ def record_ci_attestation(data, *, owner_review=False):
         website.save(update_fields=["verified_sha", "last_verified_at", "configuration_version", "blockers", "capabilities", "updated_at"])
         op, _ = WebsiteConnectionOperation.objects.update_or_create(idempotency_key=f"{website.pk}:ci:{data['evidence_digest']}", defaults={
             "connection": website, "generation": website.generation, "action": "ci-verify", "state": "completed", "payload": dict(data), "receipt": receipt})
+        from .website_prepare import wake_prepare_after_commit
+        wake_prepare_after_commit(website.pk)
         return op
 
 
@@ -201,6 +203,8 @@ def verify_live_deployment(config, *, data):
     with authority_guard(binding, action="read") as website:
         op, _ = WebsiteConnectionOperation.objects.update_or_create(idempotency_key=f"{website.pk}:deployment:{evidence_digest(binding)}", defaults={
             "connection": website, "generation": website.generation, "action": "deployment-verify", "state": "completed", "payload": binding, "receipt": receipt})
+        from .website_prepare import wake_prepare_after_commit
+        wake_prepare_after_commit(website.pk)
         return op
 
 

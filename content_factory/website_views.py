@@ -128,19 +128,28 @@ class WebsiteConnectionActionView(APIView):
     """Independent pause/disconnect/reconnect/reset/cleanup consent actions."""
 
     def post(self, request, action):
-        if action not in {"pause", "disconnect", "reconnect", "reset", "cleanup", "purge", "cancel-operation", "reconcile", "verify-access", "verify", "custom-contract", "ci-attestation", "github-revoke", "verify-cleanup"}:
+        if action not in {"prepare", "pause", "disconnect", "reconnect", "reset", "cleanup", "purge", "cancel-operation", "reconcile", "verify-access", "verify", "custom-contract", "ci-attestation", "github-revoke", "verify-cleanup"}:
             return Response({"code": "invalid_connection_action", "detail": "Unknown website action."}, status=400)
         context, config, error = _context(request)
         if error:
             return error
         try:
             revision = request.data.get("configuration_revision")
-            if revision is not None and config.website_connection and str(revision) != str(config.website_connection.configuration_version):
+            if action != "disconnect" and revision is not None and config.website_connection and str(revision) != str(config.website_connection.configuration_version):
                 raise WebsiteAuthorityError("website_configuration_changed", "Refresh the current website settings before changing them.")
             key = str(request.headers.get("Idempotency-Key") or request.data.get("idempotency_key") or request.data.get("client_request_id") or uuid.uuid4())
             if action == "purge" and request.data.get("preserve_published_articles", True) is not True:
                 raise WebsiteAuthorityError("published_content_review_required", "Published articles require a separately reviewed removal proposal.")
-            if action == "github-revoke":
+            if action == "prepare":
+                from .website_prepare import start_prepare, advance_prepare
+                operation = start_prepare(config, expected=dict(request.data), company_id=context.company.pk,
+                    user=request.user, retry=True)
+                advance_prepare(operation.pk)
+                operation.refresh_from_db()
+            elif action == "disconnect":
+                from .website_disconnect import start_disconnect
+                operation = start_disconnect(config, user=request.user, data=dict(request.data))
+            elif action == "github-revoke":
                 from .website_github_revocation import revocation_plan, apply_revocation
                 if request.data.get("phase", "plan") == "plan":
                     return Response({"githubRevocation": revocation_plan(request.user)})
@@ -186,7 +195,11 @@ class WebsiteConnectionActionView(APIView):
                     raise WebsiteAuthorityError("website_connection_required", "Select a website repository first.")
                 bind_website(config, user=request.user, repo=current.github_repo, app_root=current.app_root,
                     branch=current.branch, site_url=current.site_url, reconnect=True, expected=request.data)
-                operation = None
+                from .website_prepare import start_prepare, advance_prepare
+                config.refresh_from_db()
+                operation = start_prepare(config, company_id=context.company.pk, user=request.user)
+                advance_prepare(operation.pk)
+                operation.refresh_from_db()
             else:
                 operation = transition_connection(config, action=action, expected=request.data,
                     idempotency_key=key)
@@ -264,7 +277,7 @@ class WebsiteMutationView(APIView):
                 files = data.get("files")
                 if not operation_id or len(operation_id) > 160 or not SHA_PATTERN.fullmatch(str(data.get("base_sha") or "")) or not isinstance(files, list) or len(files) > 1000:
                     raise WebsiteAuthorityError("invalid_mutation_ledger", "An operation ID, exact base SHA and file ledger are required.", status=400)
-                allowed_fields = {"path", "kind", "ownership", "before_sha256", "after_sha256", "retained_dependencies", "operation", "before_mode", "after_mode"}
+                allowed_fields = {"path", "kind", "ownership", "before_sha256", "after_sha256", "before_blob_sha", "after_blob_sha", "retained_dependencies", "operation", "before_mode", "after_mode"}
                 for entry in files:
                     if not isinstance(entry, dict):
                         raise WebsiteAuthorityError("invalid_mutation_ledger", "Each file needs explicit ownership.", status=400)
@@ -275,6 +288,9 @@ class WebsiteMutationView(APIView):
                         value = entry.get(hash_key)
                         if value and (not isinstance(value, str) or len(value) != 64 or not all(char in "0123456789abcdefABCDEF" for char in value)):
                             raise WebsiteAuthorityError("invalid_mutation_ledger", "File evidence needs SHA-256 content hashes.", status=400)
+                    for hash_key in ("before_blob_sha", "after_blob_sha"):
+                        if entry.get(hash_key) and not SHA_PATTERN.fullmatch(str(entry[hash_key])):
+                            raise WebsiteAuthorityError("invalid_mutation_ledger", "File evidence needs exact Git blob identities.", status=400)
                     if entry.get("ownership") not in {"created", "shared", "modified"}:
                         raise WebsiteAuthorityError("invalid_mutation_ledger", "Each file needs explicit ownership.", status=400)
                 if len(str(data.get("status") or "")) > 32 or len(str(data.get("branch") or "")) > 255 or len(str(data.get("run_id") or "")) > 100 or len(str(data.get("pr_url") or "")) > 1000:

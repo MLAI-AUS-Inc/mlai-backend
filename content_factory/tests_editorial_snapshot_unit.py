@@ -266,7 +266,7 @@ class EditorialSnapshotPersistenceSeamTests(unittest.TestCase):
         seam.start()
         self.addCleanup(seam.stop)
         root = Path(__file__).resolve().parent
-        names = {"_sync_content_factory_run_snapshot", "_content_factory_run_snapshot_unchanged", "_merge_django_owned_run_result", "_merge_django_owned_run_request"}
+        names = {"_apply_run_snapshot", "_sync_content_factory_run_snapshot", "_content_factory_run_snapshot_unchanged", "_merge_django_owned_run_result", "_merge_django_owned_run_request"}
         tree = ast.parse((root / "service_views.py").read_text())
         nodes = [n for n in tree.body if (isinstance(n, ast.FunctionDef) and n.name in names) or
                  (isinstance(n, ast.Assign) and any(isinstance(t, ast.Name) and t.id.startswith("_DJANGO_OWNED_RUN_RESULT_") for t in n.targets))]

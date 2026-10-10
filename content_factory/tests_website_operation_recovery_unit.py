@@ -15,7 +15,8 @@ from .website_contract import WebsiteAuthorityError
 
 class WebsiteOperationRecoveryTests(SimpleTestCase):
     def setUp(self):
-        self.website = SimpleNamespace(pk=uuid4(), organization_id=42, generation=3, blockers=[], operations=Mock())
+        self.website = SimpleNamespace(pk=uuid4(), organization_id=42, generation=3, blockers=[], operations=Mock(),
+            installation_id="fixture-installation", repository_id=42)
         self.op = SimpleNamespace(pk=uuid4(), connection=self.website, connection_id=self.website.pk,
             generation=3, action="workflow", state="running", payload={"attempt": 2, "run_id": "saved-setup",
             "workflow": "article_system_setup", "client_request_id": "old-request"},
@@ -105,6 +106,31 @@ class WebsiteOperationRecoveryTests(SimpleTestCase):
                 self.op.state = state
                 operations.bind_operation_run(self.op, self.run)
                 self.assertEqual(self.op.state, state)
+
+    def test_binding_after_disconnect_preserves_completed_history(self):
+        from organizations.models import Organization
+        from .website_models import WebsiteConnection
+        self.run.pk, self.run.status, self.run.resume_available, self.run.error = 7, "running", True, "Old progress"
+        self.run.save = Mock()
+        completed = SimpleNamespace(status="completed", resume_available=False, error="", result={"article": "Saved"})
+        with patch.object(authority, "authority_guard", side_effect=WebsiteAuthorityError("website_connection_changed", "Changed")), \
+                patch.object(authority, "contract_for", return_value=self.binding), \
+                patch.object(operations.transaction, "atomic", side_effect=lambda: nullcontext()), \
+                patch.object(Organization.objects, "select_for_update"), \
+                patch.object(WebsiteConnection.objects, "select_for_update") as websites, \
+                patch.object(ContentFactoryRun.objects, "select_for_update") as runs, \
+                patch.object(operations.WebsiteConnectionOperation.objects, "select_for_update") as ops, \
+                patch.object(operations.WebsiteConnectionOperation.objects, "get_or_create") as cleanup:
+            websites.return_value.get.return_value = self.website
+            runs.return_value.get.return_value = completed
+            ops.return_value.get.return_value = self.op
+            cleanup.return_value = (object(), True)
+            operations.bind_operation_run(self.op, self.run)
+        self.assertEqual(self.run.status, "completed")
+        self.assertEqual(self.op.state, "cancelled")
+        self.assertEqual(self.run.result, {"article": "Saved"})
+        self.run.save.assert_not_called()
+        cleanup.assert_called_once()
 
     def test_observation_records_cancel_but_cannot_revive_or_replace_completion(self):
         with patch.object(operations.WebsiteConnectionOperation.objects, "select_for_update") as selected:

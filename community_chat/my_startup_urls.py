@@ -16,7 +16,11 @@ ROUTES = (
     ("vibe-marketing/github/connect", views.GitHubConnectView),
     ("vibe-marketing/github/repos", views.RepositoriesView),
     ("vibe-marketing/github/repository", views.RepositoryView),
+    ("vibe-marketing/website-metrics", views.WebsiteMetricsView),
+    ("vibe-marketing/company-billing", views.CompanyBillingView),
+    ("vibe-marketing/article", views.ArticleView),
     ("vibe-marketing/website-connection", views.WebsiteConnectionView),
+    ("vibe-marketing/website-connection/operations/<uuid:operation_id>", views.WebsiteConnectionOperationView),
     ("vibe-marketing/website-connection/<str:action>", views.WebsiteConnectionActionView),
     ("vibe-marketing/notifications/channels", views.NotificationChannelsView),
     ("vibe-marketing/notifications/channels/delivery", views.NotificationDeliveryView),
@@ -38,3 +42,7 @@ ROUTES = (
 )
 
 urlpatterns = [path(route + suffix, view.as_view()) for route, view in ROUTES for suffix in ("", "/")]
+
+urlpatterns += [path(f"vibe-marketing/runs/<str:run_id>/{action}{suffix}",
+    views.ArticleRunActionView.as_view(), {"action": action})
+    for action in ("approve", "publish-pr", "resume", "restart", "deny") for suffix in ("", "/")]

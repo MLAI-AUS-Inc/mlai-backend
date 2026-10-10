@@ -37,11 +37,13 @@ class ReconciledRunIdentityTests(SimpleTestCase):
         website_operations = import_module("content_factory.website_operations")
         guard = (lambda *a, **kw: nullcontext()) if denial is None else Mock(side_effect=denial)
         with patch.object(website_connections, "authority_guard", side_effect=guard), \
+                patch("content_factory.run_observations.proven_run", return_value=None) as provenance, \
                 patch.object(website_operations, "observe_workflow_status"), \
                 patch.object(service_views, "_sync_content_factory_run_snapshot",
                              side_effect=self.fixture.ns["_sync_content_factory_run_snapshot"]) as sync:
             result = reconciliation._adopt_remote_payload(self.run, snapshot)
             self.synced = sync.called
+            self.observation_attempted = provenance.called
             return result
 
     def test_sparse_remote_status_keeps_repository_domain_and_actor_through_real_snapshot_sync(self):
@@ -64,6 +66,7 @@ class ReconciledRunIdentityTests(SimpleTestCase):
             with self.subTest(change=change):
                 self.reconcile({**self.snapshot, **change})
                 self.assertFalse(self.synced)
+                self.assertFalse(self.observation_attempted)
                 self.assertEqual(self.run.github_repo, "fixture/site")
                 self.assertEqual(self.run.run_request, self.original)
 

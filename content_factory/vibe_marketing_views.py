@@ -442,6 +442,9 @@ ARTICLE_SYSTEM_SETUP_BLOCKING_STATUSES = {
     "manual_blocked",
     "completed",
     *ARTICLE_SYSTEM_SETUP_MERGED_STATUSES,
+    # Adoption proves the existing pages; a missing verification kit can still
+    # require its PR to merge before the website becomes publish-ready.
+    "adopted",
 }
 # content-factory setup statuses that deliberately do NOT hold the wizard:
 # terminal user decisions (denied/cancelled) and scan-classification verdicts
@@ -691,6 +694,9 @@ def _roo_points_response(*, domain: str, action: str, current_balance: int, cost
 
 
 def _require_roo_points_for_ai_agent(user, *, domain: str, action: str):
+    from content_factory.billing import FREE_SETUP_ACTIONS
+    if action in FREE_SETUP_ACTIONS:
+        return None, None
     required_points = get_content_factory_ai_agent_required_points(domain)
     if required_points <= 0:
         return None, None
@@ -706,14 +712,16 @@ def _require_roo_points_for_ai_agent(user, *, domain: str, action: str):
 
 
 def _mark_roo_points_gate_authorized(payload: dict, *, domain: str, action: str, current_balance: int | None) -> None:
+    from content_factory.billing import FREE_SETUP_ACTIONS
+    free = action in FREE_SETUP_ACTIONS or is_free_content_factory_domain(domain)
     payload.update(
         build_roo_points_authorization_payload(
             domain=domain,
             action=action,
             cost_points=0,
-            required_points=get_content_factory_ai_agent_required_points(domain),
+            required_points=0 if free else get_content_factory_ai_agent_required_points(domain),
             current_balance=current_balance,
-            billing_status="free" if is_free_content_factory_domain(domain) else "gated",
+            billing_status="free" if free else "gated",
         )
     )
 
@@ -726,6 +734,48 @@ def _quoted_price_response(request, *, cost_points):
         return Response({"detail": "The Roo point price changed. Review the updated price before continuing.",
                          "code": "roo_points_quote_changed", "costPoints": cost_points}, status=409)
     return None
+
+
+def _reserve_article_start_connection(context, payload):
+    """Validate and persist the original operation before billing or delivery."""
+    if payload.get("delivery_mode") != "content_only":
+        try:
+            config = _get_config(context.organization)
+            website = config.website_connection
+            if website is None:
+                raise WebsiteAuthorityError("website_connection_required", "Prepare this website before generating an article.")
+            supplied = connection_contract(payload) or connection_contract(owner_operation_contract())
+            if supplied and any(connection_contract(contract_for(website)).get(key) != value for key, value in supplied.items() if key != "connection_target_id"):
+                raise WebsiteAuthorityError("website_connection_changed", "The website changed before the article charge.")
+            payload.update(contract_for(website))
+            from .website_operations import reserve_workflow_operation
+            reserve_workflow_operation(website, workflow="article_generation", payload=payload)
+        except WebsiteAuthorityError as exc:
+            return Response(exc.as_dict(), status=exc.status)
+    return None
+
+
+def _validate_article_start_admission(context, user, actor_id, article_request):
+    """Perform provider-backed admission outside the charge transaction."""
+    from integrations.services.article_generation import require_article_activation
+    require_article_activation(domain=context.organization.domain, actor_id=actor_id, user=user, article_request=article_request)
+
+
+def _validate_article_start_reservation(context, payload):
+    """Recheck the persisted consent and operation under billing transaction locks."""
+    if payload.get("delivery_mode") == "content_only":
+        return
+    from organizations.models import Organization
+    from .website_models import WebsiteConnection
+    from .website_contract import validate_authority
+    from .website_operations import validate_operation
+    Organization.objects.select_for_update().get(pk=context.organization.pk)
+    website = WebsiteConnection.objects.select_for_update().get(pk=payload["website_connection_id"])
+    config = OrganizationContentConfig.objects.select_for_update().filter(organization=context.organization).first()
+    if config is None or config.website_connection_id != website.pk:
+        raise WebsiteAuthorityError("website_connection_changed", "The selected website changed before billing.")
+    validate_authority(website, payload, action="read", domain=context.organization.domain, github_repo=payload.get("github_repo", ""))
+    validate_operation(website, payload)
 
 
 def _charge_roo_points_for_article(request, *, context, payload: dict):
@@ -750,37 +800,56 @@ def _charge_roo_points_for_article(request, *, context, payload: dict):
         "user_last_name": getattr(request.user, "last_name", ""),
         "user_avatar_url": getattr(request.user, "avatar_url", ""),
     }
+    connection_error = _reserve_article_start_connection(context, payload)
+    if connection_error is not None:
+        return None, None, None, connection_error
+    article_request.update(payload)
     try:
-        charged_user, charge_ledger, charge_amount = charge_content_factory_request_for_user(
-            user=request.user,
-            actor_id=actor_id,
-            article_request=article_request,
-            resolved_domain=domain,
-        )
-    except InsufficientRooPointsError as exc:
-        return None, None, None, Response(
-            getattr(exc, "payload", None) or build_roo_points_payload(
-                domain=domain,
-                action="article_generation",
-                current_balance=_roo_points_balance_for_user(request.user),
-                required_points=CONTENT_FACTORY_MINIMUM_AI_AGENT_POINTS,
-                cost_points=get_content_factory_article_cost_points(domain),
-            ),
-            status=status.HTTP_402_PAYMENT_REQUIRED,
-        )
+        _validate_article_start_admission(context, request.user, actor_id, article_request)
+    except (ArticleGenerationError, WebsiteAuthorityError) as exc:
+        return None, None, None, Response({"detail": str(exc), "code": getattr(exc, "code", "article_admission_required")}, status=409)
+    with transaction.atomic():
+        try:
+            _validate_article_start_reservation(context, payload)
+            charged_user, charge_ledger, charge_amount = charge_content_factory_request_for_user(
+                user=request.user,
+                actor_id=actor_id,
+                article_request=article_request,
+                resolved_domain=domain,
+                prevalidated_admission=True,
+            )
+        except InsufficientRooPointsError as exc:
+            return None, None, None, Response(
+                getattr(exc, "payload", None) or build_roo_points_payload(
+                    domain=domain,
+                    action="article_generation",
+                    current_balance=_roo_points_balance_for_user(request.user),
+                    required_points=CONTENT_FACTORY_MINIMUM_AI_AGENT_POINTS,
+                    cost_points=get_content_factory_article_cost_points(domain),
+                ),
+                status=status.HTTP_402_PAYMENT_REQUIRED,
+            )
 
-    payload.update(
-        build_roo_points_authorization_payload(
-            domain=domain,
-            action=CONTENT_FACTORY_ACTION_ARTICLE_GENERATION,
-            cost_points=charge_amount,
-            required_points=get_content_factory_ai_agent_required_points(domain),
-            current_balance=_roo_points_balance_for_user(request.user),
-            billing_status="charged" if charge_amount > 0 else "free",
-            ledger_id=getattr(charge_ledger, "id", None),
+        except (ArticleGenerationError, WebsiteAuthorityError) as exc:
+            return None, None, None, Response({"detail": str(exc), "code": getattr(exc, "code", "company_billing_founder_unavailable")}, status=409)
+
+        payload.update(
+            build_roo_points_authorization_payload(
+                domain=domain,
+                action=CONTENT_FACTORY_ACTION_ARTICLE_GENERATION,
+                cost_points=charge_amount,
+                required_points=get_content_factory_ai_agent_required_points(domain),
+                current_balance=_roo_points_balance_for_user(charged_user),
+                billing_status="charged" if charge_amount > 0 else "free",
+                ledger_id=getattr(charge_ledger, "id", None),
+            )
         )
-    )
-    return charged_user, charge_ledger, article_request, None
+        payload.update(roo_points_requested_by_user_id=request.user.pk, roo_points_billing_user_id=charged_user.pk)
+        from content_factory.dispatch_outbox import reserve_dispatch
+        payload["dispatch_outbox_reserved"] = True
+        reserve_dispatch(organization=context.organization, payload=payload,
+            billing_user_id=charged_user.pk, actor_id=actor_id)
+        return charged_user, charge_ledger, article_request, None
 
 
 def _charge_roo_points_for_content_island_topic_generation(request, *, context, payload: dict, scope_request_id=True):
@@ -7112,6 +7181,25 @@ def _restart_article_payload_from_run(*, run, context, config, actor_id):
     return payload
 
 
+def _reserve_article_restart(*, run, context, payload, receipt):
+    """Reserve one replacement child before delivery without holding provider locks."""
+    from content_factory.website_contract import SECRET_KEYS
+    with transaction.atomic():
+        Organization.objects.select_for_update().get(pk=context.organization.pk)
+        current = ContentFactoryRun.objects.select_for_update().get(run_id=run.run_id, organization_id=context.organization.pk)
+        previous = (current.result or {}).get("restart_receipt") or {}
+        if previous.get("state") in {"pending", "running"}:
+            return Response({"code": "restart_pending", "detail": "Your restart is already being confirmed. This page will update.",
+                             "runId": run.run_id, "charged": False}, status=status.HTTP_409_CONFLICT)
+        previous_actions = (current.result or {}).get("user_action_count")
+        receipt["user_action_count"] = (max(0, previous_actions) if type(previous_actions) is int else 0) + 1
+        receipt["dispatch_payload"] = {key: value for key, value in payload.items() if key not in SECRET_KEYS}
+        run.result = {**(current.result or {}), "restart_receipt": receipt}
+        current.result = run.result
+        current.save(update_fields=["result", "updated_at"])
+    return None
+
+
 def _restart_article_run(*, run, context):
     if run.workflow not in RESTARTABLE_ARTICLE_WORKFLOWS:
         return None, Response(
@@ -7169,20 +7257,42 @@ def _restart_article_run(*, run, context):
     if billing_error is not None:
         return None, billing_error
 
-    client_request_id = str(payload.get("client_request_id") or f"vibe-article-restart:{run.run_id}:{uuid.uuid4().hex}").strip()
+    client_request_id = f"vibe-article-restart:{run.run_id}:{uuid.uuid4().hex}"
     payload["client_request_id"] = client_request_id
-    restarted_run = _queue_content_factory_run(
-        endpoint="article",
-        workflow="article_generation",
-        context=context,
-        config=config,
-        payload=payload,
-    )
-    result = run.result or {}
-    result["restart_child_run_id"] = restarted_run.run_id
-    result["restart_requested_at"] = timezone.now().isoformat()
-    run.result = result
+    payload.pop("dispatch_outbox_reserved", None)
+    reservation_error = _reserve_article_start_connection(context, payload)
+    if reservation_error is not None:
+        return None, reservation_error
+    requested_at = timezone.now().isoformat()
+    receipt = {"client_request_id": client_request_id, "state": "pending", "requested_at": requested_at,
+               "reused_authorization": "reserved", "charged": False}
+    reservation_error = _reserve_article_restart(run=run, context=context, payload=payload, receipt=receipt)
+    if reservation_error is not None:
+        return None, reservation_error
+    try:
+        restarted_run = _queue_content_factory_run(
+            endpoint="article", workflow="article_generation", context=context, config=config, payload=payload)
+        if restarted_run.status in FAILED_RUN_STATUSES:
+            raise RuntimeError("The replacement article was not accepted.")
+    except Exception as exc:
+        logger.warning("article_restart_rejected run_id=%s request=%s error=%s", run.run_id, client_request_id, type(exc).__name__)
+        # Reuse grants no new debit. Release this receipt's provisional grant;
+        # the original paid draft retains its verified billing lineage.
+        receipt.update(state="failed", reused_authorization="released", error_code="dispatch_rejected",
+                       finished_at=timezone.now().isoformat())
+        run.result = {**(run.result or {}), "restart_receipt": receipt}
+        run.save(update_fields=["result", "updated_at"])
+        return None, Response({"detail": "The restart could not start. Try again.", "code": "dispatch_rejected",
+                               "charged": False}, status=status.HTTP_503_SERVICE_UNAVAILABLE)
+    receipt.update(state="completed", child_run_id=restarted_run.run_id, reused_authorization="accepted",
+                   finished_at=timezone.now().isoformat())
+    actions = receipt["user_action_count"]
+    run.result = {**(run.result or {}), "restart_receipt": receipt, "restart_child_run_id": restarted_run.run_id,
+                  "restart_requested_at": requested_at, "user_action_count": actions}
     run.save(update_fields=["result", "updated_at"])
+    restarted_run.result = {**(restarted_run.result or {}), "user_action_count": actions}
+    restarted_run.save(update_fields=["result", "updated_at"])
+
     if restarted_run.status not in FAILED_RUN_STATUSES:
         _mark_keyword_in_progress(context.organization, payload["target_keyword"])
     return restarted_run, None
@@ -10731,6 +10841,8 @@ def _serialize_run(
     scan_progress, scan_progress_snake = _scan_progress_payloads(run)
     content_island = _run_content_island_payload(run)
     saved_request = _run_mapping(getattr(run, "run_request", {}))
+    from content_factory.billing import public_run_billing_receipt
+    billing_receipt = public_run_billing_receipt(saved_request, result)
     saved_brief = saved_request.get("editorial_brief") or saved_request.get("editorialBrief")
     editorial_snapshot = ({"schema_version": 1, "writing_run_id": run.run_id,
         "recorded_at": run.created_at.isoformat(), "brief": saved_brief,
@@ -10739,6 +10851,7 @@ def _serialize_run(
     if compact:
         return {
             "runId": run.run_id,
+            **billing_receipt,
             **connection_contract(run.run_request or {}),
             "editorialSnapshot": editorial_snapshot,
             "workflow": run.workflow,
@@ -10813,6 +10926,7 @@ def _serialize_run(
     ) if run.workflow in ARTICLE_WORKFLOWS else result
     return {
         "runId": run.run_id,
+        **billing_receipt,
             **connection_contract(run.run_request or {}),
             "editorialSnapshot": editorial_snapshot,
         "workflow": run.workflow,
@@ -11605,7 +11719,8 @@ def _timed_vibe_response(payload, *, started_at, metric_name, view=None, respons
     elapsed_ms = (time.perf_counter() - started_at) * 1000
     payload_bytes = 0
     try:
-        payload_bytes = len(json.dumps(payload, default=str).encode("utf-8"))
+        from rest_framework.renderers import JSONRenderer
+        payload_bytes = len(JSONRenderer().render(payload))
     except (TypeError, ValueError):
         payload_bytes = 0
     logger.info(
@@ -13177,7 +13292,7 @@ def _lookup_content_factory_dispatch_by_key(remote_config, client_request_id):
         if key_status == "dispatched" and str(payload.get("run_id") or "").strip():
             return "dispatched", payload
         if key_status == "failed":
-            return "absent", payload
+            return "rejected" if str(payload.get("error") or "").startswith("backend_rejected:") else "absent", payload
         # "claimed": a dispatch is (or died) mid-flight — not provable either way.
         return "unknown", payload
     if response.status_code == 404:
@@ -13302,6 +13417,22 @@ def _resolve_dispatch_token_run(run):
             remote_run_id=lookup_payload.get("run_id"),
         )
         return bound
+    if outcome == "rejected":
+        result = dict(run.result or {})
+        result.update(error_code="dispatch_rejected", backend_code=str(lookup_payload.get("error", "")).removeprefix("backend_rejected:"),
+                      error="The article start was rejected before entering the queue. Points have been refunded. Try again.", retryable=True)
+        run.result = result
+        run.error = result["error"]
+        run.status = ContentFactoryRunStatus.FAILED
+        run.run_request = {**(run.run_request or {}), "dispatch_pending_resolution": False}
+        run.save(update_fields=["result", "error", "status", "run_request", "updated_at"])
+        _process_pending_dispatch_refund(run)
+        return run
+    if (run.run_request or {}).get("dispatch_outbox_reserved"):
+        from content_factory.dispatch_models import ContentFactoryDispatchOutbox
+        row = ContentFactoryDispatchOutbox.objects.filter(client_request_id=token).first()
+        if row and row.state in {"pending", "delivering", "refund_pending", "awaiting_resolution"}:
+            return None
     if outcome == "absent":
         age_seconds = (timezone.now() - run.created_at).total_seconds()
         if age_seconds < CONTENT_FACTORY_DISPATCH_ABSENT_GRACE_SECONDS:
@@ -13363,6 +13494,7 @@ def _queue_content_factory_run_authorized(*, endpoint, workflow, context, config
     keyed_dispatch = endpoint in CONTENT_FACTORY_KEYED_DISPATCH_ENDPOINTS
     dispatch_unresolved = False
     portable_reservation = None
+    editorial_rejection = None
     requires_remote = workflow == "startup_autofill" or _remote_required_for_workflow(workflow)
     if requires_remote and not remote_config["enabled"]:
         technical_error = _content_factory_unavailable_message(remote_config)
@@ -13510,6 +13642,10 @@ def _queue_content_factory_run_authorized(*, endpoint, workflow, context, config
                 or response.text
                 or f"Content Factory returned {response.status_code}."
             )
+            rejection = detail if isinstance(detail, dict) else response_payload
+            explicitly_rejected = isinstance(rejection, dict) and rejection.get("code") == "dispatch_rejected"
+            if explicitly_rejected:
+                detail = "The article start was rejected before it entered the queue. Any charged points have been refunded. Try again."
             logger.warning(
                 "content_factory_dispatch_blocked workflow=%s endpoint=%s status_code=%s",
                 workflow,
@@ -13525,10 +13661,11 @@ def _queue_content_factory_run_authorized(*, endpoint, workflow, context, config
                 diagnostics=_content_factory_diagnostics(remote_config, workflow=workflow, endpoint=endpoint),
                 retryable=response.status_code >= 500,
             )
-            # A 5xx can land AFTER content-factory enqueued (the endpoint's
-            # generic handler). Only a definitive 4xx rejection proves no run
-            # exists; a keyed 5xx stays ambiguous until the key resolves.
-            if keyed_dispatch and response.status_code >= 500:
+            if explicitly_rejected:
+                remote_data.update(status="failed", error_code="dispatch_rejected", backend_code=rejection.get("backend_code"), retryable=True)
+            # A later generic HTTP refusal can follow an earlier accepted POST.
+            # Only the keyed rejection receipt proves no run owns this identity.
+            if keyed_dispatch and not explicitly_rejected:
                 dispatch_unresolved = True
         else:
             logger.warning(
@@ -13547,6 +13684,20 @@ def _queue_content_factory_run_authorized(*, endpoint, workflow, context, config
                 # The POST may have been processed after our read timeout; the
                 # run is provisional until the key lookup proves it either way.
                 dispatch_unresolved = True
+
+    if payload.get("dispatch_outbox_reserved"):
+        from content_factory.dispatch_outbox import mark_dispatch_delivered
+        from content_factory.dispatch_models import ContentFactoryDispatchOutbox
+        if remote_run_id:
+            mark_dispatch_delivered(dispatch_key, remote_run_id)
+        elif remote_data.get("error_code") == "dispatch_rejected":
+            ContentFactoryDispatchOutbox.objects.filter(client_request_id=dispatch_key, state__in=["pending", "delivering"]).update(
+                state="refund_pending", last_error=remote_data.get("error_code") or "dispatch_rejected", updated_at=timezone.now())
+        else:
+            dispatch_unresolved = True
+            if editorial_rejection is None:
+                remote_data = {"status": "queued", "message": "Starting your article. Delivery will retry automatically.",
+                               "client_request_id": dispatch_key, "retryable": True}
 
     with transaction.atomic() if portable_reservation is not None else nullcontext():
         if portable_reservation is not None:
@@ -13596,6 +13747,9 @@ def _queue_content_factory_run_authorized(*, endpoint, workflow, context, config
                     _refund_roo_points_for_content_island_topic_start(**refund_kwargs)
                 else:
                     _refund_roo_points_for_article_start(**refund_kwargs)
+                if payload.get("dispatch_outbox_reserved"):
+                    ContentFactoryDispatchOutbox.objects.filter(client_request_id=dispatch_key, state="refund_pending").update(
+                        state="failed", updated_at=timezone.now())
 
         if dispatch_unresolved:
             # Marks the provisional run for poll-time resolution (bind to the real
@@ -13616,7 +13770,7 @@ def _queue_content_factory_run_authorized(*, endpoint, workflow, context, config
             bind_portable_dispatch_snapshot(remote_run_id=remote_run_id,
                 payload={"domain": context.organization.domain, "workflow": workflow,
                          "run_id": remote_run_id, "run_request": payload})
-        return _create_local_run(
+        run = _create_local_run(
             workflow=workflow,
             domain=context.organization.domain,
             github_repo="" if payload.get("delivery_mode") == "content_only" else config.github_repo or payload.get("github_repo") or "",
@@ -13625,6 +13779,27 @@ def _queue_content_factory_run_authorized(*, endpoint, workflow, context, config
             remote_data=remote_data,
             fallback_run_id=remote_run_id or dispatch_key,
         )
+        if remote_run_id and run.status == "cancelled" and billing_refund_context:
+            # The worker accepted the original identity after consent changed.
+            # Its cancelled history and cleanup receipt survive; settle only
+            # the same recorded payer's debit, with durable refund retries.
+            if payload.get("dispatch_outbox_reserved"):
+                ContentFactoryDispatchOutbox.objects.filter(client_request_id=dispatch_key,
+                    state__in=["pending", "delivering", "delivered"]).update(state="refund_pending",
+                        run_id=remote_run_id, last_error="website_connection_changed", updated_at=timezone.now())
+            try:
+                refund = _refund_roo_points_for_content_island_topic_start if billing_refund_context.get("kind") == CONTENT_FACTORY_ACTION_CONTENT_ISLAND_TOPIC_GENERATION else _refund_roo_points_for_article_start
+                refund(charged_user=billing_refund_context.get("charged_user"), actor_id=actor_id,
+                    article_request=billing_refund_context.get("article_request") or {},
+                    domain=context.organization.domain, reason="Website authority changed before article delivery.")
+                if payload.get("dispatch_outbox_reserved"):
+                    ContentFactoryDispatchOutbox.objects.filter(client_request_id=dispatch_key,
+                        state="refund_pending").update(state="failed", updated_at=timezone.now())
+            except Exception:
+                run.result = {**(run.result or {}), "reconciliation_refund_pending": True}
+                run.save(update_fields=["result", "updated_at"])
+                logger.warning("content_factory_late_dispatch_refund_pending run_id=%s", run.run_id)
+        return run
 
 
 def _run_start_payload(run):
@@ -18353,6 +18528,10 @@ class VibeMarketingRunControlView(APIView):
                 run.approval_state = ContentFactoryApprovalState.DENIED
                 run.status = ContentFactoryRunStatus.DENIED
             elif action == "resume":
+                if run.workflow in ARTICLE_WORKFLOWS and not remote_data.get("already_queued"):
+                    previous_actions = (run.result or {}).get("user_action_count")
+                    run.result = {**(run.result or {}), "user_action_count":
+                                  (max(0, previous_actions) if type(previous_actions) is int else 0) + 1}
                 run.resume_available = True
                 if run.status in {ContentFactoryRunStatus.FAILED, ContentFactoryRunStatus.BLOCKED, ContentFactoryRunStatus.DENIED}:
                     run.status = ContentFactoryRunStatus.QUEUED

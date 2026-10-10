@@ -498,7 +498,7 @@ def run_action_authority(run, action):
     return "setup"
 
 
-def guarded_service_write(action, *, only_repository=False, remote_actions=(), portable=False, cancellation_receipts=False):
+def guarded_service_write(action, *, only_repository=False, remote_actions=(), portable=False, cancellation_receipts=False, observation_fallback=False):
     """Fence legacy service handlers without weakening their existing permissions."""
     def decorate(method):
         @wraps(method)
@@ -557,6 +557,8 @@ def guarded_service_write(action, *, only_repository=False, remote_actions=(), p
                         response = None
                     if action == "config_write" and effective_action != "cancel_receipt" and response is not None and response.status_code < 300:
                         record_scan_evidence(connection, payload)
+                        from .website_prepare import wake_prepare_after_commit
+                        wake_prepare_after_commit(connection.pk)
                         if run_id:
                             run = ContentFactoryRun.objects.filter(run_id=run_id).first()
                             if run:
@@ -574,6 +576,23 @@ def guarded_service_write(action, *, only_repository=False, remote_actions=(), p
                 with owner_operation_scope(payload):
                     return method(self, request, *args, **kwargs)
             except WebsiteAuthorityError as exc:
+                if observation_fallback and exc.code not in {
+                    "run_cancelled", "website_operation_cancelled", "website_data_deleted", "website_connection_deleted",
+                }:
+                    from .run_observations import observation_payload, proven_run
+                    run_id = str(kwargs.get("run_id") or payload.get("run_id") or "")
+                    original = proven_run(run_id, payload)
+                    if original is not None:
+                        from .service_views import _apply_run_snapshot
+                        safe = observation_payload(payload, original)
+                        refusals = list((safe.get("result") or {}).get("authority_refusals") or [])
+                        refusals.append({"at": timezone.now().isoformat(), "code": exc.code})
+                        safe["result"] = {**(safe.get("result") or {}), "authority_refusals": refusals[-100:]}
+                        response = _apply_run_snapshot(run_id, safe)
+                        if response.status_code < 300:
+                            response.status_code = 200
+                            response.data.update(sync_status="observation_only", authority_denied={"code": exc.code, "message": str(exc)})
+                        return response
                 recorded = record_denied_terminal_callback(payload, exc)
                 return Response({**exc.as_dict(), "terminal_failure_recorded": recorded}, status=exc.status)
         return wrapped
@@ -1047,7 +1066,7 @@ def dispatch_contract(domain, payload, *, action="read", source_run_id=""):
 
 
 
-def _verified_setup_run_base(run, head_sha, website):
+def _verified_setup_run_base(run, head_sha, website, *, automatic_approval=False):
     """Read the worker's exact approved setup proof before a target exists."""
     from .website_contract import SHA_PATTERN
     saved = scoped_run_contract(run)
@@ -1060,10 +1079,19 @@ def _verified_setup_run_base(run, head_sha, website):
         return ""
     base_sha = str(saved.get("expected_source_sha") or "")
     generation = result.get("resume_generation")
+    approved_setup = (run.approval_state == "approved" and result.get("status") == "setup_pr_created"
+        and setup.get("status") == "pr_created")
+    pending_setup = (automatic_approval and run.status == "awaiting_approval" and run.approval_state == "approval_required"
+        and result.get("status") == "preview_ready" and setup.get("status") == "preview_ready")
+    adopted_kit = (run.approval_state == "not_required" and result.get("status") == "adopted"
+        and setup.get("status") == "adopted" and result.get("adopted") is True and setup.get("adopted") is True
+        and result.get("verification_kit_required") is True and result.get("adoption_kit_preview_verified") is True
+        and result.get("preview_commit_sha") == head_sha and setup.get("preview_commit_sha") == head_sha
+        and result.get("build_verified") is True and result.get("browser_verified") is True
+        and setup.get("build_verified") is True and setup.get("browser_verified") is True)
     if (
         run.workflow != "article_system_setup"
-        or run.status != "completed" or run.approval_state != "approved"
-        or result.get("status") != "setup_pr_created" or setup.get("status") != "pr_created"
+        or not (run.status == "completed" and (approved_setup or adopted_kit) or pending_setup)
         or setup.get("setup_run_id") != run.run_id
         or not SHA_PATTERN.fullmatch(base_sha)
         or (website.verified_sha and website.verified_sha != base_sha)
