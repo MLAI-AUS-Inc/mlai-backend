@@ -7,6 +7,8 @@ from rest_framework.exceptions import NotFound, ValidationError
 from rest_framework.permissions import IsAuthenticated
 
 from founder_tools.my_startup.api import MyStartupAuthentication, MyStartupViewMixin
+from content_factory.website_metrics import WebsiteMetricsView as ContentWebsiteMetricsView
+from content_factory.company_billing import CompanyBillingView as ContentCompanyBillingView
 from content_factory.article_review_views import VibeMarketingArticleReviewView
 from content_factory.article_preview_lease import ArticlePreviewLeaseView
 from content_factory import vibe_marketing_views as marketing
@@ -235,3 +237,30 @@ class ArticleCommentsView(MyStartupAccess, marketing.VibeMarketingRunCommentsVie
 
 class ArticleCommentView(MyStartupAccess, marketing.VibeMarketingRunCommentDetailView):
     """Update or delete a draft comment within the selected startup."""
+
+
+class CompanyBillingView(MyStartupAccess, ContentCompanyBillingView):
+    """Permit a selected founder to opt in their own billing account."""
+
+
+class ArticleView(MyStartupAccess, marketing.VibeMarketingArticleView):
+    """Start a paid draft within the selected startup."""
+
+
+class ArticleRunActionView(MyStartupAccess, marketing.VibeMarketingRunControlView):
+    """Only drafting and reviewed publication controls are exposed to Chat."""
+    def post(self, request, run_id, action):
+        if action not in {"approve", "publish-pr", "resume", "restart", "deny"}:
+            from rest_framework.response import Response
+            return Response({"detail": "Unknown article action."}, status=404)
+        return super().post(request, run_id, action)
+
+
+class WebsiteMetricsView(MyStartupAccess, ContentWebsiteMetricsView):
+    """Read bounded article outcomes only for the selected startup."""
+    startup_read_bucket = "settings"
+
+
+class WebsiteConnectionOperationView(MyStartupAccess, websites.WebsiteConnectionOperationView):
+    """Read a single persisted operation under the selected company's consent."""
+    startup_read_bucket = "run"

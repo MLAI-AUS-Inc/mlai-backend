@@ -339,38 +339,44 @@ class VibeMarketingComponentCommentTests(_PublishRetryApprovalFixture, TestCase)
         )
         return config, account
 
-    def test_vibe_configuration_routes_require_six_roo_points_without_spending(self):
-        _config, account = self._prepare_billable_vibe_context(balance=5)
+    def test_website_preparation_is_free_with_zero_roo_balance(self):
+        _config, account = self._prepare_billable_vibe_context(balance=0)
+        queued_payloads = {}
 
-        with patch(
-            "content_factory.vibe_marketing_views._queue_content_factory_run",
-            side_effect=AssertionError("AI route should not queue without enough Roo points"),
-        ):
+        def fake_queue(endpoint, workflow, context, config, payload, **kwargs):
+            queued_payloads[endpoint] = dict(payload)
+            return self._create_bound_run(
+                run_id=f"{endpoint}-free-setup-run",
+                workflow=workflow,
+                domain=context.organization.domain,
+                github_repo=config.github_repo,
+                status=ContentFactoryRunStatus.QUEUED,
+                result={},
+            )
+
+        with patch("content_factory.vibe_marketing_views._queue_content_factory_run", side_effect=fake_queue):
             requests = [
-                (
-                    "/api/v1/vibe-marketing/autofill/",
-                    {"companyName": "Example", "domain": "example.com"},
-                ),
-                ("/api/v1/vibe-marketing/baseline/", {}),
-                (
-                    "/api/v1/vibe-marketing/scan/",
-                    {"githubRepo": "example/site", "scanPurpose": "inventory"},
-                ),
-                (
-                    "/api/v1/vibe-marketing/article-system-setup/",
-                    {"githubRepo": "example/site", "articleSurfaceUrl": "/articles"},
-                ),
+                ("autofill", "/api/v1/vibe-marketing/autofill/", {"companyName": "Example", "domain": "example.com"}),
+                ("baseline", "/api/v1/vibe-marketing/baseline/", {}),
+                ("scan", "/api/v1/vibe-marketing/scan/", {"githubRepo": "example/site", "scanPurpose": "inventory"}),
+                ("article-system-setup", "/api/v1/vibe-marketing/article-system-setup/", {"githubRepo": "example/site", "articleSurfaceUrl": "/articles"}),
             ]
-            for path, payload in requests:
+            for endpoint, path, payload in requests:
                 response = self.client.post(path, payload, format="json")
-                self.assertEqual(response.status_code, 402, path)
-                self.assertEqual(response.data["error_code"], "INSUFFICIENT_ROO_POINTS")
-                self.assertEqual(response.data["required_points"], 6)
-                self.assertEqual(response.data["current_balance"], 5)
-                self.assertEqual(response.data["cost_points"], 0)
+                if endpoint in {"autofill", "baseline"}:
+                    self.assertEqual(response.status_code, 402, path)
+                    self.assertEqual(response.data["required_points"], 6)
+                    self.assertNotIn(endpoint, queued_payloads)
+                    continue
+                self.assertEqual(response.status_code, 202, path)
+                self.assertIn(endpoint, queued_payloads)
+                self.assertTrue(queued_payloads[endpoint]["roo_points_authorized"])
+                self.assertEqual(queued_payloads[endpoint]["roo_points_required"], 0)
+                self.assertEqual(queued_payloads[endpoint]["roo_points_cost"], 0)
+                self.assertEqual(queued_payloads[endpoint]["roo_points_billing_status"], "free")
 
         account.refresh_from_db()
-        self.assertEqual(account.balance, 5)
+        self.assertEqual(account.balance, 0)
         self.assertEqual(account.lifetime_spent, 0)
 
     def test_vibe_configuration_routes_authorize_without_spending(self):
@@ -413,8 +419,12 @@ class VibeMarketingComponentCommentTests(_PublishRetryApprovalFixture, TestCase)
                 self.assertIn(endpoint, queued_payloads)
                 self.assertTrue(queued_payloads[endpoint]["roo_points_authorized"])
                 self.assertEqual(queued_payloads[endpoint]["roo_points_cost"], 0)
-                self.assertEqual(queued_payloads[endpoint]["roo_points_required"], 6)
-                self.assertEqual(queued_payloads[endpoint]["roo_points_balance"], 6)
+                if endpoint in {"scan", "article-system-setup"}:
+                    self.assertEqual(queued_payloads[endpoint]["roo_points_required"], 0)
+                    self.assertEqual(queued_payloads[endpoint]["roo_points_billing_status"], "free")
+                else:
+                    self.assertEqual(queued_payloads[endpoint]["roo_points_required"], 6)
+                    self.assertEqual(queued_payloads[endpoint]["roo_points_balance"], 6)
 
         account.refresh_from_db()
         self.assertEqual(account.balance, 6)
