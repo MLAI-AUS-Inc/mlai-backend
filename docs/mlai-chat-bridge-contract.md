@@ -1,5 +1,10 @@
 # MLAI Chat bridge contract
 
+Server account unread and Slack read sync are implemented behind default-off
+flags. Follow [the coordinated inbox rollout](mlai-chat-inbox-rollout.md) for
+capability prerequisites, controlled acceptance, rollback and retained legacy
+client paths. Implementation approval does not establish deployed state.
+
 The membership adapter's `inbox_erasure_v1` capability supports private
 `DELETE /v2/inbox-accounts/{account_key}` after access revocation. Successful
 responses echo `community_id`, `account_key`, status `erased`, integer
