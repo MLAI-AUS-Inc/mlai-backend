@@ -80,7 +80,12 @@ def give_up_on_disconnect(cursor):
     state = dict((cursor or {}).get(KEY) or {})
     for key, value in list(state.items()):
         state = settle(state, key, int(value.get('received') or 0))
-    return {KEY: state} if state else {}
+    from .inbox_observations import REVISION_KEY
+    result = {KEY: state} if state else {}
+    revision = (cursor or {}).get(REVISION_KEY)
+    if type(revision) is int and 0 < revision <= I64_MAX:
+        result[REVISION_KEY] = revision
+    return result
 
 
 def confirmed_read(connection, target, source_ts):
@@ -275,6 +280,9 @@ def flush_once(grant, authority, keys):
             _, connection = reads._lock_slack_grant_api_authority(authority, required_scopes={target.read_scope})
             state = dict((connection.sync_cursor or {}).get(KEY) or {})
             save(connection, settle(state, key, pending['revision']))
+            if result.get('synced') and pending['op'] == 'unread':
+                from .inbox_observations import confirmed_locked
+                confirmed_locked(connection, authority, target, result['last_read'], observed_at=time.time())
             return 1
         return None
 

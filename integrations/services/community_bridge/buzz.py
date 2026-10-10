@@ -243,6 +243,39 @@ class BuzzBridgeClient:
             raise BuzzBridgeError("MLAI Chat adapter did not accept the read notification")
 
     @classmethod
+    def inbox_export_frontier(cls, *, community_id, account_key, channel_id, consented_at):
+        """Recover a signed, scope-checked pre-consent permanent give-up frontier."""
+        payload = {'account_key': account_key, 'channel_id': str(uuid.UUID(str(channel_id))),
+                   'consented_at': consented_at.isoformat().replace('+00:00', 'Z')}
+        result = cls._post_adapter('v1/inbox-export-frontier', payload)
+        from django.utils.dateparse import parse_datetime
+        echoed = result.get('request') or {}
+        if (result.get('community_id') != community_id or not isinstance(echoed, dict)
+                or set(echoed) != set(payload)
+                or echoed.get('channel_id') != payload['channel_id']
+                or echoed.get('account_key') != account_key
+                or not isinstance(echoed.get('consented_at'), str)
+                or parse_datetime(echoed['consented_at']) != consented_at):
+            raise BuzzBridgeError('Invalid inbox consent recovery scope')
+        revision = result.get('applied_revision')
+        if not isinstance(revision, str) or not re.fullmatch(r'[0-9]+', revision) or int(revision) > 2**63 - 1:
+            raise BuzzBridgeError('Invalid inbox consent recovery revision')
+        return int(revision)
+
+    @classmethod
+    def push_inbox_cursors(cls, cursors):
+        """Deliver coalesced source observations without changing retry identities."""
+        if not 1 <= len(cursors) <= 200:
+            raise BuzzBridgePermanentError('Inbox observations require 1-200 cursors')
+        result = cls._post_adapter('v1/inbox-cursors', {'cursors': cursors})
+        responses = result.get('cursors')
+        if not isinstance(responses, list) or len(responses) != len(cursors) or any(
+            row.get('accepted') is not True for row in responses if isinstance(row, dict)
+        ) or any(not isinstance(row, dict) for row in responses):
+            raise BuzzBridgeError('Inbox observations were not accepted')
+        return responses
+
+    @classmethod
     def unregister_private_conversation(cls, channel_id: str) -> None:
         """Idempotently remove one private-channel adapter registration."""
 
