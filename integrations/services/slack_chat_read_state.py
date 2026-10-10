@@ -75,7 +75,7 @@ def _timestamp(value):
     return None
 
 
-def read_state_snapshot(details, *, kind, messages, owner_id):
+def read_state_snapshot(details, *, kind, messages, owner_id, cursor_only=False, source_activity_ts=''):
     """Combine Slack's cursor with source messages, without fabricating counts.
 
     Slack exposes unread_count_display for IMs and sometimes group DMs. For
@@ -97,6 +97,18 @@ def read_state_snapshot(details, *, kind, messages, owner_id):
         else None
     )
     latest_stamp = max(_timestamp(latest_ts) or Decimal(0), read_at)
+    if cursor_only:
+        latest_stamp = max(latest_stamp, _timestamp(source_activity_ts) or Decimal(0))
+        return {
+            'last_read': str(details['last_read']),
+            'latest_ts': format(latest_stamp, 'f'),
+            # Scheduling hint only; relay clients own all count and mention truth.
+            'is_unread': latest_stamp > read_at,
+            'unread_count': None,
+            'has_personal_mention': None,
+            'count_source': 'relay',
+            'fetched_at': time.time(),
+        }
     unread = []
     for message in messages:
         # Slack history also contains joins, leaves, topic changes and hidden
@@ -347,7 +359,12 @@ def refresh_target(grant, authority, target):
                 raise BudgetDeferred(1)
             inbox_observations.observe_locked(connection, inbox_context, details.get('last_read'), observed_at=observed_at)
         try:
-            messages, count_source, partial = _unread_messages(authority, target, details.get("last_read", "0"))
+            from .message_sync.relay_read_counts import enabled_for
+            relay_counts = enabled_for(target, inbox_context)
+            if relay_counts:
+                messages, count_source, partial = [], 'relay', False
+            else:
+                messages, count_source, partial = _unread_messages(authority, target, details.get("last_read", "0"))
         except (BudgetDeferred, SlackDmMirrorRateLimited) as exc:
             count = details.get("unread_count_display")
             if target.kind == "mpim" and type(count) is int and count >= 0:
@@ -375,7 +392,8 @@ def refresh_target(grant, authority, target):
                                                    "receipt": receipt, "expires_at": expires_at},
                                       timeout=max(1, int(expires_at - now)))
                 raise
-        snapshot = read_state_snapshot(details, kind=target.kind, owner_id=grant.slack_user_id, messages=messages)
+        snapshot = read_state_snapshot(details, kind=target.kind, owner_id=grant.slack_user_id, messages=messages,
+                                       cursor_only=count_source == 'relay', source_activity_ts=target.source_activity_ts)
         if snapshot is not None:
             snapshot["fetched_at"] = observed_at
             if snapshot["count_source"] != "slack":
