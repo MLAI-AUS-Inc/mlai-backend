@@ -441,6 +441,7 @@ def read_state_page(user, *, public_key, cursor=0, channel_ids=None):
             coverage_states = {t.channel_id: stored.get(_cache_key(authority, t)) for t in targets}
             coverage = read_coverage(
                 coverage_states,
+                source_activity={t.channel_id: t.source_activity_ts for t in targets},
                 discovery_complete=locked_grant.last_discovery_at is not None,
                 pending_channels=directory_coverage.get("pending_channels", 0),
             )
@@ -504,6 +505,7 @@ def read_state_page(user, *, public_key, cursor=0, channel_ids=None):
     coverage_states.update(results)
     coverage = read_coverage(
         coverage_states,
+        source_activity={t.channel_id: t.source_activity_ts for t in targets},
         discovery_complete=grant.last_discovery_at is not None,
         pending_channels=directory_coverage.get("pending_channels", 0),
     )
