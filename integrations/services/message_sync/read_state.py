@@ -152,6 +152,11 @@ def refresh_request_priority(target, snapshot, hint, *, now):
     activity timestamp changes scheduling only; it never asserts an unread.
     """
     from .read_priority import hint_pending
+    from django.conf import settings
+    if getattr(settings, "MESSAGE_SYNC_TARGETED_READ_POLLING", False):
+        from .targeted_reads import possibly_unread
+        if possibly_unread(target, snapshot, now=now):
+            return "foreground"
     if hint_pending(hint, now):
         return "foreground"
     try:
