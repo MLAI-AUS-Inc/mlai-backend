@@ -1569,3 +1569,30 @@ displacing hot-room probes. Legacy kind 20003 notifications remain enabled.
 
 These drafts remain disabled pending controlled Slack acceptance and the
 three-day shadow comparison. No backend migration is introduced.
+
+
+### Verified bridged mentions (default off)
+
+`MESSAGE_SYNC_INBOX_MENTIONS=false` preserves the existing delivery envelope.
+When enabled, explicit Slack user mentions resolve only through active account
+identity links and current verified devices. Unknown users, legacy key-only
+links, names, emails and broadcast keywords do not become native mentions.
+The optional `mention_pubkeys` field is sorted, deduplicated and bounded to 200;
+private deliveries select a verified device inside the registered audience.
+Empty optional fields are omitted for older adapter compatibility.
+
+Public outboxes freeze mention keys in the canonical signed-delivery envelope.
+Private outboxes freeze them when first queued and preserve them across retries
+and identity changes. Older pending deliveries retain their original empty
+mention set; a transition to another registered audience creates a new room's
+set. Frozen private broadcast reply metadata also preserves the existing relay
+main-timeline marker, so those replies qualify for the unread projection.
+Rollbacks stop adding metadata to new deliveries; already frozen deliveries
+retain their deterministic event identity. Disabling the adapter inbox flag
+pauses deliveries containing this metadata rather than stripping tags.
+
+The adapter emits `bridge-mention` tags without adding native `p` recipients.
+The relay timeline accepts these tags only from registered trusted bridge
+signers. This contract does not create duplicate native push notifications.
+Old signed events without mention tags cannot acquire them retrospectively;
+shadow comparison must distinguish that historical coverage limitation.

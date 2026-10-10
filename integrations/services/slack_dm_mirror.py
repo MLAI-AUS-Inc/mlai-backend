@@ -3607,6 +3607,10 @@ def _enqueue_normalized_slack_event_locked(
         return "ignored", ""
     if _is_slack_echo(conversation, normalized):
         return "echo", ""
+    from .slack_mentions import queue_delivery_mentions, preserve_delivery_mentions
+    if operation == CommunityBridgeDeliveryType.CREATE:
+        metadata = queue_delivery_mentions(conversation, str(normalized.get('text') or ''),
+            {**metadata, 'participant_hash': conversation.participant_hash})
     delivery, created = SlackDmMirrorDelivery.objects.get_or_create(
         conversation=conversation,
         source_platform=CommunityBridgePlatform.SLACK,
@@ -3624,6 +3628,7 @@ def _enqueue_normalized_slack_event_locked(
     )
     if created:
         return "enqueued", str(delivery.pk)
+    metadata = preserve_delivery_mentions(delivery.metadata or {}, metadata)
     if (
         delivery.status
         in (
@@ -6725,6 +6730,9 @@ def _upsert_history_delivery(
     metadata: dict[str, Any],
     held_until,
 ) -> SlackDmMirrorDelivery:
+    from .slack_mentions import queue_delivery_mentions, preserve_delivery_mentions
+    if operation == CommunityBridgeDeliveryType.CREATE:
+        metadata = queue_delivery_mentions(conversation, text, metadata)
     delivery, created = SlackDmMirrorDelivery.objects.get_or_create(
         conversation=conversation,
         source_platform=CommunityBridgePlatform.SLACK,
@@ -6739,6 +6747,7 @@ def _upsert_history_delivery(
     )
     if created:
         return delivery
+    metadata = preserve_delivery_mentions(delivery.metadata or {}, metadata)
     if bool((delivery.metadata or {}).get("permanent_failure")):
         from integrations.services.message_sync.reaction_recovery import stage_observed_reaction
         stage_observed_reaction(delivery, author_id=author_id, metadata=metadata)
@@ -7399,6 +7408,8 @@ def _deliver_private_batch(claimed: list[SlackDmMirrorDelivery]) -> None:
             rendered_text = render_private_slack_mentions(
                 delivery.encrypted_text, conversation.participant_profiles or {}
             )
+            from .slack_mentions import DELIVERY_MENTIONS_KEY, DELIVERY_BROADCAST_KEY
+            mentions = (delivery.metadata or {}).get(DELIVERY_MENTIONS_KEY) or []
             source_metadata["mention_format_version"] = int(
                 bool(source_metadata.get("slack_entities_preserved"))
                 and "<@" not in rendered_text
@@ -7425,6 +7436,8 @@ def _deliver_private_batch(claimed: list[SlackDmMirrorDelivery]) -> None:
                         approved_slack_avatar_url(profile.get("avatar_url")) or None
                     ),
                     "linked_pubkey": linked_pubkey,
+                    **({'mention_pubkeys': mentions} if mentions else {}),
+                    **({'broadcast': True} if (delivery.metadata or {}).get(DELIVERY_BROADCAST_KEY) else {}),
                     "target_message_id": None,
                     "parent_message_id": None,
                 }
@@ -8158,6 +8171,8 @@ def _deliver_to_mlai(delivery: SlackDmMirrorDelivery) -> None:
     rendered_text = render_private_slack_mentions(
         delivery.encrypted_text, conversation.participant_profiles or {}
     )
+    from .slack_mentions import DELIVERY_MENTIONS_KEY, DELIVERY_BROADCAST_KEY
+    mentions = (delivery.metadata or {}).get(DELIVERY_MENTIONS_KEY) or []
     result = BuzzBridgeClient.deliver_private(
         delivery_id=str(delivery.pk),
         created_at=_delivery_created_at(delivery),
@@ -8184,6 +8199,8 @@ def _deliver_to_mlai(delivery: SlackDmMirrorDelivery) -> None:
         ),
         source_author_avatar_url=approved_slack_avatar_url(profile.get("avatar_url")),
         linked_pubkey=linked_pubkey,
+        mention_pubkeys=mentions,
+        broadcast=bool((delivery.metadata or {}).get(DELIVERY_BROADCAST_KEY)),
         target_message_id=target_message_id,
         parent_message_id=parent_message_id,
     )
