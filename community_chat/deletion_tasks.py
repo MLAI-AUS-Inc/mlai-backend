@@ -9,7 +9,7 @@ from .models import AccountDeletionRequest, AccountDeletionTask
 
 CHAT_TARGETS = (
     "chat_access", "relay_messages_and_media", "bridge_copies_and_credentials",
-    "chat_profile_and_preferences", "backups_and_processor_copies",
+    "chat_profile_and_preferences", "backups_and_processor_copies", "relay_inbox_cursors",
 )
 ACCOUNT_TARGETS = CHAT_TARGETS + ("shared_account_and_dependencies",)
 

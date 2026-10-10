@@ -6,6 +6,18 @@ disposable local test database. No production migration or deployment has occurr
 
 ## API
 
+Relay read positions have a separate `relay_inbox_cursors` deletion target.
+`COMMUNITY_CHAT_INBOX_ERASURE_ENABLED` defaults off. The bounded
+`run_inbox_erasure_worker --limit 20` pass schedules missing targets on open
+requests and claims the existing durable leases. It requires verified
+`chat_access` completion and no non-revoked devices, holds the user enrollment
+lock, and deletes both the grouped HMAC key and prior singleton keys through
+the private adapter's `inbox_erasure_v1` capability. Only zero remaining rows
+and exact account/community echoes can complete that target. Provider failure,
+stale leases and incomplete proof cannot mark the account request complete.
+Keep the user identifier until this target completes. Bridge ledgers and caches
+remain part of `bridge_copies_and_credentials`, outside the relay-only proof.
+
 Both endpoints require a Chat account session. Bootstrap credentials cannot change
 privacy preferences. Cookie writes retain the session-bound Origin check. The user
 is derived from authentication, and unknown body fields are rejected.
