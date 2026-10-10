@@ -14,11 +14,12 @@ MAX_BYTES = 512 * 1024
 _DNS_POOL = ThreadPoolExecutor(max_workers=4, thread_name_prefix="pulse-website-dns")
 
 
-def website_evidence(domain):
+def website_evidence(domain, *, allow_host=None, user_agent="MLAI Startup Pulse verification/1.0"):
     """Read public homepage text without cookies, private IPs or unbounded bodies.
 
     Connect to the validated IP, preserving TLS hostname verification. Every
     redirect is checked independently so DNS changes cannot reach local services.
+    allow_host, when given, must accept every hop's host before its lookup.
     """
     url = str(domain or "").strip()
     if "://" not in url:
@@ -33,6 +34,8 @@ def website_evidence(domain):
                 or parsed.username or parsed.password or parsed.port not in {None, 80, 443}
                 or host == "localhost" or host.endswith((".localhost", ".local"))):
             raise ValueError("Website must be public HTTP or HTTPS.")
+        if allow_host is not None and not allow_host(host):
+            raise ValueError("Website is outside the allowed site.")
         port = parsed.port or (443 if parsed.scheme == "https" else 80)
         lookup = _DNS_POOL.submit(socket.getaddrinfo, host, port, type=socket.SOCK_STREAM)
         try:
@@ -49,7 +52,7 @@ def website_evidence(domain):
         try:
             response = pool.request(
                 "GET", (parsed.path or "/") + ("?" + parsed.query if parsed.query else ""),
-                headers={"Host": parsed.netloc, "Accept": "text/html,application/xhtml+xml", "User-Agent": "MLAI Startup Pulse verification/1.0"},
+                headers={"Host": parsed.netloc, "Accept": "text/html,application/xhtml+xml", "User-Agent": user_agent},
                 redirect=False, retries=False, preload_content=False,
             )
             if response.status in {301, 302, 303, 307, 308}:

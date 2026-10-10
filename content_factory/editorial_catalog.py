@@ -15,6 +15,8 @@ from .editorial_contract import (
 )
 
 CATALOG_KEY = "editorial_catalog"
+# Advisory page checks of offer copy; private to the owner UI. See offer_page_checks.
+OFFER_PAGE_CHECKS_KEY = "offer_page_checks"
 FIELDS = {"audience": "audience_options", "offer": "cta_options"}
 EDIT_FIELDS = {*FIELDS.values(), "expected_editorial_catalog_version"}
 
@@ -128,7 +130,7 @@ def article_brief_for_catalog(strategy, request_payload):
 def merge_strategy(existing, incoming):
     """Generated scans cannot erase or replace policy or approval history."""
     result = deepcopy(incoming or {})
-    for key in (CATALOG_KEY, "chat_source_preferences", "startup_profile_details", "startup_branding"):
+    for key in (CATALOG_KEY, OFFER_PAGE_CHECKS_KEY, "chat_source_preferences", "startup_profile_details", "startup_branding"):
         result.pop(key, None)
         if key in (existing or {}):
             result[key] = deepcopy(existing[key])
@@ -260,4 +262,4 @@ def discovery_audience_context(strategy, payload):
 
 def public_strategy(strategy):
     """Exclude private Chat defaults from worker/model and article contracts."""
-    return {key: deepcopy(value) for key, value in (strategy or {}).items() if key not in {"chat_source_preferences", "startup_profile_details", "startup_branding"}}
+    return {key: deepcopy(value) for key, value in (strategy or {}).items() if key not in {OFFER_PAGE_CHECKS_KEY, "chat_source_preferences", "startup_profile_details", "startup_branding"}}

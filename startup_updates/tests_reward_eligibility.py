@@ -150,6 +150,21 @@ class RewardWebsiteTests(SimpleTestCase):
                 website.website_evidence("example.com.au")
             self.assertEqual(pool.call_count, 1)
 
+    def test_allowed_host_guard_rejects_offsite_redirects_before_lookup(self):
+        site = lambda host: host == "example.com.au" or host.endswith(".example.com.au")
+        with patch.object(website.socket, "getaddrinfo", return_value=[(2, 1, 6, "", ("8.8.8.8", 443))]) as dns, patch.object(
+            website.urllib3, "HTTPSConnectionPool"
+        ) as pool:
+            pool.return_value.request.return_value = self.response(status=302, headers={"Location": "https://attacker.example/"})
+            with self.assertRaises(ValueError):
+                website.website_evidence("https://example.com.au/studio", allow_host=site, user_agent="Offer check/1.0")
+            self.assertEqual(dns.call_count, 1)
+            self.assertEqual(pool.return_value.request.call_args.kwargs["headers"]["User-Agent"], "Offer check/1.0")
+        with patch.object(website.socket, "getaddrinfo") as dns:
+            with self.assertRaises(ValueError):
+                website.website_evidence("https://attacker.example/", allow_host=site)
+            dns.assert_not_called()
+
     def test_bad_scheme_credentials_and_ports_are_rejected_before_lookup(self):
         for url in ("file:///etc/passwd", "https://user:pass@example.com", "https://example.com:1234", "https://localhost"):
             with self.subTest(url=url), patch.object(website.socket, "getaddrinfo") as dns:

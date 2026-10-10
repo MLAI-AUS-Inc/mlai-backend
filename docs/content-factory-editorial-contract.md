@@ -267,6 +267,60 @@ Deploy this behavior only as a coordinated backend/worker/editor release. The we
 
 When a catalog or editorial brief is supplied, the founder article endpoint requires a valid `editorialBrief` (also accepts `editorial_brief`), resolves its approved audience/offer versions and checks compatibility before charging or dispatching. The normalized brief is forwarded to the worker. Catalog-free legacy requests retain their existing contract. The website supplies a fresh company-scoped brief, but checking one earlier snapshot is not an atomic lease through later billing, dispatch or publication. Activating a catalog requires coordinated clients and worker paths that can supply and revalidate its brief.
 
+## Offer page checks (10 October 2026)
+
+Local implementation; this describes code, not deployed state. Content Factory
+cannot rewrite approved offer copy, so it reports unsupported offer claims as
+advisory `offer_advisories` on articles. The backend now checks earlier, when
+an offer is created, edited or newly approved through the catalogue PUT/approve
+operations. The check is advisory and never blocks or changes a save.
+
+Inside the existing owner-locked write, each such active offer receives a
+`pending` record in `pillar_strategy.offer_page_checks` (at most five per save).
+A shared-cache budget allows 30 page checks per organisation per hour; offers
+beyond it are recorded as `skipped` with reason `check_limit` and are not fetched.
+It is bound to a hash of the offer's `title`, `body`, `button_text` and
+`button_href` and to a per-schedule check ID. An offer whose destination is not
+the organisation's domain or a subdomain, for example a booking tool, is recorded
+as `skipped` with reason `external_destination` and is not fetched. After commit,
+a daemon thread fetches the page through the bounded public fetcher in
+`startup_updates/reward_website.py`. Every redirect hop must stay on the
+organisation's site and resolve to public addresses. The page text, treated as
+untrusted, and the offer sentences go to `OFFER_PAGE_CHECK_MODEL` through the
+OpenAI Responses API (strict JSON schema, `store=False`). Findings may quote only
+sentences from the founder's own copy. The result is saved under the
+organisation lock only when the check ID and copy hash are still current. A later
+edit supersedes it.
+
+Catalogue GET, PUT and approve responses add `offer_page_checks`, keyed by offer
+ID, for records that match each offer's current copy:
+
+```json
+{"status": "checked", "reason": null, "page_url": "https://example.com/studio",
+ "requested_at": "…", "checked_at": "…",
+ "findings": [{"sentence": "Browse testimonials and case studies from MLAI Studio.",
+               "message": "Your offer mentions testimonials; the linked page shows none."}]}
+```
+
+`status` is `pending`, `checked` (empty findings means the page supports the
+copy), `skipped` (`external_destination` or `check_limit`) or `unavailable`. `reason` is `page_unavailable`,
+`page_unreadable` (fewer than 200 visible characters, for example script-rendered
+pages), `check_failed` or `check_expired` (pending for more than 15 minutes,
+for example after a worker restart). The records sit outside `editorial_catalog`,
+so they do not affect approval hashes, receipts, admission or the worker's offer
+payload. Generated scans preserve them, and `public_strategy` omits them from
+worker contracts. No-op saves and profile saves that only re-version unchanged
+linked offers do not schedule checks.
+
+`OFFER_PAGE_CHECK_ENABLED` (default `true`) and `OPENAI_API_KEY` must both be set.
+Otherwise nothing is scheduled. Offers saved before this change have no check. An
+operator may run `python manage.py check_offer_pages --domain <domain>
+[--offer <id>]`, which fetches pages and calls the model synchronously. That
+command is an explicit operational action. There is no migration.
+`content_factory.tests_offer_page_checks_unit` and the catalogue API unit tests
+cover scoping, scheduling, supersession, model-output validation and save
+isolation without network or database access.
+
 ## Article starts, restarts and dispatch retries
 
 The coordinated worker main-start API now accepts the backend's normalised
