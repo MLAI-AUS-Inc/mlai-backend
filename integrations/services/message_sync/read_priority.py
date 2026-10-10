@@ -139,6 +139,10 @@ def select_target(ordered, snapshots, cache_key, cursor, *, now, turn):
     A quiet room keeps its place even while visible rooms continually renew
     their hints. Shared Slack admission and account fairness remain unchanged.
     """
+    from django.conf import settings
+    if getattr(settings, "MESSAGE_SYNC_TARGETED_READ_POLLING", False):
+        from .targeted_reads import select_targeted
+        return select_targeted(ordered, snapshots, cache_key, cursor, now=now, turn=turn)
     hints = (cursor or {}).get(KEY) or {}
     retries = ((cursor or {}).get("message_sync_read_state_v1") or {}).get("retries") or {}
     eligible = [target for target in ordered if retries.get(target.slack_id, 0) <= now]
