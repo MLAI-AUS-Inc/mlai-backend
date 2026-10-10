@@ -42,7 +42,17 @@ def select_targeted(ordered, snapshots, cache_key, cursor, *, now, turn):
         return ((hint.get("reason") == "own_message" and age(target) >= 1)
                 or (hint.get("reason") == "visible" and age(target) >= 15))
     safety_seconds = max(60, float(getattr(settings, "READ_STATE_SAFETY_SWEEP_HOURS", 6)) * 3600)
-    safety = [t for t in eligible if not state(t).get("fetched_at") or age(t) >= safety_seconds]
+    baselines = None
+    if getattr(settings, 'MESSAGE_SYNC_INBOX_CURSOR_PUSH', False):
+        from .inbox_observations import KEY as OBSERVATIONS_KEY, timestamp as source_timestamp
+        baselines = {(row.get('channel_id'), row.get('authority')) for row in
+                     ((cursor or {}).get(OBSERVATIONS_KEY) or {}).values()
+                     if source_timestamp(row.get('last_read')) is not None}
+    def needs_source_baseline(target):
+        return (baselines is not None and target.channel_id
+                and getattr(target, 'source_inventory', None) is None
+                and (str(target.channel_id), cache_key(target)) not in baselines)
+    safety = [t for t in eligible if not state(t).get("fetched_at") or age(t) >= safety_seconds or needs_source_baseline(t)]
     urgent_targets = [t for t in eligible if urgent(t) or (state(t).get("refresh_required") and age(t) >= 1)]
     possible = [t for t in eligible if age(t) >= 30 and possibly_unread(t, state(t), now=now)]
     known = [t for t in eligible if state(t).get("is_unread") is True and age(t) >= 60]
