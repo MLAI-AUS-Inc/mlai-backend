@@ -592,7 +592,11 @@ def _refund_failed_run(run, *, reason):
 def _settle_sweep_refunds(*, limit):
     for run in ContentFactoryRun.objects.filter(status__in=["failed", "cancelled"], result__reconciliation_refund_pending=True)[:limit]:
         try:
-            _refund_failed_run(run, reason="run_reconciliation_failed")
+            if (run.run_request or {}).get("pending_billing_refund"):
+                from .vibe_marketing_views import _process_pending_dispatch_refund
+                _process_pending_dispatch_refund(run)
+            else:
+                _refund_failed_run(run, reason="run_reconciliation_failed")
         except Exception:
             logger.warning("content_factory_reconciliation_refund_pending run_id=%s", run.run_id)
 

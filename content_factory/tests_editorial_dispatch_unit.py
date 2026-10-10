@@ -515,6 +515,105 @@ class ArticleDispatchControlFlowTests(unittest.TestCase):
         self.refund.assert_called_once()
         self.assertFalse(child.run_request.get("dispatch_pending_resolution"))
 
+    def test_rejected_lost_response_poll_retries_transient_article_refund(self):
+        self._assert_deferred_refund_retry(kind="", payer_lookup_fails=False)
+
+    def test_rejected_lost_response_poll_retries_island_payer_lookup(self):
+        self._assert_deferred_refund_retry(kind="content_island_topic_generation", payer_lookup_fails=True)
+
+    def _assert_deferred_refund_retry(self, *, kind, payer_lookup_fails):
+        import time
+        from unittest.mock import patch
+        from content_factory import reconciliation, vibe_marketing_views as views
+        from content_factory.billing import public_run_billing_receipt
+        from content_factory.dispatch_binding import run_is_dispatch_token_keyed
+
+        payer = SimpleNamespace(pk="company-payer-7")
+        self.http.post.side_effect = self.transport_error("lost queue response")
+        child = self.ns["_queue_content_factory_run"](
+            endpoint="article", workflow="article_generation", context=self.context, config=self.config,
+            payload={"domain": self.org.domain, "editorial_brief": selected_brief(),
+                     "roo_points_billing_status": "charged", "roo_points_cost": 6,
+                     "roo_points_billing_user_id": payer.pk, "requested_by_user_id": self.user.pk},
+            billing_refund_context={"charged_user": payer, "kind": kind,
+                                    "article_request": {"client_request_id": "fixture-key"}},
+        )
+        child.pk = 17
+        self.assertTrue(child.run_request["dispatch_pending_resolution"])
+        post_count = self.http.post.call_count
+        self.lookup.return_value = ("rejected", {"error": "backend_rejected:editorial_brief_invalid"})
+
+        # Execute the unchanged GET and deferred-refund helper, with persistence
+        # and presentation seams. The actual scheduler retries this same row.
+        tree = ast.parse(Path(__file__).with_name("vibe_marketing_views.py").read_text())
+        nodes = [node for node in tree.body if isinstance(node, ast.FunctionDef)
+                 and node.name in {"_process_pending_dispatch_refund", "_run_pending_remote_dispatch"}]
+        run_view = next(node for node in tree.body if isinstance(node, ast.ClassDef) and node.name == "VibeMarketingRunView")
+        get = next(node for node in run_view.body if isinstance(node, ast.FunctionDef) and node.name == "get")
+        get.name = "_run_poll_under_test"
+        nodes.append(get)
+        query = Mock()
+        query.prefetch_related.return_value = query
+        query.select_for_update.return_value = query
+        query.filter.return_value = query
+        query.first.return_value = child
+        query.get.return_value = child
+        self.ns.update({"__name__": "content_factory._refund_poll_under_test", "__package__": "content_factory",
+            "time": time, "run_is_dispatch_token_keyed": run_is_dispatch_token_keyed,
+            "ContentFactoryRun": SimpleNamespace(objects=query), "ARTICLE_WORKFLOWS": frozenset(),
+            "_resolve_context_or_response": lambda *args, **kwargs: (self.context, None),
+            "_run_belongs_to_context": lambda *args: True,
+            "_terminal_article_system_setup_has_local_failure": lambda *args: False,
+            "_call_content_factory_run_status": Mock(return_value={}),
+            "_is_status_poll_unavailable_payload": lambda *args: False,
+            "_release_failed_article_keyword": Mock(), "_log_terminal_repo_scan_status": Mock(),
+            "_serialize_run": lambda run, **kwargs: {"status": run.status,
+                **public_run_billing_receipt(run.run_request, run.result)},
+            "_timed_vibe_response": lambda payload, **kwargs: Response(payload),
+        })
+        exec(compile(ast.fix_missing_locations(ast.Module(body=nodes, type_ignores=[])),
+                     "vibe_marketing_views.py", "exec"), self.ns)
+        users = Mock()
+        users.objects.filter.return_value.first.side_effect = [DatabaseError("transient payer lookup"), payer] if payer_lookup_fails else [payer, payer]
+        refunder = self.ns["_refund_roo_points_for_content_island_topic_start"] if kind else self.refund
+        def settled(**kwargs):
+            # A newer receipt arrives while refund I/O is in flight. Completing
+            # the refund must merge its flags into the freshly locked result.
+            child.result = {**child.result, "newer_worker_receipt": {"retained": True}}
+            child.status = "cancelled"
+        def refund_attempt(**kwargs):
+            if not payer_lookup_fails and refunder.call_count == 1:
+                raise DatabaseError("transient ledger refund")
+            return settled(**kwargs)
+        refunder.side_effect = refund_attempt
+        due = Mock()
+        due.__getitem__ = Mock(return_value=[child])
+        with patch("django.contrib.auth.get_user_model", return_value=users), \
+                patch.object(views, "_process_pending_dispatch_refund", self.ns["_process_pending_dispatch_refund"]), \
+                patch.object(reconciliation.ContentFactoryRun.objects, "filter", return_value=due):
+            response = self.ns["_run_poll_under_test"](None, SimpleNamespace(query_params={"view": "status"}), child.run_id)
+            self.assertEqual(response.status_code, 200)
+            self.assertEqual(response.data["status"], "failed")
+            self.assertEqual(response.data["refundStatus"], "pending")
+            self.assertFalse(child.run_request["dispatch_pending_resolution"])
+            self.assertTrue(child.result["reconciliation_refund_pending"])
+            self.assertFalse(child.result.get("dispatch_refund_processed"))
+            reconciliation._settle_sweep_refunds(limit=10)
+            reconciliation._settle_sweep_refunds(limit=10)
+        self.assertTrue(child.result["dispatch_refund_processed"])
+        self.assertFalse(child.result["reconciliation_refund_pending"])
+        self.assertEqual(public_run_billing_receipt(child.run_request, child.result)["refundStatus"], "refunded")
+        self.assertEqual(child.result["newer_worker_receipt"], {"retained": True})
+        self.assertEqual(child.status, "cancelled")
+        self.assertEqual(child.workflow, "article_generation")
+        self.assertEqual(child.run_request["requested_by_user_id"], self.user.pk)
+        self.assertEqual(child.run_request["roo_points_billing_user_id"], payer.pk)
+        self.assertIs(refunder.call_args.kwargs["charged_user"], payer)
+        self.assertEqual(refunder.call_args.kwargs["article_request"]["client_request_id"], "fixture-key")
+        self.assertEqual(refunder.call_count, 1 if payer_lookup_fails else 2)
+        self.assertEqual(self.http.post.call_count, post_count)
+        self.charge.assert_not_called()
+
     def test_non_article_dispatch_does_not_require_an_article_brief(self):
         self.strategy = retired_catalog()
         child = self.queue(payload={"domain": self.org.domain}, endpoint="discovery")

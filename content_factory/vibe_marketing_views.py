@@ -13319,46 +13319,60 @@ def _run_pending_remote_dispatch(run) -> bool:
 
 
 def _process_pending_dispatch_refund(run) -> None:
-    """Release the refund withheld at dispatch time, exactly once. Safe to call
-    repeatedly: guarded by a result flag AND the refund ledger's idempotency key."""
-    run_request = run.run_request if isinstance(run.run_request, dict) else {}
-    stash = run_request.get("pending_billing_refund")
-    if not isinstance(stash, dict) or not stash:
-        return
-    result = run.result if isinstance(run.result, dict) else {}
-    if result.get("dispatch_refund_processed"):
-        return
-    charged_user = None
-    charged_user_id = stash.get("charged_user_id")
-    if charged_user_id:
-        from django.contrib.auth import get_user_model
+    """Settle the original spend; transient errors retain its scheduled retry."""
+    try:
+        with transaction.atomic():
+            current = ContentFactoryRun.objects.select_for_update().filter(pk=run.pk).first()
+            if current is None or current.status not in {"failed", "cancelled"}:
+                return
+            run_request = dict(current.run_request or {})
+            stash = run_request.get("pending_billing_refund")
+            result = dict(current.result or {})
+            if not isinstance(stash, dict) or not stash or result.get("dispatch_refund_processed"):
+                return
+            current.result = sanitize_json_for_postgres({**result, "reconciliation_refund_pending": True})
+            current.save(update_fields=["result", "updated_at"])
+            run.result, run.run_request = current.result, current.run_request
 
-        charged_user = get_user_model().objects.filter(pk=charged_user_id).first()
-    if charged_user is None:
-        logger.warning(
-            "content_factory_dispatch_deferred_refund_skipped run_id=%s reason=charged_user_missing",
-            run.run_id,
-        )
+        charged_user = None
+        charged_user_id = stash.get("charged_user_id")
+        if charged_user_id:
+            from django.contrib.auth import get_user_model
+
+            charged_user = get_user_model().objects.filter(pk=charged_user_id).first()
+        if charged_user is None:
+            logger.warning(
+                "content_factory_dispatch_deferred_refund_skipped run_id=%s reason=charged_user_missing",
+                run.run_id,
+            )
+            return
+        refund_kwargs = {
+            "charged_user": charged_user,
+            "actor_id": str(stash.get("actor_id") or ""),
+            "article_request": stash.get("article_request") or {},
+            "domain": current.domain,
+            "reason": stash.get("reason") or "Content Factory queue did not start.",
+        }
+        if stash.get("kind") == CONTENT_FACTORY_ACTION_CONTENT_ISLAND_TOPIC_GENERATION:
+            _refund_roo_points_for_content_island_topic_start(**refund_kwargs)
+        else:
+            _refund_roo_points_for_article_start(**refund_kwargs)
+        # Refund I/O runs without a run lock. Retain any newer worker receipt,
+        # terminal state and payer/requester history when settling its flags.
+        with transaction.atomic():
+            current = ContentFactoryRun.objects.select_for_update().filter(pk=run.pk).first()
+            if current is None:
+                return
+            current.result = sanitize_json_for_postgres({**(current.result or {}),
+                "dispatch_refund_processed": True, "reconciliation_refund_pending": False})
+            current.run_request = {**(current.run_request or {}), "roo_points_billing_status": "refunded"}
+            current.save(update_fields=["result", "run_request", "updated_at"])
+            run.result, run.run_request = current.result, current.run_request
+    except Exception:
+        logger.warning("content_factory_dispatch_deferred_refund_pending run_id=%s", run.run_id)
         return
-    refund_kwargs = {
-        "charged_user": charged_user,
-        "actor_id": str(stash.get("actor_id") or ""),
-        "article_request": stash.get("article_request") or {},
-        "domain": run.domain,
-        "reason": stash.get("reason") or "Content Factory queue did not start.",
-    }
-    if stash.get("kind") == CONTENT_FACTORY_ACTION_CONTENT_ISLAND_TOPIC_GENERATION:
-        _refund_roo_points_for_content_island_topic_start(**refund_kwargs)
-    else:
-        _refund_roo_points_for_article_start(**refund_kwargs)
-    result["dispatch_refund_processed"] = True
-    run.result = sanitize_json_for_postgres(result)
-    run.save(update_fields=["result", "updated_at"])
-    logger.warning(
-        "content_factory_dispatch_deferred_refund_processed run_id=%s client_request_id=%s",
-        run.run_id,
-        run_request.get("client_request_id"),
-    )
+    logger.warning("content_factory_dispatch_deferred_refund_processed run_id=%s client_request_id=%s",
+                   run.run_id, run_request.get("client_request_id"))
 
 
 def _fail_unconfirmed_dispatch_run(run):
@@ -13367,7 +13381,7 @@ def _fail_unconfirmed_dispatch_run(run):
     run_request = dict(run.run_request) if isinstance(run.run_request, dict) else {}
     detail = (
         "Content Factory never received this request (confirmed by dispatch-key lookup). "
-        "Any Roo points charged for it have been refunded — retry when ready."
+        "Any Roo points charged for it are being refunded automatically — retry when ready."
     )
     result = run.result if isinstance(run.result, dict) else {}
     result.update(
@@ -13377,6 +13391,7 @@ def _fail_unconfirmed_dispatch_run(run):
             "errors": [detail],
             "message": detail,
             "retryable": True,
+            "reconciliation_refund_pending": bool(run_request.get("pending_billing_refund") and not result.get("dispatch_refund_processed")),
         }
     )
     run_request["dispatch_pending_resolution"] = False
@@ -13420,7 +13435,8 @@ def _resolve_dispatch_token_run(run):
     if outcome == "rejected":
         result = dict(run.result or {})
         result.update(error_code="dispatch_rejected", backend_code=str(lookup_payload.get("error", "")).removeprefix("backend_rejected:"),
-                      error="The article start was rejected before entering the queue. Points have been refunded. Try again.", retryable=True)
+                      error="The article start was rejected before entering the queue. Any points charged are being refunded automatically. Try again.", retryable=True,
+                      reconciliation_refund_pending=bool((run.run_request or {}).get("pending_billing_refund") and not result.get("dispatch_refund_processed")))
         run.result = result
         run.error = result["error"]
         run.status = ContentFactoryRunStatus.FAILED
