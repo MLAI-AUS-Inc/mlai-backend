@@ -1758,7 +1758,8 @@ def _clear_slack_connection_locked(
     )
     if type_fences:
         connection.provider_metadata[CATALOG_KEY] = type_fences
-    connection.sync_cursor = {}
+    from .message_sync.inbox_exports import give_up_on_disconnect
+    connection.sync_cursor = give_up_on_disconnect(connection.sync_cursor)
     connection.save(
         update_fields=(
             "status",

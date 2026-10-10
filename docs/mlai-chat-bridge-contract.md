@@ -1507,3 +1507,35 @@ safety sweeps; archive completion and cache occupancy cannot prove coverage.
 The response includes `freshness_basis=possibly_unread` and a content-free
 `possibly_unread_channels` count. Disabling the flag restores the legacy rule
 that all observations must be at most 120 seconds old.
+
+### Account inbox read exports (default off)
+
+`MESSAGE_SYNC_INBOX_READ_EXPORT=false` gates HMAC `read_cursor` callbacks before
+any database or Slack operation. The exact payload contains `type`, tenant
+`community_id`, opaque `account_key`, `channel_id`, `op`, `read_through_event`,
+`read_through_us`, and `revision`; frontier and revision are decimal strings.
+The tenant must match membership adapter capabilities, and the account HMAC must
+match a mapped room's owner. User/grant/connection locks serialize revision
+deduplication with current consent and verified-device authority.
+
+Inbound messages resolve their Slack identity from delivery links; native posts
+resolve their confirmed destination. Otherwise the latest inbound timestamp at
+or before the display frontier is used. Pending native deliveries leave the
+callback retryable so a post cannot be marked read in Slack before its link
+exists. Private lookups stay in the current owner audience and never use public
+message tables.
+
+The existing durable read receipt handles ordinary advance-only exports. An
+explicit unread cancels older read intents and uses the exact anchor position
+through the same consent/device/provider admission checks. Connection JSON
+coalesces by newest relay revision. Only provider confirmation or permanent
+settlement advances `applied`; temporary failures retain pending work and the
+provider retry deadline. Missing write scope, revoked access, cancelled reads,
+and seven-day expiry release the causal fence. Disconnect erases pending source
+IDs/timestamps while retaining only native room/revision fences.
+
+Unknown/unmapped account callbacks are harmless no-ops. Initial consent and
+mirror publication must reconcile earlier permanently unexportable revisions
+from the durable relay ledger before probing; that is part of the observation
+push step. These drafts must remain disabled until that recovery path and the
+controlled Slack acceptance tests pass. No migration is introduced.

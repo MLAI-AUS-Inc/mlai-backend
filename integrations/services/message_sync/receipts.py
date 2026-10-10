@@ -60,6 +60,8 @@ def complete_read(authority, target, *, source_ts):
                      if value.get("source_id") == target.slack_id
                      and value.get("authority") == reads._cache_key(authority, target)
                      and (reads._timestamp(value.get("source_ts")) or 0) <= reads._timestamp(source_ts)}
+        from .inbox_exports import confirmed_read
+        confirmed_read(connection, target, source_ts)
         if confirmed:
             _save(connection, {k: v for k, v in queue.items() if k not in confirmed})
 

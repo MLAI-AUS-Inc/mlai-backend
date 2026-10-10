@@ -209,6 +209,12 @@ def refresh_read_state_once():
             # A sustained stream of explicit reads must still leave refresh
             # capacity for other conversations belonging to this account.
             with request_priority("foreground"):
+                from django.conf import settings
+                if getattr(settings, 'MESSAGE_SYNC_INBOX_READ_EXPORT', False) and lease.turn % 4 != 3:
+                    from .inbox_exports import flush_once
+                    exported = flush_once(grant, authority, keys)
+                    if exported is not None:
+                        return exported
                 confirmed = flush_read_once(grant, authority, keys) if lease.turn % 4 != 3 else None
             if confirmed is not None:
                 return confirmed

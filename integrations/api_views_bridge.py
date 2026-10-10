@@ -81,6 +81,17 @@ class BuzzCommunityBridgeEventView(APIView):
             return Response({"error": "invalid_json"}, status=status.HTTP_400_BAD_REQUEST)
         if not isinstance(payload, dict):
             return Response({"error": "invalid_payload"}, status=status.HTTP_400_BAD_REQUEST)
+        if payload.get("type") == "read_cursor":
+            from integrations.services.message_sync.inbox_exports import accept
+            try:
+                result = accept(payload)
+            except (ValueError, TypeError, AttributeError):
+                return Response({"error": "invalid_read_cursor"}, status=status.HTTP_400_BAD_REQUEST)
+            except Exception:
+                return Response({"error": "read_cursor_retry"}, status=status.HTTP_503_SERVICE_UNAVAILABLE)
+            if result.get("status") == "disabled":
+                return Response({"error": "inbox_export_disabled"}, status=status.HTTP_503_SERVICE_UNAVAILABLE)
+            return Response({"ok": True, **result}, status=status.HTTP_200_OK)
         normalized_event = payload.get("normalized_event")
         if not isinstance(normalized_event, dict):
             return Response({"error": "invalid_payload"}, status=status.HTTP_400_BAD_REQUEST)
