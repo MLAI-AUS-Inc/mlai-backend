@@ -1202,6 +1202,8 @@ VALLEY_HARNESS_URL = os.getenv('VALLEY_HARNESS_URL', '')
 VALLEY_HARNESS_API_KEY = os.getenv('VALLEY_HARNESS_API_KEY', '')
 # Enable after integrations.0047 and the new worker are deployed together.
 MESSAGE_SYNC_ENABLED = os.getenv('MESSAGE_SYNC_ENABLED', 'false').lower() == 'true'
+# Enable only after clients adopt authoritative relay unread counts.
+MESSAGE_SYNC_TARGETED_READ_POLLING = _env_is_true('MESSAGE_SYNC_TARGETED_READ_POLLING', False)
 # Enable only after live public/private callbacks and recovery latency pass a canary.
 MESSAGE_SYNC_QUIET_HEAD_BACKOFF_ENABLED = os.getenv(
     'MESSAGE_SYNC_QUIET_HEAD_BACKOFF_ENABLED', 'false'
