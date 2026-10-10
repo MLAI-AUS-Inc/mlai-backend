@@ -182,11 +182,13 @@ class WebsiteSetupProjectionTests(SimpleTestCase):
 
         with patch.object(lifecycle, 'authority_guard', side_effect=authorize), \
              patch.object(lifecycle, 'record_scan_evidence'), \
+             patch('content_factory.website_prepare.wake_prepare_after_commit') as wake_prepare, \
              patch.object(ContentFactoryRun.objects, 'filter') as rows:
             rows.return_value.first.return_value = run
             sync(object(), SimpleNamespace(method='PUT', data=request), run_id=run.run_id)
         self.assertEqual(connection_contract(run.run_request), connection_contract(self.binding))
         self.assertEqual(run.run_request['connection_generation'], '2')
+        wake_prepare.assert_called_once_with(self.website.pk)
 
     def test_persisted_lookup_accepts_valid_representations_after_a_newer_old_run(self):
         from . import vibe_marketing_views as marketing

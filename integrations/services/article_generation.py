@@ -758,7 +758,7 @@ def _charge_content_factory_user(
     prevalidated_admission: bool = False,
 ):
     from content_factory.models import ContentFactoryJob
-    from roo.permissions import InsufficientBalanceError
+    from roo.permissions import IdempotencyConflictError, InsufficientBalanceError
     from roo.services import PointsService
 
     if not prevalidated_admission:
@@ -812,6 +812,15 @@ def _charge_content_factory_user(
                 billing_email=user.email,
             )
         )
+    except IdempotencyConflictError as exc:
+        # A retry cannot move an existing spend to a newly selected company
+        # wallet. Its original outbox and payer remain the delivery lineage.
+        error = ArticleGenerationError(
+            "This article request was charged to a different billing account or price. "
+            "Refresh the existing article before starting a new request."
+        )
+        error.code = "content_factory_billing_key_conflict"
+        raise error from exc
 
     return user, ledger, cost_points
 

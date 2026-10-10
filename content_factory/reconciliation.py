@@ -257,6 +257,13 @@ def _adopt_remote_payload(run: ContentFactoryRun, payload: dict) -> str:
                 from .website_operations import observe_workflow_status
                 observe_workflow_status(observed, sync_payload)
         except WebsiteAuthorityError as denied:
+            # Consent may have been revoked after candidate selection. The
+            # persisted cancellation wins over both this stale Python object
+            # and any observation fallback for the worker's late snapshot.
+            try:
+                run.refresh_from_db()
+            except ContentFactoryRun.DoesNotExist:
+                return ContentFactoryRunStatus.CANCELLED
             if run.status in {"cancelled", "denied"} or denied.code in {
                     "website_scope_mismatch", "run_cancelled", "website_operation_cancelled",
                     "website_data_deleted", "website_connection_deleted"}:
