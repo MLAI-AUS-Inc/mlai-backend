@@ -58,6 +58,7 @@ from .account_sessions import (
     rotate_account_session,
 )
 from .account_profiles import ProfileVersionConflict, update_account_profile
+from .inbox_accounts import bind_verified_device
 from .models import (
     CommunityChatAccountSession,
     CommunityChatBootstrapToken,
@@ -1972,6 +1973,7 @@ class ConfirmView(APIView):
                     )
 
                 now = timezone.now()
+                bind_verified_device(locked_user.pk, public_key)
                 device.status = DeviceBindingStatus.VERIFIED
                 device.verified_at = device.verified_at or now
                 device.last_verified_membership_at = now
@@ -1996,6 +1998,11 @@ class ConfirmView(APIView):
                 if bootstrap_token is not None and bootstrap_token.revoked_at is None:
                     bootstrap_token.revoked_at = now
                     bootstrap_token.save(update_fields=("revoked_at",))
+        except MembershipAdapterConflict:
+            return Response(
+                {"error": "device_authority_changed"},
+                status=status.HTTP_409_CONFLICT,
+            )
         except MembershipAdapterUnavailable:
             return Response(
                 {"error": "membership_service_unavailable"},
