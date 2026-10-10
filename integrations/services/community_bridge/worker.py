@@ -722,6 +722,12 @@ class CommunityBridgeDiscordClient(discord.Client):
             ),
             "source_created_at": int(payload_metadata.get("slack_created_at") or 0),
         }
+        if delivery['source_platform'] == CommunityBridgePlatform.SLACK and operation == CommunityBridgeDeliveryType.CREATE:
+            from integrations.services.slack_mentions import delivery_mention_pubkeys
+            mentions = await asyncio.to_thread(delivery_mention_pubkeys, slack_workspace_id,
+                payload_metadata.get('slack_raw_text') or payload.get('text') or '')
+            if mentions:
+                provenance['mention_pubkeys'] = mentions
         text = ""
         if operation not in {
             CommunityBridgeDeliveryType.DELETE,
