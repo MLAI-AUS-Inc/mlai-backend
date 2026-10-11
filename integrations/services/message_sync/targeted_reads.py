@@ -49,16 +49,16 @@ def select_targeted(ordered, snapshots, cache_key, cursor, *, now, turn):
                      ((cursor or {}).get(OBSERVATIONS_KEY) or {}).values()
                      if source_timestamp(row.get('last_read')) is not None}
     def needs_source_baseline(target):
-        return (baselines is not None and target.channel_id
-                and getattr(target, 'source_inventory', None) is None
+        return (baselines is not None and target.has_relay_room
                 and (str(target.channel_id), cache_key(target)) not in baselines)
     safety = [t for t in eligible if not state(t).get("fetched_at") or age(t) >= safety_seconds or needs_source_baseline(t)]
     hinted = [t for t in eligible if urgent(t)]
+    own = [t for t in hinted if (hints.get(t.slack_id) or {}).get("reason") == "own_message"]
     # Older cache repairs must not displace an explicit owner/visibility
     # hint. Keep oldest-first fairness within each tier and the reserved
     # safety turn, while honoring the same age and provider retry fences.
     refresh = [t for t in eligible if state(t).get("refresh_required") and age(t) >= 1]
     possible = [t for t in eligible if age(t) >= 30 and possibly_unread(t, state(t), now=now)]
     known = [t for t in eligible if state(t).get("is_unread") is True and age(t) >= 60]
-    candidates = safety if turn % 10 == 9 and safety else (hinted or refresh or possible or known or safety)
+    candidates = safety if turn % 10 == 9 and safety else (own or hinted or refresh or possible or known or safety)
     return max(candidates, key=age, default=None)

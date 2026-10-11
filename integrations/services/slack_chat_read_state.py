@@ -57,6 +57,11 @@ class ReadTarget:
     source_inventory: object = None
 
     @property
+    def has_relay_room(self):
+        """Directory metadata does not change a mapped room's transport identity."""
+        return bool(self.channel_id) and str(self.channel_id) != self.slack_id
+
+    @property
     def read_scope(self):
         return {
             "im": "im:read",

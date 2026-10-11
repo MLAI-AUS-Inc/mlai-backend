@@ -74,6 +74,14 @@ class TargetedSelectionTests(SimpleTestCase):
         self.states['quiet']['refresh_required'] = True
         self.assertEqual(self.choose().slack_id, 'visible')
 
+    def test_own_message_precedes_older_visibility_without_skipping_safety(self):
+        self.states['known']['fetched_at'] = self.now - 2
+        self.cursor[priority.KEY]['known'] = {'until': self.now + 300, 'reason': 'own_message'}
+        self.assertEqual(self.choose().slack_id, 'known')
+        self.assertEqual(self.choose(9).slack_id, 'quiet')
+        self.states['known']['fetched_at'] = self.now
+        self.assertEqual(self.choose().slack_id, 'visible')
+
     def test_hinted_priority_keeps_age_and_retry_fences(self):
         self.states['known']['fetched_at'] = self.now
         self.states['quiet']['refresh_required'] = True

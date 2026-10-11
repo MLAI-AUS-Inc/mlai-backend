@@ -46,7 +46,7 @@ def community_id():
 
 def capture(authority, target):
     """Capture settled exports before conversations.info; never after its reply."""
-    if not enabled() or not target.channel_id or getattr(target, 'source_inventory', None) is not None:
+    if not enabled() or not target.has_relay_room:
         return None
     from community_chat.inbox_accounts import account_key
     from integrations.services import slack_chat_read_state as reads
@@ -124,7 +124,7 @@ def observe_locked(connection, context, last_read, *, observed_at):
 
 def confirmed_locked(connection, authority, target, last_read, *, observed_at):
     """A confirmed write uses the fence already settled by complete_read."""
-    if not enabled() or not target.channel_id or getattr(target, 'source_inventory', None) is not None:
+    if not enabled() or not target.has_relay_room:
         return
     from integrations.services import slack_chat_read_state as reads
     rows = (connection.sync_cursor or {}).get(KEY) or {}
