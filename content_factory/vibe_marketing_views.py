@@ -9350,7 +9350,7 @@ def _setup_metadata_from_run(run) -> dict:
     )
     setup_hint = _run_mapping(setup.get("article_surface_hint") or setup.get("articleSurfaceHint"))
     run_status_value = str(getattr(run, "status", "") or "").strip()
-    if run.workflow == "article_system_setup" and run_status_value in RUNNING_RUN_STATUSES:
+    if run.workflow == "article_system_setup" and run_status_value in RUNNING_RUN_STATUSES | {"blocked", "failed", "cancelled", "denied"}:
         status_value = run_status_value
     else:
         status_value = str(
@@ -10800,7 +10800,8 @@ def _serialize_run(
     run, *, context=None, latest_runs=None, checks=None, mode="full",
     topic_candidates=None, precomputed_article_setup_state=None,
 ):
-    run = _setup_pr_creation_failure_view(run)
+    from .setup_status_projection import terminal_setup_projection
+    run = terminal_setup_projection(_setup_pr_creation_failure_view(run))
     compact = mode in {"summary", "status"}
     original_request = _run_mapping(run.run_request)
     original_mode = str(original_request.get("delivery_mode") or original_request.get("deliveryMode") or "")

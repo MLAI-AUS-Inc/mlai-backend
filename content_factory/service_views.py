@@ -8588,6 +8588,8 @@ def _set_content_factory_run_meta(run: ContentFactoryRun, meta: dict) -> None:
 
 
 def _serialize_content_factory_run(run: ContentFactoryRun) -> dict:
+    from .setup_status_projection import terminal_setup_projection
+    run = terminal_setup_projection(run)
     steps = {}
     for step in run.steps.order_by("display_order", "id"):
         attempts = []

@@ -331,3 +331,11 @@ recorded charge without refunding a saved deliverable.
 Use owner `reconcile` to retry current scoped outbox work and poll custom verification. GET `website-connection/operations/{id}` returns only the selected company's receipt. The read-only `report_website_connections --check` identifies overdue operations and failed scans; cancelled/denied/deleted rows are terminal, and awaiting merge/deploy remains visible. `repair_website_connections` is read-only unless explicitly approved with `--apply`. No repair command silently revives consent.
 
 Release gates are: matching backend/worker/client contract tests; disposable PostgreSQL concurrency and exact historical migration replay; reviewed automatic CI artifacts and route marker; source/build/browser checks; current public-route deployment receipt; then a separately approved production rollout/canary. Local migration approval, source tests and an opened cleanup PR do not satisfy production migration/deployment or verified removal. The specifically approved `0044_website_target_generation_key` and its model/upserts have been created; its disposable tests were authorized on 11 October 2026 as part of the `0045` dependency graph, while production application remains a separate approval gate. See the [generation-key proposal](website-target-generation-migration-proposal-2026-10-07.md) for exact scope and rollback considerations.
+
+Status-only worker PUT cancellation receipts require an existing run and its exact
+saved domain, including portable runs and prior connection generations. They record
+cancellation metadata without changing saved repository/request identity, targets,
+configuration, proof, credentials or billing. Unknown runs return 404 and scope
+mismatches return 409. Terminal setup revisions project their recorded failure over
+stale preview-building labels in browser and worker responses; the read projection
+does not rewrite historical run evidence.
