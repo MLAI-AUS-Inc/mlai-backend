@@ -89,7 +89,7 @@ jobs:
       run: python scripts/test_without_database.py roo.tests_coworking_report_access
 
     - name: Check inbox account bindings without database access
-      run: python scripts/test_without_database.py community_chat.tests.test_inbox_accounts integrations.tests_inbox_activity integrations.tests_inbox_targeted_selection integrations.tests_inbox_own_hints community_chat.tests.test_adapter
+      run: python scripts/test_without_database.py community_chat.tests.test_inbox_accounts integrations.tests_inbox_activity integrations.tests_inbox_targeted_selection integrations.tests_inbox_own_hints integrations.tests_inbox_coverage integrations.tests_read_coverage community_chat.tests.test_adapter
 
     - name: Check unified DM directory without database access
       run: python scripts/test_without_database.py community_chat.tests.test_unified_dm_directory_unit

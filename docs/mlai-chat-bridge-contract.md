@@ -1495,3 +1495,15 @@ and deletion callbacks do not receive owner priority. The hint is metadata only,
 never a read assertion. Dirty generations survive provider budget pauses and
 are cleared only by the matching successful observation. Activity renewals do
 not downgrade an existing visible or owner hint.
+
+### Targeted read coverage
+
+With targeted polling enabled, `complete` requires completed discovery, no
+pending eligible channels, and a baseline observation for every eligible
+conversation (including explicit source exclusions). `fresh` requires complete
+coverage and observations within 120 seconds for possibly unread or known unread
+conversations. Quiet read conversations may remain fresh between six-hour
+safety sweeps; archive completion and cache occupancy cannot prove coverage.
+The response includes `freshness_basis=possibly_unread` and a content-free
+`possibly_unread_channels` count. Disabling the flag restores the legacy rule
+that all observations must be at most 120 seconds old.
