@@ -203,6 +203,8 @@ def refresh_read_state_once():
             reads._assert_grant_connection_authorized(grant)
             keys = set(CommunityChatDevice.objects.filter(user_id=grant.user_id, status="verified", revoked_at__isnull=True).values_list("public_key", flat=True))
             authority = reads._capture_slack_grant_api_authority(grant)
+            from .inbox_observations import flush
+            flush(authority, grant, keys)
             from .read_snapshots import flush_notification
             flush_notification(authority)
             from .receipts import flush_read_once

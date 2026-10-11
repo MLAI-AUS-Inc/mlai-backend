@@ -1534,8 +1534,38 @@ provider retry deadline. Missing write scope, revoked access, cancelled reads,
 and seven-day expiry release the causal fence. Disconnect erases pending source
 IDs/timestamps while retaining only native room/revision fences.
 
-Unknown/unmapped account callbacks are harmless no-ops. Initial consent and
-mirror publication must reconcile earlier permanently unexportable revisions
-from the durable relay ledger before probing; that is part of the observation
-push step. These drafts must remain disabled until that recovery path and the
-controlled Slack acceptance tests pass. No migration is introduced.
+Unknown/unmapped account callbacks are harmless no-ops. Before the first source
+probe in a consent generation, the backend obtains a signed private relay
+frontier for exports recorded before the current consent, plus device revisions
+that have no export because the room was not yet bridged. These are permanent
+give-ups, not pending writes under current consent. Recovering them into the
+connection JSON prevents an initial probe from being fenced forever. Exports
+recorded during current consent retain their confirmation fence.
+
+### Account inbox source observations (default off)
+
+`MESSAGE_SYNC_INBOX_CURSOR_PUSH=false` gates source observations. The backend
+captures `applied_revision` before `conversations.info`, preserves that fence in
+metadata checkpoints, and queues the returned exact `last_read` before any
+history-count request. A history quota pause therefore does not delay cursor
+push. Source-only inventory rows retain their existing snapshot path.
+
+Connection JSON coalesces each mapped room to its newest observation. Source
+revisions increase across clock reversals and survive disconnect without Slack
+identifiers. The dedicated source outbox is removed on disconnect. Confirmed
+reads/unreads queue an observation after export settlement; temporary provider
+failures cannot open the fence. `regress` requires an observed backwards cursor
+and remains meaningful against the last delivered cursor when intermediate
+transport work is coalesced. A causal-fence/unknown-account acknowledgement
+schedules a fresh probe and does not record the observation as applied.
+
+Transport retries retain the original timestamp, source revision and payload.
+After 90 seconds the outbox requests a fresh metadata probe instead of making
+stale data appear fresh. Current consent, scopes, mapped room, OAuth generation
+and verified-device routing are checked before each push. Mirror publication
+wakes a fresh initial probe after commit; existing mirrored rooms without a
+source baseline participate in reserved safety capacity and spare turns without
+displacing hot-room probes. Legacy kind 20003 notifications remain enabled.
+
+These drafts remain disabled pending controlled Slack acceptance and the
+three-day shadow comparison. No backend migration is introduced.

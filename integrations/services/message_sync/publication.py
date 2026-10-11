@@ -77,6 +77,11 @@ def record_publication_locked(conversation):
     ranges[PUBLICATION_KEY] = {**_boundary(current), **audience, "published_at": timezone.now().isoformat()}
     state.verified_ranges = ranges
     state.save(update_fields=["verified_ranges"])
+    from django.conf import settings
+    if getattr(settings, 'MESSAGE_SYNC_INBOX_CURSOR_PUSH', False):
+        from django.db import transaction
+        from .inbox_observations import publication
+        transaction.on_commit(lambda: publication(current.pk), robust=True)
     return True
 
 

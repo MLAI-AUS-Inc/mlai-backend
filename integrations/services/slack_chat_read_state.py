@@ -314,11 +314,15 @@ def refresh_target(grant, authority, target):
         pending = cache.get(pending_key)
         receipt = cache.get(key + ":receipt")
     observed_at = time.time()
+    from .message_sync import inbox_observations
     if (pending and pending.get("receipt") == receipt
             and 0 <= observed_at - pending["fetched_at"] < MAX_PENDING_INFO_SECONDS
             and observed_at < pending.get("expires_at", pending["fetched_at"] + 30)):
         details, observed_at = pending["details"], pending["fetched_at"]
+        inbox_context = pending.get('inbox_context')
     else:
+        inbox_context = inbox_observations.capture(authority, target)
+        observed_at = time.time()
         try:
             response = _call_slack_with_grant_authority(
                 authority, "conversations_info", required_scopes={target.read_scope},
@@ -337,6 +341,11 @@ def refresh_target(grant, authority, target):
     ) or details.get("is_member") is False:
         cached = {"available": False, "excluded": True}
     else:
+        with transaction.atomic():
+            _, connection = _lock_slack_grant_api_authority(authority, required_scopes={target.read_scope})
+            if cache.get(key + ':receipt') != receipt:
+                raise BudgetDeferred(1)
+            inbox_observations.observe_locked(connection, inbox_context, details.get('last_read'), observed_at=observed_at)
         try:
             messages, count_source, partial = _unread_messages(authority, target, details.get("last_read", "0"))
         except (BudgetDeferred, SlackDmMirrorRateLimited) as exc:
@@ -362,6 +371,7 @@ def refresh_target(grant, authority, target):
                                          now + max(30, getattr(exc, "retry_after", 0) + 30))
                         if expires_at > now:
                             cache.set(pending_key, {"details": safe, "fetched_at": observed_at,
+                                                   "inbox_context": inbox_context,
                                                    "receipt": receipt, "expires_at": expires_at},
                                       timeout=max(1, int(expires_at - now)))
                 raise
@@ -584,6 +594,8 @@ def mark_unread(user, *, public_key, channel_id):
     required = {target.read_scope, write_scope, history_scope}
     if not required.issubset(authority.scopes):
         return {"synced": False, "needs_reauthorization": True}
+    from .message_sync import inbox_observations
+    inbox_context = inbox_observations.capture(authority, target)
     with transaction.atomic():
         _lock_slack_grant_api_authority(authority, required_scopes=required)
         from .slack_dm_mirror import _locked_active_verified_device
@@ -655,6 +667,7 @@ def mark_unread(user, *, public_key, channel_id):
         cache.set(key + ":receipt", uuid.uuid4().hex, timeout=86400)
         from .message_sync.read_snapshots import publish_snapshot
         snapshot = publish_snapshot(connection, key, snapshot)
+        inbox_observations.observe_locked(connection, inbox_context, cursor, observed_at=now)
         cache.delete(_pending_key(authority, target))
     return {"synced": True, "last_read": cursor, "confirmed_at": now,
             "channels": {target.channel_id: snapshot}}
@@ -663,6 +676,8 @@ def mark_unread(user, *, public_key, channel_id):
 def apply_read(authority, target, *, source_ts, required, public_key=None, device_binding=None):
     """Confirm a source read and immediately share the same result with peers."""
     stamp = _timestamp(source_ts)
+    from .message_sync.inbox_observations import capture
+    capture(authority, target)
     # Serialize competing device reads and the read-before-write check with the
     # same owner consent lock used by the bridge. Never move a cursor backwards.
     with transaction.atomic():

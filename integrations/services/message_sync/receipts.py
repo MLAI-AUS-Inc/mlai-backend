@@ -5,6 +5,7 @@ Every retry revalidates consent, OAuth generation, device and source membership.
 """
 import time
 
+from django.conf import settings
 from django.db import transaction
 
 
@@ -64,6 +65,8 @@ def complete_read(authority, target, *, source_ts):
         confirmed_read(connection, target, source_ts)
         if confirmed:
             _save(connection, {k: v for k, v in queue.items() if k not in confirmed})
+        from .inbox_observations import confirmed_locked
+        confirmed_locked(connection, authority, target, source_ts, observed_at=time.time())
 
 
 def flush_read_once(grant, authority, keys):
@@ -115,6 +118,11 @@ def flush_read_once(grant, authority, keys):
                 current[intent_key] = {**intent, "due": now + max(1, getattr(error, "retry_after", 30)),
                                        "error": type(error).__name__ if error else "source_cursor_unavailable"}
             _save(connection, current)
+        if (result or {}).get('synced') and (
+            getattr(settings, 'MESSAGE_SYNC_INBOX_CURSOR_PUSH', False)
+            or getattr(settings, 'MESSAGE_SYNC_INBOX_READ_EXPORT', False)
+        ):
+            complete_read(authority, target, source_ts=result['last_read'])
     if error is not None:
         # Back off this intent only. A permanently inaccessible conversation
         # must not pause every unread refresh for this owner for seven days.
