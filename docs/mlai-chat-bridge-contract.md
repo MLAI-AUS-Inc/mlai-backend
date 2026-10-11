@@ -1475,3 +1475,16 @@ message, validates the digest/DM counterpart, and invokes the existing Slack
 handler, including requester/delegation checks. Deploy Roo first, then backend
 web and bridge workers, then clients. No migration is required. Existing cards
 can be refreshed on demand; no historical rewrite is performed by this change.
+
+### Targeted read probe selection (disabled by default)
+
+`MESSAGE_SYNC_TARGETED_READ_POLLING=false` preserves legacy selection. When
+explicitly enabled, the worker selects visible/own-message hints first, source
+activity beyond the last observed `last_read` after 30 seconds, then known
+unread rechecks after 60 seconds. Unknown baseline observations and observations
+older than `READ_STATE_SAFETY_SWEEP_HOURS` (default 6) receive every tenth turn
+and all spare capacity. Oldest-first selection and source-ID continuation keep
+safety work from starving. Per-target Retry-After deadlines and shared provider
+admission still apply to every tier. Source activity only selects work; it never
+asserts an unread count. Mirrored history count probes retain their separate
+future adoption gate, so scheduling can be rolled out before relay unread.
