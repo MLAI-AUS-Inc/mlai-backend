@@ -6,6 +6,7 @@ case "$key" in
   COMMUNITY_CHAT_EMAIL_CODE_PEPPER|\
   COMMUNITY_CHAT_EMAIL_CODE_DELIVERY_SECRET|\
   COMMUNITY_CHAT_ADAPTER_TOKEN|\
+  MLAI_CHAT_ACCOUNT_KEY_SECRET|\
   SLACK_BRIDGE_BOT_TOKEN|\
   SLACK_BRIDGE_SIGNING_SECRET|\
   MESSAGE_SYNC_SLACK_APP_TOKEN|\
@@ -30,6 +31,18 @@ secret="$(cat)"
 if [[ ${#secret} -lt 32 ]]; then
   echo "Invalid secret payload for ${key}" >&2
   exit 1
+fi
+
+if [[ "$key" == "MLAI_CHAT_ACCOUNT_KEY_SECRET" ]]; then
+  if [[ "$secret" == *$'\n'* || "$secret" == *$'\r'* ]]; then
+    echo "Account key secret must be a single line" >&2
+    exit 1
+  fi
+  existing="$(sed -n 's/^MLAI_CHAT_ACCOUNT_KEY_SECRET=//p' .env 2>/dev/null || true)"
+  if [[ -n "$existing" && "$existing" != "$secret" ]]; then
+    echo "Account key secret rotation requires explicit reconciliation" >&2
+    exit 1
+  fi
 fi
 
 tmp="$(mktemp .env.chat-secret.XXXXXX)"
