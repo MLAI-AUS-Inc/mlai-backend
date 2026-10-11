@@ -101,6 +101,9 @@ room ID and does not mark anything read. Current owner grant, consent, scope,
 membership and device access are still checked by the worker. This author
 fallback requires explicit `channel_type=channel`; private rooms, bots,
 unmapped rooms, edits and deletes retain the explicit-recipient path.
+Explicit eligible owner/visibility hints precede older unhinted cache refresh
+work. Age gates, per-target Retry-After deadlines, oldest-first ordering within
+each tier and the reserved one-in-ten safety turn remain unchanged.
 
 After two stable weeks and a raised minimum supported client version, remove
 legacy client channel read merges, forced-unread stores, unread-history fetches

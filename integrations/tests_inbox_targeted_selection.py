@@ -63,6 +63,31 @@ class TargetedSelectionTests(SimpleTestCase):
         self.assertEqual(self.choose().slack_id, 'known')
         self.assertTrue(self.states['known']['is_unread'])
 
+    def test_own_message_hint_precedes_older_unhinted_refresh_work(self):
+        self.states['known']['fetched_at'] = self.now - 2
+        self.states['quiet']['refresh_required'] = True
+        self.cursor = {priority.KEY: {'known': {'until': self.now + 300, 'reason': 'own_message'}}}
+        self.assertEqual(self.choose().slack_id, 'known')
+        self.assertEqual(self.choose(9).slack_id, 'quiet')
+
+    def test_visible_hint_precedes_older_unhinted_refresh_work(self):
+        self.states['quiet']['refresh_required'] = True
+        self.assertEqual(self.choose().slack_id, 'visible')
+
+    def test_hinted_priority_keeps_age_and_retry_fences(self):
+        self.states['known']['fetched_at'] = self.now
+        self.states['quiet']['refresh_required'] = True
+        self.cursor = {priority.KEY: {'known': {'until': self.now + 300, 'reason': 'own_message'}}}
+        self.assertEqual(self.choose().slack_id, 'quiet')
+        self.states['known']['fetched_at'] = self.now - 2
+        self.cursor['message_sync_read_state_v1'] = {'retries': {'known': self.now + 60}}
+        self.assertEqual(self.choose().slack_id, 'quiet')
+
+    def test_unhinted_refresh_keeps_priority_over_possible_work(self):
+        self.cursor = {}
+        self.states['quiet']['refresh_required'] = True
+        self.assertEqual(self.choose().slack_id, 'quiet')
+
     def test_selected_possible_work_gets_foreground_provider_admission(self):
         from integrations.services.message_sync.read_state import refresh_request_priority
         self.assertEqual(refresh_request_priority(self.targets[1], self.states['possible'], {}, now=self.now), 'foreground')
