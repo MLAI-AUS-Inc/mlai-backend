@@ -115,6 +115,7 @@ class ParentDependencyBackoffTests(SimpleTestCase):
         )
         with (
             patch.object(store.transaction, "atomic", return_value=nullcontext()),
+            patch.object(store.transaction, "on_commit") as on_commit,
             patch.object(store.CommunityBridgeDelivery.objects, "select_for_update") as query,
             patch.object(store.CommunityBridgeMessageLink.objects, "update_or_create"),
             patch.object(store.CommunityBridgeDelivery.objects, "filter") as children,
@@ -127,6 +128,11 @@ class ParentDependencyBackoffTests(SimpleTestCase):
                 delivery_id=2, destination_message_id="destination-parent",
                 destination_channel_id="destination",
             )
+        on_commit.assert_called_once()
+        callback = on_commit.call_args.args[0]
+        self.assertEqual(callback.args, (2,))
+        self.assertEqual(callback.func.__name__, "record_public_delivery")
+        self.assertTrue(on_commit.call_args.kwargs["robust"])
         self.assertEqual(parent.status, "completed")
         self.assertEqual(children.call_args_list[0].kwargs["channel"], "mapped-channel")
         self.assertEqual(children.call_args_list[0].kwargs["status__in"], ["processing", "waiting_parent"])

@@ -31,7 +31,9 @@ Existing verified installations can be previewed in bounded pages:
 
 ```sh
 python manage.py bind_chat_device_accounts --dry-run --limit 100
-python manage.py bind_chat_device_accounts --dry-run --after-device-id 123 --limit 100
+python manage.py bind_chat_device_accounts --dry-run --after-device-id 00000000-0000-0000-0000-000000000123 --limit 100
+# Scope a production acceptance page to the selected test account.
+python manage.py bind_chat_device_accounts --dry-run --user-id 42 --limit 100
 ```
 
 These commands read backend data and are operational commands: do not run them
@@ -39,7 +41,9 @@ on a live system without explicit approval. Dry-run is the default and makes no
 adapter requests. `--apply` requires the feature flag, rechecks device authority
 under locks, and makes the authenticated relay writes. Resume with the reported
 `next_after_device_id`; on failure resume before the reported failed device.
-No account keys or installation keys are printed.
+No account keys or installation keys are printed. Device IDs and resume tokens
+are UUIDs. Keep the same `--user-id` filter on every resumed test-account page;
+omitting that filter selects the community-wide verified-device inventory.
 
 **Secret rotation orphans every existing account cursor.** It is not a seamless
 key rotation. Keep the secret stable and recover it from the approved secret

@@ -1,5 +1,7 @@
 """Backfill account bindings without changing backend models or migrations."""
 
+from uuid import UUID
+
 from django.conf import settings
 from django.contrib.auth import get_user_model
 from django.core.management.base import BaseCommand, CommandError
@@ -18,24 +20,26 @@ class Command(BaseCommand):
         mode.add_argument("--apply", action="store_true")
         mode.add_argument("--dry-run", action="store_true")
         parser.add_argument("--limit", type=int, default=100)
-        parser.add_argument("--after-device-id", type=int, default=0)
+        parser.add_argument("--after-device-id", type=UUID)
+        parser.add_argument("--user-id", type=int, help="Restrict the page to one selected user")
 
     def handle(self, *args, **options):
         limit = options["limit"]
         after = options["after_device_id"]
-        if not 1 <= limit <= 10000 or after < 0:
-            raise CommandError("limit must be 1..10000 and after-device-id nonnegative")
+        user_id = options.get("user_id")
+        if not 1 <= limit <= 10000 or (user_id is not None and user_id < 1):
+            raise CommandError("limit must be 1..10000 and user-id positive")
         apply = options["apply"]
         if apply and not settings.COMMUNITY_CHAT_MEMBER_ACCOUNTS_ENABLED:
             raise CommandError("COMMUNITY_CHAT_MEMBER_ACCOUNTS_ENABLED is required for --apply")
-        candidates = list(
-            CommunityChatDevice.objects.filter(
-                id__gt=after,
-                status=DeviceBindingStatus.VERIFIED,
-                revoked_at__isnull=True,
-                user__is_active=True,
-            ).order_by("id").values_list("id", "user_id")[:limit]
-        )
+        filters = {"status": DeviceBindingStatus.VERIFIED,
+                   "revoked_at__isnull": True, "user__is_active": True}
+        if after is not None:
+            filters["id__gt"] = after
+        if user_id is not None:
+            filters["user_id"] = user_id
+        candidates = list(CommunityChatDevice.objects.filter(**filters)
+                          .order_by("id").values_list("id", "user_id")[:limit])
         bound = unchanged = skipped = 0
         if apply:
             for device_id, user_id in candidates:
@@ -56,7 +60,7 @@ class Command(BaseCommand):
                         raise CommandError(f"Binding failed at device {device_id}; resume before it") from exc
                     bound += int(changed)
                     unchanged += int(not changed)
-        last = candidates[-1][0] if candidates else after
+        last = candidates[-1][0] if candidates else (after or "none")
         self.stdout.write(
             f"mode={'apply' if apply else 'dry-run'} candidates={len(candidates)} "
             f"bound={bound} unchanged={unchanged} skipped={skipped} next_after_device_id={last}"
