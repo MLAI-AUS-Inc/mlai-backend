@@ -420,6 +420,10 @@ def process_website_connection_operations(*, limit=20, now=None, connection_id=N
                     advance_disconnect_steps(op)
                 token_scope = f"operation:{op.payload['cancelled_operation_id']}" if op.action == "cancel-operation" else op.payload.get("previous_generation")
                 tokens = revoke_generation_tokens(op.connection_id, token_scope)
+                for child_id in op.payload.get("cancelled_child_operation_ids", []):
+                    child_tokens = revoke_generation_tokens(op.connection_id, f"operation:{child_id}")
+                    for key in ("revoked", "pending"):
+                        tokens[key] = tokens.get(key, 0) + child_tokens.get(key, 0)
                 cancel_ids = op.payload.get("cancel_run_ids", [])
                 preview_ids = op.payload.get("stop_preview_run_ids", [])
                 pending = list(cancel_ids[20:])
@@ -429,7 +433,7 @@ def process_website_connection_operations(*, limit=20, now=None, connection_id=N
                     if not remote["enabled"]:
                         pending.append(run_id)
                         continue
-                    if op.action == "cancel-operation":
+                    if op.action == "cancel-operation" and op.payload.get("cancelled_action") != "prepare":
                         cancelled = op.connection.operations.get(pk=op.payload["cancelled_operation_id"])
                         from .website_operations import deletion_epoch
                         response = http_client.post(f"{remote['base_url']}/api/connections/{op.connection_id}/cancel-operation",

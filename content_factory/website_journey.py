@@ -85,7 +85,7 @@ def project_journey(*, company_id, domain, website=None, capabilities=None, disc
             allowed.append("cleanup")
         if proof.get("cleanupAwaitingDeployment") or operation and operation.get("action") == "cleanup" and operation.get("state") == "awaiting_deployment":
             allowed.append("verify-cleanup")
-        if running and operation.get("action") == "workflow":
+        if operation and ((running and operation.get("action") == "workflow") or (operation.get("action") == "prepare" and operation.get("state") in {"pending", "running", "needs_user", "needs_attention"})):
             allowed.append("cancel-operation")
     actions = [{"id": action, "label": action.replace("-", " ").capitalize(), "method": "POST",
         "path": "/api/v1/my-startup/vibe-marketing/" + ("scan" if action == "scan" else "article-system-setup" if action == "setup" else "website-connection/" + action),

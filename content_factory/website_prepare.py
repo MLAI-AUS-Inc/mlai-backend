@@ -8,7 +8,7 @@ from django.db.models import F
 from django.utils import timezone
 
 from .website_connections import authority_guard, contract_for
-from .website_contract import WebsiteAuthorityError
+from .website_contract import WebsiteAuthorityError, evidence_digest
 from .website_journey import journey_for_context
 from .website_models import WebsiteConnectionOperation
 
@@ -40,9 +40,10 @@ def start_prepare(config, *, expected=None, company_id=None, user=None, retry=Fa
                 "receipt": {"status": "working", "current_step": "verify-access", "message": "Preparing your website for articles."}})
         if op.action != "prepare" or op.generation != current.generation:
             raise WebsiteAuthorityError("operation_key_conflict", "The saved preparation belongs to another website.")
-        if not created and retry and op.state in {"needs_attention", "needs_user"}:
+        if not created and retry and op.state in {"needs_attention", "needs_user", "cancelled"}:
             op.state, op.next_attempt_at = "pending", None
-            op.receipt = {**op.receipt, "step_failures": {}, "status": "working", "user_action": None}
+            op.receipt = {**op.receipt, "step_failures": {}, "status": "working", "user_action": None, "last_completed": None,
+                "child_run_id": None, "reason_code": "", "blocked_step": None}
             op.payload = {**op.payload, "attempt": op.payload.get("attempt", 1) + 1, "user_clicks": op.payload.get("user_clicks", 1) + 1}
             op.save(update_fields=["state", "next_attempt_at", "receipt", "payload", "updated_at"])
     return op
@@ -101,10 +102,14 @@ def prepare_failure(op, step, error, *, now=None):
     code = getattr(error, "code", "website_prepare_unavailable")
     message = str(error) or "Website preparation is temporarily unavailable."
     failures = dict(op.receipt.get("step_failures") or {})
+    step = str(step or op.receipt.get("current_step") or "prepare")
     failures[step] = failures.get(step, 0) + 1
     op.receipt = {**op.receipt, "step_failures": failures, "reason_code": code, "message": message,
         "retryable": bool(getattr(error, "retryable", True))}
-    if code in AUTHORIZATION_CODES:
+    if getattr(error, "user_action", None):
+        op.state, op.next_attempt_at = "needs_user", None
+        op.receipt.update(status="needs_you", user_action=error.user_action)
+    elif code in AUTHORIZATION_CODES:
         op.state = "needs_user"
         op.receipt.update(status="needs_you", user_action={"id": "authorize_github", "label": "Authorize GitHub"})
         op.next_attempt_at = None
@@ -123,31 +128,67 @@ def prepare_failure(op, step, error, *, now=None):
         op.receipt["status"] = "working"
 
 
-def _owner_request(op, context, config, step):
-    """Call the existing owner handlers with persisted, freshly checked membership."""
+def _setup_surface(config, journey):
+    """Respect a saved owner choice, then use the current scan's listing route."""
+    pending = (config.article_system or {}).get("pending_article_system_setup") or {}
+    if pending.get("mode") in {"existing", "none"} and pending.get("route_path"):
+        return pending["mode"], pending["route_path"]
+    discovery = (journey or {}).get("discovery") or {}
+    resolution = discovery.get("resolution") or {}
+    def route(item):
+        if isinstance(item, str):
+            return item
+        if not isinstance(item, dict):
+            return ""
+        return item.get("route") or (item.get("metadata") or {}).get("route_path") or ""
+    listing = route(resolution.get("listing_surface"))
+    ranked = (resolution.get("ranked_candidates") or {}).get("listing_surface_candidates") or resolution.get("listing_surface_candidates") or []
+    candidates = list(dict.fromkeys(value for item in ranked if (value := route(item))))
+    if not candidates:
+        candidates = list(dict.fromkeys(value for item in discovery.get("candidates", [])
+            if item.get("candidate_group") == "listing_surface_candidates" and (value := route(item))))
+    state = resolution.get("existence_state")
+    if state == "missing":
+        return "none", "/articles"
+    if state == "confirmed" and (listing or candidates):
+        return "existing", listing or candidates[0]
+    if state == "ambiguous":
+        candidates = list(dict.fromkeys(([listing] if listing else []) + candidates))
+        if len(candidates) == 1:
+            return "existing", candidates[0]
+        if candidates:
+            error = WebsiteAuthorityError("articles_page_choice_required", "Choose the articles page to prepare.", retryable=False)
+            error.user_action = {"id": "choose_articles_page", "candidates": candidates}
+            raise error
+    raise WebsiteAuthorityError("article_surface_unresolved", "Scan the repository to identify an articles page before setup.", retryable=False)
+
+
+def _owner_request(op, context, config, step, *, journey=None):
+    """Call existing guarded owner handlers with a complete POST request shape."""
     connection = config.website_connection
     data = {**contract_for(connection), "company_id": str(context.company.pk),
         "configuration_revision": connection.configuration_version,
         "idempotency_key": f"prepare:{op.pk}:{step}:{op.payload.get('attempt', 1)}",
         "force_refresh": True}
     if step == "setup":
+        mode, surface = _setup_surface(config, journey or journey_for_context(context, config))
         pending = (config.article_system or {}).get("pending_article_system_setup") or {}
-        data.update(article_surface_mode=pending.get("mode") or "not_sure",
-            article_surface_url=pending.get("route_path") or "/articles",
+        data.update(article_surface_mode=mode, article_surface_url=surface,
             source_scan_run_id=pending.get("source_scan_run_id") or op.receipt.get("scan_run_id") or "")
-    return SimpleNamespace(user=context.prepare_user, data=data, query_params={}, headers={"Idempotency-Key": data["idempotency_key"]})
+    return SimpleNamespace(user=context.prepare_user, data=data, method="POST", META={},
+        query_params={"company_id": str(context.company.pk)}, headers={"Idempotency-Key": data["idempotency_key"]})
 
 
-def _dispatch_prepare_step(op, context, config, step):
+def _dispatch_prepare_step(op, context, config, step, *, journey=None):
     from .vibe_marketing_views import VibeMarketingScanView, VibeMarketingArticleSystemSetupView, _article_capabilities_for_context
-    request = _owner_request(op, context, config, step)
     if step == "verify-access":
         capabilities = _article_capabilities_for_context(context, config, force=True)
         if not capabilities.get("repositoryAccessVerified"):
             raise WebsiteAuthorityError(capabilities.get("reasonCode") or "github_access_required",
                 capabilities.get("reason") or "Authorize GitHub to prepare your website.")
-        return {"status": "completed"}
+        return {"status": "completed", "capabilities": capabilities}
     if step in {"scan", "setup"}:
+        request = _owner_request(op, context, config, step, journey=journey)
         view = VibeMarketingScanView if step == "scan" else VibeMarketingArticleSystemSetupView
         response = view().post(request)
         body = dict(response.data)
@@ -196,9 +237,16 @@ def advance_prepare(identifier, *, now=None, handlers=None):
                 return _finish_prepare(op, now=now)
             if child and child.status in {"failed", "blocked", "cancelled", "denied"}:
                 code = (child.result or {}).get("error_code") or "website_prepare_step_failed"
-                op.receipt.pop("child_run_id", None)
-                op.payload = {**op.payload, "attempt": op.payload.get("attempt", 1) + 1}
-                raise WebsiteAuthorityError(code, "The website step could not finish. Retrying preparation.", retryable=True)
+                result = child.result or {}
+                retryable = result.get("retryable") is True or code in {"worker_unavailable", "github_unavailable", "HOSTED_PREVIEW_UNAVAILABLE"}
+                message = getattr(child, "error", "") or result.get("error") or result.get("message") or "The website step could not finish."
+                if retryable or code in AUTHORIZATION_CODES:
+                    op.receipt.pop("child_run_id", None)
+                    op.payload = {**op.payload, "attempt": op.payload.get("attempt", 1) + 1}
+                    raise WebsiteAuthorityError(code, message, retryable=retryable)
+                prepare_failure(op, step, WebsiteAuthorityError(code, message, retryable=False), now=now)
+                op.receipt["user_action"] = {"id": "open_run", "label": "Open setup run", "run_id": child_id}
+                return _finish_prepare(op, now=now)
             if child and child.workflow == "article_system_setup":
                 merge = maybe_merge_prepared_setup(child, context, config)
                 if merge.get("status") == "needs_user":
@@ -210,21 +258,41 @@ def advance_prepare(identifier, *, now=None, handlers=None):
                     op.state, op.next_attempt_at = "pending", now + timedelta(minutes=2)
                     return _finish_prepare(op, now=now)
             op.receipt.pop("child_run_id", None)
-        step = (journey.get("nextAction") or {}).get("id")
-        if not step:
-            raise WebsiteAuthorityError(journey.get("reasonCode") or "website_prepare_blocked",
-                journey.get("reason") or "Website preparation needs attention.")
-        op.receipt.update(current_step=step, status="working", message=f"Preparing articles: {step.replace('-', ' ')}.", user_action=None)
-        handler = (handlers or {}).get(step)
-        outcome = handler(op, context, config) if handler else _dispatch_prepare_step(op, context, config, step)
-        run_id = (outcome or {}).get("run_id") or (outcome or {}).get("runId")
-        if run_id:
-            op.receipt.update(child_run_id=run_id, **{f"{step}_run_id": run_id})
-            op.payload = {**op.payload, "run_id": run_id}
-        steps = list(op.receipt.get("completed_steps") or [])
-        if not run_id and step not in steps:
-            steps.append(step)
-        op.receipt["completed_steps"] = steps
+        # Access probes may change the next requirement immediately; bound the
+        # same-pass continuation to one probe plus one actual work dispatch.
+        for _ in range(2):
+            next_action = journey.get("nextAction") or {}
+            step = next_action.get("id")
+            blocked = next((item for item in journey.get("steps", []) if item.get("status") != "complete"), {})
+            if not step:
+                step = blocked.get("id") or op.receipt.get("current_step") or "prepare"
+                op.receipt.update(current_step=step, blocked_step=step)
+                raise WebsiteAuthorityError(blocked.get("reasonCode") or blocked.get("reason_code") or journey.get("reasonCode") or "website_prepare_blocked",
+                    blocked.get("reason") or blocked.get("message") or journey.get("reason") or "Website preparation needs attention.", retryable=False)
+            digest = evidence_digest({"prerequisites": journey.get("prerequisites"), "capabilities": journey.get("capabilities")})
+            if op.receipt.get("last_completed") == {"step": step, "facts_digest": digest}:
+                raise WebsiteAuthorityError("prepare_no_progress", blocked.get("reason") or next_action.get("label") or "Website preparation needs attention.", retryable=False)
+            op.receipt.update(current_step=step, blocked_step=None, reason_code="", retryable=False,
+                status="working", message=f"Preparing articles: {step.replace('-', ' ')}.", user_action=None)
+            handler = (handlers or {}).get(step)
+            outcome = handler(op, context, config) if handler else _dispatch_prepare_step(op, context, config, step, journey=journey)
+            run_id = (outcome or {}).get("run_id") or (outcome or {}).get("runId")
+            if run_id:
+                op.receipt.update(child_run_id=run_id, **{f"{step}_run_id": run_id})
+                op.payload = {**op.payload, "run_id": run_id}
+                break
+            steps = list(op.receipt.get("completed_steps") or [])
+            if step not in steps:
+                steps.append(step)
+            op.receipt["completed_steps"] = steps
+            forced = (outcome or {}).get("capabilities") if step == "verify-access" else None
+            if forced is not None:
+                journey = journey_for_context(context, config, capabilities=forced)
+                digest = evidence_digest({"prerequisites": journey.get("prerequisites"), "capabilities": journey.get("capabilities")})
+            op.receipt["last_completed"] = {"step": step, "facts_digest": digest}
+            if forced is not None and (journey.get("nextAction") or {}).get("id") != step:
+                continue
+            break
         op.state, op.next_attempt_at = "pending", now + timedelta(minutes=1)
     except WebsiteAuthorityError as exc:
         prepare_failure(op, step, exc, now=now)

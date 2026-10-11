@@ -292,28 +292,39 @@ def cancel_operation(config, *, data, idempotency_key):
         raise WebsiteAuthorityError("invalid_operation_id", "Select a valid website operation.", status=422) from exc
     binding = {**connection_contract(data), "domain": config.organization.domain, "github_repo": config.github_repo}
     with authority_guard(binding, action="read") as connection:
-        op = connection.operations.select_for_update().filter(pk=identifier, generation=connection.generation, action="workflow").first()
+        op = connection.operations.select_for_update().filter(pk=identifier, generation=connection.generation, action__in=["workflow", "prepare"]).first()
         if op is None:
             raise WebsiteAuthorityError("website_operation_not_found", "Select a current website operation.", status=404)
         from .website_contract import positive_integer
         attempt = positive_integer(data.get("operation_attempt", 1), name="operation_attempt")
         if attempt != op.payload.get("attempt", 1) or str(data.get("deletion_epoch", 0)) != str(deletion_epoch(connection)):
             raise WebsiteAuthorityError("website_operation_changed", "Refresh this operation before cancelling it.")
-        if op.state in {"completed", "failed", "denied", "deleted"}:
+        if op.state in {"completed", "failed", "denied", "deleted"} or (op.action == "prepare" and op.state not in {"pending", "running", "needs_user", "needs_attention", "cancelled"}):
             raise WebsiteAuthorityError("website_operation_terminal", "This operation has finished. Review its recorded effects or prepare a removal proposal.")
         run = ContentFactoryRun.objects.filter(run_id=op.payload.get("run_id"), organization=connection.organization).first()
-        if run and workflow_operation_state(run) in {"completed", "failed", "denied", "blocked"}:
+        if op.action != "prepare" and run and workflow_operation_state(run) in {"completed", "failed", "denied", "blocked"}:
             raise WebsiteAuthorityError("website_operation_terminal", "The worker has finished this operation. Review its recorded effects.")
         effects = list(connection.repository_mutations.filter(run_id=op.payload.get("run_id", "")).values("pr_url", "branch", "head_sha", "status"))
         op.state = "cancelled"
-        op.receipt = {**op.receipt, "status": "cancelled", "repository_modified": bool(effects) or None, "remote_effects": effects,
+        op.next_attempt_at = None
+        op.receipt = {**op.receipt, "status": "cancelled_by_user" if op.action == "prepare" else "cancelled", "repository_modified": bool(effects) or None, "remote_effects": effects,
             "remote_outcome_unknown": not bool(effects), "cancellation_undoes_remote_writes": False, "remote_cleanup_pending": True}
-        op.save(update_fields=["state", "receipt", "updated_at"])
+        op.save(update_fields=["state", "receipt", "next_attempt_at", "updated_at"])
         run_ids = list(ContentFactoryRun.objects.filter(organization=connection.organization, run_request__operation_id=str(op.pk)).values_list("run_id", flat=True))
-        ContentFactoryRun.objects.filter(run_id__in=run_ids).update(status="cancelled", resume_available=False, error="Website operation cancelled.", updated_at=timezone.now())
+        child_operations = []
+        if op.action == "prepare":
+            child_id = op.receipt.get("child_run_id") or op.payload.get("run_id")
+            if child_id and child_id not in run_ids:
+                run_ids.append(child_id)
+            child_operations = list(connection.operations.filter(generation=connection.generation, action="workflow",
+                payload__run_id__in=run_ids).values_list("id", flat=True)) if run_ids else []
+            connection.operations.filter(pk__in=child_operations).exclude(state__in=["completed", "failed", "denied", "deleted"]).update(
+                state="cancelled", next_attempt_at=None, updated_at=timezone.now())
+        ContentFactoryRun.objects.filter(run_id__in=run_ids, organization=connection.organization).update(status="cancelled", resume_available=False, error="Website operation cancelled.", updated_at=timezone.now())
         followup, _ = WebsiteConnectionOperation.objects.get_or_create(idempotency_key=f"{connection.pk}:cancel:{idempotency_key}", defaults={
             "connection": connection, "generation": connection.generation, "action": "cancel-operation", "payload": {"cancel_run_ids": run_ids,
-                "stop_preview_run_ids": run_ids, "cancelled_operation_id": str(op.pk), "previous_generation": connection.generation},
+                "stop_preview_run_ids": run_ids, "cancelled_operation_id": str(op.pk), "cancelled_action": op.action,
+                "cancelled_child_operation_ids": [str(item) for item in child_operations], "previous_generation": connection.generation},
             "receipt": dict(op.receipt)})
         return followup
 
