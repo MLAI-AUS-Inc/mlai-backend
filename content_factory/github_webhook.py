@@ -148,6 +148,19 @@ def process_github_event(event_type, payload) -> dict:
     """Dispatch a verified GitHub event to its handler."""
     event_type = str(event_type or "").strip().lower()
     payload = payload if isinstance(payload, dict) else {}
+    if event_type == "installation" and payload.get("action") == "new_permissions_accepted":
+        from django.db.models import F
+        from .website_models import WebsiteConnection
+        from .website_prepare import advance_prepares_for_connection
+        from .website_github_permissions import invalidate_installation_grants
+        identifier = str((payload.get("installation") or {}).get("id") or "")
+        if not identifier.isdigit():
+            return {"event": event_type, "ignored": True}
+        invalidate_installation_grants(identifier)
+        connections = WebsiteConnection.objects.filter(installation_id=identifier, state="connected",
+            operations__action="prepare", operations__state="needs_user", operations__generation=F("generation"))
+        count = sum(advance_prepares_for_connection(key) for key in connections.values_list("id", flat=True).distinct())
+        return {"event": event_type, "action": "new_permissions_accepted", "prepares_woken": count}
     if event_type == "ping":
         return {"event": "ping"}
     if event_type in {"installation", "installation_repositories", "repository"}:

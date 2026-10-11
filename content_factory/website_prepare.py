@@ -16,6 +16,8 @@ logger = logging.getLogger(__name__)
 
 RETRY_MINUTES = (1, 2, 5, 10)
 DEPLOYMENT_RETRY_MINUTES = (2, 5, 10, 20, 40)
+PERMISSION_CODES = frozenset({"github_workflow_permission_required", "github_ci_evidence_permission_required"})
+
 AUTHORIZATION_CODES = frozenset({"github_reconnect_required", "github_authorization_required",
     "github_repository_unavailable", "github_workflow_permission_required", "github_ci_evidence_permission_required",
     "website_connection_required", "github_access_required", "github_verification_required"})
@@ -96,6 +98,12 @@ def _finish_prepare(op, *, now):
     return _persist_prepare(op, now=now)
 
 
+def _permission_action(connection, *, grants=None):
+    from .website_github_permissions import installation_grants
+    grants = grants or installation_grants(connection)
+    return {"id": "review_github_permissions", "label": "Review GitHub permissions", "url": grants["settingsUrl"]}
+
+
 def prepare_failure(op, step, error, *, now=None):
     """Classify failures without asking the founder to repeat retryable work."""
     now = now or timezone.now()
@@ -109,6 +117,9 @@ def prepare_failure(op, step, error, *, now=None):
     if getattr(error, "user_action", None):
         op.state, op.next_attempt_at = "needs_user", None
         op.receipt.update(status="needs_you", user_action=error.user_action)
+    elif code in PERMISSION_CODES:
+        op.state, op.next_attempt_at = "needs_user", None
+        op.receipt.update(status="needs_you", user_action=_permission_action(op.connection))
     elif code in AUTHORIZATION_CODES:
         op.state = "needs_user"
         op.receipt.update(status="needs_you", user_action={"id": "authorize_github", "label": "Authorize GitHub"})
@@ -181,6 +192,14 @@ def _owner_request(op, context, config, step, *, journey=None):
 
 def _dispatch_prepare_step(op, context, config, step, *, journey=None):
     from .vibe_marketing_views import VibeMarketingScanView, VibeMarketingArticleSystemSetupView, _article_capabilities_for_context
+    if step == "permissions":
+        grants = (journey or {}).get("githubPermissions") or {}
+        prerequisite = (journey or {}).get("prerequisites", {}).get("permissions") or {}
+        error = WebsiteAuthorityError(prerequisite.get("reasonCode") or "github_workflow_permission_required",
+            prerequisite.get("reason") or "Review GitHub permissions.", retryable=grants.get("retryable", False))
+        if error.code in PERMISSION_CODES:
+            error.user_action = _permission_action(config.website_connection, grants=grants)
+        raise error
     if step == "verify-access":
         capabilities = _article_capabilities_for_context(context, config, force=True)
         if not capabilities.get("repositoryAccessVerified"):
@@ -289,6 +308,10 @@ def advance_prepare(identifier, *, now=None, handlers=None):
             if forced is not None:
                 journey = journey_for_context(context, config, capabilities=forced)
                 digest = evidence_digest({"prerequisites": journey.get("prerequisites"), "capabilities": journey.get("capabilities")})
+            if journey.get("capabilities", {}).get("canPublishArticle"):
+                op.state, op.next_attempt_at = "completed", None
+                op.receipt.update(status="ready", message="Your website is ready for articles.", current_step="ready", user_action=None)
+                return _finish_prepare(op, now=now)
             op.receipt["last_completed"] = {"step": step, "facts_digest": digest}
             if forced is not None and (journey.get("nextAction") or {}).get("id") != step:
                 continue

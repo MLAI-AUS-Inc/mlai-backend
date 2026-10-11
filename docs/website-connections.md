@@ -61,6 +61,26 @@ worker requests and does not print credentials or repository content. Prepare pa
 log only identifiers, step/state/reason code, attempt, and next attempt time; scheduler
 summaries include up to twenty operation IDs, actions and outcomes.
 
+Preparation uses the scan's listing route (`existing` mode), or creates `/articles`
+in `none` mode only when inventory confirms no listing. A saved owner route takes
+precedence. Several ambiguous routes return `needs_user` with
+`user_action.id=choose_articles_page`; unchanged facts after a successful step stop
+with `prepare_no_progress`. Deterministic child failures link to the failed run,
+while explicitly retryable worker failures retain bounded retries. Owners may cancel
+an active or waiting prepare operation and explicitly reopen it with another Prepare
+click; cancelling fences its child and queues the ordinary run cancellation path.
+
+The `permissions` prerequisite sits between inventory and integration. Read-only
+App JWT grant checks for `workflow_files` and `ci_evidence` cache results for sixty
+seconds without minting a token. Missing grants return `needs_user` with
+`user_action={id:review_github_permissions,label,url}` pointing to that installation's
+personal or organization settings. Permission lookup outages remain retryable.
+GitHub's authenticated `installation.new_permissions_accepted` webhook clears this
+cache and wakes current waiting prepares. GitHub documents that Apps receive
+[installation events by default](https://docs.github.com/en/webhooks/webhook-events-and-payloads#installation)
+and documents [new_permissions_accepted](https://docs.github.com/en/apps/creating-github-apps/about-creating-github-apps/best-practices-for-creating-a-github-app#allow-time-for-users-to-accept-new-permissions)
+for permission approval. An owner's Check again click also reopens the operation.
+
 `POST .../website-connection/prepare` takes `company_id`, the reviewed connection/generation tuple and `configuration_revision`. It reserves one `prepare` operation per consent generation and persists its requesting founder, child runs, completed steps, failure counts and next attempt. The scheduled-discovery loop checks current founder membership and consent before resuming access checks, inventory, setup, exact preview proof, CI attestation and live route verification. Successful scan/configuration, CI and deployment callbacks wake the operation after commit. Concurrent requests and late callbacks cannot overwrite a newer operation lease or a disconnect fence.
 
 Preparation, scans and article setup cost zero Roo points. Ordinary step failures retry after one and two minutes, then stop at `needs_attention`. CI/deployment waits use two, five, ten, twenty and forty minutes before stopping. Missing GitHub authorization produces one `needs_user` receipt with `user_action`; callers can explicitly retry the same saved operation after resolving it. New setup previews must pass every exact-commit quality/task/resume-generation requirement before automatic approval. Adopted verification kits additionally require actual kit-commit build/browser proof. Setup auto-merge reads both GitHub branch rules and branch protection, and is allowed only with no required approving reviewers and no company `requires_review` setting. Unknown policy evidence produces a merge prompt.
