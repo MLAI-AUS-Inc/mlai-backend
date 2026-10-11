@@ -1596,3 +1596,23 @@ The relay timeline accepts these tags only from registered trusted bridge
 signers. This contract does not create duplicate native push notifications.
 Old signed events without mention tags cannot acquire them retrospectively;
 shadow comparison must distinguish that historical coverage limitation.
+
+### Relay-owned counts for mapped rooms (disabled by default)
+
+`MESSAGE_SYNC_RELAY_READ_COUNTS=false` preserves current history probes. Enable
+it only after supported clients use relay inbox counts. It additionally requires
+a current source-cursor capability context for that exact owner, source and mapped
+relay room. Missing capability or recovery context retains the legacy probe.
+
+Mapped private conversations and public bridge channels then need only
+`conversations.info` for `last_read`; their source observation still captures its
+causal fence before the provider request. Snapshot metadata uses
+`count_source: "relay"`, with unknown numeric and personal-mention counts instead
+of fabricated zeroes. `is_unread` is a scheduling hint from known source activity,
+not the count authority. The relay supplies all room counts and mention truth.
+
+Source-only owner-directory rows keep their existing history and numeric count
+behavior, even though they are also represented as read-target conversations.
+Provider admission, Retry-After handling, export shares and safety-sweep quotas
+remain unchanged. Rolling back the flag restores history probing without deleting
+cursors or source observations.
