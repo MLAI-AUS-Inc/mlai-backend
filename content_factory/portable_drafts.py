@@ -82,6 +82,7 @@ def portable_run_update_allowed(run, payload, *, event_type=""):
     if any(payload.get(key) and str(payload[key]) != str(run.run_id) for key in ("run_id", "job_id")):
         return False
     editorial_status_paths = set()
+    editorial_repository_paths = set()
     request = payload.get("run_request")
     if isinstance(request, dict) and request.get("editorial_admission") is not None:
         from .editorial_run_state import EditorialRunConflict, merge_editorial_run_snapshot
@@ -100,6 +101,9 @@ def portable_run_update_allowed(run, payload, *, event_type=""):
             ("run_request", "editorial_admission", kind, "status")
             for kind in ("audience", "offer")
         }
+        # An unchanged admission is historical editorial evidence. Its former
+        # repository cannot grant any capability to this portable draft.
+        editorial_repository_paths = {("run_request", "editorial_admission", "github_repo")}
     forbidden = REPOSITORY_CONFIG_FIELDS | set(CONNECTION_FIELDS) | {
         "github_token", "github_installation_id", "expected_source_sha", "source_sha", "repo_head_sha", "commit_sha",
         "branch", "branch_name", "head_sha", "pr_url", "pr_number", "pull_request_url", "publish_url",
@@ -117,7 +121,8 @@ def portable_run_update_allowed(run, payload, *, event_type=""):
                     return False
                 if normalized_key in {"delivery_mode", "requested_delivery_mode", "resolved_delivery_mode", "publish_resolution"} and item not in (None, "", "content_only"):
                     return False
-                if normalized_key == "github_repo" and item and item != getattr(run, "github_repo", ""):
+                if (normalized_key == "github_repo" and item and item != getattr(run, "github_repo", "")
+                        and path + (key,) not in editorial_repository_paths):
                     return False
                 if normalized_key == "domain" and item and str(item).lower().strip() != str(run.domain).lower().strip():
                     return False

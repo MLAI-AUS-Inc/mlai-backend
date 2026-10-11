@@ -137,7 +137,8 @@ class ReconciliationSweepTests(TestCase):
 
     def test_remote_still_active_leaves_run_alone_and_throttles_reprobe(self):
         _make_run("real-run-3", workflow="direct_generate")
-        remote = {"run_id": "real-run-3", "workflow": "direct_generate", "status": "processing"}
+        remote = {"run_id": "real-run-3", "workflow": "direct_generate", "status": "processing",
+                  "activity_heartbeat_at": timezone.now().isoformat()}
 
         with patch(
             "content_factory.reconciliation.requests.get",
@@ -234,7 +235,8 @@ class ReconciliationSweepTests(TestCase):
     def test_batch_limit_bounds_probes_per_tick(self):
         for index in range(4):
             _make_run(f"real-run-batch-{index}", workflow="direct_generate")
-        remote = {"workflow": "direct_generate", "status": "processing"}
+        remote = {"workflow": "direct_generate", "status": "processing",
+                  "activity_heartbeat_at": timezone.now().isoformat()}
 
         with override_settings(
             CONTENT_FACTORY_URL="http://cf.test",
