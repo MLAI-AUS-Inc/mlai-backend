@@ -210,12 +210,13 @@ def select_target(ordered, snapshots, cache_key, cursor, *, now, turn):
 
 
 def invalidate_event(payload):
-    """Prioritize known conversations for the event's explicit Slack recipients.
+    """Prioritize explicit recipients and an enabled public mapping's author.
 
     No event body or fabricated count enters the queue. The worker revalidates
     current consent, scopes, membership and device access before provider I/O.
     """
-    from integrations.models import SlackDmMirrorGrant
+    from django.conf import settings
+    from integrations.models import CommunityBridgeChannel, SlackDmMirrorGrant
     from integrations.services import slack_chat_read_state as reads
     from integrations.services.slack_dm_mirror import _slack_event_authorized_user_ids, SlackDmMirrorAuthorizationError
     event = payload.get("event") or {}
@@ -223,6 +224,19 @@ def invalidate_event(payload):
         return
     source_id = event.get("channel")
     owners = _slack_event_authorized_user_ids(payload)
+    author = str(event.get("user") or "").strip()
+    # Slack can authorize only the bridge bot for a public-channel event even
+    # when its human author has a current owner grant. A source-ID hint does
+    # not import content or grant access: the worker still checks the owner's
+    # consent, scopes, membership and device authority before provider I/O.
+    if (source_id and author and getattr(settings, "MESSAGE_SYNC_TARGETED_READ_POLLING", False)
+            and event.get("channel_type") == "channel" and not event.get("bot_id")
+            and event.get("subtype") not in {"message_changed", "message_deleted"}
+            and CommunityBridgeChannel.objects.filter(
+                slack_workspace_id=payload.get("team_id"), slack_channel_id=source_id,
+                destination_platform="buzz", enabled=True,
+            ).exclude(destination_channel_id="").exists()):
+        owners.add(author)
     if not source_id or not owners:
         return
     grants = SlackDmMirrorGrant.objects.select_related("connection").filter(
@@ -235,7 +249,6 @@ def invalidate_event(payload):
         # Unknown rooms are discarded by the worker's authorized target list.
         try:
             authority = reads._capture_slack_grant_api_authority(grant)
-            from django.conf import settings
             own = (getattr(settings, "MESSAGE_SYNC_TARGETED_READ_POLLING", False)
                    and event.get("user") == grant.slack_user_id
                    and not event.get("bot_id")

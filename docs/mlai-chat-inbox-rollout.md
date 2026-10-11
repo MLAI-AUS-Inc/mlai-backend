@@ -94,6 +94,14 @@ checks, per-target fairness and reserved safety-sweep capacity during rollback.
 `READ_STATE_SAFETY_SWEEP_HOURS` defaults to six; targeted freshness measures
 possibly-unread conversations rather than archive completion or cache size.
 
+A human's root post or ordinary reply in an enabled public Slack-to-Chat
+mapping prompts an owner read probe even when Slack's event authorization
+list contains only the bridge installation. The hint stores only the source
+room ID and does not mark anything read. Current owner grant, consent, scope,
+membership and device access are still checked by the worker. This author
+fallback requires explicit `channel_type=channel`; private rooms, bots,
+unmapped rooms, edits and deletes retain the explicit-recipient path.
+
 After two stable weeks and a raised minimum supported client version, remove
 legacy client channel read merges, forced-unread stores, unread-history fetches
 and channel NIP-RS frontiers. Keep thread contexts until the server thread
