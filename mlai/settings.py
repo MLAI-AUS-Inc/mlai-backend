@@ -581,6 +581,7 @@ COMMUNITY_CHAT_ADAPTER_URL = os.getenv(
 ).rstrip('/')
 COMMUNITY_CHAT_ADAPTER_TOKEN = os.getenv('COMMUNITY_CHAT_ADAPTER_TOKEN', '')
 COMMUNITY_CHAT_MEMBER_ACCOUNTS_ENABLED = _env_is_true('COMMUNITY_CHAT_MEMBER_ACCOUNTS_ENABLED', False)
+COMMUNITY_CHAT_INBOX_ERASURE_ENABLED = _env_is_true('COMMUNITY_CHAT_INBOX_ERASURE_ENABLED', False)
 # Dedicated stable secret, never derived from Django SECRET_KEY. Rotation starts
 # a new opaque account and requires explicitly re-binding all verified devices.
 MLAI_CHAT_ACCOUNT_KEY_SECRET = os.getenv('MLAI_CHAT_ACCOUNT_KEY_SECRET', '')

@@ -1,5 +1,13 @@
 # MLAI Chat bridge contract
 
+The membership adapter's `inbox_erasure_v1` capability supports private
+`DELETE /v2/inbox-accounts/{account_key}` after access revocation. Successful
+responses echo `community_id`, `account_key`, status `erased`, integer
+`deleted_rows` and zero `remaining_rows`. Retries are idempotent. Active
+bindings/membership return a conflict. This proof covers relay read cursors,
+cursor exports and account revisions only; the existing bridge-copy deletion
+target must also clear its own retained cursor payloads and journals.
+
 The community bridge provides a live, bidirectional view of selected public
 Slack channels inside MLAI Chat. Slack remains usable throughout the rollout;
 MLAI Chat is another client surface, not a one-time data migration.
