@@ -352,6 +352,7 @@ jobs:
           tests.test_content_factory_org_config \
           content_factory.tests_website_connections content_factory.tests_setup_merge content_factory.tests_website_articles_reliability_database \
           content_factory.tests_one_click_database.OneClickPersistenceTests \
+          content_factory.tests_one_click_database.MCPResearchPersistenceTests \
           integrations.tests_github_workflow_permissions \
           integrations.tests_github_ci_evidence \
           content_factory.tests_activation_connections \

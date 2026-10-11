@@ -446,6 +446,73 @@ class OneClickPersistenceTests(OneClickBillingFixture, TestCase):
         self.assertEqual(self.balance(self.payer), 14_000_000)
 
 
+class MCPResearchPersistenceTests(OneClickBillingFixture, TestCase):
+    """Research retries exercise the actual wallet, ledger and original outbox."""
+
+    def setUp(self):
+        super().setUp()
+        PointsService.credit_purchased_topup(user=self.requester, delta=20,
+            description='Synthetic research funding', idempotency_key='research-funding')
+
+    def research_payload(self):
+        return {'domain': self.org.domain, 'client_request_id': 'synthetic-research',
+            'requested_topic_count': 3, 'custom_topic_title': 'Original topic',
+            'expected_cost_points': 3, 'mcp_company_id': str(self.company.pk),
+            'mcp_request_hash': 'a' * 64}
+
+    def research_charge(self, payload):
+        with patch.object(views, 'get_content_factory_research_cost_points', return_value=3), \
+                patch('integrations.services.article_generation.get_content_factory_research_cost_points', return_value=3):
+            return views._charge_roo_points_for_content_island_topic_generation(
+                self.request, context=self.context, payload=payload)
+
+    def test_repeated_research_commits_one_real_spend_and_original_input_receipt(self):
+        for _ in range(2):
+            payer, _, error = self.research_charge(self.research_payload())
+            self.assertIsNone(error)
+            self.assertEqual(payer.pk, self.requester.pk)
+        self.assertEqual(self.balance(self.requester), 17_000_000)
+        self.assertEqual(Ledger.objects.filter(kind='SPEND').count(), 1)
+        row = ContentFactoryDispatchOutbox.objects.get()
+        self.assertEqual((row.payload['endpoint'], row.payload['workflow']), ('discovery', 'auto_discovery'))
+        self.assertEqual(row.payload['billing_user_id'], str(self.requester.pk))
+        self.assertEqual(row.payload['request']['custom_topic_title'], 'Original topic')
+        self.assertEqual(row.payload['request']['mcp_company_id'], str(self.company.pk))
+
+    def test_research_receipt_failure_rolls_back_wallet_and_inserted_outbox(self):
+        original = dispatch_outbox.reserve_dispatch
+        def insert_then_fail(**kwargs):
+            original(**kwargs)
+            raise RuntimeError('Synthetic research receipt failure')
+        with patch.object(dispatch_outbox, 'reserve_dispatch', side_effect=insert_then_fail):
+            with self.assertRaisesRegex(RuntimeError, 'receipt failure'):
+                self.research_charge(self.research_payload())
+        self.assertEqual(self.balance(self.requester), 20_000_000)
+        self.assertFalse(Ledger.objects.filter(kind='SPEND').exists())
+        self.assertFalse(ContentFactoryDispatchOutbox.objects.exists())
+
+    def test_research_retry_cannot_change_saved_inputs_or_debit_again(self):
+        self.research_charge(self.research_payload())
+        changed = {**self.research_payload(), 'custom_topic_title': 'Changed topic', 'mcp_request_hash': 'b' * 64}
+        with self.assertRaises(WebsiteAuthorityError) as error:
+            self.research_charge(changed)
+        self.assertEqual(error.exception.code, 'dispatch_key_conflict')
+        self.assertEqual(self.balance(self.requester), 17_000_000)
+        self.assertEqual(Ledger.objects.filter(kind='SPEND').count(), 1)
+        self.assertEqual(ContentFactoryDispatchOutbox.objects.get().payload['request']['custom_topic_title'], 'Original topic')
+
+    def test_research_refund_restores_original_spend_once_after_price_changes(self):
+        self.research_charge(self.research_payload())
+        row = ContentFactoryDispatchOutbox.objects.get()
+        with patch('integrations.services.article_generation.get_content_factory_research_cost_points', return_value=0) as price:
+            dispatch_outbox.refund_dispatch(row, reason='Synthetic refusal')
+            dispatch_outbox.refund_dispatch(row, reason='Synthetic repeated refusal')
+        price.assert_not_called()
+        self.assertEqual(self.balance(self.requester), 20_000_000)
+        self.assertEqual(Ledger.objects.filter(kind='REFUND').count(), 1)
+        self.assertEqual(Ledger.objects.get(kind='REFUND').delta_microroo, 3_000_000)
+
+
 class OneClickTransactionTests(OneClickBillingFixture, TransactionTestCase):
     def setUp(self):
         super().setUp()
