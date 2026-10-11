@@ -90,6 +90,46 @@ class InboxExportTests(SimpleTestCase):
             self.assertEqual(response.status_code, expected)
 
 
+class PublicAnchorDeliveryTests(SimpleTestCase):
+    link = InboxExportTests.link
+
+    def test_terminal_public_anchor_falls_back_and_retryable_anchor_waits(self):
+        from integrations.models import CommunityBridgeDelivery, CommunityBridgeMessageLink
+        anchor = 'b' * 64
+        inbound = self.link(source_id='100.000001', destination_id='c' * 64)
+        for delivery_status in ('dead', 'completed', 'pending', 'processing', 'waiting_parent', 'failed'):
+            with self.subTest(status=delivery_status):
+                links = Mock()
+                links.filter.return_value = []
+                delivery = Mock()
+                delivery.exclude.side_effect = lambda **kwargs: SimpleNamespace(
+                    exists=lambda: delivery_status not in kwargs['status__in'])
+                with patch.object(CommunityBridgeMessageLink.objects, 'filter', return_value=links), patch.object(
+                    CommunityBridgeDelivery.objects, 'filter', return_value=delivery
+                ) as query, patch.object(exports, 'latest_inbound_before', return_value=inbound) as fallback:
+                    if delivery_status in {'dead', 'completed'}:
+                        self.assertEqual(exports.public_anchor_timestamp('mapped', anchor, 101000000), '100.000001')
+                        fallback.assert_called_once()
+                    else:
+                        with self.assertRaisesRegex(RuntimeError, '^inbox_delivery_link_pending$'):
+                            exports.public_anchor_timestamp('mapped', anchor, 101000000)
+                        fallback.assert_not_called()
+                    query.assert_called_once_with(channel='mapped', source_platform='buzz',
+                                                  source_message_id=anchor, delivery_type='create')
+
+    def test_completed_native_anchor_uses_exact_link_without_history_fallback(self):
+        from integrations.models import CommunityBridgeDelivery, CommunityBridgeMessageLink
+        anchor = 'b' * 64
+        links = Mock()
+        links.filter.return_value = [self.link('buzz', 'slack', anchor, '101.000002')]
+        with patch.object(CommunityBridgeMessageLink.objects, 'filter', return_value=links), patch.object(
+            CommunityBridgeDelivery.objects, 'filter'
+        ) as delivery, patch.object(exports, 'latest_inbound_before') as fallback:
+            self.assertEqual(exports.public_anchor_timestamp('mapped', anchor, 100000000, unread=True), '101.000001')
+        delivery.assert_not_called()
+        fallback.assert_not_called()
+
+
 @override_settings(MESSAGE_SYNC_INBOX_READ_EXPORT=True)
 class ExportDeliveryTests(InboxExportTests):
     def pending(self, op='read', requested_at=100):
