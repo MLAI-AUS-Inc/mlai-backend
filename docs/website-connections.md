@@ -51,6 +51,16 @@ Cleanup execution requires a second explicit owner POST with `approve_cleanup:tr
 
 ## One-click preparation, disconnection and billing
 
+`python manage.py inspect_website_prepare --company-id <uuid>` (or `--domain example.test`)
+prints bounded local preparation diagnostics: connection identity and capabilities,
+the last five operation receipts, the saved setup choice, current inventory resolution,
+and current-generation targets. PostgreSQL enforces `SET TRANSACTION READ ONLY` as
+the transaction's first statement. `--journey` additionally projects prerequisites,
+the next action, and allowed actions using read-only GitHub checks. It makes no
+worker requests and does not print credentials or repository content. Prepare passes
+log only identifiers, step/state/reason code, attempt, and next attempt time; scheduler
+summaries include up to twenty operation IDs, actions and outcomes.
+
 `POST .../website-connection/prepare` takes `company_id`, the reviewed connection/generation tuple and `configuration_revision`. It reserves one `prepare` operation per consent generation and persists its requesting founder, child runs, completed steps, failure counts and next attempt. The scheduled-discovery loop checks current founder membership and consent before resuming access checks, inventory, setup, exact preview proof, CI attestation and live route verification. Successful scan/configuration, CI and deployment callbacks wake the operation after commit. Concurrent requests and late callbacks cannot overwrite a newer operation lease or a disconnect fence.
 
 Preparation, scans and article setup cost zero Roo points. Ordinary step failures retry after one and two minutes, then stop at `needs_attention`. CI/deployment waits use two, five, ten, twenty and forty minutes before stopping. Missing GitHub authorization produces one `needs_user` receipt with `user_action`; callers can explicitly retry the same saved operation after resolving it. New setup previews must pass every exact-commit quality/task/resume-generation requirement before automatic approval. Adopted verification kits additionally require actual kit-commit build/browser proof. Setup auto-merge reads both GitHub branch rules and branch protection, and is allowed only with no required approving reviewers and no company `requires_review` setting. Unknown policy evidence produces a merge prompt.

@@ -1,4 +1,5 @@
 """Persisted, bounded orchestration of the existing website readiness journey."""
+import logging
 from datetime import timedelta
 from types import SimpleNamespace
 
@@ -10,6 +11,8 @@ from .website_connections import authority_guard, contract_for
 from .website_contract import WebsiteAuthorityError
 from .website_journey import journey_for_context
 from .website_models import WebsiteConnectionOperation
+
+logger = logging.getLogger(__name__)
 
 RETRY_MINUTES = (1, 2, 5, 10)
 DEPLOYMENT_RETRY_MINUTES = (2, 5, 10, 20, 40)
@@ -83,6 +86,13 @@ def _persist_prepare(op, *, now):
         updated_at=op._claimed_at, connection__generation=op.generation, connection__state="connected").update(
             state=op.state, receipt=op.receipt, payload=op.payload, next_attempt_at=op.next_attempt_at, updated_at=now)
     return op
+
+
+def _finish_prepare(op, *, now):
+    logger.info("website_prepare operation=%s company=%s connection=%s generation=%s step=%s state=%s reason=%s attempt=%s next_attempt=%s",
+        op.pk, op.payload.get("company_id"), op.connection_id, op.generation, op.receipt.get("current_step"),
+        op.state, op.receipt.get("reason_code", ""), op.attempts, op.next_attempt_at)
+    return _persist_prepare(op, now=now)
 
 
 def prepare_failure(op, step, error, *, now=None):
@@ -172,7 +182,7 @@ def advance_prepare(identifier, *, now=None, handlers=None):
         if journey.get("capabilities", {}).get("canPublishArticle"):
             op.state, op.next_attempt_at = "completed", None
             op.receipt.update(status="ready", message="Your website is ready for articles.", current_step="ready", user_action=None)
-            return _persist_prepare(op, now=now)
+            return _finish_prepare(op, now=now)
         child_id = op.receipt.get("child_run_id")
         if child_id:
             from workflow_runs.models import ContentFactoryRun
@@ -183,7 +193,7 @@ def advance_prepare(identifier, *, now=None, handlers=None):
                 setup.get("status") in {"preview_ready", "pr_created", "completed", "ready", "adopted_existing_surface", "adopted"})
             if child and not setup_review_ready and child.status not in {"completed", "failed", "blocked", "cancelled", "denied"}:
                 op.state, op.next_attempt_at = "pending", now + timedelta(minutes=1)
-                return _persist_prepare(op, now=now)
+                return _finish_prepare(op, now=now)
             if child and child.status in {"failed", "blocked", "cancelled", "denied"}:
                 code = (child.result or {}).get("error_code") or "website_prepare_step_failed"
                 op.receipt.pop("child_run_id", None)
@@ -195,10 +205,10 @@ def advance_prepare(identifier, *, now=None, handlers=None):
                     op.state, op.next_attempt_at = "needs_user", None
                     op.receipt.update(status="needs_you", current_step="merge", message="Merge the articles setup pull request.",
                         user_action=merge["user_action"])
-                    return _persist_prepare(op, now=now)
+                    return _finish_prepare(op, now=now)
                 if merge.get("status") == "pending":
                     op.state, op.next_attempt_at = "pending", now + timedelta(minutes=2)
-                    return _persist_prepare(op, now=now)
+                    return _finish_prepare(op, now=now)
             op.receipt.pop("child_run_id", None)
         step = (journey.get("nextAction") or {}).get("id")
         if not step:
@@ -218,10 +228,14 @@ def advance_prepare(identifier, *, now=None, handlers=None):
         op.state, op.next_attempt_at = "pending", now + timedelta(minutes=1)
     except WebsiteAuthorityError as exc:
         prepare_failure(op, step, exc, now=now)
-    except Exception:
+    except Exception as exc:
+        # Preserve stack locations without logging provider exception bodies.
+        logger.exception("website_prepare unexpected operation=%s company=%s connection=%s generation=%s step=%s",
+            op.pk, op.payload.get("company_id"), op.connection_id, op.generation, step,
+            exc_info=(RuntimeError, RuntimeError("Unexpected prepare dispatch failure"), exc.__traceback__))
         prepare_failure(op, step, WebsiteAuthorityError("website_prepare_unavailable",
             "Website preparation is temporarily unavailable. It will retry automatically.", retryable=True), now=now)
-    return _persist_prepare(op, now=now)
+    return _finish_prepare(op, now=now)
 
 
 def advance_prepares_for_connection(connection_id):

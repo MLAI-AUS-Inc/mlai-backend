@@ -360,7 +360,7 @@ def process_website_connection_operations(*, limit=20, now=None, connection_id=N
     if connection_id:
         due = due.filter(connection_id=connection_id)
     ids = list(due.order_by("next_attempt_at").values_list("id", flat=True)[:limit])
-    result = {"status": "completed", "processed": 0, "completed": 0, "pending": 0}
+    result = {"status": "completed", "processed": 0, "completed": 0, "pending": 0, "operations": []}
     from .website_support import reconcile_support_verifications
     reconcile_support_verifications(limit=limit, connection_id=connection_id)
     monitor_cleanup_pull_requests(limit=limit, connection_id=connection_id)
@@ -370,18 +370,24 @@ def process_website_connection_operations(*, limit=20, now=None, connection_id=N
             operation = advance_prepare(identifier, now=now)
             if operation is not None:
                 result["processed"] += 1
+                if len(result["operations"]) < 20:
+                    result["operations"].append({"id": str(identifier), "action": "prepare", "outcome": operation.state})
                 result["completed" if operation.state == "completed" else "pending"] += 1
             continue
         if WebsiteConnectionOperation.objects.filter(pk=identifier, action="source-reverify").exists():
             outcome = _process_source_reverification(identifier, now)
             if outcome is not None:
                 result["processed"] += 1
+                if len(result["operations"]) < 20:
+                    result["operations"].append({"id": str(identifier), "action": "source-reverify", "outcome": outcome})
                 result["pending" if outcome == "pending" else "completed"] += 1
             continue
         if WebsiteConnectionOperation.objects.filter(pk=identifier, action="worker_followup").exists():
             outcome = _process_worker_followup(identifier, now)
             if outcome is not None:
                 result["processed"] += 1
+                if len(result["operations"]) < 20:
+                    result["operations"].append({"id": str(identifier), "action": "worker_followup", "outcome": outcome})
                 result["pending" if outcome == "pending" else "completed"] += 1
             continue
         purge_connection_id = None
@@ -510,6 +516,8 @@ def process_website_connection_operations(*, limit=20, now=None, connection_id=N
         # Offboarding may redact the payload while transport runs. Never replace
         # that newer retention/erasure receipt with our pre-request snapshot.
         result["pending" if not applied or op.state == "pending" else "completed"] += 1
+        if len(result["operations"]) < 20:
+            result["operations"].append({"id": str(op.pk), "action": op.action, "outcome": op.state if applied else "lease_changed"})
         if applied and op.state == "completed" and op.payload.get("purge_after_reconciliation"):
             purge_connection_id = op.connection_id
         if purge_connection_id:
