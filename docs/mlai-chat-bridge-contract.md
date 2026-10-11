@@ -1488,3 +1488,10 @@ safety work from starving. Per-target Retry-After deadlines and shared provider
 admission still apply to every tier. Source activity only selects work; it never
 asserts an unread count. Mirrored history count probes retain their separate
 future adoption gate, so scheduling can be rolled out before relay unread.
+
+Owner posts receive an `own_message` probe hint only for explicitly authorized
+Slack recipients whose current grant user matches the event author. Bot, edit
+and deletion callbacks do not receive owner priority. The hint is metadata only,
+never a read assertion. Dirty generations survive provider budget pauses and
+are cleared only by the matching successful observation. Activity renewals do
+not downgrade an existing visible or owner hint.

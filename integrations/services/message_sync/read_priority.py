@@ -21,11 +21,13 @@ def hint_pending(value, now):
             return False
     return (type(expiry) in (int, float) and math.isfinite(expiry)
             and expiry >= 0
-            and (value.get("reason") == "activity" or expiry > now))
+            and (value.get("reason") in {"activity", "own_message"} or value.get("dirty") is True or expiry > now))
 
 
 def merged_hints(hints, source_ids, *, now, reason):
     """Coalesce bounded metadata work without renewing a satisfied generation."""
+    from django.conf import settings
+    targeted = getattr(settings, "MESSAGE_SYNC_TARGETED_READ_POLLING", False)
     hints = {key: dict(value) for key, value in hints.items() if hint_pending(value, now)}
     for source_id in source_ids:
         previous = hints.get(source_id) or {}
@@ -34,14 +36,19 @@ def merged_hints(hints, source_ids, *, now, reason):
             requested_at = now
         # Repeated visibility polls refer to the same pending observation. A
         # new source event must be distinguishable from an in-flight request.
-        renewed = reason == "activity" or not previous
+        renewed = reason in {"activity", "own_message"} or not previous
+        effective_reason = "activity" if previous.get("reason") == "activity" else reason
+        if targeted:
+            order = {"own_message": 0, "visible": 1, "activity": 2}
+            effective_reason = min([reason, previous.get("reason", reason)], key=lambda r: order.get(r, 3))
         hints[source_id] = {
             **previous,
             "requested_at": requested_at,
             "last_requested_at": now if renewed else previous.get("last_requested_at", now),
             "generation": uuid.uuid4().hex if renewed else previous.get("generation", uuid.uuid4().hex),
             "until": now + (90 if reason == "visible" else 300),
-            "reason": "activity" if previous.get("reason") == "activity" else reason,
+            "reason": effective_reason,
+            **({"dirty": bool(previous.get("dirty") or reason in {"activity", "own_message"})} if targeted else {}),
         }
     return dict(sorted(hints.items(), key=lambda item: item[1]["requested_at"])[:MAX_HINTS])
 
@@ -228,7 +235,13 @@ def invalidate_event(payload):
         # Unknown rooms are discarded by the worker's authorized target list.
         try:
             authority = reads._capture_slack_grant_api_authority(grant)
-            enqueue_refresh(authority, [reads.ReadTarget("", source_id, "im")], reason="activity")
+            from django.conf import settings
+            own = (getattr(settings, "MESSAGE_SYNC_TARGETED_READ_POLLING", False)
+                   and event.get("user") == grant.slack_user_id
+                   and not event.get("bot_id")
+                   and event.get("subtype") not in {"message_changed", "message_deleted"})
+            enqueue_refresh(authority, [reads.ReadTarget("", source_id, "im")],
+                            reason="own_message" if own else "activity")
         except SlackDmMirrorAuthorizationError:
             # Another recipient's expired/replaced grant cannot hold this
             # already-durable Slack receipt or other owners' hints hostage.
