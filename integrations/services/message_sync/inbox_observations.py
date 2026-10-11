@@ -80,7 +80,8 @@ def capture(authority, target):
     return {**context, 'applied_revision': int(applied)}
 
 
-def coalesce(rows, context, last_read, *, observed_at, now, revision_floor=0):
+def coalesce(rows, context, last_read, *, observed_at, now, revision_floor=0,
+             source_frontier=None, own_echo=False):
     """A newer observation replaces transport work, retaining exact source order."""
     stamp = timestamp(last_read)
     if stamp is None or not 0 <= now - observed_at < MAX_AGE:
@@ -98,11 +99,11 @@ def coalesce(rows, context, last_read, *, observed_at, now, revision_floor=0):
     if revision > exports.I64_MAX:
         raise ValueError('inbox_revision_exhausted')
     pending = {'account_key': context['account_key'], 'channel_id': context['channel_id'],
-               'slack_last_read': stamp, 'op': 'regress' if regress else 'observe',
+               'slack_last_read': source_frontier or stamp, 'op': 'regress' if regress and not own_echo else 'observe',
                'applied_revision': context['applied_revision'], 'revision': revision,
                'created_at': int(observed_at)}
     result[key] = {**previous, **context, 'last_read': stamp, 'observed_at': observed_at,
-                   'revision': revision, 'pending': pending, 'due': now}
+                   'revision': revision, 'pending': pending, 'pending_raw_ts': stamp, 'due': now}
     return result, True
 
 
@@ -110,8 +111,10 @@ def observe_locked(connection, context, last_read, *, observed_at):
     """Persist under the caller's owner authority lock, before history count I/O."""
     if context is None or not enabled():
         return
+    frontier, own_echo = exports.native_source_frontier((connection.sync_cursor or {}).get(exports.KEY), context, last_read)
     rows, changed = coalesce((connection.sync_cursor or {}).get(KEY), context, last_read,
                             observed_at=observed_at, now=time.time(),
+                            source_frontier=frontier, own_echo=own_echo,
                             revision_floor=int((connection.sync_cursor or {}).get(REVISION_KEY) or 0))
     if changed:
         revision = rows[exports.room_key(context['community_id'], context['channel_id'])]['revision']
@@ -186,7 +189,7 @@ def flush(authority, grant, keys):
                 rows.pop(key, None)
                 continue
             if not 0 <= now - pending['created_at'] < MAX_AGE:
-                rows[key] = {k: v for k, v in row.items() if k not in {'pending', 'due'}}
+                rows[key] = {k: v for k, v in row.items() if k not in {'pending', 'pending_raw_ts', 'due'}}
                 schedule_locked(connection, target.slack_id)
                 continue
             batch.append((key, pending))
@@ -211,8 +214,9 @@ def flush(authority, grant, keys):
                 if ignored:
                     schedule_locked(connection, row['source_id'])
                 else:
-                    row['delivered_ts'] = pending['slack_last_read']
+                    row['delivered_ts'] = row.get('pending_raw_ts', pending['slack_last_read'])
                 row.pop('pending', None)
+                row.pop('pending_raw_ts', None)
                 row.pop('due', None)
             else:
                 row['due'] = now + 30

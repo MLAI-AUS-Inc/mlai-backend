@@ -188,3 +188,40 @@ class InboxObservationTests(SimpleTestCase):
             obs.flush(authority, grant, set())
         submit.assert_not_called()
         self.assertEqual(connection.sync_cursor[obs.KEY], {})
+
+    def test_native_unread_echo_preserves_display_boundary_and_raw_slack_order(self):
+        from integrations.tests_inbox_exports import NativeCursorBoundaryTests
+        state, key, _, confirmation, context = NativeCursorBoundaryTests().fixture('unread')
+        state = exports.settle(state, key, 3, confirmation=confirmation)
+        context.update(account_key='a'*64, source_id='Dsynthetic')
+        connection = SimpleNamespace(sync_cursor={exports.KEY: state}, save=Mock())
+        rows, _ = obs.coalesce({}, context, '102.500000', observed_at=999, now=999)
+        rows[key]['delivered_ts'] = '102.500000'
+        connection.sync_cursor[obs.KEY] = rows
+        with patch.object(obs.time, 'time', return_value=1000):
+            obs.observe_locked(connection, context, '102.499999', observed_at=1000)
+        row = connection.sync_cursor[obs.KEY][key]
+        self.assertEqual(row['last_read'], '102.499999')
+        self.assertEqual(row['pending_raw_ts'], '102.499999')
+        self.assertEqual(row['pending']['slack_last_read'], '99.999999')
+        self.assertEqual(row['pending']['op'], 'observe')
+        self.assertEqual(row['pending']['applied_revision'], 3)
+
+    def test_delivery_keeps_raw_slack_position_outside_the_signed_display_frontier(self):
+        target, authority, connection, grant = self.fixtures()
+        rows, _ = obs.coalesce({}, self.context(), '102.499999', observed_at=1000,
+                               now=1000, source_frontier='99.999999', own_echo=True)
+        connection.sync_cursor = {obs.KEY: rows}
+        with patch.object(obs.transaction, 'atomic', side_effect=lambda: nullcontext()), patch.object(
+            reads, '_lock_slack_grant_api_authority', return_value=(grant, connection)), patch.object(
+            reads, '_targets_for_keys', return_value=[target]), patch.object(reads, '_cache_key', return_value='scoped'), patch.object(
+            obs.time, 'time', return_value=1001), patch.object(BuzzBridgeClient, 'push_inbox_cursors',
+            return_value=[{'accepted': True, 'message': 'accepted'}]) as submit:
+            obs.flush(authority, grant, {'verified'})
+        sent = submit.call_args.args[0][0]
+        self.assertEqual(sent['slack_last_read'], '99.999999')
+        self.assertNotIn('pending_raw_ts', sent)
+        row = connection.sync_cursor[obs.KEY][self.key()]
+        self.assertEqual(row['delivered_ts'], '102.499999')
+        self.assertNotIn('pending', row)
+        self.assertNotIn('pending_raw_ts', row)
