@@ -95,7 +95,6 @@ def _deliver(row):
     if known == "rejected":
         return "failed", "dispatch_rejected", ""
     from django.contrib.auth import get_user_model
-    requester = get_user_model().objects.get(pk=request["roo_points_requested_by_user_id"], is_active=True)
     if _research_dispatch(row):
         # Discovery needs only the current owning founder/domain, plus the
         # selected approved audience when one was requested. It never inherits
@@ -103,6 +102,7 @@ def _deliver(row):
         from founder_tools.models import VibeRaisingCompany
         from .editorial_catalog import discovery_audience_context
         from .vibe_marketing_views import _get_config
+        requester = get_user_model().objects.get(pk=request["roo_points_requested_by_user_id"], is_active=True)
         if request.get("domain") != row.organization.domain or not VibeRaisingCompany.objects.filter(
                 pk=request.get("mcp_company_id"), organization=row.organization,
                 profile__user=requester, profile__role="founder").exists():
@@ -121,6 +121,7 @@ def _deliver(row):
         if policy_error is not None:
             return "pending", str(policy_error.data.get("code") or "editorial_policy_recheck_required")[:100], ""
         from integrations.services.article_generation import require_article_activation
+        requester = get_user_model().objects.get(pk=request["roo_points_requested_by_user_id"], is_active=True)
         require_article_activation(domain=row.organization.domain, actor_id=row.payload.get("actor_id") or "",
             user=requester, expected_repo=request.get("github_repo", ""), article_request=request)
     require_unlocked_remote_call()
