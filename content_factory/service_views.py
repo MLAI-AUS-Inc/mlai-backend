@@ -8703,6 +8703,11 @@ def _merge_django_owned_run_result(existing_result, incoming_result):
             continue
         if key in backend_merge_keys | {"article_review_approval", "approval_blocker", "article_image_billing"} or (merged.get(key) in (None, "", {}, []) and value not in (None, "", {}, [])):
             merged[key] = value
+    # A worker's initialized zero cannot erase a recorded manual intervention.
+    counts = [value for value in (existing.get("user_action_count"), incoming.get("user_action_count"))
+              if type(value) is int and value >= 0]
+    if counts:
+        merged["user_action_count"] = max(counts)
     saved_setup = existing.get("article_system_setup")
     incoming_setup = merged.get("article_system_setup")
     if (existing.get("merge_status") == "merged" and existing.get("merged_at")
@@ -8731,9 +8736,9 @@ def _merge_django_owned_run_request(existing_request, incoming_request):
     existing = existing_request if isinstance(existing_request, dict) else {}
     incoming = incoming_request if isinstance(incoming_request, dict) else {}
     merged = {key: deepcopy(value) for key, value in incoming.items()
-              if not (key.startswith("roo_points_") or key in {"article_publish_approval_receipt", "article_publish_approval_revoked"}) or key in existing}
+              if not (key.startswith("roo_points_") or key in {"article_publish_approval_receipt", "article_publish_approval_revoked", "website_access_lost"}) or key in existing}
     for key, value in existing.items():
-        if not (key.startswith("roo_points_") or key in {"article_publish_approval_receipt", "article_publish_approval_revoked"}):
+        if not (key.startswith("roo_points_") or key in {"article_publish_approval_receipt", "article_publish_approval_revoked", "website_access_lost"}):
             continue
         if key in incoming and incoming[key] != value:
             raise EditorialRunConflict("Worker snapshots cannot change backend billing or approval history")
@@ -8984,112 +8989,115 @@ class ContentFactoryRunView(APIView):
             return Response({"error": "Run not found"}, status=status.HTTP_404_NOT_FOUND)
         return Response(_serialize_content_factory_run(run), status=status.HTTP_200_OK)
 
-    @guarded_service_write("config_write", only_repository=True, portable=True, cancellation_receipts=True)
+    @guarded_service_write("config_write", only_repository=True, portable=True, cancellation_receipts=True, observation_fallback=True)
     def put(self, request, run_id: str):
-        existing_run = ContentFactoryRun.objects.filter(run_id=run_id).first()
-        payload = sanitize_json_for_postgres(dict(request.data))
-        payload["run_id"] = run_id
-        serializer = ContentFactoryRunSyncSerializer(data=payload)
-        serializer.is_valid(raise_exception=True)
-        data = serializer.validated_data
-        step_states = data.get("step_states", {}) or {}
-        incoming_status = str(data.get("status") or "").strip()
-        active_retry_snapshot = bool(
-            existing_run is not None
-            and existing_run.status
-            in {
-                ContentFactoryRunStatus.BLOCKED,
-                ContentFactoryRunStatus.DENIED,
-                ContentFactoryRunStatus.FAILED,
-            }
-            and existing_run.workflow in ARTICLE_WORKFLOWS
-            and incoming_status in DURABLE_ACTIVE_RUN_STATUSES
-            and (active_retry_signal(payload, data.get("result")) or (
-                execution_version(data) is not None
-                and data["generation"] > int((existing_run.result or {}).get("generation", -1))
-            ))
+        return _apply_run_snapshot(run_id, request.data)
+
+
+def _apply_run_snapshot(run_id, payload):
+    existing_run = ContentFactoryRun.objects.filter(run_id=run_id).first()
+    payload = sanitize_json_for_postgres(dict(payload))
+    payload["run_id"] = run_id
+    serializer = ContentFactoryRunSyncSerializer(data=payload)
+    serializer.is_valid(raise_exception=True)
+    data = serializer.validated_data
+    step_states = data.get("step_states", {}) or {}
+    incoming_status = str(data.get("status") or "").strip()
+    active_retry_snapshot = bool(
+        existing_run is not None
+        and existing_run.status
+        in {
+            ContentFactoryRunStatus.BLOCKED,
+            ContentFactoryRunStatus.DENIED,
+            ContentFactoryRunStatus.FAILED,
+        }
+        and existing_run.workflow in ARTICLE_WORKFLOWS
+        and incoming_status in DURABLE_ACTIVE_RUN_STATUSES
+        and (active_retry_signal(payload, data.get("result")) or (
+            execution_version(data) is not None
+            and data["generation"] > int((existing_run.result or {}).get("generation", -1))
+        ))
+    )
+
+    if (
+        existing_run is not None
+        and existing_run.status == ContentFactoryRunStatus.CANCELLED
+        and data.get("status") != ContentFactoryRunStatus.CANCELLED
+    ):
+        return Response(
+            {
+                "error": "run_cancelled",
+                "detail": "This run was cancelled and cannot accept more workflow updates.",
+                "run_id": run_id,
+                "status": existing_run.status,
+            },
+            status=status.HTTP_409_CONFLICT,
         )
 
-        if (
-            existing_run is not None
-            and existing_run.status == ContentFactoryRunStatus.CANCELLED
-            and data.get("status") != ContentFactoryRunStatus.CANCELLED
-        ):
+    if (
+        existing_run is not None
+        and _is_terminal_run_status(existing_run.status)
+        and incoming_status not in {
+            ContentFactoryRunStatus.COMPLETED,
+            ContentFactoryRunStatus.FAILED,
+            ContentFactoryRunStatus.BLOCKED,
+            ContentFactoryRunStatus.DENIED,
+            ContentFactoryRunStatus.CANCELLED,
+        }
+        and not _article_system_setup_snapshot_is_current_retry(
+            existing_run=existing_run,
+            data=data,
+            raw_payload=payload if isinstance(payload, dict) else {},
+        )
+        and not active_retry_snapshot
+    ):
+        response_payload = _serialize_content_factory_run(existing_run)
+        response_payload["sync_status"] = "ignored_terminal_state"
+        return Response(response_payload, status=status.HTTP_200_OK)
+
+    max_attempts = 3 if connection.vendor == "sqlite" else 1
+    for attempt_number in range(1, max_attempts + 1):
+        try:
+            run, created = _sync_content_factory_run_snapshot(
+                run_id=run_id,
+                data=data,
+                step_states=step_states,
+            )
+            break
+        except EditorialRunConflict as exc:
             return Response(
-                {
-                    "error": "run_cancelled",
-                    "detail": "This run was cancelled and cannot accept more workflow updates.",
-                    "run_id": run_id,
-                    "status": existing_run.status,
-                },
+                {"error": "editorial_run_conflict", "code": "editorial_run_conflict", "detail": str(exc), "run_id": run_id},
                 status=status.HTTP_409_CONFLICT,
             )
-
-        if (
-            existing_run is not None
-            and _is_terminal_run_status(existing_run.status)
-            and incoming_status not in {
-                ContentFactoryRunStatus.COMPLETED,
-                ContentFactoryRunStatus.FAILED,
-                ContentFactoryRunStatus.BLOCKED,
-                ContentFactoryRunStatus.DENIED,
-                ContentFactoryRunStatus.CANCELLED,
-            }
-            and not _article_system_setup_snapshot_is_current_retry(
-                existing_run=existing_run,
-                data=data,
-                raw_payload=payload if isinstance(payload, dict) else {},
+        except OperationalError as exc:
+            if not _is_retryable_sqlite_lock(exc) or attempt_number == max_attempts:
+                raise
+            logger.warning(
+                "Retrying Content Factory run sync for %s after SQLite lock (%s/%s).",
+                run_id,
+                attempt_number,
+                max_attempts,
             )
-            and not active_retry_snapshot
-        ):
-            response_payload = _serialize_content_factory_run(existing_run)
-            response_payload["sync_status"] = "ignored_terminal_state"
-            return Response(response_payload, status=status.HTTP_200_OK)
+            time.sleep(0.25 * attempt_number)
 
-        max_attempts = 3 if connection.vendor == "sqlite" else 1
-        for attempt_number in range(1, max_attempts + 1):
-            try:
-                run, created = _sync_content_factory_run_snapshot(
-                    run_id=run_id,
-                    data=data,
-                    step_states=step_states,
-                )
-                break
-            except EditorialRunConflict as exc:
-                return Response(
-                    {"error": "editorial_run_conflict", "code": "editorial_run_conflict", "detail": str(exc), "run_id": run_id},
-                    status=status.HTTP_409_CONFLICT,
-                )
-            except OperationalError as exc:
-                if not _is_retryable_sqlite_lock(exc) or attempt_number == max_attempts:
-                    raise
-                logger.warning(
-                    "Retrying Content Factory run sync for %s after SQLite lock (%s/%s).",
-                    run_id,
-                    attempt_number,
-                    max_attempts,
-                )
-                time.sleep(0.25 * attempt_number)
+    response_payload = _serialize_content_factory_run(run)
+    response_payload["sync_status"] = (
+        "unchanged"
+        if getattr(run, "_content_factory_sync_unchanged", False)
+        else "created"
+        if created
+        else "updated"
+    )
+    if run.status == ContentFactoryRunStatus.COMPLETED:
+        from content_factory.vibe_marketing_views import _persist_completed_article_memory_if_possible
+        from startup_updates.completion import record_completion
 
-        response_payload = _serialize_content_factory_run(run)
-        response_payload["sync_status"] = (
-            "unchanged"
-            if getattr(run, "_content_factory_sync_unchanged", False)
-            else "created"
-            if created
-            else "updated"
-        )
-        if run.status == ContentFactoryRunStatus.COMPLETED:
-            from content_factory.vibe_marketing_views import _persist_completed_article_memory_if_possible
-            from startup_updates.completion import record_completion
-
-            _persist_completed_article_memory_if_possible(run)
-            record_completion(run)
-        return Response(
-            response_payload,
-            status=status.HTTP_201_CREATED if created else status.HTTP_200_OK,
-        )
-
+        _persist_completed_article_memory_if_possible(run)
+        record_completion(run)
+    return Response(
+        response_payload,
+        status=status.HTTP_201_CREATED if created else status.HTTP_200_OK,
+    )
 
 class ContentFactoryRunValleyJobView(APIView):
     """

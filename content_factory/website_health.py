@@ -30,6 +30,7 @@ def website_connection_health(*, domain=None, now=None, hours=24, row_limit=2000
     from .models import OrganizationContentConfig
     from .website_models import WebsiteConnection, WebsiteConnectionOperation, WebsiteScanSnapshot, WebsiteTemplateRevision
     from .website_rollout import repository_write_policy
+    from .one_click_metrics import one_click_outcomes
 
     now = now or timezone.now()
     since = now - timedelta(hours=hours)
@@ -67,4 +68,5 @@ def website_connection_health(*, domain=None, now=None, hours=24, row_limit=2000
         "quarantinedTemplates": WebsiteTemplateRevision.objects.filter(connection__in=connections, status="quarantined").count(),
         "operations": {"states": {row["state"]: row["count"] for row in operations.values("state").annotate(count=Count("pk"))}, "pending": pending.count(), "overdue": overdue, "oldestPendingSeconds": max(0, int((now - oldest).total_seconds())) if oldest else None},
         "scans": {**scans, "sampleLimit": row_limit, "truncated": truncated}, "alerts": alerts,
+        "oneClick": one_click_outcomes(since=since, domain=domain, row_limit=row_limit),
     }

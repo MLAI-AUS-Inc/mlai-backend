@@ -1850,3 +1850,4 @@ from .website_models import (  # noqa: E402,F401
     WebsiteScanSnapshot,
     WebsiteTemplateRevision,
 )
+from .dispatch_models import ContentFactoryDispatchOutbox  # noqa: E402,F401

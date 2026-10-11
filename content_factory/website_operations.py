@@ -179,8 +179,8 @@ def reserve_workflow_operation(connection, *, workflow, payload):
     from .website_connections import authority_guard
     # Request keys survive reload in the operation row. An in-flight logical
     # scan/setup also resumes when an older client minted a replacement key.
-    digest = evidence_digest({key: value for key, value in payload.items() if key not in {
-        "client_request_id", "idempotency_key", "roo_points_gate", "roo_points_authorized", "operation_id", "operation_attempt", "deletion_epoch"}})
+    digest = evidence_digest({key: value for key, value in payload.items() if not key.startswith("roo_points_") and key not in {
+        "client_request_id", "idempotency_key", "roo_points_gate", "roo_points_authorized", "operation_id", "operation_attempt", "deletion_epoch", "dispatch_outbox_reserved"}})
     key = f"{connection.pk}:workflow:{payload['client_request_id']}"
     with authority_guard(payload, action="read"):
         active = None
@@ -214,6 +214,8 @@ def reserve_workflow_operation(connection, *, workflow, payload):
         op, created = WebsiteConnectionOperation.objects.get_or_create(idempotency_key=key,
             defaults={"connection": connection, "generation": connection.generation, "action": "workflow", "state": "running",
                 "payload": {"workflow": workflow, "attempt": 1, "deletion_epoch": deletion_epoch(connection), "request_digest": digest,
+                    "installation_id": connection.installation_id, "repository_id": connection.repository_id,
+                    "original_connection_generation": connection.generation,
                     "client_request_id": payload["client_request_id"]}})
         if (op.generation != connection.generation or op.payload.get("workflow") != workflow
                 or op.payload.get("request_digest") != digest or op.state in {"cancelled", "deleted", "denied"}):
@@ -244,6 +246,7 @@ def bind_operation_run(operation, run):
         # remote reference for cleanup; never resurrect the operation or run.
         from organizations.models import Organization
         from .website_models import WebsiteConnection
+        from workflow_runs.models import ContentFactoryRun
         with transaction.atomic():
             Organization.objects.select_for_update().get(pk=operation.connection.organization_id)
             website = WebsiteConnection.objects.select_for_update().get(pk=operation.connection_id)
@@ -255,8 +258,15 @@ def bind_operation_run(operation, run):
                 "connection": website, "generation": website.generation, "action": "cancel-operation" if op.generation == website.generation else "disconnect",
                 "payload": {"previous_generation": op.generation, "cancelled_operation_id": str(op.pk), "cancel_run_ids": [run.run_id], "stop_preview_run_ids": [run.run_id]},
                 "receipt": {"status": "late_dispatch_cancel_requested", "remote_cleanup_pending": True, "repository_modified": None}})
-            run.status, run.resume_available, run.error = "cancelled", False, "Website authority changed during dispatch."
-            run.save(update_fields=["status", "resume_available", "error", "updated_at"])
+            # A completed callback may have won before we acquired consent
+            # locks. Read its current history under lock before cancelling.
+            current = ContentFactoryRun.objects.select_for_update().get(pk=run.pk)
+            if current.status in {"completed", "denied", "cancelled"}:
+                run.status, run.resume_available, run.error, run.result = current.status, current.resume_available, current.error, current.result
+            else:
+                current.status, current.resume_available, current.error = "cancelled", False, "Website authority changed during dispatch."
+                current.save(update_fields=["status", "resume_available", "error", "updated_at"])
+                run.status, run.resume_available, run.error = current.status, current.resume_available, current.error
 
 
 def operation_summary(op):
@@ -268,7 +278,8 @@ def operation_summary(op):
         if run and run.status in {"completed", "failed", "cancelled", "denied", "blocked"}:
             state = workflow_operation_state(run)
     return {"id": str(op.pk), "action": op.action, "state": state, "attempt": op.payload.get("attempt", 1),
-        "runId": op.payload.get("run_id"), "updatedAt": op.updated_at.isoformat(), "receipt": op.receipt}
+        "runId": op.payload.get("run_id"), "updatedAt": op.updated_at.isoformat(), "receipt": op.receipt,
+        "nextAttemptAt": op.next_attempt_at.isoformat() if getattr(op, "next_attempt_at", None) else None}
 
 
 def cancel_operation(config, *, data, idempotency_key):

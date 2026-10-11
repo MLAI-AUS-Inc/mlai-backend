@@ -75,6 +75,10 @@ def normalize_review_update(data):
         raise ValueError("Reload this draft before applying changes.")
     edits = data.get("textEdits", data.get("edits", []))
     comment_ids = data.get("commentIds", [])
+    restored = data.get("restoredSentences", [])
+    if not isinstance(restored, list) or len(restored) > 50 or any(not isinstance(item, str) or not item.strip() or len(item) > 4000 for item in restored):
+        raise ValueError("Choose at most 50 removed sentences to restore.")
+    restored = list(dict.fromkeys(item.strip() for item in restored))
     if not isinstance(edits, list) or len(edits) > 300:
         raise ValueError("Use a text edit list with at most 300 fields.")
     if not isinstance(comment_ids, list) or len(comment_ids) > 100:
@@ -99,10 +103,11 @@ def normalize_review_update(data):
         raise ValueError("Choose valid saved comments before applying changes.") from exc
     if len(ids) != len(comment_ids) or len(set(ids)) != len(ids):
         raise ValueError("Choose each saved comment once before applying changes.")
-    if not clean_edits and not ids:
+    if not clean_edits and not ids and not restored:
         raise ValueError("Add a comment or edit some text before updating.")
     return {"action": "applyUpdate", "operationId": operation,
-            "expectedRevision": revision, "textEdits": clean_edits, "commentIds": ids}
+            "expectedRevision": revision, "textEdits": clean_edits, "commentIds": ids,
+            **({"restoredSentences": restored} if restored else {})}
 
 
 
@@ -143,7 +148,7 @@ def _claim_comments(run, payload):
 
 def _revision_authorization(request, context, run, payload):
     """Preserve the existing AI revision gates; direct text changes need no AI."""
-    if not payload["commentIds"]:
+    if not payload["commentIds"] and not payload.get("restoredSentences"):
         return None
     if run.workflow == "article_system_setup":
         error, balance = views._require_roo_points_for_ai_agent(
@@ -244,7 +249,7 @@ def _review_dispatch_contract(run, payload):
         binding = views.connection_contract(original)
         if not binding and original.get("delivery_mode") == "content_only":
             return {}
-        if run.workflow != "article_system_setup" and not payload.get("commentIds"):
+        if run.workflow != "article_system_setup" and not payload.get("commentIds") and not payload.get("restoredSentences"):
             # Deterministic edits remain on this article's existing run. Only
             # a child revision may acquire a separate immutable operation.
             return {**binding, **{key: original[key] for key in (
@@ -366,11 +371,17 @@ class VibeMarketingArticleReviewView(views.VibeMarketingRunCommentsMixin, APIVie
         for remote, comment in zip(remote_payload["comments"], comments):
             remote.setdefault("component_id", comment.component_id)
             remote.setdefault("component_type", comment.component_type)
+        remote_payload["comments"].extend({
+            "comment_id": f"{payload['operationId']}-restore-{index}", "component_id": "article",
+            "component_type": "article_body", "component_label": "Removed sentence",
+            "body": f"Restore sentence: {sentence}; recheck authoritative sources and safety before acceptance.",
+            "requested_action": "restore_sentence", "context": {"restoredSentence": sentence},
+        } for index, sentence in enumerate(payload.get("restoredSentences", [])))
         submission = {"requestHash": request_hash, "status": "submitted", "revisionRunId": None,
                       "commentIds": payload["commentIds"], "remoteComments": deepcopy(remote_payload["comments"]),
                       "recordedAt": views.timezone.now().isoformat()}
         feedback = {"id": payload["operationId"], "sourceRunId": run.run_id,
-                    "revisionRunId": None, "status": "submitted"} if comments else None
+                    "revisionRunId": None, "status": "submitted"} if comments or payload.get("restoredSentences") else None
         error = _record_update_result(run, payload["operationId"], submission, feedback)
         if error is not None:
             return error
@@ -418,7 +429,7 @@ class VibeMarketingArticleReviewView(views.VibeMarketingRunCommentsMixin, APIVie
             "status": "accepted" if accepted else "submitted", "revisionRunId": revision_id,
             "commentIds": payload["commentIds"], "recordedAt": views.timezone.now().isoformat()}
         feedback = {"id": payload["operationId"], "sourceRunId": run.run_id,
-                    "revisionRunId": revision_id, "status": "running" if accepted else "submitted"} if comments else None
+                    "revisionRunId": revision_id, "status": "running" if accepted else "submitted"} if comments or payload.get("restoredSentences") else None
         if accepted and revision_id and revision_id != run.run_id:
             child = views._create_local_run(
                 workflow="article_system_setup" if run.workflow == "article_system_setup" else "article_revision",
