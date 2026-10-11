@@ -19,6 +19,11 @@
     "contentPath": null,
     "framework": null
   },
+  "pricing": {
+    "setupPoints": 0,
+    "requiredPoints": 0,
+    "free": true
+  },
   "policy": {
     "allowed": false,
     "reasonCode": "website_writes_paused",

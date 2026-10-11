@@ -84,12 +84,14 @@ class JobsSchedulerTests(TestCase):
     @patch("core.management.commands.run_scheduled_discovery.run_daily_jobs_scheduler")
     @patch("core.management.commands.run_scheduled_discovery.run_daily_discovery_scheduler")
     @patch("core.management.commands.run_scheduled_discovery.run_research_automation_scheduler")
+    @patch("core.management.commands.run_scheduled_discovery.process_dispatch_outbox")
     def test_management_command_runs_jobs_even_if_discovery_fails(
-        self, mock_research, mock_discovery, mock_jobs
+        self, mock_outbox, mock_research, mock_discovery, mock_jobs
     ):
         mock_discovery.side_effect = RuntimeError("discovery boom")
         mock_jobs.return_value = {"status": "skipped", "reason": "before_schedule_window"}
         mock_research.return_value = {"status": "ok", "queued": 0}
+        mock_outbox.return_value = {"status": "completed", "processed": 0, "delivered": 0, "pending": 0, "failed": 0}
         stdout = io.StringIO()
 
         with self.assertRaises(CommandError):
@@ -98,6 +100,7 @@ class JobsSchedulerTests(TestCase):
         # Discovery failing must not stop the jobs or research-automation runners.
         mock_jobs.assert_called_once()
         mock_research.assert_called_once()
+        mock_outbox.assert_called_once_with()
         output = stdout.getvalue()
         self.assertIn('"daily_discovery": {"error": "discovery boom", "status": "failed"}', output)
         self.assertIn('"jobs": {"reason": "before_schedule_window", "status": "skipped"}', output)
@@ -112,22 +115,26 @@ class JobsSchedulerTests(TestCase):
     @patch("core.management.commands.run_scheduled_discovery.run_daily_jobs_scheduler")
     @patch("core.management.commands.run_scheduled_discovery.run_daily_discovery_scheduler")
     @patch("core.management.commands.run_scheduled_discovery.run_research_automation_scheduler")
+    @patch("core.management.commands.run_scheduled_discovery.process_dispatch_outbox")
     def test_management_command_ticks_research_automation_scheduler(
-        self, mock_research, mock_discovery, mock_jobs
+        self, mock_outbox, mock_research, mock_discovery, mock_jobs
     ):
         # The production scheduler container loops this command every 60s, so it
         # is the only thing that fires the daily research-topic email at 8am.
         mock_discovery.return_value = {"status": "ok"}
         mock_jobs.return_value = {"status": "skipped", "reason": "before_schedule_window"}
         mock_research.return_value = {"status": "ok", "ensured": 2, "queued": 2}
+        mock_outbox.return_value = {"status": "completed", "processed": 0, "delivered": 0, "pending": 0, "failed": 0}
         stdout = io.StringIO()
 
         call_command("run_scheduled_discovery", stdout=stdout)
 
         mock_research.assert_called_once_with()
+        mock_outbox.assert_called_once_with()
         output = stdout.getvalue()
         self.assertIn('"research_automations"', output)
         self.assertIn('"queued": 2', output)
+        self.assertIn('"article_dispatch_outbox": {"delivered": 0, "failed": 0, "pending": 0, "processed": 0, "status": "completed"}', output)
         self.assertIn('"website_connection_operations": {"completed": 0, "pending": 0, "processed": 0, "status": "completed"}', output)
         heartbeat = ScheduledDiscoveryHeartbeat.objects.get(
             name="scheduled_discovery"

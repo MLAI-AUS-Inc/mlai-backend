@@ -755,12 +755,21 @@ def _charge_content_factory_user(
     created_by_slack_id: str,
     article_request: dict,
     resolved_domain: str,
+    prevalidated_admission: bool = False,
 ):
     from content_factory.models import ContentFactoryJob
-    from roo.permissions import InsufficientBalanceError
+    from roo.permissions import IdempotencyConflictError, InsufficientBalanceError
     from roo.services import PointsService
 
-    require_article_activation(domain=resolved_domain, actor_id=created_by_slack_id, user=user, article_request=article_request)
+    if not prevalidated_admission:
+        require_article_activation(domain=resolved_domain, actor_id=created_by_slack_id, user=user, article_request=article_request)
+    from content_factory.company_billing import resolve_content_billing_user
+    requester = user
+    try:
+        user = resolve_content_billing_user(requester, resolved_domain)
+    except ValueError as exc:
+        raise ArticleGenerationError(str(exc)) from exc
+    article_request.update(roo_points_requested_by_user_id=requester.pk, roo_points_billing_user_id=user.pk)
     client_request_id = _get_client_request_id(article_request)
     cost_points = get_content_factory_article_cost_points(resolved_domain)
     _require_expected_cost(article_request, cost_points)
@@ -785,7 +794,7 @@ def _charge_content_factory_user(
             user=user,
             delta=cost_points,
             source=CONTENT_FACTORY_LEDGER_SOURCE,
-            description=_build_content_factory_charge_description(resolved_domain, article_request),
+            description=_build_content_factory_charge_description(resolved_domain, article_request) + f" (requested by account {requester.pk})",
             created_by_slack_id=created_by_slack_id,
             idempotency_key=f"content_factory:charge:{client_request_id}",
             reference_type="CONTENT_FACTORY",
@@ -799,8 +808,19 @@ def _charge_content_factory_user(
                 current_balance=_content_factory_balance_for_user(user),
                 required_points=get_content_factory_ai_agent_required_points(resolved_domain),
                 cost_points=cost_points,
+                account_email=requester.email,
+                billing_email=user.email,
             )
         )
+    except IdempotencyConflictError as exc:
+        # A retry cannot move an existing spend to a newly selected company
+        # wallet. Its original outbox and payer remain the delivery lineage.
+        error = ArticleGenerationError(
+            "This article request was charged to a different billing account or price. "
+            "Refresh the existing article before starting a new request."
+        )
+        error.code = "content_factory_billing_key_conflict"
+        raise error from exc
 
     return user, ledger, cost_points
 
@@ -835,6 +855,7 @@ def charge_content_factory_request_for_user(
     actor_id: str,
     article_request: dict,
     resolved_domain: str,
+    prevalidated_admission: bool = False,
 ):
     _validate_authenticated_content_factory_actor(user=user, actor_id=actor_id)
     return _charge_content_factory_user(
@@ -842,6 +863,7 @@ def charge_content_factory_request_for_user(
         created_by_slack_id=actor_id,
         article_request=article_request,
         resolved_domain=resolved_domain,
+        prevalidated_admission=prevalidated_admission,
     )
 
 
@@ -933,6 +955,12 @@ def _refund_content_factory_request(
         idempotency_key=f"content_factory:charge:{client_request_id}").first()
     amount = -int(getattr(original, "delta_microroo", 0) or 0) if original else 0
     if amount <= 0 or amount % 1_000_000:
+        from content_factory.billing_lineage import paid_article_request
+        if paid_article_request(article_request):
+            error = ArticleGenerationError("The original article spend could not be verified. Its refund remains pending.")
+            error.code = "content_factory_refund_pending"
+            error.retryable = True
+            raise error
         return None
     # Refund the recorded charge and its allocation, even if today's price is
     # different. A job's billing flag alone never authorizes a credit.
@@ -1018,6 +1046,11 @@ def _get_content_factory_user_for_job(job):
 
     UserModel = get_user_model()
     request_meta = getattr(job, "request_meta", {}) or {}
+    if getattr(job, "billing_ledger_id", None) or request_meta.get("roo_points_ledger_id") or (
+            getattr(job, "billing_status", "") in {CONTENT_FACTORY_BILLING_STATUS_CHARGED, CONTENT_FACTORY_BILLING_STATUS_REUSED}):
+        from content_factory.billing_lineage import original_spend_for_job
+        charge = original_spend_for_job(job)
+        return charge.user if charge else None
     actor_ids = (
         request_meta.get("requested_by_slack_user_id"),
         getattr(job, "slack_user_id", ""),
@@ -1245,6 +1278,29 @@ def _serialize_existing_confirm_child_job(job, *, source_run_id: Optional[str]) 
     return payload
 
 
+def _record_terminal_article_refund(job, *, status, error_code, ledger=None):
+    """Keep article credits retryable without replacing a newer run receipt."""
+    from django.db import transaction
+    from workflow_runs.models import ContentFactoryRun
+    job_id = str(getattr(job, 'job_id', '') or '')
+    domain = normalize_domain(getattr(job, 'domain', '') or '')
+    if not job_id or not domain:
+        return
+    with transaction.atomic():
+        current = ContentFactoryRun.objects.select_for_update().filter(run_id=job_id, domain__iexact=domain).first()
+        if current is None:
+            return
+        result = dict(current.result or {})
+        saved = result.get('article_terminal_refund')
+        receipt = dict(saved) if isinstance(saved, dict) else {}
+        receipt.update(status=status, paid_obligation=True, job_id=job_id, error_code=str(error_code or '')[:100])
+        if ledger is not None:
+            receipt['refund_ledger_id'] = str(ledger.pk)
+        current.result = {**result, 'article_terminal_refund': receipt,
+            'reconciliation_refund_pending': status == 'pending'}
+        current.save(update_fields=['result', 'updated_at'])
+
+
 def maybe_auto_refund_terminal_failure(
     job,
     *,
@@ -1267,6 +1323,16 @@ def maybe_auto_refund_terminal_failure(
     if not research_paid and not bool(refundable) and not no_value_failure and resolved_error_code not in AUTO_REFUND_ERROR_CODES:
         return False, 0
 
+    # The status handler records the terminal job before attempting its credit.
+    # Persist the owned run's pending receipt first so a failed payer/ledger
+    # lookup or refund survives that handler's "already error" early exit.
+    paid_article = not research_paid and (getattr(job, 'billing_status', '') in {
+        CONTENT_FACTORY_BILLING_STATUS_CHARGED, CONTENT_FACTORY_BILLING_STATUS_REUSED}
+        or getattr(job, 'billing_ledger_id', None)
+        or (getattr(job, 'request_meta', {}) or {}).get('roo_points_ledger_id'))
+    if paid_article:
+        _record_terminal_article_refund(job, status='pending', error_code=resolved_error_code)
+
     client_request_id = str(getattr(job, "client_request_id", "") or "").strip()
     if not client_request_id:
         return False, 0
@@ -1280,8 +1346,19 @@ def maybe_auto_refund_terminal_failure(
     if getattr(billed_job, "billing_status", "") != CONTENT_FACTORY_BILLING_STATUS_CHARGED:
         return False, 0
 
-    user = _get_content_factory_user_for_job(billed_job)
+    if not research_paid and not paid_article:
+        _record_terminal_article_refund(job, status='pending', error_code=resolved_error_code)
+    try:
+        user = _get_content_factory_user_for_job(billed_job)
+    except Exception:
+        if research_paid:
+            raise
+        _record_terminal_article_refund(job, status='pending', error_code=resolved_error_code)
+        logger.warning('content_factory_terminal_refund_pending job_id=%s reason=payer_unavailable', getattr(job, 'job_id', ''))
+        return False, 0
     if not user:
+        if not research_paid:
+            _record_terminal_article_refund(job, status='pending', error_code=resolved_error_code)
         logger.warning(
             "Unable to auto-refund Content Factory failure for %s: no user resolved",
             client_request_id,
@@ -1303,15 +1380,23 @@ def maybe_auto_refund_terminal_failure(
         billed_job.save(update_fields=["billing_status", "updated_at"])
         return True, refund_points
     refund_reason = str(error_message or resolved_error_code or "deterministic failure").strip()
-    refund_ledger = _refund_content_factory_request(
-        user=user,
-        slack_user_id=getattr(billed_job, "slack_user_id", "") or getattr(job, "slack_user_id", ""),
-        article_request=request_meta,
-        resolved_domain=resolved_domain,
-        reason=refund_reason,
-    )
+    try:
+        refund_ledger = _refund_content_factory_request(
+            user=user,
+            slack_user_id=getattr(billed_job, "slack_user_id", "") or getattr(job, "slack_user_id", ""),
+            article_request=request_meta,
+            resolved_domain=resolved_domain,
+            reason=refund_reason,
+        )
+    except Exception:
+        # A newer callback can land during the credit attempt. Re-merge the
+        # pending receipt under a fresh lock and preserve its current status.
+        _record_terminal_article_refund(job, status='pending', error_code=resolved_error_code)
+        logger.warning('content_factory_terminal_refund_pending job_id=%s reason=credit_unavailable', getattr(job, 'job_id', ''))
+        return False, 0
     if refund_ledger is None:
         return False, 0
+    _record_terminal_article_refund(job, status='refunded', error_code=resolved_error_code, ledger=refund_ledger)
     return True, int(refund_ledger.delta_microroo or 0) // 1_000_000
 
 
