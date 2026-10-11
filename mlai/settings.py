@@ -2225,6 +2225,12 @@ MY_STARTUP_DELIVERY_LINKS_ENABLED = os.environ.get("MY_STARTUP_DELIVERY_LINKS_EN
 COMMUNITY_CHAT_STARTUP_UPDATES_ENABLED = os.environ.get("COMMUNITY_CHAT_STARTUP_UPDATES_ENABLED", "false").lower() == "true"
 
 # Valley private-draft remote MCP. Requires the existing shared Redis cache.
+# Unified server is independently opt-in; legacy Valley grants remain unchanged.
+MLAI_MCP_ENABLED = _env_is_true("MLAI_MCP_ENABLED", False)
+MLAI_MCP_COMMUNITY_ENABLED = _env_is_true("MLAI_MCP_COMMUNITY_ENABLED", False)
+MLAI_MCP_COMMUNITY_RELAY_URL = os.getenv("MLAI_MCP_COMMUNITY_RELAY_URL", "")
+MLAI_MCP_COMMUNITY_SECRET = os.getenv("MLAI_MCP_COMMUNITY_SECRET", "")
+MLAI_MCP_CLIENT_INSTALL_URLS = json.loads(os.getenv("MLAI_MCP_CLIENT_INSTALL_URLS", "{}"))
 VALLEY_MCP_ENABLED = _env_is_true("VALLEY_MCP_ENABLED", False)
 VALLEY_MCP_PUBLIC_BASE_URL = os.getenv("VALLEY_MCP_PUBLIC_BASE_URL", "")
 # Public ownership challenge only; this value is not an OAuth credential.

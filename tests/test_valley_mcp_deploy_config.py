@@ -20,6 +20,20 @@ class ValleyMcpDeployConfigTests(unittest.TestCase):
         validate({"VALLEY_MCP_ENABLED": "true", "COMMUNITY_CHAT_STARTUP_UPDATES_ENABLED": "true",
                   "VALLEY_MCP_DOMAIN_VERIFICATION_TOKEN": "synthetic-public-proof-123456"})
 
+    def test_unified_settings_validate_without_disclosing_secret(self):
+        validate({"MLAI_MCP_ENABLED": "true", "MLAI_MCP_COMMUNITY_ENABLED": "true",
+                  "MLAI_MCP_COMMUNITY_RELAY_URL": "https://chat.mlai.au",
+                  "MLAI_MCP_COMMUNITY_SECRET": "synthetic-secret-at-least-32-bytes",
+                  "MLAI_MCP_CLIENT_INSTALL_URLS": '{"cursor":"https://cursor.com/marketplace/mlai"}'})
+        for key, value in (("MLAI_MCP_COMMUNITY_SECRET", "sensitive-too-short"),
+                           ("MLAI_MCP_COMMUNITY_RELAY_URL", "https://name:sensitive@example.test"),
+                           ("MLAI_MCP_CLIENT_INSTALL_URLS", '{"cursor":"javascript:sensitive"}')):
+            with self.subTest(key=key), self.assertRaises(ValueError) as error:
+                validate({key: value})
+            self.assertNotIn("sensitive", str(error.exception))
+        with self.assertRaises(ValueError):
+            validate({"MLAI_MCP_COMMUNITY_ENABLED": "true"})
+
     def test_invalid_input_is_rejected_without_echoing_its_value(self):
         for key, value in (("VALLEY_MCP_ENABLED", "yes"),
                            ("COMMUNITY_CHAT_STARTUP_UPDATES_ENABLED", "typo"),

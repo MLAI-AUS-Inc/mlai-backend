@@ -268,6 +268,123 @@ def _review_dispatch_contract(run, payload):
         return Response(exc.as_dict(), status=exc.status)
 
 
+def apply_article_review_update(*, user, context, run, data):
+    """Apply the same exact-revision update from an owned HTTP or MCP command."""
+    from .commands import ContentCommand
+    command = ContentCommand(user=user, data=data)
+    try:
+        payload = normalize_review_update(data)
+    except ValueError as exc:
+        return Response({"detail": str(exc)}, status=400)
+    request_hash = _fingerprint({key: value for key, value in payload.items() if key != "expectedRevision"})
+    updates = (run.result or {}).get("article_review_updates") or {}
+    existing = updates.get(payload["operationId"]) or {}
+    if existing.get("requestHash") and existing["requestHash"] != request_hash:
+        return Response({"detail": "This update identity was used for different changes."}, status=409)
+    if existing.get("status") == "accepted":
+        result = remote_review(run)
+        if isinstance(result, Response):
+            return result
+        return Response({**result, "revisionRunId": existing.get("revisionRunId")})
+    latest = views._latest_review_ready_component_revision(run, context)
+    if latest is not None:
+        return Response({"detail": "A newer draft is ready. Open it before editing.",
+                         "latestRunId": latest.run_id}, status=409)
+    error = _revision_authorization(command, context, run, payload)
+    if error is not None:
+        return error
+    comments, claimed, error = _claim_comments(run, payload)
+    if error is not None:
+        return error
+    remote_payload = {**payload, "source_run_id": run.run_id,
+                      "feedback_batch_id": payload["operationId"],
+                      "request_source": "founder_tools_review_update"}
+    convert = views._article_system_remote_comment_payload if run.workflow == "article_system_setup" else views._remote_comment_payload
+    remote_payload["comments"] = [convert(comment) if run.workflow == "article_system_setup"
+                                  else convert(comment, run=run) for comment in comments]
+    # Setup's older comment payload lacks component identity; retain it for
+    # matching comment targets to text changes in the combined worker update.
+    for remote, comment in zip(remote_payload["comments"], comments):
+        remote.setdefault("component_id", comment.component_id)
+        remote.setdefault("component_type", comment.component_type)
+    remote_payload["comments"].extend({
+        "comment_id": f"{payload['operationId']}-restore-{index}", "component_id": "article",
+        "component_type": "article_body", "component_label": "Removed sentence",
+        "body": f"Restore sentence: {sentence}; recheck authoritative sources and safety before acceptance.",
+        "requested_action": "restore_sentence", "context": {"restoredSentence": sentence},
+    } for index, sentence in enumerate(payload.get("restoredSentences", [])))
+    submission = {"requestHash": request_hash, "status": "submitted", "revisionRunId": None,
+                  "commentIds": payload["commentIds"], "remoteComments": deepcopy(remote_payload["comments"]),
+                  "recordedAt": views.timezone.now().isoformat()}
+    feedback = {"id": payload["operationId"], "sourceRunId": run.run_id,
+                "revisionRunId": None, "status": "submitted"} if comments or payload.get("restoredSentences") else None
+    error = _record_update_result(run, payload["operationId"], submission, feedback)
+    if error is not None:
+        return error
+    recorded = run.result["article_review_updates"][payload["operationId"]]
+    if recorded["status"] == "accepted":
+        result = remote_review(run)
+        return result if isinstance(result, Response) else Response({**result, "revisionRunId": recorded.get("revisionRunId")})
+    # A fast callback can add outcome context to saved rows. Replay the
+    # original wire comment payload, never a newly serialized retry.
+    remote_payload["comments"] = deepcopy(recorded["remoteComments"])
+    contract = recorded.get("dispatchContract")
+    if contract is None:
+        contract = _review_dispatch_contract(run, remote_payload)
+        if isinstance(contract, Response):
+            if _revert_update_submission(run, payload["operationId"], request_hash) and payload["commentIds"]:
+                views.VibeMarketingComponentComment.objects.filter(run=run, id__in=payload["commentIds"],
+                    status=views.VibeMarketingComponentCommentStatus.SUBMITTED, batch_id=payload["operationId"]).update(
+                        status=views.VibeMarketingComponentCommentStatus.DRAFT, batch_id="", updated_at=views.timezone.now())
+            return contract
+        if contract:
+            error = _record_update_result(run, payload["operationId"], {**submission, "dispatchContract": contract}, feedback)
+            if error is not None:
+                return error
+    remote_payload.update(contract)
+    if claimed and run.workflow != "article_system_setup":
+        # The worker can start as soon as dispatch is accepted. Create its
+        # learning candidates first, once, as the existing comments path does.
+        views._create_editorial_feedback_candidates(
+            organization=context.organization, run=run, comments=comments,
+            batch_id=payload["operationId"],
+        )
+    result = remote_review(run, payload=remote_payload)
+    definitive_rejection = isinstance(result, Response) and result.status_code in {400, 404, 409, 422}
+    if definitive_rejection:
+        if _revert_update_submission(run, payload["operationId"], request_hash) and payload["commentIds"]:
+            views.VibeMarketingComponentComment.objects.filter(
+                run=run, id__in=payload["commentIds"], status=views.VibeMarketingComponentCommentStatus.SUBMITTED,
+                batch_id=payload["operationId"],
+            ).update(status=views.VibeMarketingComponentCommentStatus.DRAFT, batch_id="",
+                     updated_at=views.timezone.now())
+        return result
+    accepted = not isinstance(result, Response)
+    revision_id = (result.get("revisionRunId") or result.get("newRunId")) if accepted else None
+    entry = {"requestHash": request_hash,
+        "status": "accepted" if accepted else "submitted", "revisionRunId": revision_id,
+        "commentIds": payload["commentIds"], "recordedAt": views.timezone.now().isoformat()}
+    feedback = {"id": payload["operationId"], "sourceRunId": run.run_id,
+                "revisionRunId": revision_id, "status": "running" if accepted else "submitted"} if comments or payload.get("restoredSentences") else None
+    if accepted and revision_id and revision_id != run.run_id:
+        child = views._create_local_run(
+            workflow="article_system_setup" if run.workflow == "article_system_setup" else "article_revision",
+            domain=context.organization.domain, github_repo=run.github_repo or "",
+            actor_id=views.founder_actor_id_for_user(command.user), payload=remote_payload,
+            remote_data={"run_id": revision_id, "status": "queued"},
+            preserve_existing=True,
+        )
+        if contract.get("operation_id"):
+            from .website_models import WebsiteConnectionOperation
+            from .website_operations import bind_operation_run
+            operation = WebsiteConnectionOperation.objects.get(pk=contract["operation_id"])
+            bind_operation_run(operation, child)
+    error = _record_update_result(run, payload["operationId"], entry, feedback)
+    if error is not None:
+        return error
+    return result if isinstance(result, Response) else Response(result, status=202 if result.get("previewPending") else 200)
+
+
 class VibeMarketingArticleReviewView(views.VibeMarketingRunCommentsMixin, APIView):
     allows_setup_review_updates = True
     allows_accepted_update_retries = True
@@ -336,117 +453,7 @@ class VibeMarketingArticleReviewView(views.VibeMarketingRunCommentsMixin, APIVie
         return result if isinstance(result, Response) else Response(result)
 
     def _apply_update(self, request, context, run, data):
-        try:
-            payload = normalize_review_update(data)
-        except ValueError as exc:
-            return Response({"detail": str(exc)}, status=400)
-        request_hash = _fingerprint({key: value for key, value in payload.items() if key != "expectedRevision"})
-        updates = (run.result or {}).get("article_review_updates") or {}
-        existing = updates.get(payload["operationId"]) or {}
-        if existing.get("requestHash") and existing["requestHash"] != request_hash:
-            return Response({"detail": "This update identity was used for different changes."}, status=409)
-        if existing.get("status") == "accepted":
-            result = remote_review(run)
-            if isinstance(result, Response):
-                return result
-            return Response({**result, "revisionRunId": existing.get("revisionRunId")})
-        latest = views._latest_review_ready_component_revision(run, context)
-        if latest is not None:
-            return Response({"detail": "A newer draft is ready. Open it before editing.",
-                             "latestRunId": latest.run_id}, status=409)
-        error = _revision_authorization(request, context, run, payload)
-        if error is not None:
-            return error
-        comments, claimed, error = _claim_comments(run, payload)
-        if error is not None:
-            return error
-        remote_payload = {**payload, "source_run_id": run.run_id,
-                          "feedback_batch_id": payload["operationId"],
-                          "request_source": "founder_tools_review_update"}
-        convert = views._article_system_remote_comment_payload if run.workflow == "article_system_setup" else views._remote_comment_payload
-        remote_payload["comments"] = [convert(comment) if run.workflow == "article_system_setup"
-                                      else convert(comment, run=run) for comment in comments]
-        # Setup's older comment payload lacks component identity; retain it for
-        # matching comment targets to text changes in the combined worker update.
-        for remote, comment in zip(remote_payload["comments"], comments):
-            remote.setdefault("component_id", comment.component_id)
-            remote.setdefault("component_type", comment.component_type)
-        remote_payload["comments"].extend({
-            "comment_id": f"{payload['operationId']}-restore-{index}", "component_id": "article",
-            "component_type": "article_body", "component_label": "Removed sentence",
-            "body": f"Restore sentence: {sentence}; recheck authoritative sources and safety before acceptance.",
-            "requested_action": "restore_sentence", "context": {"restoredSentence": sentence},
-        } for index, sentence in enumerate(payload.get("restoredSentences", [])))
-        submission = {"requestHash": request_hash, "status": "submitted", "revisionRunId": None,
-                      "commentIds": payload["commentIds"], "remoteComments": deepcopy(remote_payload["comments"]),
-                      "recordedAt": views.timezone.now().isoformat()}
-        feedback = {"id": payload["operationId"], "sourceRunId": run.run_id,
-                    "revisionRunId": None, "status": "submitted"} if comments or payload.get("restoredSentences") else None
-        error = _record_update_result(run, payload["operationId"], submission, feedback)
-        if error is not None:
-            return error
-        recorded = run.result["article_review_updates"][payload["operationId"]]
-        if recorded["status"] == "accepted":
-            result = remote_review(run)
-            return result if isinstance(result, Response) else Response({**result, "revisionRunId": recorded.get("revisionRunId")})
-        # A fast callback can add outcome context to saved rows. Replay the
-        # original wire comment payload, never a newly serialized retry.
-        remote_payload["comments"] = deepcopy(recorded["remoteComments"])
-        contract = recorded.get("dispatchContract")
-        if contract is None:
-            contract = _review_dispatch_contract(run, remote_payload)
-            if isinstance(contract, Response):
-                if _revert_update_submission(run, payload["operationId"], request_hash) and payload["commentIds"]:
-                    views.VibeMarketingComponentComment.objects.filter(run=run, id__in=payload["commentIds"],
-                        status=views.VibeMarketingComponentCommentStatus.SUBMITTED, batch_id=payload["operationId"]).update(
-                            status=views.VibeMarketingComponentCommentStatus.DRAFT, batch_id="", updated_at=views.timezone.now())
-                return contract
-            if contract:
-                error = _record_update_result(run, payload["operationId"], {**submission, "dispatchContract": contract}, feedback)
-                if error is not None:
-                    return error
-        remote_payload.update(contract)
-        if claimed and run.workflow != "article_system_setup":
-            # The worker can start as soon as dispatch is accepted. Create its
-            # learning candidates first, once, as the existing comments path does.
-            views._create_editorial_feedback_candidates(
-                organization=context.organization, run=run, comments=comments,
-                batch_id=payload["operationId"],
-            )
-        result = remote_review(run, payload=remote_payload)
-        definitive_rejection = isinstance(result, Response) and result.status_code in {400, 404, 409, 422}
-        if definitive_rejection:
-            if _revert_update_submission(run, payload["operationId"], request_hash) and payload["commentIds"]:
-                views.VibeMarketingComponentComment.objects.filter(
-                    run=run, id__in=payload["commentIds"], status=views.VibeMarketingComponentCommentStatus.SUBMITTED,
-                    batch_id=payload["operationId"],
-                ).update(status=views.VibeMarketingComponentCommentStatus.DRAFT, batch_id="",
-                         updated_at=views.timezone.now())
-            return result
-        accepted = not isinstance(result, Response)
-        revision_id = (result.get("revisionRunId") or result.get("newRunId")) if accepted else None
-        entry = {"requestHash": request_hash,
-            "status": "accepted" if accepted else "submitted", "revisionRunId": revision_id,
-            "commentIds": payload["commentIds"], "recordedAt": views.timezone.now().isoformat()}
-        feedback = {"id": payload["operationId"], "sourceRunId": run.run_id,
-                    "revisionRunId": revision_id, "status": "running" if accepted else "submitted"} if comments or payload.get("restoredSentences") else None
-        if accepted and revision_id and revision_id != run.run_id:
-            child = views._create_local_run(
-                workflow="article_system_setup" if run.workflow == "article_system_setup" else "article_revision",
-                domain=context.organization.domain, github_repo=run.github_repo or "",
-                actor_id=views.founder_actor_id_for_user(request.user), payload=remote_payload,
-                remote_data={"run_id": revision_id, "status": "queued"},
-                preserve_existing=True,
-            )
-            if contract.get("operation_id"):
-                from .website_models import WebsiteConnectionOperation
-                from .website_operations import bind_operation_run
-                operation = WebsiteConnectionOperation.objects.get(pk=contract["operation_id"])
-                bind_operation_run(operation, child)
-        error = _record_update_result(run, payload["operationId"], entry, feedback)
-        if error is not None:
-            return error
-        return result if isinstance(result, Response) else Response(result, status=202 if result.get("previewPending") else 200)
+        return apply_article_review_update(user=request.user, context=context, run=run, data=data)
 
 
 
