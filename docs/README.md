@@ -33,6 +33,9 @@ subsystem-specific contracts and runbooks.
 
 ## Community chat APIs
 
+- [Member agent gateway and Hermes worker API](agent-runtime-api.md) — disabled
+  by default; independent delegation, public-channel source ACLs and worker leases
+
 - [Valley remote MCP](valley-mcp.md) — client installation, scoped OAuth consent, private narrative handoff and rollout
 
 - [Private member onboarding](community-chat-onboarding.md) — email signup,

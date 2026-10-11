@@ -41,6 +41,7 @@ urlpatterns = [
     path('api/v1/points/', include('roo.urls')),
     path('api/v1/org-memory/', include('org_memory.urls')),
     path('api/v1/community-chat/', include('community_chat.urls')),
+    path('api/v1/agent-runtime/', include('agent_runtime.urls')),
     path('api/v1/public-brain/', include('org_memory.public_urls')),
     path('api/v1/jobs/', include('jobs.urls')),
     path('api/v1/medhack/', include('hospital.medhack_urls')),
@@ -64,4 +65,12 @@ urlpatterns = [
         name='startup_data_delete',
     ),
     path('api/v1/users/', include('core.urls_users')),
+]
+
+# Agent OAuth discovery is public metadata only while the opt-in runtime is on.
+from agent_runtime.views import OAuthMetadataView, ResourceMetadataView
+urlpatterns += [
+    path('.well-known/oauth-authorization-server', OAuthMetadataView.as_view()),
+    path('.well-known/oauth-protected-resource', ResourceMetadataView.as_view()),
+    path('.well-known/oauth-protected-resource/api/v1/agent-runtime/mcp/', ResourceMetadataView.as_view()),
 ]
