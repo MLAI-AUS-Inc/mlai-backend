@@ -58,7 +58,12 @@ class PortableWebsiteDraftTests(TestCase):
         response = ContentFactoryRunView.as_view()(self.request("put", {
             "workflow": "direct_generate", "domain": self.org.domain, "status": "completed",
             "run_request": {"delivery_mode": "content_only"}}), run_id=self.run.run_id)
-        self.assertEqual(response.status_code, 409)
+        self.assertEqual(response.status_code, 200, response.data)
+        self.assertEqual(response.data["sync_status"], "observation_only")
+        self.run.refresh_from_db()
+        self.assertEqual(self.run.run_request["delivery_mode"], "review_draft")
+        self.assertNotIn("delivery_mode_confirmed", self.run.run_request)
+        self.assertEqual(self.run.github_repo, "")
 
     def test_portable_claim_never_bypasses_organization_configuration_guard(self):
         response = ContentFactoryOrgConfigView.as_view()(self.request("put", {
@@ -87,9 +92,12 @@ class PortableWebsiteDraftTests(TestCase):
             self.assertEqual(self.run.run_request["roo_points_ledger_id"], "synthetic-charge")
             self.assertEqual(self.run.run_request["roo_points_cost"], 6)
         response = ContentFactoryRunView.as_view()(self.request("put", {**payload, "approval_state": "approved"}), run_id=self.run.run_id)
-        self.assertEqual(response.status_code, 409, response.data)
+        self.assertEqual(response.status_code, 200, response.data)
+        self.assertEqual(response.data["sync_status"], "observation_only")
         self.run.refresh_from_db()
         self.assertEqual(self.run.status, "completed")
+        self.assertEqual(self.run.approval_state, "not_required")
+        self.assertEqual(self.run.run_request["editorial_admission"], payload["run_request"]["editorial_admission"])
         self.config.refresh_from_db()
         self.assertIsNone(self.config.website_connection_id)
         self.assertEqual(self.config.publish_targets, [])

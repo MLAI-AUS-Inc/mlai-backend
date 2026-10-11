@@ -1,3 +1,5 @@
+from .website_metrics import WebsiteMetricsView
+from .company_billing import CompanyBillingView
 from .article_preview_lease import ArticlePreviewLeaseView, ArticlePreviewLeaseProxyView
 from .article_review_views import VibeMarketingArticleReviewView
 from .website_views import WebsiteConnectionView, WebsiteConnectionActionView, WebsiteConnectionOperationView
@@ -60,6 +62,10 @@ from .vibe_marketing_views import (
 
 
 urlpatterns = [
+    path("website-metrics", WebsiteMetricsView.as_view()),
+    path("website-metrics/", WebsiteMetricsView.as_view()),
+    path("company-billing", CompanyBillingView.as_view()),
+    path("company-billing/", CompanyBillingView.as_view()),
     path("github/repository/", VibeMarketingGitHubRepositoryView.as_view(), name="vibe-marketing-github-repository"),
     path("github/repository", VibeMarketingGitHubRepositoryView.as_view(), name="vibe-marketing-github-repository-no-slash"),
     path("website-connection", WebsiteConnectionView.as_view(), name="website-connection"),
