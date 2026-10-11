@@ -57,11 +57,16 @@ def coalesce(state, export, *, now):
     return result, True
 
 
-def settle(state, key, revision):
+def settle(state, key, revision, *, confirmation=None):
     """Release the fence only after confirmation or a permanent give-up."""
     result = dict(state or {})
     previous = dict(result.get(key) or {})
+    old_applied = int(previous.get('applied') or 0)
     previous['applied'] = max(int(previous.get('applied') or 0), revision)
+    if revision > old_applied:
+        previous.pop('confirmed_native', None)
+    if confirmation is not None and revision == previous['applied']:
+        previous['confirmed_native'] = confirmation
     pending = previous.get('pending') or {}
     if int(pending.get('revision') or 0) <= revision:
         previous.pop('pending', None)
@@ -80,6 +85,7 @@ def give_up_on_disconnect(cursor):
     state = dict((cursor or {}).get(KEY) or {})
     for key, value in list(state.items()):
         state = settle(state, key, int(value.get('received') or 0))
+        state[key] = {name: state[key][name] for name in ('received', 'applied')}
     from .inbox_observations import REVISION_KEY
     result = {KEY: state} if state else {}
     revision = (cursor or {}).get(REVISION_KEY)
@@ -88,7 +94,7 @@ def give_up_on_disconnect(cursor):
     return result
 
 
-def confirmed_read(connection, target, source_ts):
+def confirmed_read(connection, target, source_ts, *, authority=None):
     """Settle pending exported reads covered by the confirmed Slack frontier."""
     from integrations.services import slack_chat_read_state as reads
     confirmed = reads._timestamp(source_ts)
@@ -101,10 +107,54 @@ def confirmed_read(connection, target, source_ts):
         if (pending.get('op') == 'read' and pending.get('channel_id') == target.channel_id
                 and reads._timestamp(pending.get('source_ts')) is not None
                 and reads._timestamp(pending['source_ts']) <= confirmed):
-            state = settle(state, key, pending['revision'])
+            confirmation = native_confirmation(pending, source_ts, authority, target)
+            state = settle(state, key, pending['revision'], confirmation=confirmation)
             changed = True
     if changed:
         save(connection, state)
+
+
+def native_confirmation(pending, source_ts, authority, target):
+    """Retain a native boundary only after its exact Slack write is confirmed."""
+    from .inbox_observations import timestamp
+    if (authority is None or not pending.get('native_source_ts')
+            or timestamp(source_ts) != timestamp(pending.get('source_ts'))):
+        return None
+    native_ts = timestamp(pending['native_source_ts'])
+    confirmed_ts = timestamp(source_ts)
+    if native_ts is None or confirmed_ts is None:
+        return None
+    from integrations.services import slack_chat_read_state as reads
+    return {'revision': pending['revision'], 'account_key': pending['account_key'],
+            'authority': reads._cache_key(authority, target),
+            'consent': authority.consent_generation,
+            'anchor_slack_us': int(Decimal(native_ts) * 1_000_000),
+            'anchor_display_us': pending['read_through_us'] + (pending['op'] == 'unread'),
+            'source_us': int(Decimal(confirmed_ts) * 1_000_000)}
+
+
+def native_source_frontier(state, context, last_read):
+    """Map only the confirmed native anchor/before-anchor pair under the probe fence."""
+    from .inbox_observations import timestamp
+    stamp = timestamp(last_read)
+    row = (state or {}).get(room_key(context['community_id'], context['channel_id'])) or {}
+    receipt = row.get('confirmed_native') or {}
+    revision = receipt.get('revision')
+    if (stamp is None or type(revision) is not int
+            or revision != row.get('received') or revision != row.get('applied')
+            or revision != context['applied_revision']
+            or receipt.get('account_key') != context['account_key']
+            or receipt.get('authority') != context['authority']
+            or receipt.get('consent') != context['consent']
+            or any(type(receipt.get(name)) is not int for name in
+                   ('anchor_slack_us', 'anchor_display_us', 'source_us'))):
+        return stamp, False
+    source_us = int(Decimal(stamp) * 1_000_000)
+    offset = source_us - receipt['anchor_slack_us']
+    display_us = receipt['anchor_display_us'] + offset
+    if offset not in (-1, 0) or not 0 <= display_us <= I64_MAX:
+        return stamp, False
+    return format(Decimal(display_us) / 1_000_000, '.6f'), source_us == receipt['source_us']
 
 
 def resolve_link_timestamp(links, event_id, frontier_us, *, unread=False):
@@ -154,9 +204,10 @@ def _locked_owner_connection(grant):
     return ExternalServiceConnection.objects.select_for_update().get(pk=grant.connection_id, user_id=grant.user_id)
 
 
-def public_anchor_timestamp(mapped, anchor, frontier_us, *, unread=False):
+def public_anchor_resolution(mapped, anchor, frontier_us, *, unread=False):
     """Wait for retryable native deliveries; permanently dead anchors use history."""
     from django.db.models import Q
+    from .inbox_observations import timestamp
     from integrations.models import (
         CommunityBridgeDelivery, CommunityBridgeDeliveryStatus, CommunityBridgeMessageLink,
     )
@@ -170,7 +221,17 @@ def public_anchor_timestamp(mapped, anchor, frontier_us, *, unread=False):
         ).exclude(status__in=[CommunityBridgeDeliveryStatus.COMPLETED, CommunityBridgeDeliveryStatus.DEAD]).exists():
             raise RuntimeError('inbox_delivery_link_pending')
     inbound = latest_inbound_before(links.filter(source_platform='slack', destination_platform='buzz'), frontier_us) if not direct else None
-    return resolve_link_timestamp(direct + ([inbound] if inbound else []), anchor, frontier_us, unread=unread)
+    ts = resolve_link_timestamp(direct + ([inbound] if inbound else []), anchor, frontier_us, unread=unread)
+    native_ts = next((stamp for link in direct
+                      if link.source_platform == 'buzz' and link.destination_platform == 'slack'
+                      and link.source_message_id == anchor
+                      and (stamp := timestamp(link.destination_message_id)) is not None), None)
+    return ts, native_ts
+
+
+def public_anchor_timestamp(mapped, anchor, frontier_us, *, unread=False):
+    """Resolve the public Slack timestamp, waiting only for retryable creates."""
+    return public_anchor_resolution(mapped, anchor, frontier_us, unread=unread)[0]
 
 
 def accept(payload):
@@ -212,10 +273,14 @@ def accept(payload):
         except SlackDmMirrorAuthorizationError:
             save(connection, settle(state, key, export['revision']))
             return {'status': 'permanent_give_up'}
+        native_ts = None
         if private is not None:
             from integrations.services.slack_dm_mirror import _slack_destination_message_id, _current_private_delivery_rows
             ts = _slack_destination_message_id(private, export['read_through_event'])
             if ts:
+                anchor_us = export['read_through_us'] + (export['op'] == 'unread')
+                if int(Decimal(ts) * 1_000_000) != anchor_us:
+                    native_ts = ts
                 ts = format(max(Decimal(0), Decimal(ts) - (Decimal('0.000001') if export['op'] == 'unread' else 0)), '.6f')
             else:
                 rows = _current_private_delivery_rows(private)
@@ -226,10 +291,12 @@ def accept(payload):
                 inbound = latest_inbound_before(rows.filter(source_platform='slack', operation='create', status='completed'), export['read_through_us'])
                 ts = format(Decimal(inbound.source_message_id), '.6f') if inbound else '0.000000'
         else:
-            ts = public_anchor_timestamp(mapped, export['read_through_event'],
-                                         export['read_through_us'], unread=export['op'] == 'unread')
+            ts, native_ts = public_anchor_resolution(mapped, export['read_through_event'],
+                                                    export['read_through_us'], unread=export['op'] == 'unread')
         pending = state[key]['pending']
         pending.update(source_ts=ts, public_key=public_key, source_id=target.slack_id)
+        if native_ts is not None:
+            pending['native_source_ts'] = native_ts
         from .receipts import KEY as RECEIPTS_KEY, enqueue_read
         if export['op'] == 'read':
             pending['device'] = enqueue_read(authority, target, public_key=public_key, source_ts=ts)
@@ -291,7 +358,8 @@ def flush_once(grant, authority, keys):
                 complete_read(authority, target, source_ts=result['last_read'])
             _, connection = reads._lock_slack_grant_api_authority(authority, required_scopes={target.read_scope})
             state = dict((connection.sync_cursor or {}).get(KEY) or {})
-            save(connection, settle(state, key, pending['revision']))
+            confirmation = native_confirmation(pending, result.get('last_read'), authority, target) if result.get('synced') else None
+            save(connection, settle(state, key, pending['revision'], confirmation=confirmation))
             if result.get('synced') and pending['op'] == 'unread':
                 from .inbox_observations import confirmed_locked
                 confirmed_locked(connection, authority, target, result['last_read'], observed_at=time.time())

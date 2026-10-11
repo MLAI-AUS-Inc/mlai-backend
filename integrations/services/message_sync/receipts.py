@@ -62,7 +62,7 @@ def complete_read(authority, target, *, source_ts):
                      and value.get("authority") == reads._cache_key(authority, target)
                      and (reads._timestamp(value.get("source_ts")) or 0) <= reads._timestamp(source_ts)}
         from .inbox_exports import confirmed_read
-        confirmed_read(connection, target, source_ts)
+        confirmed_read(connection, target, source_ts, authority=authority)
         if confirmed:
             _save(connection, {k: v for k, v in queue.items() if k not in confirmed})
         from .inbox_observations import confirmed_locked

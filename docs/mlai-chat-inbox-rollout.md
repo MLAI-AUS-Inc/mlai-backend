@@ -73,6 +73,19 @@ frontier. A consent-rejected native message therefore does not block the
 durable export page or later cursor revisions indefinitely. This does not
 retry or bypass the rejected message's consent check.
 
+A native message's Slack delivery time may be later than its relay display
+time. After the exact exported write confirms, retain a consent/OAuth-scoped
+native boundary receipt in the existing connection cursor. A probe with that
+settled revision maps only the native Slack timestamp and the microsecond
+immediately before it to their corresponding relay display frontiers. The
+confirmed write's echo is an observation, so it preserves the device anchor;
+an external backwards change remains a regression. Raw Slack timestamps stay
+in polling/coalescing state. Unrelated timestamps, stale probe fences, changed
+authority, and permanently abandoned writes are never translated. Disconnect
+erases the receipt while retaining the revision fences. This prevents a native
+unread echo from moving past the message and making a later device read unable
+to clear manual unread.
+
 Backend implementation checks use `scripts/test_without_database.py`; local
 model dry-runs reported no changes. Database-backed Django concurrency tests,
 controlled Slack acceptance and deployment remain separate approved gates.

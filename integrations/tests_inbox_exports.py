@@ -126,8 +126,134 @@ class PublicAnchorDeliveryTests(SimpleTestCase):
             CommunityBridgeDelivery.objects, 'filter'
         ) as delivery, patch.object(exports, 'latest_inbound_before') as fallback:
             self.assertEqual(exports.public_anchor_timestamp('mapped', anchor, 100000000, unread=True), '101.000001')
+            self.assertEqual(exports.public_anchor_resolution('mapped', anchor, 100000000, unread=True),
+                             ('101.000001', '101.000002'))
         delivery.assert_not_called()
         fallback.assert_not_called()
+
+    def test_inbound_or_invalid_direct_link_is_not_a_native_boundary(self):
+        from integrations.models import CommunityBridgeMessageLink
+        anchor = 'b' * 64
+        for link in (self.link(), self.link('buzz', 'slack', anchor, 'invalid')):
+            with self.subTest(source=link.source_platform):
+                links = Mock()
+                links.filter.return_value = [link]
+                with patch.object(CommunityBridgeMessageLink.objects, 'filter', return_value=links):
+                    self.assertIsNone(exports.public_anchor_resolution('mapped', anchor, 100000000)[1])
+
+
+class NativeCursorBoundaryTests(SimpleTestCase):
+    def fixture(self, op='read'):
+        payload = InboxExportTests().payload(3, op)
+        payload['read_through_us'] = '99999999' if op == 'unread' else '100000000'
+        export = exports.parse_export(payload)
+        key = exports.room_key(export['community_id'], export['channel_id'])
+        state, _ = exports.coalesce({}, export, now=1000)
+        source_ts = '102.499999' if op == 'unread' else '102.500000'
+        pending = state[key]['pending']
+        pending.update(source_ts=source_ts, native_source_ts='102.500000')
+        authority = SimpleNamespace(consent_generation='consent-v1')
+        with patch('integrations.services.slack_chat_read_state._cache_key', return_value='scoped'):
+            confirmation = exports.native_confirmation(pending, source_ts, authority, object())
+        context = {'community_id': export['community_id'], 'channel_id': export['channel_id'],
+                   'account_key': export['account_key'],
+                   'applied_revision': 3, 'authority': 'scoped', 'consent': 'consent-v1'}
+        return state, key, pending, confirmation, context
+
+    def test_confirmed_native_read_and_unread_echo_use_original_display_boundary(self):
+        for op, raw, expected in [('read', '102.500000', '100.000000'),
+                                  ('unread', '102.499999', '99.999999')]:
+            with self.subTest(op=op):
+                state, key, _, confirmation, context = self.fixture(op)
+                state = exports.settle(state, key, 3, confirmation=confirmation)
+                self.assertEqual(exports.native_source_frontier(state, context, raw), (expected, True))
+
+    def test_external_native_read_or_unread_maps_the_adjacent_boundary_without_echo(self):
+        for op, raw, expected in [('read', '102.499999', '99.999999'),
+                                  ('unread', '102.500000', '100.000000')]:
+            with self.subTest(op=op):
+                state, key, _, confirmation, context = self.fixture(op)
+                state = exports.settle(state, key, 3, confirmation=confirmation)
+                self.assertEqual(exports.native_source_frontier(state, context, raw), (expected, False))
+
+    def test_unrelated_slack_positions_are_never_translated(self):
+        state, key, _, confirmation, context = self.fixture()
+        state = exports.settle(state, key, 3, confirmation=confirmation)
+        for raw in ('0', '102.499998', '102.500001', '103', 'NaN'):
+            with self.subTest(raw=raw):
+                from integrations.services.message_sync.inbox_observations import timestamp
+                self.assertEqual(exports.native_source_frontier(state, context, raw), (timestamp(raw), False))
+
+    def test_probe_fence_and_oauth_consent_scope_must_match_the_confirmation(self):
+        state, key, _, confirmation, context = self.fixture()
+        state = exports.settle(state, key, 3, confirmation=confirmation)
+        for changes in ({'applied_revision': 2}, {'authority': 'new-oauth'}, {'consent': 'new-consent'},
+                        {'account_key': 'c'*64}):
+            with self.subTest(changes=changes):
+                self.assertEqual(exports.native_source_frontier(state, {**context, **changes}, '102.500000'),
+                                 ('102.500000', False))
+        state[key]['received'] = 4
+        self.assertEqual(exports.native_source_frontier(state, context, '102.500000'), ('102.500000', False))
+
+    def test_permanent_give_up_or_a_later_slack_cursor_does_not_create_a_native_receipt(self):
+        state, key, pending, _, context = self.fixture()
+        authority = SimpleNamespace(consent_generation='consent-v1')
+        self.assertIsNone(exports.native_confirmation(pending, '103', authority, object()))
+        self.assertIsNone(exports.native_confirmation(pending, None, authority, object()))
+        state = exports.settle(state, key, 3)
+        self.assertEqual(exports.native_source_frontier(state, context, '102.500000'), ('102.500000', False))
+
+    def test_repeated_completion_preserves_receipt_and_newer_export_removes_it(self):
+        state, key, _, confirmation, context = self.fixture()
+        state = exports.settle(state, key, 3, confirmation=confirmation)
+        self.assertEqual(exports.settle(state, key, 3), state)
+        self.assertEqual(exports.settle(state, key, 2, confirmation={}), state)
+        next_export = exports.parse_export(InboxExportTests().payload(4, 'unread'))
+        next_state, _ = exports.coalesce(state, next_export, now=1001)
+        self.assertNotIn('confirmed_native', next_state[key])
+        self.assertEqual(exports.native_source_frontier(next_state, context, '102.500000'), ('102.500000', False))
+
+    def test_disconnect_retains_only_revision_fences(self):
+        state, key, _, confirmation, _ = self.fixture()
+        state = exports.settle(state, key, 3, confirmation=confirmation)
+        self.assertEqual(exports.give_up_on_disconnect({exports.KEY: state}),
+                         {exports.KEY: {key: {'received': 3, 'applied': 3}}})
+
+    def test_native_read_confirmation_retains_boundary_before_pending_is_removed(self):
+        from integrations.services import slack_chat_read_state as reads
+        state, key, _, confirmation, context = self.fixture()
+        connection = SimpleNamespace(sync_cursor={exports.KEY: state}, save=Mock())
+        target = reads.ReadTarget(context['channel_id'], 'Csynthetic', 'public_channel')
+        with patch.object(reads, '_cache_key', return_value='scoped'):
+            exports.confirmed_read(connection, target, '102.500000',
+                                   authority=SimpleNamespace(consent_generation='consent-v1'))
+        self.assertEqual(connection.sync_cursor[exports.KEY][key]['confirmed_native'], confirmation)
+        self.assertNotIn('pending', connection.sync_cursor[exports.KEY][key])
+
+    @override_settings(MESSAGE_SYNC_INBOX_READ_EXPORT=True)
+    def test_native_unread_flush_records_confirmation_before_source_echo(self):
+        from contextlib import nullcontext
+        from integrations.services import slack_chat_read_state as reads
+        connection, target, authority, key = ExportDeliveryTests().pending('unread')
+        authority.consent_generation = 'consent-v1'
+        pending = connection.sync_cursor[exports.KEY][key]['pending']
+        pending.update(read_through_us=99999999, native_source_ts='102.500000', source_ts='102.499999')
+        order = []
+        def echo(*args, **kwargs):
+            order.append('echo')
+            receipt = connection.sync_cursor[exports.KEY][key]['confirmed_native']
+            self.assertEqual(receipt['anchor_display_us'], 100000000)
+            self.assertEqual(receipt['source_us'], 102499999)
+            self.assertEqual(connection.sync_cursor[exports.KEY][key]['applied'], 3)
+        with patch.object(exports.transaction, 'atomic', side_effect=nullcontext), patch.object(
+            reads, '_lock_slack_grant_api_authority', return_value=(None, connection)), patch.object(
+            reads, '_targets_for_keys', return_value=[target]), patch.object(reads, '_cache_key', return_value='scoped'), patch.object(
+            exports, 'apply_unread', return_value={'synced': True, 'last_read': '102.499999'}), patch(
+            'integrations.services.message_sync.inbox_observations.confirmed_locked', side_effect=echo), patch.object(
+            exports.time, 'time', return_value=200):
+            self.assertEqual(exports.flush_once('grant', authority, {'a'*64}), 1)
+        self.assertEqual(order, ['echo'])
+        self.assertNotIn('pending', connection.sync_cursor[exports.KEY][key])
 
 
 @override_settings(MESSAGE_SYNC_INBOX_READ_EXPORT=True)
