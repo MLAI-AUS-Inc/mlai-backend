@@ -1,9 +1,10 @@
 """No-database policy and actual dispatch/restart control-flow tests.
 
-Run with unittest, never manage.py test. Selected unmodified function ASTs are
-executed from the real view module without importing its application models,
-credentials, workers or network clients. ORM/HTTP/billing seams are controlled
-fixtures, so these tests do not prove persistence, SQL races or real billing.
+Run with scripts/test_without_database.py, never manage.py test. Policy and
+dispatch cases execute selected unmodified function ASTs from the real views.
+The atomic outbox case imports configured Django models under the runner's
+database and network guards. ORM/HTTP/billing seams are controlled fixtures,
+so these tests do not prove persistence, SQL races or real billing.
 """
 import ast
 from contextlib import nullcontext
@@ -49,9 +50,14 @@ class CurrentArticleBriefTests(unittest.TestCase):
         workflow = (Path(__file__).resolve().parent.parent / ".github/workflows/deploy.yml").read_text()
         step = workflow.split("- name: Run no-database editorial contract checks\n", 1)[1].split("\n    - ", 1)[0]
         self.assertIn("python -m unittest", step)
-        for module in ("tests_editorial_catalog_unit", "tests_editorial_catalog_api_unit", "tests_editorial_dispatch_unit", "tests_editorial_snapshot_unit", "tests_editorial_revision_unit", "tests_article_admission_notice_unit"):
+        for module in ("tests_editorial_catalog_unit", "tests_editorial_catalog_api_unit", "tests_editorial_snapshot_unit", "tests_editorial_revision_unit", "tests_article_admission_notice_unit"):
             self.assertIn("content_factory." + module, step)
         self.assertNotIn("manage.py", step)
+        self.assertNotIn("content_factory.tests_editorial_dispatch_unit", step)
+        dispatch_step = workflow.split("- name: Check website journey and lifecycle contracts without database access\n", 1)[1].split("\n    - ", 1)[0]
+        self.assertIn("python scripts/test_without_database.py", dispatch_step)
+        self.assertIn("content_factory.tests_editorial_dispatch_unit", dispatch_step)
+        self.assertNotIn("manage.py", dispatch_step)
 
     def test_all_four_icps_and_explicit_outside_keep_their_own_decision(self):
         for audience in ("SMB", "BUILDER", "FOUNDER_BUILDER", "COMMUNITY", "OUTSIDE"):
@@ -137,7 +143,19 @@ class ArticleDispatchControlFlowTests(unittest.TestCase):
         self.http = SimpleNamespace(RequestException=TransportError, post=Mock(side_effect=self.post))
         # Website consent is exercised with real DB row locks in
         # tests_website_connections; this AST harness isolates editorial policy.
-        self.ns = {
+        from unittest.mock import patch
+        from content_factory import dispatch_outbox, dispatch_models
+        for target, value in (("reserve_dispatch", Mock()), ("mark_dispatch_delivered", Mock())):
+            seam = patch.object(dispatch_outbox, target, value); seam.start(); self.addCleanup(seam.stop)
+        model_seam = patch.object(dispatch_models, "ContentFactoryDispatchOutbox", SimpleNamespace(objects=Mock()))
+        model_seam.start(); self.addCleanup(model_seam.stop)
+        self.ns = {"transaction": SimpleNamespace(atomic=nullcontext),
+            "Organization": SimpleNamespace(objects=SimpleNamespace(select_for_update=lambda: SimpleNamespace(get=lambda **kw: self.org))),
+            "ContentFactoryRun": SimpleNamespace(objects=SimpleNamespace(select_for_update=lambda: SimpleNamespace(get=lambda **kw: self.run))),
+            "_reserve_article_start_connection": lambda *args: None,
+            "_validate_article_start_admission": lambda *args: None,
+            "_validate_article_start_reservation": lambda *args: None,
+
             "guarded_owner_operation": lambda *args, **kwargs: lambda method: method,
             "guarded_service_write": lambda *args, **kwargs: lambda method: method,
             "REPOSITORY_WORKFLOWS": frozenset(),
@@ -181,7 +199,7 @@ class ArticleDispatchControlFlowTests(unittest.TestCase):
             "normalize_authors": lambda authors: authors, "resolve_default_author": lambda *args: None,
         }
         names = {"_run_mapping", "_request_value", "_bool_from_request", "_refresh_article_editorial_payload", "_friendly_content_factory_error", "_blocked_worker_payload",
-                 "_restart_article_payload_from_run", "_restart_article_run", "_charge_roo_points_for_article", "_queue_content_factory_run", "_queue_content_factory_run_authorized",
+                 "_restart_article_payload_from_run", "_reserve_article_restart", "_restart_article_run", "_charge_roo_points_for_article", "_queue_content_factory_run", "_queue_content_factory_run_authorized",
                  "_run_result_from_remote", "_resolve_dispatch_token_run", "_fail_unconfirmed_dispatch_run"}
         tree = ast.parse(Path(__file__).with_name("vibe_marketing_views.py").read_text())
         nodes = [node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name in names]
@@ -215,6 +233,25 @@ class ArticleDispatchControlFlowTests(unittest.TestCase):
             payload=payload if payload is not None else {"domain": self.org.domain, "editorial_brief": selected_brief()},
             billing_refund_context={"charged_user": self.user, "article_request": {"client_request_id": "fixture-key"}} if refund else None,
         )
+
+    def test_dispatch_accepted_after_disconnect_refunds_original_payer(self):
+        def cancelled(**kwargs):
+            run = self.create_local(**kwargs)
+            run.status = "cancelled"
+            return run
+        self.local.side_effect = cancelled
+        run = self.queue(refund=True)
+        self.assertEqual(run.status, "cancelled")
+        self.refund.assert_called_once()
+        self.assertIs(self.refund.call_args.kwargs["charged_user"], self.user)
+
+    def test_later_http_refusal_cannot_refund_an_unknown_prior_dispatch(self):
+        self.http.post.return_value = None
+        self.http.post.side_effect = lambda *args, **kwargs: SimpleNamespace(status_code=401,
+            json=lambda: {"detail": "Unavailable"}, text="Unavailable", content=b"yes")
+        run = self.queue(refund=True)
+        self.assertTrue(run.run_request["dispatch_pending_resolution"])
+        self.refund.assert_not_called()
 
     def start(self, data=None):
         return self.ns["_article_start_under_test"](None, SimpleNamespace(user=self.user, data=data if data is not None else {
@@ -284,7 +321,33 @@ class ArticleDispatchControlFlowTests(unittest.TestCase):
         self.assertEqual(self.posted[0]["restart_source_run_id"], "source-1")
         self.assertEqual(self.run.run_request, original)
         self.assertEqual(child.run_id, "child-1")
-        self.run.save.assert_called_once()
+        self.assertEqual(self.run.save.call_count, 2)
+        self.assertEqual(self.run.result["restart_receipt"]["state"], "completed")
+        self.assertEqual(self.run.result["user_action_count"], 1)
+        self.assertEqual(child.result["user_action_count"], 1)
+
+    def test_restart_queue_exception_closes_receipt_and_returns_retry(self):
+        self.run.run_request["client_request_id"] = "dead-original-key"
+        self.ns["_queue_content_factory_run"] = Mock(side_effect=RuntimeError("worker refused"))
+        child, error = self.ns["_restart_article_run"](run=self.run, context=self.context)
+        self.assertIsNone(child)
+        self.assertEqual(error.status_code, 503)
+        receipt = self.run.result["restart_receipt"]
+        self.assertEqual(receipt["state"], "failed")
+        self.assertEqual(receipt["reused_authorization"], "released")
+        self.assertTrue(receipt["client_request_id"].startswith("vibe-article-restart:source-1:"))
+        self.assertFalse(receipt["charged"])
+        self.charge.assert_not_called()
+
+    def test_restart_repeated_while_confirmation_is_pending_never_dispatches_a_second_child(self):
+        self.run.result = {"restart_receipt": {"state": "pending", "client_request_id": "existing-key"}}
+        child, error = self.ns["_restart_article_run"](run=self.run, context=self.context)
+        self.assertIsNone(child)
+        self.assertEqual(error.status_code, 409)
+        self.assertEqual(error.data["code"], "restart_pending")
+        self.assertEqual(self.run.result["restart_receipt"]["client_request_id"], "existing-key")
+        self.http.post.assert_not_called()
+        self.charge.assert_not_called()
 
     def test_restart_accepts_saved_camel_case_and_keeps_no_offer_explicit(self):
         self.run.run_request.pop("editorial_brief")
@@ -445,14 +508,173 @@ class ArticleDispatchControlFlowTests(unittest.TestCase):
         self.refund.assert_not_called()
 
     def test_definitive_worker_rejection_retains_existing_refund_behavior(self):
-        self.http.post.side_effect = lambda *args, **kwargs: SimpleNamespace(status_code=422, json=lambda: {"detail": "Rejected"}, text="Rejected")
+        self.http.post.side_effect = lambda *args, **kwargs: SimpleNamespace(status_code=422,
+            json=lambda: {"detail": "Rejected", "code": "dispatch_rejected"}, text="Rejected")
         child = self.queue(refund=True)
         self.http.post.assert_called_once()
         self.refund.assert_called_once()
         self.assertFalse(child.run_request.get("dispatch_pending_resolution"))
+
+    def test_rejected_lost_response_poll_retries_transient_article_refund(self):
+        self._assert_deferred_refund_retry(kind="", payer_lookup_fails=False)
+
+    def test_rejected_lost_response_poll_retries_island_payer_lookup(self):
+        self._assert_deferred_refund_retry(kind="content_island_topic_generation", payer_lookup_fails=True)
+
+    def _assert_deferred_refund_retry(self, *, kind, payer_lookup_fails):
+        import time
+        from unittest.mock import patch
+        from content_factory import reconciliation, vibe_marketing_views as views
+        from content_factory.billing import public_run_billing_receipt
+        from content_factory.dispatch_binding import run_is_dispatch_token_keyed
+
+        payer = SimpleNamespace(pk="company-payer-7")
+        self.http.post.side_effect = self.transport_error("lost queue response")
+        child = self.ns["_queue_content_factory_run"](
+            endpoint="article", workflow="article_generation", context=self.context, config=self.config,
+            payload={"domain": self.org.domain, "editorial_brief": selected_brief(),
+                     "roo_points_billing_status": "charged", "roo_points_cost": 6,
+                     "roo_points_billing_user_id": payer.pk, "requested_by_user_id": self.user.pk},
+            billing_refund_context={"charged_user": payer, "kind": kind,
+                                    "article_request": {"client_request_id": "fixture-key"}},
+        )
+        child.pk = 17
+        self.assertTrue(child.run_request["dispatch_pending_resolution"])
+        post_count = self.http.post.call_count
+        self.lookup.return_value = ("rejected", {"error": "backend_rejected:editorial_brief_invalid"})
+
+        # Execute the unchanged GET and deferred-refund helper, with persistence
+        # and presentation seams. The actual scheduler retries this same row.
+        tree = ast.parse(Path(__file__).with_name("vibe_marketing_views.py").read_text())
+        nodes = [node for node in tree.body if isinstance(node, ast.FunctionDef)
+                 and node.name in {"_process_pending_dispatch_refund", "_run_pending_remote_dispatch"}]
+        run_view = next(node for node in tree.body if isinstance(node, ast.ClassDef) and node.name == "VibeMarketingRunView")
+        get = next(node for node in run_view.body if isinstance(node, ast.FunctionDef) and node.name == "get")
+        get.name = "_run_poll_under_test"
+        nodes.append(get)
+        query = Mock()
+        query.prefetch_related.return_value = query
+        query.select_for_update.return_value = query
+        query.filter.return_value = query
+        query.first.return_value = child
+        query.get.return_value = child
+        self.ns.update({"__name__": "content_factory._refund_poll_under_test", "__package__": "content_factory",
+            "time": time, "run_is_dispatch_token_keyed": run_is_dispatch_token_keyed,
+            "ContentFactoryRun": SimpleNamespace(objects=query), "ARTICLE_WORKFLOWS": frozenset(),
+            "_resolve_context_or_response": lambda *args, **kwargs: (self.context, None),
+            "_run_belongs_to_context": lambda *args: True,
+            "_terminal_article_system_setup_has_local_failure": lambda *args: False,
+            "_call_content_factory_run_status": Mock(return_value={}),
+            "_is_status_poll_unavailable_payload": lambda *args: False,
+            "_release_failed_article_keyword": Mock(), "_log_terminal_repo_scan_status": Mock(),
+            "_serialize_run": lambda run, **kwargs: {"status": run.status,
+                **public_run_billing_receipt(run.run_request, run.result)},
+            "_timed_vibe_response": lambda payload, **kwargs: Response(payload),
+        })
+        exec(compile(ast.fix_missing_locations(ast.Module(body=nodes, type_ignores=[])),
+                     "vibe_marketing_views.py", "exec"), self.ns)
+        users = Mock()
+        users.objects.filter.return_value.first.side_effect = [DatabaseError("transient payer lookup"), payer] if payer_lookup_fails else [payer, payer]
+        refunder = self.ns["_refund_roo_points_for_content_island_topic_start"] if kind else self.refund
+        def settled(**kwargs):
+            # A newer receipt arrives while refund I/O is in flight. Completing
+            # the refund must merge its flags into the freshly locked result.
+            child.result = {**child.result, "newer_worker_receipt": {"retained": True}}
+            child.status = "cancelled"
+        def refund_attempt(**kwargs):
+            if not payer_lookup_fails and refunder.call_count == 1:
+                raise DatabaseError("transient ledger refund")
+            return settled(**kwargs)
+        refunder.side_effect = refund_attempt
+        due = Mock()
+        due.__getitem__ = Mock(return_value=[child])
+        with patch("django.contrib.auth.get_user_model", return_value=users), \
+                patch.object(views, "_process_pending_dispatch_refund", self.ns["_process_pending_dispatch_refund"]), \
+                patch.object(reconciliation.ContentFactoryRun.objects, "filter", return_value=due):
+            response = self.ns["_run_poll_under_test"](None, SimpleNamespace(query_params={"view": "status"}), child.run_id)
+            self.assertEqual(response.status_code, 200)
+            self.assertEqual(response.data["status"], "failed")
+            self.assertEqual(response.data["refundStatus"], "pending")
+            self.assertFalse(child.run_request["dispatch_pending_resolution"])
+            self.assertTrue(child.result["reconciliation_refund_pending"])
+            self.assertFalse(child.result.get("dispatch_refund_processed"))
+            reconciliation._settle_sweep_refunds(limit=10)
+            reconciliation._settle_sweep_refunds(limit=10)
+        self.assertTrue(child.result["dispatch_refund_processed"])
+        self.assertFalse(child.result["reconciliation_refund_pending"])
+        self.assertEqual(public_run_billing_receipt(child.run_request, child.result)["refundStatus"], "refunded")
+        self.assertEqual(child.result["newer_worker_receipt"], {"retained": True})
+        self.assertEqual(child.status, "cancelled")
+        self.assertEqual(child.workflow, "article_generation")
+        self.assertEqual(child.run_request["requested_by_user_id"], self.user.pk)
+        self.assertEqual(child.run_request["roo_points_billing_user_id"], payer.pk)
+        self.assertIs(refunder.call_args.kwargs["charged_user"], payer)
+        self.assertEqual(refunder.call_args.kwargs["article_request"]["client_request_id"], "fixture-key")
+        self.assertEqual(refunder.call_count, 1 if payer_lookup_fails else 2)
+        self.assertEqual(self.http.post.call_count, post_count)
+        self.charge.assert_not_called()
 
     def test_non_article_dispatch_does_not_require_an_article_brief(self):
         self.strategy = retired_catalog()
         child = self.queue(payload={"domain": self.org.domain}, endpoint="discovery")
         self.assertEqual(child.run_id, "child-1")
         self.config_model.objects.filter.assert_not_called()
+
+
+class AtomicArticleChargeTests(unittest.TestCase):
+    def test_empty_outbox_tick_satisfies_the_actual_scheduler_contract(self):
+        from unittest.mock import patch
+        from core.scheduling import run_runners
+        from .dispatch_outbox import ContentFactoryDispatchOutbox, process_dispatch_outbox
+        due = Mock()
+        due.order_by.return_value = due
+        due.values_list.return_value = []
+        with patch.object(ContentFactoryDispatchOutbox.objects, 'filter', return_value=due):
+            results, failures = run_runners((('article_dispatch_outbox', process_dispatch_outbox),))
+        self.assertEqual(failures, [])
+        self.assertEqual(results['article_dispatch_outbox']['status'], 'completed')
+        self.assertEqual(results['article_dispatch_outbox']['processed'], 0)
+
+    def test_provider_admission_precedes_shared_charge_outbox_transaction(self):
+        from contextlib import contextmanager
+        from unittest.mock import patch
+        from content_factory import vibe_marketing_views as views
+        from content_factory import dispatch_outbox
+        active = {'transaction': False}
+        requester = SimpleNamespace(pk=2)
+        payer = SimpleNamespace(pk=7)
+        context = SimpleNamespace(organization=SimpleNamespace(pk=1, id=1, domain='example.test'))
+        events = []
+        @contextmanager
+        def atomic():
+            self.assertFalse(active['transaction'])
+            active['transaction'] = True
+            try:
+                yield
+                events.append('committed')
+            finally:
+                active['transaction'] = False
+        def admission(*args):
+            self.assertFalse(active['transaction']); events.append('admitted')
+        def charge(**kwargs):
+            self.assertTrue(active['transaction']); self.assertTrue(kwargs['prevalidated_admission'])
+            events.append('charged'); return payer, SimpleNamespace(id=123), 6
+        def reserve(**kwargs):
+            self.assertTrue(active['transaction']); events.append('reserved')
+            self.assertEqual(kwargs['billing_user_id'], 7)
+            self.assertEqual(kwargs['payload']['roo_points_requested_by_user_id'], 2)
+            self.assertEqual(kwargs['payload']['roo_points_billing_user_id'], 7)
+        with patch.object(views, '_quoted_price_response', return_value=None), \
+                patch.object(views, '_refresh_article_editorial_payload', return_value=None), \
+                patch.object(views, '_reserve_article_start_connection', return_value=None), \
+                patch.object(views, '_validate_article_start_admission', side_effect=admission), \
+                patch.object(views, '_validate_article_start_reservation'), \
+                patch.object(views, 'founder_actor_id_for_user', return_value='requester'), \
+                patch.object(views, '_roo_points_balance_for_user', return_value=30), \
+                patch.object(views.transaction, 'atomic', atomic), \
+                patch.object(views, 'charge_content_factory_request_for_user', side_effect=charge), \
+                patch.object(dispatch_outbox, 'reserve_dispatch', side_effect=reserve):
+            result = views._charge_roo_points_for_article(SimpleNamespace(user=requester, data={}),
+                context=context, payload={'delivery_mode': 'content_only', 'client_request_id': 'article-key'})
+        self.assertIsNone(result[3])
+        self.assertEqual(events, ['admitted', 'charged', 'reserved', 'committed'])

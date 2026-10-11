@@ -6,6 +6,8 @@ The API aliases keep serializers, permissions, throttles and domain services.
 
 MARKETING_VIEWS = frozenset(
     (
+        "WebsiteMetricsView",
+        "CompanyBillingView",
         "WebsiteConnectionView",
         "WebsiteConnectionActionView",
         "WebsiteConnectionOperationView",
