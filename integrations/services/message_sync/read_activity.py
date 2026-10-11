@@ -82,3 +82,85 @@ def record_public_event(payload):
         advance_public_activity(state, [event])
         from .head_repair import wake_head_locked
         wake_head_locked(state)
+
+
+def delivery_activity(delivery, link):
+    """Return the actual Slack time of a completed countable mapped delivery.
+
+    Only confirmed destination identities count for MLAI-originated messages;
+    their Nostr creation time cannot stand in for Slack's ordering domain.
+    """
+    if (delivery.status != "completed" or delivery.delivery_type != "create"
+            or link is None or link.source_deleted_at or link.destination_deleted_at):
+        return ""
+    payload = delivery.payload or {}
+    metadata = payload.get("metadata") or {}
+    parent = delivery.source_parent_message_id
+    if parent and not metadata.get("broadcast"):
+        return ""
+    if delivery.source_platform == "slack" and delivery.target_platform == "buzz":
+        stamp = delivery.source_message_id
+    elif delivery.source_platform == "buzz" and delivery.target_platform == "slack":
+        stamp = link.destination_message_id
+    else:
+        return ""
+    return latest_activity([{"ts": stamp}])
+
+
+def record_public_delivery(delivery_id):
+    """Advance public activity after delivery commit, under state->mapping locks.
+
+    The completed outbox and its delivery link are durable evidence. Repeating
+    this hook is harmless; the timestamp frontier only advances. No Slack call
+    or user read position is involved.
+    """
+    from django.conf import settings
+    if not getattr(settings, "MESSAGE_SYNC_TARGETED_READ_POLLING", False):
+        return
+    from integrations.models import (
+        BridgeSyncState, CommunityBridgeChannel, CommunityBridgeDelivery,
+        CommunityBridgeMessageLink,
+    )
+    from .history import ensure_state
+    delivery = CommunityBridgeDelivery.objects.select_related("channel").filter(
+        pk=delivery_id, status="completed", delivery_type="create",
+    ).first()
+    if delivery is None or delivery.channel is None:
+        return
+    channel = delivery.channel
+    with transaction.atomic():
+        state = BridgeSyncState.objects.select_for_update().filter(public_channel=channel).first()
+        if state is None:
+            created = ensure_state(channel)
+            state = BridgeSyncState.objects.select_for_update().get(pk=created.pk)
+        mapped = CommunityBridgeChannel.objects.select_for_update().filter(
+            pk=channel.pk, enabled=True, destination_platform="buzz",
+            slack_workspace_id=channel.slack_workspace_id,
+            slack_channel_id=channel.slack_channel_id,
+            destination_channel_id=channel.destination_channel_id,
+        ).first()
+        if (mapped is None or state.workspace_id != channel.slack_workspace_id
+                or state.source_channel_id != channel.slack_channel_id):
+            return
+        current = CommunityBridgeDelivery.objects.select_for_update().filter(
+            pk=delivery.pk, channel=mapped, status="completed", delivery_type="create",
+        ).first()
+        if current is None:
+            return
+        source_channel = (mapped.slack_channel_id if current.source_platform == "slack"
+                          else mapped.destination_channel_id)
+        target_channel = (mapped.destination_channel_id if current.target_platform == "buzz"
+                          else mapped.slack_channel_id)
+        if (current.source_channel_id != source_channel
+                or current.target_channel_id != target_channel):
+            return
+        link = CommunityBridgeMessageLink.objects.filter(
+            channel=mapped, source_platform=current.source_platform,
+            source_channel_id=current.source_channel_id,
+            source_message_id=current.source_message_id,
+            destination_platform=current.target_platform,
+            destination_channel_id=target_channel,
+        ).first()
+        stamp = delivery_activity(current, link)
+        if stamp:
+            advance_public_activity(state, [{"ts": stamp}])
