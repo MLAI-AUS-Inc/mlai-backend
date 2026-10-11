@@ -265,6 +265,8 @@ class LinearDeploymentWiringTests(unittest.TestCase):
             "LINEAR_CHANNEL_ISSUE_WRITES_ENABLED": "false",
             "OFFICE_MANAGER_SLACK_CHANNEL_ID": "C0BRM181EDV",
             "OFFICE_MANAGER_TIMEZONE": "Australia/Melbourne",
+            "MLAI_MCP_ENABLED": "false",
+            "MLAI_MCP_COMMUNITY_ENABLED": "false",
             "VALLEY_MCP_ENABLED": "false",
             "VALLEY_MCP_PUBLIC_BASE_URL": "https://api.mlai.au",
             "VALLEY_MCP_DOMAIN_VERIFICATION_TOKEN": "synthetic-public-proof-123456",
