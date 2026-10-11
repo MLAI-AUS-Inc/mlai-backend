@@ -70,6 +70,7 @@ class BuzzBridgeClient:
         linked_profile_id: str = "",
         source_created_at: int = 0,
         broadcast: bool = False,
+        mention_pubkeys: list[str] | None = None,
     ) -> dict:
         adapter_url = cls._validated_adapter_url()
         api_token = cls._api_token()
@@ -94,6 +95,8 @@ class BuzzBridgeClient:
             "source_created_at": int(source_created_at or 0) or None,
             "broadcast": bool(broadcast),
         }
+        if mention_pubkeys:
+            payload['mention_pubkeys'] = cls._mention_keys(mention_pubkeys)
         timeout = max(1, min(int(getattr(settings, "BUZZ_BRIDGE_ADAPTER_TIMEOUT_SECONDS", 15)), 60))
         try:
             response = requests.post(
@@ -308,6 +311,8 @@ class BuzzBridgeClient:
         linked_pubkey: str,
         target_message_id: str = "",
         parent_message_id: str = "",
+        mention_pubkeys: list[str] | None = None,
+        broadcast: bool = False,
     ) -> dict:
         result = cls._post_adapter(
             "v1/private-deliveries",
@@ -327,12 +332,20 @@ class BuzzBridgeClient:
                 "linked_pubkey": str(linked_pubkey),
                 "target_message_id": str(target_message_id or "") or None,
                 "parent_message_id": str(parent_message_id or "") or None,
+                **({'mention_pubkeys': cls._mention_keys(mention_pubkeys)} if mention_pubkeys else {}),
+                **({'broadcast': True} if broadcast else {}),
             },
         )
         return cls._validated_private_delivery_result(
             result,
             channel_id=str(channel_id),
         )
+
+    @staticmethod
+    def _mention_keys(values):
+        if len(values) > 200 or any(not isinstance(value, str) or not EVENT_ID_RE.fullmatch(value) for value in values):
+            raise BuzzBridgePermanentError('Mention keys must be at most 200 lowercase public keys')
+        return sorted(set(values))
 
     @classmethod
     def _validated_private_delivery_result(

@@ -23,6 +23,65 @@ from integrations.services.slack_workspace_users import PAGE_LIMIT, cached_works
 from integrations.services import slack_dm_mirror as mirror
 
 SNAPSHOT_CURSOR_PREFIX = "snapshot-v1:"
+DELIVERY_MENTIONS_KEY = 'inbox_bridge_mentions_v1'
+DELIVERY_BROADCAST_KEY = 'inbox_bridge_broadcast_v1'
+
+
+def queue_delivery_mentions(conversation, text, metadata):
+    """Freeze new private delivery metadata before its first attempt."""
+    from django.conf import settings
+    if not getattr(settings, 'MESSAGE_SYNC_INBOX_MENTIONS', False):
+        return metadata
+    return {**metadata, DELIVERY_BROADCAST_KEY: metadata.get('broadcast') is True,
+            DELIVERY_MENTIONS_KEY: delivery_mention_pubkeys(
+        conversation.slack_workspace_id, text,
+        participant_pubkeys=conversation.participant_buzz_pubkeys or [])}
+
+
+def preserve_delivery_mentions(previous, current):
+    """An existing room's retries retain their original deterministic tag set.
+
+    Older queued deliveries never acquire new tags after an ambiguous attempt.
+    A transition to another registered audience starts a new room's envelope.
+    """
+    if (DELIVERY_MENTIONS_KEY in current and
+            previous.get('participant_hash') == current.get('participant_hash')):
+        return {**current, DELIVERY_MENTIONS_KEY: previous.get(DELIVERY_MENTIONS_KEY, []),
+                DELIVERY_BROADCAST_KEY: previous.get(DELIVERY_BROADCAST_KEY, False)}
+    return current
+
+
+def delivery_mention_pubkeys(workspace, text, *, participant_pubkeys=None):
+    """Resolve explicit Slack mentions through active verified MLAI accounts only.
+
+    This performs no Slack API call and never matches names or email addresses.
+    Private deliveries restrict the chosen device to their registered audience.
+    """
+    from django.conf import settings
+    if not getattr(settings, 'MESSAGE_SYNC_INBOX_MENTIONS', False):
+        return []
+    from integrations.services.community_bridge.identity import verified_identity_for_slack
+    from community_chat.models import CommunityChatDevice
+    ids = sorted(set(re.findall(r'<@([UW][A-Z0-9]{1,127})(?:\|[^<>]*)?>', str(text or ''))))[:200]
+    allowed = set(participant_pubkeys) if participant_pubkeys is not None else None
+    result = set()
+    links = {link.slack_user_id: link for link in CommunityBridgeIdentityLink.objects.filter(
+        slack_workspace_id=workspace, slack_user_id__in=ids,
+        revoked_at__isnull=True, user__is_active=True, user__isnull=False)} if ids else {}
+    for slack_id in ids:
+        if slack_id not in links:
+            continue
+        identity = verified_identity_for_slack(slack_workspace_id=workspace, slack_user_id=slack_id)
+        key = (identity or {}).get('buzz_pubkey')
+        if (identity or {}).get('identity_source') != 'mlai_account' or not re.fullmatch(r'[0-9a-f]{64}', str(key or '')):
+            continue
+        if allowed is not None and key not in allowed:
+            key = CommunityChatDevice.objects.filter(user_id=links[slack_id].user_id,
+                user__is_active=True, status='verified', revoked_at__isnull=True,
+                public_key__in=allowed).order_by('pk').values_list('public_key', flat=True).first()
+        if key:
+            result.add(key)
+    return sorted(result)
 
 
 def eligible_user(user, workspace):
