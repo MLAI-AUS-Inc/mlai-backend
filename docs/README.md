@@ -65,6 +65,7 @@ state when using those operational documents.
 - [`mlai-chat-bridge-staging.md`](mlai-chat-bridge-staging.md)
 - [`mlai-chat-membership-bootstrap.md`](mlai-chat-membership-bootstrap.md)
 - [Server inbox account bindings](mlai-chat-inbox-accounts.md) — opaque HMAC grouping, verification, revocation and dry-run backfill
+- [Server inbox rollout](mlai-chat-inbox-rollout.md) — default-off flag order, controlled Slack acceptance, account erasure and rollback
 - [`mlai-chat-release-runbook.md`](mlai-chat-release-runbook.md)
 
 ## Organisational memory

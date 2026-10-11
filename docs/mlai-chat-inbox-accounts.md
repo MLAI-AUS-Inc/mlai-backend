@@ -3,6 +3,9 @@
 Implemented behind `COMMUNITY_CHAT_MEMBER_ACCOUNTS_ENABLED=false`. This is not
 a deployment record. No Django migration is needed.
 
+The [coordinated rollout](mlai-chat-inbox-rollout.md) covers the source/export
+flags, shadow review and account-erasure prerequisites before real activation.
+
 The backend derives an account key as
 `HMAC-SHA256(MLAI_CHAT_ACCOUNT_KEY_SECRET, "<community_id>:<user_id>")`.
 The community UUID comes from the authenticated membership adapter capability

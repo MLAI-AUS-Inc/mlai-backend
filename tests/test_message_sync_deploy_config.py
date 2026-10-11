@@ -5,9 +5,71 @@ import shutil
 import subprocess
 import tempfile
 from scripts.validate_message_sync_deploy_config import validate
+from scripts.validate_inbox_deploy_config import FLAGS, validate as validate_inbox
 
 
 class MessageSyncDeployConfigTests(unittest.TestCase):
+    def test_inbox_activation_requires_valid_flags_sync_and_distinct_account_secret(self):
+        validate_inbox({})
+        valid = {"MESSAGE_SYNC_ENABLED": "true", "MLAI_CHAT_ACCOUNT_KEY_SECRET": "a" * 32,
+                 "SECRET_KEY": "b" * 32, "MESSAGE_SYNC_INBOX_CURSOR_PUSH": "true"}
+        validate_inbox(valid)
+        validate_inbox({**valid, "MESSAGE_SYNC_RELAY_READ_COUNTS": "true"})
+        validate_inbox({"MESSAGE_SYNC_ENABLED": "true", "MESSAGE_SYNC_TARGETED_READ_POLLING": "true"})
+        for changes in (
+            {"MLAI_CHAT_ACCOUNT_KEY_SECRET": ""},
+            {"MLAI_CHAT_ACCOUNT_KEY_SECRET": "b" * 32},
+            {"MLAI_CHAT_ACCOUNT_KEY_SECRET": "a" * 32 + "\n"},
+            {"MESSAGE_SYNC_ENABLED": "false"},
+            {"MESSAGE_SYNC_INBOX_CURSOR_PUSH": "yes"},
+            {"MESSAGE_SYNC_INBOX_CURSOR_PUSH": "false", "MESSAGE_SYNC_RELAY_READ_COUNTS": "true"},
+        ):
+            with self.subTest(changes=changes), self.assertRaises(ValueError):
+                validate_inbox({**valid, **changes})
+
+    def test_inbox_flags_upsert_atomically_and_reject_invalid_payloads(self):
+        root = Path(__file__).resolve().parents[1]
+        with tempfile.TemporaryDirectory() as directory:
+            sandbox = Path(directory)
+            (sandbox / "scripts").mkdir()
+            shutil.copy(root / "scripts/upsert_env_value_from_stdin.sh", sandbox / "scripts")
+            env_file = sandbox / ".env"
+            for key in FLAGS:
+                env_file.write_text("KEEP_ME=yes\n")
+                for value in ("true", "false", "yes", "true\nfalse"):
+                    with self.subTest(key=key, value=value):
+                        before = env_file.read_text()
+                        result = subprocess.run(
+                            ["bash", "scripts/upsert_env_value_from_stdin.sh", key], cwd=sandbox,
+                            input=value, text=True, capture_output=True, timeout=5,
+                        )
+                        if value in {"true", "false"}:
+                            self.assertEqual(result.returncode, 0, result.stderr)
+                            self.assertEqual(env_file.read_text(), f"KEEP_ME=yes\n{key}={value}\n")
+                        else:
+                            self.assertNotEqual(result.returncode, 0)
+                            self.assertEqual(env_file.read_text(), before)
+
+    def test_account_secret_upsert_cannot_silently_rotate_or_inject_env(self):
+        root = Path(__file__).resolve().parents[1]
+        with tempfile.TemporaryDirectory() as directory:
+            sandbox = Path(directory)
+            (sandbox / "scripts").mkdir()
+            shutil.copy(root / "scripts/upsert_env_secret_from_stdin.sh", sandbox / "scripts")
+            env_file = sandbox / ".env"
+            original = "a" * 32
+            env_file.write_text("KEEP_ME=yes\nMLAI_CHAT_ACCOUNT_KEY_SECRET=" + original + "\n")
+            for value, accepted in ((original, True), ("b" * 32, False),
+                                    (original + "\nINJECTED=true", False)):
+                before = env_file.read_text()
+                result = subprocess.run(
+                    ["bash", "scripts/upsert_env_secret_from_stdin.sh", "MLAI_CHAT_ACCOUNT_KEY_SECRET"],
+                    cwd=sandbox, input=value, text=True, capture_output=True, timeout=5,
+                )
+                self.assertEqual(result.returncode == 0, accepted, result.stderr)
+                self.assertEqual(env_file.read_text(), before)
+                self.assertNotIn(original, result.stdout + result.stderr)
+
     def test_quiet_backoff_deploys_disabled_by_default_and_upserts_safely(self):
         root = Path(__file__).resolve().parents[1]
         key = "MESSAGE_SYNC_QUIET_HEAD_BACKOFF_ENABLED"
