@@ -104,6 +104,12 @@ unmapped rooms, edits and deletes retain the explicit-recipient path.
 Explicit eligible owner/visibility hints precede older unhinted cache refresh
 work. Age gates, per-target Retry-After deadlines, oldest-first ordering within
 each tier and the reserved one-in-ten safety turn remain unchanged.
+Own-message hints precede visibility hints so an older open row cannot delay
+the owner's new read-position probe. A routed Chat room remains mapped when
+the worker attaches owner-directory activity metadata; only a target whose
+channel ID is the Slack source ID is source-only. Mapped targets retain relay
+cursor capture, confirmation and baseline checks under the current authority
+and consent fences. Source-only targets never create relay cursors.
 
 After two stable weeks and a raised minimum supported client version, remove
 legacy client channel read merges, forced-unread stores, unread-history fetches

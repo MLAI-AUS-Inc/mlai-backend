@@ -58,8 +58,9 @@ class InboxObservationTests(SimpleTestCase):
         obs.publication(1)
 
     def test_source_only_inventory_does_not_create_a_relay_cursor(self):
-        target = reads.ReadTarget('not-a-room', 'Dsource', 'im', source_inventory=object())
+        target = reads.ReadTarget('Dsource', 'Dsource', 'im', source_inventory=object())
         self.assertIsNone(obs.capture(object(), target))
+        obs.confirmed_locked(object(), object(), target, '12', observed_at=1000)
 
     def fixtures(self):
         context = self.context()
@@ -83,6 +84,28 @@ class InboxObservationTests(SimpleTestCase):
             self.assertEqual(connection.sync_cursor[obs.KEY][self.key()]['pending']['applied_revision'], 3)
             self.assertEqual(obs.capture(authority, target)['applied_revision'], 7)
             recovery.assert_called_once()
+
+    def test_worker_directory_merge_preserves_mapped_cursor_capture(self):
+        from integrations.services import slack_owner_inventory as inventory
+        target, authority, connection, grant = self.fixtures()
+        row = SimpleNamespace(slack_conversation_id=target.slack_id, source_activity_ts='900')
+        grant.connection = connection
+        grant.owner_conversation_inventory = Mock()
+        grant.owner_conversation_inventory.filter.return_value.order_by.return_value = [row]
+        with patch.object(inventory, 'enabled', return_value=True), patch.object(
+            inventory, 'has_metadata_consent', return_value=True):
+            self.assertEqual(inventory.source_read_targets(grant, authority, [target]), [])
+        self.assertIs(target.source_inventory, row)
+        with patch.object(obs.transaction, 'atomic', side_effect=lambda: nullcontext()), patch.object(
+            obs, 'community_id', return_value=self.context()['community_id']), patch(
+            'community_chat.inbox_accounts.account_key', return_value='a'*64), patch.object(
+            reads, '_cache_key', return_value='scoped'), patch.object(
+            reads, '_lock_slack_grant_api_authority', return_value=(grant, connection)), patch.object(
+            BuzzBridgeClient, 'inbox_export_frontier', return_value=3):
+            context = obs.capture(authority, target)
+        self.assertIsNotNone(context)
+        self.assertEqual(context['channel_id'], target.channel_id)
+        self.assertEqual(context['applied_revision'], 3)
 
     def test_refresh_queues_metadata_before_history_budget_deferral(self):
         target, authority, connection, grant = self.fixtures()
@@ -114,6 +137,15 @@ class InboxObservationTests(SimpleTestCase):
             obs.confirmed_locked(connection, authority, target, '12', observed_at=1000)
         self.assertEqual(connection.sync_cursor[obs.KEY][self.key()]['pending']['applied_revision'], 7)
 
+    def test_mapped_confirmation_keeps_fence_with_inventory_metadata(self):
+        target, authority, connection, grant = self.fixtures()
+        target.source_inventory = object()
+        connection.sync_cursor = {obs.KEY: {self.key(): self.context(3)},
+                                  exports.KEY: {self.key(): {'received': 7, 'applied': 7}}}
+        with patch.object(reads, '_cache_key', return_value='scoped'), patch.object(obs.time, 'time', return_value=1000):
+            obs.confirmed_locked(connection, authority, target, '12', observed_at=1000)
+        self.assertEqual(connection.sync_cursor[obs.KEY][self.key()]['pending']['applied_revision'], 7)
+
     @override_settings(MESSAGE_SYNC_TARGETED_READ_POLLING=True)
     def test_new_source_baseline_gets_reserved_safety_capacity_without_displacing_hot_rooms(self):
         from integrations.services.message_sync.targeted_reads import select_targeted
@@ -124,6 +156,8 @@ class InboxObservationTests(SimpleTestCase):
         cursor = {obs.KEY: {'hot': {'channel_id': hot.channel_id, 'authority': 'hot', 'last_read': '1000'}}}
         key = lambda value: 'scoped' if value is target else 'hot'
         self.assertIs(select_targeted([target, hot], snapshots, key, cursor, now=1200, turn=0), hot)
+        self.assertIs(select_targeted([target, hot], snapshots, key, cursor, now=1200, turn=9), target)
+        target.source_inventory = object()
         self.assertIs(select_targeted([target, hot], snapshots, key, cursor, now=1200, turn=9), target)
 
     def test_transport_retry_keeps_identity_and_expiry_requests_fresh_metadata(self):
