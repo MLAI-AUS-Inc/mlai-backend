@@ -64,6 +64,7 @@ state when using those operational documents.
 - [`slack-unfinished-conversation-recovery.md`](slack-unfinished-conversation-recovery.md) — reviewed recovery of existing unfinished private mirrors
 - [`mlai-chat-bridge-staging.md`](mlai-chat-bridge-staging.md)
 - [`mlai-chat-membership-bootstrap.md`](mlai-chat-membership-bootstrap.md)
+- [Server inbox account bindings](mlai-chat-inbox-accounts.md) — opaque HMAC grouping, verification, revocation and dry-run backfill
 - [`mlai-chat-release-runbook.md`](mlai-chat-release-runbook.md)
 
 ## Organisational memory
