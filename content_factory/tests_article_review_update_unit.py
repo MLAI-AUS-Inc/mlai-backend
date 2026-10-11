@@ -261,6 +261,20 @@ class ArticleReviewUpdateTests(SimpleTestCase):
         self.assertEqual(response.data["fields"], [])
         self.assertEqual(response["Cache-Control"], "private, no-store")
 
+    def test_restore_only_update_is_a_stable_revision_instruction(self):
+        self.run.workflow = "article_generation"
+        body = {"action": "applyUpdate", "operationId": "restore-operation", "expectedRevision": "before",
+                "restoredSentences": ["An unsupported sentence.", "An unsupported sentence."]}
+        request = SimpleNamespace(data=body, user=SimpleNamespace(pk=2))
+        response = self.view.post(request, self.run.run_id)
+        self.assertEqual(response.status_code, 202)
+        payload = self.remote.call_args.kwargs["payload"]
+        self.assertEqual(len(payload["comments"]), 1)
+        self.assertIn("recheck authoritative sources and safety", payload["comments"][0]["body"])
+        self.assertEqual(payload["comments"][0]["context"]["restoredSentence"], "An unsupported sentence.")
+        self.assertNotEqual(review._fingerprint(review.normalize_review_update(body)),
+            review._fingerprint(review.normalize_review_update({**body, "restoredSentences": ["Changed sentence."]})))
+
     def test_unsafe_batch_shapes_never_dispatch(self):
         malformed = [self.body(commentIds=["bad-id"]), self.body(textEdits=[{}, {}]),
             self.body(textEdits=[self.body()["textEdits"][0]] * 2),

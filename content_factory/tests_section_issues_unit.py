@@ -12,6 +12,34 @@ from content_factory import vibe_marketing_views as views
 
 
 class SectionIssueContractTests(SimpleTestCase):
+    def test_delayed_refund_is_visible_in_every_run_response_without_private_billing_fields(self):
+        now = datetime.now(timezone.utc)
+        run = SimpleNamespace(run_id="delayed-refund", workflow="island_refresh", domain="example.test", github_repo="",
+            status="failed", current_step="", approval_state="not_required", resume_available=False,
+            created_at=now, updated_at=now, step_order=[], steps=SimpleNamespace(order_by=lambda *args: []),
+            result={"billingStatus": "refunded", "refundStatus": "refunded"},
+            run_request={"roo_points_billing_status": "charged", "roo_points_ledger_id": "private-charge",
+                         "roo_points_billing_user_id": "private-payer", "pending_billing_refund": {"charged_user_id": "private-payer"}},
+            acceptance_summary={}, verification_summary={}, error="")
+        with patch.object(views, "_run_source_run_id", return_value=""), \
+             patch.object(views, "_article_restart_available", return_value=False), \
+             patch.object(views, "_article_setup_state", return_value={}), \
+             patch.object(views, "_workflow_progress", return_value={}), \
+             patch.object(views, "_content_package_from_run", return_value=None), \
+             patch.object(views, "_component_feedback_from_run", return_value={}), \
+             patch.object(views, "_run_content_island_payload", return_value=None):
+            for mode in ("summary", "status", "full"):
+                projected = views._serialize_run(run, mode=mode)
+                self.assertEqual(projected["billingStatus"], "charged")
+                self.assertEqual(projected["refundStatus"], "pending")
+                self.assertNotIn("private-charge", str(projected))
+                self.assertNotIn("private-payer", str(projected))
+            run.run_request["roo_points_billing_status"] = "refunded"
+            for mode in ("summary", "status", "full"):
+                projected = views._serialize_run(run, mode=mode)
+                self.assertEqual(projected["billingStatus"], "refunded")
+                self.assertEqual(projected["refundStatus"], "refunded")
+
     def test_approved_writing_repair_is_visible_in_all_run_response_modes(self):
         now = datetime.now(timezone.utc)
         run = SimpleNamespace(run_id="writing-repair", workflow="confirmed_topic", domain="example.test", github_repo="fixture/repo",
