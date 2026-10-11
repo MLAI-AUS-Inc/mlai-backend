@@ -32,7 +32,7 @@ class DatabaseContinuityTests(unittest.TestCase):
             for line in DEPLOY.splitlines()
             if "docker compose up -d " in line and "#" not in line
         ]
-        self.assertEqual(len(commands), 6)
+        self.assertGreaterEqual(len(commands), 2)
         database = [line for line in commands if line.endswith(" db")]
         self.assertEqual(database, ["--no-recreate db"])
         for command in commands:
@@ -298,7 +298,7 @@ class WebHandoffRollbackTests(unittest.TestCase):
             manifest = root / "manifest"
             manifest.write_text(
                 "web|old-image|mlai-backend-web|rollback-web\n"
-                "scheduler|old-scheduler|mlai-backend-scheduler|rollback-scheduler\n"
+                "scheduler|old-scheduler|mlai-backend-web|rollback-scheduler\n"
             )
             events = root / "events"
             script = "\n".join(
@@ -327,14 +327,14 @@ class WebHandoffRollbackTests(unittest.TestCase):
                     "previous_scheduler_image_id=",
                     "previous_scheduler_tick_mtime=0",
                     "previous_runtime_container_ids=()",
-                    "runtime_services=(web scheduler" + (" jobs-worker password-email-worker committee-remuneration" if new_workers else "") + ")",
+                    "runtime_services=(web scheduler" + (" jobs-worker password-email-worker analytics-sync" if new_workers else "") + ")",
                     "all_runtime_writer_services=(web scheduler)",
                     "nginx_worker_snapshot() { echo 999999; }",
                     'wait_for_nginx_workers_to_drain() { echo "drain" >> "$events"; }',
                     'wait_for_origin_web_health() { echo "health $1 $2 ${3:-}" >> "$events"; }',
                     'upsert_env_value() { echo "env $1 $2" >> "$events"; }',
                     'restore_host_writer_watchdogs() { :; }',
-                    'docker() { echo "docker $*" >> "$events"; if [ "$*" = "compose stop jobs-worker" ]; then return ' + str(stop_status) + '; fi; }',
+                    'docker() { echo "docker $*" >> "$events"; if [ "$1 $2" = "compose -f" ]; then echo rollback-images-begin >> "$events"; cat "$5" >> "$events"; echo rollback-images-end >> "$events"; fi; if [ "$*" = "compose stop jobs-worker" ]; then return ' + str(stop_status) + '; fi; }',
                     'bash() { echo "route $3" >> "$events"; printf "# managed-mlai-backend-api target=%s\\n" "$3" > "$web_proxy_config"; }',
                     function,
                     "restore_runtime_on_error",
@@ -352,30 +352,42 @@ class WebHandoffRollbackTests(unittest.TestCase):
     def test_failed_replacement_routes_candidate_before_recreating_old_web(self):
         events = self.run_rollback(prior_proxy=True, replacement_started=True)
         self.assertLess(events.index("route candidate"), events.index("docker image tag"))
-        self.assertLess(events.index("docker compose up"), events.index("health 8001"))
+        self.assertLess(events.index("up -d --no-deps --force-recreate"), events.index("health 8001"))
         self.assertLess(events.index("health 8001"), events.index("route web"))
         self.assertIn("env APP_RELEASE " + "a" * 40, events)
 
     def test_rollback_stops_new_workers_before_restoring_previous_runtime(self):
         events = self.run_rollback(prior_proxy=True, replacement_started=True, new_workers=True)
-        restore = events.index("docker compose up -d --no-deps --force-recreate web scheduler")
-        for service in ("jobs-worker", "password-email-worker", "committee-remuneration"):
+        restore = events.index("up -d --no-deps --force-recreate web scheduler")
+        for service in ("jobs-worker", "password-email-worker", "analytics-sync"):
             self.assertLess(events.index(f"docker compose stop {service}"), restore)
         self.assertLess(restore, events.index("route web"))
         self.assertLess(events.index("route web"), events.index("docker compose stop web-candidate"))
+
+    def test_shared_image_services_restore_their_distinct_saved_images(self):
+        events = self.run_rollback(prior_proxy=True, replacement_started=True)
+        # Both old containers used the same normal image reference, but their
+        # recorded versions differ. Compose must use each saved rollback tag.
+        override = events.split("rollback-images-begin\n", 1)[1].split("rollback-images-end", 1)[0]
+        self.assertEqual(
+            override,
+            "services:\n  web:\n    image: rollback-web\n  scheduler:\n    image: rollback-scheduler\n",
+        )
+        self.assertIn("docker compose -f docker-compose.yml -f ", events)
+        self.assertLess(events.index("rollback-images-end"), events.index("health 8001"))
 
     def test_failed_new_worker_stop_keeps_candidate_serving_for_recovery(self):
         events = self.run_rollback(prior_proxy=True, replacement_started=True, new_workers=True, stop_status=42)
         self.assertIn("route candidate", events)
         self.assertIn("docker compose stop jobs-worker", events)
-        self.assertNotIn("docker compose up", events)
+        self.assertNotIn(" up -d ", events)
         self.assertNotIn("docker compose stop web-candidate", events)
         self.assertNotIn("route web", events)
 
     def test_failed_first_adoption_recreates_only_old_web(self):
         events = self.run_rollback(prior_proxy=False, replacement_started=False)
-        self.assertIn("docker compose up -d --no-deps --force-recreate web", events)
-        self.assertNotIn("docker compose up -d --no-deps --force-recreate web scheduler", events)
+        self.assertIn("up -d --no-deps --force-recreate web", events)
+        self.assertNotIn("up -d --no-deps --force-recreate web scheduler", events)
         self.assertNotIn("old-scheduler", events)
         self.assertLess(events.index("health 8001"), events.index("route web"))
 

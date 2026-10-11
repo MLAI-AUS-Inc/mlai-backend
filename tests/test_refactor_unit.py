@@ -49,7 +49,7 @@ class RuntimeInventoryTests(unittest.TestCase):
         # Docker and management commands are stubs; no database is constructed.
         deploy = (ROOT / "deploy.sh").read_text()
         start = deploy.index("    runtime_restore_attempted=0")
-        end = deploy.index('    echo "🧬 Re-auditing Office Manager provenance', start)
+        end = deploy.index("    # Read-only migration, vector, startup schema", start)
         boundary = deploy[start:end].replace("\\$", "$").replace("writer_pause_sentinel=/run/mlai-backend-writers-paused", 'writer_pause_sentinel="$2"')
         plan = "Planned operations:\napp.0001_example\n    Create model Example"
         approved_hash = hashlib.sha256(plan.encode()).hexdigest()
@@ -118,13 +118,13 @@ compose_run_web() {
                     self.assertNotIn("migrate:", result.stdout)
                 else:
                     self.assertIn("docker:compose stop web scheduler jobs-worker", result.stdout)
-                    self.assertIn("committee-remuneration web-candidate", result.stdout)
+                    self.assertIn("analytics-sync web-candidate", result.stdout)
                     if stop_status:
-                        self.assertIn("docker:compose up -d --no-deps --force-recreate web", result.stdout)
+                        self.assertIn("up -d --no-deps --force-recreate web", result.stdout)
                         self.assertNotIn("migrate:", result.stdout)
                     elif migrate_status:
                         self.assertIn("keeping all runtime writers safely disabled", result.stdout)
-                        self.assertNotIn("docker:compose up", result.stdout)
+                        self.assertNotIn(" up -d ", result.stdout)
                     else:
                         self.assertIn("migrate:python manage.py migrate --noinput", result.stdout)
                 self.assertEqual("boundary-complete" in result.stdout, expected_status == 0)
@@ -152,34 +152,6 @@ compose_run_web() {
         self.assertNotIn("committee-remuneration", output.splitlines())
         self.assertNotIn("web-candidate", output.splitlines())
 
-    def test_committee_worker_is_opt_in_and_disabled_service_is_stopped(self):
-        deploy = (ROOT / "deploy.sh").read_text()
-        start = deploy.index("    committee_remuneration_enabled=0")
-        end = deploy.index("    docker network inspect", start)
-        selection = deploy[start:end].replace("\\$", "$")
-        start = deploy.index('    if [ "\\$committee_remuneration_enabled" != "1" ]; then')
-        end = deploy.index('    echo "🔁 Verifying the running web container picked up APP_RELEASE', start)
-        cleanup = deploy[start:end].replace("\\$", "$")
-        for configured, enabled in (("true", True), ("1", True), ("false", False), ("", False)):
-            with self.subTest(configured=configured):
-                result = subprocess.run(
-                    ["bash", "-c", "\n".join([
-                        "set -eu",
-                        "source scripts/runtime-services.sh",
-                        "read_env_value() { printf '%s' " + shlex.quote(configured) + "; }",
-                        'docker() { printf "docker:%s\\n" "$*"; }',
-                        selection,
-                        'printf "runtime:%s\\n" "${runtime_services[*]}"',
-                        cleanup,
-                    ])],
-                    cwd=ROOT, text=True, capture_output=True, timeout=5,
-                )
-                self.assertEqual(result.returncode, 0, result.stderr)
-                runtime = next(line for line in result.stdout.splitlines() if line.startswith("runtime:"))
-                self.assertEqual("committee-remuneration" in runtime, enabled)
-                self.assertEqual("docker:compose stop committee-remuneration" in result.stdout, not enabled)
-                self.assertEqual("docker:compose rm -f committee-remuneration" in result.stdout, not enabled)
-                self.assertNotIn("web-candidate", result.stdout)
 
     def test_community_routes_have_no_duplicate_literal_paths_or_names(self):
         tree = ast.parse((ROOT / "community_chat/urls.py").read_text())

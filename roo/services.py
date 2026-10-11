@@ -2011,7 +2011,7 @@ class CoworkingService:
         requester_is_admin = is_points_admin(requester_slack_id)
         CoworkingService._lock_booking_date(booking_date)
 
-        from .office_manager import OfficeManagerService
+        from .legacy_office_manager import cancel_legacy_office_manager_booking
 
         office_manager_assignment_ref = (
             OfficeManagerAssignment.objects.filter(
@@ -2051,23 +2051,7 @@ class CoworkingService:
             )
 
         booking._already_cancelled = booking.status == 'cancelled'
-        booking._office_manager_day_reopened = False
-        booking._office_manager_day_id = None
-        booking._office_manager_assignment_id = None
         if booking.status == 'cancelled':
-            if office_manager_assignment_ref is not None:
-                assignment = (
-                    OfficeManagerAssignment.objects.select_for_update()
-                    .filter(pk=office_manager_assignment_ref['id'])
-                    .first()
-                )
-                if assignment is not None:
-                    booking._office_manager_day_id = assignment.day_id
-                    booking._office_manager_assignment_id = assignment.id
-                    booking._office_manager_day_reopened = bool(
-                        locked_office_manager_day
-                        and locked_office_manager_day.status == 'open'
-                    )
             cancellation_refunded = bool(
                 booking.refund_ledger_entry_id
                 and booking.refund_ledger_entry.reference_type
@@ -2078,16 +2062,11 @@ class CoworkingService:
         refunded = False
 
         if booking.booking_source == 'office_manager':
-            reopened, day_id, assignment_id = (
-                OfficeManagerService.relinquish_for_booking(
-                    booking,
-                    requester_slack_id=requester_slack_id,
-                    locked_day=locked_office_manager_day,
-                )
+            cancel_legacy_office_manager_booking(
+                booking,
+                requester_slack_id=requester_slack_id,
+                locked_day=locked_office_manager_day,
             )
-            booking._office_manager_day_reopened = reopened
-            booking._office_manager_day_id = day_id
-            booking._office_manager_assignment_id = assignment_id
 
         booking.status = 'cancelled'
         booking.cancelled_at = timezone.now()

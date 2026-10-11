@@ -6,7 +6,6 @@ from typing import Any
 from zoneinfo import ZoneInfo
 
 from jobs.conf import settings
-from jobs.services.careerone import collect_careerone_jobs
 from jobs.services.getro import collect_getro_jobs
 from jobs.services.himalayas import collect_himalayas_jobs
 from jobs.services.jobs_playwright import collect_jobs_for_keyword
@@ -54,11 +53,7 @@ PHASE_1_SOURCES: tuple[SourceConfig, ...] = (
     SourceConfig("AI Jobs Australia", "ai_board", 0.86, True, ("AI", "machine learning", "data")),
     SourceConfig("ai-jobs.com.au", "ai_board", 0.86, True, ("AI", "machine learning", "data")),
     SourceConfig("Company Brew", "startup_board", 0.76, True, ("AI", "startup", "software")),
-    # Matchstiq's authoritative nameservers currently refuse DNS queries.
-    SourceConfig("Matchstiq", "startup_board", 0.76, False, ("AI", "startup", "software")),
     SourceConfig("Himalayas", "remote_board", 0.82, True, ("AI", "machine learning", "startup")),
-    # CareerOne has consistently rejected production scraper traffic with HTTP 403.
-    SourceConfig("CareerOne", "broad_board", 0.56, False, ("AI", "startup", "machine learning")),
     SourceConfig("Workforce Australia", "government_board", 0.62, True, ("AI", "startup", "machine learning")),
     SourceConfig("YC Jobs", "startup_board", 0.9, True, ("AI", "remote", "startup")),
 )
@@ -76,7 +71,6 @@ PUBLIC_PAGE_SOURCES = {
     "AI Jobs Australia": "https://www.aijobs.com/jobs/in-australia",
     "ai-jobs.com.au": "https://ai-jobs.com.au/",
     "Company Brew": "https://companybrew.com/jobs",
-    "Matchstiq": "https://matchstiq.io/jobs",
 }
 
 
@@ -103,9 +97,6 @@ def collect_from_source(
 
     if source.name == "YC Jobs":
         return collect_yc_jobs(limit=per_keyword_limit or 25)
-
-    if source.name == "CareerOne":
-        return collect_careerone_jobs(per_query_limit=per_keyword_limit or 10)
 
     if source.name == "Workforce Australia":
         return collect_workforce_jobs(per_query_limit=per_keyword_limit or 10)

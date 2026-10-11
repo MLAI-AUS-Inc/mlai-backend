@@ -91,7 +91,7 @@ class DeployReleaseFreshnessTests(unittest.TestCase):
             DEPLOY.index("    upsert_env_value() {"),
         )
         self.assertIn(
-            'verify_current_main_release_on_host\n    docker compose build', DEPLOY
+            'verify_current_main_release_on_host\n    docker compose build web jobs-worker', DEPLOY
         )
         self.assertIn(
             'verify_current_main_release_on_host\n        echo "⏸️ Pausing', DEPLOY

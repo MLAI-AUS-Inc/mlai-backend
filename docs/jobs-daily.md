@@ -4,6 +4,12 @@ The backend owns the 07:00 Australia/Melbourne schedule. Roo can request a
 manual run; `jobs/services/job_pipeline.py` collects, matches, selects and
 publishes jobs. This service does not automate founder matching.
 
+## Sources
+
+CareerOne and Matchstiq have been retired from source configuration and their
+collectors have been removed. Other job sources, the daily schedule and
+historical run diagnostics remain available.
+
 ## Slack destination
 
 `JOBS_SLACK_CHANNEL` defaults to `C05QE82M2KE`, the original MLAI jobs channel,

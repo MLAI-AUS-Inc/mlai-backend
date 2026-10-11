@@ -1,22 +1,21 @@
-FROM python:3.11-slim
+FROM python:3.11-slim AS dependencies
+
+WORKDIR /build
+RUN apt-get update && apt-get install -y --no-install-recommends gcc libpq-dev \
+    && rm -rf /var/lib/apt/lists/*
+COPY requirements.txt requirements-engine.txt requirements.lock ./
+RUN pip install --no-cache-dir --prefix=/install --require-hashes -r requirements.lock
+
+FROM python:3.11-slim AS application
 
 ENV PYTHONDONTWRITEBYTECODE=1
 ENV PYTHONUNBUFFERED=1
-ENV PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
 
 WORKDIR /app
 
-# Install system dependencies
-RUN apt-get update && apt-get install -y \
-    libpq-dev \
-    gcc \
-    git \
+RUN apt-get update && apt-get install -y --no-install-recommends git \
     && rm -rf /var/lib/apt/lists/*
-
-# One hashed resolution includes both the API and Watt engine requirements.
-COPY requirements.txt requirements-engine.txt requirements.lock /app/
-RUN pip install --no-cache-dir --require-hashes -r requirements.lock
-RUN python -m playwright install --with-deps chromium
+COPY --from=dependencies /install /usr/local
 
 COPY . /app/
 
@@ -29,3 +28,11 @@ RUN DJANGO_STATIC_BUILD=True python manage.py collectstatic --noinput \
 EXPOSE 8000
 
 CMD ["sh", "/app/scripts/start-web.sh"]
+
+# Only the Jobs worker launches browsers. Other services reuse the common image.
+FROM application AS jobs
+ENV PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
+RUN python -m playwright install --with-deps chromium
+
+# Keep an ordinary `docker build .` lean too.
+FROM application AS runtime

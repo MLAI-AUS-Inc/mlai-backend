@@ -292,36 +292,16 @@ class OfficeManagerDayAdmin(admin.ModelAdmin):
     )
     list_filter = ('status', 'announcement_status', 'date')
     readonly_fields = [field.name for field in OfficeManagerDay._meta.fields]
-    actions = ('close_open_days', 'reopen_closed_days')
+    actions = None
+
+    def has_add_permission(self, request):
+        return False
+
+    def has_change_permission(self, request, obj=None):
+        return False
 
     def has_delete_permission(self, request, obj=None):
         return False
-
-    @admin.action(description='Close selected open Office Manager days')
-    def close_open_days(self, request, queryset):
-        updated = queryset.filter(status='open').update(
-            status='closed',
-            closed_at=timezone.now(),
-            message_update_pending=True,
-        )
-        self.message_user(request, f'Closed {updated} Office Manager day(s).')
-
-    @admin.action(description='Reopen selected days before their claim cutoff')
-    def reopen_closed_days(self, request, queryset):
-        reopened = 0
-        for day in queryset.filter(status='closed'):
-            if timezone.now() >= day.claim_cutoff_at:
-                continue
-            day.status = 'open'
-            day.closed_at = None
-            day.message_update_pending = True
-            day.save(
-                update_fields=[
-                    'status', 'closed_at', 'message_update_pending', 'updated_at',
-                ]
-            )
-            reopened += 1
-        self.message_user(request, f'Reopened {reopened} Office Manager day(s).')
 
 
 @admin.register(OfficeManagerAssignment)
@@ -339,6 +319,11 @@ class OfficeManagerAssignmentAdmin(admin.ModelAdmin):
     readonly_fields = [
         field.name for field in OfficeManagerAssignment._meta.fields
     ]
+
+    actions = None
+
+    def has_change_permission(self, request, obj=None):
+        return False
 
     def has_add_permission(self, request):
         return False
