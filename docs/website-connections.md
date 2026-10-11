@@ -69,6 +69,12 @@ with `prepare_no_progress`. Deterministic child failures link to the failed run,
 while explicitly retryable worker failures retain bounded retries. Owners may cancel
 an active or waiting prepare operation and explicitly reopen it with another Prepare
 click; cancelling fences its child and queues the ordinary run cancellation path.
+Choosing an ambiguous page through the existing setup form saves and attaches that
+direct setup child to the waiting prepare. Its saved company/domain, setup workflow,
+route and original connection tuple must match; its own workflow operation remains
+unchanged. A callback that wakes preparation before the handoff is saved adopts the
+same saved child, and bounded waiting while dispatch is in flight prevents a second
+setup request. A directly blocked child retains its actual failure prompt.
 
 The `permissions` prerequisite sits between inventory and integration. Read-only
 App JWT grant checks for `workflow_files` and `ci_evidence` cache results for sixty

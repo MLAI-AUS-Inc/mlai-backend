@@ -15998,6 +15998,10 @@ class VibeMarketingArticleSystemSetupView(APIView):
         with owner_write_guard():
             config.refresh_from_db()
             if _article_system_setup_run_is_dispatch_blocked(run):
+                pending = {**pending, "setupRunId": run.run_id, "setup_run_id": run.run_id,
+                    "setupStatus": run.status, "setup_status": run.status, "status": run.status}
+                config.article_system = {**dict(config.article_system or {}), "pending_article_system_setup": pending}
+                config.save(update_fields=["article_system", "updated_at"])
                 result = run.result or {}
                 result["scan_purpose"] = "setup"
                 result["article_surface_mode"] = article_surface_mode
@@ -16005,6 +16009,9 @@ class VibeMarketingArticleSystemSetupView(APIView):
                 result["pending_article_system_setup"] = pending
                 run.result = result
                 run.save(update_fields=["result", "updated_at"])
+                if not getattr(request, "_website_prepare_dispatch", False):
+                    from .website_prepare import attach_selected_setup_run
+                    attach_selected_setup_run(config, run, company_id=context.company.pk)
                 return Response(_run_start_payload(run), status=status.HTTP_503_SERVICE_UNAVAILABLE)
             result = run.result or {}
             result["scan_purpose"] = "setup"
@@ -16031,6 +16038,9 @@ class VibeMarketingArticleSystemSetupView(APIView):
             result["article_system_setup"] = setup_payload
             run.result = result
             run.save(update_fields=["result", "updated_at"])
+            if not getattr(request, "_website_prepare_dispatch", False):
+                from .website_prepare import attach_selected_setup_run
+                attach_selected_setup_run(config, run, company_id=context.company.pk)
             return Response(
                 {
                     "run_id": run.run_id,

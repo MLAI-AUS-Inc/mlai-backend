@@ -8,7 +8,7 @@ from django.db.models import F
 from django.utils import timezone
 
 from .website_connections import authority_guard, contract_for
-from .website_contract import WebsiteAuthorityError, evidence_digest
+from .website_contract import WebsiteAuthorityError, evidence_digest, connection_contract
 from .website_journey import journey_for_context
 from .website_models import WebsiteConnectionOperation
 
@@ -190,7 +190,71 @@ def _owner_request(op, context, config, step, *, journey=None):
         data.update(article_surface_mode=mode, article_surface_url=surface,
             source_scan_run_id=pending.get("source_scan_run_id") or op.receipt.get("scan_run_id") or "")
     return SimpleNamespace(user=context.prepare_user, data=data, method="POST", META={},
-        query_params={"company_id": str(context.company.pk)}, headers={"Idempotency-Key": data["idempotency_key"]})
+        query_params={"company_id": str(context.company.pk)}, headers={"Idempotency-Key": data["idempotency_key"]},
+        _website_prepare_dispatch=True)
+
+
+def _awaiting_page_choice(op):
+    return (op.receipt.get("user_action") or {}).get("id") == "choose_articles_page"
+
+
+def _selected_setup_child(op, config, *, run=None):
+    """Recognize a saved route-choice child without changing its authority tuple."""
+    if not _awaiting_page_choice(op) or op.receipt.get("child_run_id"):
+        return None
+    website = config.website_connection
+    if op.generation != website.generation or str(op.connection_id) != str(website.pk):
+        return None
+    pending = (config.article_system or {}).get("pending_article_system_setup") or {}
+    identifier = pending.get("setup_run_id") or pending.get("setupRunId")
+    route = pending.get("route_path") or pending.get("routePath")
+    candidates = (op.receipt.get("user_action") or {}).get("candidates") or []
+    if not identifier or pending.get("mode") != "existing" or route not in candidates:
+        return None
+    if run is None:
+        from workflow_runs.models import ContentFactoryRun
+        run = ContentFactoryRun.objects.filter(run_id=identifier, organization_id=website.organization_id).first()
+    if (run is None or run.run_id != identifier or run.workflow != "article_system_setup"
+            or run.organization_id != website.organization_id
+            or str(run.domain or "").casefold().strip() != website.organization.domain.casefold().strip()):
+        return None
+    saved = run.run_request if isinstance(run.run_request, dict) else {}
+    hint = saved.get("article_surface_hint") or {}
+    if (not isinstance(hint, dict) or hint.get("route_path") != route
+            or saved.get("domain") and str(saved["domain"]).casefold().strip() != website.organization.domain.casefold().strip()):
+        return None
+    try:
+        original, expected = connection_contract(saved), connection_contract(contract_for(website))
+    except WebsiteAuthorityError:
+        return None
+    if any(original.get(key) != expected.get(key) for key in ("website_connection_id", "connection_generation", "repository_id")):
+        return None
+    return run
+
+
+def _correlate_setup_child(op, run):
+    op.receipt = {**op.receipt, "child_run_id": run.run_id, "setup_run_id": run.run_id, "current_step": "setup",
+        "status": "working", "message": "Preparing your selected articles page.", "user_action": None,
+        "reason_code": "", "blocked_step": None, "step_failures": {}, "last_completed": None, "retryable": False}
+    op.payload = {**op.payload, "run_id": run.run_id}
+    op.state, op.next_attempt_at = "pending", timezone.now()
+
+
+def attach_selected_setup_run(config, run, *, company_id):
+    """Hand a founder's direct route-choice setup back to its waiting prepare.
+
+    The child retains its original workflow operation and connection fences;
+    correlation never adds or changes credentials, consent or publishing proof.
+    """
+    website = config.website_connection
+    with authority_guard(contract_for(website), action="read") as current:
+        op = current.operations.select_for_update().filter(generation=current.generation, action="prepare",
+            state__in=["needs_user", "pending", "running"], payload__company_id=str(company_id)).first()
+        if op is None or str(op.payload.get("company_id")) != str(company_id) or _selected_setup_child(op, config, run=run) is None:
+            return None
+        _correlate_setup_child(op, run)
+        op.save(update_fields=["receipt", "payload", "state", "next_attempt_at", "updated_at"])
+    return op
 
 
 def _dispatch_prepare_step(op, context, config, step, *, journey=None):
@@ -247,9 +311,23 @@ def advance_prepare(identifier, *, now=None, handlers=None):
             op.receipt.update(status="ready", message="Your website is ready for articles.", current_step="ready", user_action=None)
             return _finish_prepare(op, now=now)
         child_id = op.receipt.get("child_run_id")
+        child = None
+        if not child_id:
+            child = _selected_setup_child(op, config)
+            if child:
+                _correlate_setup_child(op, child)
+                child_id = child.run_id
+            elif _awaiting_page_choice(op):
+                pending = (config.article_system or {}).get("pending_article_system_setup") or {}
+                if pending.get("status") == "pending_generation" and pending.get("mode") == "existing":
+                    # Progress may arrive while the owner's queue request is
+                    # still in flight. Do not start another differently keyed
+                    # setup before its saved child identity is confirmed.
+                    raise WebsiteAuthorityError("website_setup_dispatch_pending",
+                        "Waiting for the selected articles setup request to finish queuing.", retryable=True)
         if child_id:
             from workflow_runs.models import ContentFactoryRun
-            child = ContentFactoryRun.objects.filter(run_id=child_id, organization_id=op.connection.organization_id).first()
+            child = child or ContentFactoryRun.objects.filter(run_id=child_id, organization_id=op.connection.organization_id).first()
             setup = ((child.result or {}).get("article_system_setup") or {}) if child else {}
             setup_review_ready = bool(child and child.workflow == "article_system_setup" and
                 child.status in {"needs_review", "awaiting_approval", "approval_required", "pr_opened", "publish_bundle_ready"} and
