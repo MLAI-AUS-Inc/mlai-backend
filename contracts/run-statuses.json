@@ -1,7 +1,7 @@
 {
   "_meta": {
     "name": "mlai-backend <-> content-factory run/setup status contract",
-    "version": 2,
+    "version": 3,
     "repos": [
       "MLAI-AUS-Inc/mlai-backend  -> contracts/run-statuses.json",
       "drsamdonegan/content-factory -> contracts/run-statuses.json"
@@ -60,6 +60,7 @@
     "running",
     "processing",
     "completed",
+    "adopted",
     "failed",
     "blocked",
     "cancelled",

@@ -399,6 +399,12 @@ class IncidentFacadeReplays(SimpleTestCase):
 
 
 class IncidentIntegratedReplays(SimpleTestCase):
+    def setUp(self):
+        for name in ("wake_prepare_for_source", "wake_prepare_after_commit"):
+            seam = patch(f"content_factory.website_prepare.{name}")
+            seam.start()
+            self.addCleanup(seam.stop)
+
     def test_repository_probe_reads_grants_and_reuses_one_read_token_per_request(self):
         from . import vibe_marketing_views as views
         from integrations.services import github_app
@@ -712,6 +718,7 @@ class OwnedMergeWebhookRaceTests(SimpleTestCase):
         from workflow_runs.models import ContentFactoryRun
         from organizations.models import Organization
         from integrations.services import github_app
+        stack.enter_context(patch("content_factory.website_prepare.wake_prepare_for_source"))
         stack.enter_context(patch.object(reconciliation.transaction, "atomic", side_effect=lambda: nullcontext()))
         stack.enter_context(patch.object(authority, "authority_guard", side_effect=lambda *a, **kw: nullcontext(self.website)))
         stack.enter_context(patch.object(Organization.objects, "select_for_update"))

@@ -49,6 +49,31 @@ class SetupMergeVerificationUnitTests(SimpleTestCase):
         self.assertEqual(self.website.verified_sha, "")
         self.website.targets.update_or_create.assert_not_called()
 
+    def test_adopted_kit_requires_its_actual_preview_head_and_full_proof(self):
+        self.run.approval_state = "not_required"
+        self.run.result.update(status="adopted", adopted=True, adoption_kit_preview_verified=True,
+            verification_kit_required=True, build_verified=True, browser_verified=True, preview_commit_sha=self.head)
+        self.run.result["article_system_setup"].update(status="adopted", adopted=True,
+            build_verified=True, browser_verified=True, preview_commit_sha=self.head)
+        self.validate()
+        valid = deepcopy(self.run.result)
+        for key, value in (("adoption_kit_preview_verified", False), ("preview_commit_sha", self.base),
+                ("build_verified", False), ("browser_verified", False)):
+            with self.subTest(key=key):
+                self.run.result = deepcopy(valid)
+                self.run.result[key] = value
+                with self.assertRaises(WebsiteAuthorityError):
+                    self.validate()
+
+    def test_pending_setup_proof_only_permits_automatic_approval_explicitly(self):
+        self.run.status, self.run.approval_state = "awaiting_approval", "approval_required"
+        self.run.result["status"] = "preview_ready"
+        self.run.result["article_system_setup"]["status"] = "preview_ready"
+        self.assertEqual(authority._verified_setup_run_base(self.run, self.head, self.website), "")
+        self.assertEqual(authority._verified_setup_run_base(self.run, self.head, self.website, automatic_approval=True), self.base)
+        self.run.result["directory_quality_gates"]["browser"] = False
+        self.assertEqual(authority._verified_setup_run_base(self.run, self.head, self.website, automatic_approval=True), "")
+
     def test_preserves_existing_target_proof_path(self):
         self.website.verified_sha = self.base
         self.website.targets.filter.return_value = [SimpleNamespace(contract={"verification": {
