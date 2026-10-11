@@ -95,13 +95,18 @@ def coalesce(rows, context, last_read, *, observed_at, now, revision_floor=0,
         return rows, False
     comparisons = [timestamp(previous.get(name)) for name in ('last_read', 'delivered_ts')]
     regress = any(value is not None and Decimal(stamp) < Decimal(value) for value in comparisons)
+    # Suppress only the first echo of this scoped device confirmation. After
+    # a later source read, returning to that timestamp is a real regression.
+    first_own_echo = own_echo and previous.get('native_echo_revision') != context['applied_revision']
     revision = max(int(previous.get('revision') or 0), revision_floor, time.time_ns() // 1000) + 1
     if revision > exports.I64_MAX:
         raise ValueError('inbox_revision_exhausted')
     pending = {'account_key': context['account_key'], 'channel_id': context['channel_id'],
-               'slack_last_read': source_frontier or stamp, 'op': 'regress' if regress and not own_echo else 'observe',
+               'slack_last_read': source_frontier or stamp, 'op': 'regress' if regress and not first_own_echo else 'observe',
                'applied_revision': context['applied_revision'], 'revision': revision,
                'created_at': int(observed_at)}
+    if own_echo:
+        previous['native_echo_revision'] = context['applied_revision']
     result[key] = {**previous, **context, 'last_read': stamp, 'observed_at': observed_at,
                    'revision': revision, 'pending': pending, 'pending_raw_ts': stamp, 'due': now}
     return result, True

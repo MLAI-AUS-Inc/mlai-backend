@@ -241,6 +241,35 @@ class InboxObservationTests(SimpleTestCase):
         self.assertEqual(row['pending']['op'], 'observe')
         self.assertEqual(row['pending']['applied_revision'], 3)
 
+    def test_return_to_a_confirmed_native_unread_after_source_read_is_a_regression(self):
+        from integrations.tests_inbox_exports import NativeCursorBoundaryTests
+        state, key, _, confirmation, context = NativeCursorBoundaryTests().fixture('unread')
+        state = exports.settle(state, key, 3, confirmation=confirmation)
+        context.update(account_key='a'*64, source_id='Dsynthetic')
+        connection = SimpleNamespace(sync_cursor={exports.KEY: state}, save=Mock())
+        with patch.object(obs.time, 'time', return_value=1000):
+            obs.observe_locked(connection, context, '102.499999', observed_at=1000)
+        self.assertEqual(connection.sync_cursor[obs.KEY][key]['pending']['op'], 'observe')
+        with patch.object(obs.time, 'time', return_value=1001):
+            obs.observe_locked(connection, context, '102.500000', observed_at=1001)
+        self.assertEqual(connection.sync_cursor[obs.KEY][key]['pending']['slack_last_read'], '100.000000')
+        with patch.object(obs.time, 'time', return_value=1002):
+            obs.observe_locked(connection, context, '102.499999', observed_at=1002)
+        pending = connection.sync_cursor[obs.KEY][key]['pending']
+        self.assertEqual(pending['op'], 'regress')
+        self.assertEqual(pending['slack_last_read'], '99.999999')
+        self.assertEqual(pending['applied_revision'], 3)
+        with patch.object(obs.time, 'time', return_value=1003):
+            obs.observe_locked(connection, context, '102.500000', observed_at=1003)
+        connection.sync_cursor[exports.KEY] = exports.settle(
+            state, key, 4, confirmation={**confirmation, 'revision': 4})
+        context['applied_revision'] = 4
+        with patch.object(obs.time, 'time', return_value=1004):
+            obs.observe_locked(connection, context, '102.499999', observed_at=1004)
+        latest = connection.sync_cursor[obs.KEY][key]
+        self.assertEqual(latest['pending']['op'], 'observe')
+        self.assertEqual(latest['native_echo_revision'], 4)
+
     def test_delivery_keeps_raw_slack_position_outside_the_signed_display_frontier(self):
         target, authority, connection, grant = self.fixtures()
         rows, _ = obs.coalesce({}, self.context(), '102.499999', observed_at=1000,

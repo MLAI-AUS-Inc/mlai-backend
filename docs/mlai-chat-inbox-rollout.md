@@ -116,3 +116,9 @@ legacy client channel read merges, forced-unread stores, unread-history fetches
 and channel NIP-RS frontiers. Keep thread contexts until the server thread
 cursor design is implemented. Keep the backend snapshot API while supported
 older clients still require it. No compatibility path is removed by this stack.
+
+A scoped native confirmation suppresses only its first own echo. The observation
+records that confirmation revision; after a later source read, returning to the
+same native unread timestamp is a genuine source regression. Scope resets and
+new device revisions cannot reuse an older echo marker. Raw Slack scheduling
+timestamps remain separate from the signed display frontier.
