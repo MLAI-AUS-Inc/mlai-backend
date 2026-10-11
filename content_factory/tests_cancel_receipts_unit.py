@@ -10,6 +10,7 @@ from django.test import SimpleTestCase
 
 from . import service_views as views
 from . import website_connections as authority
+from .website_contract import WebsiteAuthorityError
 
 
 class CancellationReceiptTests(SimpleTestCase):
@@ -26,7 +27,8 @@ class CancellationReceiptTests(SimpleTestCase):
                 patch.object(views.ContentFactoryRun.objects, "filter") as selected, \
                 patch.object(views, "_serialize_content_factory_run", side_effect=lambda saved: {"run_id": saved.run_id, "status": saved.status}), \
                 patch("content_factory.website_operations.observe_workflow_status"), \
-                patch.object(authority, "authority_guard") as grant, patch.object(authority, "record_scan_evidence") as scan, \
+                patch.object(authority, "authority_guard", side_effect=WebsiteAuthorityError("website_connection_required", "Reconnect this website.")) as grant, \
+                patch.object(authority, "record_scan_evidence") as scan, \
                 patch.object(views, "_apply_run_snapshot") as generic:
             rows.return_value.filter.return_value.first.return_value = self.run if run else None
             selected.return_value.first.return_value = self.run if run else None

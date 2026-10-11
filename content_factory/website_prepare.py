@@ -43,10 +43,13 @@ def start_prepare(config, *, expected=None, company_id=None, user=None, retry=Fa
         if op.action != "prepare" or op.generation != current.generation:
             raise WebsiteAuthorityError("operation_key_conflict", "The saved preparation belongs to another website.")
         if not created and retry and op.state in {"needs_attention", "needs_user", "cancelled"}:
+            reset_child = op.state in {"cancelled", "needs_attention"}
             op.state, op.next_attempt_at = "pending", None
             op.receipt = {**op.receipt, "step_failures": {}, "status": "working", "user_action": None, "last_completed": None,
-                "child_run_id": None, "reason_code": "", "blocked_step": None}
+                "child_run_id": None if reset_child else op.receipt.get("child_run_id"), "reason_code": "", "blocked_step": None}
             op.payload = {**op.payload, "attempt": op.payload.get("attempt", 1) + 1, "user_clicks": op.payload.get("user_clicks", 1) + 1}
+            if reset_child:
+                op.payload.pop("run_id", None)
             op.save(update_fields=["state", "next_attempt_at", "receipt", "payload", "updated_at"])
     return op
 

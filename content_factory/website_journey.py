@@ -81,7 +81,8 @@ def project_journey(*, company_id, domain, website=None, capabilities=None, disc
         if connected and write_access and write_allowed:
             allowed.append("prepare")
         if access:
-            allowed.append("permissions")
+            if not permissions_ready:
+                allowed.append("permissions")
             allowed += ["custom-contract", "ci-attestation"]
         allowed += ["scan", "pause"] if connected else ["reconnect"]
         if write_allowed and write_access:
@@ -98,6 +99,8 @@ def project_journey(*, company_id, domain, website=None, capabilities=None, disc
         "path": "/api/v1/my-startup/vibe-marketing/" + ("scan" if action == "scan" else "article-system-setup" if action == "setup" else "website-connection/" + action),
         "enabled": True, "reasonCode": "", "requiresConfirmation": action in {"disconnect", "reset", "purge", "cleanup", "github-revoke"}} for action in dict.fromkeys(allowed)]
     for action in actions:
+        if action["id"] == "permissions":
+            action.update(label="Review GitHub permissions", method="GET", path=grants.get("settingsUrl") or "", enabled=bool(grants.get("settingsUrl")))
         if action["id"] == "verify-cleanup":
             action["operationId"] = proof.get("cleanupOperationId") or op_id
             action["params"] = {"operation_id": action["operationId"]}

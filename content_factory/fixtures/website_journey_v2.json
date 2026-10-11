@@ -5,6 +5,18 @@
   "revision": "83e541dd157240f8704746652866a962ed24feaa375360e1282c6f37af14d842",
   "connectionId": "b761b209-8673-4843-9a48-90b3177bde26",
   "connectionGeneration": 3,
+  "proofContract": {
+    "version": 1,
+    "requirements": [
+      "pinned_source_sha",
+      "safe_publish_target",
+      "build_proof",
+      "browser_proof",
+      "workflows_permission",
+      "ci_artifact_digest",
+      "live_verification"
+    ]
+  },
   "configurationRevision": 5,
   "deletionEpoch": 0,
   "repository": {
@@ -16,8 +28,8 @@
     "targetId": null,
     "observedSourceSha": null,
     "publicRoute": null,
-    "contentPath": null,
-    "framework": null
+    "framework": null,
+    "contentPath": null
   },
   "pricing": {
     "setupPoints": 0,
@@ -47,6 +59,13 @@
       "operationId": null
     },
     "inventory": {
+      "status": "complete",
+      "reasonCode": "",
+      "reason": "",
+      "verifiedAt": null,
+      "operationId": null
+    },
+    "permissions": {
       "status": "complete",
       "reasonCode": "",
       "reason": "",
@@ -109,6 +128,16 @@
     {
       "id": "scan",
       "label": "Repository inventory",
+      "status": "complete",
+      "reasonCode": "",
+      "reason": "",
+      "verifiedAt": null,
+      "operationId": null,
+      "runId": null
+    },
+    {
+      "id": "permissions",
+      "label": "GitHub workflow permissions",
       "status": "complete",
       "reasonCode": "",
       "reason": "",
@@ -283,6 +312,11 @@
     "candidates": [],
     "publishReady": false
   },
+  "githubPermissions": {
+    "workflows": true,
+    "checks": true,
+    "statuses": true
+  },
   "operation": null,
   "sourceRuns": [],
   "ciSourceRuns": [],
@@ -318,17 +352,5 @@
       "available": false,
       "reasonCode": "adapter_required"
     }
-  },
-  "proofContract": {
-    "version": 1,
-    "requirements": [
-      "pinned_source_sha",
-      "safe_publish_target",
-      "build_proof",
-      "browser_proof",
-      "workflows_permission",
-      "ci_artifact_digest",
-      "live_verification"
-    ]
   }
 }

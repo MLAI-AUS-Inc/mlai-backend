@@ -27,7 +27,8 @@ def inspection_report(connection, config, operations, snapshot, targets):
             "next_attempt_at": op.next_attempt_at, "created_at": op.created_at, "updated_at": op.updated_at,
             "receipt": {key: mapping(op.receipt).get(key) for key in RECEIPT_FIELDS}} for op in operations],
         "pending_article_system_setup": {"mode": pending.get("mode"), "route": pending.get("route_path"),
-            "scan_run": pending.get("source_scan_run_id"), "setup_run": pending.get("run_id")},
+            "scan_run": pending.get("source_scan_run_id") or pending.get("sourceScanRunId"),
+            "setup_run": pending.get("setup_run_id") or pending.get("setupRunId") or pending.get("run_id")},
         "inventory": {"run_id": snapshot.run_id, "source_sha": snapshot.source_sha,
             "existence_state": resolution.get("existence_state"), "listing_surface": resolution.get("listing_surface")} if snapshot else None,
         "targets": [{"key": target.target_key, "adapter": target.adapter, "source_sha": target.source_sha,
@@ -69,7 +70,8 @@ class Command(BaseCommand):
             website = config.website_connection
             snapshots = website.scan_snapshots.filter(generation=website.generation).exclude(detector_version="github_head").filter(
                 Q(evidence__repository_inventory__discovery_complete=True) | Q(evidence__repository_discovery__discovery_complete=True)
-                | Q(evidence__scan_summary__repository_inventory__discovery_complete=True) | Q(evidence__scan_complete=True))
+                | Q(evidence__scan_summary__repository_inventory__discovery_complete=True)
+                | Q(evidence__scan_summary__repository_discovery__discovery_complete=True) | Q(evidence__scan_complete=True))
             report = inspection_report(website, config, website.operations.order_by("-created_at")[:5],
                 snapshots.order_by("-created_at").first(), website.targets.filter(generation=website.generation))
             if options["journey"]:

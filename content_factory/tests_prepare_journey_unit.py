@@ -125,6 +125,15 @@ class PrepareJourneyReplayTests(SimpleTestCase):
         self.assertEqual(self.op.state, "pending")
         self.assertEqual(self.op.payload["attempt"], 2)
 
+    def test_check_again_keeps_the_setup_child_awaiting_merge(self):
+        self.op.state = "needs_user"
+        self.op.receipt = {"current_step": "merge", "child_run_id": "existing-pr-child"}
+        with patch.object(prepare, "authority_guard", return_value=nullcontext(self.op.connection)), \
+                patch.object(prepare.WebsiteConnectionOperation.objects, "get_or_create", return_value=(self.op, False)):
+            prepare.start_prepare(self.config, expected={}, retry=True)
+        self.assertEqual(self.op.receipt["child_run_id"], "existing-pr-child")
+        self.assertEqual(self.op.state, "pending")
+
     def test_ambiguous_routes_require_owner_choice(self):
         self.facts["resolution"] = {"existence_state": "ambiguous", "ranked_candidates": {"listing_surface_candidates": [
             {"route": "/stories"}, {"metadata": {"route_path": "/news"}}]}}

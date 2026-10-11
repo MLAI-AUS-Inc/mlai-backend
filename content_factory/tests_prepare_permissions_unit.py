@@ -61,6 +61,18 @@ class PreparePermissionsTests(SimpleTestCase):
         journey = project_journey(**kwargs, permissions={"workflows": True, "checks": False, "statuses": True})
         self.assertEqual(journey["prerequisites"]["permissions"]["reasonCode"], "github_ci_evidence_permission_required")
 
+    def test_setup_child_permission_failure_uses_the_same_installation_prompt(self):
+        fixture = fixtures.PrepareJourneyReplayTests()
+        fixture.setUp()
+        fixture.op.receipt = {"child_run_id": "setup-child", "current_step": "setup"}
+        child = SimpleNamespace(status="blocked", workflow="article_system_setup", error="Workflows permission is required.",
+            result={"error_code": "github_workflow_permission_required", "retryable": False})
+        with patch("content_factory.website_github_permissions.installation_grants", return_value={"settingsUrl": "https://github.com/settings/installations/4"}):
+            fixture.advance(child=child)
+        self.assertEqual(fixture.op.state, "needs_user")
+        self.assertEqual(fixture.op.receipt["user_action"]["id"], "review_github_permissions")
+        self.assertEqual(fixture.op.receipt["message"], child.error)
+
     def test_grants_cache_expires_after_sixty_seconds_and_never_mints(self):
         from . import website_github_permissions as permissions
         from integrations.services import github_app
