@@ -26,7 +26,7 @@ from community_chat.account_sessions import InvalidAccountSession, _valid_sessio
 from community_chat.models import CommunityChatAccountSession
 from community_chat.onboarding import require_community_access
 from founder_tools.models import VibeRaisingCompany
-from .config import SCOPES, mcp_url, public_base
+from .config import ALL_SCOPES, SCOPES, availability, mcp_url, mlai_url, public_base, resource_scopes
 
 CODE_TTL = 300
 INTENT_TTL = 600
@@ -125,13 +125,21 @@ def create_intent(query):
         raise OAuthError("invalid_request", "The callback URL does not match the registered client.")
     if query.get("response_type") != "code":
         raise OAuthError("unsupported_response_type")
-    if query.get("resource") != mcp_url():
-        raise OAuthError("invalid_target", "Choose the Valley MCP resource.")
+    resource = query.get("resource")
+    supported = resource_scopes(resource)
+    if not supported:
+        raise OAuthError("invalid_target", "Choose the MLAI or Valley MCP resource.")
+    if resource == mlai_url() and not availability(resource)[0]:
+        raise OAuthError("temporarily_unavailable", "MLAI agent connections are not enabled yet.")
     challenge = str(query.get("code_challenge") or "")
     if query.get("code_challenge_method") != "S256" or not re.fullmatch(r"[A-Za-z0-9_-]{43}", challenge):
         raise OAuthError("invalid_request", "PKCE S256 is required.")
-    scopes = set(str(query.get("scope") or " ".join(sorted(SCOPES))).split())
-    if not scopes or scopes - SCOPES:
+    # Some native hosts omit scope entirely. Offer the new catalogue for
+    # explicit consent; the UI selects only basic reads by default and approval
+    # requires an explicit subset. Existing tokens/refresh are never expanded.
+    default = SCOPES if resource == mcp_url() else ALL_SCOPES
+    scopes = set(str(query.get("scope") or " ".join(sorted(default))).split())
+    if not scopes or scopes - supported:
         raise OAuthError("invalid_scope")
     state = str(query.get("state") or "")
     if not state or len(state) > 2048:
@@ -139,7 +147,7 @@ def create_intent(query):
     request_id = secrets.token_urlsafe(32)
     value = {"requestId": request_id, "client_id": client_id, "clientName": str(client.get("client_name") or "Your AI agent"),
         "redirect_uri": callback, "redirectOrigin": callback_origin(callback), "state": state, "code_challenge": challenge,
-        "scopes": sorted(scopes), "resource": mcp_url(), "expiresAt": int(time.time()) + INTENT_TTL}
+        "scopes": sorted(scopes), "resource": resource, "expiresAt": int(time.time()) + INTENT_TTL}
     cache.set(key("intent", request_id), value, timeout=INTENT_TTL)
     return value
 
@@ -148,8 +156,10 @@ def intent_for(request_id):
     value = cache.get(key("intent", request_id))
     if not value or value.get("expiresAt", 0) <= time.time():
         raise ValidationError("This agent connection expired. Start again in your agent.")
+    if value.get("resource") == mlai_url() and not availability(value["resource"])[0]:
+        raise ValidationError("MLAI agent connections are not enabled yet.")
     client = client_for(value["client_id"])
-    if value["redirect_uri"] not in client.get("redirect_uris", []) or value["resource"] != mcp_url() or set(value["scopes"]) - SCOPES:
+    if value["redirect_uri"] not in client.get("redirect_uris", []) or not resource_scopes(value["resource"]) or set(value["scopes"]) - resource_scopes(value["resource"]):
         raise ValidationError("This agent connection is no longer available.")
     return value
 
@@ -186,7 +196,12 @@ def assert_device_owner(session):
         raise AuthenticationFailed("Account device authorisation was revoked.") from exc
 
 
-def approve_intent(request_id, *, user, session, company_id, approve):
+def grant_subject(company_id):
+    """Use one canonical revocation/index identity for a company or account grant."""
+    return str(_company_uuid(company_id)) if company_id else "account"
+
+
+def approve_intent(request_id, *, user, session, company_id, approve, scopes=None, community_channel_ids=None):
     if not isinstance(approve, bool):
         raise ValidationError("Choose whether to connect this agent.")
     with lock("intent", request_id):
@@ -197,17 +212,34 @@ def approve_intent(request_id, *, user, session, company_id, approve):
         if not approve:
             cache.delete(key("intent", request_id))
             return callback_url(intent, error="access_denied")
-        company = company_for(user, company_id)
+        if intent["resource"] == mlai_url() and scopes is None:
+            raise ValidationError("Choose the MLAI capabilities to authorise.")
+        if scopes is not None and (not isinstance(scopes, list) or any(not isinstance(item, str) for item in scopes)):
+            raise ValidationError("Permissions must be a list of scope names.")
+        selected = set(intent["scopes"] if scopes is None else scopes)
+        if not selected or selected - set(intent["scopes"]):
+            raise ValidationError("Choose only permissions requested by this agent.")
+        legacy = intent["resource"] == mcp_url()
+        if legacy and selected != set(intent["scopes"]):
+            raise ValidationError("Reconnect Valley to change its permissions.")
+        needs_company = legacy or any(scope.startswith(("startup:", "article:")) for scope in selected)
+        company = company_for(user, company_id) if company_id or needs_company else None
+        channels = []
+        if selected & {"community:read", "community:write"}:
+            from .community import validate_channel_selection
+            channels = validate_channel_selection(user, session, community_channel_ids)
+        elif community_channel_ids:
+            raise ValidationError("Select Community permissions before choosing channels.")
         cache.delete(key("intent", request_id))
         grant_id = secrets.token_urlsafe(32)
         value = {"id": grant_id, "user_id": user.pk, "auth_version": user.auth_version,
-            "session_id": str(session.pk), "company_id": str(company.pk), "client_id": intent["client_id"],
-            "clientName": intent["clientName"], "redirectOrigin": intent["redirectOrigin"], "scopes": intent["scopes"], "resource": intent["resource"],
+            "session_id": str(session.pk), "company_id": str(company.pk) if company else None, "client_id": intent["client_id"],
+            "clientName": intent["clientName"], "redirectOrigin": intent["redirectOrigin"], "scopes": sorted(selected), "resource": intent["resource"], "community_channels": channels,
             "createdAt": timezone.now().isoformat(), "expiresAt": int(time.time()) + GRANT_TTL, "revoked": False,
-            "revocation_epoch": cache.get(key("epoch", f"{user.pk}:{company.pk}")) or ""}
+            "revocation_epoch": cache.get(key("epoch", f"{user.pk}:{grant_subject(company.pk if company else None)}")) or ""}
         cache.set(key("grant", grant_id), value, timeout=GRANT_TTL)
-        with lock("index", f"{user.pk}:{company.pk}"):
-            index_key = key("index", f"{user.pk}:{company.pk}")
+        with lock("index", f"{user.pk}:{grant_subject(company.pk if company else None)}"):
+            index_key = key("index", f"{user.pk}:{grant_subject(company.pk if company else None)}")
             cache.set(index_key, [*(cache.get(index_key) or []), grant_id], timeout=GRANT_TTL)
         code = secrets.token_urlsafe(48)
         cache.set(key("code", code), {"grant_id": grant_id, "client_id": intent["client_id"],
@@ -225,9 +257,11 @@ class Principal:
 
 def valid_grant(grant_id, *, scope=None):
     grant = cache.get(key("grant", grant_id))
-    if not grant or grant.get("revoked") or grant.get("expiresAt", 0) <= time.time() or grant.get("resource") != mcp_url():
+    if not grant or grant.get("revoked") or grant.get("expiresAt", 0) <= time.time() or not resource_scopes(grant.get("resource")) or set(grant.get("scopes", [])) - resource_scopes(grant.get("resource")):
         raise AuthenticationFailed("Agent authorisation expired or was revoked.")
-    current_epoch = cache.get(key("epoch", f"{grant['user_id']}:{_company_uuid(grant['company_id'])}")) or ""
+    if grant["resource"] == mlai_url() and not availability(grant["resource"])[0]:
+        raise AuthenticationFailed("MLAI agent connections are not enabled yet.")
+    current_epoch = cache.get(key("epoch", f"{grant['user_id']}:{grant_subject(grant.get('company_id'))}")) or ""
     if grant.get("revocation_epoch", "") != current_epoch:
         raise AuthenticationFailed("This startup agent connection was disconnected.")
     user = get_user_model().objects.filter(pk=grant["user_id"], is_active=True).first()
@@ -238,7 +272,10 @@ def valid_grant(grant_id, *, scope=None):
         raise AuthenticationFailed("Account session was revoked.")
     assert_device_owner(session)
     require_community_access(user)
-    company_for(user, grant["company_id"], grant)
+    if grant.get("company_id"):
+        company_for(user, grant["company_id"], grant)
+    elif any(scope.startswith(("startup:", "article:")) for scope in grant["scopes"]):
+        raise AuthenticationFailed("Startup authorisation is unavailable.")
     if scope and scope not in grant.get("scopes", []):
         raise PermissionDenied("This agent does not have the required permission.")
     return Principal(user=user, grant=grant)
@@ -260,13 +297,13 @@ def token_exchange(data):
         raise OAuthError("invalid_request", "Token requests must contain named fields.")
     client_id = str(data.get("client_id") or "")
     client_for(client_id)
-    if data.get("resource") != mcp_url():
+    if not resource_scopes(data.get("resource")):
         raise OAuthError("invalid_target")
     if data.get("grant_type") == "authorization_code":
         code = str(data.get("code") or "")
         with lock("code", code):
             record = cache.get(key("code", code))
-            if not record or record["client_id"] != client_id or record["redirect_uri"] != data.get("redirect_uri") or record["resource"] != mcp_url():
+            if not record or record["client_id"] != client_id or record["redirect_uri"] != data.get("redirect_uri") or record["resource"] != data.get("resource"):
                 raise OAuthError("invalid_grant")
             verifier = str(data.get("code_verifier") or "")
             if not re.fullmatch(r"[A-Za-z0-9._~-]{43,128}", verifier):
@@ -289,6 +326,8 @@ def token_exchange(data):
                 revoke_grant(record["grant_id"])
                 raise OAuthError("invalid_grant")
             principal = valid_grant(record["grant_id"])
+            if principal.grant["resource"] != data.get("resource"):
+                raise OAuthError("invalid_target")
             requested = set(str(data.get("scope") or " ".join(principal.grant["scopes"])).split())
             if requested != set(principal.grant["scopes"]):
                 raise OAuthError("invalid_scope", "Refresh cannot alter the authorised scopes.")
@@ -298,13 +337,16 @@ def token_exchange(data):
     raise OAuthError("unsupported_grant_type")
 
 
-def authenticate_token(raw_token, *, scope=None):
+def authenticate_token(raw_token, *, scope=None, resource=None):
     if not str(raw_token).startswith("valley_access_"):
         raise AuthenticationFailed("Connect this agent to Valley first.")
     record = cache.get(key("access", raw_token))
     if not record:
         raise AuthenticationFailed("Agent access token expired.")
-    return valid_grant(record["grant_id"], scope=scope)
+    principal = valid_grant(record["grant_id"], scope=scope)
+    if resource and principal.grant["resource"] != resource:
+        raise AuthenticationFailed("This token was issued for a different MCP server.")
+    return principal
 
 
 def revoke_grant(grant_id):
@@ -315,17 +357,17 @@ def revoke_grant(grant_id):
 
 
 def disconnect_company(user, company_id):
-    company_id = _company_uuid(company_id)
+    company_id = grant_subject(company_id)
     epoch = secrets.token_urlsafe(32)
     cache.set(key("epoch", f"{user.pk}:{company_id}"), epoch, timeout=GRANT_TTL + 1)
     for grant_id in cache.get(key("index", f"{user.pk}:{company_id}")) or []:
         grant = cache.get(key("grant", grant_id))
-        if grant and grant["user_id"] == user.pk and str(grant["company_id"]) == str(company_id) and grant.get("revocation_epoch", "") != epoch:
+        if grant and grant["user_id"] == user.pk and grant_subject(grant.get("company_id")) == str(company_id) and grant.get("revocation_epoch", "") != epoch:
             revoke_grant(grant_id)
 
 
 def grants_for(user, company_id):
-    company_id = _company_uuid(company_id)
+    company_id = grant_subject(company_id)
     rows = []
     for grant_id in cache.get(key("index", f"{user.pk}:{company_id}")) or []:
         grant = cache.get(key("grant", grant_id))
@@ -334,7 +376,7 @@ def grants_for(user, company_id):
                 valid_grant(grant_id)
             except (AuthenticationFailed, PermissionDenied):
                 continue
-            rows.append({field: grant[field] for field in ("id", "clientName", "redirectOrigin", "createdAt", "expiresAt")})
+            rows.append({field: grant[field] for field in ("id", "clientName", "redirectOrigin", "createdAt", "expiresAt", "resource", "scopes")})
     return rows
 
 
@@ -344,4 +386,4 @@ def metadata():
         "registration_endpoint": base + "/mcp/oauth/register", "revocation_endpoint": base + "/mcp/oauth/revoke",
         "response_types_supported": ["code"], "grant_types_supported": ["authorization_code", "refresh_token"],
         "token_endpoint_auth_methods_supported": ["none"], "code_challenge_methods_supported": ["S256"],
-        "scopes_supported": sorted(SCOPES), "authorization_response_iss_parameter_supported": True}
+        "scopes_supported": sorted(ALL_SCOPES if getattr(settings, "MLAI_MCP_ENABLED", False) else SCOPES), "authorization_response_iss_parameter_supported": True}

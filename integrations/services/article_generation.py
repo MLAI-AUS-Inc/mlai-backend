@@ -1022,7 +1022,8 @@ def refund_content_factory_topic_generation_for_user(
     from roo.services import PointsService
 
     client_request_id = _get_client_request_id(article_request)
-    cost_points = get_content_factory_research_cost_points(resolved_domain, article_request.get("requested_topic_count", 4))
+    cost_points = _original_content_charge_points(
+        user, f"content_factory:topic_generation:charge:{client_request_id}")
     if cost_points == 0:
         return None
 

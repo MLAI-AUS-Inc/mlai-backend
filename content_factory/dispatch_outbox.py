@@ -1,4 +1,4 @@
-"""Retry charged article starts with the same request identity, then refund."""
+"""Retry charged content starts with the same request identity, then refund."""
 from datetime import timedelta
 
 from django.db import transaction
@@ -58,15 +58,23 @@ def mark_dispatch_delivered(client_request_id, run_id):
         state__in=["pending", "delivering"]).update(state="delivered", run_id=run_id, last_error="", updated_at=timezone.now())
 
 
+def _research_dispatch(row):
+    """Identify the supported discovery contract without an article authority bypass."""
+    return row.payload.get("endpoint") == "discovery" and row.payload.get("workflow") == "auto_discovery"
+
+
 def refund_dispatch(row, *, reason):
     """The original spend identity makes retries of refund safe."""
     from django.contrib.auth import get_user_model
-    from integrations.services.article_generation import refund_content_factory_request_for_user
+    from integrations.services.article_generation import (
+        refund_content_factory_request_for_user, refund_content_factory_topic_generation_for_user,
+    )
     payer_id = row.payload.get("billing_user_id")
     if not payer_id or not row.payload.get("request", {}).get("roo_points_cost"):
         return
     payer = get_user_model().objects.get(pk=payer_id)
-    refund_content_factory_request_for_user(user=payer, actor_id=row.payload.get("actor_id") or "",
+    refund = refund_content_factory_topic_generation_for_user if _research_dispatch(row) else refund_content_factory_request_for_user
+    refund(user=payer, actor_id=row.payload.get("actor_id") or "",
         article_request=row.payload["request"], resolved_domain=row.organization.domain, reason=reason)
 
 
@@ -86,17 +94,35 @@ def _deliver(row):
         return _accept_delivery(row, request, existing, recovered=True)
     if known == "rejected":
         return "failed", "dispatch_rejected", ""
-    if not explicit_portable_request(request):
-        with authority_guard(request, action="read"):
-            pass
-    policy_error = _refresh_article_editorial_payload(organization=row.organization, payload=request)
-    if policy_error is not None:
-        return "pending", str(policy_error.data.get("code") or "editorial_policy_recheck_required")[:100], ""
     from django.contrib.auth import get_user_model
-    from integrations.services.article_generation import require_article_activation
     requester = get_user_model().objects.get(pk=request["roo_points_requested_by_user_id"], is_active=True)
-    require_article_activation(domain=row.organization.domain, actor_id=row.payload.get("actor_id") or "",
-        user=requester, expected_repo=request.get("github_repo", ""), article_request=request)
+    if _research_dispatch(row):
+        # Discovery needs only the current owning founder/domain, plus the
+        # selected approved audience when one was requested. It never inherits
+        # repository permissions or grants editorial/publication approval.
+        from founder_tools.models import VibeRaisingCompany
+        from .editorial_catalog import discovery_audience_context
+        from .vibe_marketing_views import _get_config
+        if request.get("domain") != row.organization.domain or not VibeRaisingCompany.objects.filter(
+                pk=request.get("mcp_company_id"), organization=row.organization,
+                profile__user=requester, profile__role="founder").exists():
+            raise WebsiteAuthorityError("research_owner_changed", "The original research startup is no longer available.")
+        try:
+            audience = discovery_audience_context(_get_config(row.organization).pillar_strategy, request)
+        except ValueError as exc:
+            raise WebsiteAuthorityError("research_audience_changed", "The approved research audience changed.") from exc
+        if audience != request.get("research_audience"):
+            raise WebsiteAuthorityError("research_audience_changed", "The approved research audience changed.")
+    else:
+        if not explicit_portable_request(request):
+            with authority_guard(request, action="read"):
+                pass
+        policy_error = _refresh_article_editorial_payload(organization=row.organization, payload=request)
+        if policy_error is not None:
+            return "pending", str(policy_error.data.get("code") or "editorial_policy_recheck_required")[:100], ""
+        from integrations.services.article_generation import require_article_activation
+        require_article_activation(domain=row.organization.domain, actor_id=row.payload.get("actor_id") or "",
+            user=requester, expected_repo=request.get("github_repo", ""), article_request=request)
     require_unlocked_remote_call()
     response = http_client.post(f"{remote['base_url']}/api/runs/{row.payload['endpoint']}",
         headers=_content_factory_headers(), json=request, timeout=(3, 30))

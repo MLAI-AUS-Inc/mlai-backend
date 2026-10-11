@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from .commands import ContentCommand
+
 from content_factory.website_connections import guarded_backend_run_action
 from workflow_runs.status import (
     normalize_run_status as _normalize_remote_run_status,
@@ -885,41 +887,54 @@ def _charge_roo_points_for_content_island_topic_generation(request, *, context, 
         "user_avatar_url": getattr(request.user, "avatar_url", ""),
     }
     cost_points = get_content_factory_content_island_topic_cost_points(domain)
-    try:
-        charged_user, charge_ledger, charge_amount = charge_content_factory_topic_generation_for_user(
-            user=request.user,
-            actor_id=actor_id,
-            article_request=article_request,
-            resolved_domain=domain,
-        )
-    except InsufficientRooPointsError as exc:
-        return None, None, Response(
-            getattr(exc, "payload", None) or build_roo_points_payload(
+    # MCP research has a durable original-input receipt before a worker call.
+    # Existing HTTP clients retain their contract; only explicitly marked MCP
+    # requests enlist the existing outbox in the same Roo spend transaction.
+    durable = bool(payload.get("mcp_request_hash"))
+    with transaction.atomic() if durable else nullcontext():
+        try:
+            charged_user, charge_ledger, charge_amount = charge_content_factory_topic_generation_for_user(
+                user=request.user,
+                actor_id=actor_id,
+                article_request=article_request,
+                resolved_domain=domain,
+            )
+        except InsufficientRooPointsError as exc:
+            return None, None, Response(
+                getattr(exc, "payload", None) or build_roo_points_payload(
+                    domain=domain,
+                    action=CONTENT_FACTORY_ACTION_CONTENT_ISLAND_TOPIC_GENERATION,
+                    current_balance=_roo_points_balance_for_user(request.user),
+                    required_points=cost_points,
+                    cost_points=cost_points,
+                ),
+                status=status.HTTP_402_PAYMENT_REQUIRED,
+            )
+        except ArticleGenerationError as exc:
+            return None, None, Response(
+                {"detail": str(exc), "code": "roo_points_billing_required"},
+                status=status.HTTP_409_CONFLICT,
+            )
+
+        payload.update(
+            build_roo_points_authorization_payload(
                 domain=domain,
                 action=CONTENT_FACTORY_ACTION_CONTENT_ISLAND_TOPIC_GENERATION,
-                current_balance=_roo_points_balance_for_user(request.user),
+                cost_points=charge_amount,
                 required_points=cost_points,
-                cost_points=cost_points,
-            ),
-            status=status.HTTP_402_PAYMENT_REQUIRED,
+                current_balance=_roo_points_balance_for_user(request.user),
+                billing_status="charged" if charge_amount > 0 else "free",
+                ledger_id=getattr(charge_ledger, "id", None),
+            )
         )
-    except ArticleGenerationError as exc:
-        return None, None, Response(
-            {"detail": str(exc), "code": "roo_points_billing_required"},
-            status=status.HTTP_409_CONFLICT,
-        )
-
-    payload.update(
-        build_roo_points_authorization_payload(
-            domain=domain,
-            action=CONTENT_FACTORY_ACTION_CONTENT_ISLAND_TOPIC_GENERATION,
-            cost_points=charge_amount,
-            required_points=cost_points,
-            current_balance=_roo_points_balance_for_user(request.user),
-            billing_status="charged" if charge_amount > 0 else "free",
-            ledger_id=getattr(charge_ledger, "id", None),
-        )
-    )
+        if durable:
+            from .dispatch_outbox import reserve_dispatch
+            payload.update(dispatch_outbox_reserved=True,
+                roo_points_requested_by_user_id=request.user.pk,
+                roo_points_billing_user_id=charged_user.pk)
+            reserve_dispatch(organization=context.organization, payload=payload,
+                endpoint="discovery", workflow="auto_discovery",
+                billing_user_id=charged_user.pk, actor_id=actor_id)
     return charged_user, article_request, None
 
 
@@ -13712,7 +13727,8 @@ def _queue_content_factory_run_authorized(*, endpoint, workflow, context, config
         else:
             dispatch_unresolved = True
             if editorial_rejection is None:
-                remote_data = {"status": "queued", "message": "Starting your article. Delivery will retry automatically.",
+                subject = "research" if endpoint == "discovery" else "article"
+                remote_data = {"status": "queued", "message": f"Starting your {subject}. Delivery will retry automatically.",
                                "client_request_id": dispatch_key, "retryable": True}
 
     with transaction.atomic() if portable_reservation is not None else nullcontext():
@@ -16134,115 +16150,127 @@ class VibeMarketingArticleSetupDisconnectView(APIView):
 
 
 
+def start_article_research(*, user, context, data, request_hash=None):
+    """Execute the canonical owned operation for HTTP and MCP transports."""
+    command = ContentCommand(user=user, data=data)
+    config = _get_config(context.organization)
+    from .editorial_catalog import discovery_audience_context, CatalogConflict
+    try:
+        research_audience = discovery_audience_context(config.pillar_strategy, command.data)
+    except (ValueError, CatalogConflict) as exc:
+        return Response({"detail": str(exc)}, status=409)
+    # Topic research has no dependency on a merged repository scaffold.
+    payload = {
+        "domain": context.organization.domain,
+        "slack_user_id": founder_actor_id_for_user(command.user),
+        "request_source": CONTENT_FACTORY_REQUEST_SOURCE,
+    }
+    content_island_slug = str(
+        _request_value(command.data, "contentIslandSlug", "content_island_slug", default="") or ""
+    ).strip()
+    billing_refund_context = None
+    if content_island_slug:
+        from .custom_islands import resolve_island_discovery_scope
+        try:
+            island_scope = resolve_island_discovery_scope(context.organization, config, content_island_slug)
+        except ValueError as exc:
+            return Response({"detail": str(exc)}, status=400)
+        content_island_name = island_scope["name"]
+        content_island_keyword = island_scope["keyword"]
+        content_island_icon_key = island_scope["icon_key"]
+        content_island_color_key = island_scope["color_key"]
+        island_context = island_scope["context"]
+        try:
+            requested_topic_count = int(
+                _request_value(command.data, "requestedTopicCount", "requested_topic_count", default=4) or 4
+            )
+        except (TypeError, ValueError):
+            requested_topic_count = 4
+        payload.update(
+            {
+                "content_island_slug": content_island_slug,
+                "content_island_name": content_island_name,
+                "content_island_keyword": content_island_keyword or content_island_name,
+                "content_island_icon_key": content_island_icon_key,
+                "content_island_color_key": content_island_color_key,
+                "content_island_context": island_context,
+                "requested_topic_count": max(1, min(requested_topic_count, 8)),
+            }
+        )
+    else:
+        # Custom and general research use the same paid admission below.
+        custom_topic_title = str(
+            _request_value(command.data, "customTopicTitle", "custom_topic_title", default="") or ""
+        ).strip()
+        custom_topic_keyword = str(
+            _request_value(command.data, "customTopicKeyword", "custom_topic_keyword", default="") or ""
+        ).strip()
+        custom_topic_context = str(
+            _request_value(command.data, "customTopicContext", "custom_topic_context", default="") or ""
+        ).strip()
+        if custom_topic_title or custom_topic_keyword:
+            try:
+                custom_topic_count = int(
+                    _request_value(command.data, "requestedTopicCount", "requested_topic_count", default=4) or 4
+                )
+            except (TypeError, ValueError):
+                custom_topic_count = 4
+            payload.update(
+                {
+                    "custom_topic_title": custom_topic_title,
+                    "custom_topic_keyword": custom_topic_keyword or custom_topic_title,
+                    "custom_topic_context": custom_topic_context,
+                    "requested_topic_count": max(1, min(custom_topic_count, 8)),
+                }
+            )
+    try:
+        requested_count = int(_request_value(command.data, "requestedTopicCount", "requested_topic_count", default=4))
+    except (TypeError, ValueError):
+        requested_count = 4
+    payload.setdefault("requested_topic_count", max(1, min(requested_count, 8)))
+    if research_audience:
+        payload["research_audience"] = research_audience
+        payload["preferred_audience_id"] = research_audience["id"]
+        payload["expected_editorial_catalog_version"] = _request_value(
+            command.data, "expectedEditorialCatalogVersion", "expected_editorial_catalog_version")
+    if request_hash:
+        payload["mcp_request_hash"] = request_hash
+        payload["mcp_company_id"] = str(context.company.pk)
+    charged_user, article_request, billing_error = _charge_roo_points_for_content_island_topic_generation(
+        command,
+        context=context,
+        payload=payload,
+    )
+    if billing_error is not None:
+        return billing_error
+    billing_refund_context = {
+        "kind": CONTENT_FACTORY_ACTION_CONTENT_ISLAND_TOPIC_GENERATION,
+        "charged_user": charged_user,
+        "article_request": article_request,
+        "reason": "Vibe Marketing content-island topic generation queue did not start.",
+    }
+    run = _queue_content_factory_run(
+        endpoint="discovery",
+        workflow="auto_discovery",
+        context=context,
+        config=config,
+        payload=payload,
+        billing_refund_context=billing_refund_context,
+    )
+    if payload.get("custom_topic_keyword") and run.status not in {"failed", "blocked", "cancelled"}:
+        from integrations.services.daily_research_policy import record_engagement
+        record_engagement(context.organization, resume=True)
+    response_payload = _run_start_payload(run)
+    response_status = status.HTTP_503_SERVICE_UNAVAILABLE if run.status == ContentFactoryRunStatus.BLOCKED else status.HTTP_202_ACCEPTED
+    return Response(response_payload, status=response_status)
+
+
 class VibeMarketingDiscoveryView(APIView):
     def post(self, request):
         context, error_response = _resolve_context_or_response(request)
         if error_response:
             return error_response
-        config = _get_config(context.organization)
-        from .editorial_catalog import discovery_audience_context, CatalogConflict
-        try:
-            research_audience = discovery_audience_context(config.pillar_strategy, request.data)
-        except (ValueError, CatalogConflict) as exc:
-            return Response({"detail": str(exc)}, status=409)
-        # Topic research has no dependency on a merged repository scaffold.
-        payload = {
-            "domain": context.organization.domain,
-            "slack_user_id": founder_actor_id_for_user(request.user),
-            "request_source": CONTENT_FACTORY_REQUEST_SOURCE,
-        }
-        content_island_slug = str(
-            _request_value(request.data, "contentIslandSlug", "content_island_slug", default="") or ""
-        ).strip()
-        billing_refund_context = None
-        if content_island_slug:
-            from .custom_islands import resolve_island_discovery_scope
-            try:
-                island_scope = resolve_island_discovery_scope(context.organization, config, content_island_slug)
-            except ValueError as exc:
-                return Response({"detail": str(exc)}, status=400)
-            content_island_name = island_scope["name"]
-            content_island_keyword = island_scope["keyword"]
-            content_island_icon_key = island_scope["icon_key"]
-            content_island_color_key = island_scope["color_key"]
-            island_context = island_scope["context"]
-            try:
-                requested_topic_count = int(
-                    _request_value(request.data, "requestedTopicCount", "requested_topic_count", default=4) or 4
-                )
-            except (TypeError, ValueError):
-                requested_topic_count = 4
-            payload.update(
-                {
-                    "content_island_slug": content_island_slug,
-                    "content_island_name": content_island_name,
-                    "content_island_keyword": content_island_keyword or content_island_name,
-                    "content_island_icon_key": content_island_icon_key,
-                    "content_island_color_key": content_island_color_key,
-                    "content_island_context": island_context,
-                    "requested_topic_count": max(1, min(requested_topic_count, 8)),
-                }
-            )
-        else:
-            # Custom and general research use the same paid admission below.
-            custom_topic_title = str(
-                _request_value(request.data, "customTopicTitle", "custom_topic_title", default="") or ""
-            ).strip()
-            custom_topic_keyword = str(
-                _request_value(request.data, "customTopicKeyword", "custom_topic_keyword", default="") or ""
-            ).strip()
-            custom_topic_context = str(
-                _request_value(request.data, "customTopicContext", "custom_topic_context", default="") or ""
-            ).strip()
-            if custom_topic_title or custom_topic_keyword:
-                try:
-                    custom_topic_count = int(
-                        _request_value(request.data, "requestedTopicCount", "requested_topic_count", default=4) or 4
-                    )
-                except (TypeError, ValueError):
-                    custom_topic_count = 4
-                payload.update(
-                    {
-                        "custom_topic_title": custom_topic_title,
-                        "custom_topic_keyword": custom_topic_keyword or custom_topic_title,
-                        "custom_topic_context": custom_topic_context,
-                        "requested_topic_count": max(1, min(custom_topic_count, 8)),
-                    }
-                )
-        try:
-            requested_count = int(_request_value(request.data, "requestedTopicCount", "requested_topic_count", default=4))
-        except (TypeError, ValueError):
-            requested_count = 4
-        payload.setdefault("requested_topic_count", max(1, min(requested_count, 8)))
-        charged_user, article_request, billing_error = _charge_roo_points_for_content_island_topic_generation(
-            request,
-            context=context,
-            payload=payload,
-        )
-        if billing_error is not None:
-            return billing_error
-        billing_refund_context = {
-            "kind": CONTENT_FACTORY_ACTION_CONTENT_ISLAND_TOPIC_GENERATION,
-            "charged_user": charged_user,
-            "article_request": article_request,
-            "reason": "Vibe Marketing content-island topic generation queue did not start.",
-        }
-        if research_audience:
-            payload["research_audience"] = research_audience
-        run = _queue_content_factory_run(
-            endpoint="discovery",
-            workflow="auto_discovery",
-            context=context,
-            config=config,
-            payload=payload,
-            billing_refund_context=billing_refund_context,
-        )
-        if payload.get("custom_topic_keyword") and run.status not in {"failed", "blocked", "cancelled"}:
-            from integrations.services.daily_research_policy import record_engagement
-            record_engagement(context.organization, resume=True)
-        response_payload = _run_start_payload(run)
-        response_status = status.HTTP_503_SERVICE_UNAVAILABLE if run.status == ContentFactoryRunStatus.BLOCKED else status.HTTP_202_ACCEPTED
-        return Response(response_payload, status=response_status)
+        return start_article_research(user=request.user, context=context, data=request.data)
 
 
 def _topic_selection_candidate_pool(organization, config):
@@ -16433,290 +16461,300 @@ def _article_selection_conflicts(*, submitted, resolved):
     return conflicts
 
 
+def start_article_generation(*, user, context, data, request_hash=None, website_contract=None):
+    """Execute the canonical owned operation for HTTP and MCP transports."""
+    command = ContentCommand(user=user, data=data)
+    config = _get_config(context.organization)
+    blocked_response = _setup_blocked_response_for_generation(context, config, request_data=command.data)
+    if blocked_response is not None:
+        return blocked_response
+    selected_title = str(
+        _request_value(command.data, "selected_title", "selectedTitle", "candidate_title", "candidateTitle", default="")
+        or ""
+    ).strip()
+    custom_title = str(
+        _request_value(command.data, "custom_title", "customTitle", "title", "titleAngle", default="") or ""
+    ).strip()
+    topic_value = str(_request_value(command.data, "topic", default="") or "").strip()
+    target_keyword = str(
+        _request_value(
+            command.data,
+            "target_keyword",
+            "targetKeyword",
+            "custom_keyword",
+            "customKeyword",
+            "keyword",
+            "candidate_keyword",
+            "candidateKeyword",
+            default="",
+        )
+        or ""
+    ).strip()
+    topic_candidate_id = str(_request_value(command.data, "topic_candidate_id", "topicCandidateId", default="") or "").strip()
+    is_custom_topic = not topic_candidate_id or topic_candidate_id == "__custom__"
+    client_source_run_id = str(
+        _request_value(
+            command.data,
+            "source_run_id",
+            "sourceRunId",
+            "source_discovery_run_id",
+            "sourceDiscoveryRunId",
+            default="",
+        )
+        or ""
+    ).strip()
+    client_selection = {
+        "topic": topic_value,
+        "selected_title": selected_title,
+        "custom_title": custom_title,
+        "target_keyword": target_keyword,
+        "source_run_id": client_source_run_id,
+    }
+    selected_candidate = None
+    selection_conflicts = {}
+    if not is_custom_topic:
+        selected_candidate = _resolve_topic_selection_candidate(
+            context.organization,
+            config,
+            topic_candidate_id,
+            submitted=client_selection,
+        )
+        if not selected_candidate:
+            return Response(
+                {
+                    "detail": "That topic is no longer available. Choose another topic or enter a custom one.",
+                    "field": "topicCandidateId",
+                    "topicCandidateId": topic_candidate_id,
+                },
+                status=status.HTTP_409_CONFLICT,
+            )
+        resolved_title = str(selected_candidate.get("title") or selected_candidate.get("keyword") or "").strip()
+        resolved_keyword = str(selected_candidate.get("keyword") or resolved_title or "").strip()
+        resolved_source_run_id = str(selected_candidate.get("sourceRunId") or "").strip()
+        selection_conflicts = _article_selection_conflicts(
+            submitted=client_selection,
+            resolved={
+                "topic": resolved_title,
+                "selected_title": resolved_title,
+                "custom_title": resolved_title,
+                "target_keyword": resolved_keyword,
+                "source_run_id": resolved_source_run_id,
+            },
+        )
+        if selection_conflicts:
+            logger.warning(
+                "vibe_marketing_topic_selection_conflict domain=%s topic_candidate_id=%s conflicts=%s",
+                context.organization.domain,
+                topic_candidate_id,
+                selection_conflicts,
+            )
+            return Response(
+                {
+                    "detail": "The selected topic no longer matches the submitted article fields. Refresh and choose the topic again.",
+                    "field": "topicCandidateId",
+                    "topicCandidateId": topic_candidate_id,
+                    "conflicts": selection_conflicts,
+                },
+                status=status.HTTP_409_CONFLICT,
+            )
+        selected_title = resolved_title
+        custom_title = ""
+        topic_value = resolved_title
+        target_keyword = resolved_keyword
+    topic = selected_title or custom_title or topic_value or target_keyword
+    if not (selected_title or custom_title or topic_value or target_keyword):
+        return Response(
+            {
+                "detail": "Choose a discovered topic or enter a custom title or keyword before generating an article.",
+                "field": "topicCandidateId",
+            },
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+    coverage_match = match_covered_topic(
+        organization=context.organization,
+        keyword=target_keyword or topic,
+        title=selected_title or custom_title or topic,
+    )
+    distinct_custom_task = False
+    if coverage_match and custom_title and not selected_candidate and coverage_match.article:
+        from .article_editorial import custom_article_has_distinct_task
+        try:
+            reviewed_brief = article_brief_for_catalog(config.pillar_strategy, command.data)
+            distinct_custom_task = custom_article_has_distinct_task(context.organization, coverage_match.article, reviewed_brief, custom_title)
+        except ValueError:
+            pass  # The normal admission validation supplies the actionable error.
+    if coverage_match and not distinct_custom_task:
+        written_article = coverage_match.article
+        return Response(
+            {
+                "detail": (
+                    "This topic has already been written. Choose a pending topic or enter a new custom article."
+                    if written_article
+                    else "This topic is not available because it matches a previously skipped or covered topic."
+                ),
+                "field": "topicCandidateId",
+                "writtenArticle": _serialize_written_article(written_article) if written_article else None,
+                "coveredTopic": _serialize_topic_coverage_match(coverage_match),
+            },
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+    source_run_id = str(selected_candidate.get("sourceRunId") or "").strip() if selected_candidate else None
+    requested_delivery_mode = _request_value(command.data, "delivery_mode", "deliveryMode", default=None)
+    delivery_mode_explicit = _bool_from_request(
+        _request_value(
+            command.data,
+            "delivery_mode_explicit",
+            "deliveryModeExplicit",
+            default=False,
+        )
+    )
+    # "Operable" repo = the platform can actually reach the repo: a live user OAuth
+    # token OR a stamped GitHub App installation (the credential every scan/scaffold/
+    # publish/live-preview operation authenticates with). The prior check only honored
+    # the user token, so a fully-scaffolded org running on an App installation (the
+    # fleet norm) 409-ed here with a misleading "connect the article location" message.
+    github_ready = _github_repo_operable(config)
+    article_ready = article_system_ready(resolve_article_system(config)) or bool(config.publish_targets)
+    has_repo_setup_intent = bool(config.github_repo or config.github_connection_state == "connected")
+    if not delivery_mode_explicit and has_repo_setup_intent and not github_ready:
+        # An implicit exact-preview request still needs a credential that the
+        # Content Factory token service can mint from. Surface readiness is
+        # deliberately *not* enforced here: Content Factory owns the durable
+        # scan -> scaffold -> resume repair loop and must receive the article
+        # request in order to run it.
+        #
+        # Blocking an operable repo merely because its latest scan is
+        # ambiguous creates a deadlock: the backend asks the founder to
+        # verify the article location, while the self-healing scan that can
+        # perform that verification is never queued.
+        return Response(
+            {
+                "status": "setup_required",
+                "nextRequiredStep": "connect_github",
+                "next_required_step": "connect_github",
+                "detail": (
+                    "Reconnect GitHub before generating an exact preview article — the "
+                    "platform no longer has access to this repository (the GitHub App "
+                    "installation is missing or revoked and any saved token has expired)."
+                ),
+                "fallbackReason": "github_auth_required",
+                "fallback_reason": "github_auth_required",
+            },
+            status=status.HTTP_409_CONFLICT,
+        )
+    if not delivery_mode_explicit and github_ready and not article_ready:
+        logger.info(
+            "vibe_marketing_article_surface_repair_delegated domain=%s github_repo=%s "
+            "article_system_state=%s publish_target_count=%s",
+            context.organization.domain,
+            config.github_repo,
+            resolve_article_system(config).get("state"),
+            len(config.publish_targets or []),
+        )
+    delivery_mode = (
+        _effective_article_delivery_mode(
+            config,
+            requested_mode=requested_delivery_mode,
+            explicit=True,
+        )
+        if delivery_mode_explicit
+        else ""
+    )
+    payload = {
+        "domain": context.organization.domain,
+        "slack_user_id": founder_actor_id_for_user(command.user),
+        "topic": topic,
+        "target_keyword": target_keyword or topic,
+        "context": str(command.data.get("context") or ""),
+        "github_repo": config.github_repo,
+        "delivery_mode_explicit": delivery_mode_explicit,
+        "delivery_mode_confirmed": bool(delivery_mode_explicit),
+        "source_run_id": source_run_id,
+        "custom_title": selected_title or custom_title or None,
+        "topic_candidate_id": None if is_custom_topic else topic_candidate_id,
+        "topic_selection": {
+            "topicCandidateId": None if is_custom_topic else topic_candidate_id,
+            "resolved": {
+                "id": selected_candidate.get("id") if selected_candidate else None,
+                "rawCandidateId": selected_candidate.get("rawCandidateId") if selected_candidate else None,
+                "title": selected_title or custom_title or topic,
+                "keyword": target_keyword or topic,
+                "sourceRunId": source_run_id or "",
+                "source": selected_candidate.get("source") if selected_candidate else "custom",
+            },
+            "submitted": client_selection,
+            "conflicts": selection_conflicts,
+        },
+        "request_source": CONTENT_FACTORY_REQUEST_SOURCE,
+        "analytics_article_id": str(uuid.uuid4()),
+    }
+    # Resolve the explicit decision without dropping null/conflicting aliases
+    # or treating an empty configured catalogue as legacy permission.
+    try:
+        editorial_brief = article_brief_for_catalog(config.pillar_strategy, command.data)
+    except ValueError as exc:
+        return Response({"detail": str(exc), "field": "editorialBrief"}, status=status.HTTP_400_BAD_REQUEST)
+    if editorial_brief is not None:
+        payload["editorial_brief"] = editorial_brief
+    payload["analytics_config"] = analytics_config_for_content_factory(
+        context.organization,
+        analytics_article_id=payload["analytics_article_id"],
+        provision_if_missing=True,
+    )
+    if delivery_mode_explicit and delivery_mode:
+        payload["delivery_mode"] = delivery_mode
+    # Byline: resolve the per-article author pick (else the org default) and carry the resolved
+    # profile so content-factory's renderer stamps the right author for this run.
+    article_authors = normalize_authors(config.authors)
+    requested_author_id = str(_request_value(command.data, "author_id", "authorId", default="") or "").strip()
+    effective_author = resolve_default_author(article_authors, requested_author_id or config.default_author_id)
+    if effective_author:
+        payload["author_id"] = effective_author.get("id", "")
+        payload["default_author_name"] = effective_author.get("name", "")
+        payload["default_author_profile"] = author_profile_for_renderer(effective_author)
+    if website_contract:
+        payload.update(website_contract)
+    if request_hash:
+        payload["mcp_request_hash"] = request_hash
+    charged_user, _charge_ledger, article_request, billing_error = _charge_roo_points_for_article(
+        command,
+        context=context,
+        payload=payload,
+    )
+    if billing_error is not None:
+        return billing_error
+    logger.info(
+        "vibe_marketing_article_selection domain=%s topic_candidate_id=%s title=%s keyword=%s source_run_id=%s",
+        context.organization.domain,
+        payload.get("topic_candidate_id") or "custom",
+        topic,
+        payload["target_keyword"],
+        source_run_id or "",
+    )
+    run = _queue_content_factory_run(
+        endpoint="article",
+        workflow="article_generation",
+        context=context,
+        config=config,
+        payload=payload,
+        billing_refund_context={
+            "charged_user": charged_user,
+            "article_request": article_request,
+            "reason": "Vibe Marketing article queue did not start.",
+        },
+    )
+    if run.status not in FAILED_RUN_STATUSES:
+        _mark_keyword_in_progress(context.organization, payload["target_keyword"])
+    return Response({"run_id": run.run_id, "runId": run.run_id, "status": run.status}, status=status.HTTP_202_ACCEPTED)
+
+
 class VibeMarketingArticleView(APIView):
     @guarded_owner_operation("read", run_operation=False)
     def post(self, request):
         context, error_response = _resolve_context_or_response(request)
         if error_response:
             return error_response
-        config = _get_config(context.organization)
-        blocked_response = _setup_blocked_response_for_generation(context, config, request_data=request.data)
-        if blocked_response is not None:
-            return blocked_response
-        selected_title = str(
-            _request_value(request.data, "selected_title", "selectedTitle", "candidate_title", "candidateTitle", default="")
-            or ""
-        ).strip()
-        custom_title = str(
-            _request_value(request.data, "custom_title", "customTitle", "title", "titleAngle", default="") or ""
-        ).strip()
-        topic_value = str(_request_value(request.data, "topic", default="") or "").strip()
-        target_keyword = str(
-            _request_value(
-                request.data,
-                "target_keyword",
-                "targetKeyword",
-                "custom_keyword",
-                "customKeyword",
-                "keyword",
-                "candidate_keyword",
-                "candidateKeyword",
-                default="",
-            )
-            or ""
-        ).strip()
-        topic_candidate_id = str(_request_value(request.data, "topic_candidate_id", "topicCandidateId", default="") or "").strip()
-        is_custom_topic = not topic_candidate_id or topic_candidate_id == "__custom__"
-        client_source_run_id = str(
-            _request_value(
-                request.data,
-                "source_run_id",
-                "sourceRunId",
-                "source_discovery_run_id",
-                "sourceDiscoveryRunId",
-                default="",
-            )
-            or ""
-        ).strip()
-        client_selection = {
-            "topic": topic_value,
-            "selected_title": selected_title,
-            "custom_title": custom_title,
-            "target_keyword": target_keyword,
-            "source_run_id": client_source_run_id,
-        }
-        selected_candidate = None
-        selection_conflicts = {}
-        if not is_custom_topic:
-            selected_candidate = _resolve_topic_selection_candidate(
-                context.organization,
-                config,
-                topic_candidate_id,
-                submitted=client_selection,
-            )
-            if not selected_candidate:
-                return Response(
-                    {
-                        "detail": "That topic is no longer available. Choose another topic or enter a custom one.",
-                        "field": "topicCandidateId",
-                        "topicCandidateId": topic_candidate_id,
-                    },
-                    status=status.HTTP_409_CONFLICT,
-                )
-            resolved_title = str(selected_candidate.get("title") or selected_candidate.get("keyword") or "").strip()
-            resolved_keyword = str(selected_candidate.get("keyword") or resolved_title or "").strip()
-            resolved_source_run_id = str(selected_candidate.get("sourceRunId") or "").strip()
-            selection_conflicts = _article_selection_conflicts(
-                submitted=client_selection,
-                resolved={
-                    "topic": resolved_title,
-                    "selected_title": resolved_title,
-                    "custom_title": resolved_title,
-                    "target_keyword": resolved_keyword,
-                    "source_run_id": resolved_source_run_id,
-                },
-            )
-            if selection_conflicts:
-                logger.warning(
-                    "vibe_marketing_topic_selection_conflict domain=%s topic_candidate_id=%s conflicts=%s",
-                    context.organization.domain,
-                    topic_candidate_id,
-                    selection_conflicts,
-                )
-                return Response(
-                    {
-                        "detail": "The selected topic no longer matches the submitted article fields. Refresh and choose the topic again.",
-                        "field": "topicCandidateId",
-                        "topicCandidateId": topic_candidate_id,
-                        "conflicts": selection_conflicts,
-                    },
-                    status=status.HTTP_409_CONFLICT,
-                )
-            selected_title = resolved_title
-            custom_title = ""
-            topic_value = resolved_title
-            target_keyword = resolved_keyword
-        topic = selected_title or custom_title or topic_value or target_keyword
-        if not (selected_title or custom_title or topic_value or target_keyword):
-            return Response(
-                {
-                    "detail": "Choose a discovered topic or enter a custom title or keyword before generating an article.",
-                    "field": "topicCandidateId",
-                },
-                status=status.HTTP_400_BAD_REQUEST,
-            )
-        coverage_match = match_covered_topic(
-            organization=context.organization,
-            keyword=target_keyword or topic,
-            title=selected_title or custom_title or topic,
-        )
-        distinct_custom_task = False
-        if coverage_match and custom_title and not selected_candidate and coverage_match.article:
-            from .article_editorial import custom_article_has_distinct_task
-            try:
-                reviewed_brief = article_brief_for_catalog(config.pillar_strategy, request.data)
-                distinct_custom_task = custom_article_has_distinct_task(context.organization, coverage_match.article, reviewed_brief, custom_title)
-            except ValueError:
-                pass  # The normal admission validation supplies the actionable error.
-        if coverage_match and not distinct_custom_task:
-            written_article = coverage_match.article
-            return Response(
-                {
-                    "detail": (
-                        "This topic has already been written. Choose a pending topic or enter a new custom article."
-                        if written_article
-                        else "This topic is not available because it matches a previously skipped or covered topic."
-                    ),
-                    "field": "topicCandidateId",
-                    "writtenArticle": _serialize_written_article(written_article) if written_article else None,
-                    "coveredTopic": _serialize_topic_coverage_match(coverage_match),
-                },
-                status=status.HTTP_400_BAD_REQUEST,
-            )
-        source_run_id = str(selected_candidate.get("sourceRunId") or "").strip() if selected_candidate else None
-        requested_delivery_mode = _request_value(request.data, "delivery_mode", "deliveryMode", default=None)
-        delivery_mode_explicit = _bool_from_request(
-            _request_value(
-                request.data,
-                "delivery_mode_explicit",
-                "deliveryModeExplicit",
-                default=False,
-            )
-        )
-        # "Operable" repo = the platform can actually reach the repo: a live user OAuth
-        # token OR a stamped GitHub App installation (the credential every scan/scaffold/
-        # publish/live-preview operation authenticates with). The prior check only honored
-        # the user token, so a fully-scaffolded org running on an App installation (the
-        # fleet norm) 409-ed here with a misleading "connect the article location" message.
-        github_ready = _github_repo_operable(config)
-        article_ready = article_system_ready(resolve_article_system(config)) or bool(config.publish_targets)
-        has_repo_setup_intent = bool(config.github_repo or config.github_connection_state == "connected")
-        if not delivery_mode_explicit and has_repo_setup_intent and not github_ready:
-            # An implicit exact-preview request still needs a credential that the
-            # Content Factory token service can mint from. Surface readiness is
-            # deliberately *not* enforced here: Content Factory owns the durable
-            # scan -> scaffold -> resume repair loop and must receive the article
-            # request in order to run it.
-            #
-            # Blocking an operable repo merely because its latest scan is
-            # ambiguous creates a deadlock: the backend asks the founder to
-            # verify the article location, while the self-healing scan that can
-            # perform that verification is never queued.
-            return Response(
-                {
-                    "status": "setup_required",
-                    "nextRequiredStep": "connect_github",
-                    "next_required_step": "connect_github",
-                    "detail": (
-                        "Reconnect GitHub before generating an exact preview article — the "
-                        "platform no longer has access to this repository (the GitHub App "
-                        "installation is missing or revoked and any saved token has expired)."
-                    ),
-                    "fallbackReason": "github_auth_required",
-                    "fallback_reason": "github_auth_required",
-                },
-                status=status.HTTP_409_CONFLICT,
-            )
-        if not delivery_mode_explicit and github_ready and not article_ready:
-            logger.info(
-                "vibe_marketing_article_surface_repair_delegated domain=%s github_repo=%s "
-                "article_system_state=%s publish_target_count=%s",
-                context.organization.domain,
-                config.github_repo,
-                resolve_article_system(config).get("state"),
-                len(config.publish_targets or []),
-            )
-        delivery_mode = (
-            _effective_article_delivery_mode(
-                config,
-                requested_mode=requested_delivery_mode,
-                explicit=True,
-            )
-            if delivery_mode_explicit
-            else ""
-        )
-        payload = {
-            "domain": context.organization.domain,
-            "slack_user_id": founder_actor_id_for_user(request.user),
-            "topic": topic,
-            "target_keyword": target_keyword or topic,
-            "context": str(request.data.get("context") or ""),
-            "github_repo": config.github_repo,
-            "delivery_mode_explicit": delivery_mode_explicit,
-            "delivery_mode_confirmed": bool(delivery_mode_explicit),
-            "source_run_id": source_run_id,
-            "custom_title": selected_title or custom_title or None,
-            "topic_candidate_id": None if is_custom_topic else topic_candidate_id,
-            "topic_selection": {
-                "topicCandidateId": None if is_custom_topic else topic_candidate_id,
-                "resolved": {
-                    "id": selected_candidate.get("id") if selected_candidate else None,
-                    "rawCandidateId": selected_candidate.get("rawCandidateId") if selected_candidate else None,
-                    "title": selected_title or custom_title or topic,
-                    "keyword": target_keyword or topic,
-                    "sourceRunId": source_run_id or "",
-                    "source": selected_candidate.get("source") if selected_candidate else "custom",
-                },
-                "submitted": client_selection,
-                "conflicts": selection_conflicts,
-            },
-            "request_source": CONTENT_FACTORY_REQUEST_SOURCE,
-            "analytics_article_id": str(uuid.uuid4()),
-        }
-        # Resolve the explicit decision without dropping null/conflicting aliases
-        # or treating an empty configured catalogue as legacy permission.
-        try:
-            editorial_brief = article_brief_for_catalog(config.pillar_strategy, request.data)
-        except ValueError as exc:
-            return Response({"detail": str(exc), "field": "editorialBrief"}, status=status.HTTP_400_BAD_REQUEST)
-        if editorial_brief is not None:
-            payload["editorial_brief"] = editorial_brief
-        payload["analytics_config"] = analytics_config_for_content_factory(
-            context.organization,
-            analytics_article_id=payload["analytics_article_id"],
-            provision_if_missing=True,
-        )
-        if delivery_mode_explicit and delivery_mode:
-            payload["delivery_mode"] = delivery_mode
-        # Byline: resolve the per-article author pick (else the org default) and carry the resolved
-        # profile so content-factory's renderer stamps the right author for this run.
-        article_authors = normalize_authors(config.authors)
-        requested_author_id = str(_request_value(request.data, "author_id", "authorId", default="") or "").strip()
-        effective_author = resolve_default_author(article_authors, requested_author_id or config.default_author_id)
-        if effective_author:
-            payload["author_id"] = effective_author.get("id", "")
-            payload["default_author_name"] = effective_author.get("name", "")
-            payload["default_author_profile"] = author_profile_for_renderer(effective_author)
-        charged_user, _charge_ledger, article_request, billing_error = _charge_roo_points_for_article(
-            request,
-            context=context,
-            payload=payload,
-        )
-        if billing_error is not None:
-            return billing_error
-        logger.info(
-            "vibe_marketing_article_selection domain=%s topic_candidate_id=%s title=%s keyword=%s source_run_id=%s",
-            context.organization.domain,
-            payload.get("topic_candidate_id") or "custom",
-            topic,
-            payload["target_keyword"],
-            source_run_id or "",
-        )
-        run = _queue_content_factory_run(
-            endpoint="article",
-            workflow="article_generation",
-            context=context,
-            config=config,
-            payload=payload,
-            billing_refund_context={
-                "charged_user": charged_user,
-                "article_request": article_request,
-                "reason": "Vibe Marketing article queue did not start.",
-            },
-        )
-        if run.status not in FAILED_RUN_STATUSES:
-            _mark_keyword_in_progress(context.organization, payload["target_keyword"])
-        return Response({"run_id": run.run_id, "runId": run.run_id, "status": run.status}, status=status.HTTP_202_ACCEPTED)
+        return start_article_generation(user=request.user, context=context, data=request.data)
 
 
 class VibeMarketingRunView(APIView):
@@ -18000,6 +18038,796 @@ def _project_setup_pr_creation_failure(run, config, remote_data):
     return detail
 
 
+def control_article_run(*, user, context, run, action, data, run_id=None):
+    """Execute the canonical owned operation for HTTP and MCP transports."""
+    command = ContentCommand(user=user, data=data)
+    run_id = run_id or run.run_id
+    gated_actions = {"restart", "resume", "revise", "regenerate-image", "regenerate-images", "retry-preview-quality", "promote-bundle", "publish-pr", "approve", "merge-publish-pr"}
+    if action in gated_actions and run.workflow in ARTICLE_WORKFLOWS | {"article_publish", "publish_article"}:
+        blocked = _setup_blocked_response_for_generation(context, _get_config(context.organization), run=run,
+            publishing=action in {"promote-bundle", "publish-pr", "approve", "merge-publish-pr"})
+        if blocked is not None:
+            return blocked
+
+    approval_requires_receipt = (
+        action == "approve"
+        and run.workflow in ARTICLE_WORKFLOWS
+        and not _is_publish_child_run(run)
+    )
+    if approval_requires_receipt:
+        from .article_review_views import check_approval_comments
+        comment_error = check_approval_comments(run, command.data)
+        if comment_error is not None:
+            return comment_error
+        latest_revision = _latest_review_ready_component_revision(run, context)
+        if latest_revision is not None:
+            return Response(
+                {
+                    "detail": "A newer article revision is ready. Review and approve that draft instead.",
+                    "latestRunId": latest_revision.run_id,
+                },
+                status=status.HTTP_409_CONFLICT,
+            )
+        if not article_review_identity_is_complete(run):
+            return Response(
+                {"detail": "The hosted article preview and quality review must match this revision before approval."},
+                status=status.HTTP_409_CONFLICT,
+            )
+
+    approval_review_identity = (
+        article_review_identity(run)
+        if approval_requires_receipt
+        else None
+    )
+
+    payload = dict(command.data or {})
+    payload.setdefault("request_source", CONTENT_FACTORY_REQUEST_SOURCE)
+    payload.setdefault("slack_user_id", founder_actor_id_for_user(command.user))
+    auto_merge_requested = bool(
+        action in {"promote-bundle", "publish-pr", "approve"}
+        and run.workflow in ARTICLE_WORKFLOWS
+        and _payload_requests_auto_merge(payload)
+    )
+    if auto_merge_requested:
+        payload["auto_merge"] = True
+    if action in {"promote-bundle", "publish-pr", "approve", "merge-publish-pr"} and run.workflow in ARTICLE_WORKFLOWS:
+        from .incident_guards import publish_child_binding
+        try:
+            payload.update(publish_child_binding(_get_config(context.organization), run, payload, {}))
+        except WebsiteAuthorityError as exc:
+            return Response(exc.as_dict(), status=exc.status)
+
+    if action == "cancel":
+        if run.workflow in SCAN_WORKFLOWS:
+            remote_data = _call_content_factory_run_action(
+                run_id=run_id,
+                action=action,
+                payload=payload,
+                workflow=run.workflow,
+                timeout=(2, 8),
+                transport_errors_are_pending=True,
+            )
+            run = _cancel_local_scan_run(run=run, remote_data=remote_data)
+            run = ContentFactoryRun.objects.prefetch_related("steps").get(pk=run.pk)
+            return Response(_serialize_run(run, context=context), status=status.HTTP_202_ACCEPTED)
+
+        if run.workflow in ARTICLE_SYSTEM_SETUP_WORKFLOWS:
+            if _run_has_external_publish_evidence(run):
+                return Response(
+                    {
+                        "detail": (
+                            "This articles setup already has setup PR evidence. "
+                            "Close or clean up the external PR manually before cancelling."
+                        )
+                    },
+                    status=status.HTTP_409_CONFLICT,
+                )
+            remote_data = _call_content_factory_run_action(
+                run_id=run_id,
+                action=action,
+                payload=payload,
+                workflow=run.workflow,
+                timeout=(3, 30),
+            )
+            remote_status_code = int(remote_data.get("content_factory_status_code") or 0)
+            if remote_data.get("error"):
+                response_status = (
+                    status.HTTP_409_CONFLICT
+                    if remote_status_code == 409
+                    else status.HTTP_502_BAD_GATEWAY
+                )
+                return Response(
+                    {
+                        "detail": remote_data.get("error") or "Content Factory could not cancel this setup build.",
+                        "retryable": bool(remote_data.get("retryable")),
+                    },
+                    status=response_status,
+                )
+            run = _cancel_local_article_system_setup_run(
+                run=run,
+                organization=context.organization,
+                remote_data=remote_data,
+            )
+            run = ContentFactoryRun.objects.prefetch_related("steps").get(pk=run.pk)
+            return Response(_serialize_run(run, context=context), status=status.HTTP_202_ACCEPTED)
+
+        if run.workflow not in ARTICLE_WORKFLOWS:
+            return Response({"detail": "Only article runs can be cancelled from this action."}, status=status.HTTP_400_BAD_REQUEST)
+
+        if bool(payload.get("cancel_group") or payload.get("cancelGroup")):
+            members = _article_draft_group_members(run, context.organization)
+            cancelled_ids = []
+            protected_ids = []
+            for member in members:
+                if _run_has_external_publish_evidence(member):
+                    protected_ids.append(member.run_id)
+                    continue
+                member_remote = _call_content_factory_run_action(
+                    run_id=member.run_id,
+                    action="cancel",
+                    payload=payload,
+                    workflow=member.workflow,
+                )
+                if int(member_remote.get("content_factory_status_code") or 0) == 409:
+                    protected_ids.append(member.run_id)
+                    continue
+                _cancel_local_article_run(run=member, organization=context.organization, remote_data=member_remote)
+                cancelled_ids.append(member.run_id)
+
+            if not cancelled_ids and protected_ids:
+                return Response(
+                    {"detail": "This article already has external publish evidence. Close or clean up the external PR manually before cancelling."},
+                    status=status.HTTP_409_CONFLICT,
+                )
+
+            run = ContentFactoryRun.objects.prefetch_related("steps").get(pk=run.pk)
+            body = _serialize_run(run, context=context)
+            body["cancelledRunIds"] = cancelled_ids
+            body["protectedRunIds"] = protected_ids
+            return Response(body, status=status.HTTP_202_ACCEPTED)
+
+        if _run_has_external_publish_evidence(run):
+            return Response(
+                {"detail": "This article already has external publish evidence. Close or clean up the external PR manually before cancelling."},
+                status=status.HTTP_409_CONFLICT,
+            )
+
+        remote_data = _call_content_factory_run_action(run_id=run_id, action=action, payload=payload, workflow=run.workflow)
+        if int(remote_data.get("content_factory_status_code") or 0) == 409:
+            detail = remote_data.get("error") or "Content Factory rejected cancellation for this run."
+            return Response({"detail": detail}, status=status.HTTP_409_CONFLICT)
+
+        run = _cancel_local_article_run(run=run, organization=context.organization, remote_data=remote_data)
+        run = ContentFactoryRun.objects.prefetch_related("steps").get(pk=run.pk)
+        return Response(_serialize_run(run, context=context), status=status.HTTP_202_ACCEPTED)
+
+    if action == "restart":
+        restarted_run, restart_error = _restart_article_run(run=run, context=context)
+        if restart_error:
+            return restart_error
+        return Response(_serialize_run(restarted_run, context=context), status=status.HTTP_202_ACCEPTED)
+
+    if action == "enable-daily-automation":
+        quote_error = _quoted_price_response(command, cost_points=get_content_factory_research_cost_points(context.organization.domain, 3))
+        if quote_error:
+            return quote_error
+        from integrations.services.notification_channels import (
+            ensure_research_automation_for_org,
+            serialize_channel,
+        )
+
+        config = _get_config(context.organization)
+        _assign_config_actor(config, command.user)
+        if command.data.get("default_timezone") or command.data.get("defaultTimezone"):
+            config.default_timezone = command.data.get("default_timezone") or command.data.get("defaultTimezone")
+        config.daily_discovery_enabled = True
+        checks = _profile_checks(
+            context.organization,
+            config,
+            _latest_runs_for_org(context.organization),
+            _latest_baseline_snapshot(context.organization),
+        )
+        if not checks["dailyAutomation"]["passed"]:
+            return Response(
+                {"detail": "Daily generation prerequisites are not complete.", "checks": checks},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        config.save(update_fields=["daily_discovery_enabled", "default_timezone", "updated_at"])
+        automation, automation_channels = ensure_research_automation_for_org(
+            organization=context.organization,
+            user=command.user,
+            timezone_name=config.default_timezone or "Australia/Melbourne",
+            enabled=True,
+            config=config,
+        )
+        result = run.result or {}
+        result["daily_automation_enabled_at"] = timezone.now().isoformat()
+        result["daily_automation_timezone"] = config.default_timezone
+        if automation is not None:
+            result["daily_automation_id"] = str(automation.id)
+            result["daily_automation_channels"] = [
+                serialize_channel(channel, primary_channel_id=automation.notification_channel_id)
+                for channel in automation_channels
+            ]
+        else:
+            # No verified channel and Slack couldn't be auto-linked; the
+            # legacy shared daily queue keeps serving this org.
+            result["daily_automation_channel_warning"] = "no_verified_channels"
+        run.result = result
+        run.save(update_fields=["result", "updated_at"])
+        return Response(_serialize_run(run, context=context), status=status.HTTP_200_OK)
+
+    if action == "merge-publish-pr":
+        # The PR lives on the publish child run; resolve it so the action
+        # works from the article page too. Manual retries clear a blocked
+        # auto-merge so the next attempt starts fresh.
+        merge_target = _publish_child_for_run_state(run, context=context) or run
+        _reset_publish_auto_merge_block(merge_target)
+        merged_run, merge_error = _merge_publish_pr_for_run(run=merge_target, context=context)
+        if merge_error:
+            if merge_target.pk != run.pk:
+                _annotate_publish_child_state(
+                    ContentFactoryRun.objects.prefetch_related("steps").get(pk=run.pk),
+                    context=context,
+                )
+            return merge_error
+        if merge_target.pk != run.pk:
+            _apply_publish_child_evidence_to_article(context.organization, run, merged_run or merge_target)
+            run = ContentFactoryRun.objects.prefetch_related("steps").get(pk=run.pk)
+            run = _annotate_publish_child_state(run, context=context)
+            return Response(_serialize_run(run, context=context), status=status.HTTP_200_OK)
+        return Response(_serialize_run(merged_run or run, context=context), status=status.HTTP_200_OK)
+
+    if action == "refresh-setup-pr-status":
+        if run.workflow != "article_system_setup":
+            return Response({"detail": "This action is only available for article system setup runs."}, status=status.HTTP_400_BAD_REQUEST)
+        refreshed_run, _refreshed = _refresh_pending_article_system_setup_pr_status(context=context, run=run)
+        if refreshed_run is not None:
+            run = ContentFactoryRun.objects.prefetch_related("steps").get(pk=refreshed_run.pk)
+        return Response(_serialize_run(run, context=context), status=status.HTTP_200_OK)
+
+    if action == "merge-setup-pr":
+        merged_run, merge_error = _merge_setup_pr_for_run(run=run, context=context)
+        if merge_error:
+            return merge_error
+        return Response(_serialize_run(merged_run or run, context=context), status=status.HTTP_200_OK)
+
+    remote_run = run
+    if action in {"promote-bundle", "publish-pr"}:
+        publish_child_source = _publish_source_run_for_child(run, context)
+        if publish_child_source is not None:
+            remote_run = publish_child_source
+            payload.setdefault("source_run_id", publish_child_source.run_id)
+            payload.setdefault("publish_child_run_id", run.run_id)
+            run = publish_child_source
+        accepted_revision = _accepted_component_revision_for_publish(run, context)
+        if accepted_revision is not None:
+            remote_run = accepted_revision
+            payload.setdefault("review_source_run_id", run.run_id)
+            payload.setdefault("source_run_id", accepted_revision.run_id)
+        if not _article_publish_retry_authorized(remote_run):
+            return Response(
+                {"detail": "Approve this exact article preview before publishing it."},
+                status=status.HTTP_409_CONFLICT,
+            )
+        # Prefer the newest revision's child. An older source may already
+        # have a completed publish child from the regression this path is
+        # designed to repair; returning it would publish/reopen stale code.
+        publishing_superseding_revision = remote_run.pk != run.pk
+        existing_publish_run = _local_publish_child_for_run(remote_run, context=context)
+        if existing_publish_run is None and not publishing_superseding_revision:
+            existing_publish_run = _local_publish_child_for_run(run, context=context)
+        if existing_publish_run is not None:
+            existing_publish_run = _refresh_publish_child_remote_state(existing_publish_run, context=context)
+            if not _publish_child_run_recoverable(existing_publish_run):
+                if auto_merge_requested:
+                    _record_publish_auto_merge_flag(existing_publish_run)
+                    _record_publish_auto_merge_flag(run)
+                return Response(_serialize_run(existing_publish_run, context=context), status=status.HTTP_202_ACCEPTED)
+        known_child_run_id = _publish_child_run_id_for_run(remote_run)
+        if not known_child_run_id and not publishing_superseding_revision:
+            known_child_run_id = _publish_child_run_id_for_run(run)
+        if known_child_run_id:
+            recovered_publish_run = ContentFactoryRun.objects.filter(run_id=known_child_run_id).prefetch_related("steps").first()
+            if recovered_publish_run is not None and _run_belongs_to_context(recovered_publish_run, context):
+                recovered_publish_run = _refresh_publish_child_remote_state(recovered_publish_run, context=context)
+                if not _publish_child_run_recoverable(recovered_publish_run):
+                    if auto_merge_requested:
+                        _record_publish_auto_merge_flag(recovered_publish_run)
+                        _record_publish_auto_merge_flag(run)
+                    return Response(_serialize_run(recovered_publish_run, context=context), status=status.HTTP_202_ACCEPTED)
+        pending_runs = [
+            candidate
+            for candidate in (run, remote_run)
+            if candidate is not None and _publish_handoff_pending_for_run(candidate)
+        ]
+        if pending_runs and any(not _publish_handoff_stale_for_run(candidate) for candidate in pending_runs):
+            for candidate in pending_runs:
+                _annotate_publish_handoff_staleness(candidate)
+            return Response(_serialize_run(run, context=context), status=status.HTTP_202_ACCEPTED)
+        _mark_publish_handoff_pending(run=run, remote_run=remote_run, action=action, auto_merge=auto_merge_requested)
+    if action == "revise":
+        gate_response, gate_balance = _require_roo_points_for_ai_agent(
+            command.user,
+            domain=context.organization.domain,
+            action="article_revision",
+        )
+        if gate_response is not None:
+            return gate_response
+        _mark_roo_points_gate_authorized(
+            payload,
+            domain=context.organization.domain,
+            action="article_revision",
+            current_balance=gate_balance,
+        )
+    if approval_requires_receipt and not _require_article_publish_approval_receipt(
+        run, expected_identity=approval_review_identity
+    ):
+        return Response(
+            {"detail": "The article preview changed before approval. Refresh and review the current preview."},
+            status=status.HTTP_409_CONFLICT,
+        )
+    remote_data = _call_content_factory_run_action(
+        run_id=remote_run.run_id,
+        action=action,
+        payload=payload,
+        workflow=remote_run.workflow,
+        # Wait for the worker's durable publication acknowledgement so its exact-review
+        # receipt is saved, including an explicit worker rejection.
+        timeout=(3, 45) if approval_requires_receipt else (
+            (3, 20) if action in {"promote-bundle", "publish-pr"} else (3, 15)
+        ),
+        transport_errors_are_pending=action in {"promote-bundle", "publish-pr"},
+    )
+
+    with _remote_response_write_guard(remote_data, workflow="article_generation"):
+        run.refresh_from_db()
+        if remote_run.pk != run.pk:
+            remote_run.refresh_from_db()
+        remote_status_code = int(remote_data.get("content_factory_status_code") or 0)
+        if (action == "approve" and run.workflow == "article_system_setup"
+                and remote_data.get("status") == "setup_pr_create_failed"):
+            detail = _project_setup_pr_creation_failure(
+                run, _get_config(context.organization), remote_data,
+            )
+            return Response({"detail": detail, "error": detail, "runId": run.run_id},
+                            status=status.HTTP_409_CONFLICT)
+        if action != "approve" and (
+            remote_status_code >= 400 or remote_data.get("allowed") is False
+            or (remote_data.get("error") and not (
+                action in {"promote-bundle", "publish-pr"} and _content_factory_action_transport_pending(remote_data)))
+            or (action == "resume" and remote_data.get("status") == "noop")
+        ):
+            # A rejected control is not a dispatch. Preserve the saved run
+            # and its failure instead of projecting a phantom queued job.
+            detail = str(remote_data.get("detail") or remote_data.get("error")
+                         or remote_data.get("message") or "Content Factory rejected this run action.")
+            response_status = remote_status_code if 400 <= remote_status_code < 600 else (
+                status.HTTP_409_CONFLICT if remote_data.get("allowed") is False or remote_data.get("status") == "noop"
+                else status.HTTP_502_BAD_GATEWAY)
+            return Response({"detail": detail, "error": detail, "code": remote_data.get("code"),
+                             "runId": run.run_id, "contentFactoryStatusCode": remote_status_code or None},
+                            status=response_status)
+        if action == "approve" and remote_status_code in {400, 404, 409, 422}:
+            # Approval is a gate, not a fire-and-forget command. Preserve Content
+            # Factory's rejection verbatim and keep the local run awaiting review;
+            # converting this to a 200 makes the frontend redirect back to the same
+            # page with no explanation and can briefly mislabel the run approved.
+            remote_errors = remote_data.get("errors")
+            first_remote_error = (
+                remote_errors[0]
+                if isinstance(remote_errors, list) and remote_errors
+                else ""
+            )
+            detail = str(
+                remote_data.get("error")
+                or first_remote_error
+                or "Content Factory rejected article approval."
+            ).strip()
+            result = dict(run.result or {})
+            result["latest_control_response"] = remote_data
+            remote_blocker = remote_data.get("approval_blocker")
+            result["approval_blocker"] = {
+                **(
+                    remote_blocker
+                    if isinstance(remote_blocker, dict)
+                    else {"detail": detail, "message": detail}
+                ),
+                "detail": detail,
+                "content_factory_status_code": remote_status_code,
+                "recorded_at": timezone.now().isoformat(),
+            }
+            run.result = result
+            run.save(update_fields=["result", "updated_at"])
+            return Response(
+                {
+                    "detail": detail,
+                    "error": detail,
+                    "runId": run.run_id,
+                    "run_id": run.run_id,
+                    "contentFactoryStatusCode": remote_status_code,
+                },
+                status=remote_status_code,
+            )
+
+        if action == "approve" and remote_data.get("error"):
+            return Response(
+                {"detail": str(remote_data["error"]), "runId": run.run_id},
+                status=status.HTTP_502_BAD_GATEWAY,
+            )
+
+        if action == "retry-preview-quality":
+            if run.workflow not in ARTICLE_WORKFLOWS:
+                return Response(
+                    {"detail": "Preview quality can only be retried for an article run."},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+            if remote_data.get("error"):
+                response_status = (
+                    status.HTTP_409_CONFLICT
+                    if remote_status_code in {400, 404, 409, 422}
+                    else status.HTTP_502_BAD_GATEWAY
+                )
+                return Response(
+                    {
+                        "detail": str(remote_data.get("error")),
+                        "retryable": bool(remote_data.get("retryable")),
+                    },
+                    status=response_status,
+                )
+            result = dict(run.result or {})
+            remote_quality = remote_data.get("article_preview_quality")
+            if isinstance(remote_quality, dict):
+                result["article_preview_quality"] = remote_quality
+            result["latest_control_response"] = remote_data
+            result.pop("approval_blocker", None)
+            result.pop("preview_quality_warning", None)
+            result.pop("previewQualityWarning", None)
+            run.result = result
+            run.save(update_fields=["result", "updated_at"])
+            return Response(
+                _serialize_run(run, context=context),
+                status=status.HTTP_202_ACCEPTED,
+            )
+
+        if action == "revise":
+            new_run_id = str(remote_data.get("run_id") or remote_data.get("runId") or "").strip()
+            if new_run_id and new_run_id != run.run_id:
+                config = _get_config(context.organization)
+                revised_run = _create_local_run(
+                    workflow="article_generation",
+                    domain=context.organization.domain,
+                    github_repo="" if original_portable_run(run) else config.github_repo or run.github_repo or "",
+                    actor_id=founder_actor_id_for_user(command.user),
+                    payload=payload,
+                    remote_data=remote_data,
+                )
+                return Response(_serialize_run(revised_run, context=context), status=status.HTTP_202_ACCEPTED)
+
+            result = run.result or {}
+            revisions = list(result.get("revisions") or [])
+            revisions.append(
+                {
+                    "submitted_at": timezone.now().isoformat(),
+                    "instructions": payload.get("revision_instructions") or payload.get("revisionInstructions") or "",
+                    "edited_content": payload.get("edited_content") or payload.get("editedContent") or "",
+                    "component_id": payload.get("component_id") or payload.get("componentId") or "",
+                    "component_type": payload.get("component_type") or payload.get("componentType") or "",
+                    "remote": remote_data,
+                }
+            )
+            result["revisions"] = revisions
+            if remote_data:
+                result["latest_revision_response"] = remote_data
+            run.result = result
+            if run.status in {ContentFactoryRunStatus.COMPLETED, ContentFactoryRunStatus.AWAITING_APPROVAL, ContentFactoryRunStatus.APPROVAL_REQUIRED}:
+                run.status = ContentFactoryRunStatus.QUEUED
+                run.current_step = "revision_requested"
+            run.save(update_fields=["status", "current_step", "result", "updated_at"])
+            return Response(_serialize_run(run, context=context), status=status.HTTP_202_ACCEPTED)
+
+        if action in {"promote-bundle", "publish-pr"}:
+            publish_run = _sync_publish_child_from_control_response(
+                run=run,
+                remote_run=remote_run,
+                request=command,
+                context=context,
+                payload=payload,
+                remote_data=remote_data,
+            )
+            if publish_run is not None:
+                return Response(_serialize_run(publish_run, context=context), status=status.HTTP_202_ACCEPTED)
+            if _content_factory_action_transport_pending(remote_data):
+                _mark_publish_handoff_pending(
+                    run=run,
+                    remote_run=remote_run,
+                    action=action,
+                    remote_data=remote_data,
+                    auto_merge=auto_merge_requested,
+                )
+                return Response(_serialize_run(run, context=context), status=status.HTTP_202_ACCEPTED)
+
+        if action == "approve" and run.workflow in ARTICLE_WORKFLOWS:
+            publish_run = _sync_publish_child_from_control_response(
+                run=run,
+                remote_run=remote_run,
+                request=command,
+                context=context,
+                payload=payload,
+                remote_data=remote_data,
+                mark_source_approved=True,
+            )
+            if publish_run is not None:
+                if approval_requires_receipt and not _record_article_publish_approval_receipt(
+                    run,
+                    actor_id=founder_actor_id_for_user(command.user) or str(command.user.pk),
+                    expected_identity=approval_review_identity,
+                ):
+                    return _article_publish_approval_receipt_failure(run)
+                if approval_requires_receipt:
+                    from .article_review_views import record_review_approval
+                    record_review_approval(run, context, payload)
+                return Response(_serialize_run(publish_run, context=context), status=status.HTTP_202_ACCEPTED)
+
+        if action == "approve":
+            run.approval_state = ContentFactoryApprovalState.APPROVED
+            run.status = ContentFactoryRunStatus.RUNNING
+        elif action == "deny":
+            run.approval_state = ContentFactoryApprovalState.DENIED
+            run.status = ContentFactoryRunStatus.DENIED
+        elif action == "resume":
+            if run.workflow in ARTICLE_WORKFLOWS and not remote_data.get("already_queued"):
+                previous_actions = (run.result or {}).get("user_action_count")
+                run.result = {**(run.result or {}), "user_action_count":
+                              (max(0, previous_actions) if type(previous_actions) is int else 0) + 1}
+            run.resume_available = True
+            if run.status in {ContentFactoryRunStatus.FAILED, ContentFactoryRunStatus.BLOCKED, ContentFactoryRunStatus.DENIED}:
+                run.status = ContentFactoryRunStatus.QUEUED
+            if run.workflow == "article_system_setup":
+                resume_current_step = str(remote_data.get("current_step") or remote_data.get("step") or run.current_step or "queued").strip()
+                resume_generation = _article_system_setup_resume_generation(
+                    remote_data,
+                    remote_data.get("article_system_setup") if isinstance(remote_data.get("article_system_setup"), dict) else {},
+                )
+                if not resume_generation:
+                    local_result = run.result if isinstance(run.result, dict) else {}
+                    local_setup = local_result.get("article_system_setup") if isinstance(local_result.get("article_system_setup"), dict) else {}
+                    resume_generation = _article_system_setup_resume_generation(local_result, local_setup) + 1
+                run.result = _clear_article_system_setup_retry_state(
+                    run.result or {},
+                    current_step=resume_current_step,
+                    resume_generation=resume_generation or None,
+                )
+                run.status = ContentFactoryRunStatus.QUEUED
+                run.current_step = resume_current_step
+                run.approval_state = ContentFactoryApprovalState.NOT_REQUIRED
+                run.resume_available = False
+                run.error = ""
+            elif run.workflow in ARTICLE_WORKFLOWS:
+                resume_current_step = str(
+                    remote_data.get("current_step")
+                    or remote_data.get("step")
+                    or run.current_step
+                    or "queued"
+                ).strip()
+                run.result = clear_obsolete_active_run_blockers(
+                    run.result,
+                    active_status=ContentFactoryRunStatus.QUEUED,
+                    current_step=resume_current_step,
+                )
+                run.current_step = resume_current_step
+                run.resume_available = False
+                run.error = ""
+        elif action == "delivery-mode":
+            result = run.result or {}
+            result["delivery_mode"] = command.data.get("delivery_mode") or command.data.get("deliveryMode")
+            run.result = result
+        elif action == "promote-bundle":
+            result = run.result or {}
+            result["promote_bundle_requested_at"] = timezone.now().isoformat()
+            run.result = result
+        else:
+            return Response({"detail": "Unsupported run action."}, status=status.HTTP_400_BAD_REQUEST)
+
+        handled_setup_pr_created = False
+        if remote_data:
+            result = run.result or {}
+            result["latest_control_response"] = remote_data
+            if action == "approve" and run.workflow == "article_system_setup":
+                remote_result = _run_result_from_remote(remote_data)
+                if remote_result:
+                    result.update({key: value for key, value in remote_result.items() if value not in (None, "", {}, [])})
+                remote_setup_payload = remote_data.get("article_system_setup") if isinstance(remote_data.get("article_system_setup"), dict) else {}
+                setup_payload = dict(result.get("article_system_setup") or {})
+                setup_payload.update(remote_setup_payload)
+                remote_status = str(remote_data.get("status") or result.get("status") or "").strip().lower()
+                setup_status = str(
+                    remote_data.get("setup_status")
+                    or remote_data.get("setupStatus")
+                    or setup_payload.get("status")
+                    or result.get("setup_status")
+                    or result.get("setupStatus")
+                    or ""
+                ).strip().lower()
+                if remote_status == "setup_pr_created" or setup_status in {"pr_created", "setup_pr_created"}:
+                    pr_url = str(
+                        remote_data.get("pr_url")
+                        or remote_data.get("prUrl")
+                        or result.get("pr_url")
+                        or setup_payload.get("pr_url")
+                        or setup_payload.get("prUrl")
+                        or ""
+                    ).strip()
+                    pr_number = (
+                        remote_data.get("pr_number")
+                        or remote_data.get("prNumber")
+                        or result.get("pr_number")
+                        or setup_payload.get("pr_number")
+                        or setup_payload.get("prNumber")
+                    )
+                    if pr_url:
+                        result["pr_url"] = pr_url
+                        result["prUrl"] = pr_url
+                        setup_payload["pr_url"] = pr_url
+                        setup_payload["prUrl"] = pr_url
+                    if pr_number not in (None, ""):
+                        result["pr_number"] = pr_number
+                        result["prNumber"] = pr_number
+                        setup_payload["pr_number"] = pr_number
+                        setup_payload["prNumber"] = pr_number
+                    setup_payload["status"] = "pr_created"
+                    setup_payload["setup_status"] = "pr_created"
+                    setup_payload["setupStatus"] = "pr_created"
+                    setup_payload["merge_status"] = "not_merged"
+                    setup_payload["mergeStatus"] = "not_merged"
+                    setup_payload["current_step"] = "create_pull_request"
+                    setup_payload["currentStep"] = "create_pull_request"
+                    setup_payload.setdefault("setup_run_id", run.run_id)
+                    setup_payload.setdefault("setupRunId", run.run_id)
+                    result["article_system_setup"] = setup_payload
+                    result["status"] = "setup_pr_created"
+                    result["setup_status"] = "pr_created"
+                    result["setupStatus"] = "pr_created"
+                    result["merge_status"] = "not_merged"
+                    result["mergeStatus"] = "not_merged"
+                    result["current_step"] = "create_pull_request"
+                    result["currentStep"] = "create_pull_request"
+                    result["setup_run_id"] = result.get("setup_run_id") or run.run_id
+                    result["source_setup_run_id"] = result.get("source_setup_run_id") or run.run_id
+                    run.status = ContentFactoryRunStatus.COMPLETED
+                    run.current_step = "create_pull_request"
+                    run.approval_state = ContentFactoryApprovalState.APPROVED
+                    run.resume_available = False
+                    run.error = ""
+                    _mark_pending_article_system_setup_pr_created(_get_config(context.organization), run=run, result=result)
+                    handled_setup_pr_created = True
+            if action == "resume" and run.workflow == "article_system_setup":
+                remote_result = _run_result_from_remote(remote_data)
+                resume_current_step = str(
+                    remote_data.get("current_step")
+                    or remote_data.get("step")
+                    or remote_result.get("current_step")
+                    or remote_result.get("currentStep")
+                    or run.current_step
+                    or "queued"
+                ).strip()
+                resume_generation = _article_system_setup_resume_generation(
+                    remote_data,
+                    remote_result,
+                    remote_result.get("article_system_setup") if isinstance(remote_result.get("article_system_setup"), dict) else {},
+                )
+                result = _clear_article_system_setup_retry_state(
+                    result,
+                    current_step=resume_current_step,
+                    resume_generation=resume_generation or None,
+                )
+                result.update({key: value for key, value in remote_result.items() if value not in (None, "", {}, [])})
+                setup_payload = dict(result.get("article_system_setup") or {})
+                setup_payload["status"] = "queued"
+                setup_payload.setdefault("setup_run_id", run.run_id)
+                setup_payload["current_step"] = resume_current_step
+                setup_payload["currentStep"] = resume_current_step
+                setup_payload["retry_available"] = False
+                setup_payload["retryAvailable"] = False
+                setup_payload["retryable"] = False
+                setup_payload["is_current_attempt"] = True
+                setup_payload["isCurrentAttempt"] = True
+                if resume_generation:
+                    setup_payload["resume_generation"] = resume_generation
+                    setup_payload["resumeGeneration"] = resume_generation
+                    result["resume_generation"] = resume_generation
+                    result["resumeGeneration"] = resume_generation
+                result["article_system_setup"] = setup_payload
+                result["status"] = "queued"
+                result["current_step"] = resume_current_step
+                result["currentStep"] = resume_current_step
+                run.status = ContentFactoryRunStatus.QUEUED
+                run.current_step = resume_current_step
+                run.resume_available = False
+                run.error = ""
+                _mark_pending_article_system_setup_retry(_get_config(context.organization), run=run, result=result)
+            if action == "approve" and run.workflow in SCAN_WORKFLOWS:
+                setup_run_id = str(remote_data.get("setup_run_id") or "").strip()
+                if setup_run_id:
+                    result["setup_run_id"] = setup_run_id
+                    result["scaffold_job_id"] = remote_data.get("scaffold_job_id") or setup_run_id
+                    result["scaffold_status"] = remote_data.get("scaffold_status") or "queued"
+                    setup_payload = remote_data.get("article_system_setup")
+                    setup_payload = dict(setup_payload) if isinstance(setup_payload, dict) else dict(result.get("article_system_setup") or {})
+                    setup_payload.setdefault("setup_run_id", setup_run_id)
+                    setup_payload.setdefault("parent_run_id", run.run_id)
+                    setup_payload["status"] = setup_payload.get("status") or "queued"
+                    setup_payload["requested_action"] = None
+                    result["article_system_setup"] = setup_payload
+
+                    nested_result = dict(result.get("result") or {})
+                    nested_result["setup_run_id"] = setup_run_id
+                    nested_result["scaffold_job_id"] = remote_data.get("scaffold_job_id") or setup_run_id
+                    nested_result["scaffold_status"] = remote_data.get("scaffold_status") or "queued"
+                    nested_result["article_system_setup"] = setup_payload
+                    result["result"] = nested_result
+
+                    if not ContentFactoryRun.objects.filter(run_id=setup_run_id).exists():
+                        ContentFactoryRun.objects.create(
+                            run_id=setup_run_id,
+                            workflow="article_system_setup",
+                            domain=run.domain,
+                            github_repo=run.github_repo,
+                            slack_user_id=run.slack_user_id,
+                            status=ContentFactoryRunStatus.QUEUED,
+                            current_step="queued",
+                            approval_state=ContentFactoryApprovalState.NOT_REQUIRED,
+                            step_order=[
+                                "load_context",
+                                "validate_plan",
+                                "prepare_branch",
+                                "create_pull_request",
+                                "start_hosted_preview",
+                                "await_review",
+                            ],
+                            run_request={
+                                "workflow": "article_system_setup",
+                                "domain": run.domain,
+                                "github_repo": run.github_repo,
+                                "parent_run_id": run.run_id,
+                                "scan_run_id": run.run_id,
+                            },
+                            result=setup_payload,
+                            error="",
+                        )
+            if remote_data.get("status") and not _content_factory_action_transport_pending(remote_data) and action != "resume" and not handled_setup_pr_created:
+                run.status = _normalize_remote_run_status(remote_data["status"])
+            if remote_data.get("current_step") and not handled_setup_pr_created:
+                run.current_step = remote_data["current_step"]
+            if action == "resume" and run.workflow == "article_system_setup":
+                remote_result = _run_result_from_remote(remote_data)
+                if remote_result:
+                    result.update(remote_result)
+                    setup_payload = result.get("article_system_setup") if isinstance(result.get("article_system_setup"), dict) else {}
+                    remote_setup_payload = remote_result.get("article_system_setup") if isinstance(remote_result.get("article_system_setup"), dict) else {}
+                    setup_payload = {**setup_payload, **remote_setup_payload}
+                    if setup_payload:
+                        result["article_system_setup"] = setup_payload
+            elif action == "resume" and run.workflow in ARTICLE_WORKFLOWS:
+                result = clear_obsolete_active_run_blockers(
+                    result,
+                    active_status=ContentFactoryRunStatus.QUEUED,
+                    current_step=run.current_step,
+                )
+            run.result = result
+        run.save(update_fields=["approval_state", "status", "current_step", "resume_available", "result", "error", "updated_at"])
+        if approval_requires_receipt and not _record_article_publish_approval_receipt(
+            run,
+            actor_id=founder_actor_id_for_user(command.user) or str(command.user.pk),
+            expected_identity=approval_review_identity,
+        ):
+            return _article_publish_approval_receipt_failure(run)
+        if approval_requires_receipt:
+            from .article_review_views import record_review_approval
+            record_review_approval(run, context, payload)
+        return Response(_serialize_run(run, context=context), status=status.HTTP_200_OK)
+
+
 class VibeMarketingRunControlView(APIView):
     @guarded_owner_operation("setup", run_operation=True)
     def post(self, request, run_id, action):
@@ -18010,790 +18838,7 @@ class VibeMarketingRunControlView(APIView):
         if not _run_belongs_to_context(run, context):
             return Response({"detail": "Run not found."}, status=status.HTTP_404_NOT_FOUND)
 
-        gated_actions = {"restart", "resume", "revise", "regenerate-image", "regenerate-images", "retry-preview-quality", "promote-bundle", "publish-pr", "approve", "merge-publish-pr"}
-        if action in gated_actions and run.workflow in ARTICLE_WORKFLOWS | {"article_publish", "publish_article"}:
-            blocked = _setup_blocked_response_for_generation(context, _get_config(context.organization), run=run,
-                publishing=action in {"promote-bundle", "publish-pr", "approve", "merge-publish-pr"})
-            if blocked is not None:
-                return blocked
-
-        approval_requires_receipt = (
-            action == "approve"
-            and run.workflow in ARTICLE_WORKFLOWS
-            and not _is_publish_child_run(run)
-        )
-        if approval_requires_receipt:
-            from .article_review_views import check_approval_comments
-            comment_error = check_approval_comments(run, request.data)
-            if comment_error is not None:
-                return comment_error
-            latest_revision = _latest_review_ready_component_revision(run, context)
-            if latest_revision is not None:
-                return Response(
-                    {
-                        "detail": "A newer article revision is ready. Review and approve that draft instead.",
-                        "latestRunId": latest_revision.run_id,
-                    },
-                    status=status.HTTP_409_CONFLICT,
-                )
-            if not article_review_identity_is_complete(run):
-                return Response(
-                    {"detail": "The hosted article preview and quality review must match this revision before approval."},
-                    status=status.HTTP_409_CONFLICT,
-                )
-
-        approval_review_identity = (
-            article_review_identity(run)
-            if approval_requires_receipt
-            else None
-        )
-
-        payload = dict(request.data or {})
-        payload.setdefault("request_source", CONTENT_FACTORY_REQUEST_SOURCE)
-        payload.setdefault("slack_user_id", founder_actor_id_for_user(request.user))
-        auto_merge_requested = bool(
-            action in {"promote-bundle", "publish-pr", "approve"}
-            and run.workflow in ARTICLE_WORKFLOWS
-            and _payload_requests_auto_merge(payload)
-        )
-        if auto_merge_requested:
-            payload["auto_merge"] = True
-        if action in {"promote-bundle", "publish-pr", "approve", "merge-publish-pr"} and run.workflow in ARTICLE_WORKFLOWS:
-            from .incident_guards import publish_child_binding
-            try:
-                payload.update(publish_child_binding(_get_config(context.organization), run, payload, {}))
-            except WebsiteAuthorityError as exc:
-                return Response(exc.as_dict(), status=exc.status)
-
-        if action == "cancel":
-            if run.workflow in SCAN_WORKFLOWS:
-                remote_data = _call_content_factory_run_action(
-                    run_id=run_id,
-                    action=action,
-                    payload=payload,
-                    workflow=run.workflow,
-                    timeout=(2, 8),
-                    transport_errors_are_pending=True,
-                )
-                run = _cancel_local_scan_run(run=run, remote_data=remote_data)
-                run = ContentFactoryRun.objects.prefetch_related("steps").get(pk=run.pk)
-                return Response(_serialize_run(run, context=context), status=status.HTTP_202_ACCEPTED)
-
-            if run.workflow in ARTICLE_SYSTEM_SETUP_WORKFLOWS:
-                if _run_has_external_publish_evidence(run):
-                    return Response(
-                        {
-                            "detail": (
-                                "This articles setup already has setup PR evidence. "
-                                "Close or clean up the external PR manually before cancelling."
-                            )
-                        },
-                        status=status.HTTP_409_CONFLICT,
-                    )
-                remote_data = _call_content_factory_run_action(
-                    run_id=run_id,
-                    action=action,
-                    payload=payload,
-                    workflow=run.workflow,
-                    timeout=(3, 30),
-                )
-                remote_status_code = int(remote_data.get("content_factory_status_code") or 0)
-                if remote_data.get("error"):
-                    response_status = (
-                        status.HTTP_409_CONFLICT
-                        if remote_status_code == 409
-                        else status.HTTP_502_BAD_GATEWAY
-                    )
-                    return Response(
-                        {
-                            "detail": remote_data.get("error") or "Content Factory could not cancel this setup build.",
-                            "retryable": bool(remote_data.get("retryable")),
-                        },
-                        status=response_status,
-                    )
-                run = _cancel_local_article_system_setup_run(
-                    run=run,
-                    organization=context.organization,
-                    remote_data=remote_data,
-                )
-                run = ContentFactoryRun.objects.prefetch_related("steps").get(pk=run.pk)
-                return Response(_serialize_run(run, context=context), status=status.HTTP_202_ACCEPTED)
-
-            if run.workflow not in ARTICLE_WORKFLOWS:
-                return Response({"detail": "Only article runs can be cancelled from this action."}, status=status.HTTP_400_BAD_REQUEST)
-
-            if bool(payload.get("cancel_group") or payload.get("cancelGroup")):
-                members = _article_draft_group_members(run, context.organization)
-                cancelled_ids = []
-                protected_ids = []
-                for member in members:
-                    if _run_has_external_publish_evidence(member):
-                        protected_ids.append(member.run_id)
-                        continue
-                    member_remote = _call_content_factory_run_action(
-                        run_id=member.run_id,
-                        action="cancel",
-                        payload=payload,
-                        workflow=member.workflow,
-                    )
-                    if int(member_remote.get("content_factory_status_code") or 0) == 409:
-                        protected_ids.append(member.run_id)
-                        continue
-                    _cancel_local_article_run(run=member, organization=context.organization, remote_data=member_remote)
-                    cancelled_ids.append(member.run_id)
-
-                if not cancelled_ids and protected_ids:
-                    return Response(
-                        {"detail": "This article already has external publish evidence. Close or clean up the external PR manually before cancelling."},
-                        status=status.HTTP_409_CONFLICT,
-                    )
-
-                run = ContentFactoryRun.objects.prefetch_related("steps").get(pk=run.pk)
-                body = _serialize_run(run, context=context)
-                body["cancelledRunIds"] = cancelled_ids
-                body["protectedRunIds"] = protected_ids
-                return Response(body, status=status.HTTP_202_ACCEPTED)
-
-            if _run_has_external_publish_evidence(run):
-                return Response(
-                    {"detail": "This article already has external publish evidence. Close or clean up the external PR manually before cancelling."},
-                    status=status.HTTP_409_CONFLICT,
-                )
-
-            remote_data = _call_content_factory_run_action(run_id=run_id, action=action, payload=payload, workflow=run.workflow)
-            if int(remote_data.get("content_factory_status_code") or 0) == 409:
-                detail = remote_data.get("error") or "Content Factory rejected cancellation for this run."
-                return Response({"detail": detail}, status=status.HTTP_409_CONFLICT)
-
-            run = _cancel_local_article_run(run=run, organization=context.organization, remote_data=remote_data)
-            run = ContentFactoryRun.objects.prefetch_related("steps").get(pk=run.pk)
-            return Response(_serialize_run(run, context=context), status=status.HTTP_202_ACCEPTED)
-
-        if action == "restart":
-            restarted_run, restart_error = _restart_article_run(run=run, context=context)
-            if restart_error:
-                return restart_error
-            return Response(_serialize_run(restarted_run, context=context), status=status.HTTP_202_ACCEPTED)
-
-        if action == "enable-daily-automation":
-            quote_error = _quoted_price_response(request, cost_points=get_content_factory_research_cost_points(context.organization.domain, 3))
-            if quote_error:
-                return quote_error
-            from integrations.services.notification_channels import (
-                ensure_research_automation_for_org,
-                serialize_channel,
-            )
-
-            config = _get_config(context.organization)
-            _assign_config_actor(config, request.user)
-            if request.data.get("default_timezone") or request.data.get("defaultTimezone"):
-                config.default_timezone = request.data.get("default_timezone") or request.data.get("defaultTimezone")
-            config.daily_discovery_enabled = True
-            checks = _profile_checks(
-                context.organization,
-                config,
-                _latest_runs_for_org(context.organization),
-                _latest_baseline_snapshot(context.organization),
-            )
-            if not checks["dailyAutomation"]["passed"]:
-                return Response(
-                    {"detail": "Daily generation prerequisites are not complete.", "checks": checks},
-                    status=status.HTTP_400_BAD_REQUEST,
-                )
-            config.save(update_fields=["daily_discovery_enabled", "default_timezone", "updated_at"])
-            automation, automation_channels = ensure_research_automation_for_org(
-                organization=context.organization,
-                user=request.user,
-                timezone_name=config.default_timezone or "Australia/Melbourne",
-                enabled=True,
-                config=config,
-            )
-            result = run.result or {}
-            result["daily_automation_enabled_at"] = timezone.now().isoformat()
-            result["daily_automation_timezone"] = config.default_timezone
-            if automation is not None:
-                result["daily_automation_id"] = str(automation.id)
-                result["daily_automation_channels"] = [
-                    serialize_channel(channel, primary_channel_id=automation.notification_channel_id)
-                    for channel in automation_channels
-                ]
-            else:
-                # No verified channel and Slack couldn't be auto-linked; the
-                # legacy shared daily queue keeps serving this org.
-                result["daily_automation_channel_warning"] = "no_verified_channels"
-            run.result = result
-            run.save(update_fields=["result", "updated_at"])
-            return Response(_serialize_run(run, context=context), status=status.HTTP_200_OK)
-
-        if action == "merge-publish-pr":
-            # The PR lives on the publish child run; resolve it so the action
-            # works from the article page too. Manual retries clear a blocked
-            # auto-merge so the next attempt starts fresh.
-            merge_target = _publish_child_for_run_state(run, context=context) or run
-            _reset_publish_auto_merge_block(merge_target)
-            merged_run, merge_error = _merge_publish_pr_for_run(run=merge_target, context=context)
-            if merge_error:
-                if merge_target.pk != run.pk:
-                    _annotate_publish_child_state(
-                        ContentFactoryRun.objects.prefetch_related("steps").get(pk=run.pk),
-                        context=context,
-                    )
-                return merge_error
-            if merge_target.pk != run.pk:
-                _apply_publish_child_evidence_to_article(context.organization, run, merged_run or merge_target)
-                run = ContentFactoryRun.objects.prefetch_related("steps").get(pk=run.pk)
-                run = _annotate_publish_child_state(run, context=context)
-                return Response(_serialize_run(run, context=context), status=status.HTTP_200_OK)
-            return Response(_serialize_run(merged_run or run, context=context), status=status.HTTP_200_OK)
-
-        if action == "refresh-setup-pr-status":
-            if run.workflow != "article_system_setup":
-                return Response({"detail": "This action is only available for article system setup runs."}, status=status.HTTP_400_BAD_REQUEST)
-            refreshed_run, _refreshed = _refresh_pending_article_system_setup_pr_status(context=context, run=run)
-            if refreshed_run is not None:
-                run = ContentFactoryRun.objects.prefetch_related("steps").get(pk=refreshed_run.pk)
-            return Response(_serialize_run(run, context=context), status=status.HTTP_200_OK)
-
-        if action == "merge-setup-pr":
-            merged_run, merge_error = _merge_setup_pr_for_run(run=run, context=context)
-            if merge_error:
-                return merge_error
-            return Response(_serialize_run(merged_run or run, context=context), status=status.HTTP_200_OK)
-
-        remote_run = run
-        if action in {"promote-bundle", "publish-pr"}:
-            publish_child_source = _publish_source_run_for_child(run, context)
-            if publish_child_source is not None:
-                remote_run = publish_child_source
-                payload.setdefault("source_run_id", publish_child_source.run_id)
-                payload.setdefault("publish_child_run_id", run.run_id)
-                run = publish_child_source
-            accepted_revision = _accepted_component_revision_for_publish(run, context)
-            if accepted_revision is not None:
-                remote_run = accepted_revision
-                payload.setdefault("review_source_run_id", run.run_id)
-                payload.setdefault("source_run_id", accepted_revision.run_id)
-            if not _article_publish_retry_authorized(remote_run):
-                return Response(
-                    {"detail": "Approve this exact article preview before publishing it."},
-                    status=status.HTTP_409_CONFLICT,
-                )
-            # Prefer the newest revision's child. An older source may already
-            # have a completed publish child from the regression this path is
-            # designed to repair; returning it would publish/reopen stale code.
-            publishing_superseding_revision = remote_run.pk != run.pk
-            existing_publish_run = _local_publish_child_for_run(remote_run, context=context)
-            if existing_publish_run is None and not publishing_superseding_revision:
-                existing_publish_run = _local_publish_child_for_run(run, context=context)
-            if existing_publish_run is not None:
-                existing_publish_run = _refresh_publish_child_remote_state(existing_publish_run, context=context)
-                if not _publish_child_run_recoverable(existing_publish_run):
-                    if auto_merge_requested:
-                        _record_publish_auto_merge_flag(existing_publish_run)
-                        _record_publish_auto_merge_flag(run)
-                    return Response(_serialize_run(existing_publish_run, context=context), status=status.HTTP_202_ACCEPTED)
-            known_child_run_id = _publish_child_run_id_for_run(remote_run)
-            if not known_child_run_id and not publishing_superseding_revision:
-                known_child_run_id = _publish_child_run_id_for_run(run)
-            if known_child_run_id:
-                recovered_publish_run = ContentFactoryRun.objects.filter(run_id=known_child_run_id).prefetch_related("steps").first()
-                if recovered_publish_run is not None and _run_belongs_to_context(recovered_publish_run, context):
-                    recovered_publish_run = _refresh_publish_child_remote_state(recovered_publish_run, context=context)
-                    if not _publish_child_run_recoverable(recovered_publish_run):
-                        if auto_merge_requested:
-                            _record_publish_auto_merge_flag(recovered_publish_run)
-                            _record_publish_auto_merge_flag(run)
-                        return Response(_serialize_run(recovered_publish_run, context=context), status=status.HTTP_202_ACCEPTED)
-            pending_runs = [
-                candidate
-                for candidate in (run, remote_run)
-                if candidate is not None and _publish_handoff_pending_for_run(candidate)
-            ]
-            if pending_runs and any(not _publish_handoff_stale_for_run(candidate) for candidate in pending_runs):
-                for candidate in pending_runs:
-                    _annotate_publish_handoff_staleness(candidate)
-                return Response(_serialize_run(run, context=context), status=status.HTTP_202_ACCEPTED)
-            _mark_publish_handoff_pending(run=run, remote_run=remote_run, action=action, auto_merge=auto_merge_requested)
-        if action == "revise":
-            gate_response, gate_balance = _require_roo_points_for_ai_agent(
-                request.user,
-                domain=context.organization.domain,
-                action="article_revision",
-            )
-            if gate_response is not None:
-                return gate_response
-            _mark_roo_points_gate_authorized(
-                payload,
-                domain=context.organization.domain,
-                action="article_revision",
-                current_balance=gate_balance,
-            )
-        if approval_requires_receipt and not _require_article_publish_approval_receipt(
-            run, expected_identity=approval_review_identity
-        ):
-            return Response(
-                {"detail": "The article preview changed before approval. Refresh and review the current preview."},
-                status=status.HTTP_409_CONFLICT,
-            )
-        remote_data = _call_content_factory_run_action(
-            run_id=remote_run.run_id,
-            action=action,
-            payload=payload,
-            workflow=remote_run.workflow,
-            # Wait for the worker's durable publication acknowledgement so its exact-review
-            # receipt is saved, including an explicit worker rejection.
-            timeout=(3, 45) if approval_requires_receipt else (
-                (3, 20) if action in {"promote-bundle", "publish-pr"} else (3, 15)
-            ),
-            transport_errors_are_pending=action in {"promote-bundle", "publish-pr"},
-        )
-
-        with _remote_response_write_guard(remote_data, workflow="article_generation"):
-            run.refresh_from_db()
-            if remote_run.pk != run.pk:
-                remote_run.refresh_from_db()
-            remote_status_code = int(remote_data.get("content_factory_status_code") or 0)
-            if (action == "approve" and run.workflow == "article_system_setup"
-                    and remote_data.get("status") == "setup_pr_create_failed"):
-                detail = _project_setup_pr_creation_failure(
-                    run, _get_config(context.organization), remote_data,
-                )
-                return Response({"detail": detail, "error": detail, "runId": run.run_id},
-                                status=status.HTTP_409_CONFLICT)
-            if action != "approve" and (
-                remote_status_code >= 400 or remote_data.get("allowed") is False
-                or (remote_data.get("error") and not (
-                    action in {"promote-bundle", "publish-pr"} and _content_factory_action_transport_pending(remote_data)))
-                or (action == "resume" and remote_data.get("status") == "noop")
-            ):
-                # A rejected control is not a dispatch. Preserve the saved run
-                # and its failure instead of projecting a phantom queued job.
-                detail = str(remote_data.get("detail") or remote_data.get("error")
-                             or remote_data.get("message") or "Content Factory rejected this run action.")
-                response_status = remote_status_code if 400 <= remote_status_code < 600 else (
-                    status.HTTP_409_CONFLICT if remote_data.get("allowed") is False or remote_data.get("status") == "noop"
-                    else status.HTTP_502_BAD_GATEWAY)
-                return Response({"detail": detail, "error": detail, "code": remote_data.get("code"),
-                                 "runId": run.run_id, "contentFactoryStatusCode": remote_status_code or None},
-                                status=response_status)
-            if action == "approve" and remote_status_code in {400, 404, 409, 422}:
-                # Approval is a gate, not a fire-and-forget command. Preserve Content
-                # Factory's rejection verbatim and keep the local run awaiting review;
-                # converting this to a 200 makes the frontend redirect back to the same
-                # page with no explanation and can briefly mislabel the run approved.
-                remote_errors = remote_data.get("errors")
-                first_remote_error = (
-                    remote_errors[0]
-                    if isinstance(remote_errors, list) and remote_errors
-                    else ""
-                )
-                detail = str(
-                    remote_data.get("error")
-                    or first_remote_error
-                    or "Content Factory rejected article approval."
-                ).strip()
-                result = dict(run.result or {})
-                result["latest_control_response"] = remote_data
-                remote_blocker = remote_data.get("approval_blocker")
-                result["approval_blocker"] = {
-                    **(
-                        remote_blocker
-                        if isinstance(remote_blocker, dict)
-                        else {"detail": detail, "message": detail}
-                    ),
-                    "detail": detail,
-                    "content_factory_status_code": remote_status_code,
-                    "recorded_at": timezone.now().isoformat(),
-                }
-                run.result = result
-                run.save(update_fields=["result", "updated_at"])
-                return Response(
-                    {
-                        "detail": detail,
-                        "error": detail,
-                        "runId": run.run_id,
-                        "run_id": run.run_id,
-                        "contentFactoryStatusCode": remote_status_code,
-                    },
-                    status=remote_status_code,
-                )
-
-            if action == "approve" and remote_data.get("error"):
-                return Response(
-                    {"detail": str(remote_data["error"]), "runId": run.run_id},
-                    status=status.HTTP_502_BAD_GATEWAY,
-                )
-
-            if action == "retry-preview-quality":
-                if run.workflow not in ARTICLE_WORKFLOWS:
-                    return Response(
-                        {"detail": "Preview quality can only be retried for an article run."},
-                        status=status.HTTP_400_BAD_REQUEST,
-                    )
-                if remote_data.get("error"):
-                    response_status = (
-                        status.HTTP_409_CONFLICT
-                        if remote_status_code in {400, 404, 409, 422}
-                        else status.HTTP_502_BAD_GATEWAY
-                    )
-                    return Response(
-                        {
-                            "detail": str(remote_data.get("error")),
-                            "retryable": bool(remote_data.get("retryable")),
-                        },
-                        status=response_status,
-                    )
-                result = dict(run.result or {})
-                remote_quality = remote_data.get("article_preview_quality")
-                if isinstance(remote_quality, dict):
-                    result["article_preview_quality"] = remote_quality
-                result["latest_control_response"] = remote_data
-                result.pop("approval_blocker", None)
-                result.pop("preview_quality_warning", None)
-                result.pop("previewQualityWarning", None)
-                run.result = result
-                run.save(update_fields=["result", "updated_at"])
-                return Response(
-                    _serialize_run(run, context=context),
-                    status=status.HTTP_202_ACCEPTED,
-                )
-
-            if action == "revise":
-                new_run_id = str(remote_data.get("run_id") or remote_data.get("runId") or "").strip()
-                if new_run_id and new_run_id != run.run_id:
-                    config = _get_config(context.organization)
-                    revised_run = _create_local_run(
-                        workflow="article_generation",
-                        domain=context.organization.domain,
-                        github_repo="" if original_portable_run(run) else config.github_repo or run.github_repo or "",
-                        actor_id=founder_actor_id_for_user(request.user),
-                        payload=payload,
-                        remote_data=remote_data,
-                    )
-                    return Response(_serialize_run(revised_run, context=context), status=status.HTTP_202_ACCEPTED)
-
-                result = run.result or {}
-                revisions = list(result.get("revisions") or [])
-                revisions.append(
-                    {
-                        "submitted_at": timezone.now().isoformat(),
-                        "instructions": payload.get("revision_instructions") or payload.get("revisionInstructions") or "",
-                        "edited_content": payload.get("edited_content") or payload.get("editedContent") or "",
-                        "component_id": payload.get("component_id") or payload.get("componentId") or "",
-                        "component_type": payload.get("component_type") or payload.get("componentType") or "",
-                        "remote": remote_data,
-                    }
-                )
-                result["revisions"] = revisions
-                if remote_data:
-                    result["latest_revision_response"] = remote_data
-                run.result = result
-                if run.status in {ContentFactoryRunStatus.COMPLETED, ContentFactoryRunStatus.AWAITING_APPROVAL, ContentFactoryRunStatus.APPROVAL_REQUIRED}:
-                    run.status = ContentFactoryRunStatus.QUEUED
-                    run.current_step = "revision_requested"
-                run.save(update_fields=["status", "current_step", "result", "updated_at"])
-                return Response(_serialize_run(run, context=context), status=status.HTTP_202_ACCEPTED)
-
-            if action in {"promote-bundle", "publish-pr"}:
-                publish_run = _sync_publish_child_from_control_response(
-                    run=run,
-                    remote_run=remote_run,
-                    request=request,
-                    context=context,
-                    payload=payload,
-                    remote_data=remote_data,
-                )
-                if publish_run is not None:
-                    return Response(_serialize_run(publish_run, context=context), status=status.HTTP_202_ACCEPTED)
-                if _content_factory_action_transport_pending(remote_data):
-                    _mark_publish_handoff_pending(
-                        run=run,
-                        remote_run=remote_run,
-                        action=action,
-                        remote_data=remote_data,
-                        auto_merge=auto_merge_requested,
-                    )
-                    return Response(_serialize_run(run, context=context), status=status.HTTP_202_ACCEPTED)
-
-            if action == "approve" and run.workflow in ARTICLE_WORKFLOWS:
-                publish_run = _sync_publish_child_from_control_response(
-                    run=run,
-                    remote_run=remote_run,
-                    request=request,
-                    context=context,
-                    payload=payload,
-                    remote_data=remote_data,
-                    mark_source_approved=True,
-                )
-                if publish_run is not None:
-                    if approval_requires_receipt and not _record_article_publish_approval_receipt(
-                        run,
-                        actor_id=founder_actor_id_for_user(request.user) or str(request.user.pk),
-                        expected_identity=approval_review_identity,
-                    ):
-                        return _article_publish_approval_receipt_failure(run)
-                    if approval_requires_receipt:
-                        from .article_review_views import record_review_approval
-                        record_review_approval(run, context, payload)
-                    return Response(_serialize_run(publish_run, context=context), status=status.HTTP_202_ACCEPTED)
-
-            if action == "approve":
-                run.approval_state = ContentFactoryApprovalState.APPROVED
-                run.status = ContentFactoryRunStatus.RUNNING
-            elif action == "deny":
-                run.approval_state = ContentFactoryApprovalState.DENIED
-                run.status = ContentFactoryRunStatus.DENIED
-            elif action == "resume":
-                if run.workflow in ARTICLE_WORKFLOWS and not remote_data.get("already_queued"):
-                    previous_actions = (run.result or {}).get("user_action_count")
-                    run.result = {**(run.result or {}), "user_action_count":
-                                  (max(0, previous_actions) if type(previous_actions) is int else 0) + 1}
-                run.resume_available = True
-                if run.status in {ContentFactoryRunStatus.FAILED, ContentFactoryRunStatus.BLOCKED, ContentFactoryRunStatus.DENIED}:
-                    run.status = ContentFactoryRunStatus.QUEUED
-                if run.workflow == "article_system_setup":
-                    resume_current_step = str(remote_data.get("current_step") or remote_data.get("step") or run.current_step or "queued").strip()
-                    resume_generation = _article_system_setup_resume_generation(
-                        remote_data,
-                        remote_data.get("article_system_setup") if isinstance(remote_data.get("article_system_setup"), dict) else {},
-                    )
-                    if not resume_generation:
-                        local_result = run.result if isinstance(run.result, dict) else {}
-                        local_setup = local_result.get("article_system_setup") if isinstance(local_result.get("article_system_setup"), dict) else {}
-                        resume_generation = _article_system_setup_resume_generation(local_result, local_setup) + 1
-                    run.result = _clear_article_system_setup_retry_state(
-                        run.result or {},
-                        current_step=resume_current_step,
-                        resume_generation=resume_generation or None,
-                    )
-                    run.status = ContentFactoryRunStatus.QUEUED
-                    run.current_step = resume_current_step
-                    run.approval_state = ContentFactoryApprovalState.NOT_REQUIRED
-                    run.resume_available = False
-                    run.error = ""
-                elif run.workflow in ARTICLE_WORKFLOWS:
-                    resume_current_step = str(
-                        remote_data.get("current_step")
-                        or remote_data.get("step")
-                        or run.current_step
-                        or "queued"
-                    ).strip()
-                    run.result = clear_obsolete_active_run_blockers(
-                        run.result,
-                        active_status=ContentFactoryRunStatus.QUEUED,
-                        current_step=resume_current_step,
-                    )
-                    run.current_step = resume_current_step
-                    run.resume_available = False
-                    run.error = ""
-            elif action == "delivery-mode":
-                result = run.result or {}
-                result["delivery_mode"] = request.data.get("delivery_mode") or request.data.get("deliveryMode")
-                run.result = result
-            elif action == "promote-bundle":
-                result = run.result or {}
-                result["promote_bundle_requested_at"] = timezone.now().isoformat()
-                run.result = result
-            else:
-                return Response({"detail": "Unsupported run action."}, status=status.HTTP_400_BAD_REQUEST)
-
-            handled_setup_pr_created = False
-            if remote_data:
-                result = run.result or {}
-                result["latest_control_response"] = remote_data
-                if action == "approve" and run.workflow == "article_system_setup":
-                    remote_result = _run_result_from_remote(remote_data)
-                    if remote_result:
-                        result.update({key: value for key, value in remote_result.items() if value not in (None, "", {}, [])})
-                    remote_setup_payload = remote_data.get("article_system_setup") if isinstance(remote_data.get("article_system_setup"), dict) else {}
-                    setup_payload = dict(result.get("article_system_setup") or {})
-                    setup_payload.update(remote_setup_payload)
-                    remote_status = str(remote_data.get("status") or result.get("status") or "").strip().lower()
-                    setup_status = str(
-                        remote_data.get("setup_status")
-                        or remote_data.get("setupStatus")
-                        or setup_payload.get("status")
-                        or result.get("setup_status")
-                        or result.get("setupStatus")
-                        or ""
-                    ).strip().lower()
-                    if remote_status == "setup_pr_created" or setup_status in {"pr_created", "setup_pr_created"}:
-                        pr_url = str(
-                            remote_data.get("pr_url")
-                            or remote_data.get("prUrl")
-                            or result.get("pr_url")
-                            or setup_payload.get("pr_url")
-                            or setup_payload.get("prUrl")
-                            or ""
-                        ).strip()
-                        pr_number = (
-                            remote_data.get("pr_number")
-                            or remote_data.get("prNumber")
-                            or result.get("pr_number")
-                            or setup_payload.get("pr_number")
-                            or setup_payload.get("prNumber")
-                        )
-                        if pr_url:
-                            result["pr_url"] = pr_url
-                            result["prUrl"] = pr_url
-                            setup_payload["pr_url"] = pr_url
-                            setup_payload["prUrl"] = pr_url
-                        if pr_number not in (None, ""):
-                            result["pr_number"] = pr_number
-                            result["prNumber"] = pr_number
-                            setup_payload["pr_number"] = pr_number
-                            setup_payload["prNumber"] = pr_number
-                        setup_payload["status"] = "pr_created"
-                        setup_payload["setup_status"] = "pr_created"
-                        setup_payload["setupStatus"] = "pr_created"
-                        setup_payload["merge_status"] = "not_merged"
-                        setup_payload["mergeStatus"] = "not_merged"
-                        setup_payload["current_step"] = "create_pull_request"
-                        setup_payload["currentStep"] = "create_pull_request"
-                        setup_payload.setdefault("setup_run_id", run.run_id)
-                        setup_payload.setdefault("setupRunId", run.run_id)
-                        result["article_system_setup"] = setup_payload
-                        result["status"] = "setup_pr_created"
-                        result["setup_status"] = "pr_created"
-                        result["setupStatus"] = "pr_created"
-                        result["merge_status"] = "not_merged"
-                        result["mergeStatus"] = "not_merged"
-                        result["current_step"] = "create_pull_request"
-                        result["currentStep"] = "create_pull_request"
-                        result["setup_run_id"] = result.get("setup_run_id") or run.run_id
-                        result["source_setup_run_id"] = result.get("source_setup_run_id") or run.run_id
-                        run.status = ContentFactoryRunStatus.COMPLETED
-                        run.current_step = "create_pull_request"
-                        run.approval_state = ContentFactoryApprovalState.APPROVED
-                        run.resume_available = False
-                        run.error = ""
-                        _mark_pending_article_system_setup_pr_created(_get_config(context.organization), run=run, result=result)
-                        handled_setup_pr_created = True
-                if action == "resume" and run.workflow == "article_system_setup":
-                    remote_result = _run_result_from_remote(remote_data)
-                    resume_current_step = str(
-                        remote_data.get("current_step")
-                        or remote_data.get("step")
-                        or remote_result.get("current_step")
-                        or remote_result.get("currentStep")
-                        or run.current_step
-                        or "queued"
-                    ).strip()
-                    resume_generation = _article_system_setup_resume_generation(
-                        remote_data,
-                        remote_result,
-                        remote_result.get("article_system_setup") if isinstance(remote_result.get("article_system_setup"), dict) else {},
-                    )
-                    result = _clear_article_system_setup_retry_state(
-                        result,
-                        current_step=resume_current_step,
-                        resume_generation=resume_generation or None,
-                    )
-                    result.update({key: value for key, value in remote_result.items() if value not in (None, "", {}, [])})
-                    setup_payload = dict(result.get("article_system_setup") or {})
-                    setup_payload["status"] = "queued"
-                    setup_payload.setdefault("setup_run_id", run.run_id)
-                    setup_payload["current_step"] = resume_current_step
-                    setup_payload["currentStep"] = resume_current_step
-                    setup_payload["retry_available"] = False
-                    setup_payload["retryAvailable"] = False
-                    setup_payload["retryable"] = False
-                    setup_payload["is_current_attempt"] = True
-                    setup_payload["isCurrentAttempt"] = True
-                    if resume_generation:
-                        setup_payload["resume_generation"] = resume_generation
-                        setup_payload["resumeGeneration"] = resume_generation
-                        result["resume_generation"] = resume_generation
-                        result["resumeGeneration"] = resume_generation
-                    result["article_system_setup"] = setup_payload
-                    result["status"] = "queued"
-                    result["current_step"] = resume_current_step
-                    result["currentStep"] = resume_current_step
-                    run.status = ContentFactoryRunStatus.QUEUED
-                    run.current_step = resume_current_step
-                    run.resume_available = False
-                    run.error = ""
-                    _mark_pending_article_system_setup_retry(_get_config(context.organization), run=run, result=result)
-                if action == "approve" and run.workflow in SCAN_WORKFLOWS:
-                    setup_run_id = str(remote_data.get("setup_run_id") or "").strip()
-                    if setup_run_id:
-                        result["setup_run_id"] = setup_run_id
-                        result["scaffold_job_id"] = remote_data.get("scaffold_job_id") or setup_run_id
-                        result["scaffold_status"] = remote_data.get("scaffold_status") or "queued"
-                        setup_payload = remote_data.get("article_system_setup")
-                        setup_payload = dict(setup_payload) if isinstance(setup_payload, dict) else dict(result.get("article_system_setup") or {})
-                        setup_payload.setdefault("setup_run_id", setup_run_id)
-                        setup_payload.setdefault("parent_run_id", run.run_id)
-                        setup_payload["status"] = setup_payload.get("status") or "queued"
-                        setup_payload["requested_action"] = None
-                        result["article_system_setup"] = setup_payload
-
-                        nested_result = dict(result.get("result") or {})
-                        nested_result["setup_run_id"] = setup_run_id
-                        nested_result["scaffold_job_id"] = remote_data.get("scaffold_job_id") or setup_run_id
-                        nested_result["scaffold_status"] = remote_data.get("scaffold_status") or "queued"
-                        nested_result["article_system_setup"] = setup_payload
-                        result["result"] = nested_result
-
-                        if not ContentFactoryRun.objects.filter(run_id=setup_run_id).exists():
-                            ContentFactoryRun.objects.create(
-                                run_id=setup_run_id,
-                                workflow="article_system_setup",
-                                domain=run.domain,
-                                github_repo=run.github_repo,
-                                slack_user_id=run.slack_user_id,
-                                status=ContentFactoryRunStatus.QUEUED,
-                                current_step="queued",
-                                approval_state=ContentFactoryApprovalState.NOT_REQUIRED,
-                                step_order=[
-                                    "load_context",
-                                    "validate_plan",
-                                    "prepare_branch",
-                                    "create_pull_request",
-                                    "start_hosted_preview",
-                                    "await_review",
-                                ],
-                                run_request={
-                                    "workflow": "article_system_setup",
-                                    "domain": run.domain,
-                                    "github_repo": run.github_repo,
-                                    "parent_run_id": run.run_id,
-                                    "scan_run_id": run.run_id,
-                                },
-                                result=setup_payload,
-                                error="",
-                            )
-                if remote_data.get("status") and not _content_factory_action_transport_pending(remote_data) and action != "resume" and not handled_setup_pr_created:
-                    run.status = _normalize_remote_run_status(remote_data["status"])
-                if remote_data.get("current_step") and not handled_setup_pr_created:
-                    run.current_step = remote_data["current_step"]
-                if action == "resume" and run.workflow == "article_system_setup":
-                    remote_result = _run_result_from_remote(remote_data)
-                    if remote_result:
-                        result.update(remote_result)
-                        setup_payload = result.get("article_system_setup") if isinstance(result.get("article_system_setup"), dict) else {}
-                        remote_setup_payload = remote_result.get("article_system_setup") if isinstance(remote_result.get("article_system_setup"), dict) else {}
-                        setup_payload = {**setup_payload, **remote_setup_payload}
-                        if setup_payload:
-                            result["article_system_setup"] = setup_payload
-                elif action == "resume" and run.workflow in ARTICLE_WORKFLOWS:
-                    result = clear_obsolete_active_run_blockers(
-                        result,
-                        active_status=ContentFactoryRunStatus.QUEUED,
-                        current_step=run.current_step,
-                    )
-                run.result = result
-            run.save(update_fields=["approval_state", "status", "current_step", "resume_available", "result", "error", "updated_at"])
-            if approval_requires_receipt and not _record_article_publish_approval_receipt(
-                run,
-                actor_id=founder_actor_id_for_user(request.user) or str(request.user.pk),
-                expected_identity=approval_review_identity,
-            ):
-                return _article_publish_approval_receipt_failure(run)
-            if approval_requires_receipt:
-                from .article_review_views import record_review_approval
-                record_review_approval(run, context, payload)
-            return Response(_serialize_run(run, context=context), status=status.HTTP_200_OK)
+        return control_article_run(user=request.user, context=context, data=request.data, run=run, action=action, run_id=run_id)
 
 
 class VibeMarketingDailyReplayView(APIView):

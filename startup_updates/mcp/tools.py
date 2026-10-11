@@ -19,6 +19,7 @@ from startup_updates.models import MonthlyUpdateDraft, StartupProfile
 from startup_updates.revisions import RevisionConflict, capture_snapshot, save_revision
 from startup_updates.update_identity import resolve_update
 from .oauth import company_for, valid_grant
+from .config import STARTUP_IDENTITY_SCOPES, mlai_url
 
 NARRATIVE_FIELDS = {"summary": "summary", "highlights": "highlights", "challenges": "lowlights",
     "learnings": "learnings", "next30Days": "next_30_days", "asks": "asks"}
@@ -258,6 +259,10 @@ def call_tool(principal, name, arguments):
     if not isinstance(arguments, dict) or set(arguments) - schema["properties"].keys() or set(schema["required"]) - arguments.keys():
         raise ValidationError("Provide the required supported tool arguments only.")
     scope = "startup:draft:write" if name == "save_narrative_draft" else "startup:brief:read"
+    if name == "list_startups" and principal.grant["resource"] == mlai_url():
+        # Startup identity is necessary for any explicitly granted Article or
+        # Pulse operation; it does not read a Pulse brief or financial evidence.
+        scope = next((item for item in STARTUP_IDENTITY_SCOPES if item in principal.grant["scopes"]), scope)
     principal = valid_grant(principal.grant["id"], scope=scope)
     if name == "list_startups":
         company = company_for(principal.user, principal.grant["company_id"], principal.grant)

@@ -33,6 +33,8 @@ subsystem-specific contracts and runbooks.
 
 ## Community chat APIs
 
+- [MLAI remote MCP](mlai-mcp.md) — unified Pulse, Articles and explicit-channel Community capabilities with legacy audience isolation
+
 - [Valley remote MCP](valley-mcp.md) — client installation, scoped OAuth consent, private narrative handoff and rollout
 
 - [Private member onboarding](community-chat-onboarding.md) — email signup,

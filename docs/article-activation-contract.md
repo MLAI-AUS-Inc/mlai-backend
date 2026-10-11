@@ -1,5 +1,49 @@
 # Articles activation and Pulse source selection
 
+## MLAI MCP Articles
+
+The unified MLAI server exposes opt-in Articles scopes, independent of legacy
+Valley Pulse grants. `article:read` allows current capability, catalogue, price,
+private draft and progress reads. `article:generate` starts topic research and
+article generation only with a bounded integer `expectedCostPoints` and UUID
+`idempotencyKey`. Generation also requires the reviewed website connection
+generation returned by capability discovery. These commands reuse the same
+founder-owned admission, editorial policy, Roo ledger and durable dispatch
+functions as the authenticated HTTP product. They do not dispatch HTTP views
+or return provider credentials. Keys are bound to the owner, company and
+operation; an altered payload cannot reuse an accepted key. A transport retry
+returns the saved run without another debit or dispatch.
+
+MCP topic research reserves its original inputs and hash in the existing
+dispatch outbox in the same transaction as the Roo spend. A crash before run
+persistence therefore leaves a recoverable receipt: retry returns that receipt,
+and changed-topic reuse of its key fails before charging or queueing. Discovery
+delivery uses `/api/runs/discovery`, rechecks the original founder/company/domain
+and any selected approved audience, and requires no article repository setup.
+Unknown queue outcomes remain pending until dispatch-key evidence resolves
+them; confirmed absence/refusal refunds the original research debit using the
+topic-generation ledger family. Refunds read the recorded spend, including when
+pricing or the free-domain exception changes after the request.
+
+`article:draft:write` accepts deterministic text edits against the exact current
+revision and original field values. It cannot approve comments, generate images,
+change the website or publish. `article:publish` can inspect the private founder
+review link and continue an existing publication handoff only after the owning
+founder's persisted approval receipt matches the exact hosted run, commit,
+render generation and quality inputs. The requested destination must also match
+the current startup domain, repository and selected publishing target. Agent
+input cannot create that approval. The MCP action creates or reuses the approved
+publication PR; merging remains a separately reviewed founder action.
+
+Run these additional transport contracts with the database-free runner:
+`python scripts/test_without_database.py startup_updates.tests_mcp_articles_unit
+content_factory.tests_mcp_operations_unit`. Existing HTTP editorial, admission,
+review and publication suites also exercise the shared operations. These tests
+do not prove SQL locking, deployed provider execution or worker persistence.
+`content_factory.tests_research_dispatch_unit` additionally checks research
+charge/receipt transaction ordering, the discovery delivery policy, crash
+retry conflict protection and refunds across price changes.
+
 Local implementation, 4 October 2026. This describes code and test contracts;
 it does not establish production deployment or live OAuth/worker behavior.
 No new model, migration or production data repair is included.

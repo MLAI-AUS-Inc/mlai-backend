@@ -129,6 +129,11 @@ jobs:
           community_chat.tests.test_startup_activity_defaults \
           community_chat.tests.test_startup_lifecycle \
           community_chat.tests.test_startup_mcp \
+          community_chat.tests.test_mlai_mcp \
+          startup_updates.tests_mcp_articles_unit \
+          content_factory.tests_mcp_operations_unit \
+          content_factory.tests_research_dispatch_unit \
+          community_chat.tests.test_mlai_mcp_community \
           community_chat.tests.test_startup_publication \
           startup_updates.tests_month_scope \
           startup_updates.tests_monthly_groups \
@@ -722,6 +727,11 @@ jobs:
         COMMUNITY_CHAT_ADAPTER_URL: ${{ vars.COMMUNITY_CHAT_ADAPTER_URL }}
         COMMUNITY_CHAT_PASSWORD_AUTH_ENABLED: ${{ vars.COMMUNITY_CHAT_PASSWORD_AUTH_ENABLED || 'false' }}
         COMMUNITY_CHAT_STARTUP_UPDATES_ENABLED: ${{ vars.COMMUNITY_CHAT_STARTUP_UPDATES_ENABLED || '' }}
+        MLAI_MCP_ENABLED: ${{ vars.MLAI_MCP_ENABLED || 'false' }}
+        MLAI_MCP_COMMUNITY_ENABLED: ${{ vars.MLAI_MCP_COMMUNITY_ENABLED || 'false' }}
+        MLAI_MCP_COMMUNITY_RELAY_URL: ${{ vars.MLAI_MCP_COMMUNITY_RELAY_URL || '' }}
+        MLAI_MCP_COMMUNITY_SECRET: ${{ secrets.MLAI_MCP_COMMUNITY_SECRET || '' }}
+        MLAI_MCP_CLIENT_INSTALL_URLS: ${{ vars.MLAI_MCP_CLIENT_INSTALL_URLS || '' }}
         VALLEY_MCP_ENABLED: ${{ vars.VALLEY_MCP_ENABLED || 'false' }}
         VALLEY_MCP_PUBLIC_BASE_URL: ${{ vars.VALLEY_MCP_PUBLIC_BASE_URL || 'https://api.mlai.au' }}
         VALLEY_MCP_DOMAIN_VERIFICATION_TOKEN: ${{ vars.VALLEY_MCP_DOMAIN_VERIFICATION_TOKEN || '' }}

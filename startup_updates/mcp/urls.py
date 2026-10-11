@@ -3,6 +3,8 @@ from . import views
 
 urlpatterns = [
     path(".well-known/openai-apps-challenge", views.DomainVerificationView.as_view(), name="valley_mcp_domain_verification"),
+    path("mcp/mlai", views.MlaiMcpView.as_view(), name="mlai_mcp"),
+    path(".well-known/oauth-protected-resource/mcp/mlai", views.MlaiResourceMetadataView.as_view()),
     path("mcp/valley", views.McpView.as_view(), name="valley_mcp"),
     path(".well-known/oauth-protected-resource/mcp/valley", views.ResourceMetadataView.as_view()),
     path(".well-known/oauth-protected-resource", views.ResourceMetadataView.as_view()),
