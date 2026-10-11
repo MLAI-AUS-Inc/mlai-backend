@@ -154,6 +154,25 @@ def _locked_owner_connection(grant):
     return ExternalServiceConnection.objects.select_for_update().get(pk=grant.connection_id, user_id=grant.user_id)
 
 
+def public_anchor_timestamp(mapped, anchor, frontier_us, *, unread=False):
+    """Wait for retryable native deliveries; permanently dead anchors use history."""
+    from django.db.models import Q
+    from integrations.models import (
+        CommunityBridgeDelivery, CommunityBridgeDeliveryStatus, CommunityBridgeMessageLink,
+    )
+    links = CommunityBridgeMessageLink.objects.filter(
+        channel=mapped, source_deleted_at__isnull=True, destination_deleted_at__isnull=True)
+    direct = list(links.filter(Q(source_platform='buzz', source_message_id=anchor)
+                             | Q(destination_platform='buzz', destination_message_id=anchor))) if anchor else []
+    if not direct and anchor:
+        if CommunityBridgeDelivery.objects.filter(
+            channel=mapped, source_platform='buzz', source_message_id=anchor, delivery_type='create',
+        ).exclude(status__in=[CommunityBridgeDeliveryStatus.COMPLETED, CommunityBridgeDeliveryStatus.DEAD]).exists():
+            raise RuntimeError('inbox_delivery_link_pending')
+    inbound = latest_inbound_before(links.filter(source_platform='slack', destination_platform='buzz'), frontier_us) if not direct else None
+    return resolve_link_timestamp(direct + ([inbound] if inbound else []), anchor, frontier_us, unread=unread)
+
+
 def accept(payload):
     """Enqueue only an HMAC-matched owner and currently authorized mapped room."""
     if not getattr(settings, 'MESSAGE_SYNC_INBOX_READ_EXPORT', False):
@@ -162,7 +181,7 @@ def accept(payload):
     from community_chat.models import CommunityChatDevice
     from community_chat import adapter
     from integrations.services import slack_chat_read_state as reads
-    from integrations.models import CommunityBridgeMessageLink
+    from integrations.models import CommunityBridgeDeliveryStatus
     export = parse_export(payload)
     capabilities, _ = adapter._request('GET', '/v1/capabilities')
     if str(capabilities.get('community_id')) != export['community_id']:
@@ -200,22 +219,15 @@ def accept(payload):
                 ts = format(max(Decimal(0), Decimal(ts) - (Decimal('0.000001') if export['op'] == 'unread' else 0)), '.6f')
             else:
                 rows = _current_private_delivery_rows(private)
-                if rows.filter(source_platform='buzz', source_message_id=export['read_through_event'], operation='create').exclude(status__in=['completed', 'failed']).exists():
+                if rows.filter(source_platform='buzz', source_message_id=export['read_through_event'], operation='create').exclude(
+                    status__in=[CommunityBridgeDeliveryStatus.COMPLETED, CommunityBridgeDeliveryStatus.DEAD],
+                ).exists():
                     raise RuntimeError('private_inbox_anchor_pending')
                 inbound = latest_inbound_before(rows.filter(source_platform='slack', operation='create', status='completed'), export['read_through_us'])
                 ts = format(Decimal(inbound.source_message_id), '.6f') if inbound else '0.000000'
         else:
-            links = CommunityBridgeMessageLink.objects.filter(channel=mapped, source_deleted_at__isnull=True, destination_deleted_at__isnull=True)
-            anchor = export['read_through_event']
-            from django.db.models import Q
-            direct = list(links.filter(Q(source_platform='buzz', source_message_id=anchor) | Q(destination_platform='buzz', destination_message_id=anchor))) if anchor else []
-            if not direct and anchor:
-                from integrations.models import CommunityBridgeDelivery
-                if CommunityBridgeDelivery.objects.filter(channel=mapped, source_platform='buzz', source_message_id=anchor, delivery_type='create').exclude(status__in=['completed', 'failed']).exists():
-                    raise RuntimeError('inbox_delivery_link_pending')
-            inbound = latest_inbound_before(links.filter(source_platform='slack', destination_platform='buzz'), export['read_through_us']) if not direct else None
-            fallback = [inbound] if inbound else []
-            ts = resolve_link_timestamp(direct + fallback, anchor, export['read_through_us'], unread=export['op'] == 'unread')
+            ts = public_anchor_timestamp(mapped, export['read_through_event'],
+                                         export['read_through_us'], unread=export['op'] == 'unread')
         pending = state[key]['pending']
         pending.update(source_ts=ts, public_key=public_key, source_id=target.slack_id)
         from .receipts import KEY as RECEIPTS_KEY, enqueue_read

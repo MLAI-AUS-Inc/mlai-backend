@@ -65,6 +65,14 @@ Slack latency objectives or replace this human review.
 
 ## Validation and cleanup
 
+An exported native anchor waits while its bridge create is pending, processing,
+waiting for a parent, or failed with a retry still possible. Completed or
+permanently dead deliveries cannot produce a new link: when their link is
+absent, resolve the latest inbound Slack message at or before the relay
+frontier. A consent-rejected native message therefore does not block the
+durable export page or later cursor revisions indefinitely. This does not
+retry or bypass the rejected message's consent check.
+
 Backend implementation checks use `scripts/test_without_database.py`; local
 model dry-runs reported no changes. Database-backed Django concurrency tests,
 controlled Slack acceptance and deployment remain separate approved gates.
