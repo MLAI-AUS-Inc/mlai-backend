@@ -11,6 +11,18 @@ FREE_CONTENT_FACTORY_DOMAINS = {"mlai.au"}
 INSUFFICIENT_ROO_POINTS_ERROR_CODE = "INSUFFICIENT_ROO_POINTS"
 CONTENT_FACTORY_ACTION_ARTICLE_GENERATION = "article_generation"
 CONTENT_FACTORY_ACTION_CONTENT_ISLAND_TOPIC_GENERATION = "content_island_topic_generation"
+FREE_SETUP_ACTIONS = frozenset({"prepare", "repo_scan", "content_factory_scan", "article_system_setup", "website_verify"})
+
+
+def get_content_factory_setup_cost_points(domain: Optional[str]) -> int:
+    """Website preparation and its verification steps are free for every company."""
+    return 0
+
+
+def mask_billing_email(email: str) -> str:
+    """Identify an account without exposing its complete email address."""
+    local, separator, host = str(email or "").partition("@")
+    return f"{local[:1]}***@{host}" if separator else "your signed-in account"
 
 
 def normalize_content_factory_domain(domain: Optional[str]) -> str:
@@ -65,6 +77,9 @@ def build_roo_points_payload(
     current_balance: Optional[int],
     required_points: Optional[int] = None,
     cost_points: Optional[int] = None,
+    account_email: str = "",
+    other_founder_has_points: bool = False,
+    billing_email: str = "",
 ) -> dict:
     normalized_domain = normalize_content_factory_domain(domain)
     required = (
@@ -78,13 +93,17 @@ def build_roo_points_payload(
         else get_content_factory_article_cost_points(normalized_domain)
     )
     balance = int(current_balance or 0)
+    account = mask_billing_email(account_email)
+    payer = mask_billing_email(billing_email) if billing_email else account
     if cost > 0 and action == CONTENT_FACTORY_ACTION_CONTENT_ISLAND_TOPIC_GENERATION:
         plural = "point" if cost == 1 else "points"
-        message = f"Researching topics costs {cost} Roo {plural}, and this user does not have enough."
+        message = f"Researching topics costs {cost} Roo {plural}. {payer} has {balance} Roo points."
     elif cost > 0:
-        message = f"Creating an article costs {cost} Roo points, and this user does not have enough."
+        message = f"Creating an article costs {cost} Roo points. {payer} has {balance} Roo points."
     else:
-        message = f"This AI action requires at least {required} Roo points before it can start."
+        message = f"This AI action requires at least {required} Roo points. {payer} has {balance} Roo points."
+    if other_founder_has_points:
+        message += " Another founder has enough points and can opt in as the company billing founder."
     return {
         "error": message,
         "detail": message,
@@ -97,6 +116,9 @@ def build_roo_points_payload(
         "domain": normalized_domain,
         "action": action,
         "retryable": False,
+        "signed_in_account": account,
+        "billing_account": payer,
+        "other_founder_has_points": bool(other_founder_has_points),
     }
 
 
@@ -127,3 +149,18 @@ def build_roo_points_authorization_payload(
     if ledger_id not in (None, ""):
         payload["roo_points_ledger_id"] = str(ledger_id)
     return payload
+
+
+def public_run_billing_receipt(run_request: dict, result: dict) -> dict:
+    """Expose backend billing state for polling without payer or ledger identities."""
+    billing_status = str(run_request.get("roo_points_billing_status") or "").strip()
+    if billing_status not in {"charged", "reused", "free", "gated", "refunded"}:
+        billing_status = "unknown"
+    pending = bool(
+        run_request.get("pending_billing_refund") and not result.get("dispatch_refund_processed")
+        or result.get("reconciliation_refund_pending")
+    )
+    return {
+        "billingStatus": billing_status,
+        "refundStatus": "refunded" if billing_status == "refunded" else "pending" if pending else "none",
+    }
