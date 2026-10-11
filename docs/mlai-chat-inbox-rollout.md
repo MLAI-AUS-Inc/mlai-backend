@@ -1,9 +1,18 @@
 # Server inbox rollout and rollback
 
-The source implementation is complete behind default-off flags. This document
-does not record a deployment or authorize operational commands. The client and
-relay rollout is owned by the MLAI Chat runbook, `docs/mlai/INBOX_ROLLOUT.md`.
-The backend introduces no schema change for this feature.
+The source implementation is complete behind default-off flags. Sam authorized
+direct production testing and administrator merges on 11 October 2026,
+superseding the staging and pre-activation shadow requirements below for this
+release. Follow Chat's `docs/mlai/INBOX_PRODUCTION_TEST_PLAN.md` and record actual
+deployment and acceptance evidence. This document itself is not a deployment
+record. The backend introduces no schema change for this feature.
+
+The deployment workflow now supplies every inbox flag from repository variables
+with default false and the dedicated account secret from GitHub secrets.
+The release validates activation inputs before changing host configuration.
+Managed secret installation refuses silently replacing an existing account
+secret, and managed flag writes reject malformed/multiline values. Deployment
+does not automatically bind the whole member population.
 
 ## Preparation
 
