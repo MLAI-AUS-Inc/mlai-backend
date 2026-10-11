@@ -53,8 +53,12 @@ def select_targeted(ordered, snapshots, cache_key, cursor, *, now, turn):
                 and getattr(target, 'source_inventory', None) is None
                 and (str(target.channel_id), cache_key(target)) not in baselines)
     safety = [t for t in eligible if not state(t).get("fetched_at") or age(t) >= safety_seconds or needs_source_baseline(t)]
-    urgent_targets = [t for t in eligible if urgent(t) or (state(t).get("refresh_required") and age(t) >= 1)]
+    hinted = [t for t in eligible if urgent(t)]
+    # Older cache repairs must not displace an explicit owner/visibility
+    # hint. Keep oldest-first fairness within each tier and the reserved
+    # safety turn, while honoring the same age and provider retry fences.
+    refresh = [t for t in eligible if state(t).get("refresh_required") and age(t) >= 1]
     possible = [t for t in eligible if age(t) >= 30 and possibly_unread(t, state(t), now=now)]
     known = [t for t in eligible if state(t).get("is_unread") is True and age(t) >= 60]
-    candidates = safety if turn % 10 == 9 and safety else (urgent_targets or possible or known or safety)
+    candidates = safety if turn % 10 == 9 and safety else (hinted or refresh or possible or known or safety)
     return max(candidates, key=age, default=None)
