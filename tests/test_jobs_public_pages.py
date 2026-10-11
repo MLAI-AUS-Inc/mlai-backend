@@ -3,7 +3,6 @@ from django.test import SimpleTestCase
 
 from jobs.services.public_pages import (
     parse_ai_jobs_au_jobs,
-    parse_matchstiq_jobs,
     parse_topstartups_jobs,
 )
 from jobs.services.sources import PHASE_1_SOURCES
@@ -16,8 +15,7 @@ class JobsPublicPagesParserTests(SimpleTestCase):
         self.assertIn("ai-jobs.com.au", enabled)
         self.assertNotIn("Matchstiq", enabled)
         self.assertNotIn("CareerOne", enabled)
-        unavailable_sources = {"CareerOne", "Matchstiq"}
-        self.assertTrue(all(source.enabled for source in PHASE_1_SOURCES if source.name not in unavailable_sources))
+        self.assertTrue(all(source.enabled for source in PHASE_1_SOURCES))
 
     def test_parse_topstartups_jobs(self):
         soup = BeautifulSoup(
@@ -62,25 +60,3 @@ class JobsPublicPagesParserTests(SimpleTestCase):
         self.assertEqual(len(jobs), 1)
         self.assertEqual(jobs[0]["company_name"], "Mindrift")
         self.assertEqual(jobs[0]["location"], "Remote, AU")
-
-    def test_parse_matchstiq_jobs(self):
-        soup = BeautifulSoup(
-            """
-            <main>
-              <h4>Senior Machine Learning / ML Engineer</h4>
-              <p>Harrison.ai</p>
-              <p>Building diagnostic AI tools for healthcare.</p>
-              <p>Remote Artificial Intelligence</p>
-              <p>Posted 2 d ago</p>
-              <a href="/jobs/senior-machine-learning-engineer">View job</a>
-            </main>
-            """,
-            "html.parser",
-        )
-
-        jobs = parse_matchstiq_jobs(soup, "https://matchstiq.io/jobs", "Matchstiq", "startup_board", 0.76, 5)
-
-        self.assertEqual(len(jobs), 1)
-        self.assertEqual(jobs[0]["company_name"], "Harrison.ai")
-        self.assertEqual(jobs[0]["location"], "Remote Artificial Intelligence")
-        self.assertEqual(jobs[0]["job_url"], "https://matchstiq.io/jobs/senior-machine-learning-engineer")

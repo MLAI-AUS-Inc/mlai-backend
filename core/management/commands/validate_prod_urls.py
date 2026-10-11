@@ -54,9 +54,6 @@ REQUIRED_CORS_ORIGINS = {
     "https://mlai.au",
     "https://ops.mlai.au",
     "https://www.mlai.au",
-    # victorai.win registration form posts to /api/v1/victor-ai/ cross-origin.
-    "https://victorai.win",
-    "https://www.victorai.win",
 }
 
 REQUIRED_COMMUNITY_CHAT_ORIGINS = {

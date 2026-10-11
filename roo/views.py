@@ -27,7 +27,7 @@ from uuid import UUID
 from .models import (
     PointsAdmin, Minter, Task, Ledger, PointsAccount, BoostPostAdmission,
     TaskAssignment, TaskSubmission, CoworkingBooking, CoworkingDayCapacity,
-    CoworkingBookingOperation, OfficeManagerAssignment, OfficeManagerDay,
+    CoworkingBookingOperation,
     RewardsCatalog, RewardRedemption, TaskTemplate, PointsRequest, PointsPurchase,
 )
 
@@ -38,15 +38,6 @@ from .services import (
 )
 from .coworking_snapshot import build_booking_snapshot
 from .coding import roo_decimal_string
-from .office_manager_policy import (
-    OFFICE_MANAGER_TEST_CHANNEL_ID,
-    is_office_manager_channel_allowed,
-)
-from .office_manager import (
-    MAX_OFFICE_MANAGER_GENERATION,
-    OfficeManagerClaimError,
-    OfficeManagerService,
-)
 from .permissions import (
     can_list_committee_candidate_emails,
     can_generate_coworking_reports,
@@ -66,7 +57,7 @@ from core.slack_founder_links import (
 )
 from core.permissions import (
     HasAPIKey,
-    HasOfficeManagerRooApiKey,
+    HasIsolatedRooApiKey,
     HasRooApiKey,
     HasStrictRooApiKey,
 )
@@ -1672,8 +1663,6 @@ class CoworkingViewSet(viewsets.ViewSet):
         # @action metadata.
         if self.action in {'book_many', 'bookings_for_date'}:
             return [HasStrictRooApiKey()]
-        if self.action in {'office_manager_claim', 'office_manager_preflight'}:
-            return [HasOfficeManagerRooApiKey()]
         return super().get_permissions()
 
     @action(detail=False, methods=['get'])
@@ -2142,183 +2131,6 @@ class CoworkingViewSet(viewsets.ViewSet):
             return Response({'error': str(e)}, status=status.HTTP_400_BAD_REQUEST)
         return Response(response_data, status=response_status)
 
-    @action(detail=False, methods=['get'], url_path='office-manager/preflight')
-    def office_manager_preflight(self, request):
-        """Authenticate Roo's isolated credential and publish the contract."""
-        return Response(
-            {
-                'status': 'ok',
-                'contract': 'office-manager-v1',
-                'credential_scope': 'strict_roo',
-                'claim_generation_supported': True,
-                'claim_generation_required': True,
-                'claim_channel_required': True,
-                'allowed_channel_id': OFFICE_MANAGER_TEST_CHANNEL_ID,
-                'timezone': str(
-                    getattr(
-                        settings,
-                        'OFFICE_MANAGER_TIMEZONE',
-                        'Australia/Melbourne',
-                    )
-                ),
-                'enabled': bool(
-                    getattr(settings, 'OFFICE_MANAGER_ENABLED', False)
-                ),
-            },
-            status=status.HTTP_200_OK,
-        )
-
-    @action(detail=False, methods=['post'], url_path='office-manager/claim')
-    def office_manager_claim(self, request):
-        """Atomically select and book today's first Office Manager volunteer."""
-        # This field comes from Roo's verified Slack envelope, never button values.
-        if not is_office_manager_channel_allowed(request.data.get("slack_channel_id")):
-            return Response(
-                {
-                    "code": "channel_not_allowed",
-                    "error": "Office Manager is only available in #roo-testing",
-                },
-                status=status.HTTP_403_FORBIDDEN,
-            )
-        slack_user_id = clean_slack_id(request.data.get('slack_user_id'))
-        booking_date_raw = str(request.data.get('date') or '').strip()
-        attempt_id_raw = str(request.data.get('attempt_id') or '').strip()
-        generation_raw = request.data.get('generation')
-        if (
-            not slack_user_id
-            or not booking_date_raw
-            or not attempt_id_raw
-            or generation_raw is None
-        ):
-            return Response(
-                {
-                    'code': 'invalid_request',
-                    'error': (
-                        'slack_user_id, date, attempt_id, and generation are required'
-                    ),
-                },
-                status=status.HTTP_400_BAD_REQUEST,
-            )
-        generation_text = (
-            str(generation_raw)
-            if type(generation_raw) is int
-            else ""
-        )
-        if (
-            not generation_text.isdigit()
-            or generation_text.startswith("0")
-            or len(generation_text) > 10
-            or int(generation_text) > MAX_OFFICE_MANAGER_GENERATION
-        ):
-            return Response(
-                {
-                    'code': 'invalid_request',
-                    'error': 'generation must be a canonical positive integer',
-                },
-                status=status.HTTP_400_BAD_REQUEST,
-            )
-        generation = int(generation_text)
-        try:
-            booking_date = date.fromisoformat(booking_date_raw)
-        except ValueError:
-            return Response(
-                {
-                    'code': 'invalid_request',
-                    'error': 'Invalid date format. Use YYYY-MM-DD',
-                },
-                status=status.HTTP_400_BAD_REQUEST,
-            )
-        if booking_date_raw != booking_date.isoformat():
-            return Response(
-                {
-                    'code': 'invalid_request',
-                    'error': 'Invalid date format. Use YYYY-MM-DD',
-                },
-                status=status.HTTP_400_BAD_REQUEST,
-            )
-        try:
-            attempt_id = uuid.UUID(attempt_id_raw)
-        except (ValueError, AttributeError):
-            attempt_id = None
-        if attempt_id is None or attempt_id_raw != str(attempt_id):
-            return Response(
-                {
-                    'code': 'invalid_request',
-                    'error': 'attempt_id must be a canonical lowercase UUID',
-                },
-                status=status.HTTP_400_BAD_REQUEST,
-            )
-
-        try:
-            result = OfficeManagerService.claim(
-                slack_user_id=slack_user_id,
-                booking_date=booking_date,
-                attempt_id=attempt_id,
-                generation=generation,
-            )
-        except OfficeManagerClaimError as exc:
-            if exc.code == 'claim_closed':
-                day = OfficeManagerDay.objects.filter(date=booking_date).first()
-                if day and day.message_update_pending:
-                    OfficeManagerService.reconcile_message(day.id)
-            status_by_code = {
-                'feature_disabled': status.HTTP_503_SERVICE_UNAVAILABLE,
-                'member_not_eligible': status.HTTP_403_FORBIDDEN,
-                'channel_not_allowed': status.HTTP_403_FORBIDDEN,
-                'slack_profile_unavailable': status.HTTP_503_SERVICE_UNAVAILABLE,
-                'office_manager_day_not_found': status.HTTP_404_NOT_FOUND,
-                'already_claimed': status.HTTP_409_CONFLICT,
-                'claim_closed': status.HTTP_409_CONFLICT,
-                'attempt_payload_conflict': status.HTTP_409_CONFLICT,
-                'attempt_superseded': status.HTTP_409_CONFLICT,
-                'announcement_superseded': status.HTTP_409_CONFLICT,
-                'attempt_unavailable': status.HTTP_503_SERVICE_UNAVAILABLE,
-                'refund_unavailable': status.HTTP_409_CONFLICT,
-            }
-            response_data = {'code': exc.code, 'error': str(exc)}
-            response_data['generation'] = generation
-            response_data['attempt_id'] = str(exc.attempt_id or attempt_id)
-            if exc.code == 'attempt_superseded':
-                response_data['status'] = 'superseded'
-            if exc.assignee_slack_user_id:
-                response_data['assignee_slack_user_id'] = (
-                    exc.assignee_slack_user_id
-                )
-            return Response(
-                response_data,
-                status=status_by_code.get(
-                    exc.code,
-                    status.HTTP_400_BAD_REQUEST,
-                ),
-            )
-
-        OfficeManagerService.reconcile_message(result.assignment.day_id)
-        OfficeManagerService.deliver_winner_channel_announcement(
-            result.assignment.id
-        )
-        OfficeManagerService.deliver_winner_dm(result.assignment.id)
-        response_data = {
-            'status': result.status,
-            'attempt_id': str(result.attempt_id or attempt_id),
-            'replayed': result.replayed,
-            'date': booking_date.isoformat(),
-            'generation': generation,
-            'office_manager_slack_user_id': slack_user_id,
-            'assignment_id': result.assignment.id,
-            'booking': CoworkingBookingSerializer(result.booking).data,
-            'points_charged': 0,
-            'points_refunded': result.assignment.points_refunded,
-            'existing_booking_converted': result.existing_booking_converted,
-            'monthly_update_discount_applied': False,
-            'office_manager_free_day': True,
-        }
-        response_status = (
-            status.HTTP_200_OK
-            if result.status == 'already_claimed_by_you'
-            else status.HTTP_201_CREATED
-        )
-        return Response(response_data, status=response_status)
-
     @action(detail=False, methods=['post'])
     def cancel(self, request):
         """Cancel a booking."""
@@ -2350,7 +2162,7 @@ class CoworkingViewSet(viewsets.ViewSet):
 
         user = PointsService.get_user_by_slack_id(slack_user_id)
         office_manager_authorized = (
-            HasOfficeManagerRooApiKey().has_permission(request, self)
+            HasIsolatedRooApiKey().has_permission(request, self)
         )
 
         try:
@@ -2359,8 +2171,8 @@ class CoworkingViewSet(viewsets.ViewSet):
             return Response({'error': 'Booking not found'}, status=status.HTTP_404_NOT_FOUND)
 
         # Standard coworking cancellation retains its existing service
-        # contract. Actor-changing Office Manager cancellation is narrower and
-        # must be authenticated by Roo's isolated credential.
+        # contract. Cancelling a historical Office Manager booking still requires
+        # Roo's isolated credential to preserve its financial trust boundary.
         if (
             booking.booking_source == 'office_manager'
             and not office_manager_authorized
@@ -2380,40 +2192,6 @@ class CoworkingViewSet(viewsets.ViewSet):
                 slack_user_id,
                 office_manager_authorized=office_manager_authorized,
             )
-            office_manager_day_id = getattr(
-                booking,
-                '_office_manager_day_id',
-                None,
-            )
-            if office_manager_day_id:
-                OfficeManagerService.reconcile_message(office_manager_day_id)
-            office_manager_assignment_id = getattr(
-                booking,
-                '_office_manager_assignment_id',
-                None,
-            )
-            retraction_delivered = None
-            retraction_status = None
-            if office_manager_assignment_id:
-                retraction_delivered = bool(
-                    OfficeManagerService.retract_winner_channel_announcement(
-                        office_manager_assignment_id
-                    )
-                )
-                if OfficeManagerAssignment.objects.filter(
-                    pk=office_manager_assignment_id,
-                    private_correction_pending=True,
-                ).exists():
-                    OfficeManagerService.deliver_private_correction(
-                        office_manager_assignment_id
-                    )
-                retraction_status = (
-                    OfficeManagerAssignment.objects.filter(
-                        pk=office_manager_assignment_id
-                    ).values_list(
-                        'winner_channel_retraction_status', flat=True
-                    ).first()
-                )
             return Response({
                 'booking': CoworkingBookingSerializer(booking).data,
                 'refunded': refunded,
@@ -2421,15 +2199,6 @@ class CoworkingViewSet(viewsets.ViewSet):
                 'already_cancelled': bool(
                     getattr(booking, '_already_cancelled', False)
                 ),
-                'office_manager_day_reopened': bool(
-                    getattr(
-                        booking,
-                        '_office_manager_day_reopened',
-                        False,
-                    )
-                ),
-                'office_manager_retraction_delivered': retraction_delivered,
-                'office_manager_retraction_status': retraction_status,
             })
         except PermissionDeniedError as e:
             return Response({'error': str(e)}, status=status.HTTP_403_FORBIDDEN)

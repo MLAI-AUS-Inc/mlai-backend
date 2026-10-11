@@ -32,8 +32,6 @@ def collect_simple_jobs(
         return parse_aijobs_com_jobs(soup, url, source_name, source_type, source_quality_score, limit)
     if source_name == "ai-jobs.com.au":
         return parse_ai_jobs_au_jobs(soup, url, source_name, source_type, source_quality_score, limit)
-    if source_name == "Matchstiq":
-        return parse_matchstiq_jobs(soup, url, source_name, source_type, source_quality_score, limit)
 
     jobs = parse_json_ld_jobs(soup, url, source_name, source_type, source_quality_score, limit)
     if jobs:
@@ -230,60 +228,6 @@ def parse_ai_jobs_au_jobs(
     return jobs[:limit]
 
 
-def parse_matchstiq_jobs(
-    soup: BeautifulSoup,
-    page_url: str,
-    source_name: str,
-    source_type: str,
-    source_quality_score: float,
-    limit: int,
-) -> list[dict[str, Any]]:
-    lines = visible_lines(soup)
-    jobs: list[dict[str, Any]] = []
-    seen: set[str] = set()
-
-    for index, line in enumerate(lines):
-        if len(jobs) >= limit:
-            break
-        title = clean_text(line)
-        if not looks_like_title(title):
-            continue
-        if looks_like_location(title) or infer_posted([title]):
-            continue
-
-        window = lines[index + 1 : index + 7]
-        company = first_company_after_title(window)
-        location = infer_matchstiq_location(window)
-        posted = infer_posted(window)
-        if not company or not posted:
-            continue
-
-        if company.lower() in {"jobs", "companies", "post job"}:
-            continue
-
-        job_url = find_nearby_link(soup, title, page_url) or stable_listing_url(page_url, title, company)
-        key = f"{title.lower()}|{company.lower()}|{location or ''}"
-        if key in seen:
-            continue
-        seen.add(key)
-
-        jobs.append(
-            job_dict(
-                source_name,
-                source_type,
-                source_quality_score,
-                title,
-                company,
-                location,
-                job_url,
-                " ".join(window),
-                posted,
-            )
-        )
-
-    return jobs[:limit]
-
-
 def parse_json_ld_list_items(
     soup: BeautifulSoup,
     page_url: str,
@@ -476,23 +420,6 @@ def find_nearby_link(soup: BeautifulSoup, title: str, page_url: str) -> str | No
         if text in {"view job", "read more"} and looks_like_job_href(href):
             return urljoin(page_url, href)
     return None
-
-
-def first_company_after_title(fragments: list[str]) -> str | None:
-    for value in fragments:
-        if looks_like_company(value):
-            return value
-    return None
-
-
-def infer_matchstiq_location(fragments: list[str]) -> str | None:
-    for value in fragments[1:]:
-        text = clean_text(value)
-        if len(text) > 80 or text.endswith("..."):
-            continue
-        if looks_like_location(text):
-            return text
-    return infer_location(fragments)
 
 
 def stable_listing_url(page_url: str, title: str, company: str | None) -> str:

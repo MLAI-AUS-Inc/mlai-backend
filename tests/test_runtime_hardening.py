@@ -444,7 +444,7 @@ with patch('dotenv.load_dotenv', return_value=False), \
                             "previous_scheduler_container_id=",
                             "upsert_env_value() { :; }",
                             "restore_host_writer_watchdogs() { :; }",
-                            'docker() { [ "$2" != compose ] || :; if [ "$1" = compose ] && [ "$2" = up ]; then [ "$recreation_succeeds" = 1 ]; else return 0; fi; }',
+                            'docker() { [ "$2" != compose ] || :; if [[ "$*" == compose*" up -d "* ]]; then [ "$recreation_succeeds" = 1 ]; else return 0; fi; }',
                             recovery_function,
                             "restore_runtime_on_error",
                         ]
@@ -504,10 +504,6 @@ with patch('dotenv.load_dotenv', return_value=False), \
         )
         self.assertIn(
             "source scripts/runtime-services.sh",
-            deploy,
-        )
-        self.assertIn(
-            'if [ "\\$internal_status" != "401" ] || [ "\\$missing_status" != "401" ]; then',
             deploy,
         )
         self.assertIn(
@@ -595,7 +591,7 @@ with patch('dotenv.load_dotenv', return_value=False), \
         )
         self.assertIn('docker image tag "\\$image_id" "\\$image_ref"', deploy)
         self.assertIn(
-            'docker compose up -d --no-deps --force-recreate "\\${restored_services[@]}"',
+            'docker compose -f docker-compose.yml -f "\\$rollback_override" up -d --no-deps --force-recreate "\\${restored_services[@]}"',
             deploy,
         )
         failure_trap = re.search(r"^    trap .* ERR$", deploy, re.MULTILINE)
@@ -659,7 +655,8 @@ printf 'unexpected-continuation\n'
         self.assertEqual(completed.returncode, 1, completed.stderr)
         self.assertIn("keeping all runtime writers safely disabled", completed.stdout)
         self.assertIn("docker:compose stop web scheduler jobs-worker", completed.stdout)
-        self.assertIn("committee-remuneration", completed.stdout)
+        self.assertIn("web-candidate", completed.stdout)
+        self.assertNotIn("committee-remuneration", completed.stdout)
         self.assertNotIn("unexpected-continuation", completed.stdout)
 
     def test_code_only_health_failure_rolls_back_after_replacement(self):
@@ -691,8 +688,8 @@ rm -f "$rollback_manifest" "$docker_log"
         )
         self.assertEqual(completed.returncode, 0, completed.stderr)
         self.assertIn("image tag old-image-id mlai-backend-web", completed.stdout)
-        self.assertIn("compose up -d --no-deps --force-recreate web", completed.stdout)
-        self.assertNotIn("compose up -d --no-deps --force-recreate web scheduler", completed.stdout)
+        self.assertIn("up -d --no-deps --force-recreate web", completed.stdout)
+        self.assertNotIn("up -d --no-deps --force-recreate web scheduler", completed.stdout)
 
     def test_bridge_deploy_validation_requires_explicit_production_activation(self):
         workflow = (ROOT / ".github" / "workflows" / "deploy.yml").read_text()
@@ -772,17 +769,3 @@ rm -f "$rollback_manifest" "$docker_log"
             'docker compose run -T --rm --no-deps web "\\$@" </dev/null', deploy
         )
         self.assertIn("compose_run_web python manage.py migrate --noinput", deploy)
-
-    def test_office_manager_deploy_probes_exact_authenticated_contract(self):
-        deploy = (ROOT / "deploy.sh").read_text()
-
-        self.assertIn(
-            "/api/v1/points/coworking/office-manager/preflight/",
-            deploy,
-        )
-        self.assertIn('"credential_scope": "strict_roo"', deploy)
-        self.assertIn(
-            "Public Roo reported an inconsistent Office Manager backend contract",
-            deploy,
-        )
-        self.assertIn("Live Office Manager preflight returned the wrong contract", deploy)

@@ -87,7 +87,6 @@
     "roo.tests_boost_post_admission",
     "roo.tests_coding_migration",
     "roo.tests_committee_candidates",
-    "roo.tests_committee_remuneration",
     "roo.tests_committee_sync",
     "roo.tests_permissions",
     "roo.tests_quests",

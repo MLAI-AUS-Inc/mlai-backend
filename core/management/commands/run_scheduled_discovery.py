@@ -26,102 +26,10 @@ from integrations.services.xero_reconciliation import run_daily_payout_reconcili
 from jobs.services.job_pipeline import enqueue_daily_jobs as run_daily_jobs_scheduler
 from hospital.sim_retention import run_scheduled_sim_conversation_cleanup
 from roo.coding import reconcile_coding_reservations
-from roo.office_manager import run_office_manager_scheduler
 from roo.models import ScheduledDiscoveryHeartbeat
 from startup_updates.monthly_update_reminders import run_monthly_update_reminder_scheduler
 
 logger = logging.getLogger(__name__)
-
-
-_OFFICE_MANAGER_DELIVERY_BOOLEAN_KEYS = frozenset(
-    {
-        "announcement_sent",
-        "message_updated",
-        "winner_channel_announcement_sent",
-        "winner_dm_sent",
-        "end_of_day_reminder_sent",
-    }
-)
-_OFFICE_MANAGER_DELIVERY_CONTAINER_KEYS = frozenset(
-    {
-        "delivery_results",
-        "delivery_statuses",
-        "recovered_deliveries",
-        "winner_channel_retractions",
-    }
-)
-_OFFICE_MANAGER_FAILURE_CONTAINER_KEYS = frozenset(
-    {
-        "delivery_failures",
-        "failed_deliveries",
-        "exhausted_deliveries",
-    }
-)
-_OFFICE_MANAGER_TERMINAL_DELIVERY_STATES = frozenset(
-    {
-        "dead_letter",
-        "dead-letter",
-        "exhausted",
-        "failed",
-        "failure",
-        "permanent_failure",
-        "permanent-failure",
-        "terminal_failure",
-        "terminal-failure",
-    }
-)
-_OFFICE_MANAGER_DELIVERY_KEY_PARTS = (
-    "announcement",
-    "delivery",
-    "message",
-    "reminder",
-    "retraction",
-    "winner_dm",
-)
-
-
-def _office_manager_delivery_value_failed(value, *, delivery_context=False) -> bool:
-    """Return whether an explicit delivery result reports a required failure."""
-    if value is False and delivery_context:
-        return True
-    if isinstance(value, str) and delivery_context:
-        return value.strip().lower() in _OFFICE_MANAGER_TERMINAL_DELIVERY_STATES
-    if isinstance(value, dict):
-        for raw_key, nested_value in value.items():
-            key = str(raw_key).strip().lower()
-            if key in _OFFICE_MANAGER_FAILURE_CONTAINER_KEYS and nested_value:
-                return True
-            nested_delivery_context = delivery_context or (
-                key in _OFFICE_MANAGER_DELIVERY_CONTAINER_KEYS
-                or key in _OFFICE_MANAGER_DELIVERY_BOOLEAN_KEYS
-                or any(part in key for part in _OFFICE_MANAGER_DELIVERY_KEY_PARTS)
-            )
-            if _office_manager_delivery_value_failed(
-                nested_value,
-                delivery_context=nested_delivery_context,
-            ):
-                return True
-        return False
-    if isinstance(value, (list, tuple, set)):
-        return any(
-            _office_manager_delivery_value_failed(
-                item,
-                delivery_context=delivery_context,
-            )
-            for item in value
-        )
-    return False
-
-
-def _office_manager_scheduler_failed(result) -> bool:
-    """Keep business states non-fatal while propagating required I/O failure."""
-    if not isinstance(result, dict):
-        return True
-    if str(result.get("status") or "").strip().lower() in (
-        _OFFICE_MANAGER_TERMINAL_DELIVERY_STATES
-    ):
-        return True
-    return _office_manager_delivery_value_failed(result)
 
 
 class Command(BaseCommand):
@@ -224,19 +132,7 @@ class Command(BaseCommand):
             # Authenticated request paths only reconcile their own account;
             # this production scheduler is the sole global sweep.
             ("coding_reconciliation", lambda: {"status": "completed", **reconcile_coding_reservations()}),
-            # Posts one weekday Office Manager callout, closes the volunteer
-            # window, repairs message state, and sends the end-of-day reminder.
-            ("office_manager", run_office_manager_scheduler),
         ))
-        # Office Manager returns business states and nested delivery outcomes;
-        # retain its richer failure check alongside shared runner validation.
-        if (
-            "office_manager" in results
-            and "office_manager" not in failures
-            and _office_manager_scheduler_failed(results["office_manager"])
-        ):
-            failures.append("office_manager")
-
         self.stdout.write(json.dumps(results, sort_keys=True))
         if failures:
             error = f"Scheduled runner(s) failed: {', '.join(failures)}"

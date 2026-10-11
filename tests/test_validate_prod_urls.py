@@ -57,8 +57,6 @@ VALID_PROD_URL_SETTINGS = {
         "https://mlai.au",
         "https://ops.mlai.au",
         "https://www.mlai.au",
-        "https://victorai.win",
-        "https://www.victorai.win",
     ],
     "CSRF_TRUSTED_ORIGINS": [
         "https://api.mlai.au",
@@ -132,8 +130,6 @@ class ValidateProdUrlsTests(SimpleTestCase):
             CORS_ALLOWED_ORIGINS=[
                 "https://mlai.au",
                 "https://ops.mlai.au",
-                "https://victorai.win",
-                "https://www.victorai.win",
             ],
             CSRF_TRUSTED_ORIGINS=[
                 "https://mlai.au",
@@ -159,8 +155,6 @@ class ValidateProdUrlsTests(SimpleTestCase):
                 "https://chat.mlai.au",
                 "https://mlai.au",
                 "https://www.mlai.au",
-                "https://victorai.win",
-                "https://www.victorai.win",
             ],
             CSRF_TRUSTED_ORIGINS=[
                 "https://api.mlai.au",
@@ -247,8 +241,7 @@ class ValidateProdUrlsTests(SimpleTestCase):
         )
         self.assertIn(
             "CORS_ALLOWED_ORIGINS: "
-            "https://mlai.au,https://www.mlai.au,https://victorai.win,"
-            "https://www.victorai.win,https://ops.mlai.au,https://chat.mlai.au",
+            "https://mlai.au,https://www.mlai.au,https://ops.mlai.au,https://chat.mlai.au",
             workflow,
         )
 

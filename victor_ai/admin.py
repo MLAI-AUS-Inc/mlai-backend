@@ -1,19 +1,11 @@
+"""Read-only access to retained Victor AI applications and audit history."""
+
 from django.contrib import admin
 
 from .models import VictorApplication, VictorApplicationAccessAudit, VictorRooRequestReceipt
 
 
-@admin.register(VictorApplication)
-class VictorApplicationAdmin(admin.ModelAdmin):
-    list_display = ('first_name', 'last_name', 'email', 'stage', 'role', 'startup_stage', 'industry_sector', 'team_name', 'team_size', 'created_at')
-    list_filter = ('stage', 'role', 'startup_stage', 'industry_sector', 'created_at')
-    search_fields = ('first_name', 'last_name', 'email', 'linkedin', 'team_name', 'location')
-    readonly_fields = ('client_ref', 'created_at', 'updated_at')
-    date_hierarchy = 'created_at'
-    ordering = ('-created_at',)
-
-
-class ReadOnlyAuditAdmin(admin.ModelAdmin):
+class ReadOnlyVictorAdmin(admin.ModelAdmin):
     def has_add_permission(self, request):
         return False
 
@@ -24,8 +16,18 @@ class ReadOnlyAuditAdmin(admin.ModelAdmin):
         return False
 
 
+@admin.register(VictorApplication)
+class VictorApplicationAdmin(ReadOnlyVictorAdmin):
+    list_display = ('first_name', 'last_name', 'email', 'stage', 'role', 'startup_stage', 'industry_sector', 'team_name', 'team_size', 'created_at')
+    list_filter = ('stage', 'role', 'startup_stage', 'industry_sector', 'created_at')
+    search_fields = ('first_name', 'last_name', 'email', 'linkedin', 'team_name', 'location')
+    readonly_fields = ('client_ref', 'created_at', 'updated_at')
+    date_hierarchy = 'created_at'
+    ordering = ('-created_at',)
+
+
 @admin.register(VictorApplicationAccessAudit)
-class VictorApplicationAccessAuditAdmin(ReadOnlyAuditAdmin):
+class VictorApplicationAccessAuditAdmin(ReadOnlyVictorAdmin):
     list_display = (
         'created_at', 'action', 'acting_slack_user_id', 'slack_channel_id',
         'target_application_id', 'row_count', 'outcome', 'request_id',
@@ -36,7 +38,7 @@ class VictorApplicationAccessAuditAdmin(ReadOnlyAuditAdmin):
 
 
 @admin.register(VictorRooRequestReceipt)
-class VictorRooRequestReceiptAdmin(ReadOnlyAuditAdmin):
+class VictorRooRequestReceiptAdmin(ReadOnlyVictorAdmin):
     list_display = ('created_at', 'request_id', 'event_id', 'expires_at')
     search_fields = ('request_id', 'event_id')
     ordering = ('-created_at',)

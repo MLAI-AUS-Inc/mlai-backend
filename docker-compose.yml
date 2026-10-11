@@ -13,7 +13,9 @@ x-logging: &default-logging
 
 services:
   web:
-    build: .
+    build:
+      context: .
+      target: runtime
     image: mlai-backend-web
     logging: *default-logging
     command: sh /app/scripts/start-web.sh
@@ -67,7 +69,7 @@ services:
       mlai-shared:
 
   scheduler:
-    build: .
+    image: mlai-backend-web
     logging: *default-logging
     command: >-
       sh -ec '
@@ -91,16 +93,9 @@ services:
           echo "Waiting for migrations to complete...";
           sleep 5;
         done;
-        while true; do
-          python manage.py run_scheduled_discovery || {
-            tick_status=$$?;
-            rm -f "$${health_file}";
-            echo "Scheduled discovery failed; exiting for container restart" >&2;
-            exit "$${tick_status}";
-          };
-          touch "$${health_file}";
-          sleep "$${SCHEDULED_DISCOVERY_POLL_SECONDS}";
-        done
+        exec python manage.py run_periodic_command run_scheduled_discovery \
+          --poll-seconds "$${SCHEDULED_DISCOVERY_POLL_SECONDS}" \
+          --health-file "$${health_file}"
       '
     environment:
       APP_ENV: ${APP_ENV:-production}
@@ -132,7 +127,10 @@ services:
           - mlai-backend-scheduler
 
   jobs-worker:
-    build: .
+    build:
+      context: .
+      target: jobs
+    image: mlai-backend-jobs-worker
     logging: *default-logging
     command: sh -c "until python manage.py migrate --check --noinput; do sleep 5; done; exec python manage.py run_jobs_worker"
     environment:
@@ -155,28 +153,8 @@ services:
         aliases:
           - mlai-backend-jobs-worker
 
-  committee-remuneration:
-    build: .
-    command: sh -c "until python manage.py migrate --check --noinput; do echo 'Waiting for migrations to complete...'; sleep 5; done; while true; do python manage.py pay_committee_weekly_points; sleep 3600; done"
-    environment:
-      APP_ENV: ${APP_ENV:-production}
-      COMMITTEE_REMUNERATION_ENABLED: ${COMMITTEE_REMUNERATION_ENABLED:-false}
-      COMMITTEE_REMUNERATION_WEEKLY_POINTS: ${COMMITTEE_REMUNERATION_WEEKLY_POINTS:-40}
-      COMMITTEE_REMUNERATION_SLACK_CHANNEL: ${COMMITTEE_REMUNERATION_SLACK_CHANNEL:-#roo-testing}
-      COMMITTEE_REMUNERATION_TIMEZONE: ${COMMITTEE_REMUNERATION_TIMEZONE:-Australia/Melbourne}
-    env_file:
-      - .env
-    depends_on:
-      - db
-    restart: unless-stopped
-    networks:
-      default:
-      mlai-shared:
-        aliases:
-          - mlai-backend-committee-remuneration
-
   analytics-sync:
-    build: .
+    image: mlai-backend-web
     logging: *default-logging
     command: >-
       sh -ec '
@@ -216,7 +194,7 @@ services:
           - mlai-backend-analytics-sync
 
   memory-worker:
-    build: .
+    image: mlai-backend-web
     logging: *default-logging
     command: >-
       sh -ec '
@@ -245,7 +223,7 @@ services:
           - mlai-backend-memory-worker
 
   memory-scheduler:
-    build: .
+    image: mlai-backend-web
     logging: *default-logging
     command: >-
       sh -ec '
@@ -253,12 +231,9 @@ services:
           echo "Waiting for migrations to complete...";
           sleep 5;
         done;
-        while true; do
-          if ! python manage.py schedule_memory_work; then
-            echo "Memory scheduler tick failed; the next bounded poll will retry" >&2;
-          fi;
-          sleep "$${ORG_MEMORY_SCHEDULER_POLL_SECONDS}";
-        done
+        exec python manage.py run_periodic_command schedule_memory_work \
+          --poll-seconds "$${ORG_MEMORY_SCHEDULER_POLL_SECONDS}" \
+          --continue-on-error
       '
     environment:
       APP_ENV: ${APP_ENV:-production}
@@ -276,7 +251,7 @@ services:
           - mlai-backend-memory-scheduler
 
   password-email-worker:
-    build: .
+    image: mlai-backend-web
     logging: *default-logging
     command: >-
       sh -ec '
@@ -298,7 +273,7 @@ services:
     stop_grace_period: 30s
 
   community-email-worker:
-    build: .
+    image: mlai-backend-web
     logging: *default-logging
     command: >-
       sh -ec '
@@ -322,7 +297,7 @@ services:
     stop_grace_period: 30s
 
   bridge-worker:
-    build: .
+    image: mlai-backend-web
     logging: *default-logging
     healthcheck:
       test: ["CMD", "python", "manage.py", "message_sync_status", "--check", "--local-worker"]
@@ -346,7 +321,7 @@ services:
     restart: unless-stopped
 
   bridge-reconciler:
-    build: .
+    image: mlai-backend-web
     command: >-
       sh -ec '
         until python manage.py migrate --check --noinput; do
@@ -387,7 +362,7 @@ services:
     stop_grace_period: 30s
 
   bridge-retention:
-    build: .
+    image: mlai-backend-web
     logging: *default-logging
     command: >-
       sh -ec '

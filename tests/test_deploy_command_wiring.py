@@ -11,7 +11,7 @@ from core.management.commands.deploy_preflight import PREFLIGHT_STEPS
 # starts into two, but that means every sub-command they invoke is now called
 # through call_command with keyword options instead of a shell flag. A renamed
 # command or a retired flag would no longer fail at review time — it would fail
-# mid-deploy, and deploy_postmigrate runs while web is stopped. These tests
+# mid-deploy before runtime replacement. These tests
 # check the wiring against the real command registry.
 class DeployCommandWiringTests(SimpleTestCase):
     def _assert_step_is_callable(self, name, kwargs):
@@ -64,4 +64,7 @@ class DeployCommandWiringTests(SimpleTestCase):
         # option checks would silently cover only part of the sequence.
         recorded = self._recorded_postmigrate_steps()
 
-        self.assertEqual(recorded[-1][0], "configure_firebase_storage_cors")
+        self.assertEqual(
+            [name for name, _ in recorded],
+            ["migrate", "check_org_memory_search", "validate_startup_update_schema"],
+        )

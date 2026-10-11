@@ -25,3 +25,14 @@ outputs
 .worktrees
 .codex-work
 staticfiles
+docs
+plans
+tests
+**/tests
+**/tests.py
+**/tests_*.py
+**/test_*.py
+README.md
+AGENTS.md
+ARCHITECTURE.md
+output

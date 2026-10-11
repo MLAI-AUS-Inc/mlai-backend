@@ -19,7 +19,10 @@ has not been measured. No row in this register authorises data deletion.
 | HealthHack | hospital | Simulation and scoring contracts remain; MedHack game/prediction deletion exists in migration history | Preserve active contracts and scoring-data boundary |
 | MedHack compatibility | hospital | Announcement alias and historical team profile fields remain | Measure client dependence before versioning or removing compatibility fields |
 | Watt and generic hackathons | hackathons, generic_hackathons | Preserve the previous keep decision; Watt engine shares dependency installation | Review event ownership and archived event retention |
-| Studio and Victor AI | mlai_studio, victor_ai | Registered product APIs; presence alone does not establish usage | Assign owners and collect endpoint/consumer evidence |
+| Studio | mlai_studio | Recruitment and project website forms consume intake | Keep current consumer contract |
+| Victor AI intake/reporting | victor_ai | Retired by user request on 12 October 2026; historical models/admin remain | Release consumer retirement before backend endpoint removal; decide retention separately |
+| Office Manager | roo | Pilot runtime, scheduling and new-claim APIs retired; historical financial compatibility retained | Preserve ledger/provenance and migration history |
+| Committee weekly remuneration | roo | Automatic payout service/command retired; committee authorization remains | Preserve historical ledger entries |
 
 For each new feature, its change should identify the owning package, product
 owner, entry points, workers, data classes, retention decision and review date.

@@ -3,8 +3,8 @@
 The default lazy URL import puts the full founder tools and content factory
 module graph on each worker's first request. Under load, even /healthz/live can
 spend the whole worker timeout importing modules. Resolve routes before each
-worker accepts requests, after fork: URL imports initialize a Firestore gRPC
-client and those clients must not be inherited from a Gunicorn master process.
+worker accepts requests, after fork. Firebase is initialized lazily by the
+features that use it, so route warming does not create a Firestore client.
 """
 
 
