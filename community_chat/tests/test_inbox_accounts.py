@@ -159,14 +159,39 @@ class InboxVerificationBoundaryTests(SimpleTestCase):
 class InboxBindingCommandTests(SimpleTestCase):
     def test_default_dry_run_reads_only_and_does_not_contact_adapter(self):
         from io import StringIO
+        from uuid import UUID
         from community_chat.management.commands import bind_chat_device_accounts as command
         output = StringIO()
         with patch.object(command.CommunityChatDevice, "objects") as devices, patch.object(command, "bind_verified_device") as bind:
-            devices.filter.return_value.order_by.return_value.values_list.return_value.__getitem__.return_value = [(10, 42), (11, 43)]
-            command.Command(stdout=output).handle(apply=False, dry_run=True, limit=100, after_device_id=0)
+            last = UUID("00000000-0000-0000-0000-000000000011")
+            devices.filter.return_value.order_by.return_value.values_list.return_value.__getitem__.return_value = [(last, 42)]
+            command.Command(stdout=output).handle(apply=False, dry_run=True, limit=100, after_device_id=None)
+        self.assertNotIn("id__gt", devices.filter.call_args.kwargs)
         bind.assert_not_called()
-        self.assertIn("mode=dry-run candidates=2", output.getvalue())
-        self.assertIn("next_after_device_id=11", output.getvalue())
+        self.assertIn("mode=dry-run candidates=1", output.getvalue())
+        self.assertIn(f"next_after_device_id={last}", output.getvalue())
+
+    def test_parser_and_real_model_filters_accept_uuid_resume_and_user_scope_without_database(self):
+        from io import StringIO
+        from uuid import UUID
+        from django.db.models.query import QuerySet
+        from community_chat.management.commands import bind_chat_device_accounts as command
+        resume = UUID("00000000-0000-0000-0000-000000000010")
+        cmd = command.Command(stdout=StringIO())
+        parser = cmd.create_parser("manage.py", "bind_chat_device_accounts")
+        options = vars(parser.parse_args(["--after-device-id", str(resume), "--user-id", "42"]))
+        queried = []
+        def fetch(queryset):
+            queried.append(queryset)
+            queryset._result_cache = []
+        with patch.object(QuerySet, "_fetch_all", fetch), patch.object(command, "bind_verified_device") as bind:
+            cmd.handle(**options)
+        bind.assert_not_called()
+        conditions = {condition.lhs.target.name: condition.rhs
+                      for condition in queried[0].query.where.children
+                      if hasattr(condition.lhs, "target")}
+        self.assertEqual(conditions["id"], resume)
+        self.assertEqual(conditions["user"], 42)
 
     @override_settings(COMMUNITY_CHAT_MEMBER_ACCOUNTS_ENABLED=False)
     def test_apply_requires_feature_and_invalid_limits_do_not_read(self):
@@ -175,5 +200,5 @@ class InboxBindingCommandTests(SimpleTestCase):
         with patch.object(command.CommunityChatDevice, "objects") as devices:
             for apply, limit in ((True, 100), (False, 0), (False, 10001)):
                 with self.assertRaises(CommandError):
-                    command.Command().handle(apply=apply, dry_run=False, limit=limit, after_device_id=0)
+                    command.Command().handle(apply=apply, dry_run=False, limit=limit, after_device_id=None)
         devices.filter.assert_not_called()
