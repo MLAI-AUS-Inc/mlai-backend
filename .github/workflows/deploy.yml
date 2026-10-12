@@ -135,6 +135,7 @@ jobs:
           community_chat.tests.test_startup_mcp \
           community_chat.tests.test_mlai_mcp \
           community_chat.tests.test_mlai_mcp_native_agents \
+          community_chat.tests.test_relay_role_service_unit \
           startup_updates.tests_mcp_articles_unit \
           content_factory.tests_mcp_operations_unit \
           content_factory.tests_research_dispatch_unit \
