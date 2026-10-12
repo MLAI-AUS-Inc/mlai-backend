@@ -70,13 +70,21 @@ def _lock(lease, *, skip_locked=False):
     return (grant, connection) if grant.connection_id == lease.connection_id else (None, None)
 
 
-def claim_read_state():
-    """Rotate workspaces, then owners; keep a durable source-ID continuation."""
+def claim_read_state(*, owner_id=None):
+    """Rotate workspaces, then owners; optionally scope an operator canary.
+
+    The optional owner narrows selection only. Normal grant/connection locks,
+    current consent, due time and provider admission remain authoritative.
+    """
+    if owner_id is not None and (type(owner_id) is not int or owner_id <= 0):
+        raise ValueError("A positive owner ID is required")
     clock = timezone.now().timestamp()
     active = SlackDmMirrorGrant.objects.filter(
         status="active", revoked_at__isnull=True,
         connection__status__in=("connected", "syncing"),
     )
+    if owner_id is not None:
+        active = active.filter(user_id=owner_id)
     due = active
     for field in ("due", "expires"):
         path = f"connection__sync_cursor__{KEY}__{field}"
@@ -185,12 +193,12 @@ def refresh_request_priority(target, snapshot, hint, *, now):
     return "foreground" if source > max(fetched_at, latest) else "background"
 
 
-def refresh_read_state_once():
-    """Confirm one explicit queued read, or refresh one account conversation."""
+def refresh_read_state_once(*, owner_id=None):
+    """Confirm or refresh one conversation, optionally scoped to an operator canary."""
     from integrations.services import slack_chat_read_state as reads
     if not enabled():
         return 0
-    lease = claim_read_state()
+    lease = claim_read_state() if owner_id is None else claim_read_state(owner_id=owner_id)
     if lease is None:
         return 0
     after, delay, error, return_turn, failed_source = lease.after, 1, "", False, ""

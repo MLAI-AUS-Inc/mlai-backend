@@ -1494,13 +1494,23 @@ can be refreshed on demand; no historical rewrite is performed by this change.
 `MESSAGE_SYNC_TARGETED_READ_POLLING=false` preserves legacy selection. When
 explicitly enabled, the worker selects visible/own-message hints first, source
 activity beyond the last observed `last_read` after 30 seconds, then known
-unread rechecks after 60 seconds. Unknown baseline observations and observations
+unread rechecks after 60 seconds. Every third turn reserves capacity for the
+oldest eligible possibly-unread or known-unread conversation, so continuous
+visible hints and cache repairs cannot starve existing unread risk. The safety
+reservation takes precedence when the two reservations coincide. Unknown
+baseline observations and observations
 older than `READ_STATE_SAFETY_SWEEP_HOURS` (default 6) receive every tenth turn
 and all spare capacity. Oldest-first selection and source-ID continuation keep
 safety work from starving. Per-target Retry-After deadlines and shared provider
 admission still apply to every tier. Source activity only selects work; it never
 asserts an unread count. Mirrored history count probes retain their separate
 future adoption gate, so scheduling can be rolled out before relay unread.
+
+Operators can scope `refresh_read_state_once(owner_id=<positive integer>)` to
+one approved test owner. This narrows normal lease selection; it preserves due
+times, consent, current grants, provider admission and retry deadlines. Omitting
+the argument retains global worker scheduling. A scoped canary is not evidence
+of population-wide freshness or a latency percentile.
 
 Owner posts receive an `own_message` probe hint only for explicitly authorized
 Slack recipients whose current grant user matches the event author. Bot, edit

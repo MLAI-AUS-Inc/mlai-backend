@@ -21,7 +21,7 @@ def possibly_unread(target, snapshot, *, now):
 
 
 def select_targeted(ordered, snapshots, cache_key, cursor, *, now, turn):
-    """Reserve one in ten turns for oldest safety work, spending spare turns too.
+    """Reserve safety and confirmed-unread work while serving prompt hints.
 
     Eligibility still obeys the worker's per-target provider retry deadlines.
     Stable oldest-first selection preserves continuation when ages tie.
@@ -60,5 +60,12 @@ def select_targeted(ordered, snapshots, cache_key, cursor, *, now, turn):
     refresh = [t for t in eligible if state(t).get("refresh_required") and age(t) >= 1]
     possible = [t for t in eligible if age(t) >= 30 and possibly_unread(t, state(t), now=now)]
     known = [t for t in eligible if state(t).get("is_unread") is True and age(t) >= 60]
-    candidates = safety if turn % 10 == 9 and safety else (own or hinted or refresh or possible or known or safety)
+    # A continuous stream of dirty hints/unknown cache repairs must not starve
+    # conversations whose source activity is already beyond their read cursor.
+    # Keep the safety reservation, and spend every third other turn on the
+    # oldest confirmed risk. Spare capacity still serves the original tiers.
+    risky = possible + [t for t in known if t not in possible]
+    candidates = (safety if turn % 10 == 9 and safety else
+                  risky if turn % 3 == 2 and risky else
+                  (own or hinted or refresh or possible or known or safety))
     return max(candidates, key=age, default=None)
