@@ -580,3 +580,5 @@ class TokenUsageDailyBucket(models.Model):
             f"{self.usage_date}:{self.account_id}:{self.source}:"
             f"{self.session_id}:{self.model}"
         )
+
+from .federation_models import ChatFederationGrant, ChatFederationIdentity, ChatFederationTransaction  # noqa: F401

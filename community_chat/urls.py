@@ -47,6 +47,7 @@ from .usage_views import (
 
 
 urlpatterns = [
+    path("federation/", include("community_chat.federation_urls")),
     path("usage/insights/", TokenInsightsView.as_view(), name="community_chat_token_insights"),
     path("account-bans/", AccountBanView.as_view(), name="community_chat_account_bans"),
     path("account-bans/<int:ban_id>/", AccountBanView.as_view(), name="community_chat_account_ban"),
