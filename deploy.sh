@@ -1413,8 +1413,8 @@ ssh "$DEPLOY_SSH_TARGET" <<EOF
     # plan requires its own explicit approval before any runtime is paused.
     # A database or migration-loader failure also leaves the current runtime
     # untouched.
-    echo "🔎 Checking pending migrations before pausing runtime services..."
     compose_run_web python scripts/validate_native_agent_deploy_config.py
+    echo "🔎 Checking pending migrations before pausing runtime services..."
     migrations_pending=1
     if compose_run_web python manage.py migrate --check --noinput; then
         migrations_pending=0
