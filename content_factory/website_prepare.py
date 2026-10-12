@@ -55,7 +55,7 @@ def _retain_setup_example_cleanup(op, child):
     """Keep a terminal, current-operation cleanup child waiting for its owner."""
     from .website_operations import validate_operation
     connection = op.connection
-    if child.workflow != "article_system_setup" or child.status != "blocked":
+    if child.workflow != "article_system_setup" or child.status not in {"blocked", "failed"}:
         return False
     result = child.result if isinstance(child.result, dict) else {}
     nested = result.get("article_system_setup")

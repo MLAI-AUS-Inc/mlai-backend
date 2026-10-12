@@ -187,7 +187,8 @@ receive the same canonical failure in their response projection. This read does
 not rewrite their history, and a newer control receipt or an existing PR keeps
 its current state. Recovery still starts through the reviewed setup boundary.
 
-A current-generation setup child blocked with `SETUP_EXAMPLE_CLEANUP_REQUIRED`
+A current-generation setup child blocked (or marked failed by an older generic
+failure callback) with `SETUP_EXAMPLE_CLEANUP_REQUIRED`
 and a validated `remove_setup_example` file/record action leaves preparation in
 `needs_user`. The public receipt names the exact relative file and article
 record, with a repository-derived GitHub file link. The blocked child is
@@ -199,6 +200,12 @@ and the pending setup's old source-scan hint are not reused. Other owner actions
 (permissions, route selection, review and merge) retain their existing retry
 behavior. Missing/malformed actions or stale operation, tenant, repository,
 generation, attempt or deletion-watermark proof keep the generic blocked path.
+CF's wire status `needs_user` normalizes to durable `blocked` through the shared
+workflow status mapper for HTTP polling and reconciliation. Its root and nested
+cleanup action remain available to preparation. A same-payload callback replay
+uses that same terminal-state alias while retaining every original operation
+fence, so it can acknowledge an already processed manual cleanup event. An
+explicit callback `resume_available=false` clears an older true Resume flag.
 
 Status polling retains the worker's authoritative execution generation and
 state version, so refreshing an approved article cannot erase its exact-preview

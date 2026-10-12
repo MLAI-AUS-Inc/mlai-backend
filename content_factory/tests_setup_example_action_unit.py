@@ -91,6 +91,25 @@ class SetupExampleCleanupActionTests(SimpleTestCase):
         self.assertNotIn("retry automatically", summary["receipt"]["message"])
         self.assertEqual(self.child.run_request, original_request)
 
+    def test_cf_needs_user_wire_status_is_blocked_at_both_read_boundaries(self):
+        from workflow_runs.status import normalize_run_status
+        for value in ("needs_user", " NEEDS_USER ", "preview_failed", "setup_pr_create_failed"):
+            with self.subTest(value=value):
+                self.assertEqual(normalize_run_status(value), "blocked")
+                self.assertEqual(views._normalize_remote_run_status(value), "blocked")
+        self.assertEqual(normalize_run_status("unknown-future-status"), "queued")
+        self.assertEqual(views._normalize_remote_run_status("unknown-future-status"), "queued")
+
+    def test_legacy_failed_cleanup_child_keeps_only_validated_owner_instruction(self):
+        self.child.status = "failed"
+        self.workflow.state = "failed"
+        with self.scope():
+            self.assertTrue(prepare._retain_setup_example_cleanup(self.op, self.child))
+        self.assertEqual(self.op.state, "needs_user")
+        self.child.result["error_code"] = "INVALID_ADAPTER"
+        with self.scope():
+            self.assertFalse(prepare._retain_setup_example_cleanup(self.op, self.child))
+
     def test_callback_nested_cleanup_is_retained_after_preview_failed_projection(self):
         self.child.result = {"status": "preview_failed", "error_code": "SETUP_EXAMPLE_CLEANUP_REQUIRED",
             "article_system_setup": {"status": "preview_failed", "error_code": "SETUP_EXAMPLE_CLEANUP_REQUIRED",
@@ -180,7 +199,15 @@ class SetupExampleCleanupActionTests(SimpleTestCase):
         """A saved owner action also leaves its terminal child behind on retry."""
         self._real_chain_cleanup_and_owner_retry(saved_cleanup=True)
 
-    def _real_chain_cleanup_and_owner_retry(self, *, saved_cleanup=False):
+    @skipUnless("user" in signature(prepare._owner_request).parameters, "Requires the earlier Phase 1.2 frozen-context fix")
+    def test_real_wire_callback_replay_poll_reconciliation_and_legacy_failure_prepare_chain(self):
+        """No planted terminal status: actual wire receivers establish the child."""
+        for mode in ("callback", "callback_resume", "poll", "reconcile", "legacy_failure"):
+            self.setUp()
+            with self.subTest(mode=mode):
+                self._real_chain_cleanup_and_owner_retry(wire_mode=mode)
+
+    def _real_chain_cleanup_and_owner_retry(self, *, saved_cleanup=False, wire_mode=None):
         from integrations.models import GitHubInstallation
         from integrations.services import github_app
         context = FounderCompanyContext(profile=SimpleNamespace(user=self.user, companies=self.rows()),
@@ -200,7 +227,10 @@ class SetupExampleCleanupActionTests(SimpleTestCase):
             stack.enter_context(patch.object(views, "get_founder_company_context", return_value=context))
             stack.enter_context(patch.object(views, "_get_config", return_value=self.config))
             stack.enter_context(patch.object(prepare.transaction, "atomic", side_effect=lambda *a, **kw: nullcontext()))
-            stack.enter_context(patch.object(WebsiteConnectionOperation.objects, "select_for_update", return_value=self.rows(first=self.op)))
+            leased = self.rows(first=self.op)
+            leased.filter.side_effect = lambda *a, **kw: self.rows(first=self.workflow if kw.get("action") == "workflow" else self.op)
+            self.workflow.save = Mock()
+            stack.enter_context(patch.object(WebsiteConnectionOperation.objects, "select_for_update", return_value=leased))
             stack.enter_context(patch.object(WebsiteConnectionOperation.objects, "filter", return_value=self.rows()))
             stack.enter_context(patch.object(WebsiteConnectionOperation.objects, "get_or_create", return_value=(self.op, False)))
             for relation in ("targets", "repository_mutations"):
@@ -225,6 +255,85 @@ class SetupExampleCleanupActionTests(SimpleTestCase):
             for method, result in (("set", None), ("add", True), ("delete", None)):
                 stack.enter_context(patch.object(views.cache, method, return_value=result))
             queue = stack.enter_context(patch.object(views, "_queue_content_factory_run", return_value=worker_run))
+            if wire_mode:
+                from . import service_views, reconciliation
+                from workflow_runs.models import ContentFactoryRunStep
+                from .models import ContentFactoryCallbackEvent
+                self.child.status, self.child.result, self.workflow.state = "queued", {}, "running"
+                self.child.save, self.child.refresh_from_db = Mock(), Mock()
+                self.child.resume_available = wire_mode == "callback_resume"
+                self.child.run_request["expected_source_sha"] = self.website.verified_sha
+                self.config.save = Mock()
+                self.website.save = Mock()
+                stack.enter_context(patch.object(OrganizationContentConfig.objects, "get", return_value=self.config))
+                stack.enter_context(patch.object(Organization, "content_config", self.config))
+                stack.enter_context(patch.object(Organization.objects, "filter", return_value=self.rows(first=self.org)))
+                stack.enter_context(patch.object(ContentFactoryRun, "steps", self.rows()))
+                stack.enter_context(patch.object(ContentFactoryRun.objects, "select_for_update", return_value=self.rows(first=self.child)))
+                stack.enter_context(patch.object(ContentFactoryRun.objects, "get_or_create", return_value=(self.child, False)))
+                def save_snapshot(*, defaults, **kwargs):
+                    for key, value in defaults.items():
+                        setattr(self.child, key, value)
+                    return self.child, False
+                stack.enter_context(patch.object(ContentFactoryRun.objects, "update_or_create", side_effect=save_snapshot))
+                stack.enter_context(patch.object(ContentFactoryRunStep.objects, "update_or_create", return_value=(SimpleNamespace(), False)))
+                events = {}
+                def event_row(*, event_id, defaults):
+                    created = event_id not in events
+                    if created:
+                        events[event_id] = ContentFactoryCallbackEvent(event_id=event_id, **defaults)
+                    return events[event_id], created
+                def event_rows(**filters):
+                    event = events.get(filters["event_id"])
+                    rows = self.rows(first={"claimed_at": event.claimed_at, "processed_at": event.processed_at} if event else None)
+                    rows.values.return_value = rows
+                    def update_event(**values):
+                        if not event or "claimed_at__lt" in filters:
+                            return 0
+                        for key, value in values.items():
+                            setattr(event, key, value)
+                        return 1
+                    rows.update.side_effect = update_event
+                    return rows
+                stack.enter_context(patch.object(ContentFactoryCallbackEvent.objects, "get_or_create", side_effect=event_row))
+                stack.enter_context(patch.object(ContentFactoryCallbackEvent.objects, "filter", side_effect=event_rows))
+                stack.enter_context(patch.object(prepare.transaction, "on_commit"))
+                setup = {"status": "needs_user", "error_code": "SETUP_EXAMPLE_CLEANUP_REQUIRED", "user_action": self.action,
+                    "requested_action": self.action, "next_action": "remove_setup_example", "retryable": False,
+                    "retry_available": False, "resume_available": False}
+                wire = {**self.child.run_request, "run_id": self.child.run_id, "job_id": self.child.run_id,
+                    "workflow": "article_system_setup", "event_type": "article_system_setup_preview_failed", "status": "needs_user",
+                    "error": "Remove setup example record guides/review-sample from src/content/articles/registry.ts.",
+                    "error_code": "SETUP_EXAMPLE_CLEANUP_REQUIRED", "current_step": "verify_directory_build",
+                    "resume_generation": 1, "is_current_attempt": True, "resume_available": False, "retryable": False,
+                    "retry_available": False, "user_action": self.action, "requested_action": self.action,
+                    "next_action": "remove_setup_example", "article_system_setup": setup,
+                    "event_id": "fixture-cleanup-event", "generation": 1, "state_version": 2,
+                    "failure": {"code": "SETUP_EXAMPLE_CLEANUP_REQUIRED", "retryable": False}}
+                if wire_mode in {"callback", "callback_resume", "legacy_failure"}:
+                    request = SimpleNamespace(method="POST", data=deepcopy(wire), query_params={}, headers={}, META={})
+                    response = service_views.ContentFactoryCallbackView().post(request)
+                    self.assertEqual(response.status_code, 200, response.data)
+                    self.assertEqual(self.child.status, "blocked")
+                    self.assertFalse(self.child.resume_available)
+                    self.assertEqual(self.workflow.state, "blocked")
+                    if wire_mode in {"callback", "callback_resume"}:
+                        response = service_views.ContentFactoryCallbackView().post(request)
+                        self.assertEqual(response.status_code, 200, response.data)
+                    else:
+                        service_views._sync_generation_callback_to_run(data={**wire, "event_type": "generation_failed", "status": "error"},
+                            run_status="failed", step_status="failed")
+                        self.assertEqual(self.child.status, "failed")
+                elif wire_mode == "poll":
+                    views._sync_local_run_from_remote(self.child, wire)
+                    self.assertEqual(self.child.status, "blocked")
+                    self.assertEqual(self.child.result["user_action"], self.action)
+                else:
+                    snapshot = {**wire, "result": {**setup, "article_system_setup": setup}, "step_order": [], "step_states": {}}
+                    reconciliation._adopt_remote_payload(self.child, snapshot)
+                    self.assertEqual(self.child.status, "blocked")
+                self.assertEqual(self.child.result["article_system_setup"]["user_action"], self.action)
+                self.assertFalse(self.child.resume_available)
             if not saved_cleanup:
                 prepare.advance_prepare(self.op.pk)
                 self.assertEqual(self.op.state, "needs_user", self.op.receipt)

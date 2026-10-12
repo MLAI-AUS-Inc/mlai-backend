@@ -119,6 +119,9 @@ def validate_operation(connection, payload, *, worker_cleanup=False, restoration
         raise WebsiteAuthorityError("website_operation_cancelled", "This operation was cancelled.")
     if op.state in {"completed", "failed", "blocked"} and not (worker_cleanup or restoration or cancellation or cancellation_receipt):
         incoming_status = payload.get("status")
+        if str(incoming_status or "").strip().lower() == "needs_user":
+            from workflow_runs.status import normalize_run_status
+            incoming_status = normalize_run_status(incoming_status)
         event = payload.get("event_type") or payload.get("event")
         # Scan callbacks use "success" after the durable snapshot has already
         # completed the operation. This is the same terminal outcome, not a
