@@ -23,6 +23,8 @@ subsystem-specific contracts and runbooks.
 
 ## Content Factory
 
+- [Articles Phase 2 design approvals](articles-phase2-design-notes-2026-10-12.md) — proposed notes; implementation waits for Phase 1 deployment and per-step owner approval
+
 - [Article performance health evidence](article-performance-health.md) — publication age, scoped competitor observations and report metric provenance
 - [Topic picker research metrics](content-topic-metrics.md) — difficulty provenance, dated trends and sparse research persistence
 
