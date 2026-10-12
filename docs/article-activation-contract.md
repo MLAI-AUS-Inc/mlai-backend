@@ -25,6 +25,21 @@ them; confirmed absence/refusal refunds the original research debit using the
 topic-generation ledger family. Refunds read the recorded spend, including when
 pricing or the free-domain exception changes after the request.
 
+Dispatch-key reconciliation distinguishes `not_received` (the lookup endpoint's
+own 404), `received_not_started` (a durable failed dispatch receipt, retaining
+the worker's reason), `rejected` (backend authorization refused the dispatch),
+`started` (a worker run exists), and `unknown`. A missing endpoint, missing
+request identity, provider errors or an in-progress claim cannot establish that
+the request was never received. Polling, delivery-budget reconciliation and
+restart/orphan receipts preserve this distinction. Confirmed no-work outcomes
+retain the original refund identity, amount and grace policy; restart receipts
+release reused authorization without creating another charge.
+
+Preparation messages promise automatic retries only for pending operations with
+an actual next-attempt time. Exhausted or non-retryable preparation records say
+that work stopped and offer Try again. The operation summary applies the same
+message correction to historical receipts on read without changing saved rows.
+
 `article:draft:write` accepts deterministic text edits against the exact current
 revision and original field values. It cannot approve comments, generate images,
 change the website or publish. `article:publish` can inspect the private founder

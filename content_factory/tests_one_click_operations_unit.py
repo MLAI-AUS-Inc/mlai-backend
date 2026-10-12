@@ -174,7 +174,7 @@ class DispatchOutboxTests(SimpleTestCase):
     def test_unconfirmed_prior_delivery_cannot_refund_on_a_new_http_refusal(self):
         from .dispatch_outbox import dispatch_outcome
         self.assertEqual(dispatch_outcome(401, {"detail": "Unavailable"}), ("pending", True))
-        self.assertEqual(dispatch_outcome(401, {}, known_key_outcome="absent"), ("failed", False))
+        self.assertEqual(dispatch_outcome(401, {}, known_key_outcome="not_received"), ("failed", False))
 
     def test_accepted_child_cancelled_by_disconnect_requires_original_payer_refund(self):
         from . import dispatch_outbox as outbox
@@ -189,7 +189,7 @@ class DispatchOutboxTests(SimpleTestCase):
         from . import dispatch_outbox as outbox
         row = SimpleNamespace(client_request_id="saved-key", payload={"request": {}, "endpoint": "article"})
         with patch("content_factory.vibe_marketing_views._content_factory_remote_config", return_value={"enabled": True}), \
-                patch("content_factory.vibe_marketing_views._lookup_content_factory_dispatch_by_key", return_value=("dispatched", {"run_id": "real-run"})), \
+                patch("content_factory.vibe_marketing_views._lookup_content_factory_dispatch_by_key", return_value=("started", {"run_id": "real-run"})), \
                 patch("content_factory.vibe_marketing_views._refresh_article_editorial_payload") as policy, \
                 patch.object(outbox, "_accept_delivery", return_value=("delivered", "", "real-run")) as adopt, \
                 patch("integrations.http_client.post") as post:
@@ -204,7 +204,7 @@ class DispatchOutboxTests(SimpleTestCase):
         row = SimpleNamespace(client_request_id="saved-key", organization=Mock(), payload={"request": {
             "delivery_mode": "content_only", "delivery_mode_confirmed": True}, "endpoint": "article"})
         with patch("content_factory.vibe_marketing_views._content_factory_remote_config", return_value={"enabled": True}), \
-                patch("content_factory.vibe_marketing_views._lookup_content_factory_dispatch_by_key", return_value=("absent", {})), \
+                patch("content_factory.vibe_marketing_views._lookup_content_factory_dispatch_by_key", return_value=("not_received", {})), \
                 patch("content_factory.vibe_marketing_views._refresh_article_editorial_payload", return_value=Response({"code": "editorial_policy_changed"}, status=409)), \
                 patch("integrations.http_client.post") as post:
             self.assertEqual(outbox._deliver(row), ("pending", "editorial_policy_changed", ""))
@@ -213,8 +213,8 @@ class DispatchOutboxTests(SimpleTestCase):
     def test_exhausted_unknown_delivery_never_authorizes_refund(self):
         from .dispatch_outbox import exhausted_dispatch_outcome
         self.assertEqual(exhausted_dispatch_outcome("unknown"), "awaiting_resolution")
-        self.assertEqual(exhausted_dispatch_outcome("absent"), "failed")
-        self.assertEqual(exhausted_dispatch_outcome("dispatched"), "delivered")
+        self.assertEqual(exhausted_dispatch_outcome("not_received"), "failed")
+        self.assertEqual(exhausted_dispatch_outcome("started"), "delivered")
 
     def test_terminal_refusal_is_not_retried(self):
         from .dispatch_outbox import dispatch_outcome

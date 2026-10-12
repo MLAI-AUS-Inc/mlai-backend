@@ -618,6 +618,7 @@ def _settle_sweep_refunds(*, limit):
 def _reconcile_orphan_operations(*, limit, now):
     from .website_models import WebsiteConnectionOperation
     from .dispatch_models import ContentFactoryDispatchOutbox
+    from .dispatch_outbox import dispatch_failure_details
     count = 0
     pending_refunds = WebsiteConnectionOperation.objects.filter(action__in=["workflow", "restart"], state="failed",
         receipt__refund_pending=True).select_related("connection__organization")[:limit]
@@ -637,18 +638,21 @@ def _reconcile_orphan_operations(*, limit, now):
         if run:
             continue
         outcome, remote_payload = _lookup_orphan_child(op)
-        if outcome == "dispatched":
+        if outcome == "started":
             try:
                 _adopt_orphan_child(op, remote_payload)
             except Exception:
                 logger.warning("content_factory_orphan_adoption_pending operation_id=%s", op.pk)
             continue
-        if outcome not in {"absent", "rejected"}:
+        if outcome not in {"not_received", "received_not_started", "rejected"}:
             WebsiteConnectionOperation.objects.filter(pk=op.pk, state=op.state, updated_at=op.updated_at).update(
-                receipt={**op.receipt, "status": "dispatch_reconciliation_pending", "remote_outcome_unknown": True}, updated_at=now)
+                receipt={**op.receipt, "status": "dispatch_reconciliation_pending", "remote_outcome_unknown": True,
+                    "dispatch_outcome": "unknown"}, updated_at=now)
             continue
+        code, message = dispatch_failure_details(outcome, remote_payload)
         changed = WebsiteConnectionOperation.objects.filter(pk=op.pk, state=op.state, updated_at=op.updated_at).update(
-            state="failed", receipt={**op.receipt, "status": "failed", "reason_code": "dispatch_child_missing", "refund_pending": True}, updated_at=now)
+            state="failed", receipt={**op.receipt, "status": "failed", "reason_code": code,
+                "dispatch_outcome": outcome, "message": message, "refund_pending": True}, updated_at=now)
         if changed:
             count += 1
             try:
@@ -663,7 +667,7 @@ def _lookup_orphan_child(op):
     from .vibe_marketing_views import _content_factory_remote_config, _lookup_content_factory_dispatch_by_key
     key = op.payload.get("client_request_id")
     if not key:
-        return "absent", {}
+        return "unknown", {}
     remote = _content_factory_remote_config()
     if not remote["enabled"]:
         return "unknown", {}
@@ -672,13 +676,14 @@ def _lookup_orphan_child(op):
 
 def restart_receipt_resolution(outcome):
     """Release only the restart's provisional reuse; it created no new debit."""
-    return "completed" if outcome == "dispatched" else "failed" if outcome in {"absent", "rejected"} else "pending"
+    return "completed" if outcome == "started" else "failed" if outcome in {"not_received", "received_not_started", "rejected"} else "pending"
 
 
 def _reconcile_restart_receipts(*, limit, now):
     """Close original-run receipts even when the web request died before its final write."""
     from .vibe_marketing_views import _content_factory_remote_config, _lookup_content_factory_dispatch_by_key, _create_local_run
     from .website_models import WebsiteConnectionOperation
+    from .dispatch_outbox import dispatch_failure_details
     settled = 0
     candidates = ContentFactoryRun.objects.filter(result__restart_receipt__state="pending",
         updated_at__lt=now - timedelta(minutes=10))[:limit]
@@ -686,12 +691,12 @@ def _reconcile_restart_receipts(*, limit, now):
         receipt = (original.result or {}).get("restart_receipt") or {}
         key = str(receipt.get("client_request_id") or "")
         if not key:
-            outcome, body = "absent", {}
+            outcome, body = "unknown", {}
         else:
             child = ContentFactoryRun.objects.filter(organization_id=original.organization_id,
                 domain=original.domain, run_request__client_request_id=key).exclude(run_id=key).first()
             if child:
-                outcome, body = "dispatched", {"run_id": child.run_id}
+                outcome, body = "started", {"run_id": child.run_id}
             else:
                 remote = _content_factory_remote_config()
                 if not remote["enabled"]:
@@ -724,11 +729,11 @@ def _reconcile_restart_receipts(*, limit, now):
             if not current or not saved or saved.get("client_request_id") != key or saved.get("state") != "pending":
                 continue
             receipt = {**saved, "state": state, "reused_authorization": "accepted" if state == "completed" else "released",
-                "finished_at": now.isoformat(), "reconciled": True, "charged": False}
+                "finished_at": now.isoformat(), "reconciled": True, "charged": False, "dispatch_outcome": outcome}
             if child_id:
                 receipt["child_run_id"] = child_id
             if state == "failed":
-                receipt["error_code"] = "dispatch_rejected" if outcome == "rejected" else "dispatch_child_missing"
+                receipt["error_code"], receipt["message"] = dispatch_failure_details(outcome, body, refund=False)
             current.result = {**current.result, "restart_receipt": receipt}
             if state == "completed":
                 count = saved.get("user_action_count")

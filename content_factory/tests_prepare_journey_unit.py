@@ -174,7 +174,8 @@ class PrepareJourneyReplayTests(SimpleTestCase):
         self.advance()
         self.assertEqual(self.op.receipt["current_step"], "integration")
         self.assertEqual(self.op.receipt["blocked_step"], "integration")
-        self.assertEqual(self.op.receipt["message"], "Prepare and verify your articles integration.")
+        self.assertIn("Prepare and verify your articles integration.", self.op.receipt["message"])
+        self.assertIn("We stopped", self.op.receipt["message"])
         self.assertNotIn(None, self.op.receipt["step_failures"])
 
     def test_non_retryable_setup_child_is_not_dispatched_again(self):
@@ -184,7 +185,8 @@ class PrepareJourneyReplayTests(SimpleTestCase):
         handler = Mock()
         self.advance({"setup": handler}, child)
         self.assertEqual(self.op.state, "needs_attention")
-        self.assertEqual(self.op.receipt["message"], child.error)
+        self.assertIn(child.error, self.op.receipt["message"])
+        self.assertIn("We stopped", self.op.receipt["message"])
         self.assertEqual(self.op.receipt["user_action"]["run_id"], "failed-child")
         handler.assert_not_called()
 
