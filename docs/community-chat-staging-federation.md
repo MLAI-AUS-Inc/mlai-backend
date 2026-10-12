@@ -1,6 +1,6 @@
 # Staging account federation
 
-Work in progress; disabled by default. No production deployment is established.
+Prepared source; disabled by default. Live rollout and full monorepo validation remain pending.
 
 ## Cookie cutover
 
@@ -49,6 +49,9 @@ permissions and key-proof membership endpoints. Production root URLs and workers
 are excluded. It uses synthetic local accounts with unusable passwords, a copied
 display name and opaque issuer/subject mapping. Staff/admin authority is never copied.
 API access lasts five minutes; refresh rechecks issuer eligibility and fails closed.
+An authoritative eligibility denial revokes the staging session. If two tabs
+refresh the same token concurrently, the stale request receives 401 without
+revoking the other tab's successfully rotated credentials.
 No immediate removal of an already-connected relay is implied by token expiry.
 
 `remove_staging_identity --subject <subject>` previews removal with this profile.
@@ -101,3 +104,10 @@ checkout and stopped while extracting the pinned Rust toolchain because the
 Mac disk was full. Targeted Python/TypeScript/browser checks passed; that does
 not establish Rust/mobile checks or a live production pilot. No GitHub workflow
 was dispatched, no branch was pushed, and no PR was created.
+
+
+Final local review found and fixed an overlapping-refresh revocation race. Its
+regression failed before the fix and passed afterward; the complete affected
+backend auth/device/federation suites passed 100 tests, and the separate-database
+handler integration passed one test. These checks do not establish live TLS,
+proxy, cookie cutover or successful real-relay messaging/upload behavior.

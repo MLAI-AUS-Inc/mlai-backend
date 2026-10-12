@@ -67,9 +67,14 @@ class StagingRefreshView(StagingView):
             raise AuthenticationFailed('Staging session has expired.')
         try:
             relying.recheck_session(session)
-            credentials=rotate_account_session(raw,required_origin=origin)
-        except (PermissionDenied,InvalidAccountSession):
+        except PermissionDenied:
             CommunityChatAccountSession.objects.filter(pk=session.pk).update(revoked_at=timezone.now())
+            return Response({'error':'invalid_session'},status=401)
+        try:
+            credentials=rotate_account_session(raw,required_origin=origin)
+        except InvalidAccountSession:
+            # Another tab may have already rotated this token while eligibility
+            # was checked. Reject the stale request without revoking its winner.
             return Response({'error':'invalid_session'},status=401)
         response=Response({'status':'refreshed','session':views._account_session_payload(credentials)})
         return set_account_session_cookies(response,credentials)

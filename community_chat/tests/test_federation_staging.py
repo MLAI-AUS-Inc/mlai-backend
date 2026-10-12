@@ -103,6 +103,33 @@ class FederationStagingTests(TestCase):
         self.assertEqual(self.complete().status_code,302)
         with patch('community_chat.federation_relying.issuer_post',return_value=self.identity(eligible=False)):
             self.assertEqual(self.client.post(ROOT+'auth/session/refresh/',{},format='json').status_code,401)
+        self.assertEqual(self.client.get(ROOT+'account/').status_code,401)
+
+    def test_overlapping_refresh_does_not_revoke_winners_rotated_credentials(self):
+        self.assertEqual(self.complete().status_code,302)
+        winner=APIClient()
+        winner.credentials(HTTP_ORIGIN=STAGE)
+        winner.cookies=self.client.cookies.copy()
+        winner_responses=[]
+        overlapping=False
+
+        def eligibility(*args, **kwargs):
+            nonlocal overlapping
+            # Both requests have loaded the original token. Complete the other
+            # tab's refresh while this tab waits for its eligibility response.
+            if not overlapping:
+                overlapping=True
+                winner_responses.append(winner.post(ROOT+'auth/session/refresh/',{},format='json'))
+            return self.identity()
+
+        with patch('community_chat.federation_relying.issuer_post',side_effect=eligibility):
+            loser=self.client.post(ROOT+'auth/session/refresh/',{},format='json')
+        self.assertEqual(winner_responses[0].status_code,200)
+        self.assertEqual(loser.status_code,401)
+        self.assertFalse(loser.cookies)
+        self.assertEqual(winner.get(ROOT+'account/').status_code,200)
+        with patch('community_chat.federation_relying.issuer_post',return_value=self.identity()):
+            self.assertEqual(winner.post(ROOT+'auth/session/refresh/',{},format='json').status_code,200)
 
     def test_production_cookie_names_are_not_accepted_by_staging(self):
         self.assertEqual(self.complete().status_code,302)
