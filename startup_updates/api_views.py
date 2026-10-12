@@ -4251,7 +4251,7 @@ class StartupUpdateDraftResultsView(APIView):
                 draft = MonthlyUpdateDraft.objects.select_for_update().get(pk=draft.pk)
                 if item.get("revision_id"):
                     revision = draft.current_revision
-                    if not revision or revision.pk != item["revision_id"] or revision.content_hash != item.get("revision_hash") or revision.snapshot_id != snapshot.pk:
+                    if not revision or revision.pk != item["revision_id"] or revision.content_hash != item.get("revision_hash") or revision.snapshot_id != snapshot.pk or revision.audience != item["audience"]:
                         raise RevisionConflict()
                     validation = {"groundedness_status": item["groundedness_status"], "notes": item.get("groundedness_notes", ""), "run_id": run.run_id}
                     # Validation metadata can be attached; the reviewed content stays immutable.
