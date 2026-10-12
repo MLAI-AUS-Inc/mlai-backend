@@ -1,7 +1,7 @@
 """Replay preparation against the canonical journey, without a database."""
 from contextlib import nullcontext, ExitStack
 from types import SimpleNamespace
-from unittest.mock import Mock, patch
+from unittest.mock import MagicMock, Mock, patch
 from uuid import uuid4
 
 from django.test import SimpleTestCase
@@ -11,6 +11,93 @@ from . import website_operations as operations
 from .website_journey import project_journey
 from .website_connections import contract_for
 from . import tests_one_click_operations_unit as fixtures
+
+
+class FrozenPrepareContextTests(SimpleTestCase):
+    @staticmethod
+    def rows(*, first=None, exists=False):
+        """Replace persistence access while leaving preparation/projection real."""
+        rows = MagicMock()
+        for method in ("filter", "exclude", "order_by", "select_related", "select_for_update", "prefetch_related", "values_list"):
+            getattr(rows, method).return_value = rows
+        rows.first.return_value = first
+        rows.get.return_value = first
+        rows.exists.return_value = exists
+        rows.__iter__.side_effect = lambda: iter(())
+        rows.__getitem__.return_value = []
+        rows.update.return_value = 1
+        return rows
+
+    def test_real_frozen_context_reaches_guarded_owner_dispatch(self):
+        from dataclasses import FrozenInstanceError
+        from django.contrib.auth import get_user_model
+        from founder_tools.services import FounderCompanyContext
+        from integrations.models import GitHubInstallation
+        from integrations.services import github_app
+        from organizations.models import Organization
+        from workflow_runs.models import ContentFactoryRun
+        from .models import OrganizationContentConfig
+        from .website_models import WebsiteConnection
+        from . import vibe_marketing_views as views
+
+        user = get_user_model()(pk=4, is_active=True, email="founder@example.test")
+        organization = Organization(pk=7, domain="fixture.test")
+        context = FounderCompanyContext(profile=SimpleNamespace(user=user, companies=self.rows()),
+            company=SimpleNamespace(pk=9, id=9, domain="fixture.test"), organization=organization)
+        website = WebsiteConnection(organization=organization, authorized_by=user,
+            github_repo="fixture/site", repository_id=123, installation_id="4", generation=3,
+            configuration_version=2, branch="main", verified_sha="a" * 40)
+        config = OrganizationContentConfig(organization=organization, website_connection=website,
+            github_repo=website.github_repo)
+        op = fixtures.PrepareJourneyTests().operation()
+        op.connection, op.connection_id = website, website.pk
+        worker_run = SimpleNamespace(run_id="scan-child", status="queued", result={}, save=Mock())
+        repo = Mock(status_code=200)
+        repo.json.return_value = {"full_name": "fixture/site", "default_branch": "main", "permissions": {"push": True}}
+        commit = Mock(status_code=200)
+        commit.json.return_value = {"sha": website.verified_sha}
+        with ExitStack() as stack:
+            # All seams below load/store records, call providers, or contact the
+            # cache. The frozen context, journey loader/projector, dispatcher,
+            # request builder and guarded owner view execute their real code.
+            stack.enter_context(patch.object(get_user_model().objects, "get", return_value=user))
+            lookup = stack.enter_context(patch.object(views, "get_founder_company_context", return_value=context))
+            stack.enter_context(patch.object(views, "_get_config", return_value=config))
+            stack.enter_context(patch.object(prepare.transaction, "atomic", side_effect=lambda *a, **kw: nullcontext()))
+            stack.enter_context(patch.object(prepare.WebsiteConnectionOperation.objects, "select_for_update", return_value=self.rows(first=op)))
+            persistence = stack.enter_context(patch.object(prepare.WebsiteConnectionOperation.objects, "filter", return_value=self.rows()))
+            for relation in ("targets", "scan_snapshots", "operations", "repository_mutations"):
+                stack.enter_context(patch.object(WebsiteConnection, relation, self.rows()))
+            stack.enter_context(patch.object(WebsiteConnection.objects, "select_related", return_value=self.rows(first=website)))
+            stack.enter_context(patch.object(WebsiteConnection.objects, "select_for_update", return_value=self.rows(first=website)))
+            stack.enter_context(patch.object(Organization.objects, "select_for_update", return_value=self.rows(first=organization)))
+            stack.enter_context(patch.object(OrganizationContentConfig.objects, "filter", return_value=self.rows(exists=True)))
+            stack.enter_context(patch.object(ContentFactoryRun.objects, "filter", return_value=self.rows()))
+            stack.enter_context(patch.object(GitHubInstallation.objects, "filter", return_value=self.rows()))
+            stack.enter_context(patch.object(github_app, "probe_installation_liveness", return_value=github_app.INSTALLATION_LIVE))
+            stack.enter_context(patch.object(github_app, "create_installation_access_token", return_value=SimpleNamespace(token="synthetic")))
+            stack.enter_context(patch.object(github_app, "require_installation_repository_permissions", return_value={"contents": "write", "pull_requests": "write"}))
+            stack.enter_context(patch.object(github_app, "_require_installation_profile_permissions", return_value={"workflows": "write", "checks": "read", "statuses": "read"}))
+            stack.enter_context(patch.object(views.http_client, "get", side_effect=[repo, commit]))
+            stack.enter_context(patch.object(views.http_client, "delete"))
+            for method, result in (("get", None), ("set", None), ("add", True), ("delete", None)):
+                stack.enter_context(patch.object(views.cache, method, return_value=result))
+            queue = stack.enter_context(patch.object(views, "_queue_content_factory_run", return_value=worker_run))
+            result = prepare.advance_prepare(op.pk)
+
+        self.assertIs(result, op)
+        self.assertEqual(op.state, "pending")
+        self.assertEqual(op.receipt.get("child_run_id"), "scan-child")
+        self.assertEqual(op.receipt.get("current_step"), "scan")
+        queue.assert_called_once()
+        self.assertIs(queue.call_args.kwargs["context"], context)
+        self.assertEqual(queue.call_args.kwargs["payload"]["slack_user_id"], "mlai_user:4")
+        self.assertGreaterEqual(lookup.call_count, 3)
+        self.assertTrue(all(call.args[0] is user for call in lookup.call_args_list))
+        self.assertNotIn("prepare_user", context.__dict__)
+        with self.assertRaises(FrozenInstanceError):
+            context.company = SimpleNamespace(pk=10)
+        self.assertEqual(persistence.call_args.kwargs["connection__generation"], website.generation)
 
 
 class PrepareJourneyReplayTests(SimpleTestCase):
@@ -24,7 +111,8 @@ class PrepareJourneyReplayTests(SimpleTestCase):
         self.op.connection.branch = "main"
         self.op.connection.organization = SimpleNamespace(domain="fixture.test")
         self.config = SimpleNamespace(website_connection=self.op.connection, website_connection_id="website", article_system={})
-        self.context = SimpleNamespace(company=SimpleNamespace(pk=9), organization=SimpleNamespace(pk=7), prepare_user=SimpleNamespace(pk=4))
+        self.user = SimpleNamespace(pk=4)
+        self.context = SimpleNamespace(company=SimpleNamespace(pk=9), organization=SimpleNamespace(pk=7))
         self.facts = {"access": True, "repository": 123, "inventory": True, "write": True,
             "resolution": {"existence_state": "confirmed", "listing_surface": {"metadata": {"route_path": "/stories"}}}}
 
@@ -37,7 +125,7 @@ class PrepareJourneyReplayTests(SimpleTestCase):
     def advance(self, handlers=None, child=None):
         with ExitStack() as stack:
             stack.enter_context(patch.object(prepare, "_claim_prepare", return_value=self.op))
-            stack.enter_context(patch.object(prepare, "_prepare_context", return_value=(self.context, self.config)))
+            stack.enter_context(patch.object(prepare, "_prepare_context", return_value=(self.context, self.config, self.user)))
             stack.enter_context(patch.object(prepare, "journey_for_context", side_effect=self.journey))
             stack.enter_context(patch.object(prepare, "_persist_prepare", side_effect=lambda op, **kw: op))
             if child is not None:
@@ -46,15 +134,15 @@ class PrepareJourneyReplayTests(SimpleTestCase):
             return prepare.advance_prepare(self.op.pk, handlers=handlers)
 
     def setup_handler(self, captured):
-        def handler(op, context, config):
-            captured.append(prepare._owner_request(op, context, config, "setup", journey=self.journey()).data)
+        def handler(op, context, config, *, user):
+            captured.append(prepare._owner_request(op, context, config, "setup", user=user, journey=self.journey()).data)
             return {"run_id": "setup-child"}
         return handler
 
     def test_talathrive_stale_scan_then_existing_stories_setup(self):
         captured = []
         self.facts["inventory"] = False
-        self.advance({"scan": lambda *args: {"run_id": "scan-child"}})
+        self.advance({"scan": lambda *args, **kwargs: {"run_id": "scan-child"}})
         self.assertEqual(self.op.receipt["child_run_id"], "scan-child")
         self.facts["inventory"] = True
         self.advance({"setup": self.setup_handler(captured)}, SimpleNamespace(status="completed", result={}, workflow="repo_scan"))
@@ -163,7 +251,7 @@ class PrepareJourneyReplayTests(SimpleTestCase):
         self.config.organization = self.op.connection.organization
         self.config.save = Mock()
         self.config.refresh_from_db = Mock()
-        self.context.profile = SimpleNamespace(user=self.context.prepare_user, companies=Mock())
+        self.context.profile = SimpleNamespace(user=self.user, companies=Mock())
         self.context.organization.domain = "fixture.test"
         self.context.company.domain = "fixture.test"
         run = SimpleNamespace(run_id="queued-child", status="queued", result={}, save=Mock())
@@ -181,7 +269,7 @@ class PrepareJourneyReplayTests(SimpleTestCase):
             stack.enter_context(patch("content_factory.website_views.owner_operation_scope", side_effect=lambda *a, **kw: nullcontext()))
             queue = stack.enter_context(patch.object(views, "_queue_content_factory_run", return_value=run))
             for step, view in (("scan", views.VibeMarketingScanView), ("setup", views.VibeMarketingArticleSystemSetupView)):
-                request = prepare._owner_request(self.op, self.context, self.config, step, journey=self.journey())
+                request = prepare._owner_request(self.op, self.context, self.config, step, user=self.user, journey=self.journey())
                 self.assertEqual(request.method, "POST")
                 self.assertEqual(request.query_params, {"company_id": "9"})
                 self.assertEqual(request.META, {})
@@ -202,7 +290,7 @@ class PrepareJourneyReplayTests(SimpleTestCase):
         self.config.organization = self.op.connection.organization
         self.config.requires_review = True
         self.config.save = self.config.refresh_from_db = Mock()
-        self.context.profile = SimpleNamespace(user=self.context.prepare_user, companies=Mock())
+        self.context.profile = SimpleNamespace(user=self.user, companies=Mock())
         self.context.organization.domain = self.context.company.domain = "fixture.test"
         self.op.receipt = {"scan_run_id": "original-scan", "current_step": "setup"}
         self.facts["resolution"] = {"existence_state": "ambiguous", "ranked_candidates": {"listing_surface_candidates": [
@@ -212,7 +300,7 @@ class PrepareJourneyReplayTests(SimpleTestCase):
         run = SimpleNamespace(run_id="direct-choice-child", status="blocked" if blocked else "queued", workflow="article_system_setup", error="Invalid selected-page adapter." if blocked else "",
             organization_id=7, domain="fixture.test", run_request={**contract_for(self.op.connection),
                 "operation_id": str(uuid4()), "operation_attempt": 1, "deletion_epoch": 0}, result={"error_code": "INVALID_ADAPTER", "retryable": False} if blocked else {}, save=Mock())
-        request = SimpleNamespace(method="POST", META={}, user=self.context.prepare_user,
+        request = SimpleNamespace(method="POST", META={}, user=self.user,
             query_params={"company_id": "9"}, headers={"Idempotency-Key": "direct-choice"}, data={
                 **contract_for(self.op.connection), "company_id": "9", "article_surface_mode": "existing", "article_surface_url": "/stories"})
         def queue_child(**kwargs):

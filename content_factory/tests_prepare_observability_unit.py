@@ -31,6 +31,18 @@ class PrepareObservabilityTests(SimpleTestCase):
         self.assertIn("Traceback", logged.output[0])
         self.assertIn("reason=website_prepare_unavailable", logged.output[-1])
 
+    def test_unexpected_error_logs_real_type_and_frames_without_provider_text(self):
+        def dispatch(*args, **kwargs):
+            message = "private provider token=sensitive-fixture-value"
+            raise TypeError(message)
+        with self.assertLogs("content_factory.website_prepare", level="INFO") as logged:
+            fixtures.PrepareJourneyTests().run_step("scan", dispatch)
+        self.assertIn("error_type=TypeError", logged.output[0])
+        self.assertIn("in dispatch", logged.output[0])
+        self.assertIn("Traceback", logged.output[0])
+        self.assertNotIn("sensitive-fixture-value", " ".join(logged.output))
+        self.assertNotIn("private provider", " ".join(logged.output))
+
     def test_scheduler_lists_bounded_operation_outcomes(self):
         from . import website_reconciliation as reconciliation
         op = fixtures.PrepareJourneyTests().operation()
