@@ -46,8 +46,8 @@ from .authentication import (
     CommunityChatBootstrapAuthentication,
 )
 from .account_cookies import (
-    ACCESS_COOKIE as ACCOUNT_ACCESS_COOKIE,
-    REFRESH_COOKIE as ACCOUNT_REFRESH_COOKIE,
+    access_cookie_name,
+    refresh_cookie_name,
     clear_account_session_cookies,
     set_account_session_cookies,
 )
@@ -217,7 +217,7 @@ def _require_current_chat_credential_locked(request, locked_user):
         if authorization.startswith("Bearer "):
             raw_access_token = authorization.removeprefix("Bearer ").strip()
         else:
-            raw_access_token = str(request.COOKIES.get(ACCOUNT_ACCESS_COOKIE) or "")
+            raw_access_token = str(request.COOKIES.get(access_cookie_name()) or "")
         presented_hash = hashlib.sha256(raw_access_token.encode("utf-8")).hexdigest()
         current = (
             CommunityChatAccountSession.objects.select_for_update(of=("self",))
@@ -872,7 +872,7 @@ class AccountSessionRefreshView(APIView):
         explicit_token = str(request.data.get("refresh_token") or "").strip()
         raw_token = (
             explicit_token
-            or str(request.COOKIES.get(ACCOUNT_REFRESH_COOKIE) or "").strip()
+            or str(request.COOKIES.get(refresh_cookie_name()) or "").strip()
         )
         required_origin = None
         if not explicit_token:
@@ -917,7 +917,7 @@ class AccountSessionLogoutView(APIView):
         explicit_token = str(request.data.get("refresh_token") or "").strip()
         raw_token = (
             explicit_token
-            or str(request.COOKIES.get(ACCOUNT_REFRESH_COOKIE) or "").strip()
+            or str(request.COOKIES.get(refresh_cookie_name()) or "").strip()
         )
         required_origin = None
         if not explicit_token:
@@ -1387,7 +1387,7 @@ class DeviceAuthAuthorizeView(APIView):
                 status=status.HTTP_404_NOT_FOUND,
             )
         _require_eligible(request.user)
-        cookie_access = str(request.COOKIES.get(ACCOUNT_ACCESS_COOKIE) or "")
+        cookie_access = str(request.COOKIES.get(access_cookie_name()) or "")
         cookie_hash = hashlib.sha256(cookie_access.encode("utf-8")).hexdigest()
         if not cookie_access or not secrets.compare_digest(
             cookie_hash,

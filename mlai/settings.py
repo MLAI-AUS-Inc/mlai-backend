@@ -2183,3 +2183,8 @@ VALLEY_MCP_OAUTH_CLIENTS = json.loads(os.getenv("VALLEY_MCP_OAUTH_CLIENTS", "{}"
 # Paid editor image regeneration fails closed until a reviewed price is configured.
 _image_regeneration_price = os.getenv("CONTENT_FACTORY_IMAGE_REGENERATION_COST_POINTS", "").strip()
 CONTENT_FACTORY_IMAGE_REGENERATION_COST_POINTS = int(_image_regeneration_price) if _image_regeneration_price.isdigit() else None
+
+# Opt-in cookie cutover; deploy disabled and retire legacy browser credentials first.
+COMMUNITY_CHAT_HOST_ONLY_COOKIES = _env_is_true('COMMUNITY_CHAT_HOST_ONLY_COOKIES', False)
+COMMUNITY_CHAT_ACCESS_COOKIE_NAME = os.getenv('COMMUNITY_CHAT_ACCESS_COOKIE_NAME', '__Host-mlai_chat_access')
+COMMUNITY_CHAT_REFRESH_COOKIE_NAME = os.getenv('COMMUNITY_CHAT_REFRESH_COOKIE_NAME', '__Host-mlai_chat_refresh')

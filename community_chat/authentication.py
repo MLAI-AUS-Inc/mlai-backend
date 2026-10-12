@@ -7,7 +7,7 @@ from rest_framework.authentication import BaseAuthentication
 from rest_framework.exceptions import AuthenticationFailed
 
 from .models import CommunityChatBootstrapToken, TokenUsageAccount
-from .account_cookies import ACCESS_COOKIE
+from .account_cookies import access_cookie_name
 from .account_sessions import (
     ACCESS_TOKEN_PREFIX,
     InvalidAccountSession,
@@ -111,8 +111,8 @@ class CommunityChatAccountAuthentication(BaseAuthentication):
             raw_token = header.removeprefix("Bearer ").strip()
             if not raw_token.startswith(ACCESS_TOKEN_PREFIX):
                 return None
-        elif request.COOKIES.get(ACCESS_COOKIE):
-            raw_token = request.COOKIES[ACCESS_COOKIE]
+        elif request.COOKIES.get(access_cookie_name()):
+            raw_token = request.COOKIES[access_cookie_name()]
             cookie_authenticated = True
         else:
             return None
