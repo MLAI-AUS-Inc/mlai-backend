@@ -21,8 +21,8 @@ Generated financial claims must use `{{metric:revenue}}` style references. The s
 1. `POST /api/v1/integrations/startup-updates/runs/{run_id}/evidence-snapshot` captures each requested month's evidence once. The run pins `snapshot_id` and the base `expected_revision`.
 2. Valley generates a private draft from that frozen payload. Live context and newly fetched memory are not merged back into generation or review.
 3. Each draft-result write includes `snapshot_id` and `expected_revision`. Django locks the run and draft, checks startup/month ownership, and creates a numbered revision.
-4. The response includes `revisionId`, `revisionHash`, `snapshotId`, and the private evidence payload. Valley stores these exact returned references.
-5. Groundedness review submits `revision_id` and `revision_hash` for those saved revisions. Stale writes return HTTP 409. Review attaches validation metadata without rewriting content.
+4. The backend saves the founder-selected Private, Community, or Public disclosure on an unpublished revision. The response includes `revisionId`, `revisionHash`, `snapshotId`, `audience`, and the frozen evidence payload for internal verification. Valley stores these exact returned references and checks disclosure against the run's requested audience.
+5. Groundedness review submits `revision_id`, `revision_hash`, and the saved `audience` for those revisions. Stale writes or an audience mismatch return HTTP 409. Review attaches validation metadata without rewriting content or publishing the update. Public review receipts are accepted alongside Private and Community receipts.
 6. A retry after a retryable save failure resubmits the stored generated payload. The backend only acknowledges duplicate generation when its input hash and current revision agree.
 
 Candidate auto-selection is not publication approval. Generated revisions start with pending validation. Pending, failed, and needs-review validation block publication.
