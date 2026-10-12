@@ -1,6 +1,7 @@
 # Articles adapter: Phase 2 design approvals
 
-12 October 2026. Status: proposed; no implementation or production approval.
+12 October 2026. Status: all eight designs approved by the owner in this chat on 12 October 2026.
+Implementation still waits for Phase 1 deployment; production actions are not approved.
 
 These notes make each required design decision reviewable while Phase 1 draft
 PRs are prepared. Implementation starts only after the Phase 1 merge/deploy gate
@@ -8,22 +9,22 @@ in the user runbook. Approval of a note does not authorize customer writes,
 production migrations, the production consistency sweep, or publication.
 
 Source: `ARTICLES_ADAPTER_IMPLEMENTATION_PLAN_2026-10-12.md`, supplied by the
-owner and available under `mlai-chat/docs/mlai/`. Every Phase 2 step requires its
-own approval. All flags below are proposed, default off, and must be documented
+owner and available under `mlai-chat/docs/mlai/`. The owner approved all eight individual designs together in this chat on
+12 October 2026. All flags below are proposed, default off, and must be documented
 in each consuming repository's environment inventory. Backend JSON columns and
 CF's durable JSON artifacts provide storage; any newly required migration needs
 separate approval before it is created.
 
 | Step | Repositories | Dependencies | Approval |
 | --- | --- | --- | --- |
-| 2.1 | backend, chat | Phase 1 deployed | Pending |
-| 2.2 | CF, backend | 2.1 | Pending |
-| 2.3 | CF, backend | 2.2 | Pending |
-| 2.4 | CF, backend display | 2.3 | Pending |
-| 2.5 | CF, backend | 2.1 | Pending |
-| 2.6 | CF, backend guard | Phase 1 deployed, test owner/account | Pending |
-| 2.7 | chat, backend | 2.1 | Pending |
-| 2.8 | backend, CF | 2.3 | Pending |
+| 2.1 | backend, chat | Phase 1 deployed | Approved 12 Oct |
+| 2.2 | CF, backend | 2.1 | Approved 12 Oct |
+| 2.3 | CF, backend | 2.2 | Approved 12 Oct |
+| 2.4 | CF, backend display | 2.3 | Approved 12 Oct |
+| 2.5 | CF, backend | 2.1 | Approved 12 Oct |
+| 2.6 | CF, backend guard | Phase 1 deployed, test owner/account | Approved 12 Oct |
+| 2.7 | chat, backend | 2.1 | Approved 12 Oct |
+| 2.8 | backend, CF | 2.3 | Approved 12 Oct |
 
 ## 2.1: one backend status owner and consistency sweep
 
@@ -327,6 +328,7 @@ first, then Ghost; later connectors follow customer demand. Hosted articles need
 the owner's provider and default-domain choice before implementation. Monorepo and
 non-default-branch gates remain until exact combinations pass the zoo.
 
-This document grants none of those choices or operations by assumption. The
+The Phase 2 design approval does not choose a Phase 3 provider/domain or authorize
+production operations. The
 implementation report will track owner-approved design IDs, feature flags,
 acceptance evidence and remaining deployment dependencies separately.
