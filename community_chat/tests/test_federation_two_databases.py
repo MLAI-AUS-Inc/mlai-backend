@@ -3,6 +3,8 @@ from contextlib import contextmanager
 from types import SimpleNamespace
 from urllib.parse import urlsplit,parse_qs
 from unittest.mock import patch
+from unittest import skipUnless
+from django.conf import settings
 import uuid
 
 from coincurve import PrivateKey
@@ -15,11 +17,12 @@ from community_chat.models import CommunityChatAccountSession,CommunityChatDevic
 from tests.federation_database_support import active_api_database
 
 
+@skipUnless('staging' in settings.DATABASES, 'Run with tests.federation_settings for two isolated databases.')
 @override_settings(DATABASE_ROUTERS=['tests.federation_database_support.FederationTestRouter'],
     COMMUNITY_CHAT_HOST_ONLY_COOKIES=True,COMMUNITY_CHAT_FEDERATION_CLIENT_SECRET='synthetic-confidential-client-credential',
     COMMUNITY_CHAT_SIGNUP_ENABLED=False)
 class FederationTwoDatabaseTests(TestCase):
-    databases={'default','staging'}
+    databases={'default','staging'} if 'staging' in settings.DATABASES else {'default'}
 
     @contextmanager
     def api(self,staging=False):

@@ -376,6 +376,12 @@ jobs:
           content_factory.tests_admin_metrics \
           tests.test_community_bridge_adapter_url \
           community_chat.tests.test_account_sessions \
+          community_chat.tests.test_account_cookie_isolation \
+          community_chat.tests.test_legacy_session_retirement \
+          community_chat.tests.test_federation_issuer \
+          community_chat.tests.test_federation_staging \
+          community_chat.tests.test_federation_two_databases \
+          tests.test_staging_federation_deploy \
           community_chat.tests.test_session_device_binding \
           community_chat.tests.test_account_profiles.AccountProfileTests \
           community_chat.tests.test_account_privacy.AccountPrivacyTests \

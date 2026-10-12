@@ -48,3 +48,14 @@ class StagingFederationDeploymentTests(unittest.TestCase):
         self.assertEqual(api['DJANGO_SETTINGS_MODULE'],'mlai.settings_staging_chat')
         self.assertEqual(api['COMMUNITY_CHAT_ADAPTER_URL'],'http://membership-adapter:3100')
         self.assertEqual(config['networks']['chat']['name'],'mlai-chat-staging_chat')
+
+    def test_production_mode_staging_profile_boots_with_only_its_private_configuration(self):
+        env=dict(os.environ,DEBUG='false',APP_ENV='chat-staging',
+            SECRET_KEY='synthetic-key-only-for-isolated-tests',
+            DATABASE_URL='postgresql://staging_test@127.0.0.1:65439/federation_local',
+            REDIS_URL='redis://127.0.0.1:65440/0',DJANGO_SETTINGS_MODULE='mlai.settings_staging_chat')
+        for name in ('HEALTH_HACK_API_KEY','ROO_SIM_PATIENT_KEY','ROO_API_KEY','MLAI_API_KEY','INTERNAL_API_KEY'):
+            env.pop(name,None)
+        code="import django; django.setup(); from django.test import Client,override_settings; settings=override_settings(ALLOWED_HOSTS=['127.0.0.1']); settings.enable(); response=Client().get('/healthz/live',HTTP_HOST='127.0.0.1'); assert response.status_code == 200, response.status_code"
+        result=subprocess.run([sys.executable,'-c',code],env=env,cwd=ROOT,capture_output=True,text=True)
+        self.assertEqual(result.returncode,0,result.stderr)

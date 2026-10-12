@@ -70,3 +70,7 @@ DB. Build with the committed source revision, inspect its image revision/environ
 labels, and record its immutable image ID before use. Do not print rendered Compose
 configuration: it contains secrets. Use `docker compose config --quiet` for validation.
 Keep federation disabled until the production cookie/issuer/client rollout is ready.
+
+Local verification (no remote CI): use a disposable local PostgreSQL instance, synthetic credentials and two databases named `federation_local` and `federation_stage_local`. Set `DEBUG=true`, `DATABASE_URL` to the first local database and `FEDERATION_TEST_STAGING_DATABASE_URL` to the second. Run `python manage.py test community_chat.tests.test_federation_two_databases --settings=tests.federation_settings --keepdb --noinput`. Its transport calls the real API handlers in process; it does not claim a live HTTP/TLS deployment. The ordinary single-database runner reports this dedicated test as skipped. Browser tests separately exercise URL-scoped cookies and popup handoff against synthetic local fixtures. No production data is used.
+
+The staging production-mode profile excludes unrelated Roo/Health Hack credential validation only when both `APP_ENV=chat-staging` and `DJANGO_SETTINGS_MODULE=mlai.settings_staging_chat` identify the restricted API. Other production deployments retain those checks. Federation remains disabled and the pilot tester list remains empty until later approval.

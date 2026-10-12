@@ -190,6 +190,8 @@ APP_ENV = _resolve_app_env(debug=DEBUG, raw_env=RAW_APP_ENV)
 APP_RELEASE = _resolve_app_release(BASE_DIR)
 IS_LOCAL_ENV = APP_ENV in {'local', 'development', 'dev', 'test'}
 IS_PRODUCTION_ENV = not IS_LOCAL_ENV
+# The isolated chat profile does not expose Roo/Health Hack integration routes.
+IS_CHAT_STAGING_ENV = APP_ENV == "chat-staging" and os.getenv("DJANGO_SETTINGS_MODULE") == "mlai.settings_staging_chat"
 
 # SECURITY WARNING: keep the secret key used in production secret!
 # Production MUST supply SECRET_KEY via the environment. We fail closed rather
@@ -1062,7 +1064,7 @@ _validate_health_hack_service_secrets(
     health_hack_key=HEALTH_HACK_API_KEY,
     roo_sim_patient_key=ROO_SIM_PATIENT_KEY,
     roo_api_key=ROO_API_KEY,
-    is_production=IS_PRODUCTION_ENV,
+    is_production=IS_PRODUCTION_ENV and not IS_CHAT_STAGING_ENV,
 )
 CONTENT_FACTORY_PREVIEW_BASE_URL = os.getenv('CONTENT_FACTORY_PREVIEW_BASE_URL', '')
 CONTENT_FACTORY_PREVIEW_LINK_TTL_SECONDS = int(
@@ -1721,7 +1723,7 @@ _validate_roo_service_secret_boundaries(
     roo_api_key=ROO_API_KEY,
     internal_api_key=INTERNAL_API_KEY,
     mlai_api_key=MLAI_API_KEY,
-    is_production=IS_PRODUCTION_ENV,
+    is_production=IS_PRODUCTION_ENV and not IS_CHAT_STAGING_ENV,
 )
 CONNECTOR_CREDENTIAL_KEYS = os.environ.get('CONNECTOR_CREDENTIAL_KEYS', '')
 CONNECTOR_CREDENTIAL_ACTIVE_KEY_ID = os.environ.get(
