@@ -167,7 +167,7 @@ class OneClickPersistenceTests(OneClickBillingFixture, TestCase):
             status='queued', run_request=payload)
         now = timezone.now() + timedelta(minutes=1)
         with patch.object(views, '_content_factory_remote_config', return_value={'enabled': True, 'base_url': 'https://worker.invalid'}), \
-                patch.object(views, '_lookup_content_factory_dispatch_by_key', return_value=('dispatched', {'run_id': 'actual-worker-child'})), \
+                patch.object(views, '_lookup_content_factory_dispatch_by_key', return_value=('started', {'run_id': 'actual-worker-child'})), \
                 patch('integrations.http_client.post') as post:
             self.assertEqual(dispatch_outbox.process_dispatch_outbox(now=now)['delivered'], 1)
             self.assertEqual(dispatch_outbox.process_dispatch_outbox(now=now)['processed'], 0)
@@ -210,7 +210,7 @@ class OneClickPersistenceTests(OneClickBillingFixture, TestCase):
             status='completed', run_request=payload, result={'draft': 'Retained reviewed article'})
         transition_connection(self.config, action='disconnect', expected=self.binding)
         with patch.object(views, '_content_factory_remote_config', return_value={'enabled': True, 'base_url': 'https://worker.invalid'}), \
-                patch.object(views, '_lookup_content_factory_dispatch_by_key', return_value=('dispatched', {'run_id': run.run_id})), \
+                patch.object(views, '_lookup_content_factory_dispatch_by_key', return_value=('started', {'run_id': run.run_id})), \
                 patch('integrations.http_client.post') as post:
             self.assertEqual(dispatch_outbox.process_dispatch_outbox(now=timezone.now() + timedelta(minutes=1))['delivered'], 1)
         post.assert_not_called()

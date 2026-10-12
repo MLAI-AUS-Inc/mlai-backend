@@ -87,7 +87,7 @@ class ResearchDispatchTests(SimpleTestCase):
         row = self.row()
         response = Obj(status_code=202, json=lambda: {"run_id": "research-1"})
         with patch.object(views, "_content_factory_remote_config", return_value={"enabled": True, "base_url": "https://worker.example.test"}), \
-             patch.object(views, "_lookup_content_factory_dispatch_by_key", return_value=("absent", {})), \
+             patch.object(views, "_lookup_content_factory_dispatch_by_key", return_value=("not_received", {})), \
              patch.object(views, "_content_factory_headers", return_value={}), \
              patch.object(get_user_model().objects, "get", return_value=self.user), \
              patch.object(VibeRaisingCompany.objects, "filter") as companies, \
@@ -116,7 +116,7 @@ class ResearchDispatchTests(SimpleTestCase):
                 row.payload["request"]["domain"] = "old.example.test"
             with self.subTest(changed=changed), \
                  patch.object(views, "_content_factory_remote_config", return_value={"enabled": True}), \
-                 patch.object(views, "_lookup_content_factory_dispatch_by_key", return_value=("absent", {})), \
+                 patch.object(views, "_lookup_content_factory_dispatch_by_key", return_value=("not_received", {})), \
                  patch.object(get_user_model().objects, "get", return_value=self.user), \
                  patch.object(VibeRaisingCompany.objects, "filter") as companies, \
                  patch.object(http_client, "post") as post:
@@ -143,7 +143,7 @@ class ResearchDispatchTests(SimpleTestCase):
         row = self.row()
         row.payload["request"]["research_audience"] = {"id": "audience-1", "version": 1}
         with patch.object(views, "_content_factory_remote_config", return_value={"enabled": True}), \
-             patch.object(views, "_lookup_content_factory_dispatch_by_key", return_value=("absent", {})), \
+             patch.object(views, "_lookup_content_factory_dispatch_by_key", return_value=("not_received", {})), \
              patch.object(get_user_model().objects, "get", return_value=self.user), \
              patch.object(VibeRaisingCompany.objects, "filter") as companies, \
              patch.object(views, "_get_config", return_value=Obj(pillar_strategy={})), \

@@ -13281,11 +13281,13 @@ def _lookup_content_factory_dispatch_by_key(remote_config, client_request_id):
     """Resolve a dispatch whose response was lost, by its idempotency key.
 
     Returns ``(outcome, payload)`` with outcome one of:
-    - ``"dispatched"`` — the run exists (payload carries run_id); adopt it.
-    - ``"absent"`` — content-factory proves nothing was enqueued for this key.
+    - ``"started"`` — the run exists (payload carries run_id); adopt it.
+    - ``"not_received"`` — the lookup endpoint has no record of this key.
+    - ``"received_not_started"`` — the key has a failed dispatch receipt.
+    - ``"rejected"`` — backend authorization refused the dispatch.
     - ``"unknown"`` — cannot prove either way (lookup unreachable, key still
       mid-claim, or an old content-factory without the lookup endpoint).
-    Refunds are only ever safe on ``"absent"``.
+    The three confirmed no-work outcomes retain the existing refund policy.
     """
     key = str(client_request_id or "").strip()
     if not key:
@@ -13304,11 +13306,13 @@ def _lookup_content_factory_dispatch_by_key(remote_config, client_request_id):
             payload = sanitize_json_for_postgres(response.json() if response.content else {}) or {}
         except Exception:
             return "unknown", {}
+        if not isinstance(payload, dict):
+            return "unknown", {}
         key_status = str(payload.get("key_status") or "").strip()
         if key_status == "dispatched" and str(payload.get("run_id") or "").strip():
-            return "dispatched", payload
+            return "started", payload
         if key_status == "failed":
-            return "rejected" if str(payload.get("error") or "").startswith("backend_rejected:") else "absent", payload
+            return "rejected" if str(payload.get("error") or "").startswith("backend_rejected:") else "received_not_started", payload
         # "claimed": a dispatch is (or died) mid-flight — not provable either way.
         return "unknown", payload
     if response.status_code == 404:
@@ -13320,7 +13324,7 @@ def _lookup_content_factory_dispatch_by_key(remote_config, client_request_id):
         # A content-factory WITHOUT the endpoint routes this path to
         # /api/runs/{run_id} ("Run not found") — that proves nothing.
         if "client_request_id" in detail:
-            return "absent", {"detail": detail}
+            return "not_received", {"detail": detail}
         return "unknown", {"status_code": 404, "detail": detail}
     return "unknown", {"status_code": response.status_code}
 
@@ -13391,18 +13395,19 @@ def _process_pending_dispatch_refund(run) -> None:
                    run.run_id, run_request.get("client_request_id"))
 
 
-def _fail_unconfirmed_dispatch_run(run):
-    """The key lookup confirms Content Factory never enqueued this dispatch:
-    fail the provisional run honestly and release the withheld refund."""
+def _fail_unconfirmed_dispatch_run(run, *, outcome, lookup_payload=None):
+    """Fail only a confirmed no-work dispatch and release its withheld refund."""
+    from content_factory.dispatch_outbox import dispatch_failure_details
+    from content_factory.section_issues import _safe_text
     run_request = dict(run.run_request) if isinstance(run.run_request, dict) else {}
-    detail = (
-        "Content Factory never received this request (confirmed by dispatch-key lookup). "
-        "Any Roo points charged for it are being refunded automatically — retry when ready."
-    )
-    result = run.result if isinstance(run.result, dict) else {}
+    lookup_payload = lookup_payload or {}
+    code, detail = dispatch_failure_details(outcome, lookup_payload)
+    result = dict(run.result) if isinstance(run.result, dict) else {}
     result.update(
         {
-            "dispatch_confirmed_absent": True,
+            "dispatch_confirmed_absent": outcome == "not_received",
+            "dispatch_outcome": outcome,
+            "error_code": code,
             "error": detail,
             "errors": [detail],
             "message": detail,
@@ -13410,6 +13415,8 @@ def _fail_unconfirmed_dispatch_run(run):
             "reconciliation_refund_pending": bool(run_request.get("pending_billing_refund") and not result.get("dispatch_refund_processed")),
         }
     )
+    if outcome == "rejected":
+        result["backend_code"] = _safe_text(str(lookup_payload.get("error") or "").removeprefix("backend_rejected:"), 100)
     run_request["dispatch_pending_resolution"] = False
     run.status = ContentFactoryRunStatus.FAILED
     run.error = detail
@@ -13417,9 +13424,10 @@ def _fail_unconfirmed_dispatch_run(run):
     run.run_request = sanitize_json_for_postgres(run_request)
     run.save(update_fields=["status", "error", "result", "run_request", "updated_at"])
     logger.warning(
-        "content_factory_dispatch_confirmed_absent run_id=%s workflow=%s",
+        "content_factory_dispatch_no_work run_id=%s workflow=%s outcome=%s",
         run.run_id,
         run.workflow,
+        outcome,
     )
     _process_pending_dispatch_refund(run)
     return run
@@ -13429,8 +13437,8 @@ def _resolve_dispatch_token_run(run):
     """Poll-time resolution for a provisional token-keyed run.
 
     Returns the (possibly re-keyed) run when something changed, else None:
-    - key lookup says dispatched → bind the local record to the real run_id;
-    - confirmed absent AND the run has aged past the grace window (covers an
+    - key lookup says started → bind the local record to the real run_id;
+    - confirmed no work AND the run has aged past the grace window (covers an
       overloaded content-factory processing the timed-out POST late) → fail
       honestly + release the withheld refund;
     - anything else → stay pending; the next poll retries.
@@ -13442,34 +13450,24 @@ def _resolve_dispatch_token_run(run):
         return None
     token = str(run.run_id or "").strip()
     outcome, lookup_payload = _lookup_content_factory_dispatch_by_key(remote_config, token)
-    if outcome == "dispatched":
+    if outcome == "started":
         bound = bind_dispatch_token_run(
             client_request_id=token,
             remote_run_id=lookup_payload.get("run_id"),
         )
         return bound
     if outcome == "rejected":
-        result = dict(run.result or {})
-        result.update(error_code="dispatch_rejected", backend_code=str(lookup_payload.get("error", "")).removeprefix("backend_rejected:"),
-                      error="The article start was rejected before entering the queue. Any points charged are being refunded automatically. Try again.", retryable=True,
-                      reconciliation_refund_pending=bool((run.run_request or {}).get("pending_billing_refund") and not result.get("dispatch_refund_processed")))
-        run.result = result
-        run.error = result["error"]
-        run.status = ContentFactoryRunStatus.FAILED
-        run.run_request = {**(run.run_request or {}), "dispatch_pending_resolution": False}
-        run.save(update_fields=["result", "error", "status", "run_request", "updated_at"])
-        _process_pending_dispatch_refund(run)
-        return run
+        return _fail_unconfirmed_dispatch_run(run, outcome=outcome, lookup_payload=lookup_payload)
     if (run.run_request or {}).get("dispatch_outbox_reserved"):
         from content_factory.dispatch_models import ContentFactoryDispatchOutbox
         row = ContentFactoryDispatchOutbox.objects.filter(client_request_id=token).first()
         if row and row.state in {"pending", "delivering", "refund_pending", "awaiting_resolution"}:
             return None
-    if outcome == "absent":
+    if outcome in {"not_received", "received_not_started"}:
         age_seconds = (timezone.now() - run.created_at).total_seconds()
         if age_seconds < CONTENT_FACTORY_DISPATCH_ABSENT_GRACE_SECONDS:
             return None
-        return _fail_unconfirmed_dispatch_run(run)
+        return _fail_unconfirmed_dispatch_run(run, outcome=outcome, lookup_payload=lookup_payload)
     return None
 
 
@@ -13595,7 +13593,7 @@ def _queue_content_factory_run_authorized(*, endpoint, workflow, context, config
             # safe either way: content-factory claims the key before enqueueing
             # and replays the existing run.
             outcome, lookup_payload = _lookup_content_factory_dispatch_by_key(remote_config, dispatch_key)
-            if outcome == "dispatched":
+            if outcome == "started":
                 recovered_by_key = lookup_payload
                 break
 
@@ -13603,7 +13601,7 @@ def _queue_content_factory_run_authorized(*, endpoint, workflow, context, config
             # A caller may repeat a previously charged idempotency key. No POST
             # in *this* call does not prove that key has never reached a worker.
             outcome, lookup_payload = _lookup_content_factory_dispatch_by_key(remote_config, dispatch_key)
-            if outcome == "dispatched":
+            if outcome == "started":
                 recovered_by_key = lookup_payload
             else:
                 # Even an immediate absent lookup can race an earlier in-flight

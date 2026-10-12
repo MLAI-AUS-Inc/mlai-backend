@@ -414,7 +414,7 @@ class ArticleDispatchControlFlowTests(unittest.TestCase):
 
     def test_rejected_repeated_key_returns_existing_run_without_post_or_refund(self):
         self.strategy = retired_catalog()
-        self.lookup.return_value = ("dispatched", {"run_id": "previous-call", "status": "queued"})
+        self.lookup.return_value = ("started", {"run_id": "previous-call", "status": "queued"})
         child = self.queue(refund=True)
         self.http.post.assert_not_called()
         self.refund.assert_not_called()
@@ -423,14 +423,14 @@ class ArticleDispatchControlFlowTests(unittest.TestCase):
 
     def test_no_post_and_immediate_absent_lookup_still_preserves_grace_for_earlier_call(self):
         self.strategy = retired_catalog()
-        self.lookup.return_value = ("absent", {})
+        self.lookup.return_value = ("not_received", {})
         child = self.queue(refund=True)
         self.refund.assert_not_called()
         self.assertTrue(child.run_request["dispatch_pending_resolution"])
 
     def test_policy_rejected_dispatch_refund_waits_for_absent_lookup_after_grace(self):
         self.strategy = retired_catalog()
-        self.lookup.return_value = ("absent", {})
+        self.lookup.return_value = ("not_received", {})
         child = self.queue(refund=True)
         self.assertIsNone(self.ns["_resolve_dispatch_token_run"](child))
         self.refund_pending.assert_not_called()
@@ -444,7 +444,7 @@ class ArticleDispatchControlFlowTests(unittest.TestCase):
     def test_policy_rejected_dispatch_can_bind_a_late_existing_run_without_new_post(self):
         self.strategy = retired_catalog()
         child = self.queue(refund=True)
-        self.lookup.return_value = ("dispatched", {"run_id": "late-worker-run"})
+        self.lookup.return_value = ("started", {"run_id": "late-worker-run"})
         self.assertEqual(self.ns["_resolve_dispatch_token_run"](child), "bound-existing-run")
         self.bind_existing.assert_called_once_with(client_request_id="fixture-key", remote_run_id="late-worker-run")
         self.refund_pending.assert_not_called()
@@ -452,7 +452,7 @@ class ArticleDispatchControlFlowTests(unittest.TestCase):
 
     def test_lookup_recovers_an_existing_dispatch_without_a_second_post(self):
         self.http.post.side_effect = self.transport_error("lost response")
-        self.lookup.return_value = ("dispatched", {"run_id": "existing-child", "status": "queued"})
+        self.lookup.return_value = ("started", {"run_id": "existing-child", "status": "queued"})
         child = self.queue(refund=True)
         self.http.post.assert_called_once()
         self.assertEqual(child.run_id, "existing-child")

@@ -1,5 +1,6 @@
 """Versioned operation fences using the existing durable operation envelope."""
 
+import re
 from uuid import UUID
 
 from django.db import transaction
@@ -269,6 +270,37 @@ def bind_operation_run(operation, run):
                 run.status, run.resume_available, run.error = current.status, current.resume_available, current.error
 
 
+def prepare_receipt(op):
+    """Describe saved preparation without promising an unscheduled retry.
+
+    The returned copy also corrects historical terminal receipts on read;
+    it never mutates the persisted receipt or writes the operation.
+    """
+    receipt = dict(op.receipt or {})
+    message = str(receipt.get("message") or "")
+    scheduled = op.state == "pending" and getattr(op, "next_attempt_at", None) is not None
+    if scheduled:
+        return receipt
+    retry_promise = r"will\s+(?:automatically\s+)?(?:retry|be retried)|retry\s+automatically|automatically\s+retry"
+    promise = re.search(retry_promise, message, flags=re.IGNORECASE)
+    stopped = op.state in {"needs_attention", "stopped"}
+    if not stopped and not promise:
+        return receipt
+    reason = re.sub(rf"(?:\b(?:it|we|this operation)\s+)?(?:{retry_promise})[^.!?]*(?:[.!?]|$)",
+        "", message, flags=re.IGNORECASE)
+    reason = reason.strip() or "Website preparation could not finish."
+    if stopped and not reason.startswith("We stopped"):
+        failures = receipt.get("step_failures")
+        failures = failures if isinstance(failures, dict) else {}
+        counts = [*failures.values(), receipt.get("deployment_attempts")]
+        attempts = max([value for value in counts if type(value) is int and value > 0] + [1])
+        reason = f"We stopped after {attempts} {'attempt' if attempts == 1 else 'attempts'}: {reason.rstrip('.')}. Use Try again when you're ready."
+    if stopped:
+        receipt["status"] = "needs_attention" if op.state == "needs_attention" else "stopped"
+    receipt["message"] = reason
+    return receipt
+
+
 def operation_summary(op):
     """Public receipt without internal provider credentials or source bodies."""
     state = op.state
@@ -277,9 +309,13 @@ def operation_summary(op):
         run = ContentFactoryRun.objects.filter(run_id=op.payload["run_id"]).first()
         if run and run.status in {"completed", "failed", "cancelled", "denied", "blocked"}:
             state = workflow_operation_state(run)
+    receipt = prepare_receipt(op) if op.action == "prepare" else op.receipt
+    next_attempt = getattr(op, "next_attempt_at", None)
+    if op.action == "prepare" and state not in {"pending", "running"}:
+        next_attempt = None
     return {"id": str(op.pk), "action": op.action, "state": state, "attempt": op.payload.get("attempt", 1),
-        "runId": op.payload.get("run_id"), "updatedAt": op.updated_at.isoformat(), "receipt": op.receipt,
-        "nextAttemptAt": op.next_attempt_at.isoformat() if getattr(op, "next_attempt_at", None) else None}
+        "runId": op.payload.get("run_id"), "updatedAt": op.updated_at.isoformat(), "receipt": receipt,
+        "nextAttemptAt": next_attempt.isoformat() if next_attempt else None}
 
 
 def cancel_operation(config, *, data, idempotency_key):

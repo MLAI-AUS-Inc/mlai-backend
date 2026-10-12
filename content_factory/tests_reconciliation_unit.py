@@ -188,12 +188,12 @@ class SplitRunRecoveryTests(SimpleTestCase):
     def test_orphan_receipt_uses_dispatch_key_lookup(self):
         op = SimpleNamespace(payload={"client_request_id": "saved-key"})
         with patch("content_factory.vibe_marketing_views._content_factory_remote_config", return_value={"enabled": True}) as config, \
-                patch("content_factory.vibe_marketing_views._lookup_content_factory_dispatch_by_key", return_value=("dispatched", {"run_id": "actual-child"})) as lookup:
-            self.assertEqual(reconciliation._lookup_orphan_child(op), ("dispatched", {"run_id": "actual-child"}))
+                patch("content_factory.vibe_marketing_views._lookup_content_factory_dispatch_by_key", return_value=("started", {"run_id": "actual-child"})) as lookup:
+            self.assertEqual(reconciliation._lookup_orphan_child(op), ("started", {"run_id": "actual-child"}))
         lookup.assert_called_once_with(config.return_value, "saved-key")
 
     def test_restart_no_child_releases_only_confirmed_rejected_reuse(self):
-        self.assertEqual(reconciliation.restart_receipt_resolution("absent"), "failed")
+        self.assertEqual(reconciliation.restart_receipt_resolution("not_received"), "failed")
         self.assertEqual(reconciliation.restart_receipt_resolution("rejected"), "failed")
-        self.assertEqual(reconciliation.restart_receipt_resolution("dispatched"), "completed")
+        self.assertEqual(reconciliation.restart_receipt_resolution("started"), "completed")
         self.assertEqual(reconciliation.restart_receipt_resolution("unknown"), "pending")

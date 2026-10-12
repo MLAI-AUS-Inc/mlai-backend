@@ -7,6 +7,7 @@ from django.utils import timezone
 
 from .dispatch_models import ContentFactoryDispatchOutbox
 from .website_contract import WebsiteAuthorityError, evidence_digest, sanitized_evidence
+from .section_issues import _safe_text
 
 MAX_ATTEMPTS = 5
 
@@ -21,14 +22,33 @@ def dispatch_outcome(status_code, body, *, known_key_outcome="unknown"):
     if status_code in {200, 201, 202} and isinstance(body, dict) and (body.get("run_id") or body.get("runId")):
         return "delivered", False
     if status_code in {400, 401, 403, 409, 410, 422} and (
-            known_key_outcome == "absent" or isinstance(body, dict) and body.get("code") == "dispatch_rejected"):
+            known_key_outcome in {"not_received", "received_not_started"} or isinstance(body, dict) and body.get("code") == "dispatch_rejected"):
         return "failed", False
     return "pending", True
 
 
 def exhausted_dispatch_outcome(key_outcome):
     """An exhausted POST budget does not prove that the worker owns no run."""
-    return {"dispatched": "delivered", "absent": "failed", "rejected": "failed"}.get(key_outcome, "awaiting_resolution")
+    return {"started": "delivered", "not_received": "failed", "received_not_started": "failed", "rejected": "failed"}.get(key_outcome, "awaiting_resolution")
+
+
+def dispatch_failure_details(outcome, payload, *, refund=True):
+    """Name the proven no-work outcome and the caller's actual billing action."""
+    ending = "Any Roo points charged are being refunded — try again when ready." if refund else "Try again when ready."
+    if outcome == "not_received":
+        return "dispatch_child_missing", (
+            "Content Factory did not receive this request (confirmed by dispatch-key lookup). "
+            + ending)
+    if outcome == "received_not_started":
+        reason = _safe_text(payload.get("error"), 240) or "work could not start"
+        return "received_not_started", (
+            f"Content Factory received this request but couldn't start it ({reason}). "
+            + ending)
+    if outcome == "rejected":
+        return "dispatch_rejected", (
+            "The article start was rejected before entering the queue. "
+            + ending)
+    raise ValueError("A dispatch failure requires a confirmed no-work outcome.")
 
 
 def reserve_dispatch(*, organization, payload, endpoint="article", workflow="article_generation", billing_user_id=None, actor_id=""):
@@ -90,7 +110,7 @@ def _deliver(row):
     # The previous POST may already own a run. Identity lookup precedes both
     # new policy checks and re-dispatch so no second child is created.
     known, existing = _lookup_content_factory_dispatch_by_key(remote, row.client_request_id)
-    if known == "dispatched":
+    if known == "started":
         return _accept_delivery(row, request, existing, recovered=True)
     if known == "rejected":
         return "failed", "dispatch_rejected", ""
@@ -169,8 +189,8 @@ def _resolve_exhausted_dispatch(row):
     state = exhausted_dispatch_outcome(known)
     if state == "delivered":
         return _accept_delivery(row, dict(row.payload["request"]), body, recovered=True)
-    return state, "dispatch_never_received" if known == "absent" else (
-        "dispatch_rejected" if known == "rejected" else "dispatch_outcome_unconfirmed"), ""
+    return state, {"not_received": "dispatch_never_received", "received_not_started": "received_not_started",
+        "rejected": "dispatch_rejected"}.get(known, "dispatch_outcome_unconfirmed"), ""
 
 
 def process_dispatch_outbox(*, limit=20, now=None):

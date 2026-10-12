@@ -140,6 +140,8 @@ def prepare_failure(op, step, error, *, now=None):
         op.state = "pending"
         op.next_attempt_at = now + timedelta(minutes=RETRY_MINUTES[min(failures[step] - 1, 3)])
         op.receipt["status"] = "working"
+    from .website_operations import prepare_receipt
+    op.receipt = prepare_receipt(op)
 
 
 def _setup_surface(config, journey):
