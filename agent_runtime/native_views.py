@@ -42,7 +42,9 @@ class NativeInstallationsView(NativeOwnerView):
                 "limits": {"personal_limit": max(0, getattr(settings, "AGENT_RUNTIME_NATIVE_PERSONAL_LIMIT", 1)),
                            "personal_used": 0}})
         rows = AgentInstallation.objects.filter(owner=request.user, community_id=community,
-            app_id="openai-dot").exclude(state="revoked").select_related("owner_device").order_by("-created_at")[:100]
+            app_id="openai-dot").select_related("owner_device").order_by("-created_at")[:100]
+        # Revoked public identities remain owner-visible tombstones so search
+        # results cannot mistake them for ordinary users when directory data is absent.
         return Response({"community_id": community,
             "installations": [native_installations.installation_payload(row) for row in rows],
             "limits": native_installations.limits(request.user, community)})

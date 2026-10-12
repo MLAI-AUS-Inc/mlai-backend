@@ -220,6 +220,31 @@ class InvocationAuthorityTests(SimpleTestCase):
 @override_settings(AGENT_RUNTIME_ENABLED=False, AGENT_RUNTIME_NATIVE_COMMUNITIES=CONFIG,
                    AGENT_RUNTIME_NATIVE_REGISTRY_KEY="r" * 40)
 class NativeDisabledBoundaryTests(SimpleTestCase):
+    @override_settings(AGENT_RUNTIME_ENABLED=True)
+    def test_owner_listing_retains_revoked_identity_without_directory_or_positive_authority(self):
+        owner = SimpleNamespace(pk=7, is_authenticated=True, is_active=True)
+        revoked = SimpleNamespace(pk=uuid4(), app_id="openai-dot", name="Revoked Dot", state="revoked",
+            community_id=COMMUNITY, public_key="a" * 64, native_cursor={})
+        revoked.grants = MagicMock()
+        revoked.grants.filter.return_value.order_by.return_value.first.return_value = None
+        request = APIRequestFactory().get("/installations/", {"community": COMMUNITY})
+        force_authenticate(request, user=owner)
+        with patch("agent_runtime.native_views.AgentInstallation.objects") as rows, patch(
+                "agent_runtime.native_installations.AgentInvocationReply.objects") as replies, patch(
+                "agent_runtime.native_installations.limits", return_value={"personal_limit": 1, "personal_used": 0}):
+            rows.filter.return_value.select_related.return_value.order_by.return_value.__getitem__.return_value = [revoked]
+            replies.filter.return_value.order_by.return_value.first.return_value = None
+            response = NativeInstallationsView.as_view()(request)
+        rows.filter.assert_called_once_with(owner=owner, community_id=COMMUNITY, app_id="openai-dot")
+        rows.filter.return_value.exclude.assert_not_called()
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data["installations"][0]["public_key"], revoked.public_key)
+        self.assertEqual(response.data["installations"][0]["status"], "revoked")
+        self.assertFalse(response.data["installations"][0]["subscription_active"])
+        self.assertFalse(response.data["installations"][0]["test_completed"])
+        self.assertEqual(response.data["installations"][0]["resources"], [])
+        self.assertEqual(response.data["limits"]["personal_used"], 0)
+
     def test_disabled_owner_catalog_and_listing_do_not_query_database(self):
         owner = SimpleNamespace(pk=7, is_authenticated=True, is_active=True)
         request = APIRequestFactory().get("/apps/", {"relay_url": "https://chat.example"})
