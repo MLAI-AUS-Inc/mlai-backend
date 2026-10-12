@@ -8588,6 +8588,8 @@ def _set_content_factory_run_meta(run: ContentFactoryRun, meta: dict) -> None:
 
 
 def _serialize_content_factory_run(run: ContentFactoryRun) -> dict:
+    from .setup_status_projection import terminal_setup_projection
+    run = terminal_setup_projection(run)
     steps = {}
     for step in run.steps.order_by("display_order", "id"):
         attempts = []
@@ -8992,6 +8994,40 @@ class ContentFactoryRunView(APIView):
     @guarded_service_write("config_write", only_repository=True, portable=True, cancellation_receipts=True, observation_fallback=True)
     def put(self, request, run_id: str):
         return _apply_run_snapshot(run_id, request.data)
+
+
+def _apply_cancellation_receipt(run_id, payload):
+    """Record a worker cancellation against saved tenant identity, granting no writes.
+
+    Only cancellation metadata is consumed. Incoming repository/configuration,
+    tokens, targets, proof and run-request identity remain discarded.
+    """
+    from .run_observations import _observations
+    from .website_operations import observe_workflow_status
+    with transaction.atomic():
+        run = ContentFactoryRun.objects.select_for_update().filter(run_id=run_id).first()
+        if run is None:
+            return Response({"error": "Run not found", "run_id": run_id}, status=404)
+        request = payload.get("run_request") if isinstance(payload.get("run_request"), dict) else {}
+        domain = str(payload.get("domain") or request.get("domain") or "").strip().casefold()
+        expected = str(run.domain or "").strip().casefold()
+        if (not domain or domain != expected or (request.get("domain") and str(request["domain"]).strip().casefold() != expected)
+                or (payload.get("run_id") and payload["run_id"] != run_id)
+                or (request.get("run_id") and request["run_id"] != run_id)):
+            return Response({"code": "website_scope_mismatch", "detail": "Cancellation receipt does not match the saved run domain.", "run_id": run_id}, status=409)
+        incoming = payload.get("result") if isinstance(payload.get("result"), dict) else {}
+        metadata = _observations({key: incoming[key] for key in (
+            "cancelled_at", "cancellation", "cleanup", "cleanup_pending", "remote_cleanup_pending", "mirror_rejection",
+        ) if key in incoming})
+        run.status, run.current_step, run.resume_available = "cancelled", "cancelled", False
+        run.error = str(payload.get("error") or run.error or "Cancelled.")[:2000]
+        run.result = {**(run.result or {}), **metadata, "status": "cancelled", "cancelled": True,
+            "cancellation_receipt": {"status": "recorded", "received_at": timezone.now().isoformat(), "repository_authority": False}}
+        run.save(update_fields=["status", "current_step", "resume_available", "error", "result", "updated_at"])
+        observe_workflow_status(run, {"status": "cancelled"})
+        response = _serialize_content_factory_run(run)
+        response["sync_status"] = "cancellation_recorded"
+        return Response(response, status=200)
 
 
 def _apply_run_snapshot(run_id, payload):

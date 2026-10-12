@@ -101,7 +101,7 @@ class PrepareJourneyTests(SimpleTestCase):
                 patch.object(prepare, "journey_for_context", return_value={"nextAction": {"id": "setup"}}), \
                 patch.object(prepare, "_persist_prepare", side_effect=lambda operation, **kw: operation), \
                 patch.object(ContentFactoryRun.objects, "filter") as runs:
-            runs.return_value.first.return_value = SimpleNamespace(status="failed", result={}, workflow="article_system_setup")
+            runs.return_value.first.return_value = SimpleNamespace(status="failed", result={"retryable": True}, workflow="article_system_setup")
             prepare.advance_prepare(op.pk)
         self.assertNotIn("child_run_id", op.receipt)
         self.assertEqual(op.payload["attempt"], 2)

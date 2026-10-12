@@ -15,13 +15,17 @@ def fact(complete=False, *, code="", reason="", status=None, verified_at=None, o
         "reason": "" if complete else reason, "verifiedAt": verified_at, "operationId": operation}
 
 
-def project_journey(*, company_id, domain, website=None, capabilities=None, discovery=None, target=None, operation=None, epoch=0, proof=None, source_runs=None, ci_source_runs=None):
+def project_journey(*, company_id, domain, website=None, capabilities=None, discovery=None, target=None, operation=None, epoch=0, proof=None, source_runs=None, ci_source_runs=None, permissions=None):
     """Project verified facts without interpreting legacy completion ticks."""
     website, capabilities, target = mapping(website), mapping(capabilities), mapping(target)
     discovery = discovery or discovery_snapshot({})
     target_contract = mapping(target.get("contract"))
     proof = mapping(proof)
     authoring_supported = target.get("adapter") != "custom_contract_v1" and target_contract.get("delivery_adapter") != "custom_contract_v1"
+    grants = mapping(permissions) if permissions is not None else {"workflows": True, "checks": True, "statuses": True}
+    permissions_ready = all(grants.get(key) is True for key in ("workflows", "checks", "statuses"))
+    permission_code = grants.get("reasonCode") or ("github_workflow_permission_required" if not grants.get("workflows") else "github_ci_evidence_permission_required")
+    permission_reason = grants.get("reason") or ("Review GitHub installation permissions to allow articles workflow checks." if not grants.get("workflows") else "Review GitHub installation permissions to read Checks and Commit statuses.")
     verified = bool(capabilities.get("canGenerateArticle") and authoring_supported)
     access = bool(capabilities.get("repositoryAccessVerified"))
     account_access = bool(capabilities.get("accountAccessVerified", access))
@@ -33,7 +37,7 @@ def project_journey(*, company_id, domain, website=None, capabilities=None, disc
     deployed = bool(deployment.get("status") == "passed" and deployment.get("source_sha") == website.get("verifiedSha")
         and deployment.get("connection_generation") == website.get("connectionGeneration") and deployment.get("target_id") == target.get("key")
         and deployment.get("public_url") and deployment.get("checked_at"))
-    live_ready = verified and deployed
+    live_ready = verified and deployed and permissions_ready
     reason_code = capabilities.get("reasonCode") or "integration_required"
     reason = capabilities.get("reason") or "Prepare and verify your articles integration."
     if not authoring_supported:
@@ -54,6 +58,7 @@ def project_journey(*, company_id, domain, website=None, capabilities=None, disc
         "repository": fact(access and bool(website.get("repositoryId")), code="repository_required", reason="Select and verify your website repository."),
         "inventory": fact(bool(discovery.get("complete")) and not inventory_stale,
             code="scan_stale" if inventory_stale else "scan_required", reason="Scan the current repository.", status="stale" if inventory_stale else None),
+        "permissions": fact(permissions_ready, code=permission_code, reason=permission_reason),
         "integration": fact(proof.get("integrationVerified", verified), code=reason_code, reason=reason,
             status="blocked" if not write_allowed and not proof.get("integrationVerified", verified) else None),
         "verification": fact(proof.get("buildVerified", verified), code="verification_stale" if verification_stale else reason_code,
@@ -63,6 +68,7 @@ def project_journey(*, company_id, domain, website=None, capabilities=None, disc
     }
     step_facts = [("startup", "Startup details", fact(bool(company_id))), ("github", "GitHub access", prerequisites["account"]),
         ("repository", "Website repository", prerequisites["repository"]), ("scan", "Repository inventory", prerequisites["inventory"]),
+        ("permissions", "GitHub workflow permissions", prerequisites["permissions"]),
         ("integration", "Articles integration", prerequisites["integration"]),
         ("preview", "Build and render verification", prerequisites["verification"]),
         ("activation", "Live articles route", prerequisites["deployment"]), ("articles", "Write articles", fact(verified, code=reason_code, reason=reason))]
@@ -75,6 +81,8 @@ def project_journey(*, company_id, domain, website=None, capabilities=None, disc
         if connected and write_access and write_allowed:
             allowed.append("prepare")
         if access:
+            if not permissions_ready:
+                allowed.append("permissions")
             allowed += ["custom-contract", "ci-attestation"]
         allowed += ["scan", "pause"] if connected else ["reconnect"]
         if write_allowed and write_access:
@@ -85,17 +93,19 @@ def project_journey(*, company_id, domain, website=None, capabilities=None, disc
             allowed.append("cleanup")
         if proof.get("cleanupAwaitingDeployment") or operation and operation.get("action") == "cleanup" and operation.get("state") == "awaiting_deployment":
             allowed.append("verify-cleanup")
-        if running and operation.get("action") == "workflow":
+        if operation and ((running and operation.get("action") == "workflow") or (operation.get("action") == "prepare" and operation.get("state") in {"pending", "running", "needs_user", "needs_attention"})):
             allowed.append("cancel-operation")
     actions = [{"id": action, "label": action.replace("-", " ").capitalize(), "method": "POST",
         "path": "/api/v1/my-startup/vibe-marketing/" + ("scan" if action == "scan" else "article-system-setup" if action == "setup" else "website-connection/" + action),
         "enabled": True, "reasonCode": "", "requiresConfirmation": action in {"disconnect", "reset", "purge", "cleanup", "github-revoke"}} for action in dict.fromkeys(allowed)]
     for action in actions:
+        if action["id"] == "permissions":
+            action.update(label="Review GitHub permissions", method="GET", path=grants.get("settingsUrl") or "", enabled=bool(grants.get("settingsUrl")))
         if action["id"] == "verify-cleanup":
             action["operationId"] = proof.get("cleanupOperationId") or op_id
             action["params"] = {"operation_id": action["operationId"]}
     next_step = next((step for step in steps if step["status"] != "complete"), None)
-    action_id = {"github": "verify-access", "repository": "verify-access", "scan": "scan", "integration": "setup",
+    action_id = {"github": "verify-access", "repository": "verify-access", "scan": "scan", "permissions": "permissions", "integration": "setup",
         "preview": "ci-attestation" if verification_stale else "verify", "activation": "verify"}.get(next_step["id"] if next_step else "")
     next_action = {"id": action_id, "label": next_step["reason"] or next_step["label"], "step": next_step["id"]} if next_step and action_id in allowed else None
     repository = {"id": website.get("repositoryId"), "name": website.get("githubRepo", ""), "branch": website.get("branch", ""),
@@ -119,7 +129,7 @@ def project_journey(*, company_id, domain, website=None, capabilities=None, disc
             "canGeneratePortableDraft": bool(capabilities.get("canGeneratePortableDraft", company_id)), "canGenerateArticle": verified, "canOpenPublicationPr": verified,
             "canPublishArticle": live_ready, "canMerge": bool(write_allowed and proof.get("reviewedMergeReady")), "canDisconnect": bool(website), "canPurge": bool(website), "canCleanup": "cleanup" in allowed},
         "allowedActions": list(dict.fromkeys(allowed)), "actions": actions, "nextAction": next_action,
-        "discovery": discovery, "operation": operation, "sourceRuns": source_runs or [], "ciSourceRuns": ci_source_runs or source_runs or [],
+        "discovery": discovery, "githubPermissions": grants, "operation": operation, "sourceRuns": source_runs or [], "ciSourceRuns": ci_source_runs or source_runs or [],
         "support": {"native": {"available": native_certified or native_path.get("status") == "available", "certified": native_certified,
                 "reasonCode": "" if native_certified else "native_verification_required" if native_path.get("status") == "available" else "adapter_required",
                 "reason": native_path.get("reason") or "A verified framework adapter is required."},
@@ -230,5 +240,7 @@ def journey_for_context(context, config, *, capabilities=None):
                 run_request__operation_attempt__isnull=False, run_request__deletion_epoch__isnull=False)
         ci_source_runs = [projection for row in verifier_runs.exclude(status__in=["cancelled", "denied"]).order_by("-updated_at")[:12]
             if (projection := ci_source_run(row, connection, verifier_operations.get(row.run_request.get("operation_id"))))] + source_runs
+    from .website_github_permissions import installation_grants
+    grants = installation_grants(connection) if connection else None
     return project_journey(company_id=context.company.pk, domain=context.organization.domain, website=website,
-        capabilities=capabilities, discovery=discovery, target=target, operation=operation, epoch=epoch, proof=proof, source_runs=source_runs, ci_source_runs=ci_source_runs)
+        capabilities=capabilities, discovery=discovery, target=target, operation=operation, epoch=epoch, proof=proof, source_runs=source_runs, ci_source_runs=ci_source_runs, permissions=grants)

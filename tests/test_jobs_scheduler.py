@@ -1,4 +1,5 @@
 import io
+import json
 from datetime import datetime, timedelta
 from unittest.mock import patch
 from zoneinfo import ZoneInfo
@@ -135,7 +136,10 @@ class JobsSchedulerTests(TestCase):
         self.assertIn('"research_automations"', output)
         self.assertIn('"queued": 2', output)
         self.assertIn('"article_dispatch_outbox": {"delivered": 0, "failed": 0, "pending": 0, "processed": 0, "status": "completed"}', output)
-        self.assertIn('"website_connection_operations": {"completed": 0, "pending": 0, "processed": 0, "status": "completed"}', output)
+        self.assertEqual(json.loads(output)["website_connection_operations"], {
+            "completed": 0, "operations": [], "pending": 0,
+            "processed": 0, "status": "completed",
+        })
         heartbeat = ScheduledDiscoveryHeartbeat.objects.get(
             name="scheduled_discovery"
         )

@@ -507,6 +507,12 @@ def guarded_service_write(action, *, only_repository=False, remote_actions=(), p
             payload = dict(data.items())
             if kwargs.get("run_id"):
                 payload["run_id"] = kwargs["run_id"]
+            # A status-only cancellation receipt never requests repository
+            # authority, including after reconnect or for an unbound draft.
+            if (cancellation_receipts and request.method == "PUT" and payload.get("status") == "cancelled"
+                    and not payload.get("event_type") and not payload.get("event")):
+                from .service_views import _apply_cancellation_receipt
+                return _apply_cancellation_receipt(str(kwargs.get("run_id") or payload.get("run_id") or ""), payload)
             if portable:
                 from workflow_runs.models import ContentFactoryRun
                 run_id = str(payload.get("run_id") or payload.get("job_id") or "")

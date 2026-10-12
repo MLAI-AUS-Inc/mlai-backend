@@ -178,37 +178,15 @@ class WebsiteOperationRecoveryTests(SimpleTestCase):
         with self.assertRaises(WebsiteAuthorityError):
             operations.validate_operation(self.website, payload, cancellation_receipt=True)
 
-    def test_cancellation_snapshot_cannot_write_repository_configuration(self):
+    def test_cancellation_snapshot_uses_pure_receipt_before_authority_checks(self):
         handler = Mock()
         wrapped = authority.guarded_service_write("config_write", cancellation_receipts=True)(handler)
-        request = SimpleNamespace(method="PUT", data={**self.binding, "status": "cancelled", "publish_targets": []})
-        with patch.object(authority, "record_denied_terminal_callback", return_value=False):
+        payload = {**self.binding, "status": "cancelled", "publish_targets": []}
+        request = SimpleNamespace(method="PUT", data=payload)
+        with patch("content_factory.service_views._apply_cancellation_receipt", return_value=Response({"status": "cancelled"})) as receipt, \
+                patch.object(authority, "authority_guard") as grant:
             response = wrapped(None, request, run_id=self.run.run_id)
-        self.assertEqual(response.status_code, 409)
-        self.assertEqual(response.data["code"], "cancellation_scope_mismatch")
+        self.assertEqual(response.status_code, 200)
+        receipt.assert_called_once_with(self.run.run_id, {**payload, "run_id": self.run.run_id})
         handler.assert_not_called()
-
-    def test_cancelled_snapshot_records_receipt_without_config_write_or_revival(self):
-        self.run.status = self.op.state = "failed"
-        @contextmanager
-        def guard(payload, *, action):
-            self.assertEqual(action, "cancel_receipt")
-            operations.validate_operation(self.website, payload, cancellation_receipt=True)
-            yield self.website
-        def handler(self_unused, request, **kwargs):
-            self.run.status = request.data["status"]
-            return Response({"status": self.run.status})
-        wrapped = authority.guarded_service_write("config_write", cancellation_receipts=True)(handler)
-        request = SimpleNamespace(method="PUT", data={**self.binding, "status": "cancelled"})
-        self.run.refresh_from_db = Mock()
-        with patch.object(authority, "authority_guard", side_effect=guard), \
-                patch.object(authority, "record_scan_evidence") as scan, \
-                patch.object(ContentFactoryRun.objects, "filter") as runs, \
-                patch.object(operations.WebsiteConnectionOperation.objects, "select_for_update") as selected:
-            runs.return_value.first.return_value = self.run
-            selected.return_value.filter.return_value.first.return_value = self.op
-            response = wrapped(None, request, run_id=self.run.run_id)
-            self.assertEqual(response.status_code, 200)
-            self.assertEqual(self.run.status, "cancelled")
-            self.assertEqual(self.op.state, "cancelled")
-            scan.assert_not_called()
+        grant.assert_not_called()

@@ -51,6 +51,42 @@ Cleanup execution requires a second explicit owner POST with `approve_cleanup:tr
 
 ## One-click preparation, disconnection and billing
 
+`python manage.py inspect_website_prepare --company-id <uuid>` (or `--domain example.test`)
+prints bounded local preparation diagnostics: connection identity and capabilities,
+the last five operation receipts, the saved setup choice, current inventory resolution,
+and current-generation targets. PostgreSQL enforces `SET TRANSACTION READ ONLY` as
+the transaction's first statement. `--journey` additionally projects prerequisites,
+the next action, and allowed actions using read-only GitHub checks. It makes no
+worker requests and does not print credentials or repository content. Prepare passes
+log only identifiers, step/state/reason code, attempt, and next attempt time; scheduler
+summaries include up to twenty operation IDs, actions and outcomes.
+
+Preparation uses the scan's listing route (`existing` mode), or creates `/articles`
+in `none` mode only when inventory confirms no listing. A saved owner route takes
+precedence. Several ambiguous routes return `needs_user` with
+`user_action.id=choose_articles_page`; unchanged facts after a successful step stop
+with `prepare_no_progress`. Deterministic child failures link to the failed run,
+while explicitly retryable worker failures retain bounded retries. Owners may cancel
+an active or waiting prepare operation and explicitly reopen it with another Prepare
+click; cancelling fences its child and queues the ordinary run cancellation path.
+Choosing an ambiguous page through the existing setup form saves and attaches that
+direct setup child to the waiting prepare. Its saved company/domain, setup workflow,
+route and original connection tuple must match; its own workflow operation remains
+unchanged. A callback that wakes preparation before the handoff is saved adopts the
+same saved child, and bounded waiting while dispatch is in flight prevents a second
+setup request. A directly blocked child retains its actual failure prompt.
+
+The `permissions` prerequisite sits between inventory and integration. Read-only
+App JWT grant checks for `workflow_files` and `ci_evidence` cache results for sixty
+seconds without minting a token. Missing grants return `needs_user` with
+`user_action={id:review_github_permissions,label,url}` pointing to that installation's
+personal or organization settings. Permission lookup outages remain retryable.
+GitHub's authenticated `installation.new_permissions_accepted` webhook clears this
+cache and wakes current waiting prepares. GitHub documents that Apps receive
+[installation events by default](https://docs.github.com/en/webhooks/webhook-events-and-payloads#installation)
+and documents [new_permissions_accepted](https://docs.github.com/en/apps/creating-github-apps/about-creating-github-apps/best-practices-for-creating-a-github-app#allow-time-for-users-to-accept-new-permissions)
+for permission approval. An owner's Check again click also reopens the operation.
+
 `POST .../website-connection/prepare` takes `company_id`, the reviewed connection/generation tuple and `configuration_revision`. It reserves one `prepare` operation per consent generation and persists its requesting founder, child runs, completed steps, failure counts and next attempt. The scheduled-discovery loop checks current founder membership and consent before resuming access checks, inventory, setup, exact preview proof, CI attestation and live route verification. Successful scan/configuration, CI and deployment callbacks wake the operation after commit. Concurrent requests and late callbacks cannot overwrite a newer operation lease or a disconnect fence.
 
 Preparation, scans and article setup cost zero Roo points. Ordinary step failures retry after one and two minutes, then stop at `needs_attention`. CI/deployment waits use two, five, ten, twenty and forty minutes before stopping. Missing GitHub authorization produces one `needs_user` receipt with `user_action`; callers can explicitly retry the same saved operation after resolving it. New setup previews must pass every exact-commit quality/task/resume-generation requirement before automatic approval. Adopted verification kits additionally require actual kit-commit build/browser proof. Setup auto-merge reads both GitHub branch rules and branch protection, and is allowed only with no required approving reviewers and no company `requires_review` setting. Unknown policy evidence produces a merge prompt.
@@ -301,3 +337,11 @@ recorded charge without refunding a saved deliverable.
 Use owner `reconcile` to retry current scoped outbox work and poll custom verification. GET `website-connection/operations/{id}` returns only the selected company's receipt. The read-only `report_website_connections --check` identifies overdue operations and failed scans; cancelled/denied/deleted rows are terminal, and awaiting merge/deploy remains visible. `repair_website_connections` is read-only unless explicitly approved with `--apply`. No repair command silently revives consent.
 
 Release gates are: matching backend/worker/client contract tests; disposable PostgreSQL concurrency and exact historical migration replay; reviewed automatic CI artifacts and route marker; source/build/browser checks; current public-route deployment receipt; then a separately approved production rollout/canary. Local migration approval, source tests and an opened cleanup PR do not satisfy production migration/deployment or verified removal. The specifically approved `0044_website_target_generation_key` and its model/upserts have been created; its disposable tests were authorized on 11 October 2026 as part of the `0045` dependency graph, while production application remains a separate approval gate. See the [generation-key proposal](website-target-generation-migration-proposal-2026-10-07.md) for exact scope and rollback considerations.
+
+Status-only worker PUT cancellation receipts require an existing run and its exact
+saved domain, including portable runs and prior connection generations. They record
+cancellation metadata without changing saved repository/request identity, targets,
+configuration, proof, credentials or billing. Unknown runs return 404 and scope
+mismatches return 409. Terminal setup revisions project their recorded failure over
+stale preview-building labels in browser and worker responses; the read projection
+does not rewrite historical run evidence.
