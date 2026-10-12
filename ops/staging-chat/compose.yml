@@ -2,6 +2,7 @@ name: mlai-chat-staging-api
 services:
   staging-api:
     image: mlai-chat-staging-api:${STAGING_API_SOURCE_SHA:?source commit required}
+    pull_policy: never
     build:
       context: ../..
       dockerfile: Dockerfile

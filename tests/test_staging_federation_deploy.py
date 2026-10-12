@@ -2,6 +2,7 @@ import json
 import os
 from pathlib import Path
 import subprocess
+import shutil
 import sys
 import tempfile
 import unittest
@@ -59,3 +60,30 @@ class StagingFederationDeploymentTests(unittest.TestCase):
         code="import django; django.setup(); from django.test import Client,override_settings; settings=override_settings(ALLOWED_HOSTS=['127.0.0.1']); settings.enable(); response=Client().get('/healthz/live',HTTP_HOST='127.0.0.1'); assert response.status_code == 200, response.status_code"
         result=subprocess.run([sys.executable,'-c',code],env=env,cwd=ROOT,capture_output=True,text=True)
         self.assertEqual(result.returncode,0,result.stderr)
+
+    def test_retagged_api_image_is_refused_before_service_changes(self):
+        with tempfile.TemporaryDirectory() as temp:
+            directory=Path(temp)
+            profile=directory/'ops'/'staging-chat'
+            shutil.copytree(PROFILE,profile)
+            chat=directory/'chat.env'
+            chat.write_text('CHAT_DOMAIN=chat-staging.mlai.au\nMLAI_MEMBERSHIP_ADAPTER_TOKEN='+'a'*64+'\n')
+            chat.chmod(0o600)
+            config=profile/'.env'
+            subprocess.run([sys.executable,str(PROFILE/'config.py'),'init','--chat-env',str(chat),'--output',str(config),'--source-sha','b'*40],check=True,capture_output=True)
+            metadata=directory/'image.json'
+            image={'Id':'sha256:'+'c'*64,'Config':{'Labels':{'org.opencontainers.image.revision':'b'*40,'au.mlai.environment':'chat-staging-api'}}}
+            metadata.write_text(json.dumps([image]))
+            record=subprocess.run([sys.executable,str(PROFILE/'config.py'),'record-build','--output',str(config),'--metadata',str(metadata),'--source-sha','b'*40],capture_output=True,text=True)
+            self.assertEqual(record.returncode,0,record.stderr)
+            image['Id']='sha256:'+'d'*64
+            metadata.write_text(json.dumps([image]))
+            binaries=directory/'bin';binaries.mkdir()
+            docker=binaries/'docker'
+            docker.write_text("#!/usr/bin/env python3\nimport json,os,sys\nwith open(os.environ['COMMAND_LOG'],'a') as out:out.write(json.dumps(sys.argv[1:])+'\\n')\nif sys.argv[1:3]==['image','inspect']:print(open(os.environ['IMAGE_METADATA']).read())\n")
+            docker.chmod(0o700)
+            trace=directory/'commands.jsonl'
+            env=dict(os.environ,PATH=str(binaries)+os.pathsep+os.environ['PATH'],COMMAND_LOG=str(trace),IMAGE_METADATA=str(metadata))
+            result=subprocess.run(['bash',str(profile/'run.sh'),'start'],env=env,capture_output=True,text=True)
+            self.assertNotEqual(result.returncode,0)
+            self.assertEqual([json.loads(line)[:2] for line in trace.read_text().splitlines()],[['image','inspect']])

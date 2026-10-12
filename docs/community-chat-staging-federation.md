@@ -74,3 +74,28 @@ Keep federation disabled until the production cookie/issuer/client rollout is re
 Local verification (no remote CI): use a disposable local PostgreSQL instance, synthetic credentials and two databases named `federation_local` and `federation_stage_local`. Set `DEBUG=true`, `DATABASE_URL` to the first local database and `FEDERATION_TEST_STAGING_DATABASE_URL` to the second. Run `python manage.py test community_chat.tests.test_federation_two_databases --settings=tests.federation_settings --keepdb --noinput`. Its transport calls the real API handlers in process; it does not claim a live HTTP/TLS deployment. The ordinary single-database runner reports this dedicated test as skipped. Browser tests separately exercise URL-scoped cookies and popup handoff against synthetic local fixtures. No production data is used.
 
 The staging production-mode profile excludes unrelated Roo/Health Hack credential validation only when both `APP_ENV=chat-staging` and `DJANGO_SETTINGS_MODULE=mlai.settings_staging_chat` identify the restricted API. Other production deployments retain those checks. Federation remains disabled and the pilot tester list remains empty until later approval.
+
+The API profile now has a guarded local deployment runner. From a committed
+backend checkout: `ops/staging-chat/run.sh init --chat-env /path/to/staging-chat/.env`
+creates independent owner-only credentials without exposing them; `check`
+validates the profile; `build` records the source commit and immutable image ID.
+`migrate` is an explicit, approval-dependent live schema operation and starts
+only this profile's private data services before applying migrations. `start`
+rejects changed/retagged images before changing services and runs migrations in
+check-only mode. No worker or production integration process is started.
+These live steps have not been run by this implementation.
+
+Before any production cutover, inspect the actual production cookie behavior
+without recording token values, choose a UTC cutoff immediately before stopping
+browser session issuance, deploy the disabled issuer with the additive schema,
+and execute the approved retirement command. Keep host-only cookie names and
+security behavior enabled during rollback; disable federation instead of
+restoring shared-domain cookie acceptance. New browser sessions after the cutoff
+and native sessions are preserved by retirement. Production has not been touched.
+
+The first tester list is deliberately deferred. Source flags are disabled and
+the allowlist is empty. A local full monorepo gate was attempted in the chat
+checkout and stopped while extracting the pinned Rust toolchain because the
+Mac disk was full. Targeted Python/TypeScript/browser checks passed; that does
+not establish Rust/mobile checks or a live production pilot. No GitHub workflow
+was dispatched, no branch was pushed, and no PR was created.
