@@ -10,7 +10,7 @@ import sys
 from urllib.parse import urlsplit
 
 
-BOOL_KEYS = {"VALLEY_MCP_ENABLED", "COMMUNITY_CHAT_STARTUP_UPDATES_ENABLED", "MLAI_MCP_ENABLED", "MLAI_MCP_COMMUNITY_ENABLED"}
+BOOL_KEYS = {"VALLEY_MCP_ENABLED", "COMMUNITY_CHAT_STARTUP_UPDATES_ENABLED", "MLAI_MCP_ENABLED", "MLAI_MCP_COMMUNITY_ENABLED", "VALLEY_MCP_UNIFIED_ALIAS_ENABLED"}
 PUBLIC_BASE = "VALLEY_MCP_PUBLIC_BASE_URL"
 CHALLENGE = "VALLEY_MCP_DOMAIN_VERIFICATION_TOKEN"
 
@@ -67,7 +67,7 @@ def validate(environment: dict[str, str]) -> None:
     validate_single("COMMUNITY_CHAT_STARTUP_UPDATES_ENABLED", startup_gate, optional=True)
     validate_single(PUBLIC_BASE, environment.get(PUBLIC_BASE, "https://api.mlai.au"))
     validate_single(CHALLENGE, environment.get(CHALLENGE, ""), optional=True)
-    for setting in ("MLAI_MCP_ENABLED", "MLAI_MCP_COMMUNITY_ENABLED"):
+    for setting in ("MLAI_MCP_ENABLED", "MLAI_MCP_COMMUNITY_ENABLED", "VALLEY_MCP_UNIFIED_ALIAS_ENABLED"):
         validate_single(setting, environment.get(setting, "false"))
     for setting in ("MLAI_MCP_COMMUNITY_RELAY_URL", "MLAI_MCP_COMMUNITY_SECRET", "MLAI_MCP_CLIENT_INSTALL_URLS"):
         validate_single(setting, environment.get(setting, ""), optional=True)
@@ -75,6 +75,9 @@ def validate(environment: dict[str, str]) -> None:
         raise ValueError("MLAI_MCP_ENABLED=true requires the startup update gate")
     if environment.get("MLAI_MCP_COMMUNITY_ENABLED") == "true" and environment.get("MLAI_MCP_ENABLED", "false") != "true":
         raise ValueError("Native community MCP requires the unified server gate")
+    if environment.get("VALLEY_MCP_UNIFIED_ALIAS_ENABLED") == "true" and (
+            environment.get("MLAI_MCP_ENABLED", "false") != "true" or enabled != "true"):
+        raise ValueError("The registered transport alias requires both explicit MCP gates")
     if enabled == "true" and startup_gate == "false":
         raise ValueError("VALLEY_MCP_ENABLED=true requires the startup update gate")
 

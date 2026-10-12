@@ -3,6 +3,9 @@ set -euo pipefail
 
 key="${1:-}"
 case "$key" in
+  AGENT_RUNTIME_NATIVE_SERVICE_PRIVATE_KEY|\
+  AGENT_RUNTIME_NATIVE_REGISTRY_KEY|\
+  COMMUNITY_CHAT_ROLE_SERVICE_TOKEN|\
   COMMUNITY_CHAT_EMAIL_CODE_PEPPER|\
   COMMUNITY_CHAT_EMAIL_CODE_DELIVERY_SECRET|\
   COMMUNITY_CHAT_ADAPTER_TOKEN|\
@@ -30,6 +33,9 @@ secret="$(cat)"
 if [[ ${#secret} -lt 32 ]]; then
   echo "Invalid secret payload for ${key}" >&2
   exit 1
+fi
+if [[ "$key" == "AGENT_RUNTIME_NATIVE_SERVICE_PRIVATE_KEY" || "$key" == "AGENT_RUNTIME_NATIVE_REGISTRY_KEY" || "$key" == "COMMUNITY_CHAT_ROLE_SERVICE_TOKEN" ]]; then
+  printf '%s' "$secret" | python3 scripts/validate_native_agent_deploy_config.py --stdin "$key"
 fi
 
 if [[ "$key" == "MLAI_CHAT_ACCOUNT_KEY_SECRET" ]]; then

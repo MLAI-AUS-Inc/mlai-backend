@@ -392,6 +392,30 @@ services:
     restart: unless-stopped
     stop_grace_period: 30s
 
+  native-agent-worker:
+    profiles: [native-agent]
+    image: mlai-backend-web
+    logging: *default-logging
+    command: >-
+      sh -ec '
+        until python manage.py migrate --check --noinput; do
+          echo "Waiting for migrations to complete...";
+          sleep 5;
+        done;
+        exec python manage.py run_agent_scheduler --native --webhooks --interval 5 --limit 50
+      '
+    environment:
+      APP_ENV: ${APP_ENV:-production}
+    env_file:
+      - .env
+    depends_on:
+      - db
+    networks:
+      default:
+      mlai-shared:
+    restart: unless-stopped
+    stop_grace_period: 30s
+
   db:
     image: pgvector/pgvector:0.8.2-pg15-bookworm
     logging: *default-logging

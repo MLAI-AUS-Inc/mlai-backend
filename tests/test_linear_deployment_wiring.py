@@ -236,6 +236,7 @@ class LinearDeploymentWiringTests(unittest.TestCase):
                 root = Path(directory)
                 (root / "scripts").mkdir()
                 shutil.copy(REPO_ROOT / "scripts/upsert_env_secret_from_stdin.sh", root / "scripts")
+                shutil.copy(REPO_ROOT / "scripts/validate_native_agent_deploy_config.py", root / "scripts")
                 (root / ".env").write_text("KEEP_ME=yes\n")
                 secret = "test-service-credential-at-least-32-characters"
                 result = subprocess.run(
@@ -265,6 +266,7 @@ class LinearDeploymentWiringTests(unittest.TestCase):
             "MLAI_MCP_ENABLED": "false",
             "MLAI_MCP_COMMUNITY_ENABLED": "false",
             "VALLEY_MCP_ENABLED": "false",
+            "VALLEY_MCP_UNIFIED_ALIAS_ENABLED": "false",
             "VALLEY_MCP_PUBLIC_BASE_URL": "https://api.mlai.au",
             "VALLEY_MCP_DOMAIN_VERIFICATION_TOKEN": "synthetic-public-proof-123456",
             "COMMUNITY_CHAT_STARTUP_UPDATES_ENABLED": "true",

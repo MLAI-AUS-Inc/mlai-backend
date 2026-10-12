@@ -68,7 +68,7 @@ jobs:
       run: python -m unittest tests.test_deploy_release_freshness tests.test_backend_web_handoff -v
 
     - name: Test deployment failure handling and live contract
-      run: python -m unittest tests.test_deploy_runtime_checks tests.test_message_sync_deploy_config tests.test_valley_mcp_deploy_config tests.test_slack_owner_inventory_deploy_config tests.test_tech_volunteers_bridge_workflow -v
+      run: python -m unittest tests.test_deploy_runtime_checks tests.test_message_sync_deploy_config tests.test_valley_mcp_deploy_config tests.test_native_agent_deploy_config tests.test_slack_owner_inventory_deploy_config tests.test_tech_volunteers_bridge_workflow -v
 
     - name: Check jobs delivery contracts without database access
       run: python -m unittest tests.test_jobs_delivery_unit -v
@@ -87,6 +87,10 @@ jobs:
 
     - name: Check coworking report channel permissions without database access
       run: python scripts/test_without_database.py roo.tests_coworking_report_access
+
+    - name: Check personal agent gateway without database access
+      # SQL suites skip here; they require the separately reviewed disposable runner.
+      run: python scripts/test_without_database.py agent_runtime.tests.test_core agent_runtime.tests.test_interface agent_runtime.tests.test_event_webhooks agent_runtime.tests.test_dot_protocol agent_runtime.tests.test_native_pilot agent_runtime.tests.test_model_budget agent_runtime.tests.test_model_proxy agent_runtime.tests.test_model_transport agent_runtime.tests.test_native_database agent_runtime.tests.test_unified_bridge_database
 
     - name: Check inbox account bindings without database access
       run: python scripts/test_without_database.py community_chat.tests.test_inbox_accounts community_chat.tests.test_inbox_erasure integrations.tests_inbox_activity integrations.tests_inbox_targeted_selection integrations.tests_inbox_own_hints integrations.tests_inbox_coverage integrations.tests_read_coverage integrations.tests_inbox_exports integrations.tests_inbox_observations integrations.tests_inbox_mentions integrations.tests_inbox_relay_counts community_chat.tests.test_adapter
@@ -130,6 +134,8 @@ jobs:
           community_chat.tests.test_startup_lifecycle \
           community_chat.tests.test_startup_mcp \
           community_chat.tests.test_mlai_mcp \
+          community_chat.tests.test_mlai_mcp_native_agents \
+          community_chat.tests.test_relay_role_service_unit \
           startup_updates.tests_mcp_articles_unit \
           content_factory.tests_mcp_operations_unit \
           content_factory.tests_research_dispatch_unit \
@@ -719,14 +725,26 @@ jobs:
         COMMUNITY_CHAT_EMAIL_CODE_PEPPER: ${{ secrets.COMMUNITY_CHAT_EMAIL_CODE_PEPPER }}
         COMMUNITY_CHAT_EMAIL_CODE_DELIVERY_SECRET: ${{ secrets.COMMUNITY_CHAT_EMAIL_CODE_DELIVERY_SECRET }}
         COMMUNITY_CHAT_ADAPTER_TOKEN: ${{ secrets.COMMUNITY_CHAT_ADAPTER_TOKEN }}
+        COMMUNITY_CHAT_ROLE_SERVICE_TOKEN: ${{ secrets.COMMUNITY_CHAT_ROLE_SERVICE_TOKEN || '' }}
         COMMUNITY_CHAT_ADAPTER_URL: ${{ vars.COMMUNITY_CHAT_ADAPTER_URL }}
         COMMUNITY_CHAT_PASSWORD_AUTH_ENABLED: ${{ vars.COMMUNITY_CHAT_PASSWORD_AUTH_ENABLED || 'false' }}
         COMMUNITY_CHAT_STARTUP_UPDATES_ENABLED: ${{ vars.COMMUNITY_CHAT_STARTUP_UPDATES_ENABLED || '' }}
         MLAI_MCP_ENABLED: ${{ vars.MLAI_MCP_ENABLED || 'false' }}
+        VALLEY_MCP_UNIFIED_ALIAS_ENABLED: ${{ vars.VALLEY_MCP_UNIFIED_ALIAS_ENABLED || 'false' }}
         MLAI_MCP_COMMUNITY_ENABLED: ${{ vars.MLAI_MCP_COMMUNITY_ENABLED || 'false' }}
         MLAI_MCP_COMMUNITY_RELAY_URL: ${{ vars.MLAI_MCP_COMMUNITY_RELAY_URL || '' }}
         MLAI_MCP_COMMUNITY_SECRET: ${{ secrets.MLAI_MCP_COMMUNITY_SECRET || '' }}
         MLAI_MCP_CLIENT_INSTALL_URLS: ${{ vars.MLAI_MCP_CLIENT_INSTALL_URLS || '' }}
+        MLAI_MCP_NATIVE_AGENTS_ENABLED: ${{ vars.MLAI_MCP_NATIVE_AGENTS_ENABLED || 'false' }}
+        AGENT_RUNTIME_ENABLED: ${{ vars.AGENT_RUNTIME_ENABLED || 'false' }}
+        AGENT_RUNTIME_NATIVE_ENABLED: ${{ vars.AGENT_RUNTIME_NATIVE_ENABLED || 'false' }}
+        AGENT_RUNTIME_NATIVE_REPLIES_ENABLED: ${{ vars.AGENT_RUNTIME_NATIVE_REPLIES_ENABLED || 'false' }}
+        AGENT_RUNTIME_MCP_EVENTS_ENABLED: ${{ vars.AGENT_RUNTIME_MCP_EVENTS_ENABLED || 'false' }}
+        AGENT_RUNTIME_NATIVE_COMMUNITIES: ${{ vars.AGENT_RUNTIME_NATIVE_COMMUNITIES || '' }}
+        AGENT_RUNTIME_DOT_SETUP_URL: ${{ vars.AGENT_RUNTIME_DOT_SETUP_URL || '' }}
+        AGENT_RUNTIME_NATIVE_PERSONAL_LIMIT: ${{ vars.AGENT_RUNTIME_NATIVE_PERSONAL_LIMIT || '1' }}
+        AGENT_RUNTIME_NATIVE_SERVICE_PRIVATE_KEY: ${{ secrets.AGENT_RUNTIME_NATIVE_SERVICE_PRIVATE_KEY || '' }}
+        AGENT_RUNTIME_NATIVE_REGISTRY_KEY: ${{ secrets.AGENT_RUNTIME_NATIVE_REGISTRY_KEY || '' }}
         VALLEY_MCP_ENABLED: ${{ vars.VALLEY_MCP_ENABLED || 'false' }}
         VALLEY_MCP_PUBLIC_BASE_URL: ${{ vars.VALLEY_MCP_PUBLIC_BASE_URL || 'https://api.mlai.au' }}
         VALLEY_MCP_DOMAIN_VERIFICATION_TOKEN: ${{ vars.VALLEY_MCP_DOMAIN_VERIFICATION_TOKEN || '' }}

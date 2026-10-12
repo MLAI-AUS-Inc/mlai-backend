@@ -295,6 +295,9 @@ class RelayChatRoleView(APIView):
 
     authentication_classes = ()
     permission_classes = (IsChatRelay,)
+    # One trusted relay resolves many users behind one egress IP. Preserve
+    # its constant-time service authentication without charging public quotas.
+    throttle_classes = ()
 
     def get(self, request, public_key):
         if not re.fullmatch(r"[0-9a-f]{64}", public_key):

@@ -33,6 +33,10 @@ class ValleyMcpDeployConfigTests(unittest.TestCase):
             self.assertNotIn("sensitive", str(error.exception))
         with self.assertRaises(ValueError):
             validate({"MLAI_MCP_COMMUNITY_ENABLED": "true"})
+        validate({"VALLEY_MCP_ENABLED": "true", "MLAI_MCP_ENABLED": "true", "VALLEY_MCP_UNIFIED_ALIAS_ENABLED": "true"})
+        for unavailable in ({}, {"VALLEY_MCP_ENABLED": "true"}, {"MLAI_MCP_ENABLED": "true"}):
+            with self.subTest(unavailable=unavailable), self.assertRaises(ValueError):
+                validate({**unavailable, "VALLEY_MCP_UNIFIED_ALIAS_ENABLED": "true"})
 
     def test_invalid_input_is_rejected_without_echoing_its_value(self):
         for key, value in (("VALLEY_MCP_ENABLED", "yes"),

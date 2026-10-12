@@ -4,6 +4,7 @@
 required_runtime_services=(web scheduler jobs-worker memory-worker memory-scheduler password-email-worker community-email-worker)
 bridge_runtime_services=(bridge-worker bridge-reconciler bridge-retention)
 analytics_runtime_services=(analytics-sync)
+native_agent_runtime_services=(native-agent-worker)
 # The transient handoff slot is managed explicitly, never normal startup.
 handoff_runtime_services=(web-candidate)
 all_runtime_writer_services=(
@@ -11,5 +12,6 @@ all_runtime_writer_services=(
     "${bridge_runtime_services[@]}"
     "${analytics_runtime_services[@]}"
     "${handoff_runtime_services[@]}"
+    "${native_agent_runtime_services[@]}"
 )
 runtime_services=("${required_runtime_services[@]}")
