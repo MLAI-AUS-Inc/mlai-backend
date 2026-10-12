@@ -17,6 +17,10 @@ logger = logging.getLogger(__name__)
 RETRY_MINUTES = (1, 2, 5, 10)
 DEPLOYMENT_RETRY_MINUTES = (2, 5, 10, 20, 40)
 PERMISSION_CODES = frozenset({"github_workflow_permission_required", "github_ci_evidence_permission_required"})
+PERMISSION_STEPS = {
+    "github_workflow_permission_required": frozenset({"permissions", "setup"}),
+    "github_ci_evidence_permission_required": frozenset({"permissions", "verify", "ci-attestation"}),
+}
 
 AUTHORIZATION_CODES = frozenset({"github_reconnect_required", "github_authorization_required",
     "github_repository_unavailable", "github_workflow_permission_required", "github_ci_evidence_permission_required",
@@ -113,16 +117,17 @@ def prepare_failure(op, step, error, *, now=None):
     message = str(error) or "Website preparation is temporarily unavailable."
     failures = dict(op.receipt.get("step_failures") or {})
     step = str(step or op.receipt.get("current_step") or "prepare")
+    permission_needed = step in PERMISSION_STEPS.get(code, ())
     failures[step] = failures.get(step, 0) + 1
     op.receipt = {**op.receipt, "step_failures": failures, "reason_code": code, "message": message,
         "retryable": bool(getattr(error, "retryable", True))}
-    if getattr(error, "user_action", None):
+    if getattr(error, "user_action", None) and (code not in PERMISSION_CODES or permission_needed):
         op.state, op.next_attempt_at = "needs_user", None
         op.receipt.update(status="needs_you", user_action=error.user_action)
-    elif code in PERMISSION_CODES:
+    elif permission_needed:
         op.state, op.next_attempt_at = "needs_user", None
         op.receipt.update(status="needs_you", user_action=_permission_action(op.connection))
-    elif code in AUTHORIZATION_CODES:
+    elif code in AUTHORIZATION_CODES and code not in PERMISSION_CODES:
         op.state = "needs_user"
         op.receipt.update(status="needs_you", user_action={"id": "authorize_github", "label": "Authorize GitHub"})
         op.next_attempt_at = None
@@ -282,15 +287,20 @@ def _dispatch_prepare_step(op, context, config, step, *, user, journey=None):
                 body.get("detail") or "Website preparation could not start.", status=response.status_code,
                 retryable=body.get("retryable", response.status_code >= 500))
         return body
-    from .website_verification import discover_source_attestation, record_ci_attestation, verify_live_deployment
+    from .website_verification import current_ci_attestation, discover_source_attestation, record_ci_attestation, verify_live_deployment
     website = config.website_connection
     target = website.targets.filter(generation=website.generation, target_key=config.default_publish_target_id).first()
     if target is None:
         raise WebsiteAuthorityError("verified_target_required", "Waiting for articles build and render proof.", retryable=True)
-    proof = discover_source_attestation(website, target, website.verified_sha)
-    ci = record_ci_attestation(proof)
+    repository = (journey or {}).get("repository") or {}
+    receipt = current_ci_attestation(website, target, capabilities={"repositorySourceSha": repository.get("observedSourceSha"),
+        "repositoryBranch": repository.get("branch")}) if step == "verify" else None
+    if receipt is None:
+        proof = discover_source_attestation(website, target, website.verified_sha)
+        ci = record_ci_attestation(proof)
+        receipt = ci.receipt
     if step == "verify":
-        deployment = verify_live_deployment(config, data=ci.receipt)
+        deployment = verify_live_deployment(config, data=receipt)
         return {"status": "completed", "operation_id": str(deployment.pk)}
     return {"status": "completed", "operation_id": str(ci.pk)}
 
