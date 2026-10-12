@@ -23,9 +23,6 @@ def project_journey(*, company_id, domain, website=None, capabilities=None, disc
     proof = mapping(proof)
     authoring_supported = target.get("adapter") != "custom_contract_v1" and target_contract.get("delivery_adapter") != "custom_contract_v1"
     grants = mapping(permissions) if permissions is not None else {"workflows": True, "checks": True, "statuses": True}
-    permissions_ready = all(grants.get(key) is True for key in ("workflows", "checks", "statuses"))
-    permission_code = grants.get("reasonCode") or ("github_workflow_permission_required" if not grants.get("workflows") else "github_ci_evidence_permission_required")
-    permission_reason = grants.get("reason") or ("Review GitHub installation permissions to allow articles workflow checks." if not grants.get("workflows") else "Review GitHub installation permissions to read Checks and Commit statuses.")
     verified = bool(capabilities.get("canGenerateArticle") and authoring_supported)
     access = bool(capabilities.get("repositoryAccessVerified"))
     account_access = bool(capabilities.get("accountAccessVerified", access))
@@ -37,7 +34,7 @@ def project_journey(*, company_id, domain, website=None, capabilities=None, disc
     deployed = bool(deployment.get("status") == "passed" and deployment.get("source_sha") == website.get("verifiedSha")
         and deployment.get("connection_generation") == website.get("connectionGeneration") and deployment.get("target_id") == target.get("key")
         and deployment.get("public_url") and deployment.get("checked_at"))
-    live_ready = verified and deployed and permissions_ready
+    live_ready = verified and deployed
     reason_code = capabilities.get("reasonCode") or "integration_required"
     reason = capabilities.get("reason") or "Prepare and verify your articles integration."
     if not authoring_supported:
@@ -53,6 +50,23 @@ def project_journey(*, company_id, domain, website=None, capabilities=None, disc
     current_source = capabilities.get("repositorySourceSha") or website.get("verifiedSha")
     inventory_stale = bool(discovery.get("complete") and current_source and discovery.get("sourceSha") != current_source)
     verification_stale = proof.get("verificationStale") is True
+    # Current verification paths use in-repository CI. Once its proof is
+    # current, publishing needs neither workflow-file writes nor CI reads.
+    workflow_needed = not proof.get("integrationVerified", verified)
+    ci_read_needed = not proof.get("buildVerified", verified) or verification_stale
+    workflow_missing = workflow_needed and grants.get("workflows") is not True
+    ci_missing = ci_read_needed and not (grants.get("checks") is True and grants.get("statuses") is True)
+    permissions_ready = not (workflow_missing or ci_missing)
+    # A grant probe covers both profiles. Its older permission diagnostic may
+    # describe a grant this action does not use; only provider failures carry
+    # over to the action-specific fact.
+    grant_lookup_failed = grants.get("reasonCode") in {"github_unavailable", "github_access_required"}
+    permission_code = grants.get("reasonCode") if grant_lookup_failed else (
+        "github_workflow_permission_required" if workflow_missing else "github_ci_evidence_permission_required")
+    missing_ci = [name for key, name in (("checks", "Checks: read"), ("statuses", "Commit statuses: read")) if grants.get(key) is not True]
+    permission_reason = (grants.get("reason") if grant_lookup_failed else "") or (
+        "Approve Workflows: write to install or update .github/workflows/mlai-articles-verification.yml." if workflow_missing
+        else f"Approve {' and '.join(missing_ci)} to read the current in-repository CI result.")
     prerequisites = {
         "account": fact(account_access, code="github_access_required", reason="Check saved GitHub access."),
         "repository": fact(access and bool(website.get("repositoryId")), code="repository_required", reason="Select and verify your website repository."),

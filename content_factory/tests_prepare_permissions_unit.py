@@ -1,14 +1,118 @@
 """GitHub permission prompts use installation grants, never minted tokens."""
 from types import SimpleNamespace
+from itertools import product
 from unittest.mock import patch, Mock
 
 from django.test import SimpleTestCase
 
 from . import tests_prepare_journey_unit as fixtures
 from .website_journey import project_journey
+from .activation import article_capabilities
+
+
+def projected_permissions(*, integration, build, deployed, workflows, checks, statuses, domain="fixture.test", diagnostic=None):
+    """Run the real capability and journey projections on synthetic proof."""
+    source = "a" * 40
+    capabilities = article_capabilities(SimpleNamespace(github_repo="fixture/site"), domain=domain,
+        account={"saved": True, "owned": True, "verified": True},
+        evidence={"verified": integration and build == "fresh", "branch": "main", "sha": source,
+            "publishingVerified": deployed},
+        repository_access={"verified": True, "writable": True, "branch": "main", "sha": source})
+    receipt = {"status": "passed", "source_sha": source, "connection_generation": 3, "target_id": "native",
+        "public_url": f"https://{domain}/articles", "checked_at": "2026-10-12T00:00:00Z"} if deployed else {}
+    return project_journey(company_id=9, domain=domain,
+        website={"status": "connected", "repositoryId": 123, "connectionGeneration": 3,
+            "verifiedSha": source, "writePolicy": {"allowed": True}, "capabilities": {"previewSupported": True}},
+        capabilities=capabilities, discovery={"complete": True, "sourceSha": source},
+        target={"key": "native", "adapter": "react_component", "deployment_receipt": receipt},
+        proof={"integrationVerified": integration, "buildVerified": build == "fresh", "verificationStale": build == "stale"},
+        permissions={"workflows": workflows, "checks": checks, "statuses": statuses,
+            "settingsUrl": "https://github.com/settings/installations/4", **(diagnostic or {})})
 
 
 class PreparePermissionsTests(SimpleTestCase):
+    def test_action_scoped_grants_truth_table(self):
+        diagnostics = (None, {"reasonCode": "github_workflow_permission_required", "reason": "Old workflow grant diagnostic."},
+            {"reasonCode": "github_ci_evidence_permission_required", "reason": "Old CI grant diagnostic."})
+        cases = product((False, True), ("missing", "fresh", "stale"), (False, True), (False, True), (False, True), (False, True), diagnostics)
+        for integration, build, deployed, workflows, checks, statuses, diagnostic in cases:
+            with self.subTest(integration=integration, build=build, deployed=deployed,
+                    workflows=workflows, checks=checks, statuses=statuses, diagnostic=diagnostic):
+                journey = projected_permissions(integration=integration, build=build, deployed=deployed,
+                    workflows=workflows, checks=checks, statuses=statuses, diagnostic=diagnostic)
+                workflow_missing = not integration and not workflows
+                ci_missing = build != "fresh" and not (checks and statuses)
+                permissions_complete = not (workflow_missing or ci_missing)
+                publish_ready = integration and build == "fresh" and deployed
+                next_id = "permissions" if not permissions_complete else "setup" if not integration else (
+                    "ci-attestation" if build == "stale" else "verify" if build != "fresh" or not deployed else None)
+                self.assertEqual(journey["capabilities"]["canPublishArticle"], publish_ready)
+                self.assertEqual(journey["capabilities"]["canGenerateArticle"], integration and build == "fresh")
+                self.assertEqual((journey["nextAction"] or {}).get("id"), next_id)
+                self.assertEqual(journey["prerequisites"]["permissions"]["status"] == "complete", permissions_complete)
+                permission_step = next(step for step in journey["steps"] if step["id"] == "permissions")
+                self.assertEqual(permission_step["status"] == "complete", permissions_complete)
+                self.assertEqual("permissions" in journey["allowedActions"], not permissions_complete)
+                self.assertTrue(journey["capabilities"]["canScan"])
+                self.assertTrue(journey["capabilities"]["canPreview"])
+                self.assertIn("disconnect", journey["allowedActions"])
+                permission = journey["prerequisites"]["permissions"]
+                if workflow_missing:
+                    self.assertEqual(permission["reasonCode"], "github_workflow_permission_required")
+                    self.assertIn("Workflows: write", permission["reason"])
+                elif ci_missing:
+                    self.assertEqual(permission["reasonCode"], "github_ci_evidence_permission_required")
+                    self.assertEqual("Checks: read" in permission["reason"], not checks)
+                    self.assertEqual("Commit statuses: read" in permission["reason"], not statuses)
+
+    def test_mlai_verified_and_deployed_publishes_without_workflows_grant(self):
+        journey = projected_permissions(integration=True, build="fresh", deployed=True,
+            workflows=False, checks=True, statuses=True, domain="mlai.example.test")
+        self.assertTrue(journey["capabilities"]["canPublishArticle"])
+        self.assertIsNone(journey["nextAction"])
+        self.assertNotIn("permissions", journey["allowedActions"])
+        self.assertEqual(journey["prerequisites"]["permissions"]["status"], "complete")
+
+    def test_grant_lookup_outage_is_preserved_only_while_optional_grants_are_needed(self):
+        diagnostic = {"reasonCode": "github_unavailable", "reason": "GitHub permission checks are temporarily unavailable.", "retryable": True}
+        for build in ("missing", "fresh"):
+            with self.subTest(build=build):
+                journey = projected_permissions(integration=True, build=build, deployed=True,
+                    workflows=False, checks=False, statuses=False, diagnostic=diagnostic)
+                permission = journey["prerequisites"]["permissions"]
+                if build == "missing":
+                    self.assertEqual(permission["reasonCode"], diagnostic["reasonCode"])
+                    self.assertEqual(permission["reason"], diagnostic["reason"])
+                else:
+                    self.assertEqual(permission["status"], "complete")
+                    self.assertEqual(permission["reasonCode"], "")
+                    self.assertIsNone(journey["nextAction"])
+                    self.assertTrue(journey["capabilities"]["canPublishArticle"])
+
+    def test_permission_failure_prompts_only_for_a_step_using_that_grant(self):
+        from .website_prepare import prepare_failure
+        from .website_contract import WebsiteAuthorityError
+        needed = {"github_workflow_permission_required": {"permissions", "setup"},
+            "github_ci_evidence_permission_required": {"permissions", "verify", "ci-attestation"}}
+        steps = {"permissions", "setup", "verify", "ci-attestation", "scan", "preview", "publish", "generate", "disconnect"}
+        for code, needed_steps in needed.items():
+            for step, supplied_action in product(steps, (False, True)):
+                with self.subTest(code=code, step=step, supplied_action=supplied_action), \
+                        patch("content_factory.website_github_permissions.installation_grants", return_value={"settingsUrl": "https://github.com/settings/installations/4"}) as grants:
+                    fixture = fixtures.PrepareJourneyReplayTests()
+                    fixture.setUp()
+                    error = WebsiteAuthorityError(code, "Review permissions.", retryable=False)
+                    if supplied_action:
+                        error.user_action = {"id": "review_github_permissions", "url": "https://github.com/settings/installations/4"}
+                    prepare_failure(fixture.op, step, error)
+                    if step in needed_steps:
+                        self.assertEqual(fixture.op.state, "needs_user")
+                        self.assertEqual(fixture.op.receipt["user_action"]["id"], "review_github_permissions")
+                    else:
+                        self.assertEqual(fixture.op.state, "needs_attention")
+                        self.assertEqual(fixture.op.receipt["user_action"]["id"], "retry")
+                        grants.assert_not_called()
+
     def test_missing_grant_uses_the_stored_installation_account_url(self):
         from . import website_github_permissions as permissions
         from integrations.services.github_app import GitHubWorkflowPermissionRequired

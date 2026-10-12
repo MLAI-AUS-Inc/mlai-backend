@@ -212,6 +212,15 @@ All reconciliation actions lease an operation in a short transaction and release
 
 GitHub account liveness probes do not require a selected repository or optional `/user` endpoint. They have bounded cache TTLs and a short probe lease. Repository inventory uses read tokens; setup and publication separately require write permission. Completed readiness cannot bypass that distinction. Ephemeral probe and verification tokens are revoked after use.
 
+The journey's GitHub permissions step is action-scoped. Workflows write is
+required only while the current-source integration needs verification-file
+installation or updates. Checks and Commit statuses read are required only
+while in-repository build proof is missing or stale. Once integration and
+build proof are current and the deployment is verified, publication does not
+require either optional profile. Permission receipts from earlier setup work
+cannot downgrade that publication readiness. Scans, article generation,
+previews and disconnect do not require these grants.
+
 Bootstrap `articleSetupState.setupMerged` and its snake-case alias retain the
 server-observed merge fact when source verification expires or access changes.
 They do not grant generation or publication permission: `generationReady`,
