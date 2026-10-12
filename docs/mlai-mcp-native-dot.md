@@ -109,10 +109,19 @@ Database-free tests run through `scripts/test_without_database.py`; their
 registered PostgreSQL module deliberately skips. Real native transaction tests
 were separately run on the approved disposable old-branch schema, and focused
 bridge tests reuse that same schema with synthetic cached authority. Neither
-test path authorises applying main's newer migration graph. The previously
-approved inventory contains 340 existing migrations plus the reviewed native
-initial migration; main has additional unreviewed prerequisites. Review that
-deployment's actual migration plan before any schema application.
+test path authorises applying main's newer migration graph. The earlier
+disposable-only inventory contained 340 existing migrations plus the reviewed
+native initial migration. The user subsequently explicitly requested deployment
+of this pilot. A read-only production graph audit at
+`29aba82f58a03c51fea603b1d0c066c3a6c079b6` confirmed that every current prerequisite
+is already applied; the only pending candidate is `agent_runtime.0001_initial`.
+Its file SHA-256 is
+`22a3cbbd144fe1c06617f24001cd9fa1ca91ab1d98d7034dc83c53a3ced20783`;
+its expected canonical deployment-plan SHA-256 is
+`a1ea1f419173ab4f74e8203d97b87b8c957c21de591ae0f2c85fd84ebc3365ed`.
+That review does not authorise any different pending migration or claim a
+production schema application. The deployed candidate must still reproduce
+that exact plan before the guarded writer pause and schema transition.
 
 These checks use synthetic providers, relays and callbacks. They do not certify
 an actual Dot subscription, a production native reply, portal publication or

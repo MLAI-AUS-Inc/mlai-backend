@@ -232,7 +232,7 @@ class NativeDisabledBoundaryTests(SimpleTestCase):
         with patch("agent_runtime.native_views.AgentInstallation.objects") as rows, patch(
                 "agent_runtime.native_installations.AgentInvocationReply.objects") as replies, patch(
                 "agent_runtime.native_installations.limits", return_value={"personal_limit": 1, "personal_used": 0}):
-            rows.filter.return_value.select_related.return_value.order_by.return_value.__getitem__.return_value = [revoked]
+            rows.filter.return_value.select_related.return_value.order_by.return_value = [revoked]
             replies.filter.return_value.order_by.return_value.first.return_value = None
             response = NativeInstallationsView.as_view()(request)
         rows.filter.assert_called_once_with(owner=owner, community_id=COMMUNITY, app_id="openai-dot")
@@ -244,6 +244,27 @@ class NativeDisabledBoundaryTests(SimpleTestCase):
         self.assertFalse(response.data["installations"][0]["test_completed"])
         self.assertEqual(response.data["installations"][0]["resources"], [])
         self.assertEqual(response.data["limits"]["personal_used"], 0)
+
+    @override_settings(AGENT_RUNTIME_ENABLED=True)
+    def test_oldest_revoked_identity_remains_classified_after_more_than_one_hundred_cycles(self):
+        owner = SimpleNamespace(pk=7, is_authenticated=True, is_active=True)
+        all_rows = [SimpleNamespace(pk=uuid4(), state="active", public_key="b" * 64)]
+        all_rows.extend(SimpleNamespace(pk=uuid4(), state="revoked", public_key=f"{index:064x}") for index in range(1, 102))
+        request = APIRequestFactory().get("/installations/", {"community": COMMUNITY})
+        force_authenticate(request, user=owner)
+        with patch("agent_runtime.native_views.AgentInstallation.objects") as rows, patch(
+                "agent_runtime.native_installations.limits", return_value={"personal_limit": 1, "personal_used": 1}), patch(
+                "agent_runtime.native_installations.installation_payload", side_effect=lambda row: {
+                    "public_key": row.public_key, "status": row.state,
+                    "subscription_active": row.state == "active", "resources": []}):
+            rows.filter.return_value.select_related.return_value.order_by.return_value = all_rows
+            response = NativeInstallationsView.as_view()(request)
+        self.assertEqual(len(response.data["installations"]), 102)
+        oldest = response.data["installations"][-1]
+        self.assertEqual(oldest["public_key"], all_rows[-1].public_key)
+        self.assertEqual(oldest["status"], "revoked")
+        self.assertFalse(oldest["subscription_active"])
+        self.assertEqual(response.data["limits"]["personal_used"], 1)
 
     def test_disabled_owner_catalog_and_listing_do_not_query_database(self):
         owner = SimpleNamespace(pk=7, is_authenticated=True, is_active=True)
