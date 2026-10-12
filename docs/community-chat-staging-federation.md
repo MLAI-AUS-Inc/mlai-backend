@@ -6,7 +6,9 @@ Work in progress; disabled by default. No production deployment is established.
 
 Deploy with `COMMUNITY_CHAT_HOST_ONLY_COOKIES=false`. Before enabling identity
 federation, approve a cutover window and inspect real browser cookie behavior.
-At the approved UTC cutover, enable host-only cookies for every web process and
+During the approved window, pause browser session issuance/refresh, drain in-flight requests,
+then record the UTC cutoff so every legacy browser session precedes it. Enable
+host-only cookies for every web process and
 run `python manage.py retire_legacy_chat_sessions --before <UTC-cutoff>` to
 preview the count, then the same command with `--apply` after checking it.
 The command revokes only pre-cutover web sessions; it does not remove accounts,
@@ -86,8 +88,8 @@ check-only mode. No worker or production integration process is started.
 These live steps have not been run by this implementation.
 
 Before any production cutover, inspect the actual production cookie behavior
-without recording token values, choose a UTC cutoff immediately before stopping
-browser session issuance, deploy the disabled issuer with the additive schema,
+without recording token values, pause browser session issuance/refresh and drain requests before choosing the
+UTC cutoff, deploy the disabled issuer with the additive schema,
 and execute the approved retirement command. Keep host-only cookie names and
 security behavior enabled during rollback; disable federation instead of
 restoring shared-domain cookie acceptance. New browser sessions after the cutoff

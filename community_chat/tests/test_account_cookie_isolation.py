@@ -2,6 +2,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from django.http import HttpResponse
+from django.core.exceptions import ImproperlyConfigured
 from django.test import SimpleTestCase, override_settings
 from rest_framework.test import APIRequestFactory
 
@@ -65,3 +66,9 @@ class AccountCookieIsolationTests(SimpleTestCase):
         response = account_cookies.set_account_session_cookies(HttpResponse(), self.credentials())
         self.assertEqual(response.cookies['mlai_chat_access']['domain'], '.mlai.au')
         self.assertNotIn('__Host-mlai_chat_access', response.cookies)
+
+    def test_isolated_cookie_names_cannot_disable_host_prefix_or_collide(self):
+        for access,refresh in [('mlai_chat_access','__Host-refresh'),('__Host-access','__Host-access')]:
+            with self.subTest(access=access),override_settings(COMMUNITY_CHAT_ACCESS_COOKIE_NAME=access,COMMUNITY_CHAT_REFRESH_COOKIE_NAME=refresh):
+                with self.assertRaises(ImproperlyConfigured):
+                    account_cookies.set_account_session_cookies(HttpResponse(),self.credentials())

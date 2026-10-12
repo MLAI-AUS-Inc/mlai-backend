@@ -1,19 +1,27 @@
 from django.conf import settings
+from django.core.exceptions import ImproperlyConfigured
 
 ACCESS_COOKIE = 'mlai_chat_access'
 REFRESH_COOKIE = 'mlai_chat_refresh'
 PRODUCTION_COOKIE_DOMAIN = '.mlai.au'
 
 
+def _isolated_cookie_names():
+    names=(settings.COMMUNITY_CHAT_ACCESS_COOKIE_NAME,settings.COMMUNITY_CHAT_REFRESH_COOKIE_NAME)
+    if any(not isinstance(name,str) or not name.startswith("__Host-") for name in names) or names[0] == names[1]:
+        raise ImproperlyConfigured("Isolated chat cookies require distinct __Host- names.")
+    return names
+
+
 def access_cookie_name():
     if settings.COMMUNITY_CHAT_HOST_ONLY_COOKIES:
-        return settings.COMMUNITY_CHAT_ACCESS_COOKIE_NAME
+        return _isolated_cookie_names()[0]
     return ACCESS_COOKIE
 
 
 def refresh_cookie_name():
     if settings.COMMUNITY_CHAT_HOST_ONLY_COOKIES:
-        return settings.COMMUNITY_CHAT_REFRESH_COOKIE_NAME
+        return _isolated_cookie_names()[1]
     return REFRESH_COOKIE
 
 
