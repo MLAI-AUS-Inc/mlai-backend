@@ -11,7 +11,7 @@ all_runtime_writer_services=(
     "${required_runtime_services[@]}"
     "${bridge_runtime_services[@]}"
     "${analytics_runtime_services[@]}"
-    "${native_agent_runtime_services[@]}"
     "${handoff_runtime_services[@]}"
+    "${native_agent_runtime_services[@]}"
 )
 runtime_services=("${required_runtime_services[@]}")

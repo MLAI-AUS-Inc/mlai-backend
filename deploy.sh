@@ -950,6 +950,7 @@ ssh "$DEPLOY_SSH_TARGET" <<EOF
     # command-substituted on the deploying runner.)
     echo "🧪 Running deployment preflight..."
     compose_run_web python manage.py deploy_preflight
+    compose_run_web python scripts/validate_native_agent_deploy_config.py
 
     previous_runtime_container_ids=()
     previous_scheduler_container_id=""
@@ -1413,7 +1414,6 @@ ssh "$DEPLOY_SSH_TARGET" <<EOF
     # plan requires its own explicit approval before any runtime is paused.
     # A database or migration-loader failure also leaves the current runtime
     # untouched.
-    compose_run_web python scripts/validate_native_agent_deploy_config.py
     echo "🔎 Checking pending migrations before pausing runtime services..."
     migrations_pending=1
     if compose_run_web python manage.py migrate --check --noinput; then
