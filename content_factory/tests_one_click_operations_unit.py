@@ -27,7 +27,7 @@ class PrepareJourneyTests(SimpleTestCase):
         journey = {"nextAction": {"id": step}, "capabilities": {"canPublishArticle": False}}
         handler = handler or Mock(return_value={"status": "completed"})
         with patch.object(prepare, "_claim_prepare", return_value=op), \
-                patch.object(prepare, "_prepare_context", return_value=(context, config)), \
+                patch.object(prepare, "_prepare_context", return_value=(context, config, SimpleNamespace(pk=4))), \
                 patch.object(prepare, "journey_for_context", return_value=journey), \
                 patch.object(prepare, "_persist_prepare", side_effect=lambda operation, **kwargs: operation):
             result = prepare.advance_prepare(op.pk, handlers={step: handler})
@@ -63,7 +63,7 @@ class PrepareJourneyTests(SimpleTestCase):
         from . import website_prepare as prepare
         op = self.operation()
         with patch.object(prepare, "_claim_prepare", return_value=op), \
-                patch.object(prepare, "_prepare_context", return_value=(Mock(), Mock())), \
+                patch.object(prepare, "_prepare_context", return_value=(Mock(), Mock(), Mock())), \
                 patch.object(prepare, "journey_for_context", return_value={"capabilities": {"canPublishArticle": True}}), \
                 patch.object(prepare, "_persist_prepare", side_effect=lambda operation, **kwargs: operation):
             prepare.advance_prepare(op.pk, handlers={})
@@ -97,7 +97,7 @@ class PrepareJourneyTests(SimpleTestCase):
         op = self.operation()
         op.receipt = {"child_run_id": "dead-child", "current_step": "setup"}
         with patch.object(prepare, "_claim_prepare", return_value=op), \
-                patch.object(prepare, "_prepare_context", return_value=(Mock(), Mock())), \
+                patch.object(prepare, "_prepare_context", return_value=(Mock(), Mock(), Mock())), \
                 patch.object(prepare, "journey_for_context", return_value={"nextAction": {"id": "setup"}}), \
                 patch.object(prepare, "_persist_prepare", side_effect=lambda operation, **kw: operation), \
                 patch.object(ContentFactoryRun.objects, "filter") as runs:
@@ -115,7 +115,7 @@ class PrepareJourneyTests(SimpleTestCase):
         child = SimpleNamespace(status="needs_review", workflow="article_system_setup", result={
             "article_system_setup": {"status": "preview_ready"}})
         with patch.object(prepare, "_claim_prepare", return_value=op), \
-                patch.object(prepare, "_prepare_context", return_value=(Mock(), Mock())), \
+                patch.object(prepare, "_prepare_context", return_value=(Mock(), Mock(), Mock())), \
                 patch.object(prepare, "journey_for_context", return_value={"nextAction": {"id": "verify"}}), \
                 patch.object(prepare, "_persist_prepare", side_effect=lambda operation, **kw: operation), \
                 patch.object(prepare, "maybe_merge_prepared_setup", return_value={"status": "needs_user",

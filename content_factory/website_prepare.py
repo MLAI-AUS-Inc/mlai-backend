@@ -82,8 +82,7 @@ def _prepare_context(op):
     config = _get_config(context.organization)
     if config.website_connection_id != op.connection_id:
         raise WebsiteAuthorityError("website_connection_changed", "The selected website changed.")
-    context.prepare_user = user
-    return context, config
+    return context, config, user
 
 
 def _persist_prepare(op, *, now):
@@ -177,7 +176,7 @@ def _setup_surface(config, journey):
     raise WebsiteAuthorityError("article_surface_unresolved", "Scan the repository to identify an articles page before setup.", retryable=False)
 
 
-def _owner_request(op, context, config, step, *, journey=None):
+def _owner_request(op, context, config, step, *, user, journey=None):
     """Call existing guarded owner handlers with a complete POST request shape."""
     connection = config.website_connection
     data = {**contract_for(connection), "company_id": str(context.company.pk),
@@ -189,7 +188,7 @@ def _owner_request(op, context, config, step, *, journey=None):
         pending = (config.article_system or {}).get("pending_article_system_setup") or {}
         data.update(article_surface_mode=mode, article_surface_url=surface,
             source_scan_run_id=pending.get("source_scan_run_id") or op.receipt.get("scan_run_id") or "")
-    return SimpleNamespace(user=context.prepare_user, data=data, method="POST", META={},
+    return SimpleNamespace(user=user, data=data, method="POST", META={},
         query_params={"company_id": str(context.company.pk)}, headers={"Idempotency-Key": data["idempotency_key"]},
         _website_prepare_dispatch=True)
 
@@ -257,7 +256,7 @@ def attach_selected_setup_run(config, run, *, company_id):
     return op
 
 
-def _dispatch_prepare_step(op, context, config, step, *, journey=None):
+def _dispatch_prepare_step(op, context, config, step, *, user, journey=None):
     from .vibe_marketing_views import VibeMarketingScanView, VibeMarketingArticleSystemSetupView, _article_capabilities_for_context
     if step == "permissions":
         grants = (journey or {}).get("githubPermissions") or {}
@@ -274,7 +273,7 @@ def _dispatch_prepare_step(op, context, config, step, *, journey=None):
                 capabilities.get("reason") or "Authorize GitHub to prepare your website.")
         return {"status": "completed", "capabilities": capabilities}
     if step in {"scan", "setup"}:
-        request = _owner_request(op, context, config, step, journey=journey)
+        request = _owner_request(op, context, config, step, user=user, journey=journey)
         view = VibeMarketingScanView if step == "scan" else VibeMarketingArticleSystemSetupView
         response = view().post(request)
         body = dict(response.data)
@@ -304,7 +303,7 @@ def advance_prepare(identifier, *, now=None, handlers=None):
         return None
     step = op.receipt.get("current_step") or "verify-access"
     try:
-        context, config = _prepare_context(op)
+        context, config, user = _prepare_context(op)
         journey = journey_for_context(context, config)
         if journey.get("capabilities", {}).get("canPublishArticle"):
             op.state, op.next_attempt_at = "completed", None
@@ -348,7 +347,7 @@ def advance_prepare(identifier, *, now=None, handlers=None):
                 op.receipt["user_action"] = {"id": "open_run", "label": "Open setup run", "run_id": child_id}
                 return _finish_prepare(op, now=now)
             if child and child.workflow == "article_system_setup":
-                merge = maybe_merge_prepared_setup(child, context, config)
+                merge = maybe_merge_prepared_setup(child, context, config, user=user)
                 if merge.get("status") == "needs_user":
                     op.state, op.next_attempt_at = "needs_user", None
                     op.receipt.update(status="needs_you", current_step="merge", message="Merge the articles setup pull request.",
@@ -375,7 +374,7 @@ def advance_prepare(identifier, *, now=None, handlers=None):
             op.receipt.update(current_step=step, blocked_step=None, reason_code="", retryable=False,
                 status="working", message=f"Preparing articles: {step.replace('-', ' ')}.", user_action=None)
             handler = (handlers or {}).get(step)
-            outcome = handler(op, context, config) if handler else _dispatch_prepare_step(op, context, config, step, journey=journey)
+            outcome = handler(op, context, config, user=user) if handler else _dispatch_prepare_step(op, context, config, step, user=user, journey=journey)
             run_id = (outcome or {}).get("run_id") or (outcome or {}).get("runId")
             if run_id:
                 op.receipt.update(child_run_id=run_id, **{f"{step}_run_id": run_id})
@@ -402,8 +401,8 @@ def advance_prepare(identifier, *, now=None, handlers=None):
         prepare_failure(op, step, exc, now=now)
     except Exception as exc:
         # Preserve stack locations without logging provider exception bodies.
-        logger.exception("website_prepare unexpected operation=%s company=%s connection=%s generation=%s step=%s",
-            op.pk, op.payload.get("company_id"), op.connection_id, op.generation, step,
+        logger.exception("website_prepare unexpected operation=%s company=%s connection=%s generation=%s step=%s error_type=%s",
+            op.pk, op.payload.get("company_id"), op.connection_id, op.generation, step, type(exc).__name__,
             exc_info=(RuntimeError, RuntimeError("Unexpected prepare dispatch failure"), exc.__traceback__))
         prepare_failure(op, step, WebsiteAuthorityError("website_prepare_unavailable",
             "Website preparation is temporarily unavailable. It will retry automatically.", retryable=True), now=now)
@@ -448,7 +447,7 @@ def wake_prepare_for_source(connection_id, *, organization_id):
     return op
 
 
-def maybe_merge_prepared_setup(run, context, config):
+def maybe_merge_prepared_setup(run, context, config, *, user):
     """Auto-merge only after exact preview proof and confirmed absence of reviewers."""
     from urllib.parse import quote
     from integrations import http_client
@@ -462,7 +461,7 @@ def maybe_merge_prepared_setup(run, context, config):
     if not number:
         if run.status == "completed" and (run.result or {}).get("adopted") is True:
             return {"status": "completed"}
-        return approve_prepared_setup(run, context, config)
+        return approve_prepared_setup(run, context, config, user=user)
     website = config.website_connection
     action = {"id": "merge_pr", "label": f"Merge PR #{number}", "pr_number": number,
         "url": f"https://github.com/{website.github_repo}/pull/{number}"}
@@ -518,7 +517,7 @@ def maybe_merge_prepared_setup(run, context, config):
                 pass
 
 
-def approve_prepared_setup(run, context, config):
+def approve_prepared_setup(run, context, config, *, user):
     """Use the existing setup control only after exact automatic preview proof."""
     from .website_connections import _verified_setup_run_base, scoped_run_contract, verify_repository_head
     from .vibe_marketing_views import VibeMarketingRunControlView
@@ -533,7 +532,7 @@ def approve_prepared_setup(run, context, config):
         raise WebsiteAuthorityError("setup_preview_verification_required", "Waiting for exact setup preview proof.", retryable=True)
     verify_repository_head(website, base)
     data = {**scoped_run_contract(run), "company_id": str(context.company.pk), "configuration_revision": website.configuration_version}
-    request = SimpleNamespace(method="POST", user=context.prepare_user, data=data, query_params={}, headers={})
+    request = SimpleNamespace(method="POST", user=user, data=data, query_params={}, headers={})
     response = VibeMarketingRunControlView().post(request, run.run_id, "approve")
     if response.status_code >= 400:
         raise WebsiteAuthorityError(response.data.get("code") or "setup_approval_unavailable",
