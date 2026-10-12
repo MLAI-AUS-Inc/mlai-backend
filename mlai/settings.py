@@ -254,6 +254,7 @@ INSTALLED_APPS = [
     'content_factory',
     'content_analytics',
     'community_chat',
+    'agent_runtime',
     'founder_tools',
     'data_access',
     'core',
@@ -487,6 +488,7 @@ REST_FRAMEWORK = {
         'core.authentication.CustomJWTAuthentication',
     ],
     'DEFAULT_THROTTLE_RATES': {
+        'agent_runtime': os.getenv('AGENT_RUNTIME_RATE', '60/minute'),
         'anon': '100/hour',  # Rate limit for MedHack endpoints
         'watt_unity_ticket_redeem': os.getenv('WATT_UNITY_TICKET_REDEEM_RATE', '60/minute'),
         'public_knowledge': os.getenv('ORG_MEMORY_PUBLIC_RATE', '60/minute'),
@@ -2168,6 +2170,7 @@ COMMUNITY_CHAT_STARTUP_UPDATES_ENABLED = os.environ.get("COMMUNITY_CHAT_STARTUP_
 # Valley private-draft remote MCP. Requires the existing shared Redis cache.
 # Unified server is independently opt-in; legacy Valley grants remain unchanged.
 MLAI_MCP_ENABLED = _env_is_true("MLAI_MCP_ENABLED", False)
+VALLEY_MCP_UNIFIED_ALIAS_ENABLED = _env_is_true("VALLEY_MCP_UNIFIED_ALIAS_ENABLED", False)
 MLAI_MCP_COMMUNITY_ENABLED = _env_is_true("MLAI_MCP_COMMUNITY_ENABLED", False)
 MLAI_MCP_COMMUNITY_RELAY_URL = os.getenv("MLAI_MCP_COMMUNITY_RELAY_URL", "")
 MLAI_MCP_COMMUNITY_SECRET = os.getenv("MLAI_MCP_COMMUNITY_SECRET", "")
@@ -2183,3 +2186,38 @@ VALLEY_MCP_OAUTH_CLIENTS = json.loads(os.getenv("VALLEY_MCP_OAUTH_CLIENTS", "{}"
 # Paid editor image regeneration fails closed until a reviewed price is configured.
 _image_regeneration_price = os.getenv("CONTENT_FACTORY_IMAGE_REGENERATION_COST_POINTS", "").strip()
 CONTENT_FACTORY_IMAGE_REGENERATION_COST_POINTS = int(_image_regeneration_price) if _image_regeneration_price.isdigit() else None
+
+# Separately gated durable personal-agent control plane.
+AGENT_RUNTIME_ENABLED = _env_is_true("AGENT_RUNTIME_ENABLED", False)
+AGENT_RUNTIME_SLACK_READ_ENABLED = _env_is_true("AGENT_RUNTIME_SLACK_READ_ENABLED", False)
+AGENT_RUNTIME_ACTIONS_ENABLED = _env_is_true("AGENT_RUNTIME_ACTIONS_ENABLED", False)
+AGENT_RUNTIME_MCP_EVENTS_ENABLED = _env_is_true("AGENT_RUNTIME_MCP_EVENTS_ENABLED", False)
+AGENT_RUNTIME_PUBLIC_WEB_ENABLED = _env_is_true("AGENT_RUNTIME_PUBLIC_WEB_ENABLED", False)
+AGENT_RUNTIME_NATIVE_ENABLED = _env_is_true("AGENT_RUNTIME_NATIVE_ENABLED", False)
+AGENT_RUNTIME_NATIVE_REPLIES_ENABLED = _env_is_true("AGENT_RUNTIME_NATIVE_REPLIES_ENABLED", False)
+# UUID -> {relay_url: canonical HTTPS origin, channel_ids: [public UUIDs]}.
+AGENT_RUNTIME_NATIVE_COMMUNITIES = json.loads(os.getenv("AGENT_RUNTIME_NATIVE_COMMUNITIES", "{}"))
+AGENT_RUNTIME_NATIVE_SERVICE_PRIVATE_KEY = os.getenv("AGENT_RUNTIME_NATIVE_SERVICE_PRIVATE_KEY", "")
+AGENT_RUNTIME_NATIVE_REGISTRY_KEY = os.getenv("AGENT_RUNTIME_NATIVE_REGISTRY_KEY", "")
+AGENT_RUNTIME_NATIVE_PERSONAL_LIMIT = int(os.getenv("AGENT_RUNTIME_NATIVE_PERSONAL_LIMIT", "1"))
+AGENT_RUNTIME_DOT_SETUP_URL = os.getenv("AGENT_RUNTIME_DOT_SETUP_URL", "")
+AGENT_RUNTIME_SLACK_WORKSPACES = _env_list("AGENT_RUNTIME_SLACK_WORKSPACES", [])
+AGENT_RUNTIME_SLACK_CHANNEL_IDS = _env_list("AGENT_RUNTIME_SLACK_CHANNEL_IDS", [])
+AGENT_RUNTIME_WORKER_KEY = os.getenv("AGENT_RUNTIME_WORKER_KEY", "")
+AGENT_RUNTIME_EVENT_KEY = os.getenv("AGENT_RUNTIME_EVENT_KEY", "")
+AGENT_RUNTIME_ADMISSION_KEY = os.getenv("AGENT_RUNTIME_ADMISSION_KEY", "")
+AGENT_RUNTIME_ISSUER = os.getenv("AGENT_RUNTIME_ISSUER", "https://api.mlai.au").rstrip("/")
+MLAI_MCP_NATIVE_AGENTS_ENABLED = _env_is_true("MLAI_MCP_NATIVE_AGENTS_ENABLED", False)
+_native_mcp_default = ((os.getenv("VALLEY_MCP_PUBLIC_BASE_URL", "").rstrip("/") or AGENT_RUNTIME_ISSUER) + "/mcp/mlai"
+    if MLAI_MCP_NATIVE_AGENTS_ENABLED else AGENT_RUNTIME_ISSUER + "/api/v1/agent-runtime/mcp/")
+AGENT_RUNTIME_RESOURCE = os.getenv("AGENT_RUNTIME_RESOURCE", _native_mcp_default)
+AGENT_RUNTIME_OAUTH_CLIENTS = json.loads(os.getenv("AGENT_RUNTIME_OAUTH_CLIENTS", "{}"))
+AGENT_RUNTIME_ARTIFACT_ROOT = os.getenv("AGENT_RUNTIME_ARTIFACT_ROOT", "")
+AGENT_RUNTIME_MODEL_BASE_URL = os.getenv("AGENT_RUNTIME_MODEL_BASE_URL", "")
+AGENT_RUNTIME_MODEL_API_KEY = os.getenv("AGENT_RUNTIME_MODEL_API_KEY", "")
+AGENT_RUNTIME_MODEL_NAME = os.getenv("AGENT_RUNTIME_MODEL_NAME", "")
+AGENT_RUNTIME_MODEL_TIMEOUT_SECONDS = int(os.getenv("AGENT_RUNTIME_MODEL_TIMEOUT_SECONDS", "90"))
+AGENT_RUNTIME_MODEL_MAX_REQUEST_BYTES = int(os.getenv("AGENT_RUNTIME_MODEL_MAX_REQUEST_BYTES", "262144"))
+AGENT_RUNTIME_MODEL_MAX_RESPONSE_BYTES = int(os.getenv("AGENT_RUNTIME_MODEL_MAX_RESPONSE_BYTES", "2097152"))
+AGENT_RUNTIME_MODEL_INPUT_MICROUNITS_PER_MILLION = int(os.getenv("AGENT_RUNTIME_MODEL_INPUT_MICROUNITS_PER_MILLION", "0"))
+AGENT_RUNTIME_MODEL_OUTPUT_MICROUNITS_PER_MILLION = int(os.getenv("AGENT_RUNTIME_MODEL_OUTPUT_MICROUNITS_PER_MILLION", "0"))

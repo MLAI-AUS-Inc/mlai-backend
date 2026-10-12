@@ -35,6 +35,8 @@ subsystem-specific contracts and runbooks.
 
 - [MLAI remote MCP](mlai-mcp.md) — unified Pulse, Articles and explicit-channel Community capabilities with legacy audience isolation
 
+- [Personal Dot on MLAI MCP](mlai-mcp-native-dot.md) — fresh installation-bound consent, mention events and native replies on the existing connection
+
 - [Valley remote MCP](valley-mcp.md) — client installation, scoped OAuth consent, private narrative handoff and rollout
 
 - [Private member onboarding](community-chat-onboarding.md) — email signup,

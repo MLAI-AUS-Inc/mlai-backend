@@ -1,0 +1,28 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Connect your Dot · MLAI</title>
+<style>body{font:1rem system-ui;max-width:42rem;margin:3rem auto;padding:1.25rem}select,button{font:inherit;padding:.75rem}label{display:block;margin:1rem 0}button{cursor:pointer}p{line-height:1.5}</style></head>
+<body><h1>Connect your Dot to MLAI Chat</h1>
+<p>{{ authorization.client_name }} requests access to the personal agent you enrolled in MLAI Chat.</p>
+<p>Your Dot may receive notifications of your mentions, read the permitted thread, and answer in that same thread under its own agent name. Everyone who can see the thread can see its answer. Existing thread messages may be sent to OpenAI.</p>
+<p>Only you can activate this personal agent. Other channels, private messages, arbitrary posts and account changes are outside this permission. Listening starts only when you explicitly ask your Dot to subscribe.</p>
+<form id="consent"><label>Enrolled agent <select id="installation" required>
+{% for installation in installations %}<option value="{{ installation.installation_id }}">{{ installation.name }} — access expires {{ installation.expires_at }}</option>{% endfor %}
+</select></label><button {% if not installations %}disabled{% endif %}>Allow this Dot connection</button></form>
+{% if not installations %}<p>Finish enrolling your personal agent in MLAI Chat, then return here.</p>{% endif %}
+<p id="status" role="status"></p><a href="https://chat.mlai.au/apps">Return to Apps &amp; agents</a>
+{{ oauth_params|json_script:"oauth-params" }}{{ installations|json_script:"installations" }}{{ authorization.scopes|json_script:"requested-scopes" }}
+<script>
+document.getElementById('consent').onsubmit=async event=>{
+  event.preventDefault();
+  const installation=JSON.parse(document.getElementById('installations').textContent).find(item=>item.installation_id===document.getElementById('installation').value);
+  if(!installation)return;
+  const status=document.getElementById('status');
+  try{
+    const response=await fetch('/api/v1/agent-runtime/oauth/authorize/',{method:'POST',credentials:'same-origin',headers:{'Content-Type':'application/json'},body:JSON.stringify({authorization:JSON.parse(document.getElementById('oauth-params').textContent),consent:{name:installation.name,runtime:'external',installation_id:installation.installation_id,resources:[installation.resource],scopes:JSON.parse(document.getElementById('requested-scopes').textContent),expires_in_days:30}})});
+    const body=await response.json();
+    if(!response.ok)throw Error('Connection was not approved. Sign in again or retry.');
+    location.assign(body.redirect_uri);
+  }catch(error){status.textContent=error.message;}
+};
+</script></body></html>

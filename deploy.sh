@@ -32,12 +32,14 @@ python3 scripts/validate_inbox_deploy_config.py
 SLACK_OWNER_INVENTORY_ENABLED="${SLACK_OWNER_INVENTORY_ENABLED:-false}"
 COMMUNITY_CHAT_PASSWORD_AUTH_ENABLED="${COMMUNITY_CHAT_PASSWORD_AUTH_ENABLED:-false}"
 MLAI_MCP_ENABLED="${MLAI_MCP_ENABLED:-false}"
+VALLEY_MCP_UNIFIED_ALIAS_ENABLED="${VALLEY_MCP_UNIFIED_ALIAS_ENABLED:-false}"
 MLAI_MCP_COMMUNITY_ENABLED="${MLAI_MCP_COMMUNITY_ENABLED:-false}"
 MLAI_MCP_COMMUNITY_RELAY_URL="${MLAI_MCP_COMMUNITY_RELAY_URL:-}"
 MLAI_MCP_COMMUNITY_SECRET="${MLAI_MCP_COMMUNITY_SECRET:-}"
 MLAI_MCP_CLIENT_INSTALL_URLS="${MLAI_MCP_CLIENT_INSTALL_URLS:-}"
 export MLAI_MCP_ENABLED MLAI_MCP_COMMUNITY_ENABLED MLAI_MCP_COMMUNITY_RELAY_URL
 export MLAI_MCP_COMMUNITY_SECRET MLAI_MCP_CLIENT_INSTALL_URLS
+export VALLEY_MCP_UNIFIED_ALIAS_ENABLED
 VALLEY_MCP_ENABLED="${VALLEY_MCP_ENABLED:-false}"
 VALLEY_MCP_PUBLIC_BASE_URL="${VALLEY_MCP_PUBLIC_BASE_URL:-https://api.mlai.au}"
 WEBSITE_CONNECTION_WRITE_MODE="${WEBSITE_CONNECTION_WRITE_MODE:-disabled}"
@@ -51,6 +53,23 @@ VALLEY_MCP_DOMAIN_VERIFICATION_TOKEN="${VALLEY_MCP_DOMAIN_VERIFICATION_TOKEN:-}"
 export VALLEY_MCP_ENABLED VALLEY_MCP_PUBLIC_BASE_URL
 export COMMUNITY_CHAT_STARTUP_UPDATES_ENABLED VALLEY_MCP_DOMAIN_VERIFICATION_TOKEN
 python3 scripts/validate_valley_mcp_deploy_config.py
+MLAI_MCP_NATIVE_AGENTS_ENABLED="${MLAI_MCP_NATIVE_AGENTS_ENABLED:-false}"
+AGENT_RUNTIME_ENABLED="${AGENT_RUNTIME_ENABLED:-false}"
+AGENT_RUNTIME_NATIVE_ENABLED="${AGENT_RUNTIME_NATIVE_ENABLED:-false}"
+AGENT_RUNTIME_NATIVE_REPLIES_ENABLED="${AGENT_RUNTIME_NATIVE_REPLIES_ENABLED:-false}"
+AGENT_RUNTIME_MCP_EVENTS_ENABLED="${AGENT_RUNTIME_MCP_EVENTS_ENABLED:-false}"
+AGENT_RUNTIME_NATIVE_COMMUNITIES="${AGENT_RUNTIME_NATIVE_COMMUNITIES:-}"
+AGENT_RUNTIME_DOT_SETUP_URL="${AGENT_RUNTIME_DOT_SETUP_URL:-}"
+AGENT_RUNTIME_NATIVE_PERSONAL_LIMIT="${AGENT_RUNTIME_NATIVE_PERSONAL_LIMIT:-1}"
+AGENT_RUNTIME_NATIVE_SERVICE_PRIVATE_KEY="${AGENT_RUNTIME_NATIVE_SERVICE_PRIVATE_KEY:-}"
+AGENT_RUNTIME_NATIVE_REGISTRY_KEY="${AGENT_RUNTIME_NATIVE_REGISTRY_KEY:-}"
+COMMUNITY_CHAT_ROLE_SERVICE_TOKEN="${COMMUNITY_CHAT_ROLE_SERVICE_TOKEN:-}"
+export MLAI_MCP_NATIVE_AGENTS_ENABLED AGENT_RUNTIME_ENABLED AGENT_RUNTIME_NATIVE_ENABLED
+export AGENT_RUNTIME_NATIVE_REPLIES_ENABLED AGENT_RUNTIME_MCP_EVENTS_ENABLED
+export AGENT_RUNTIME_NATIVE_COMMUNITIES AGENT_RUNTIME_DOT_SETUP_URL AGENT_RUNTIME_NATIVE_PERSONAL_LIMIT
+export AGENT_RUNTIME_NATIVE_SERVICE_PRIVATE_KEY AGENT_RUNTIME_NATIVE_REGISTRY_KEY
+export COMMUNITY_CHAT_ROLE_SERVICE_TOKEN
+python3 scripts/validate_native_agent_deploy_config.py
 case "$COMMUNITY_CHAT_PASSWORD_AUTH_ENABLED" in
     true|TRUE|True) COMMUNITY_CHAT_PASSWORD_AUTH_ENABLED=true ;;
     false|FALSE|False) COMMUNITY_CHAT_PASSWORD_AUTH_ENABLED=false ;;
@@ -380,12 +399,30 @@ for mcp_setting in MLAI_MCP_COMMUNITY_RELAY_URL MLAI_MCP_COMMUNITY_SECRET MLAI_M
     fi
 done
 install_remote_env_value VALLEY_MCP_ENABLED "$VALLEY_MCP_ENABLED"
+install_remote_env_value VALLEY_MCP_UNIFIED_ALIAS_ENABLED "$VALLEY_MCP_UNIFIED_ALIAS_ENABLED"
 install_remote_env_value VALLEY_MCP_PUBLIC_BASE_URL "$VALLEY_MCP_PUBLIC_BASE_URL"
 if [ -n "$COMMUNITY_CHAT_STARTUP_UPDATES_ENABLED" ]; then
     install_remote_env_value COMMUNITY_CHAT_STARTUP_UPDATES_ENABLED "$COMMUNITY_CHAT_STARTUP_UPDATES_ENABLED"
 fi
 if [ -n "$VALLEY_MCP_DOMAIN_VERIFICATION_TOKEN" ]; then
     install_remote_env_value VALLEY_MCP_DOMAIN_VERIFICATION_TOKEN "$VALLEY_MCP_DOMAIN_VERIFICATION_TOKEN"
+fi
+for native_flag in MLAI_MCP_NATIVE_AGENTS_ENABLED AGENT_RUNTIME_ENABLED AGENT_RUNTIME_NATIVE_ENABLED \
+    AGENT_RUNTIME_NATIVE_REPLIES_ENABLED AGENT_RUNTIME_MCP_EVENTS_ENABLED AGENT_RUNTIME_NATIVE_PERSONAL_LIMIT; do
+    install_remote_env_value "$native_flag" "${!native_flag}"
+done
+for native_value in AGENT_RUNTIME_NATIVE_COMMUNITIES AGENT_RUNTIME_DOT_SETUP_URL; do
+    if [ -n "${!native_value}" ]; then
+        install_remote_env_value "$native_value" "${!native_value}"
+    fi
+done
+for native_secret in AGENT_RUNTIME_NATIVE_SERVICE_PRIVATE_KEY AGENT_RUNTIME_NATIVE_REGISTRY_KEY; do
+    if [ -n "${!native_secret}" ]; then
+        install_remote_env_secret "$native_secret" "${!native_secret}"
+    fi
+done
+if [ -n "$COMMUNITY_CHAT_ROLE_SERVICE_TOKEN" ]; then
+    install_remote_env_secret COMMUNITY_CHAT_ROLE_SERVICE_TOKEN "$COMMUNITY_CHAT_ROLE_SERVICE_TOKEN"
 fi
 
 # The app-level token travels only through SSH stdin. Never reuse an OAuth
@@ -838,6 +875,12 @@ ssh "$DEPLOY_SSH_TARGET" <<EOF
     unset retired_committee_container_ids
 
     source scripts/runtime-services.sh
+    if [ "\$(read_env_value MLAI_MCP_NATIVE_AGENTS_ENABLED)" = "true" ]; then
+        runtime_services+=("\${native_agent_runtime_services[@]}")
+        native_agent_worker_enabled=1
+    else
+        native_agent_worker_enabled=0
+    fi
     if [ "\$community_bridge_production_enabled" = "true" ] \
         && env_has_value SLACK_BRIDGE_BOT_TOKEN \
         && { env_has_value DISCORD_BRIDGE_BOT_TOKEN \
@@ -1371,6 +1414,7 @@ ssh "$DEPLOY_SSH_TARGET" <<EOF
     # A database or migration-loader failure also leaves the current runtime
     # untouched.
     echo "🔎 Checking pending migrations before pausing runtime services..."
+    compose_run_web python scripts/validate_native_agent_deploy_config.py
     migrations_pending=1
     if compose_run_web python manage.py migrate --check --noinput; then
         migrations_pending=0
@@ -1664,6 +1708,11 @@ PY
         echo "🧹 Stopping disabled analytics-sync service..."
         docker compose stop analytics-sync || true
         docker compose rm -f analytics-sync || true
+    fi
+    if [ "\$native_agent_worker_enabled" != "1" ]; then
+        echo "🧹 Stopping disabled personal-agent delivery worker..."
+        docker compose stop native-agent-worker || true
+        docker compose rm -f native-agent-worker || true
     fi
 
     echo "🔁 Verifying the running web container picked up APP_RELEASE..."

@@ -5,7 +5,7 @@ from rest_framework.views import APIView
 
 from founder_tools.models import VibeRaisingCompany
 from startup_updates.mcp import oauth
-from startup_updates.mcp.config import availability, capability_catalog, client_catalog, mcp_url, mlai_url, public_base
+from startup_updates.mcp.config import DOT_SCOPES, availability, capability_catalog, client_catalog, mcp_url, mlai_url, public_base
 from .views import ChatStartupAccess
 from django.conf import settings
 
@@ -54,6 +54,16 @@ class AgentAuthorizationView(ChatStartupAccess, APIView):
         companies = VibeRaisingCompany.objects.filter(profile__user=request.user, organization__isnull=False).order_by("name")
         channels = []
         community_reason = None
+        native_installations = []
+        native_reason = None
+        if intent["resource"] == mlai_url() and set(intent["scopes"]) & DOT_SCOPES:
+            from startup_updates.mcp.native_agents import consent_installations
+            try:
+                native_installations = consent_installations(request.user, request.auth)
+                if not native_installations:
+                    native_reason = "Enroll and verify a personal Dot in Apps & agents before connecting its chat permissions."
+            except (PermissionDenied, ValidationError) as exc:
+                native_reason = str(exc.detail)
         if set(intent["scopes"]) & {"community:read", "community:write"}:
             from startup_updates.mcp.community import consent_channels
             try:
@@ -64,6 +74,7 @@ class AgentAuthorizationView(ChatStartupAccess, APIView):
                 # the native relay cannot currently return channel metadata.
                 community_reason = str(exc.detail)
         return Response({"resource": intent["resource"], "capabilities": capability_catalog(intent["scopes"]),
+            "nativeInstallations": native_installations, "nativeInstallationReason": native_reason,
             "communityChannels": channels, "communityReason": community_reason, "requestId": intent["requestId"], "clientName": intent["clientName"],
             "scopes": intent["scopes"], "redirectOrigin": intent["redirectOrigin"], "expiresAt": intent["expiresAt"],
             "companies": [{"id": str(company.pk), "name": company.name} for company in companies]})
@@ -79,7 +90,8 @@ class AgentAuthorizationView(ChatStartupAccess, APIView):
         try:
             url = oauth.approve_intent(request_id, user=request.user, session=request.auth,
                 company_id=company_id, approve=request.data["approve"], scopes=request.data.get("scopes"),
-                community_channel_ids=request.data.get("communityChannelIds"))
+                community_channel_ids=request.data.get("communityChannelIds"),
+                native_installation_id=request.data.get("nativeInstallationId"))
         except oauth.OAuthError as exc:
             raise ValidationError(exc.description) from exc
         return Response({"redirectUrl": url})
