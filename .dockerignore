@@ -36,3 +36,8 @@ README.md
 AGENTS.md
 ARCHITECTURE.md
 output
+
+.scratch/
+.superpowers/
+ops/staging-chat/.env
+ops/staging-chat/.secrets/

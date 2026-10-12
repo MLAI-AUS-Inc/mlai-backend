@@ -30,7 +30,7 @@ def _cookie_kwargs():
 
 
 def _clear_legacy_cookies(response):
-    if settings.COMMUNITY_CHAT_HOST_ONLY_COOKIES:
+    if settings.COMMUNITY_CHAT_HOST_ONLY_COOKIES and settings.COMMUNITY_CHAT_CLEAR_LEGACY_COOKIES:
         for name in (ACCESS_COOKIE, REFRESH_COOKIE):
             response.delete_cookie(name, path='/', domain=PRODUCTION_COOKIE_DOMAIN, samesite='None')
     return response

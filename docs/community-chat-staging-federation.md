@@ -38,3 +38,35 @@ browser JavaScript. Only issuer/subject/display name/eligibility is returned.
 No production relay device is created by granting identity. The production
 account-only sign-in preceding approval may write normal login/bootstrap state.
 Do not log request bodies or callback query strings at proxies/application servers.
+
+## Isolated staging API
+
+Use `DJANGO_SETTINGS_MODULE=mlai.settings_staging_chat`; this composition root
+registers only the browser federation, own-account read, session, public profile,
+permissions and key-proof membership endpoints. Production root URLs and workers
+are excluded. It uses synthetic local accounts with unusable passwords, a copied
+display name and opaque issuer/subject mapping. Staff/admin authority is never copied.
+API access lasts five minutes; refresh rechecks issuer eligibility and fails closed.
+No immediate removal of an already-connected relay is implied by token expiry.
+
+`remove_staging_identity --subject <subject>` previews removal with this profile.
+After removing the tester from the production issuer allowlist, apply this command
+with `--apply` on staging. Local account/session access is disabled first. Each
+pending invite and staging membership is revoked; adapter failure leaves the local
+account disabled and reports incomplete membership cleanup for retry. The command
+refuses the production settings profile. Staging logout affects only staging cookies.
+
+The prepared `ops/staging-chat/compose.yml` has private PostgreSQL18/Redis7 and one
+API process. The API joins `mlai-chat-staging_chat` only to reach the existing
+membership adapter and Caddy; its database/cache remain on its own network. There
+are no host-published ports or scheduler/email/integration workers. Initialize its
+private `.env` with `config.py init --chat-env <staging-chat-env> --output <api-env>
+--source-sha <backend-commit>`. Existing credentials are preserved by refusal to
+initialize twice. Only the verified staging adapter token is copied.
+
+Startup checks pending migrations and refuses to apply them automatically. Inspect
+and approve the exact schema plan before applying migrations to a fresh staging API
+DB. Build with the committed source revision, inspect its image revision/environment
+labels, and record its immutable image ID before use. Do not print rendered Compose
+configuration: it contains secrets. Use `docker compose config --quiet` for validation.
+Keep federation disabled until the production cookie/issuer/client rollout is ready.

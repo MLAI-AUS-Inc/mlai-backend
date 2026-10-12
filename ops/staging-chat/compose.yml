@@ -1,0 +1,77 @@
+name: mlai-chat-staging-api
+services:
+  staging-api:
+    image: mlai-chat-staging-api:${STAGING_API_SOURCE_SHA:?source commit required}
+    build:
+      context: ../..
+      dockerfile: Dockerfile
+      target: runtime
+      labels:
+        org.opencontainers.image.revision: ${STAGING_API_SOURCE_SHA:?source commit required}
+        au.mlai.environment: chat-staging-api
+    restart: unless-stopped
+    environment:
+      DJANGO_SETTINGS_MODULE: mlai.settings_staging_chat
+      APP_ENV: chat-staging
+      APP_RELEASE: ${STAGING_API_SOURCE_SHA:?source commit required}
+      DEBUG: "false"
+      ALLOWED_HOSTS: api-staging.mlai.au,staging-api,localhost,127.0.0.1
+      SECRET_KEY: ${STAGING_API_SECRET_KEY:?private key required}
+      DATABASE_URL: postgresql://staging_account_api:${STAGING_API_DATABASE_PASSWORD:?database credential required}@postgres-api:5432/staging_account_api
+      REDIS_URL: redis://:${STAGING_API_REDIS_PASSWORD:?cache credential required}@redis-api:6379/0
+      COMMUNITY_CHAT_FEDERATION_CLIENT_SECRET: ${COMMUNITY_CHAT_FEDERATION_CLIENT_SECRET:?client credential required}
+      COMMUNITY_CHAT_FEDERATION_STAGING_ENABLED: ${COMMUNITY_CHAT_FEDERATION_STAGING_ENABLED:-false}
+      COMMUNITY_CHAT_ADAPTER_URL: http://membership-adapter:3100
+      COMMUNITY_CHAT_ADAPTER_TOKEN: ${COMMUNITY_CHAT_ADAPTER_TOKEN:?staging adapter credential required}
+      RUN_MIGRATIONS_ON_START: "0"
+      GUNICORN_WORKERS: "2"
+    command:
+      - /bin/sh
+      - -ec
+      - >-
+        python manage.py migrate --check --noinput;
+        exec gunicorn --config scripts/gunicorn.conf.py --bind 0.0.0.0:8000
+        --workers 2 --timeout 30 --access-logformat '%(m)s %(U)s %(s)s %(L)s'
+        mlai.wsgi:application
+    depends_on:
+      postgres-api: {condition: service_healthy}
+      redis-api: {condition: service_healthy}
+    healthcheck:
+      test: [CMD, python, -c, "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/healthz/live', timeout=3)"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+    networks: [default, chat]
+  postgres-api:
+    image: postgres:18-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: staging_account_api
+      POSTGRES_USER: staging_account_api
+      POSTGRES_PASSWORD: ${STAGING_API_DATABASE_PASSWORD:?database credential required}
+    volumes: [api-postgres:/var/lib/postgresql]
+    healthcheck:
+      test: [CMD-SHELL, pg_isready -U staging_account_api -d staging_account_api]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+  redis-api:
+    image: redis:7-alpine
+    restart: unless-stopped
+    environment:
+      REDIS_PASSWORD: ${STAGING_API_REDIS_PASSWORD:?cache credential required}
+    command: [/bin/sh, -ec, 'exec redis-server --appendonly yes --requirepass "$$REDIS_PASSWORD"']
+    volumes: [api-redis:/data]
+    healthcheck:
+      test: [CMD-SHELL, 'REDISCLI_AUTH="$$REDIS_PASSWORD" redis-cli ping | grep -q PONG']
+      interval: 5s
+      timeout: 3s
+      retries: 20
+volumes:
+  api-postgres:
+  api-redis:
+networks:
+  default:
+  chat:
+    external: true
+    name: mlai-chat-staging_chat
