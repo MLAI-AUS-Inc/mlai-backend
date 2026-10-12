@@ -181,10 +181,31 @@ error and approved preview evidence retained. The browser receives a conflict
 response instead of a successful queued acknowledgement. A status poll also
 normalizes that failure over stale nested `preview_ready` metadata; neither path
 creates a PR or reopens the website operation.
+
 Older approved runs whose recorded PR failure was masked by preview polling
 receive the same canonical failure in their response projection. This read does
 not rewrite their history, and a newer control receipt or an existing PR keeps
 its current state. Recovery still starts through the reviewed setup boundary.
+
+A current-generation setup child blocked (or marked failed by an older generic
+failure callback) with `SETUP_EXAMPLE_CLEANUP_REQUIRED`
+and a validated `remove_setup_example` file/record action leaves preparation in
+`needs_user`. The public receipt names the exact relative file and article
+record, with a repository-derived GitHub file link. The blocked child is
+terminal: callbacks, reads and scheduler wakeups do not retry it. After the
+owner removes the named record, an explicit prepare `retry=true` clears only
+that preparation's old scan/setup child references, increments its attempt,
+probes the current repository HEAD and starts fresh work. Old preview approvals
+and the pending setup's old source-scan hint are not reused. Other owner actions
+(permissions, route selection, review and merge) retain their existing retry
+behavior. Missing/malformed actions or stale operation, tenant, repository,
+generation, attempt or deletion-watermark proof keep the generic blocked path.
+CF's wire status `needs_user` normalizes to durable `blocked` through the shared
+workflow status mapper for HTTP polling and reconciliation. Its root and nested
+cleanup action remain available to preparation. A same-payload callback replay
+uses that same terminal-state alias while retaining every original operation
+fence, so it can acknowledge an already processed manual cleanup event. An
+explicit callback `resume_available=false` clears an older true Resume flag.
 
 Status polling retains the worker's authoritative execution generation and
 state version, so refreshing an approved article cannot erase its exact-preview

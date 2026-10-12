@@ -12332,6 +12332,7 @@ def _run_result_from_remote(remote_data):
         "article_system_setup",
         "pending_article_system_setup",
         "requested_action",
+        "user_action",
         "setup_requested_action",
         "content_island",
         "contentIsland",
@@ -18882,24 +18883,3 @@ class VibeMarketingDailyReplayView(APIView):
             remote_data={"status": ContentFactoryRunStatus.QUEUED, "message": "Daily replay queued"},
         )
         return Response({"run_id": run.run_id, "runId": run.run_id, "status": run.status}, status=status.HTTP_202_ACCEPTED)
-
-
-def _normalize_remote_run_status(value):
-    normalized = str(value or "").strip().lower()
-    mapping = {
-        "processing": ContentFactoryRunStatus.RUNNING,
-        "in_progress": ContentFactoryRunStatus.RUNNING,
-        "blocked_verification": ContentFactoryRunStatus.BLOCKED,
-        "precondition_failed": ContentFactoryRunStatus.BLOCKED,
-        "preview_failed": ContentFactoryRunStatus.BLOCKED,
-        "fallback_ready": ContentFactoryRunStatus.BLOCKED,
-        "setup_pr_create_failed": ContentFactoryRunStatus.BLOCKED,
-        "setup_pr_created": ContentFactoryRunStatus.COMPLETED,
-        "pr_created": ContentFactoryRunStatus.COMPLETED,
-        "merged": ContentFactoryRunStatus.COMPLETED,
-        "merged_verifying": ContentFactoryRunStatus.COMPLETED,
-        "error": ContentFactoryRunStatus.FAILED,
-    }
-    normalized = mapping.get(normalized, normalized)
-    allowed = {choice[0] for choice in ContentFactoryRunStatus.choices}
-    return normalized if normalized in allowed else ContentFactoryRunStatus.QUEUED

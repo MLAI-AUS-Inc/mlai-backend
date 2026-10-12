@@ -3393,7 +3393,8 @@ def _sync_article_system_setup_callback_to_run(*, data: dict, event_type: str) -
             },
             "result": result,
             "error": error,
-            "resume_available": bool(result.get("retry_available") or (existing_run.resume_available if existing_run else False)),
+            "resume_available": bool(data["resume_available"]) if data.get("resume_available") is not None
+                else bool(result.get("retry_available") or (existing_run.resume_available if existing_run else False)),
             # Datetime watermark; passes through sanitize_json_for_postgres untouched.
             "last_event_emitted_at": emitted_at or (existing_run.last_event_emitted_at if existing_run else None),
         }

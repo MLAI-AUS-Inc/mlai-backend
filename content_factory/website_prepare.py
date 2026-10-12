@@ -1,7 +1,9 @@
 """Persisted, bounded orchestration of the existing website readiness journey."""
 import logging
+import re
 from datetime import timedelta
 from types import SimpleNamespace
+from urllib.parse import quote
 
 from django.db import transaction
 from django.db.models import F
@@ -28,6 +30,76 @@ AUTHORIZATION_CODES = frozenset({"github_reconnect_required", "github_authorizat
 DEPLOYMENT_WAIT_CODES = frozenset({"deployment_source_unverified", "deployment_marker_unverified",
     "live_route_unavailable", "ci_attestation_required", "ci_evidence_unavailable", "verified_target_required",
     "deployment_verification_required", "native_ci_attestation_missing", "ci_proof_unavailable"})
+SETUP_EXAMPLE_CLEANUP_CODE = "SETUP_EXAMPLE_CLEANUP_REQUIRED"
+
+
+def _setup_example_cleanup_action(raw, connection):
+    """Accept only CF's exact, portable file/record cleanup instruction."""
+    from .website_contract import safe_repository_path
+    if not isinstance(raw, dict) or raw.get("id") != "remove_setup_example":
+        return None
+    path, record = raw.get("file"), raw.get("record")
+    if (not isinstance(path, str) or len(path) > 500 or any(ord(char) < 32 or ord(char) == 127 for char in path)
+            or not isinstance(record, str) or len(record) > 255
+            or not re.fullmatch(r"[a-z0-9]+(?:-[a-z0-9]+)*(?:/[a-z0-9]+(?:-[a-z0-9]+)*)?", record)):
+        return None
+    try:
+        if safe_repository_path(path) != path:
+            return None
+    except WebsiteAuthorityError:
+        return None
+    action = {"id": "remove_setup_example", "label": "Review example cleanup", "file": path, "record": record}
+    repository, branch = str(connection.github_repo or ""), str(connection.branch or "")
+    if re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", repository) and branch and not any(ord(char) < 32 or ord(char) == 127 for char in branch):
+        action["url"] = f"https://github.com/{repository}/blob/{quote(branch, safe='')}/{quote(path, safe='/')}"
+    return action
+
+
+def _retain_setup_example_cleanup(op, child):
+    """Keep a terminal, current-operation cleanup child waiting for its owner."""
+    from .website_operations import validate_operation
+    connection = op.connection
+    if child.workflow != "article_system_setup" or child.status not in {"blocked", "failed"}:
+        return False
+    result = child.result if isinstance(child.result, dict) else {}
+    nested = result.get("article_system_setup")
+    nested = nested if isinstance(nested, dict) else {}
+    if not any(code == SETUP_EXAMPLE_CLEANUP_CODE for code in (result.get("error_code"), nested.get("error_code"))):
+        return False
+    if (child.run_id != op.receipt.get("child_run_id") or child.organization_id != connection.organization_id
+            or str(child.domain or "").casefold().strip() != connection.organization.domain.casefold().strip()
+            or str(child.github_repo or "").casefold() != connection.github_repo.casefold() or op.generation != connection.generation):
+        return False
+    action = next((valid for entry in (result.get("user_action"), result.get("requested_action"),
+        nested.get("user_action"), nested.get("requested_action")) if (valid := _setup_example_cleanup_action(entry, connection))), None)
+    if action is None:
+        return False
+    saved = child.run_request if isinstance(child.run_request, dict) else {}
+    try:
+        original, expected = connection_contract(saved), connection_contract(contract_for(connection))
+        if any(original.get(key) != expected.get(key) for key in ("website_connection_id", "connection_generation", "repository_id")):
+            return False
+        if any(key not in saved for key in ("operation_id", "operation_attempt", "deletion_epoch")):
+            return False
+        operation = validate_operation(connection, {**saved, "run_id": child.run_id})
+        if operation is None or operation.action != "workflow":
+            return False
+    except WebsiteAuthorityError:
+        return False
+    op.state, op.next_attempt_at = "needs_user", None
+    op.receipt = {**op.receipt, "status": "needs_you", "current_step": "setup", "blocked_step": "setup",
+        "reason_code": SETUP_EXAMPLE_CLEANUP_CODE, "retryable": False, "user_action": action,
+        "message": f"Remove setup example record '{action['record']}' from {action['file']}. Then check again after cleaning it up."}
+    return True
+
+
+def _cleanup_retry_journey(op, context, config, journey):
+    """Refresh source facts before dispatching the owner's new cleanup attempt."""
+    if op.payload.get("manual_setup_example_cleanup_retry") and not op.receipt.get("scan_run_id"):
+        from .vibe_marketing_views import _article_capabilities_for_context
+        capabilities = _article_capabilities_for_context(context, config, force=True)
+        return journey_for_context(context, config, capabilities=capabilities)
+    return journey
 
 
 def start_prepare(config, *, expected=None, company_id=None, user=None, retry=False):
@@ -47,13 +119,19 @@ def start_prepare(config, *, expected=None, company_id=None, user=None, retry=Fa
         if op.action != "prepare" or op.generation != current.generation:
             raise WebsiteAuthorityError("operation_key_conflict", "The saved preparation belongs to another website.")
         if not created and retry and op.state in {"needs_attention", "needs_user", "cancelled"}:
-            reset_child = op.state in {"cancelled", "needs_attention"}
+            cleanup_retry = (op.state == "needs_user" and op.receipt.get("reason_code") == SETUP_EXAMPLE_CLEANUP_CODE
+                and _setup_example_cleanup_action(op.receipt.get("user_action"), current) is not None)
+            reset_child = op.state in {"cancelled", "needs_attention"} or cleanup_retry
             op.state, op.next_attempt_at = "pending", None
             op.receipt = {**op.receipt, "step_failures": {}, "status": "working", "user_action": None, "last_completed": None,
                 "child_run_id": None if reset_child else op.receipt.get("child_run_id"), "reason_code": "", "blocked_step": None}
             op.payload = {**op.payload, "attempt": op.payload.get("attempt", 1) + 1, "user_clicks": op.payload.get("user_clicks", 1) + 1}
             if reset_child:
                 op.payload.pop("run_id", None)
+            if cleanup_retry:
+                op.payload["manual_setup_example_cleanup_retry"] = True
+                for key in ("scan_run_id", "setup_run_id", "completed_steps"):
+                    op.receipt.pop(key, None)
             op.save(update_fields=["state", "next_attempt_at", "receipt", "payload", "updated_at"])
     return op
 
@@ -193,6 +271,8 @@ def _owner_request(op, context, config, step, *, user, journey=None):
     if step == "setup":
         mode, surface = _setup_surface(config, journey or journey_for_context(context, config))
         pending = (config.article_system or {}).get("pending_article_system_setup") or {}
+        if op.payload.get("manual_setup_example_cleanup_retry"):
+            pending = {**pending, "source_scan_run_id": op.receipt.get("scan_run_id") or ""}
         data.update(article_surface_mode=mode, article_surface_url=surface,
             source_scan_run_id=pending.get("source_scan_run_id") or op.receipt.get("scan_run_id") or "")
     return SimpleNamespace(user=user, data=data, method="POST", META={},
@@ -317,6 +397,7 @@ def advance_prepare(identifier, *, now=None, handlers=None):
     try:
         context, config, user = _prepare_context(op)
         journey = journey_for_context(context, config)
+        journey = _cleanup_retry_journey(op, context, config, journey)
         if journey.get("capabilities", {}).get("canPublishArticle"):
             op.state, op.next_attempt_at = "completed", None
             op.receipt.update(status="ready", message="Your website is ready for articles.", current_step="ready", user_action=None)
@@ -347,6 +428,8 @@ def advance_prepare(identifier, *, now=None, handlers=None):
                 op.state, op.next_attempt_at = "pending", now + timedelta(minutes=1)
                 return _finish_prepare(op, now=now)
             if child and child.status in {"failed", "blocked", "cancelled", "denied"}:
+                if _retain_setup_example_cleanup(op, child):
+                    return _finish_prepare(op, now=now)
                 code = (child.result or {}).get("error_code") or "website_prepare_step_failed"
                 result = child.result or {}
                 retryable = result.get("retryable") is True or code in {"worker_unavailable", "github_unavailable", "HOSTED_PREVIEW_UNAVAILABLE"}
