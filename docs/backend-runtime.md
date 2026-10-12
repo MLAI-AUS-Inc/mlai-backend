@@ -14,13 +14,12 @@ services so adding a service without including it in stop/rollback handling fail
 | Required | web, scheduler, jobs-worker, memory-worker, memory-scheduler, password-email-worker, community-email-worker | Every normal deployment |
 | Bridge | bridge-worker, bridge-reconciler, bridge-retention | Existing bridge enablement and adapter credential checks |
 | Analytics | analytics-sync | Existing complete analytics configuration checks |
-| Committee | committee-remuneration | COMMITTEE_REMUNERATION_ENABLED evaluates to true |
 | Handoff | web-candidate | Explicitly managed during code-only web handoff |
 
 Code-only releases keep writers serving during checks and use the
 [two-slot web handoff](backend-api-web-handoff.md) for replacement. The candidate
-is not part of normal runtime startup. Disabled committee remuneration is
-stopped and removed even during a code-only release. On code-only rollback,
+is not part of normal runtime startup. The retired committee remuneration container is stopped and removed by its
+exact Compose project/service labels before any migration transition. On code-only rollback,
 newly introduced writers with no prior image are stopped before restoring the
 previous runtime.
 
@@ -29,12 +28,30 @@ including optional services that were running before a configuration change.
 If stopping any writer fails, deployment aborts before applying migrations.
 An incomplete migration transition keeps writers stopped for forward recovery,
 including after a partially committed credential backfill. Once the full graph
-is applied and checked, recovery may recreate the new image with Office Manager
-disabled and verify a fresh scheduler tick. Recovery preserves the failure exit
+is applied and checked, recovery may recreate the new image and verify a fresh scheduler tick. Recovery preserves the failure exit
 status; it never rolls back to a plaintext-writing image after migration begins.
 Adding a service also requires its Compose definition, settings inventory, tests,
 and an owning subsystem contract. The database is infrastructure, not an
 application writer.
+
+## Shared images and retired features
+
+Deployment builds two images: `web` targets the common `runtime` stage and all
+non-browser workers reuse `mlai-backend-web`; `jobs-worker` targets `jobs`, adding
+Chromium. Compiler tools stay in the dependency builder. Rollback generates
+per-service image overrides from the saved manifest so every writer gets its
+exact former image even when services share a normal image tag.
+
+The rsync payload and Docker context omit tests, docs, generated static assets
+and workstation files. Static assets are still collected and verified in the
+common image. Release checks no longer rebuild every memory search vector or
+write Firebase bucket CORS: those existing commands are explicit maintenance.
+The governed Admin Brain rollout operations remain unchanged.
+
+Office Manager, Victor intake/applicant reporting and committee weekly payouts
+are retired. Models, historical migrations and financial evidence remain.
+Release the Roo consumer retirement and closed Victor website before the backend
+removes their endpoints. See [Office Manager retirement](office-manager.md).
 
 ## Scheduling and Jobs
 
@@ -42,6 +59,10 @@ application writer.
 The dedicated `run_jobs_worker` command consumes persisted queued runs. Its
 `--once` mode consumes at most one run; normal mode polls every five seconds.
 Both manual API jobs and scheduled jobs use the existing persisted run settings.
+`run_periodic_command` keeps discovery and memory scheduling in one Django
+process each, closes stale connections around every tick and preserves failure
+handling: discovery exits and clears its health marker on failure; memory waits
+and retries. Local discovery retains its previous retry behavior.
 The historical `run_daily_jobs_scheduler` service retains synchronous execution
 by default for explicit callers; the shared scheduler deliberately uses its
 enqueue-only wrapper.

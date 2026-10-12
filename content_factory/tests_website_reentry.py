@@ -96,8 +96,11 @@ class WebsiteWorkerReentryTests(WebsiteDatabaseFixture, TransactionTestCase):
                         base = f'http://127.0.0.1:{self.server.server_port}'
                         mirrored = requests.post(base + '/mirror', json={**testcase.binding,
                             'workflow': 'article_generation', 'status': 'cancelled'}, timeout=3)
-                        if mirrored.status_code != 409:
-                            raise RuntimeError('Revoked cleanup callback unexpectedly admitted')
+                        if mirrored.status_code != 200:
+                            raise RuntimeError('Revoked cleanup cancellation observation was rejected')
+                        receipt = mirrored.json()['result']['cancellation_receipt']
+                        if receipt['repository_authority'] is not False:
+                            raise RuntimeError('Revoked cleanup observation acquired repository authority')
                         deleting.join(3)
                         if deleting.is_alive():
                             raise RuntimeError('Offboarding remained blocked by cleanup HTTP')

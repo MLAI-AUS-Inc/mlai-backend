@@ -1,6 +1,9 @@
 services:
   web:
-    build: .
+    build:
+      context: .
+      target: runtime
+    image: mlai-backend-local
     command: sh /app/scripts/start-web.sh
     environment:
       APP_ENV: local
@@ -24,8 +27,8 @@ services:
     restart: unless-stopped
 
   scheduler:
-    build: .
-    command: sh -c "until python manage.py migrate --check --noinput; do echo 'Waiting for migrations to complete...'; sleep 5; done; while true; do python manage.py run_scheduled_discovery; sleep 60; done"
+    image: mlai-backend-local
+    command: sh -c "until python manage.py migrate --check --noinput; do echo 'Waiting for migrations to complete...'; sleep 5; done; exec python manage.py run_periodic_command run_scheduled_discovery --poll-seconds 60 --continue-on-error"
     environment:
       APP_ENV: local
       JOBS_SCRAPE_HEADLESS: ${JOBS_SCRAPE_HEADLESS:-false}
@@ -44,7 +47,10 @@ services:
     restart: unless-stopped
 
   jobs-worker:
-    build: .
+    build:
+      context: .
+      target: jobs
+    image: mlai-backend-local-jobs
     command: sh -c "until python manage.py migrate --check --noinput; do sleep 5; done; exec python manage.py run_jobs_worker"
     environment:
       APP_ENV: local
@@ -64,7 +70,7 @@ services:
     restart: unless-stopped
 
   analytics-sync:
-    build: .
+    image: mlai-backend-local
     command: >-
       sh -ec '
         until python manage.py migrate --check --noinput; do
@@ -105,7 +111,7 @@ services:
     restart: unless-stopped
 
   memory-worker:
-    build: .
+    image: mlai-backend-local
     command: >-
       sh -ec '
         until python manage.py migrate --check --noinput; do
@@ -136,19 +142,16 @@ services:
     stop_grace_period: 30s
 
   memory-scheduler:
-    build: .
+    image: mlai-backend-local
     command: >-
       sh -ec '
         until python manage.py migrate --check --noinput; do
           echo "Waiting for migrations to complete...";
           sleep 5;
         done;
-        while true; do
-          if ! python manage.py schedule_memory_work; then
-            echo "Memory scheduler tick failed; the next bounded poll will retry" >&2;
-          fi;
-          sleep "$${ORG_MEMORY_SCHEDULER_POLL_SECONDS}";
-        done
+        exec python manage.py run_periodic_command schedule_memory_work \
+          --poll-seconds "$${ORG_MEMORY_SCHEDULER_POLL_SECONDS}" \
+          --continue-on-error
       '
     environment:
       APP_ENV: local
@@ -169,7 +172,7 @@ services:
     stop_grace_period: 30s
 
   password-email-worker:
-    build: .
+    image: mlai-backend-local
     command: >-
       sh -ec '
         until python manage.py migrate --check --noinput; do
@@ -198,7 +201,7 @@ services:
     stop_grace_period: 30s
 
   bridge-worker:
-    build: .
+    image: mlai-backend-local
     command: sh -c "until python manage.py migrate --check --noinput; do echo 'Waiting for migrations to complete...'; sleep 5; done; python manage.py run_community_bridge"
     environment:
       APP_ENV: local
@@ -218,7 +221,7 @@ services:
     restart: unless-stopped
 
   bridge-reconciler:
-    build: .
+    image: mlai-backend-local
     command: >-
       sh -ec '
         until python manage.py migrate --check --noinput; do
@@ -261,7 +264,7 @@ services:
     stop_grace_period: 30s
 
   bridge-retention:
-    build: .
+    image: mlai-backend-local
     command: >-
       sh -ec '
         until python manage.py migrate --check --noinput; do

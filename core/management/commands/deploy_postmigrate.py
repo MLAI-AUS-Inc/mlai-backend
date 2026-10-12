@@ -25,8 +25,8 @@ class Command(BaseCommand):
     )
 
     def handle(self, *args, **options):
-        # Same fail-fast ordering deploy.sh used across seven separate
-        # `docker compose run` containers, minus six cold Django boots.
+        # Keep release checks read-only; rebuilds and external provisioning
+        # remain explicit maintenance commands.
         self._step(
             "Verifying migration readiness",
             "migrate",
@@ -36,11 +36,6 @@ class Command(BaseCommand):
             "Verifying vector installation",
             "check_org_memory_search",
             {"require_vector": True, "require_installed": True},
-        )
-        self._step(
-            "Rebuilding memory search vectors",
-            "rebuild_memory_search_vectors",
-            {},
         )
         self._step(
             "Verifying startup update schema",
@@ -55,12 +50,6 @@ class Command(BaseCommand):
             except Resolver404 as exc:
                 raise CommandError(f"Required route {route} no longer resolves.") from exc
         self.stdout.write("vibe raising video upload routes ok")
-
-        self._step(
-            "Configuring Firebase Storage CORS for direct video uploads",
-            "configure_firebase_storage_cors",
-            {},
-        )
 
         self.stdout.write("-- Verifying coworking booking concurrency guard...")
         with connection.cursor() as cursor:

@@ -1183,10 +1183,6 @@ JOBS_NOTION_API_VERSION = os.getenv('JOBS_NOTION_API_VERSION', '2022-06-28')
 JOBS_SLACK_CHANNEL = os.getenv('JOBS_SLACK_CHANNEL', 'C05QE82M2KE')
 JOBS_SLACK_WEBHOOK_URL = os.getenv('JOBS_SLACK_WEBHOOK_URL', '')
 SLACK_BOT_TOKEN = os.getenv('SLACK_BOT_TOKEN', '')
-COMMITTEE_REMUNERATION_ENABLED = _env_is_true('COMMITTEE_REMUNERATION_ENABLED', False)
-COMMITTEE_REMUNERATION_WEEKLY_POINTS = int(os.getenv('COMMITTEE_REMUNERATION_WEEKLY_POINTS', '40'))
-COMMITTEE_REMUNERATION_SLACK_CHANNEL = os.getenv('COMMITTEE_REMUNERATION_SLACK_CHANNEL', '#roo-testing')
-COMMITTEE_REMUNERATION_TIMEZONE = os.getenv('COMMITTEE_REMUNERATION_TIMEZONE', 'Australia/Melbourne')
 HOSPITAL_SLACK_CHANNEL_NAME = os.getenv('HOSPITAL_SLACK_CHANNEL_NAME', 'healthhack')
 HEALTHHACK_ANNOUNCEMENT_ADMIN_IDS = [
     value.strip()
@@ -1701,30 +1697,6 @@ COWORKING_DAY_COST_POINTS = int(os.getenv('COWORKING_DAY_COST_POINTS', '8'))
 COWORKING_DAY_DISCOUNT_COST_POINTS = int(os.getenv('COWORKING_DAY_DISCOUNT_COST_POINTS', '4'))
 COWORKING_REFUND_CUTOFF_HOURS = int(os.getenv('COWORKING_REFUND_CUTOFF_HOURS', '18'))  # 6pm prev day
 COWORKING_BOOKING_ADVANCE_DAYS = int(os.environ.get('COWORKING_BOOKING_ADVANCE_DAYS', 30))
-OFFICE_MANAGER_ENABLED = _env_is_true('OFFICE_MANAGER_ENABLED', False)
-OFFICE_MANAGER_SLACK_CHANNEL_ID = os.getenv('OFFICE_MANAGER_SLACK_CHANNEL_ID', '')
-OFFICE_MANAGER_SLACK_BOT_TOKEN = os.getenv('OFFICE_MANAGER_SLACK_BOT_TOKEN', '')
-OFFICE_MANAGER_TIMEZONE = os.getenv('OFFICE_MANAGER_TIMEZONE', 'Australia/Melbourne')
-OFFICE_MANAGER_WEEKDAYS = os.getenv('OFFICE_MANAGER_WEEKDAYS', '0,1,2,3,4')
-OFFICE_MANAGER_ANNOUNCEMENT_HOUR = int(
-    os.getenv('OFFICE_MANAGER_ANNOUNCEMENT_HOUR', '8')
-)
-OFFICE_MANAGER_ANNOUNCEMENT_MINUTE = int(
-    os.getenv('OFFICE_MANAGER_ANNOUNCEMENT_MINUTE', '30')
-)
-OFFICE_MANAGER_CLAIM_CUTOFF_HOUR = int(
-    os.getenv('OFFICE_MANAGER_CLAIM_CUTOFF_HOUR', '10')
-)
-OFFICE_MANAGER_CLAIM_CUTOFF_MINUTE = int(
-    os.getenv('OFFICE_MANAGER_CLAIM_CUTOFF_MINUTE', '0')
-)
-OFFICE_MANAGER_END_OF_DAY_REMINDER_HOUR = int(
-    os.getenv('OFFICE_MANAGER_END_OF_DAY_REMINDER_HOUR', '16')
-)
-OFFICE_MANAGER_END_OF_DAY_REMINDER_MINUTE = int(
-    os.getenv('OFFICE_MANAGER_END_OF_DAY_REMINDER_MINUTE', '30')
-)
-
 # Roo meeting-room booking. Deploy the backend and Roo support first, then
 # enable this flag once the seeded room has been verified in production.
 MEETING_ROOM_BOOKING_ENABLED = _env_is_true('MEETING_ROOM_BOOKING_ENABLED', False)
@@ -2142,37 +2114,6 @@ ORG_MEMORY_CONSOLIDATION_ESTIMATED_INPUT_TOKENS = int(
 )
 ORG_MEMORY_SCHEDULER_POLL_SECONDS = int(os.environ.get('ORG_MEMORY_SCHEDULER_POLL_SECONDS', '60'))
 
-# Dedicated, fail-closed access for read-only Victor application reports in Roo.
-# This secret is used only to sign short-lived Slack actor assertions; the
-# generic Roo/internal API keys are deliberately not accepted by these views.
-VICTOR_AI_ROO_ENABLED = _env_is_true('VICTOR_AI_ROO_ENABLED', False)
-VICTOR_AI_ROO_SIGNING_SECRET = os.environ.get('VICTOR_AI_ROO_SIGNING_SECRET', '').strip()
-VICTOR_AI_ROO_ASSERTION_MAX_AGE_SECONDS = int(
-    os.environ.get('VICTOR_AI_ROO_ASSERTION_MAX_AGE_SECONDS', '60') or 60
-)
-VICTOR_AI_ROO_ASSERTION_CLOCK_SKEW_SECONDS = int(
-    os.environ.get('VICTOR_AI_ROO_ASSERTION_CLOCK_SKEW_SECONDS', '5') or 5
-)
-VICTOR_AI_ROO_EXPORT_MAX_ROWS = int(
-    os.environ.get('VICTOR_AI_ROO_EXPORT_MAX_ROWS', '5000') or 5000
-)
-if VICTOR_AI_ROO_ENABLED:
-    if len(VICTOR_AI_ROO_SIGNING_SECRET) < 32:
-        raise ImproperlyConfigured(
-            'VICTOR_AI_ROO_SIGNING_SECRET must contain at least 32 characters when enabled.'
-        )
-    if not 10 <= VICTOR_AI_ROO_ASSERTION_MAX_AGE_SECONDS <= 300:
-        raise ImproperlyConfigured(
-            'VICTOR_AI_ROO_ASSERTION_MAX_AGE_SECONDS must be between 10 and 300.'
-        )
-    if not 0 <= VICTOR_AI_ROO_ASSERTION_CLOCK_SKEW_SECONDS <= 30:
-        raise ImproperlyConfigured(
-            'VICTOR_AI_ROO_ASSERTION_CLOCK_SKEW_SECONDS must be between 0 and 30.'
-        )
-    if not 1 <= VICTOR_AI_ROO_EXPORT_MAX_ROWS <= 10000:
-        raise ImproperlyConfigured(
-            'VICTOR_AI_ROO_EXPORT_MAX_ROWS must be between 1 and 10000.'
-        )
 LUMA_API_KEY = os.environ.get('LUMA_API_KEY')
 LUMA_BASE_URL = os.environ.get('LUMA_BASE_URL', 'https://public-api.luma.com')
 LUMA_CALENDAR_URL = os.environ.get(

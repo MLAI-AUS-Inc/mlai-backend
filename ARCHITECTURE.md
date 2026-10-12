@@ -45,7 +45,8 @@ the relevant deployment runbook, not in this document.
 | `jobs` | Job discovery and scheduled job operations |
 | `hospital`, `esafety`, `generic_hackathons`, `hackathons` | Event and hackathon APIs |
 | `data_access` | Reviewed access to shared data surfaces |
-| `mlai_studio`, `victor_ai` | Product-specific application APIs |
+| `mlai_studio` | Studio application intake |
+| `victor_ai` | Retained historical registration/audit models; intake and reports retired |
 
 The table is an ownership guide, not a complete module inventory. Consult each
 package and its tests before changing a contract.
@@ -60,7 +61,7 @@ and may share the same database and cache when enabled.
 
 The discovery scheduler enqueues daily Jobs runs; `jobs-worker` executes them.
 `scripts/runtime-services.sh` supplies deployment's required and optional writer
-groups, including the opt-in committee remuneration worker. See the
+groups. Committee weekly remuneration has been retired. See the
 [runtime contract](docs/backend-runtime.md) for health checks and limitations,
 and the [feature lifecycle register](docs/feature-lifecycle.md) for review work.
 

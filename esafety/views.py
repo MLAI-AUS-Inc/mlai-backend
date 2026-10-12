@@ -11,7 +11,6 @@ import random
 
 logger = logging.getLogger(__name__)
 
-print("DEBUG: ESAFETY VIEWS MODULE LOADED")
 
 from .serializers import TeamSerializer, SubmissionSerializer, AnnouncementSerializer
 

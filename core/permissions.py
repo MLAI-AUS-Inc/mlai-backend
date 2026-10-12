@@ -193,7 +193,7 @@ class HasStrictRooApiKey(permissions.BasePermission):
         return False
 
 
-class HasOfficeManagerRooApiKey(HasStrictRooApiKey):
+class HasIsolatedRooApiKey(HasStrictRooApiKey):
     """Require an isolated Roo credential for actor-selected mutations."""
 
     def has_permission(self, request, view):
@@ -208,7 +208,7 @@ class HasOfficeManagerRooApiKey(HasStrictRooApiKey):
         mlai_key = str(getattr(settings, 'MLAI_API_KEY', '') or '').strip()
         if not roo_key or not internal_key:
             logger.error(
-                'Office Manager requires both ROO_API_KEY and '
+                'Actor-selected mutations require both ROO_API_KEY and '
                 'INTERNAL_API_KEY to be configured.'
             )
             return False
@@ -216,7 +216,7 @@ class HasOfficeManagerRooApiKey(HasStrictRooApiKey):
             mlai_key and secrets.compare_digest(roo_key, mlai_key)
         ):
             logger.error(
-                'Office Manager Roo credentials are aliased across trust '
+                'Actor-selected Roo credentials are aliased across trust '
                 'domains.'
             )
             return False

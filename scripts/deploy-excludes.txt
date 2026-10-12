@@ -1,0 +1,36 @@
+# Runtime-only rsync payload. Keep templates, migrations, contracts and scenarios.
+.git
+.github
+.DS_Store
+.env
++ .env.example
+.env.*
+.venv
+venv
+env
+node_modules
+__pycache__
+.pytest_cache
+.mypy_cache
+.ruff_cache
+.coverage
+htmlcov
+*.pyc
+*.pyo
+*.log
+*.sqlite3*
+*.db*
+staticfiles
+docs
+plans
+tests
+tests.py
+tests_*.py
+test_*.py
+README.md
+AGENTS.md
+ARCHITECTURE.md
+outputs
+output
+.worktrees
+.codex-work

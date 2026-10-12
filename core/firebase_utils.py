@@ -1,6 +1,6 @@
 # core/firebase_utils.py
 import firebase_admin
-from firebase_admin import auth, credentials, db as rtdb, firestore, storage
+from firebase_admin import auth, credentials, db as rtdb, storage
 from google.api_core.exceptions import NotFound
 import logging
 import os
@@ -30,13 +30,12 @@ FIREBASE_DATABASE_URL = os.getenv(
 
 def initialize_firebase():
     """Initialize Firebase Admin SDK"""
-    logger.info(f"Initializing Firebase with project ID: {FIREBASE_PROJECT_ID}, Storage bucket: {FIREBASE_STORAGE_BUCKET}")
-    
     try:
         # Check if already initialized
         if firebase_admin._apps:
-            logger.info("Using existing Firebase app")
-            return firestore.client()
+            return firebase_admin.get_app()
+
+        logger.info(f"Initializing Firebase with project ID: {FIREBASE_PROJECT_ID}, Storage bucket: {FIREBASE_STORAGE_BUCKET}")
 
         # Construct credentials dictionary
         # Handle potential newline escaping in private key
@@ -88,20 +87,11 @@ def initialize_firebase():
         })
         logger.info("Firebase app initialized successfully")
         
-        firestore_client = firestore.client()
-        return firestore_client
+        return firebase_admin.get_app()
     except Exception as e:
         logger.error(f"Error initializing Firebase: {str(e)}", exc_info=True)
         # Don't crash the app on init failure, but log it
         return None
-
-# Initialize on module load
-try:
-    db = initialize_firebase()
-except Exception as e:
-    logger.error(f"Failed to initialize Firebase on module load: {str(e)}")
-    db = None
-
 
 def get_rtdb_reference(path):
     """Return a Realtime Database reference at ``path`` (ensures Firebase is initialized).
@@ -136,6 +126,7 @@ def rtdb_delete(path):
 
 def get_storage_bucket():
     """Get Firebase storage bucket instance"""
+    initialize_firebase()
     try:
         bucket = storage.bucket()
         return bucket
