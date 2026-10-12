@@ -53,7 +53,8 @@ def project_journey(*, company_id, domain, website=None, capabilities=None, disc
     # Current verification paths use in-repository CI. Once its proof is
     # current, publishing needs neither workflow-file writes nor CI reads.
     workflow_needed = not proof.get("integrationVerified", verified)
-    ci_read_needed = not proof.get("buildVerified", verified) or verification_stale
+    ci_attestation_needed = proof.get("ciAttestationRequired") is True and not deployed
+    ci_read_needed = not proof.get("buildVerified", verified) or verification_stale or ci_attestation_needed
     workflow_missing = workflow_needed and grants.get("workflows") is not True
     ci_missing = ci_read_needed and not (grants.get("checks") is True and grants.get("statuses") is True)
     permissions_ready = not (workflow_missing or ci_missing)
@@ -75,8 +76,10 @@ def project_journey(*, company_id, domain, website=None, capabilities=None, disc
         "permissions": fact(permissions_ready, code=permission_code, reason=permission_reason),
         "integration": fact(proof.get("integrationVerified", verified), code=reason_code, reason=reason,
             status="blocked" if not write_allowed and not proof.get("integrationVerified", verified) else None),
-        "verification": fact(proof.get("buildVerified", verified), code="verification_stale" if verification_stale else reason_code,
-            reason="Rerun native CI verification and attest the current source." if verification_stale else reason,
+        "verification": fact(proof.get("buildVerified", verified) and not ci_attestation_needed,
+            code="ci_attestation_required" if ci_attestation_needed else "verification_stale" if verification_stale else reason_code,
+            reason="Authenticate native CI proof for this exact target and operation." if ci_attestation_needed else
+                "Rerun native CI verification and attest the current source." if verification_stale else reason,
             status="stale" if verification_stale else None, verified_at=capabilities.get("verifiedAt")),
         "deployment": fact(deployed, code="deployment_verification_required", reason="Verify the deployed public articles route.", verified_at=deployment.get("checked_at")),
     }
@@ -225,8 +228,10 @@ def journey_for_context(context, config, *, capabilities=None):
         preview_proof = mapping(mapping(preview_target.contract).get("verification")) if preview_target else {}
         prepared = bool(preview_target and preview_target.source_sha == connection.verified_sha and preview_proof.get("status") in {"passed", "verified", "preview_verified"})
         fresh = prepared and build_proof_fresh(connection, preview_target, capabilities)
+        from .website_verification import current_ci_attestation
         proof = {"integrationVerified": prepared, "buildVerified": fresh, "verificationStale": prepared and not fresh,
-            "verifiedAdapter": preview_target.adapter if fresh else None}
+            "verifiedAdapter": preview_target.adapter if fresh else None,
+            "ciAttestationRequired": bool(fresh and current_ci_attestation(connection, selected, capabilities=capabilities) is None)}
         cleanup = connection.operations.filter(generation=connection.generation, action="cleanup", state="awaiting_deployment").order_by("-created_at").first()
         if cleanup:
             proof.update(cleanupAwaitingDeployment=True, cleanupOperationId=str(cleanup.pk))

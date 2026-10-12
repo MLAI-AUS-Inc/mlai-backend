@@ -215,7 +215,14 @@ GitHub account liveness probes do not require a selected repository or optional 
 The journey's GitHub permissions step is action-scoped. Workflows write is
 required only while the current-source integration needs verification-file
 installation or updates. Checks and Commit statuses read are required only
-while in-repository build proof is missing or stale. Once integration and
+while authenticated in-repository CI proof is missing or stale. Fresh selected
+target proof reuses its backend-validated `ci-verify` receipt only when the
+current source, target/contract, original operation/attempt, consent generation
+and deletion watermark match. Live verification then checks the repository HEAD
+and public listing/detail/404 artifact evidence without reading CI again.
+Fresh preview-only build metadata cannot substitute for that authenticated
+receipt; missing, mismatched or expired CI receipts expose the permission
+requirement before dispatch and still require reattestation. Once integration and
 build proof are current and the deployment is verified, publication does not
 require either optional profile. Permission receipts from earlier setup work
 cannot downgrade that publication readiness. Scans, article generation,

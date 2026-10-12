@@ -288,15 +288,20 @@ def _dispatch_prepare_step(op, context, config, step, *, journey=None):
                 body.get("detail") or "Website preparation could not start.", status=response.status_code,
                 retryable=body.get("retryable", response.status_code >= 500))
         return body
-    from .website_verification import discover_source_attestation, record_ci_attestation, verify_live_deployment
+    from .website_verification import current_ci_attestation, discover_source_attestation, record_ci_attestation, verify_live_deployment
     website = config.website_connection
     target = website.targets.filter(generation=website.generation, target_key=config.default_publish_target_id).first()
     if target is None:
         raise WebsiteAuthorityError("verified_target_required", "Waiting for articles build and render proof.", retryable=True)
-    proof = discover_source_attestation(website, target, website.verified_sha)
-    ci = record_ci_attestation(proof)
+    repository = (journey or {}).get("repository") or {}
+    receipt = current_ci_attestation(website, target, capabilities={"repositorySourceSha": repository.get("observedSourceSha"),
+        "repositoryBranch": repository.get("branch")}) if step == "verify" else None
+    if receipt is None:
+        proof = discover_source_attestation(website, target, website.verified_sha)
+        ci = record_ci_attestation(proof)
+        receipt = ci.receipt
     if step == "verify":
-        deployment = verify_live_deployment(config, data=ci.receipt)
+        deployment = verify_live_deployment(config, data=receipt)
         return {"status": "completed", "operation_id": str(deployment.pk)}
     return {"status": "completed", "operation_id": str(ci.pk)}
 

@@ -3,6 +3,7 @@
 import base64
 import json
 import re
+from datetime import timedelta
 from urllib.parse import quote
 
 from django.utils import timezone
@@ -157,6 +158,37 @@ def ci_attestation_for(connection, data):
     if op is None or any(str(op.receipt.get(key)) != str(data.get(key)) for key in IDENTITY_FIELDS):
         raise WebsiteAuthorityError("ci_attestation_required", "Authenticate and verify the exact CI evidence first.")
     return dict(op.receipt)
+
+
+def current_ci_attestation(connection, target, *, capabilities=None):
+    """Reuse only fresh, exact-target provider proof in its original operation."""
+    from .activation import mapping, VERIFICATION_MAX_AGE
+    from .incident_guards import proof_stamp
+    from .website_journey import build_proof_fresh
+    from .website_operations import deletion_epoch, validate_operation
+    if (target is None or getattr(target, "connection_id", None) != connection.pk or getattr(target, "generation", None) != connection.generation
+            or not target.verified_at or not build_proof_fresh(connection, target, capabilities or {})):
+        return None
+    proof = mapping(mapping(target.contract).get("verification"))
+    if proof.get("status") not in ("passed", "verified") or any(field not in proof for field in IDENTITY_FIELDS):
+        return None
+    expected = {**{key: value for key, value in contract_for(connection).items() if key in IDENTITY_FIELDS}, "source_sha": connection.verified_sha,
+        "target_id": target.target_key, "contract_digest": target.contract.get("contract_digest"), "deletion_epoch": deletion_epoch(connection)}
+    if any(str(proof.get(field)) != str(value) for field, value in expected.items()):
+        return None
+    try:
+        receipt = ci_attestation_for(connection, proof)
+        now = timezone.now()
+        stamp = proof_stamp(receipt, now=now)
+        if (receipt.get("allowed") is not True or receipt.get("attestation_origin") != "authenticated_ci"
+                or not stamp or not now - VERIFICATION_MAX_AGE <= stamp <= now + timedelta(minutes=5)):
+            return None
+        operation = validate_operation(connection, {field: receipt[field] for field in IDENTITY_FIELDS})
+        if operation is None:
+            return None
+    except (WebsiteAuthorityError, TypeError, ValueError, AttributeError):
+        return None
+    return receipt
 
 
 def verify_live_deployment(config, *, data):
