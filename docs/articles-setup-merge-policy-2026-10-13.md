@@ -36,9 +36,15 @@ the status GET merge. The PR records the exact before/after output.
 
 ```text
 .venv/bin/python scripts/test_without_database.py content_factory.tests_setup_merge_policy_unit
-Ran 15 tests
+Ran 16 tests
 OK
 ```
 
 Database-backed tests, live customer merges and production rollout are outside
 this validation. Rollback is a code revert; there is no schema change.
+
+The legacy database-backed merge fixture now replaces the shared policy’s branch-rule
+and protection HTTP reads as well as the REST merge transport. Local validation
+uses database-free equivalents, including a checks-read 403 and protection 403
+that still attempt the exact-head merge; the database-backed fixture is exercised
+only by remote CI.

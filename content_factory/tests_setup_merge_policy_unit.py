@@ -101,6 +101,19 @@ class SetupMergePolicyUnitTests(SimpleTestCase):
         self.assertEqual(self.merge_calls[0]["sha"], self.head)
         self.assertEqual(self.run.result["merge_status"], "merged")
 
+    def test_checks_read_403_still_uses_policy_and_attempts_fenced_merge(self):
+        original_provider = self.provider
+        def provider(method, url, **kwargs):
+            if url.endswith(("/status", "/check-runs")):
+                return response({"message": "Resource not accessible by integration"}, 403)
+            return original_provider(method, url, **kwargs)
+        self.provider = provider
+        result = self.merge()
+        self.assertEqual(result["status"], "pending")
+        self.assertEqual(len(self.merge_calls), 1)
+        self.assertEqual(self.merge_calls[0]["sha"], self.head)
+        self.assertEqual(self.run.result["merge_status"], "merged")
+
     def test_ruleset_requiring_review_asks_without_merging(self):
         self.rules = [{"type": "pull_request", "parameters": {"required_approving_review_count": 1}}]
         result = self.merge()
