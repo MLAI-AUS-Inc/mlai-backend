@@ -2,9 +2,9 @@
 
 14 October 2026.
 
-**Status:** proposal for owner approval; documentation only. No implementation, migration, database-backed validation, rollout or production repair is authorized by this note. Preparing or merging this documentation does not approve implementation.
+**Status:** proposal for owner approval; documentation only. Explicit owner approval of this design and its open decisions authorizes B5 implementation in separate draft PRs. Preparing or merging this documentation does not record that approval. Migrations, database-backed validation, releases, customer repository writes, production flags and production repair remain outside that implementation approval.
 
-**Source baseline:** backend `7caa968c91802a1d557ee065f40e772566aa818c`; Content Factory (CF) `a96a362a0c653eaddce6f36111e0d2a701eeef64`. The 13 October v3 runbook's B5 is the requirement. Phase A backend PR #1010 and CF PR #980 are dependencies, not assumed changes in these baselines. B1's separately reviewed failure contract is the classification interface.
+**Source baseline:** backend `7caa968c91802a1d557ee065f40e772566aa818c`; Content Factory (CF) `a96a362a0c653eaddce6f36111e0d2a701eeef64`. The 13 October v3 runbook's B5 is the requirement. Phase A backend PR #1010 and CF PR #980 are dependencies, not assumed changes in these baselines. The companion [B1 failure-contract draft PR #981](https://github.com/drsamdonegan/content-factory/pull/981) is the classification interface; its stable PR link follows the evolving design review.
 
 The owner should see the saved setup outcome even if a worker restarts or a response is lost. A delivery problem must not restart setup, consume another article charge, replace a causal setup failure, or ask the owner to repair service credentials. The backend may recover current state and verified milestones from a trusted snapshot; it may not invent approval or replay publication, refunds or messages while doing so.
 
@@ -153,4 +153,4 @@ Database-free tests establish control-flow contracts but not PostgreSQL transact
 4. Confirm the backend JSON namespace/preservation rules and audited idempotency keys for each enrolled setup effect. Any effect lacking safe replay remains outside v1 enrollment until separately fixed.
 5. Approve the pure CF `delivery_snapshot` mode and backend state-only projector separation; do not adopt current side-effectful GET/PUT functions as if they already met that contract.
 
-**Approval checkpoint:** the owner reviews this approach and these decisions before any B5 runtime implementation. A design PR approval is not permission for a migration, production data access, deployment, merge/publication action or customer repository push.
+**Approval checkpoint:** explicit owner approval of this design and its open decisions authorizes implementation in separate B5 draft PRs. Creating or merging this documentation does not imply that owner approval. Migration, database-backed validation, release, deployment, merge/publication, customer repository writes and production flag changes require their own specific authorization.
