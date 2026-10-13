@@ -120,6 +120,20 @@ def _cancel_prepare_child(op, config):
         idempotency_key=f"prepare-retry:{op.pk}:{op.payload.get('attempt', 1)}")
 
 
+def _checking_owner_wait(op):
+    """A permission, review, merge or deploy recheck preserves its saved child."""
+    if op.state != "needs_user" or op.receipt.get("failure_class") in {"repairable", "strategy", "unsupported"}:
+        return False
+    action = op.receipt.get("user_action") or {}
+    action_id = action.get("id") if isinstance(action, dict) else None
+    if action_id in {"merge_pr", "review_setup", "review_github_permissions", "authorize_github",
+            "deploy_site", "choose_articles_page"}:
+        return True
+    # Older receipts can lack the action object. Do not let an explicit retry or
+    # failed-run action inherit this compatibility treatment from its step name.
+    return action_id is None and op.receipt.get("current_step") in {"merge", "permissions", "verify", "ci-attestation"}
+
+
 def start_prepare(config, *, expected=None, company_id=None, user=None, retry=False):
     """Reuse one prepare receipt for the current consent generation."""
     connection = config.website_connection
@@ -139,7 +153,7 @@ def start_prepare(config, *, expected=None, company_id=None, user=None, retry=Fa
         if not created and retry and op.state in {"needs_attention", "needs_user", "cancelled", "stopped"}:
             cleanup_retry = (op.state == "needs_user" and op.receipt.get("reason_code") == SETUP_EXAMPLE_CLEANUP_CODE
                 and _setup_example_cleanup_action(op.receipt.get("user_action"), current) is not None)
-            check_again = op.state == "needs_user" and op.receipt.get("current_step") in {"merge", "permissions", "verify", "ci-attestation"}
+            check_again = _checking_owner_wait(op)
             if not check_again:
                 _cancel_prepare_child(op, config)
             op.state, op.next_attempt_at = "pending", None
@@ -235,13 +249,14 @@ def prepare_failure(op, step, error, *, now=None):
     if (getattr(error, "user_action", None) and (classification == "needs_user" or getattr(error, "result", None) is None)
             and (code not in PERMISSION_CODES or permission_needed)):
         op.state, op.next_attempt_at = "needs_user", None
-        op.receipt.update(status="needs_you", user_action=error.user_action)
+        op.receipt.update(status="needs_you", user_action=error.user_action, failure_class="needs_user", retryable=False)
     elif permission_needed:
         op.state, op.next_attempt_at = "needs_user", None
-        op.receipt.update(status="needs_you", user_action=_permission_action(op.connection))
+        op.receipt.update(status="needs_you", user_action=_permission_action(op.connection), failure_class="needs_user", retryable=False)
     elif code in AUTHORIZATION_CODES and code not in PERMISSION_CODES:
         op.state = "needs_user"
-        op.receipt.update(status="needs_you", user_action={"id": "authorize_github", "label": "Authorize GitHub"})
+        op.receipt.update(status="needs_you", user_action={"id": "authorize_github", "label": "Authorize GitHub"},
+            failure_class="needs_user", retryable=False)
         op.next_attempt_at = None
     elif code in DEPLOYMENT_WAIT_CODES or classification == "waiting":
         count = op.receipt.get("deployment_attempts", 0) + 1
