@@ -9030,7 +9030,7 @@ class ContentFactoryRunView(APIView):
         from .setup_delivery_receiver import is_setup_delivery, receive_setup_delivery
         if not isinstance(request.data, dict) or is_setup_delivery(request.data):
             return receive_setup_delivery(request.data, expected_kind="run_snapshot", path_run_id=run_id)
-        return self._put_legacy(request, run_id)
+        return self._put_legacy(request, run_id=run_id)
 
     @guarded_service_write("config_write", only_repository=True, portable=True, cancellation_receipts=True, observation_fallback=True)
     def _put_legacy(self, request, run_id: str):

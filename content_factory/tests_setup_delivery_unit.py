@@ -7,7 +7,7 @@ import json
 import os
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import Mock, patch
+from unittest.mock import Mock, PropertyMock, patch
 
 from django.test import SimpleTestCase, override_settings
 from django.utils import timezone
@@ -334,6 +334,44 @@ class SetupDeliveryChainTests(SimpleTestCase):
         # the setup-only 2 MiB schema must not replace it with a 422 size error.
         self.assertEqual(result.status_code, 409)
         self.legacy.assert_not_called()
+
+    def test_legacy_revoked_cleanup_put_preserves_url_identity_and_erasure_receipt(self):
+        self.run.workflow = "article_generation"
+        self.run.run_request.pop("setup_delivery_v1")
+        self.run.created_at = self.run.updated_at = timezone.now()
+        self.website.state, self.website.generation = "disconnected", 2
+        self.operation.action, self.operation.state = "disconnect", "cancelled"
+        self.operation.receipt = {"website_database_evidence_erased": True,
+            "artifact_retention": {"status": "retained"}}
+        erased = deepcopy(self.operation.receipt)
+        body = {"domain": self.run.domain, "workflow": "article_generation", "status": "cancelled",
+            "repository_inventory": {"discovery_complete": True},
+            "result": {"publishing_ready": True, "cleanup_pending": False}}
+        steps = Mock(order_by=Mock(return_value=[]))
+        with patch.object(receiver.ContentFactoryRun, "steps", PropertyMock(return_value=steps)):
+            request = APIRequestFactory().put("/api/content-factory/runs/" + self.run.run_id, body,
+                format="json", HTTP_X_API_KEY="fixture-service-key")
+            response = service_views.ContentFactoryRunView.as_view()(request, run_id=self.run.run_id)
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data["run_id"], self.run.run_id)
+        self.assertIs(response.data["result"]["cancellation_receipt"]["repository_authority"], False)
+        self.assertEqual(self.run.status, "cancelled")
+        self.assertNotIn("publishing_ready", self.run.result)
+        self.assertEqual(self.website.capabilities, {})
+        self.assertEqual(self.operation.receipt, erased)
+        self.operation.save.assert_not_called()
+        self.snapshot.assert_not_called()
+        self.legacy.assert_not_called()
+
+    def test_legacy_cleanup_put_still_rejects_another_tenant_before_writes(self):
+        body = {"domain": "another.example.org", "workflow": "article_generation", "status": "cancelled"}
+        request = APIRequestFactory().put("/api/content-factory/runs/" + self.run.run_id, body,
+            format="json", HTTP_X_API_KEY="fixture-service-key")
+        response = service_views.ContentFactoryRunView.as_view()(request, run_id=self.run.run_id)
+        self.assertEqual(response.status_code, 409)
+        self.assertEqual(response.data["code"], "website_scope_mismatch")
+        self.run.save.assert_not_called()
+        self.assertEqual(self.markers, [])
 
     def test_structured_repair_diagnostics_remain_valid_without_becoming_action_status(self):
         data = envelope(result={"repair_status": {"attempts": 2, "reason": "generated import needs repair"},
