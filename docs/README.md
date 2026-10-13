@@ -23,6 +23,9 @@ subsystem-specific contracts and runbooks.
 
 ## Content Factory
 
+- [Articles B1 failure contract](articles-b1-implementation-2026-10-14.md) — immutable taxonomy, trusted enrollment, emitter coverage and regression/provenance evidence
+- [Articles B5 setup delivery](articles-b5-implementation-2026-10-14.md) — durable receipts, pure reconciliation and initial implementation evidence
+
 - [Articles Phase 2 design approvals](articles-phase2-design-notes-2026-10-12.md) — all eight designs approved; implementation waits for Phase 1 deployment
 
 - [Article performance health evidence](article-performance-health.md) — publication age, scoped competitor observations and report metric provenance

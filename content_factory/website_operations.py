@@ -228,8 +228,10 @@ def reserve_workflow_operation(connection, *, workflow, payload):
                 or op.payload.get("request_digest") != digest or op.state in {"cancelled", "deleted", "denied"}):
             raise WebsiteAuthorityError("operation_key_conflict", "This request identity belongs to different or cancelled work.")
         payload.update(operation_id=str(op.pk), operation_attempt=op.payload.get("attempt", 1), deletion_epoch=deletion_epoch(connection))
+        from .setup_delivery_enrollment import enroll_setup_delivery
+        enroll_setup_delivery(op, payload, connection, workflow)
         op.receipt = {**(getattr(op, "receipt", None) or {}), "dispatch_outcome": "new_attempt" if created else "replayed"}
-        op.save(update_fields=["receipt", "updated_at"])
+        op.save(update_fields=["payload", "receipt", "updated_at"])
         from .website_connections import extend_owner_operation_contract
         extend_owner_operation_contract({key: payload[key] for key in OPERATION_FIELDS})
     return op
@@ -292,6 +294,12 @@ def prepare_receipt(op):
     retry_promise = r"will\s+(?:automatically\s+)?(?:retry|be retried)|retry\s+automatically|automatically\s+retry"
     promise = re.search(retry_promise, message, flags=re.IGNORECASE)
     stopped = op.state in {"needs_attention", "stopped"}
+    failure = receipt.get("failure")
+    if stopped and receipt.get("failure_taxonomy_policy_applied") and isinstance(failure, dict) and failure.get("schema_version") == 1 and failure.get("failure_class") == "unsupported":
+        # Internal B1 contract/authority failures have no invented owner retry.
+        receipt["status"] = "needs_attention"
+        receipt["message"] = failure["user_message"]
+        return receipt
     if not stopped and not promise:
         return receipt
     reason = re.sub(rf"(?:\b(?:it|we|this operation)\s+)?(?:{retry_promise})[^.!?]*(?:[.!?]|$)",
@@ -446,6 +454,9 @@ def advance_workflow_attempt(run):
         op.save(update_fields=["payload", "state", "updated_at"])
         fields = {"operation_id": str(op.pk), "operation_attempt": op.payload["attempt"], "deletion_epoch": deletion_epoch(website)}
         run.run_request = {**(run.run_request or {}), **contract_for(website), **fields}
+        from .setup_delivery_enrollment import enroll_setup_delivery
+        if enroll_setup_delivery(op, run.run_request, website, getattr(run, "workflow", "")):
+            op.save(update_fields=["payload", "updated_at"])
         run.save(update_fields=["run_request", "updated_at"])
         extend_owner_operation_contract(fields)
         return fields

@@ -1,0 +1,889 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "mlai/setup-delivery-v1.schema.json",
+  "title": "Enrolled website setup delivery v1",
+  "type": "object",
+  "required": [
+    "body",
+    "emitted_at",
+    "event_id",
+    "event_type",
+    "execution",
+    "kind",
+    "payload_sha256",
+    "run_id",
+    "schema_version",
+    "scope",
+    "state_sha256",
+    "workflow"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": 1,
+      "type": "integer"
+    },
+    "kind": {
+      "enum": [
+        "run_snapshot",
+        "setup_callback"
+      ]
+    },
+    "event_id": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9_.-]{0,99}$"
+    },
+    "event_type": {
+      "oneOf": [
+        {
+          "type": "null"
+        },
+        {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_.-]{0,99}$",
+          "enum": [
+            "article_system_setup_cancelled",
+            "article_system_setup_code_review_ready",
+            "article_system_setup_complete",
+            "article_system_setup_completed",
+            "article_system_setup_failed",
+            "article_system_setup_pr_create_failed",
+            "article_system_setup_pr_created",
+            "article_system_setup_preview_failed",
+            "article_system_setup_preview_fallback_ready",
+            "article_system_setup_preview_ready",
+            "article_system_setup_progress",
+            "generation_blocked",
+            "generation_failed",
+            "generation_recovering",
+            "scaffold_complete",
+            "scan_complete",
+            "scan_progress"
+          ]
+        }
+      ]
+    },
+    "run_id": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9_.-]{0,99}$"
+    },
+    "workflow": {
+      "enum": [
+        "article_system_setup",
+        "repo_scan"
+      ]
+    },
+    "emitted_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "scope": {
+      "type": "object",
+      "required": [
+        "domain",
+        "github_repo",
+        "website_connection_id",
+        "connection_generation",
+        "repository_id",
+        "operation_id",
+        "operation_attempt",
+        "deletion_epoch",
+        "client_request_id"
+      ],
+      "properties": {
+        "domain": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 255
+        },
+        "github_repo": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 255
+        },
+        "website_connection_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "connection_generation": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "repository_id": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "operation_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "operation_attempt": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "deletion_epoch": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "client_request_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 255
+        },
+        "app_root": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 255
+        },
+        "branch": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 255
+        },
+        "expected_source_sha": {
+          "type": "string",
+          "pattern": "^[a-fA-F0-9]{40}([a-fA-F0-9]{24})?$"
+        }
+      },
+      "additionalProperties": false
+    },
+    "execution": {
+      "type": "object",
+      "required": [
+        "generation",
+        "state_version"
+      ],
+      "properties": {
+        "generation": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "state_version": {
+          "type": "integer",
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false
+    },
+    "state_sha256": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$"
+    },
+    "payload_sha256": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$"
+    },
+    "body": {
+      "type": "object",
+      "required": [
+        "state_projection"
+      ],
+      "properties": {
+        "state_projection": {
+          "type": "object",
+          "required": [
+            "status",
+            "current_step",
+            "generation",
+            "state_version",
+            "approval_state",
+            "resume_available",
+            "failure",
+            "failure_occurrence_id",
+            "result",
+            "step_states",
+            "verification_summary",
+            "acceptance_summary"
+          ],
+          "properties": {
+            "status": {
+              "enum": [
+                "queued",
+                "running",
+                "completed",
+                "failed",
+                "blocked",
+                "cancelled",
+                "awaiting_delivery_mode",
+                "awaiting_confirmation",
+                "awaiting_approval",
+                "denied"
+              ]
+            },
+            "current_step": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 120
+            },
+            "generation": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "state_version": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "approval_state": {
+              "enum": [
+                "not_required",
+                "approval_required",
+                "approved",
+                "denied"
+              ]
+            },
+            "resume_available": {
+              "type": "boolean"
+            },
+            "failure": {
+              "oneOf": [
+                {
+                  "type": "object",
+                  "maxProperties": 0
+                },
+                {
+                  "$ref": "failure-envelope-v1.schema.json"
+                }
+              ]
+            },
+            "failure_occurrence_id": {
+              "oneOf": [
+                {
+                  "type": "null"
+                },
+                {
+                  "type": "string",
+                  "pattern": "^[A-Za-z0-9][A-Za-z0-9_.-]{0,99}$"
+                }
+              ]
+            },
+            "result": {
+              "type": "object",
+              "properties": {
+                "adopted": {
+                  "$ref": "#/$defs/bounded"
+                },
+                "adoption": {
+                  "$ref": "#/$defs/bounded"
+                },
+                "adoption_kit_preview_verified": {
+                  "$ref": "#/$defs/bounded"
+                },
+                "article_system": {
+                  "$ref": "#/$defs/bounded"
+                },
+                "article_system_setup": {
+                  "$ref": "#/$defs/bounded"
+                },
+                "baseline_build_blocked": {
+                  "$ref": "#/$defs/bounded"
+                },
+                "branch": {
+                  "$ref": "#/$defs/bounded"
+                },
+                "branch_commit_sha": {
+                  "$ref": "#/$defs/bounded"
+                },
+                "browser_verified": {
+                  "$ref": "#/$defs/bounded"
+                },
+                "build_verified": {
+                  "$ref": "#/$defs/bounded"
+                },
+                "changed_files_preview": {
+                  "$ref": "#/$defs/bounded"
+                },
+                "code_review_only": {
+                  "$ref": "#/$defs/bounded"
+                },
+                "code_review_reason": {
+                  "$ref": "#/$defs/bounded"
+                },
+                "commit_sha": {
+                  "$ref": "#/$defs/bounded"
+                },
+                "created_file_count": {
+                  "$ref": "#/$defs/bounded"
+                },
+                "directory_browser_repair": {
+                  "$ref": "#/$defs/bounded"
+                },
+                "directory_build_report": {
+                  "$ref": "#/$defs/bounded"
+                },
+                "directory_build_verification": {
+                  "$ref": "#/$defs/bounded"
+                },
+                "directory_dependency_report": {
+                  "$ref": "#/$defs/bounded"
+                },
+                "directory_quality_gates": {
+                  "$ref": "#/$defs/bounded"
+                },
+                "directory_quality_verification": {
+                  "$ref": "#/$defs/bounded"
+                },
+                "directory_static_report": {
+                  "$ref": "#/$defs/bounded"
+                },
+                "directory_visual_repair": {
+                  "$ref": "#/$defs/bounded"
+                },
+                "directory_visual_style_report": {
+                  "$ref": "#/$defs/bounded"
+                },
+                "error_code": {
+                  "$ref": "#/$defs/bounded"
+                },
+                "failed_step": {
+                  "$ref": "#/$defs/bounded"
+                },
+                "failure": {
+                  "$ref": "#/$defs/bounded"
+                },
+                "failure_class": {
+                  "$ref": "#/$defs/bounded"
+                },
+                "failure_fingerprint": {
+                  "$ref": "#/$defs/bounded"
+                },
+                "failure_kind": {
+                  "$ref": "#/$defs/bounded"
+                },
+                "failure_occurrence_id": {
+                  "$ref": "#/$defs/bounded"
+                },
+                "fallback_preview_url": {
+                  "$ref": "#/$defs/bounded"
+                },
+                "head_sha": {
+                  "$ref": "#/$defs/bounded"
+                },
+                "integration_manifest_path": {
+                  "$ref": "#/$defs/bounded"
+                },
+                "is_current_attempt": {
+                  "$ref": "#/$defs/bounded"
+                },
+                "last_scanned_sha": {
+                  "$ref": "#/$defs/bounded"
+                },
+                "live_preview": {
+                  "$ref": "#/$defs/bounded"
+                },
+                "live_preview_url": {
+                  "$ref": "#/$defs/bounded"
+                },
+                "manual_quality_gate_override": {
+                  "$ref": "#/$defs/bounded"
+                },
+                "merge_status": {
+                  "$ref": "#/$defs/bounded"
+                },
+                "merged_at": {
+                  "$ref": "#/$defs/bounded"
+                },
+                "next_action": {
+                  "$ref": "#/$defs/bounded"
+                },
+                "parent_run_id": {
+                  "$ref": "#/$defs/bounded"
+                },
+                "planned_file_count": {
+                  "$ref": "#/$defs/bounded"
+                },
+                "pr_number": {
+                  "$ref": "#/$defs/bounded"
+                },
+                "pr_url": {
+                  "$ref": "#/$defs/bounded"
+                },
+                "preview_commit_sha": {
+                  "$ref": "#/$defs/bounded"
+                },
+                "preview_runtime_unsupported": {
+                  "$ref": "#/$defs/bounded"
+                },
+                "preview_unsupported_reason": {
+                  "$ref": "#/$defs/bounded"
+                },
+                "preview_url": {
+                  "$ref": "#/$defs/bounded"
+                },
+                "publish_targets": {
+                  "$ref": "#/$defs/bounded"
+                },
+                "repair_diagnostics": {
+                  "$ref": "#/$defs/bounded"
+                },
+                "repair_state": {
+                  "$ref": "#/$defs/bounded"
+                },
+                "repair_status": {
+                  "$ref": "#/$defs/bounded"
+                },
+                "repo_execution_contract": {
+                  "$ref": "#/$defs/bounded"
+                },
+                "repo_head_sha": {
+                  "$ref": "#/$defs/bounded"
+                },
+                "repository_inventory": {
+                  "$ref": "#/$defs/bounded"
+                },
+                "requested_action": {
+                  "$ref": "#/$defs/bounded"
+                },
+                "requires_user_action": {
+                  "$ref": "#/$defs/bounded"
+                },
+                "rescan_run_id": {
+                  "$ref": "#/$defs/bounded"
+                },
+                "resume_generation": {
+                  "$ref": "#/$defs/bounded"
+                },
+                "retry_available": {
+                  "$ref": "#/$defs/bounded"
+                },
+                "retryable": {
+                  "$ref": "#/$defs/bounded"
+                },
+                "scan_run_id": {
+                  "$ref": "#/$defs/bounded"
+                },
+                "scan_summary": {
+                  "$ref": "#/$defs/bounded"
+                },
+                "setup_plan": {
+                  "oneOf": [
+                    {
+                      "type": "null"
+                    },
+                    {
+                      "type": "object",
+                      "properties": {
+                        "adapter_mode": {
+                          "oneOf": [
+                            {
+                              "type": "null"
+                            },
+                            {
+                              "type": "string",
+                              "maxLength": 4096
+                            }
+                          ]
+                        },
+                        "app_root": {
+                          "oneOf": [
+                            {
+                              "type": "null"
+                            },
+                            {
+                              "type": "string",
+                              "maxLength": 4096
+                            }
+                          ]
+                        },
+                        "article_route_path": {
+                          "oneOf": [
+                            {
+                              "type": "null"
+                            },
+                            {
+                              "type": "string",
+                              "maxLength": 4096
+                            }
+                          ]
+                        },
+                        "articles_route_path": {
+                          "oneOf": [
+                            {
+                              "type": "null"
+                            },
+                            {
+                              "type": "string",
+                              "maxLength": 4096
+                            }
+                          ]
+                        },
+                        "authors_path": {
+                          "oneOf": [
+                            {
+                              "type": "null"
+                            },
+                            {
+                              "type": "string",
+                              "maxLength": 4096
+                            }
+                          ]
+                        },
+                        "content_path_pattern": {
+                          "oneOf": [
+                            {
+                              "type": "null"
+                            },
+                            {
+                              "type": "string",
+                              "maxLength": 4096
+                            }
+                          ]
+                        },
+                        "entry_path": {
+                          "oneOf": [
+                            {
+                              "type": "null"
+                            },
+                            {
+                              "type": "string",
+                              "maxLength": 4096
+                            }
+                          ]
+                        },
+                        "framework": {
+                          "oneOf": [
+                            {
+                              "type": "null"
+                            },
+                            {
+                              "type": "string",
+                              "maxLength": 4096
+                            }
+                          ]
+                        },
+                        "planned_file_count": {
+                          "oneOf": [
+                            {
+                              "type": "null"
+                            },
+                            {
+                              "type": "integer",
+                              "minimum": 0
+                            }
+                          ]
+                        },
+                        "preview_route_path": {
+                          "oneOf": [
+                            {
+                              "type": "null"
+                            },
+                            {
+                              "type": "string",
+                              "maxLength": 4096
+                            }
+                          ]
+                        },
+                        "reason": {
+                          "oneOf": [
+                            {
+                              "type": "null"
+                            },
+                            {
+                              "type": "string",
+                              "maxLength": 4096
+                            }
+                          ]
+                        },
+                        "registry_path": {
+                          "oneOf": [
+                            {
+                              "type": "null"
+                            },
+                            {
+                              "type": "string",
+                              "maxLength": 4096
+                            }
+                          ]
+                        },
+                        "resources_path": {
+                          "oneOf": [
+                            {
+                              "type": "null"
+                            },
+                            {
+                              "type": "string",
+                              "maxLength": 4096
+                            }
+                          ]
+                        },
+                        "route_path": {
+                          "oneOf": [
+                            {
+                              "type": "null"
+                            },
+                            {
+                              "type": "string",
+                              "maxLength": 4096
+                            }
+                          ]
+                        },
+                        "route_pattern": {
+                          "oneOf": [
+                            {
+                              "type": "null"
+                            },
+                            {
+                              "type": "string",
+                              "maxLength": 4096
+                            }
+                          ]
+                        },
+                        "route_shell_path": {
+                          "oneOf": [
+                            {
+                              "type": "null"
+                            },
+                            {
+                              "type": "string",
+                              "maxLength": 4096
+                            }
+                          ]
+                        },
+                        "site_root": {
+                          "oneOf": [
+                            {
+                              "type": "null"
+                            },
+                            {
+                              "type": "string",
+                              "maxLength": 4096
+                            }
+                          ]
+                        },
+                        "status": {
+                          "oneOf": [
+                            {
+                              "type": "null"
+                            },
+                            {
+                              "type": "string",
+                              "maxLength": 4096
+                            }
+                          ]
+                        },
+                        "strategy": {
+                          "oneOf": [
+                            {
+                              "type": "null"
+                            },
+                            {
+                              "type": "string",
+                              "maxLength": 4096
+                            }
+                          ]
+                        },
+                        "support_level": {
+                          "oneOf": [
+                            {
+                              "type": "null"
+                            },
+                            {
+                              "type": "string",
+                              "maxLength": 4096
+                            }
+                          ]
+                        }
+                      },
+                      "additionalProperties": false
+                    }
+                  ]
+                },
+                "setup_run_id": {
+                  "$ref": "#/$defs/bounded"
+                },
+                "setup_status": {
+                  "$ref": "#/$defs/bounded"
+                },
+                "source_setup_run_id": {
+                  "$ref": "#/$defs/bounded"
+                },
+                "source_sha": {
+                  "$ref": "#/$defs/bounded"
+                },
+                "status": {
+                  "$ref": "#/$defs/bounded"
+                },
+                "tech_stack": {
+                  "$ref": "#/$defs/bounded"
+                },
+                "updated_file_count": {
+                  "$ref": "#/$defs/bounded"
+                },
+                "user_action": {
+                  "$ref": "#/$defs/bounded"
+                },
+                "user_action_count": {
+                  "$ref": "#/$defs/bounded"
+                },
+                "verification_kit_required": {
+                  "$ref": "#/$defs/bounded"
+                }
+              },
+              "additionalProperties": false
+            },
+            "step_states": {
+              "type": "object",
+              "maxProperties": 512,
+              "additionalProperties": {
+                "type": "object",
+                "required": [
+                  "status",
+                  "required",
+                  "attempts"
+                ],
+                "properties": {
+                  "status": {
+                    "enum": [
+                      "blocked",
+                      "cancelled",
+                      "completed",
+                      "failed",
+                      "pending",
+                      "running",
+                      "skipped"
+                    ]
+                  },
+                  "required": {
+                    "type": "boolean"
+                  },
+                  "attempts": {
+                    "type": "integer",
+                    "minimum": 0
+                  }
+                },
+                "additionalProperties": false
+              }
+            },
+            "verification_summary": {
+              "type": "object",
+              "additionalProperties": {
+                "$ref": "#/$defs/bounded"
+              },
+              "maxProperties": 512
+            },
+            "acceptance_summary": {
+              "type": "object",
+              "additionalProperties": {
+                "$ref": "#/$defs/bounded"
+              },
+              "maxProperties": 512
+            }
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    }
+  },
+  "additionalProperties": false,
+  "$defs": {
+    "scalar": {
+      "oneOf": [
+        {
+          "type": "null"
+        },
+        {
+          "type": "boolean"
+        },
+        {
+          "type": "number"
+        },
+        {
+          "type": "string",
+          "maxLength": 4096,
+          "pattern": "^[^\\u0000]*$"
+        }
+      ]
+    },
+    "bounded": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/scalar"
+        },
+        {
+          "type": "array",
+          "maxItems": 512,
+          "items": {
+            "$ref": "#/$defs/bounded"
+          }
+        },
+        {
+          "type": "object",
+          "maxProperties": 512,
+          "propertyNames": {
+            "maxLength": 256,
+            "not": {
+              "enum": [
+                "access_token",
+                "ack",
+                "acked_at",
+                "acknowledgment",
+                "api_key",
+                "authorization",
+                "command",
+                "content",
+                "cookies",
+                "credentials",
+                "delivery_intents",
+                "delivery_journal",
+                "delivery_receipts",
+                "delivery_v1",
+                "detail",
+                "details",
+                "diff",
+                "error",
+                "error_excerpt",
+                "error_message",
+                "excerpt",
+                "file_content",
+                "file_contents",
+                "github_access_token",
+                "github_token",
+                "headers",
+                "html",
+                "journal",
+                "lease",
+                "leases",
+                "log_excerpt",
+                "log_tail",
+                "logs",
+                "markup",
+                "message",
+                "output",
+                "output_excerpt",
+                "output_tail",
+                "password",
+                "patch",
+                "payload_sha256",
+                "private_key",
+                "raw_output",
+                "raw_response",
+                "refresh_token",
+                "response_body",
+                "route_source",
+                "script",
+                "service_credentials",
+                "snippet",
+                "source",
+                "source_code",
+                "source_content",
+                "stack_trace",
+                "state_sha256",
+                "stderr",
+                "stderr_tail",
+                "stdout",
+                "stdout_tail",
+                "template",
+                "template_body",
+                "token",
+                "traceback"
+              ]
+            }
+          },
+          "additionalProperties": {
+            "$ref": "#/$defs/bounded"
+          }
+        }
+      ]
+    }
+  },
+  "$comment": "Semantic validators enforce canonical digests, finite numbers, depth16,2MiB bytes,64KiB diagnostics, normalized forbidden keys, exact scope and outcome fences."
+}

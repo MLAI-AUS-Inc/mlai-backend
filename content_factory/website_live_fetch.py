@@ -43,7 +43,8 @@ class PinnedHTTPSConnection(http.client.HTTPSConnection):
 def fetch_live_route(url, domain, *, expected_status=200):
     """Fetch bounded HTML, repinning up to four canonical same-site redirects."""
     if expected_status not in {200, 404}:
-        raise WebsiteAuthorityError("deployment_route_unverified", "An explicit public route status is required.")
+        from .website_github_failure import taxonomy_active
+        raise WebsiteAuthorityError("deployment_route_contract_invalid" if taxonomy_active() else "deployment_route_unverified", "An explicit public route status is required.")
     original = urlsplit(url)
     if original.username or original.password or original.query or original.fragment:
         raise WebsiteAuthorityError("deployment_origin_invalid", "Verify the exact public website origin.")
@@ -55,7 +56,8 @@ def fetch_live_route(url, domain, *, expected_status=200):
         try:
             parsed, addresses = public_addresses(url, domain)
         except OSError as exc:
-            raise WebsiteAuthorityError("live_route_unavailable", "The public articles route is still deploying.") from exc
+            from .website_github_failure import taxonomy_active
+            raise WebsiteAuthorityError("deployment_route_transient" if taxonomy_active() else "live_route_unavailable", "The public articles route could not be reached.") from exc
         if (parsed.path.rstrip("/") or "/") != original_path:
             raise WebsiteAuthorityError("deployment_origin_invalid", "A redirect changed the public articles route.")
         client = PinnedHTTPSConnection(parsed.hostname, addresses[0])
@@ -71,6 +73,9 @@ def fetch_live_route(url, domain, *, expected_status=200):
                 continue
             if response.status != expected_status:
                 code = "live_route_unavailable" if response.status == 404 or response.status >= 500 else "deployment_route_unverified"
+                from .website_github_failure import taxonomy_active
+                if taxonomy_active():
+                    code = "deployment_route_transient" if response.status == 429 or response.status >= 500 else "live_route_unavailable" if response.status == 404 else "deployment_route_contract_invalid"
                 raise WebsiteAuthorityError(code, "The exact public articles route has not deployed successfully.")
             size = response.getheader("Content-Length")
             if size and (not size.isdigit() or int(size) > MAX_BYTES):
@@ -79,8 +84,12 @@ def fetch_live_route(url, domain, *, expected_status=200):
             if len(body) > MAX_BYTES:
                 raise WebsiteAuthorityError("deployment_body_oversized", "The public route exceeds the verification size limit.")
             return body, {key.lower(): value for key, value in response.getheaders()}
+        except ssl.SSLCertVerificationError as exc:
+            from .website_github_failure import taxonomy_active
+            raise WebsiteAuthorityError("deployment_tls_invalid" if taxonomy_active() else "live_route_unavailable", "The public articles route has invalid TLS evidence.") from exc
         except (OSError, http.client.HTTPException) as exc:
-            raise WebsiteAuthorityError("live_route_unavailable", "The public articles route is still deploying.") from exc
+            from .website_github_failure import taxonomy_active
+            raise WebsiteAuthorityError("deployment_route_transient" if taxonomy_active() else "live_route_unavailable", "The public articles route could not be reached.") from exc
         finally:
             if response is not None:
                 response.close()

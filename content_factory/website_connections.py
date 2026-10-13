@@ -98,9 +98,13 @@ def read_setup_merge_pull(connection, number):
         response = http_client.get(f"https://api.github.com/repos/{connection.github_repo}/pulls/{number}",
             headers={"Authorization": f"Bearer {credential.token}", "Accept": "application/vnd.github+json"}, timeout=(3, 15))
         response.raise_for_status()
-        return response.json()
+        payload = response.json()
+        if not isinstance(payload, dict):
+            raise ValueError("Invalid GitHub payload shape")
+        return payload
     except Exception as exc:
-        raise WebsiteAuthorityError("github_source_unavailable", "GitHub could not verify the setup merge. Retry when GitHub is available.", status=503, retryable=True) from exc
+        from .website_github_failure import github_failure
+        raise github_failure(exc, legacy_code="github_source_unavailable", legacy_message="GitHub could not verify the setup merge. Retry when GitHub is available.", legacy_retryable=True, source=True) from exc
 
 
 @contextmanager
@@ -323,9 +327,13 @@ def read_repository_native_target(connection):
         response = http_client.get(f"https://api.github.com/repos/{connection.github_repo}",
             headers={"Authorization": f"Bearer {credential.token}", "Accept": "application/vnd.github+json"}, timeout=(3, 15))
         response.raise_for_status()
-        return response.json()
+        payload = response.json()
+        if not isinstance(payload, dict):
+            raise ValueError("Invalid GitHub payload shape")
+        return payload
     except Exception as exc:
-        raise WebsiteAuthorityError("github_source_unavailable", "GitHub could not verify the current repository target. Retry when GitHub is available.", status=503, retryable=True) from exc
+        from .website_github_failure import github_failure
+        raise github_failure(exc, legacy_code="github_source_unavailable", legacy_message="GitHub could not verify the current repository target. Retry when GitHub is available.", legacy_retryable=True, source=True) from exc
 
 
 def verify_repository_native_target(connection):
@@ -356,6 +364,7 @@ def verify_repository_native_target(connection):
 def verify_repository_head(connection, expected_sha):
     """Recheck GitHub's selected branch before promoting publication readiness."""
     from urllib.parse import quote
+    from .website_contract import SHA_PATTERN
     from integrations import http_client
     from integrations.services.github_app import create_installation_access_token
     try:
@@ -363,9 +372,14 @@ def verify_repository_head(connection, expected_sha):
         response = http_client.get(f"https://api.github.com/repos/{connection.github_repo}/commits/{quote(connection.branch, safe='')}",
             headers={"Authorization": f"Bearer {credential.token}", "Accept": "application/vnd.github+json"}, timeout=(3, 15))
         response.raise_for_status()
-        current_sha = str(response.json().get("sha") or "")
+        payload = response.json()
+        from .website_github_failure import taxonomy_active
+        if taxonomy_active() and (not isinstance(payload, dict) or not isinstance(payload.get("sha"), str) or not SHA_PATTERN.fullmatch(payload["sha"])):
+            raise ValueError("Invalid GitHub source identity")
+        current_sha = str(payload.get("sha") or "")
     except Exception as exc:
-        raise WebsiteAuthorityError("github_source_unavailable", "GitHub could not verify the current repository source. Retry when GitHub is available.", status=503, retryable=True) from exc
+        from .website_github_failure import github_failure
+        raise github_failure(exc, legacy_code="github_source_unavailable", legacy_message="GitHub could not verify the current repository source. Retry when GitHub is available.", legacy_retryable=True, source=True) from exc
     if current_sha != expected_sha:
         raise WebsiteAuthorityError("website_source_changed", "The repository changed since this verification. Verify the current source again.")
     return current_sha
@@ -398,86 +412,89 @@ def authority_guard(data, *, action="read", domain="", github_repo="", require_s
     candidate = WebsiteConnection.objects.select_related("organization").filter(pk=contract["website_connection_id"]).first()
     if candidate is None:
         raise WebsiteAuthorityError("website_connection_not_found", "Website connection was not found.")
-    revision = payload.get("configuration_revision")
-    if revision is not None and str(revision) != str(candidate.configuration_version):
-        raise WebsiteAuthorityError("website_configuration_changed", "Refresh the reviewed website configuration.")
-    cleanup = action in {"worker_cleanup", "restoration", "restoration_read", "cancel_operation", "cancel_receipt"}
-    if cleanup:
-        validate_operation(candidate, {**payload, "action": action}, worker_cleanup=action == "worker_cleanup",
-            restoration=action in {"restoration", "restoration_read"}, cancellation=action == "cancel_operation", cancellation_receipt=action == "cancel_receipt")
-        if domain.casefold() != candidate.organization.domain.casefold() or (github_repo and github_repo.casefold() != candidate.github_repo.casefold()):
-            raise WebsiteAuthorityError("worker_cleanup_scope_mismatch", "Cleanup does not belong to this company and repository.")
-    else:
-        validate_authority(candidate, payload, action=action, domain=domain, github_repo=github_repo)
-        validate_operation(candidate, payload)
-        require_repository_write_policy(action=action, domain=candidate.organization.domain)
-    expected = str(payload.get("expected_source_sha") or payload.get("source_sha") or payload.get("repo_head_sha") or payload.get("last_scanned_sha") or "").lower()
-    if expected and not SHA_PATTERN.fullmatch(expected):
-        raise WebsiteAuthorityError("invalid_source_sha", "An exact source commit is required.", status=422)
-    observed = observed_source_sha(candidate)
-    if action in {"publish", "merge"} and observed and not expected:
-        raise WebsiteAuthorityError("website_source_required", "Current source identity is required.")
-    if action == "portable" and expected and observed and expected != observed:
-        raise WebsiteAuthorityError("website_source_changed", "The reviewed repository source changed.")
-    snapshot = (candidate.generation, candidate.configuration_version, candidate.state, candidate.installation_id, candidate.authorized_by_id, observed)
-    needs_head = not cleanup and action != "portable" and (bool(expected and observed and expected != observed) or action in {"publish", "merge"} or (action == "preview" and bool(expected)))
-    targets = payload.get("publish_targets") if isinstance(payload.get("publish_targets"), list) else []
-    target_promotion = action == "config_write" and any(isinstance(item, dict) and (item.get("verification") or {}).get("status") in {"passed", "verified", "preview_verified"} for item in targets)
-    needs_native = action in {"setup", "publish", "merge", "preview"} or target_promotion
-    # Partial checkpoints can retain an accepted publishing proof even when
-    # they omit publish_targets. Recheck that proof's source outside the lock;
-    # inventory without accepted proof does not promote publication readiness.
-    retains_publication_proof = action == "config_write" and bool(expected) and candidate.targets.filter(
-        generation=candidate.generation, source_sha=expected, verified_at__isnull=False,
-        capabilities__publishingReady=True).exists()
-    needs_head = needs_head or target_promotion or retains_publication_proof
-    if needs_native or needs_head:
-        require_unlocked_remote_call()
-    if needs_native:
-        verify_repository_native_target(candidate)
-    if needs_head:
-        verify_repository_head(candidate, expected or candidate.verified_sha)
-    with transaction.atomic():
-        Organization.objects.select_for_update().get(pk=candidate.organization_id)
-        connection = WebsiteConnection.objects.select_for_update().select_related("organization").get(pk=candidate.pk)
-        current = (connection.generation, connection.configuration_version, connection.state, connection.installation_id, connection.authorized_by_id, observed_source_sha(connection))
-        if current != snapshot:
-            raise WebsiteAuthorityError("website_connection_changed", "Website authority changed during verification. Refresh and retry.", retryable=True)
+    from .website_failure_scope import failure_scope
+    with failure_scope(candidate.organization_id):
+        revision = payload.get("configuration_revision")
+        if revision is not None and str(revision) != str(candidate.configuration_version):
+            raise WebsiteAuthorityError("website_configuration_changed", "Refresh the reviewed website configuration.")
+        cleanup = action in {"worker_cleanup", "restoration", "restoration_read", "cancel_operation", "cancel_receipt"}
         if cleanup:
-            validate_operation(connection, {**payload, "action": action}, worker_cleanup=action == "worker_cleanup",
+            validate_operation(candidate, {**payload, "action": action}, worker_cleanup=action == "worker_cleanup",
                 restoration=action in {"restoration", "restoration_read"}, cancellation=action == "cancel_operation", cancellation_receipt=action == "cancel_receipt")
+            if domain.casefold() != candidate.organization.domain.casefold() or (github_repo and github_repo.casefold() != candidate.github_repo.casefold()):
+                raise WebsiteAuthorityError("worker_cleanup_scope_mismatch", "Cleanup does not belong to this company and repository.")
         else:
-            validate_authority(connection, payload, action=action, domain=domain, github_repo=github_repo)
-            validate_operation(connection, payload)
-            require_repository_write_policy(action=action, domain=connection.organization.domain)
-        if require_selected and not OrganizationContentConfig.objects.filter(organization_id=connection.organization_id,
-                website_connection=connection, github_repo__iexact=connection.github_repo).exists():
-            raise WebsiteAuthorityError("website_connection_changed", "This website is no longer selected.")
-        target_key = contract.get("connection_target_id")
-        if not target_key and action in {"publish", "merge"}:
-            target_key = OrganizationContentConfig.objects.filter(website_connection=connection).values_list("default_publish_target_id", flat=True).first()
-        target = connection.targets.filter(target_key=target_key, generation=connection.generation).first() if target_key else None
-        if target_key and target is None:
-            raise WebsiteAuthorityError("website_target_changed", "The publishing target changed.")
-        if action in {"publish", "merge"} and target and target.adapter == "custom_contract_v1":
-            raise WebsiteAuthorityError("publishing_adapter_required", "A verified build contract needs an implemented article publishing adapter. Portable drafts remain available.")
-        if action in {"publish", "merge"} and (target is None or not target.verified_at or not target.capabilities.get("publishingReady") or target.source_sha != connection.verified_sha):
-            raise WebsiteAuthorityError("website_target_verification_required", "Select a verified publishing target.")
-        if action in {"publish", "merge"}:
-            from .activation import live_deployment_verified
-            if not live_deployment_verified(connection, target):
-                raise WebsiteAuthorityError("deployment_verification_required", "Verify the current public articles integration before publishing.")
-        heads_token = _verified_heads.set(_verified_heads.get() | {(str(connection.pk), connection.generation, expected)} if needs_head else _verified_heads.get())
-        native_token = _verified_native_targets.set(_verified_native_targets.get() | {(str(connection.pk), connection.generation)} if needs_native else _verified_native_targets.get())
-        depth_token = _authority_depth.set(_authority_depth.get() + 1)
-        try:
-            if needs_head and observed and expected != observed:
-                check_source_identity(connection, payload)
-            yield connection
-        finally:
-            _authority_depth.reset(depth_token)
-            _verified_heads.reset(heads_token)
-            _verified_native_targets.reset(native_token)
+            validate_authority(candidate, payload, action=action, domain=domain, github_repo=github_repo)
+            validate_operation(candidate, payload)
+            require_repository_write_policy(action=action, domain=candidate.organization.domain)
+        expected = str(payload.get("expected_source_sha") or payload.get("source_sha") or payload.get("repo_head_sha") or payload.get("last_scanned_sha") or "").lower()
+        if expected and not SHA_PATTERN.fullmatch(expected):
+            raise WebsiteAuthorityError("invalid_source_sha", "An exact source commit is required.", status=422)
+        observed = observed_source_sha(candidate)
+        if action in {"publish", "merge"} and observed and not expected:
+            raise WebsiteAuthorityError("website_source_required", "Current source identity is required.")
+        if action == "portable" and expected and observed and expected != observed:
+            raise WebsiteAuthorityError("website_source_changed", "The reviewed repository source changed.")
+        snapshot = (candidate.generation, candidate.configuration_version, candidate.state, candidate.installation_id, candidate.authorized_by_id, observed)
+        needs_head = not cleanup and action != "portable" and (bool(expected and observed and expected != observed) or action in {"publish", "merge"} or (action == "preview" and bool(expected)))
+        targets = payload.get("publish_targets") if isinstance(payload.get("publish_targets"), list) else []
+        target_promotion = action == "config_write" and any(isinstance(item, dict) and (item.get("verification") or {}).get("status") in {"passed", "verified", "preview_verified"} for item in targets)
+        needs_native = action in {"setup", "publish", "merge", "preview"} or target_promotion
+        # Partial checkpoints can retain an accepted publishing proof even when
+        # they omit publish_targets. Recheck that proof's source outside the lock;
+        # inventory without accepted proof does not promote publication readiness.
+        retains_publication_proof = action == "config_write" and bool(expected) and candidate.targets.filter(
+            generation=candidate.generation, source_sha=expected, verified_at__isnull=False,
+            capabilities__publishingReady=True).exists()
+        needs_head = needs_head or target_promotion or retains_publication_proof
+        if needs_native or needs_head:
+            require_unlocked_remote_call()
+        if needs_native:
+            verify_repository_native_target(candidate)
+        if needs_head:
+            verify_repository_head(candidate, expected or candidate.verified_sha)
+        with transaction.atomic():
+            Organization.objects.select_for_update().get(pk=candidate.organization_id)
+            connection = WebsiteConnection.objects.select_for_update().select_related("organization").get(pk=candidate.pk)
+            current = (connection.generation, connection.configuration_version, connection.state, connection.installation_id, connection.authorized_by_id, observed_source_sha(connection))
+            if current != snapshot:
+                from .website_github_failure import taxonomy_active
+                raise WebsiteAuthorityError("website_authority_raced" if taxonomy_active() else "website_connection_changed", "Website authority changed during verification. Refresh and retry.", retryable=True)
+            if cleanup:
+                validate_operation(connection, {**payload, "action": action}, worker_cleanup=action == "worker_cleanup",
+                    restoration=action in {"restoration", "restoration_read"}, cancellation=action == "cancel_operation", cancellation_receipt=action == "cancel_receipt")
+            else:
+                validate_authority(connection, payload, action=action, domain=domain, github_repo=github_repo)
+                validate_operation(connection, payload)
+                require_repository_write_policy(action=action, domain=connection.organization.domain)
+            if require_selected and not OrganizationContentConfig.objects.filter(organization_id=connection.organization_id,
+                    website_connection=connection, github_repo__iexact=connection.github_repo).exists():
+                raise WebsiteAuthorityError("website_connection_changed", "This website is no longer selected.")
+            target_key = contract.get("connection_target_id")
+            if not target_key and action in {"publish", "merge"}:
+                target_key = OrganizationContentConfig.objects.filter(website_connection=connection).values_list("default_publish_target_id", flat=True).first()
+            target = connection.targets.filter(target_key=target_key, generation=connection.generation).first() if target_key else None
+            if target_key and target is None:
+                raise WebsiteAuthorityError("website_target_changed", "The publishing target changed.")
+            if action in {"publish", "merge"} and target and target.adapter == "custom_contract_v1":
+                raise WebsiteAuthorityError("publishing_adapter_required", "A verified build contract needs an implemented article publishing adapter. Portable drafts remain available.")
+            if action in {"publish", "merge"} and (target is None or not target.verified_at or not target.capabilities.get("publishingReady") or target.source_sha != connection.verified_sha):
+                raise WebsiteAuthorityError("website_target_verification_required", "Select a verified publishing target.")
+            if action in {"publish", "merge"}:
+                from .activation import live_deployment_verified
+                if not live_deployment_verified(connection, target):
+                    raise WebsiteAuthorityError("deployment_verification_required", "Verify the current public articles integration before publishing.")
+            heads_token = _verified_heads.set(_verified_heads.get() | {(str(connection.pk), connection.generation, expected)} if needs_head else _verified_heads.get())
+            native_token = _verified_native_targets.set(_verified_native_targets.get() | {(str(connection.pk), connection.generation)} if needs_native else _verified_native_targets.get())
+            depth_token = _authority_depth.set(_authority_depth.get() + 1)
+            try:
+                if needs_head and observed and expected != observed:
+                    check_source_identity(connection, payload)
+                yield connection
+            finally:
+                _authority_depth.reset(depth_token)
+                _verified_heads.reset(heads_token)
+                _verified_native_targets.reset(native_token)
 
 
 def scoped_run_contract(run):
@@ -703,10 +720,21 @@ def verify_repository_access(*, user, repo):
         response = http_client.get(f"https://api.github.com/repos/{repo}", headers={"Authorization": f"Bearer {credential.token}", "Accept": "application/vnd.github+json"}, timeout=(3, 15))
         response.raise_for_status()
         metadata = response.json()
-        if not isinstance(metadata.get("id"), int) or metadata["id"] < 1 or str(metadata.get("full_name") or "").casefold() != repo.casefold():
+        from .website_github_failure import taxonomy_active
+        if taxonomy_active() and (not isinstance(metadata, dict) or type(metadata.get("id")) is not int or metadata["id"] < 1 or not isinstance(metadata.get("full_name"), str) or not isinstance(metadata.get("default_branch"), str) or not metadata["default_branch"]):
+            raise ValueError("Invalid GitHub repository payload")
+        if not isinstance(metadata.get("id"), int) or metadata["id"] < 1:
             raise ValueError("Repository identity mismatch")
+        if metadata["full_name"].casefold() != repo.casefold():
+            from .website_github_failure import taxonomy_active
+            if taxonomy_active():
+                raise WebsiteAuthorityError("github_repository_identity_mismatch", "GitHub returned a different repository identity.")
+            raise ValueError("Repository identity mismatch")
+    except WebsiteAuthorityError:
+        raise
     except Exception as exc:
-        raise WebsiteAuthorityError("github_repository_unavailable", "GitHub could not verify access to this selected repository. Reconnect GitHub and retry.") from exc
+        from .website_github_failure import github_failure
+        raise github_failure(exc, legacy_code="github_repository_unavailable", legacy_message="GitHub could not verify access to this selected repository. Reconnect GitHub and retry.") from exc
     return {"repository_id": metadata["id"], "github_repo": metadata["full_name"], "installation_id": str(inst.installation_id), "branch": str(metadata.get("default_branch") or "")}
 
 
@@ -721,7 +749,9 @@ def bind_website(config, *, user, repo, app_root="", branch="", site_url="", rec
     branch = str(branch or "").strip()
     if branch and (len(branch) > 255 or branch.startswith(("-", "/")) or branch.endswith(("/", ".", ".lock")) or any(piece in branch for piece in ("..", "@{", "\\", " ", "~", "^", ":", "?", "*", "[")) or any(ord(char) < 32 for char in branch)):
         raise WebsiteAuthorityError("invalid_repository_branch", "Use a valid branch name for the selected repository.", status=400)
-    metadata = verify_repository_access(user=user, repo=repo)
+    from .website_failure_scope import failure_scope
+    with failure_scope(config.organization_id):
+        metadata = verify_repository_access(user=user, repo=repo)
     with transaction.atomic():
         Organization.objects.select_for_update().get(pk=config.organization_id)
         config.refresh_from_db()

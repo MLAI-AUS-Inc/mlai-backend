@@ -43,11 +43,21 @@ def installation_grants(connection):
             result.update(checks=ci.get("checks") in {"read", "write"}, statuses=ci.get("statuses") in {"read", "write"})
         except GitHubCIEvidencePermissionRequired:
             pass
-    except (GitHubPermissionLookupUnavailable, http_client.RequestException):
+    except (GitHubPermissionLookupUnavailable, http_client.RequestException) as exc:
         # Provider outages must not be diagnosed as an owner's missing grant.
+        from .website_github_failure import taxonomy_active, github_failure
+        if taxonomy_active():
+            error = github_failure(exc, legacy_code="github_unavailable", legacy_message="GitHub permission checks are temporarily unavailable.", legacy_retryable=True)
+            result.update(reasonCode=error.code, reason=str(error), retryable=error.retryable)
+            return result
         result.update(reasonCode="github_unavailable", reason="GitHub permission checks are temporarily unavailable.", retryable=True)
         return result
-    except GitHubAppTokenError:
+    except GitHubAppTokenError as exc:
+        from .website_github_failure import taxonomy_active, github_failure
+        if taxonomy_active():
+            error = github_failure(exc, legacy_code="github_access_required", legacy_message="Check the selected GitHub installation.")
+            result.update(reasonCode=error.code, reason=str(error), retryable=error.retryable)
+            return result
         result.update(reasonCode="github_access_required", reason="Check the selected GitHub installation.", retryable=False)
         return result
     cache.set(_cache_key(identifier), result, timeout=60)

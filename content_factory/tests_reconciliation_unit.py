@@ -18,6 +18,7 @@ class SplitRunRecoveryTests(SimpleTestCase):
         run.domain, run.workflow = "fixture.test", "article_generation"
         query = Mock()
         query.filter.return_value = query
+        query.exclude.return_value = query
         query.order_by.return_value = query
         query.__getitem__ = Mock(return_value=[run])
         with patch.object(reconciliation.ContentFactoryRun.objects, "filter", return_value=query), \

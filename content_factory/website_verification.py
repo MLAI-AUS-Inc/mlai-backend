@@ -208,7 +208,8 @@ def verify_live_deployment(config, *, data):
         if not re.fullmatch(r"[a-f0-9]{64}", str(artifact_digest or "")):
             raise WebsiteAuthorityError("deployment_marker_required", "Prepare a certified route with a reviewed artifact digest marker.")
         if ci_proof.get("artifact_digest") != artifact_digest:
-            raise WebsiteAuthorityError("deployment_marker_unverified", "The repository CI proof must verify this exact reviewed live artifact marker.")
+            from .website_github_failure import taxonomy_active
+            raise WebsiteAuthorityError("ci_marker_identity_mismatch" if taxonomy_active() else "deployment_marker_unverified", "The repository CI proof must verify this exact reviewed live artifact marker.")
         routes = ci_proof.get("verified_routes")
         template = str(target.contract.get("route_template") or "")
         pattern = re.escape(template).replace(r"\{slug\}", r"[A-Za-z0-9][A-Za-z0-9_-]*")

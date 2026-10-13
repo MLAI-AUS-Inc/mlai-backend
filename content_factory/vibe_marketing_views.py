@@ -638,8 +638,10 @@ def _refresh_article_editorial_payload(*, organization, payload):
             )
         brief = article_brief_for_catalog(config.pillar_strategy, payload)
     except DatabaseError:
+        from .website_failure_scope import taxonomy_enabled
+        code = "editorial_catalog_transient" if taxonomy_enabled(organization.pk) else "editorial_catalog_unavailable"
         return Response(
-            {"detail": "Article policy could not be checked. Reload before trying again.", "field": "editorialBrief", "code": "editorial_catalog_unavailable"},
+            {"detail": "Article policy could not be checked. Reload before trying again.", "field": "editorialBrief", "code": code},
             status=status.HTTP_503_SERVICE_UNAVAILABLE,
         )
     except ValueError as exc:
@@ -11768,6 +11770,10 @@ def _github_account_for_context(context, config, *, force=False):
 
 def _verify_github_repository_access(context, config, *, force=False):
     """Verify inventory reads independently from write authorization and rollout."""
+    from .website_failure_scope import taxonomy_enabled
+    if ((taxonomy_enabled(context.organization.pk) or taxonomy_enabled(context.organization.pk, observe=True))
+            and getattr(config, "website_connection", None) is not None):
+        return _verify_github_repository_access_b1(context, config, force=force)
     repo = str(getattr(config, "github_repo", "") or "").strip()
     if not repo:
         return {"verified": False, "reasonCode": "github_access_required"}
@@ -11839,6 +11845,70 @@ def _verify_github_repository_access(context, config, *, force=False):
             if probe is not None:
                 try:
                     http_client.delete("https://api.github.com/installation/token", headers={"Authorization": f"Bearer {probe.token}"}, timeout=(3, 8))
+                except http_client.RequestException:
+                    pass
+    cache.set(key, result, 60 if result.get("verified") else 15)
+    request_cache[key] = {"result": dict(result), "fresh": True}
+    return result
+
+
+def _verify_github_repository_access_b1(context, config, *, force=False):
+    """Read typed provider evidence for an explicitly enrolled saved resource."""
+    from .website_failure_scope import failure_scope
+    from .website_github_failure import github_failure
+    from .website_contract import SHA_PATTERN, evidence_digest
+    from .website_failure_contract import load_registry
+    from integrations.services.github_app import create_installation_access_token, require_installation_repository_permissions
+    website = config.website_connection
+    repo = str(config.github_repo or "")
+    key = "articles-repository-access-b1:" + evidence_digest({"organization": context.organization.pk,
+        "user": context.profile.user.pk, "repo": repo, "connection": str(website.pk), "generation": website.generation,
+        "revision": website.configuration_version, "source": website.verified_sha, "registry": load_registry()["sha256"]})
+    request_cache = context.__dict__.setdefault("_website_taxonomy_probes", {})
+    previous = request_cache.get(key)
+    if previous and (not force or previous["fresh"]):
+        return dict(previous["result"])
+    cached = None if force else cache.get(key)
+    if isinstance(cached, dict):
+        request_cache[key] = {"result": dict(cached), "fresh": False}
+        return cached
+    credential, response = None, None
+    with failure_scope(context.organization.pk):
+        try:
+            if not _github_account_for_context(context, config).get("owned") or not repo:
+                raise WebsiteAuthorityError("github_access_required", "Authorize the selected repository.")
+            credential = create_installation_access_token(installation_id=website.installation_id, repository=repo,
+                repository_id=website.repository_id, permission_mode="read", use_cache=False)
+            permissions = require_installation_repository_permissions(website.installation_id)
+            headers = {"Authorization": f"Bearer {credential.token}", "Accept": "application/vnd.github+json"}
+            response = http_client.get(f"https://api.github.com/repos/{quote(repo, safe='/')}", headers=headers, timeout=(3, 8))
+            response.raise_for_status()
+            payload = response.json()
+            if not isinstance(payload, dict) or type(payload.get("id")) is not int or not isinstance(payload.get("full_name"), str):
+                raise ValueError("Invalid repository payload")
+            if payload["id"] != website.repository_id or payload["full_name"].casefold() != repo.casefold():
+                raise WebsiteAuthorityError("github_repository_identity_mismatch", "GitHub returned a different repository identity.")
+            branch = website.branch
+            if not isinstance(payload.get("default_branch"), str) or not payload["default_branch"] or not branch:
+                raise ValueError("Invalid repository branch")
+            response = http_client.get(f"https://api.github.com/repos/{quote(repo, safe='/')}/commits/{quote(branch, safe='')}",
+                headers=headers, timeout=(3, 8))
+            response.raise_for_status()
+            head = response.json()
+            if not isinstance(head, dict) or not isinstance(head.get("sha"), str) or not SHA_PATTERN.fullmatch(head["sha"]):
+                raise ValueError("Invalid source identity")
+            result = {"verified": True, "writable": permissions.get("contents") == "write" and permissions.get("pull_requests") == "write",
+                "branch": branch, "sha": head["sha"], "checkedAt": timezone.now().isoformat()}
+        except WebsiteAuthorityError as exc:
+            result = {"verified": False, "reasonCode": exc.code, "retryable": exc.retryable}
+        except Exception as exc:
+            error = github_failure(exc, legacy_code="github_unavailable", legacy_message="GitHub access is temporarily unavailable.",
+                legacy_retryable=True, response=response)
+            result = {"verified": False, "reasonCode": error.code, "retryable": error.retryable}
+        finally:
+            if credential is not None:
+                try:
+                    http_client.delete("https://api.github.com/installation/token", headers={"Authorization": f"Bearer {credential.token}"}, timeout=(3, 8))
                 except http_client.RequestException:
                     pass
     cache.set(key, result, 60 if result.get("verified") else 15)

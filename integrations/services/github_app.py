@@ -28,6 +28,22 @@ class GitHubPermissionLookupUnavailable(GitHubAppTokenError):
     """Provider permission evidence is temporarily unavailable."""
 
 
+class GitHubPermissionPayloadInvalid(GitHubPermissionLookupUnavailable):
+    """Malformed grant data; the superclass retains the Phase A compatibility view."""
+
+
+class GitHubPermissionIdentityMismatch(GitHubPermissionLookupUnavailable):
+    """Grant evidence describes a different installation, not a transient outage."""
+
+
+class GitHubInstallationAccessRequired(GitHubAppTokenError):
+    """A provider-proved suspended installation or missing repository grant."""
+
+
+class GitHubPlatformConfigurationInvalid(GitHubAppTokenError):
+    """The service's App credential or configured provider contract is invalid."""
+
+
 WORKFLOW_PERMISSION_DETAIL = (
     "The GitHub App owner must review and enable Workflows: Read and write, "
     "then the repository owner must approve the installation permission update. "
@@ -84,7 +100,7 @@ def _github_app_jwt() -> str:
     app_id = str(getattr(settings, "GITHUB_APP_ID", "") or "").strip()
     private_key = _github_app_private_key()
     if not app_id or not private_key:
-        raise GitHubAppTokenError("GitHub App credentials are not configured.")
+        raise GitHubPlatformConfigurationInvalid("GitHub App credentials are not configured.")
 
     now = int(time.time())
     payload = {
@@ -137,15 +153,24 @@ def _temporary_permission_failure(response) -> bool:
                 (headers.get("Retry-After") or headers.get("X-RateLimit-Remaining") == "0")))
 
 
+def _failure_taxonomy_active():
+    """Use only a trusted backend resource scope, never a token request field."""
+    from content_factory.website_failure_scope import taxonomy_enabled
+    return taxonomy_enabled() or taxonomy_enabled(observe=True)
+
+
 def _profile_grant_permissions(payload, *, profile) -> dict[str, str]:
     if not isinstance(payload, dict) or not isinstance(payload.get("permissions"), dict):
-        raise GitHubPermissionLookupUnavailable("GitHub permission evidence is temporarily unavailable.")
+        raise GitHubPermissionPayloadInvalid("GitHub permission evidence is invalid.")
+    if _failure_taxonomy_active() and any(not isinstance(key, str) or not key or not isinstance(value, str) or value not in {"read", "write", "admin", "none"}
+                                        for key, value in payload["permissions"].items()):
+        raise GitHubPermissionPayloadInvalid("GitHub permission evidence is invalid.")
     permissions = _normalize_permissions(payload["permissions"])
     if payload.get("suspended_at"):
-        raise GitHubAppTokenError("The selected GitHub installation is suspended.")
+        raise GitHubInstallationAccessRequired("The selected GitHub installation is suspended.")
     repository_modes = {"write"} if profile == "workflow_files" else {"read", "write"}
     if any(permissions.get(key) not in repository_modes for key in ("contents", "pull_requests")):
-        raise GitHubAppTokenError("The selected GitHub installation lacks the required repository permissions.")
+        raise GitHubInstallationAccessRequired("The selected GitHub installation lacks the required repository permissions.")
     if profile == "workflow_files" and permissions.get("workflows") != "write":
         raise GitHubWorkflowPermissionRequired(WORKFLOW_PERMISSION_DETAIL)
     if profile == "ci_evidence" and any(permissions.get(key) not in {"read", "write"} for key in ("checks", "statuses")):
@@ -192,11 +217,14 @@ def _require_installation_profile_permissions(installation_id, *, profile):
         if _temporary_permission_failure(response):
             raise GitHubPermissionLookupUnavailable("GitHub permission evidence is temporarily unavailable.")
         if response.status_code != 200:
-            raise GitHubAppTokenError("The selected GitHub installation could not be verified.")
+            raise GitHubPlatformConfigurationInvalid("The selected GitHub installation could not be verified.")
         try:
             payload = response.json()
         except (TypeError, ValueError) as exc:
-            raise GitHubPermissionLookupUnavailable("GitHub permission evidence is temporarily unavailable.") from exc
+            raise GitHubPermissionPayloadInvalid("GitHub permission evidence is invalid.") from exc
+        # A returned identity is never ignored; older provider fixtures omitted it.
+        if kind == "installation" and _failure_taxonomy_active() and isinstance(payload, dict) and (type(payload.get("id")) is not int or payload["id"] != int(identifier)):
+            raise GitHubPermissionIdentityMismatch("GitHub installation identity does not match.")
         permissions = _profile_grant_permissions(payload, profile=profile)
         if kind == "installation":
             installation_permissions = permissions
@@ -286,6 +314,8 @@ def create_installation_access_token(
         timeout=(3, 20),
     )
     if response.status_code not in {200, 201}:
+        if (permission_profile in {"workflow_files", "ci_evidence"} or _failure_taxonomy_active()) and _temporary_permission_failure(response):
+            raise GitHubPermissionLookupUnavailable("GitHub credential service is temporarily unavailable.")
         if permission_profile in {"workflow_files", "ci_evidence"}:
             if _temporary_permission_failure(response):
                 raise GitHubPermissionLookupUnavailable("GitHub permission evidence is temporarily unavailable.")
@@ -293,7 +323,7 @@ def create_installation_access_token(
             # grants to distinguish a raced approval from repository access.
             if response.status_code == 403:
                 _require_installation_profile_permissions(normalized_installation_id, profile=permission_profile)
-            raise GitHubAppTokenError("The selected GitHub repository credential could not be issued.")
+            raise GitHubPlatformConfigurationInvalid("The selected GitHub repository credential could not be issued.")
         try:
             error_payload = response.json()
         except (TypeError, ValueError):
