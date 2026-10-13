@@ -274,3 +274,53 @@ class DiscoveryTests(SlackDmIoAuthorityFixture, TransactionTestCase):
                 dm.discover_grants_if_due()
             self.assertEqual(calls, [0, 5, 10])
             self.assertEqual(cleanup.call_count, 3)
+
+
+    def set_pending_open(self, grant, *, served):
+        from integrations.services.slack_open_requests import KEY as OPEN_KEY
+        now = timezone.now().timestamp()
+        grant.connection.sync_cursor = {KEY: {"served": served, "due": 0, "open_requested_at": now}, OPEN_KEY: {
+            "synthetic": {"state": "pending", "until": now + 900, "requested_at": now},
+        }}
+        grant.connection.save(update_fields=["sync_cursor"])
+
+    def test_pending_open_owner_claimed_before_older_served_owners(self):
+        opened = self.make_grant(402, "TOPEN")
+        self.set_pending_open(opened, served=timezone.now().timestamp())
+        self.assertEqual(claim_discovery(300, prefer_opens=True).grant_id, opened.pk)
+
+    def test_open_owners_round_robin(self):
+        other = self.make_grant(403, self.grant.slack_workspace_id)
+        now = timezone.now().timestamp()
+        self.set_pending_open(self.grant, served=now - 2)
+        self.set_pending_open(other, served=now - 1)
+        first = claim_discovery(300, prefer_opens=True)
+        self.assertEqual(first.grant_id, self.grant.pk)
+        finish_discovery(first)
+        self.release_due()
+        self.assertEqual(claim_discovery(300, prefer_opens=True).grant_id, other.pk)
+
+    def test_claim_preserves_and_finish_clears_marker(self):
+        from integrations.services.slack_open_requests import KEY as OPEN_KEY
+        self.set_pending_open(self.grant, served=0)
+        stamp = self.grant.connection.sync_cursor[KEY]["open_requested_at"]
+        lease = claim_discovery(300, prefer_opens=True)
+        self.connection.refresh_from_db()
+        self.assertEqual(self.connection.sync_cursor[KEY]["open_requested_at"], stamp)
+        self.connection.sync_cursor[OPEN_KEY] = {}
+        self.connection.save(update_fields=["sync_cursor"])
+        finish_discovery(lease)
+        self.connection.refresh_from_db()
+        self.assertNotIn("open_requested_at", self.connection.sync_cursor[KEY])
+
+    @override_settings(MESSAGE_SYNC_ENABLED=True)
+    def test_discovery_precedence_open_recovery_prefetch_directory(self):
+        from integrations.services import slack_open_requests, slack_owner_inventory
+        for stop, expected in (("open", ["open"]), ("recovery", ["open", "recovery"]), ("prefetch", ["open", "recovery", "prefetch"]), ("directory", ["open", "recovery", "prefetch", "directory"])):
+            seen = []
+            def turn(name):
+                seen.append(name)
+                return name == stop
+            with self.subTest(stop=stop), patch.object(dm, "_reconcile_registration_cleanup"), patch.object(slack_open_requests, "process_next_open", side_effect=lambda *_: turn("open")), patch("integrations.services.message_sync.device_recovery.recover_recent_conversation", side_effect=lambda *_, **__: turn("recovery")), patch.object(slack_open_requests, "prefetch_unread_source", side_effect=lambda *_, **__: turn("prefetch")), patch.object(slack_owner_inventory, "collect_private_page"), patch.object(slack_owner_inventory, "collect_public_page"), patch.object(slack_owner_inventory, "hydrate_source_names"), patch.object(dm, "_call_slack_with_grant_authority", side_effect=lambda *_, **__: (turn("directory") and {"channels": [], "response_metadata": {}})):
+                dm.discover_conversations(self.grant)
+            self.assertEqual(seen, expected)

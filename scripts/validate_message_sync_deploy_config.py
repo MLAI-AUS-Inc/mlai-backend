@@ -17,6 +17,14 @@ def validate(env):
         raise ValueError("SLACK_OWNER_INVENTORY_ENABLED must be true or false")
     if inventory_enabled == "true" and enabled != "true":
         raise ValueError("SLACK_OWNER_INVENTORY_ENABLED requires MESSAGE_SYNC_ENABLED=true")
+    for key, default in (("MESSAGE_SYNC_OPEN_PRIORITY_ENABLED", "true"), ("MESSAGE_SYNC_UNREAD_PREFETCH_ENABLED", "false")):
+        if env.get(key, default).lower() not in {"true", "false"}:
+            raise ValueError(f"{key} must be true or false")
+    cap = env.get("MESSAGE_SYNC_UNREAD_PREFETCH_PER_HOUR", "6")
+    if not re.fullmatch(r"[1-9][0-9]{0,2}", cap) or int(cap) > 256:
+        raise ValueError("MESSAGE_SYNC_UNREAD_PREFETCH_PER_HOUR must be an integer from 1 to 256")
+    if env.get("MESSAGE_SYNC_UNREAD_PREFETCH_ENABLED", "false").lower() == "true" and (enabled != "true" or inventory_enabled != "true"):
+        raise ValueError("MESSAGE_SYNC_UNREAD_PREFETCH_ENABLED requires MESSAGE_SYNC_ENABLED=true and SLACK_OWNER_INVENTORY_ENABLED=true")
     user_app = env.get("MESSAGE_SYNC_SLACK_USER_APP_ID", "")
     if user_app:
         if not re.fullmatch(r"A[A-Z0-9]+", user_app) or not re.fullmatch(r"[0-9a-f]{32}", env.get("MESSAGE_SYNC_SLACK_USER_SIGNING_SECRET", "")):

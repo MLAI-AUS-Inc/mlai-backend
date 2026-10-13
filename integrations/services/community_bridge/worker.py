@@ -61,6 +61,10 @@ from integrations.services.slack_workspace_users import warm_workspace_directory
 
 logger = logging.getLogger(__name__)
 WORKER_ID = f"{socket.gethostname()}:{os.getpid()}"[:100]
+_discovery_heartbeat_at = 0.0
+_discovery_completed = 0
+_discovery_failed = 0
+_discovery_error = ""
 
 
 class ParentMappingPending(Exception):
@@ -1054,4 +1058,24 @@ async def _warm_workspace_directory_turn() -> None:
 def _maintain_chat_accounts():
     from community_chat.account_bans import process_account_ban_revocations
     process_account_ban_revocations()
-    discover_grants_if_due()
+    outcome = discover_grants_if_due()
+    _record_discovery_heartbeat(outcome)
+    return outcome
+
+
+def _record_discovery_heartbeat(outcome):
+    """Aggregate turns from either entrypoint and write no more than every 5 s."""
+    global _discovery_heartbeat_at, _discovery_completed, _discovery_failed, _discovery_error
+    if not message_sync_enabled():
+        return
+    if outcome is not None:
+        _discovery_completed += outcome.completed
+        _discovery_failed += outcome.failed
+        _discovery_error = outcome.error_code
+    now = time.monotonic()
+    if now - _discovery_heartbeat_at >= 5:
+        heartbeat(WORKER_ID, "discovery", completed=_discovery_completed,
+                  failed=_discovery_failed, error_code=_discovery_error)
+        _discovery_heartbeat_at = now
+        _discovery_completed = _discovery_failed = 0
+        _discovery_error = ""

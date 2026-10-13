@@ -299,3 +299,38 @@ class SlackProgressivePresentationTests(SimpleTestCase):
             self.assertFalse(catalog.source_limited_without_pending(self.grant, "DTEST"))
             rows.exists.return_value = False
             self.assertTrue(catalog.source_limited_without_pending(self.grant, "DTEST"))
+
+
+    def test_open_latency_proof_preserves_first_request_on_rewrite(self):
+        marker = SimpleNamespace(metadata={"open_request_id": "synthetic-request", "open_requested_at": self.now.timestamp() - 40})
+        self.conversation.deliveries.filter.return_value.first.return_value = marker
+        with patch.object(presentation.telemetry, "record_latency") as latency, self.assertLogs(presentation.logger) as logs:
+            self.record()
+        proof = self.state.verified_ranges["presentation"]
+        self.assertEqual(proof["open_request_id"], "synthetic-request")
+        self.assertEqual(proof["open_requested_at"], marker.metadata["open_requested_at"])
+        latency.assert_called_once()
+        self.assertEqual(latency.call_args.args[0], "open_presented")
+        self.assertNotIn("DTEST", str(logs.output))
+        marker.metadata["open_request_id"] = "another-open"
+        with patch.object(presentation.telemetry, "record_latency") as repeated:
+            self.record([self.delivery(source_message_id=f"{int(self.now.timestamp()) - 1}.000001")])
+        repeated.assert_not_called()
+        self.assertEqual(self.state.verified_ranges["presentation"]["open_request_id"], "synthetic-request")
+
+    def test_awaiting_presentation_checks_current_authority_scopes(self):
+        self.state.private_conversation_id = self.conversation.pk
+        self.state.private_conversation = self.conversation
+        self.assertTrue(presentation.awaiting_presentation(self.state))
+        self.record()
+        self.assertFalse(presentation.awaiting_presentation(self.state))
+        self.conversation.participant_hash = "changed-audience"
+        self.assertTrue(presentation.awaiting_presentation(self.state))
+        self.state.verified_ranges["publication"] = {"scope": publication._audience(self.conversation)["scope"]}
+        self.assertFalse(presentation.awaiting_presentation(self.state))
+        self.state.verified_ranges = {}
+        for obj, field, value in ((self.grant, "status", "paused"), (self.grant, "revoked_at", self.now), (self.conversation, "status", "paused"), (self.conversation, "mlai_channel_id", None)):
+            old = getattr(obj, field)
+            setattr(obj, field, value)
+            self.assertFalse(presentation.awaiting_presentation(self.state))
+            setattr(obj, field, old)

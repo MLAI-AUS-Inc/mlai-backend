@@ -151,3 +151,45 @@ class MinuteCoverageTests(SimpleTestCase):
         self.assertEqual(result["scopes"]["synthetic"]["admitted"], 10)
         self.assertIsNone(result["scopes"]["missing"])
         self.assertIsNone(telemetry.snapshot(["synthetic"], minutes=1, now=61)["scopes"]["synthetic"])
+
+
+class OpenLatencyTests(SimpleTestCase):
+    def setUp(self):
+        telemetry.cache.clear()
+
+    def test_latency_records_minute_and_hour_buckets_without_identifiers(self):
+        queued = []
+        with patch.object(telemetry, "time", return_value=3661), patch.object(telemetry, "_enqueue", side_effect=queued.append):
+            telemetry.record_latency("open_presented", 120001)
+            telemetry.record_latency("open_presented", 30000)
+        telemetry._write_batch(queued)
+        result = telemetry.latency_snapshot(minutes=1, now=3720)
+        self.assertEqual(result["kinds"]["open_presented"], {
+            "count": 2, "sum_ms": 150001, "over_30s": 1, "over_120s": 1,
+        })
+        hourly = telemetry.latency_snapshot(hours=1, now=7200)
+        self.assertEqual(hourly["kinds"], result["kinds"])
+        self.assertIsNone(result["kinds"]["open_ready"])
+        self.assertIsNone(telemetry.latency_snapshot(minutes=1, now=3661)["kinds"]["open_presented"])
+
+    def test_latency_rejects_unknown_kind_and_sink_failure_never_stalls(self):
+        with self.assertRaises(ValueError):
+            telemetry.record_latency("private source", 1)
+        with patch.object(telemetry, "_enqueue", side_effect=RuntimeError()):
+            telemetry.record_latency("open_ready", 100)
+
+
+class OpenStatusTests(SimpleTestCase):
+    def test_status_sections_are_content_free_and_expired_requests_are_ignored(self):
+        from integrations.management.commands.message_sync_status import summarize_open_discovery
+        from integrations.services.message_sync.discovery import KEY as DISCOVERY_KEY
+        from integrations.services.slack_open_requests import KEY as OPEN_KEY
+        cursors = [{DISCOVERY_KEY: {"expires": 110, "error": "BudgetDeferred"}, OPEN_KEY: {
+            "device:private": {"state": "pending", "until": 200, "requested_at": 60},
+            "other": {"state": "importing", "until": 200, "requested_at": 80},
+            "expired": {"state": "pending", "until": 99, "requested_at": 1},
+        }}, {DISCOVERY_KEY: {"error": "TimeoutError"}}, {DISCOVERY_KEY: {"error": "private body"}}]
+        discovery, opens = summarize_open_discovery(cursors, now=100)
+        self.assertEqual(discovery, {"leased_grants": 1, "budget_deferred_grants": 1, "error_codes": {"TimeoutError": 1, "sync_error": 1}})
+        self.assertEqual(opens, {"pending": 1, "importing": 1, "error": 0, "oldest_pending_age_seconds": 40, "oldest_importing_age_seconds": 20})
+        self.assertNotIn("private", str((discovery, opens)))

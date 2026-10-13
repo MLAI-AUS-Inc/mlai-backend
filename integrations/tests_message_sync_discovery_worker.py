@@ -28,6 +28,7 @@ class DiscoveryWorkerCadenceTests(IsolatedAsyncioTestCase):
                     patch.object(worker.asyncio, "sleep", side_effect=sleep),
                     patch("community_chat.account_bans.process_account_ban_revocations", side_effect=lambda: events.append("revoke")),
                     patch.object(worker, "discover_grants_if_due", side_effect=lambda: events.append("claim")),
+                    patch.object(worker, "_record_discovery_heartbeat"),
                     self.assertRaises(asyncio.CancelledError),
                 ):
                     await worker._run_discovery_loop()
@@ -43,6 +44,7 @@ class DiscoveryWorkerCadenceTests(IsolatedAsyncioTestCase):
             patch.object(worker.asyncio, "to_thread", side_effect=dispatch),
             patch("community_chat.account_bans.process_account_ban_revocations", side_effect=lambda: events.append("revoke")),
             patch.object(worker, "discover_grants_if_due", side_effect=lambda: events.append("claim")),
+                    patch.object(worker, "_record_discovery_heartbeat"),
         ):
             await worker.CommunityBridgeDiscordClient.slack_dm_discovery_loop.coro(SimpleNamespace())
         self.assertEqual(events, ["revoke", "claim"])
@@ -68,3 +70,23 @@ class DiscoveryWorkerCadenceTests(IsolatedAsyncioTestCase):
                 client.slack_dm_discovery_loop.change_interval.assert_called_once_with(seconds=expected)
                 client.slack_dm_discovery_loop.start.assert_called_once()
                 client.slack_user_directory_loop.start.assert_called_once()
+
+
+class DiscoveryHealthTests(IsolatedAsyncioTestCase):
+    async def test_heartbeat_coalesces_turns_and_budget_deferral_is_not_failure(self):
+        from integrations.services.message_sync.discovery import DiscoveryOutcome
+        with override_settings(MESSAGE_SYNC_ENABLED=True), patch.multiple(worker, _discovery_heartbeat_at=0.0, _discovery_completed=0, _discovery_failed=0, _discovery_error=""), patch.object(worker.time, "monotonic", side_effect=[10, 11, 12, 15]), patch.object(worker, "heartbeat") as beat:
+            worker._record_discovery_heartbeat(DiscoveryOutcome(completed=1))
+            worker._record_discovery_heartbeat(DiscoveryOutcome(error_code="BudgetDeferred"))
+            worker._record_discovery_heartbeat(DiscoveryOutcome(failed=1, error_code="TimeoutError"))
+            worker._record_discovery_heartbeat(None)
+        self.assertEqual(beat.call_count, 2)
+        self.assertEqual(beat.call_args.kwargs, {"completed": 0, "failed": 1, "error_code": "TimeoutError"})
+
+    async def test_fourth_discovery_turn_reserves_normal_fairness(self):
+        from itertools import count
+        from integrations.services.message_sync import discovery
+        with override_settings(MESSAGE_SYNC_OPEN_PRIORITY_ENABLED=True), patch.object(discovery, "_turns", count()), patch.object(discovery, "claim_discovery", return_value=None) as claim:
+            for _ in range(8):
+                self.assertIsNone(discovery.discover_once(300))
+        self.assertEqual([call.kwargs["prefer_opens"] for call in claim.call_args_list], [True, True, True, False] * 2)

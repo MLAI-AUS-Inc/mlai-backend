@@ -1,7 +1,8 @@
 """Database-owned leases and budgets shared by every worker process.
 
-A claim is one page in one conversation. Import priority never outranks owner
-fairness; ordinary slots retain least-recently-served conversation rotation.
+A claim is one page in one conversation. Import slots can prefer a recently
+opened private room across owners until its first acknowledged message. Ordinary
+slots retain least-recently-served workspace, owner and conversation rotation.
 Checkpoints contain cursors and boundaries only.
 """
 
@@ -11,6 +12,7 @@ import uuid
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 
+from django.conf import settings
 from django.db import connection, transaction
 from django.db.models import BigIntegerField, Case, Exists, F, Max, Min, OuterRef, Q, Subquery, Value, When
 from django.db.models.functions import Coalesce
@@ -156,6 +158,10 @@ def claim_job(*, kinds=None, lease_seconds=120, prefer_import=False):
         ))
         state_order.append("import_priority")
     state_order.extend([F("history_turn").asc(nulls_first=True), "id"])
+    if prefer_import and getattr(settings, "MESSAGE_SYNC_OPEN_PRIORITY_ENABLED", True):
+        opened = _claim_open_state(candidates, due, workspaces, lease_seconds)
+        if opened is not None:
+            return opened
     for workspace_id in workspaces:
         with transaction.atomic():
             if connection.vendor == "postgresql":
@@ -178,24 +184,9 @@ def claim_job(*, kinds=None, lease_seconds=120, prefer_import=False):
                 lane = {"kind": "archive"}
             if lane is None:
                 continue
-            job = due.filter(state=state, kind=lane["kind"]).select_for_update(skip_locked=True).order_by(
-                F("last_served_at").asc(nulls_first=True), "due_at", "id",
-            ).first()
-            if job is None:
-                continue
-            previous_job_turn = job.last_served_at
-            token = uuid.uuid4()
-            # A caller may start before another worker but acquire the claim
-            # lock afterwards. Record service order inside the serialized
-            # decision so owner turns and lease lifetimes cannot run backwards.
-            claimed_at = timezone.now()
-            job.lease_token = token
-            job.lease_expires_at = claimed_at + timedelta(seconds=max(1, lease_seconds))
-            job.last_served_at = claimed_at
-            job.attempts += 1
-            job.save(update_fields=["lease_token", "lease_expires_at", "last_served_at", "attempts"])
-            return JobLease(job.pk, state.pk, token, state.authority_generation,
-                            job.kind, job.source_object_key, dict(job.checkpoint), previous_job_turn)
+            lease = _lease_job(state, due, lane["kind"], lease_seconds)
+            if lease is not None:
+                return lease
     return None
 
 
@@ -297,3 +288,49 @@ def heartbeat(worker_id, lane, *, completed=0, failed=0, error_code=""):
     if completed:
         values["progressed_at"] = timezone.now()
     BridgeWorkerHeartbeat.objects.filter(pk=row.pk).update(**values)
+
+
+def _lease_job(state, due, kind, lease_seconds):
+    """Lease one due page under the already held state/workspace claim locks."""
+    job = due.filter(state=state, kind=kind).select_for_update(skip_locked=True).order_by(
+        F("last_served_at").asc(nulls_first=True), "due_at", "id",
+    ).first()
+    if job is None:
+        return None
+    previous_job_turn = job.last_served_at
+    token = uuid.uuid4()
+    # A caller may start before another worker but acquire the claim
+    # lock afterwards. Record service order inside the serialized
+    # decision so owner turns and lease lifetimes cannot run backwards.
+    claimed_at = timezone.now()
+    job.lease_token = token
+    job.lease_expires_at = claimed_at + timedelta(seconds=max(1, lease_seconds))
+    job.last_served_at = claimed_at
+    job.attempts += 1
+    job.save(update_fields=["lease_token", "lease_expires_at", "last_served_at", "attempts"])
+    return JobLease(job.pk, state.pk, token, state.authority_generation,
+            job.kind, job.source_object_key, dict(job.checkpoint), previous_job_turn)
+
+
+def _claim_open_state(candidates, due, workspaces, lease_seconds):
+    """Use only import slots for first-page opens, preserving workspace locks."""
+    opened = candidates.filter(foreground_refresh=True, private_conversation__isnull=False).exclude(
+        Q(verified_ranges__has_key="presentation") | Q(verified_ranges__has_key="publication"),
+    )
+    for workspace_id in workspaces:
+        with transaction.atomic():
+            if connection.vendor == "postgresql":
+                with connection.cursor() as cursor:
+                    cursor.execute("SELECT pg_try_advisory_xact_lock(hashtextextended(%s, 0))", [f"message-sync-history:{workspace_id}"])
+                    if not cursor.fetchone()[0]:
+                        continue
+            state = opened.filter(workspace_id=workspace_id).select_for_update(
+                skip_locked=True, of=("self",),
+            ).order_by(F("history_turn").asc(nulls_first=True), "id").first()
+            if state is None:
+                continue
+            for kind in ("archive", "head"):
+                lease = _lease_job(state, due, kind, lease_seconds)
+                if lease is not None:
+                    return lease
+    return None

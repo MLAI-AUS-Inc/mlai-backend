@@ -33,8 +33,10 @@ flowchart LR
   separate owner turn for each of its conversations.
 - Four independent history execution slots replace batch barriers: a slow
   page cannot stop a free slot from claiming another conversation. Two slots
-  prefer unfinished, known-recent private imports (within the selected window)
-  and first public archives **within** the selected owner's turn. Two slots
+  prefer recently opened private rooms across owners until their first
+  presentation/publication proof when `MESSAGE_SYNC_OPEN_PRIORITY_ENABLED=true`
+  (default). Other unfinished, known-recent private imports and first public
+  archives stay within the selected owner's turn. Two slots
   preserve ordinary least-recently-served repair rotation. Current conversation
   leases still exclude simultaneous head/archive/thread writes to one room.
   Owner turns are aggregated once per claim, then the worker selects a room
@@ -71,7 +73,10 @@ flowchart LR
 ## Timing objectives and capacity
 
 The requested initial-import objective is **within two hours**, with useful
-recent conversations becoming ready earlier. This is a service objective to
+recent conversations becoming ready earlier. Explicit opens have a separate
+measurement target: first presentation below 20 seconds at p50 and 60 seconds at
+p95, and oldest pending opens below 30 seconds at p95. These targets require
+production baseline and post-rollout measurements. This is a service objective to
 measure, not an unconditional guarantee for arbitrary Slack accounts.
 
 For the verified internal/Marketplace configuration, history and replies each
@@ -186,3 +191,30 @@ Sources: [Slack rate limits](https://docs.slack.dev/apis/web-api/rate-limits/),
 [IM marker events](https://docs.slack.dev/reference/events/im_marked/),
 [members](https://docs.slack.dev/reference/methods/conversations.members/),
 [profiles](https://docs.slack.dev/reference/methods/users.info/).
+
+
+## Responsiveness changes prepared on 13 October 2026
+
+Pending explicit opens carry an opaque timestamp preference and receive at most
+three of four discovery turns. FIFO within an owner, durable provider delays,
+consent and lease checks remain in force. The first archive page and private
+message delivery receive open priority until the room has an acknowledged
+presentation; ordinary history slots and thread repair retain fairness.
+Scheduled possibly-unread read re-probes use background admission. Fresh source
+activity, pending hints, explicit marks and receipts retain foreground priority.
+Read-state observation age must be measured after rollout against the approved
+p95 objective under five minutes; source-code tests do not prove this objective.
+
+`message_sync_status` now includes open latency aggregates, live open queue ages
+and discovery liveness/backlog/error counts. Both discovery loops heartbeat at
+most every five seconds, without counting shared-budget pacing as failure.
+`--check` remains unchanged pending deployed discovery heartbeat evidence.
+
+Unread prefetch is implemented behind `MESSAGE_SYNC_UNREAD_PREFETCH_ENABLED`
+(default `false`) and the per-owner hourly cap
+`MESSAGE_SYNC_UNREAD_PREFETCH_PER_HOUR` (default `6`). Opens and device recovery
+run first. Prefetch rechecks source consent/membership/window and includes every
+verified device; the import proceeds at normal background priority. Activation
+still requires the B2/B3 measurements and the human operations rollout. See the
+[implementation record](chat-responsiveness-implementation-2026-10-13.md) for
+source validation and outstanding production checks.

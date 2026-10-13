@@ -154,3 +154,47 @@ class MessageSyncDeployConfigTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ResponsivenessConfigTests(unittest.TestCase):
+    flags = {"MESSAGE_SYNC_OPEN_PRIORITY_ENABLED": "true", "MESSAGE_SYNC_UNREAD_PREFETCH_ENABLED": "false", "MESSAGE_SYNC_UNREAD_PREFETCH_PER_HOUR": "6"}
+
+    def test_flags_are_wired_through_every_configuration_surface(self):
+        root = Path(__file__).resolve().parents[1]
+        for key, default in self.flags.items():
+            with self.subTest(key=key):
+                self.assertIn(key + ": ${{ vars." + key + " || '" + default + "' }}", (root / ".github/workflows/deploy.yml").read_text())
+                self.assertIn('install_remote_env_value ' + key + ' "$' + key + '"', (root / "deploy.sh").read_text())
+                self.assertIn(key, (root / "scripts/upsert_env_value_from_stdin.sh").read_text())
+                self.assertIn(key, (root / "mlai/settings.py").read_text())
+                self.assertIn(key + "=" + default, (root / ".env.example").read_text())
+
+    def test_invalid_flags_and_unread_prefetch_without_sync_and_inventory_rejected(self):
+        validate({})
+        for key in self.flags:
+            with self.subTest(key=key), self.assertRaises(ValueError):
+                validate({key: "yes"})
+        for amount in ("0", "257", "-1", "1.5", "6\nOTHER=true"):
+            with self.subTest(amount=amount), self.assertRaises(ValueError):
+                validate({"MESSAGE_SYNC_UNREAD_PREFETCH_PER_HOUR": amount})
+        with self.assertRaises(ValueError):
+            validate({"MESSAGE_SYNC_UNREAD_PREFETCH_ENABLED": "true"})
+
+    def test_new_inputs_upsert_atomically_and_reject_invalid_values(self):
+        root = Path(__file__).resolve().parents[1]
+        with tempfile.TemporaryDirectory() as directory:
+            sandbox = Path(directory)
+            (sandbox / "scripts").mkdir()
+            shutil.copy(root / "scripts/upsert_env_value_from_stdin.sh", sandbox / "scripts")
+            env_file = sandbox / ".env"
+            for key in self.flags:
+                env_file.write_text("KEEP_ME=yes\n")
+                numeric = key.endswith("PER_HOUR")
+                values = ("6", "256", "0", "257", "6\nINJECT=true") if numeric else ("true", "false", "yes", "TRUE", "true\nINJECT=true")
+                for value in values:
+                    before = env_file.read_text()
+                    result = subprocess.run(["bash", "scripts/upsert_env_value_from_stdin.sh", key], cwd=sandbox, input=value, text=True, capture_output=True, timeout=5)
+                    accepted = value in ({"6", "256"} if numeric else {"true", "false"})
+                    self.assertEqual(result.returncode == 0, accepted, result.stderr)
+                    if not accepted:
+                        self.assertEqual(env_file.read_text(), before)

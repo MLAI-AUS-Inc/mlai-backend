@@ -551,7 +551,7 @@ def _validate_open_source(grant, authority, row):
 
 def request_open(user, *, public_key, slack_conversation_id):
     """Resolve a ready mirror or queue one bounded owner/device-scoped import."""
-    from integrations.services.slack_open_requests import complete_open_locked, enqueue_open_locked
+    from integrations.services.slack_open_requests import KEY as OPEN_KEY, complete_open_locked, enqueue_open_locked, log_open_latency
 
     grant, authority, device, _ = _authorized(user, public_key)
     source_id = str(slack_conversation_id or "").strip()
@@ -589,9 +589,55 @@ def request_open(user, *, public_key, slack_conversation_id):
             if (device.public_key in (mirror.participant_buzz_pubkeys or [])
                     and mirror.mlai_channel_id
                     and ready_for_display(mirror, public_key=device.public_key)):
+                request = ((connection.sync_cursor or {}).get(OPEN_KEY) or {}).get(f"{device.pk}:{source_id}")
+                if request and request.get("until", 0) > time.time():
+                    log_open_latency("open_ready", request, grant.pk)
                 complete_open_locked(connection, device, source_id)
                 return 200, {"state": "ready", "mlai_channel_id": str(mirror.mlai_channel_id)}
         if _grant_history_days(grant) and row.source_archived is True:
             raise InventoryError("inventory_history_consent_required", 409)
         payload = enqueue_open_locked(grant, connection, authority, device, row)
+        provisional = _provisional_channel_id(grant, connection, authority, device, mirror)
+        if provisional is not None:
+            payload["provisional_channel_id"] = provisional
     return 202, payload
+
+
+def _provisional_channel_id(grant, connection, authority, device, mirror):
+    """Return an importing room only from a current nonlegacy adapter audience."""
+    from integrations.models import SlackDmMirrorDelivery
+    from integrations.services.slack_open_requests import KEY as OPEN_KEY
+    from integrations.services.slack_dm_registration_ledger import (
+        REGISTRATION_STATE_PREFIX, REGISTRATION_STATE_ACTIVE,
+        REGISTRATION_STATE_CLEANUP_PENDING, REGISTRATION_STATE_CLEANUP_PROCESSING,
+        grant_consent_generation, registration_channel_id, registration_generation,
+        registration_participant_hash, registration_slack_participant_ids, registration_state,
+    )
+    if mirror is None or mirror.status != "live" or not mirror.mlai_channel_id:
+        return None
+    request = ((connection.sync_cursor or {}).get(OPEN_KEY) or {}).get(f"{device.pk}:{mirror.slack_conversation_id}")
+    if (not isinstance(request, dict) or request.get("state") != "importing"
+            or request.get("until", 0) <= time.time()
+            or request.get("epoch") != device_epoch(grant, authority, device, state=state_for(connection, authority))
+            or request.get("public_key") != device.public_key
+            or device.public_key not in (mirror.participant_buzz_pubkeys or [])):
+        return None
+    rows = list(SlackDmMirrorDelivery.objects.filter(
+        conversation=mirror, source_platform="buzz",
+        source_message_id__startswith=REGISTRATION_STATE_PREFIX, operation="create",
+    ).order_by("id"))
+    if any(row.status in {"pending", "processing"} or registration_state(row) in {
+        REGISTRATION_STATE_CLEANUP_PENDING, REGISTRATION_STATE_CLEANUP_PROCESSING,
+    } for row in rows):
+        return None
+    for row in reversed(rows):
+        metadata = row.metadata or {}
+        if (row.status == "completed" and metadata.get("legacy") is False
+                and registration_state(row) == REGISTRATION_STATE_ACTIVE
+                and registration_channel_id(row) == str(mirror.mlai_channel_id)
+                and registration_generation(row) == grant_consent_generation(grant)
+                and registration_participant_hash(row) == mirror.participant_hash
+                and registration_slack_participant_ids(row) == sorted(mirror.participant_slack_ids or [])
+                and device.public_key in (metadata.get("participant_pubkeys") or [])):
+            return str(mirror.mlai_channel_id)
+    return None

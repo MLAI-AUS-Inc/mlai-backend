@@ -2741,6 +2741,9 @@ def discover_conversations(
             cycle_started_at=discovery_started_at,
         ):
             return 1
+        from integrations.services.slack_open_requests import prefetch_unread_source
+        if prefetch_unread_source(grant, authority, profile_cache=profile_cache, cycle_started_at=discovery_started_at):
+            return 1
     staged_channel_ids = _staged_slack_channel_ids(grant.connection)
     history_days = _grant_history_days(grant)
     activity_cutoff = int(time.time()) - history_days * 86_400 if history_days else 0
@@ -4622,7 +4625,7 @@ def _record_private_delivery_failure(
         delivery.save(update_fields=tuple(update_fields))
 
 
-def discover_grants_if_due() -> None:
+def discover_grants_if_due():
     """Periodically discover new IM channels without blocking Slack webhooks."""
 
     global _last_grant_discovery_scan, _last_registration_cleanup_scan
@@ -4636,8 +4639,7 @@ def discover_grants_if_due() -> None:
         _reconcile_due_registration_cleanup()
     if getattr(settings, "MESSAGE_SYNC_ENABLED", False):
         from integrations.services.message_sync.discovery import discover_once
-        discover_once(GRANT_DISCOVERY_INTERVAL_SECONDS)
-        return
+        return discover_once(GRANT_DISCOVERY_INTERVAL_SECONDS)
     cutoff = timezone.now() - timedelta(seconds=GRANT_DISCOVERY_INTERVAL_SECONDS)
     grants = (
         SlackDmMirrorGrant.objects.select_related("connection")

@@ -6,6 +6,9 @@ can create this receipt under the grant/conversation authority locks.
 """
 
 import hashlib
+import logging
+import math
+from . import telemetry
 
 from django.utils import timezone
 from django.db import transaction
@@ -16,6 +19,7 @@ from integrations.services.slack_oauth_authority import connection_slack_oauth_g
 from .publication import _audience, _boundary
 
 PRESENTATION_KEY = "presentation"
+logger = logging.getLogger(__name__)
 
 
 def presentation_scope(conversation):
@@ -81,15 +85,28 @@ def record_presentation_locked(conversation, deliveries):
                 return True
         except SlackDmMirrorError:
             pass
+    first_scope = proof.get("scope") != scope
+    open_fields = {key: proof[key] for key in ("open_request_id", "open_requested_at") if key in proof} if not first_scope else {}
+    if first_scope:
+        from integrations.services.slack_chat_refresh import FOREGROUND_STATE_ID
+        marker = conversation.deliveries.filter(source_message_id=FOREGROUND_STATE_ID, status="completed").first()
+        metadata = marker.metadata if marker is not None and isinstance(marker.metadata, dict) else {}
+        requested = metadata.get("open_requested_at")
+        if isinstance(metadata.get("open_request_id"), str) and type(requested) in (int, float) and math.isfinite(requested):
+            open_fields = {"open_request_id": metadata["open_request_id"], "open_requested_at": requested}
     state.verified_ranges = {
         **(state.verified_ranges or {}),
         PRESENTATION_KEY: {
             **_presentation_boundary(conversation), **_audience(conversation),
             "scope": scope, "source_message_ts": source_ts,
-            "published_at": now.isoformat(),
+            "published_at": now.isoformat(), **open_fields,
         },
     }
     state.save(update_fields=["verified_ranges"])
+    if first_scope and open_fields:
+        elapsed = max(0, round((now.timestamp() - open_fields["open_requested_at"]) * 1000))
+        telemetry.record_latency("open_presented", elapsed)
+        logger.info("slack_open_presented grant_id=%s request_id=%s latency_ms=%s", grant.pk, open_fields["open_request_id"], elapsed)
     return True
 
 
@@ -203,3 +220,17 @@ def recover_presentation(grant, authority, device, source_id, *, before_id=None)
             conversation.save(update_fields=["latest_synced_ts", "updated_at"])
             return True, None
         return False, candidates[-1].pk if len(candidates) == 20 else None
+
+
+def awaiting_presentation(state):
+    """Check exact current consent/audience receipts before preferring a page."""
+    if not state.private_conversation_id:
+        return False
+    conversation = state.private_conversation
+    grant = conversation.grant
+    if (conversation.status != "live" or not conversation.mlai_channel_id
+            or grant.status != "active" or grant.revoked_at is not None):
+        return False
+    ranges = state.verified_ranges or {}
+    return ((ranges.get(PRESENTATION_KEY) or {}).get("scope") != presentation_scope(conversation)
+            and (ranges.get("publication") or {}).get("scope") != _audience(conversation)["scope"])
