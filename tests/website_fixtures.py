@@ -8,6 +8,26 @@ from content_factory.website_connections import contract_for
 from content_factory.website_models import WebsiteConnection
 
 
+def setup_branch_policy_get_fixture(url, **kwargs):
+    """Serve only branch-policy provider reads; keep merge/protection logic real."""
+    import json
+    import re
+    from urllib.parse import urlsplit
+    from requests import Response
+    parsed = urlsplit(url)
+    response = Response()
+    if parsed.scheme != "https" or parsed.netloc != "api.github.com":
+        raise AssertionError(f"Unexpected branch-policy origin: {url}")
+    if re.fullmatch(r"/repos/[^/]+/[^/]+/rules/branches/[^/]+", parsed.path):
+        response.status_code, payload = 200, []
+    elif re.fullmatch(r"/repos/[^/]+/[^/]+/branches/[^/]+/protection", parsed.path):
+        response.status_code, payload = 403, {"message": "Resource not accessible by integration"}
+    else:
+        raise AssertionError(f"Unexpected branch-policy read: {url}")
+    response._content = json.dumps(payload).encode()
+    return response
+
+
 def certify_live_target_fixture(target):
     """Persist exact synthetic live evidence without replacing authority guards."""
     from django.utils import timezone

@@ -57,7 +57,9 @@ def _find_owned_merge(website, organization_id, source_sha):
     rows = ContentFactoryRun.objects.filter(organization_id=organization_id,
         github_repo__iexact=website.github_repo,
         run_request__website_connection_id=str(website.pk), run_request__connection_generation=website.generation)
-    saved = rows.filter(result__merge_status="merged", result__merge_response__sha=source_sha).first()
+    saved = rows.filter(result__merge_status="merged", result__merge_sha=source_sha).first()
+    if saved is None:
+        saved = rows.filter(result__merge_status="merged", result__merge_response__sha=source_sha).first()
     identity = _merge_connection_identity(website)
     if saved:
         return {"run_id": saved.run_id, "connection_identity": identity}
@@ -356,7 +358,8 @@ def process_website_connection_operations(*, limit=20, now=None, connection_id=N
     from .website_tokens import revoke_generation_tokens
     now = now or timezone.now()
     due = WebsiteConnectionOperation.objects.filter(Q(next_attempt_at__isnull=True) | Q(next_attempt_at__lte=now),
-        Q(state="pending") | Q(action="prepare", state="running")).exclude(action="workflow")
+        Q(state="pending") | Q(action="prepare", state="running") |
+        Q(action="prepare", state="needs_user", receipt__user_action__id="deploy_site")).exclude(action="workflow")
     if connection_id:
         due = due.filter(connection_id=connection_id)
     ids = list(due.order_by("next_attempt_at").values_list("id", flat=True)[:limit])

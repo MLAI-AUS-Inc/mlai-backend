@@ -2,6 +2,7 @@
 
 import re
 from datetime import datetime, timedelta, timezone as datetime_timezone
+from functools import partial
 from uuid import UUID
 
 from django.db import transaction
@@ -237,26 +238,13 @@ def poll_native_mentions(*, limit=50, now=None):
                 context = {"bot_pubkey": installation.public_key, "installation_id": str(installation.pk),
                            "grant_generation": grant.generation, "limit": 100}
                 from community_chat.models import CommunityChatDevice
-                caller_keys = list(CommunityChatDevice.objects.filter(user=installation.owner, status="verified",
-                    revoked_at__isnull=True).order_by("pk").values_list("public_key", flat=True)[:20])
-                if device.public_key not in caller_keys:
-                    caller_keys = [device.public_key, *caller_keys[:19]]
-                context["caller_pubkeys"] = caller_keys
+                caller_keys = CommunityChatDevice.objects.filter(user=installation.owner, status="verified",
+                    revoked_at__isnull=True).order_by("pk").values_list("public_key", flat=True).iterator(chunk_size=200)
                 cursor = installation.native_cursor
-                if cursor.get("epoch") is not None and cursor.get("sequence") is not None:
-                    context.update(epoch=cursor["epoch"], after_sequence=cursor["sequence"])
-                result = native_sources.query(installation.owner, resource, "mentions",
-                                             owner_public_key=device.public_key, **context)
-                new_cursor = result.get("cursor")
-                if (not isinstance(new_cursor, dict) or set(new_cursor) != {"epoch", "sequence"}
-                        or type(new_cursor["sequence"]) is not int or new_cursor["sequence"] < 0):
-                    raise ValidationError("Native cursor is invalid.")
-                if not isinstance(new_cursor["epoch"], str):
-                    raise ValidationError("Native cursor is invalid.")
-                UUID(new_cursor["epoch"])
-                events = result.get("events")
-                if not isinstance(events, list) or len(events) > 100:
-                    raise ValidationError("Native event page is invalid.")
+                from .native_mention_scan import scan_mentions
+                events, new_cursor = scan_mentions(device.public_key, caller_keys, cursor,
+                    partial(native_sources.query, installation.owner, resource, "mentions",
+                            owner_public_key=device.public_key, **context))
                 active = AgentSubscription.objects.filter(grant=grant, generation=grant.generation,
                     resource=resource, is_active=True, event_types=["agent.mentioned"], delivery__mode="webhook").first()
                 from django.utils.dateparse import parse_datetime

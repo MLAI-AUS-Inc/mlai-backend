@@ -38,7 +38,7 @@ class WebsiteOperationRecoveryTests(SimpleTestCase):
                 self.run.status = status
                 self.website.operations.select_for_update.return_value.filter.return_value = [self.op]
                 runs.return_value.filter.return_value.first.return_value = self.run
-                fresh = SimpleNamespace(pk=uuid4(), generation=3, state="running", payload={"attempt": 1,
+                fresh = SimpleNamespace(pk=uuid4(), generation=3, state="running", receipt={}, save=Mock(), payload={"attempt": 1,
                     "workflow": "article_system_setup", "request_digest": operations.evidence_digest({"domain": "fixture.test"})})
                 create.return_value = (fresh, True)
                 payload = {"client_request_id": "new-request", "domain": "fixture.test"}
@@ -63,7 +63,8 @@ class WebsiteOperationRecoveryTests(SimpleTestCase):
             operations.reserve_workflow_operation(self.website, workflow="article_system_setup", payload=payload)
             self.assertEqual(payload["client_request_id"], "old-request")
             self.assertEqual(create.call_args.kwargs["idempotency_key"], "old-key")
-            self.op.save.assert_not_called()
+        self.op.save.assert_called_once_with(update_fields=["receipt", "updated_at"])
+        self.assertEqual(self.op.receipt["dispatch_outcome"], "replayed")
 
     def test_reconciliation_does_not_trust_a_different_saved_attempt(self):
         self.run.run_request["operation_attempt"] = 1

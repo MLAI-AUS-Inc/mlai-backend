@@ -1,5 +1,6 @@
 """Background page/restart/permission tests using synthetic provider responses."""
 import json
+from datetime import timedelta
 from unittest.mock import MagicMock, patch
 
 from django.test import TransactionTestCase, override_settings

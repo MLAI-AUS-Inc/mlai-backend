@@ -46,7 +46,7 @@ class PrepareJourneyTests(SimpleTestCase):
         self.assertEqual(op.state, "needs_user")
         self.assertEqual(op.receipt["user_action"]["id"], "authorize_github")
 
-    def test_retryable_failure_backoff_then_attention(self):
+    def test_transient_failure_keeps_backoff_until_24_hour_deadline(self):
         from .website_prepare import prepare_failure
         op = self.operation()
         error = WebsiteAuthorityError("worker_unavailable", "Temporarily unavailable.", retryable=True)
@@ -57,6 +57,8 @@ class PrepareJourneyTests(SimpleTestCase):
             if attempt < 3:
                 self.assertEqual(op.state, "pending")
                 self.assertEqual(op.next_attempt_at, now + timedelta(minutes=[1, 2][attempt - 1]))
+        self.assertEqual(op.state, "pending")
+        prepare_failure(op, "setup", error, now=now + timedelta(hours=24))
         self.assertEqual(op.state, "needs_attention")
 
     def test_publish_ready_completes_without_dispatch(self):
@@ -91,7 +93,7 @@ class PrepareJourneyTests(SimpleTestCase):
         self.assertEqual(rows.call_args.kwargs["connection__state"], "connected")
         self.assertEqual(rows.call_args.kwargs["updated_at"], op._claimed_at)
 
-    def test_dead_child_is_cleared_before_retry(self):
+    def test_transient_child_retains_identity_for_resume(self):
         from . import website_prepare as prepare
         from workflow_runs.models import ContentFactoryRun
         op = self.operation()
@@ -103,8 +105,9 @@ class PrepareJourneyTests(SimpleTestCase):
                 patch.object(ContentFactoryRun.objects, "filter") as runs:
             runs.return_value.first.return_value = SimpleNamespace(status="failed", result={"retryable": True}, workflow="article_system_setup")
             prepare.advance_prepare(op.pk)
-        self.assertNotIn("child_run_id", op.receipt)
-        self.assertEqual(op.payload["attempt"], 2)
+        self.assertEqual(op.receipt["child_run_id"], "dead-child")
+        self.assertTrue(op.receipt["child_resume_pending"])
+        self.assertNotIn("attempt", op.payload)
         self.assertEqual(op.state, "pending")
 
     def test_setup_ready_for_review_checks_merge_without_waiting_for_terminal(self):
@@ -126,6 +129,29 @@ class PrepareJourneyTests(SimpleTestCase):
         merge.assert_called_once()
         self.assertEqual(op.state, "needs_user")
         self.assertEqual(op.receipt["user_action"]["pr_number"], 42)
+        self.assertEqual((op.receipt["current_step"], op.receipt["message"]),
+            ("merge", "Merge the articles setup pull request."))
+
+    def test_setup_review_prompt_describes_review_not_a_missing_pull_request(self):
+        from . import website_prepare as prepare
+        from workflow_runs.models import ContentFactoryRun
+        op = self.operation()
+        op.receipt = {"child_run_id": "setup-child", "current_step": "setup"}
+        child = SimpleNamespace(status="awaiting_approval", workflow="article_system_setup", result={
+            "article_system_setup": {"status": "preview_ready"}})
+        review = {"id": "review_setup", "label": "Review setup", "url": None, "run_id": "setup-child"}
+        with patch.object(prepare, "_claim_prepare", return_value=op), \
+                patch.object(prepare, "_prepare_context", return_value=(Mock(), Mock(), Mock())), \
+                patch.object(prepare, "journey_for_context", return_value={"nextAction": {"id": "verify"}}), \
+                patch.object(prepare, "_persist_prepare", side_effect=lambda operation, **kw: operation), \
+                patch.object(prepare, "maybe_merge_prepared_setup",
+                    return_value={"status": "needs_user", "user_action": review}), \
+                patch.object(ContentFactoryRun.objects, "filter") as runs:
+            runs.return_value.first.return_value = child
+            prepare.advance_prepare(op.pk)
+        self.assertEqual((op.state, op.receipt["status"], op.receipt["current_step"]), ("needs_user", "needs_you", "setup"))
+        self.assertEqual(op.receipt["user_action"], review)
+        self.assertIn("Review the articles setup preview", op.receipt["message"])
 
     def test_prepare_callback_waits_for_commit(self):
         from . import website_prepare as prepare

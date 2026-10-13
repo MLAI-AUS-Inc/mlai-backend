@@ -215,7 +215,7 @@ class AccountPrivacyConcurrencyTests(TransactionTestCase):
                 )
                 return record.pk, created
             finally:
-                close_old_connections()
+                connection.close()
 
         with ThreadPoolExecutor(max_workers=2) as pool:
             results = list(pool.map(request, sessions))

@@ -74,6 +74,63 @@ class SetupMergeVerificationUnitTests(SimpleTestCase):
         self.run.result["directory_quality_gates"]["browser"] = False
         self.assertEqual(authority._verified_setup_run_base(self.run, self.head, self.website, automatic_approval=True), "")
 
+    def pending_setup(self):
+        self.run.status, self.run.approval_state = "awaiting_approval", "approval_required"
+        self.run.result["status"] = "preview_ready"
+        self.run.result["article_system_setup"]["status"] = "preview_ready"
+        self.run.result["live_preview"]["url"] = "https://preview.example/articles"
+        self.website.configuration_version = 3
+
+    def approve(self):
+        from . import website_prepare as prepare
+        config = SimpleNamespace(requires_review=False, website_connection=self.website)
+        return prepare.approve_prepared_setup(self.run, SimpleNamespace(company=SimpleNamespace(pk="company")),
+            config, user=SimpleNamespace(pk=1))
+
+    def test_proven_preview_asks_for_review_when_automatic_approval_is_ineligible(self):
+        # TalaThrive run af819ae1: a platform-deployed preview skips the local build,
+        # so prepare looped on "Waiting for exact setup preview proof" with passed proof.
+        self.pending_setup()
+        self.run.result["directory_quality_gates"]["local_build_skipped"] = True
+        ineligible = deepcopy(self.run.result)
+        for change in ("skipped_local_build", "approval_required_status", "stale_verified_source"):
+            with self.subTest(change=change):
+                self.run.result, self.run.status, self.website.verified_sha = deepcopy(ineligible), "awaiting_approval", ""
+                if change == "approval_required_status":
+                    self.run.status = "approval_required"
+                if change == "stale_verified_source":
+                    self.run.result["directory_quality_gates"]["local_build_skipped"] = False
+                    self.website.verified_sha = "c" * 40
+                self.assertEqual(authority._verified_setup_run_base(self.run, self.head, self.website, automatic_approval=True), "")
+                with patch.object(authority, "verify_repository_head") as verify:
+                    outcome = self.approve()
+                verify.assert_not_called()
+                self.assertEqual(outcome, {"status": "needs_user", "user_action": {"id": "review_setup",
+                    "label": "Review setup", "url": "https://preview.example/articles", "run_id": "setup-1"}})
+
+    def test_unfinished_preview_proof_keeps_waiting(self):
+        self.pending_setup()
+        self.run.result["directory_quality_gates"]["local_build_skipped"] = True
+        proven = deepcopy(self.run.result)
+        for key, value in (("status", "running"), ("completed_at", None), ("commit_sha", self.base)):
+            with self.subTest(key=key):
+                self.run.result = deepcopy(proven)
+                self.run.result["directory_quality_verification"][key] = value
+                with self.assertRaises(WebsiteAuthorityError) as raised:
+                    self.approve()
+                self.assertEqual(raised.exception.code, "setup_preview_verification_required")
+                self.assertTrue(raised.exception.retryable)
+
+    def test_eligible_preview_is_still_approved_automatically(self):
+        from . import vibe_marketing_views
+        self.pending_setup()
+        with patch.object(authority, "verify_repository_head", return_value=self.base) as verify, \
+                patch.object(vibe_marketing_views.VibeMarketingRunControlView, "post",
+                    return_value=SimpleNamespace(status_code=202, data={})) as control:
+            self.assertEqual(self.approve(), {"status": "pending"})
+        verify.assert_called_once_with(self.website, self.base)
+        self.assertEqual(control.call_args.args[1:], ("setup-1", "approve"))
+
     def test_preserves_existing_target_proof_path(self):
         self.website.verified_sha = self.base
         self.website.targets.filter.return_value = [SimpleNamespace(contract={"verification": {

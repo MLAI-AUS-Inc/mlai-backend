@@ -1,6 +1,7 @@
 from django.urls import include, path
 from .apple_iap_views import AppleIapView, AppleIapTransactionView, AppleIapNotificationView
 from .privacy_views import AccountDeletionView, AiConsentView
+from .device_management_views import AccountDevicesView, AccountDeviceView
 from .onboarding_views import MemberOnboardingView
 from .account_ban_views import AccountBanView
 from .permission_views import ChatPermissionsView, RelayChatRoleView, ChatModeratorView, ChatMemberRolesView, ChatAdminView
@@ -102,6 +103,8 @@ urlpatterns = [
         name="community_chat_coding_turn_finalize",
     ),
     path("account/", AccountView.as_view(), name="community_chat_account"),
+    path("account/devices/", AccountDevicesView.as_view(), name="community_chat_account_devices"),
+    path("account/devices/<uuid:device_id>/", AccountDeviceView.as_view(), name="community_chat_account_device"),
     path(
         "upcoming-events/",
         UpcomingEventsView.as_view(),

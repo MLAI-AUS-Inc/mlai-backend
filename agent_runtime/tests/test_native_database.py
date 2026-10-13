@@ -14,7 +14,7 @@ import os
 import threading
 import unittest
 from unittest.mock import patch
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 from coincurve import PrivateKey
 from django.contrib.auth import get_user_model
@@ -66,7 +66,7 @@ class NativeDatabaseTests(unittest.TestCase):
         self.receipts = []
         self.epoch = str(uuid4())
         self.source_patch = patch("agent_runtime.native_sources._request", side_effect=self.source)
-        self.source_patch.start()
+        self.source_mock = self.source_patch.start()
         self.addCleanup(self.source_patch.stop)
 
     def tearDown(self):
@@ -87,7 +87,11 @@ class NativeDatabaseTests(unittest.TestCase):
             return {"channels": [{"id": CHANNEL, "name": "dot-pilot"}]
                     if self.membership and directive["owner_pubkey"] in self.allowed_keys else []}
         if directive["operation"] == "mentions":
-            return {"events": list(self.source_events), "cursor": {"epoch": self.epoch, "sequence": len(self.source_events)}}
+            after = directive.get("after_sequence")
+            callers = set(directive.get("caller_pubkeys", [directive["owner_pubkey"]]))
+            events = [] if after is None else [event for sequence, event in enumerate(self.source_events, 1)
+                if sequence > after and event["author_pubkey"] in callers]
+            return {"events": events, "cursor": {"epoch": self.epoch, "sequence": len(self.source_events)}}
         if directive["operation"] == "thread":
             return {"messages": [{"id": directive["trigger_event_id"], "content": "Synthetic permitted thread"}], "truncated": False}
         raise AssertionError(f"Unexpected source operation: {directive['operation']}")
@@ -142,6 +146,92 @@ class NativeDatabaseTests(unittest.TestCase):
             result = event_webhooks.subscribe(principal, params, transport=callback)
         return AgentSubscription.objects.get(pk=result["id"])
 
+    def caller_devices(self, count):
+        base = uuid4().int & ~((1 << 64) - 1)
+        return [CommunityChatDevice.objects.create(id=UUID(int=base + n), user=self.owner,
+            public_key=native_crypto.public_key(PrivateKey()), status="verified", verified_at=timezone.now())
+            for n in range(1, count + 1)]
+
+    def test_poll_discovers_owned_device_beyond_twenty_and_excludes_other_authority(self):
+        installation, grant, principal = self.active()
+        self.subscription(principal)
+        devices = self.caller_devices(33)
+        other = get_user_model().objects.create(email=f"other-{uuid4().hex}@example.test", is_active=True)
+        foreign = CommunityChatDevice.objects.create(user=other, public_key=native_crypto.public_key(PrivateKey()),
+            status="verified", verified_at=timezone.now())
+        pending = CommunityChatDevice.objects.create(user=self.owner, public_key=native_crypto.public_key(PrivateKey()), status="pending")
+        revoked = CommunityChatDevice.objects.create(user=self.owner, public_key=native_crypto.public_key(PrivateKey()),
+            status="verified", verified_at=timezone.now(), revoked_at=timezone.now())
+        self.source_events = [self.metadata(caller=d.public_key) for d in (foreign, pending, revoked, devices[-1])]
+        self.source_calls.clear()
+        self.assertEqual(native_invocations.poll_native_mentions(), 1)
+        invocation = AgentInvocation.objects.get(installation=installation)
+        self.assertEqual(invocation.owner_public_key, devices[-1].public_key)
+        own_keys = {self.device.public_key, *(d.public_key for d in devices)}
+        scans = [p[0]["native_agent"] for path, p in self.source_calls
+                 if path == "/query" and p[0]["native_agent"]["operation"] == "mentions"]
+        self.assertEqual(len(scans), 2)
+        self.assertEqual(set(key for scan in scans for key in scan["caller_pubkeys"]), own_keys)
+        self.assertTrue(all(len(scan["caller_pubkeys"]) <= 20 and self.device.public_key in scan["caller_pubkeys"] for scan in scans))
+        installation.refresh_from_db()
+        self.assertEqual(installation.native_cursor["sequence"], 4)
+        self.assertEqual(native_invocations.poll_native_mentions(), 0)
+
+    def test_poll_deduplicates_bound_owner_mention_across_batches(self):
+        installation, grant, principal = self.active()
+        self.subscription(principal)
+        self.caller_devices(33)
+        self.source_events = [self.metadata()]
+        self.assertEqual(native_invocations.poll_native_mentions(), 1)
+        self.assertEqual(AgentInvocation.objects.filter(installation=installation).count(), 1)
+        self.assertEqual(AgentEvent.objects.filter(payload__installation_id=str(installation.pk)).count(), 1)
+
+    def test_late_scan_failure_commits_neither_invocation_nor_cursor_progress(self):
+        installation, grant, principal = self.active()
+        self.subscription(principal)
+        self.caller_devices(33)
+        self.source_events = [self.metadata()]
+        old_cursor = dict(installation.native_cursor)
+        scans = 0
+        def failing(config, path, payload):
+            nonlocal scans
+            if path == "/query" and payload[0]["native_agent"]["operation"] == "mentions":
+                scans += 1
+                if scans == 2:
+                    raise native_sources.SourceUnavailable()
+            return self.source(config, path, payload)
+        self.source_mock.side_effect = failing
+        self.assertEqual(native_invocations.poll_native_mentions(), 0)
+        self.assertFalse(AgentInvocation.objects.filter(installation=installation).exists())
+        self.assertFalse(AgentEvent.objects.filter(payload__installation_id=str(installation.pk)).exists())
+        installation.refresh_from_db()
+        self.assertEqual(installation.native_cursor["sequence"], old_cursor["sequence"])
+        self.assertEqual(installation.native_cursor["error_code"], "native_source_unavailable")
+        self.source_mock.side_effect = self.source
+        self.assertEqual(native_invocations.poll_native_mentions(), 1)
+
+    def test_between_batch_message_is_found_on_next_tick(self):
+        installation, grant, principal = self.active()
+        self.subscription(principal)
+        devices = self.caller_devices(33)
+        message = self.metadata(caller=devices[0].public_key)
+        scans = 0
+        def racing(config, path, payload):
+            nonlocal scans
+            result = self.source(config, path, payload)
+            if path == "/query" and payload[0]["native_agent"]["operation"] == "mentions":
+                scans += 1
+                if scans == 1:
+                    self.source_events.append(message)
+            return result
+        self.source_mock.side_effect = racing
+        self.assertEqual(native_invocations.poll_native_mentions(), 0)
+        installation.refresh_from_db()
+        self.assertEqual(installation.native_cursor["sequence"], 0)
+        self.source_mock.side_effect = self.source
+        self.assertEqual(native_invocations.poll_native_mentions(), 1)
+        self.assertEqual(AgentInvocation.objects.get(installation=installation).source_event_id, message["event_id"])
+
     def test_slot_race_serializes_real_postgres_owner_lock(self):
         barrier = threading.Barrier(2)
         def claim(index):
@@ -152,7 +242,7 @@ class NativeDatabaseTests(unittest.TestCase):
             except PermissionDenied:
                 return "quota_denied"
             finally:
-                close_old_connections()
+                connection.close()
         with ThreadPoolExecutor(max_workers=2) as pool:
             result = list(pool.map(claim, range(2)))
         self.assertEqual(result.count("quota_denied"), 1)
@@ -184,7 +274,7 @@ class NativeDatabaseTests(unittest.TestCase):
             try:
                 return AgentInstallation.objects.get(pk=installation.pk).profile_events
             finally:
-                close_old_connections()
+                connection.close()
         with ThreadPoolExecutor(max_workers=1) as pool:
             self.assertEqual(pool.submit(committed_profiles).result(timeout=10), profiles)
         retry_event, retry_tag = self.proof(enrollment)
@@ -429,14 +519,14 @@ class NativeDatabaseTests(unittest.TestCase):
             try:
                 return event_webhooks.dispatch_webhooks(transport=callback)
             finally:
-                close_old_connections()
+                connection.close()
         def revoke():
             close_old_connections()
             try:
                 revoking.set()
                 return runtime.revoke_installation(installation.pk, owner=self.owner)
             finally:
-                close_old_connections()
+                connection.close()
         with ThreadPoolExecutor(max_workers=2) as pool:
             delivery = pool.submit(dispatch)
             try:
@@ -523,7 +613,7 @@ class NativeDatabaseTests(unittest.TestCase):
                     invocation = native_invocations.admit_metadata(runtime._grant(grant.pk), metadata)
                 return str(invocation.pk) if invocation else None
             finally:
-                close_old_connections()
+                connection.close()
         with ThreadPoolExecutor(max_workers=2) as pool:
             results = list(pool.map(request, range(2)))
         self.assertEqual(results.count(None), 1)

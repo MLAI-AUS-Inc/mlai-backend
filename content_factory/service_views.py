@@ -1999,6 +1999,7 @@ ARTICLE_SYSTEM_SETUP_ACTIVE_STATUSES = {
 }
 ARTICLE_SYSTEM_SETUP_RETRY_TERMINAL_STATUSES = {"failed", "blocked", "preview_failed", "fallback_ready"}
 ARTICLE_SYSTEM_SETUP_FAILURE_METADATA_KEYS = (
+    "failure_class",
     "failed_preview_url",
     "failedPreviewUrl",
     "failure_kind",
@@ -2727,6 +2728,7 @@ def _article_system_setup_common_callback_fields(*, data: dict, setup_payload: d
         "repair_status",
         "worker_queue",
         "failure_kind",
+        "failure_class",
         "failed_preview_url",
         "failedPreviewUrl",
         "failed_step",
@@ -3109,7 +3111,7 @@ def _sync_article_system_setup_callback_to_run(*, data: dict, event_type: str) -
         approval_state = ContentFactoryApprovalState.APPROVED
         current_step = "create_pull_request"
         error = ""
-    elif event_type == "article_system_setup_preview_failed":
+    elif event_type in {"article_system_setup_preview_failed", "article_system_setup_failed"}:
         setup_payload = dict(setup_payload)
         setup_payload.update(common_fields)
         setup_payload["status"] = "preview_failed"
@@ -3168,14 +3170,19 @@ def _sync_article_system_setup_callback_to_run(*, data: dict, event_type: str) -
             if failed_step_value:
                 live_preview.setdefault("failedPhase", failed_step_value)
                 live_preview.setdefault("failed_phase", failed_step_value)
-        if "retryable" not in setup_payload:
-            setup_payload["retryable"] = live_preview.get("retryable", True)
+        from .website_failure_classes import failure_class
+        classification = failure_class(error_code, {**data, "article_system_setup": setup_payload},
+            retryable=data.get("retryable", setup_payload.get("retryable", live_preview.get("retryable", False))))
+        setup_payload["failure_class"] = classification
+        setup_payload["retryable"] = classification == "transient"
         setup_payload["retry_available"] = bool(
             data.get("retry_available")
             if data.get("retry_available") is not None
             else setup_payload.get("retryable", True)
         )
         result["status"] = "preview_failed"
+        result["error_code"] = error_code
+        result["failure_class"] = classification
         result["article_system_setup"] = setup_payload
         result["preview_url"] = ""
         result.pop("approve_url", None)
@@ -3214,6 +3221,10 @@ def _sync_article_system_setup_callback_to_run(*, data: dict, event_type: str) -
         approval_state = ContentFactoryApprovalState.NOT_REQUIRED
         current_step = "preview_failed"
         error = preview_error
+        if event_type == "article_system_setup_failed":
+            setup_payload["status"] = result["status"] = "failed"
+            run_status = ContentFactoryRunStatus.FAILED
+            current_step = "failed"
     elif event_type == "article_system_setup_code_review_ready":
         # Server-rendered stacks (FastAPI/Django/Rails/...) have no hosted preview
         # shape, so Content Factory hands review to the setup branch diff instead.
@@ -3321,7 +3332,12 @@ def _sync_article_system_setup_callback_to_run(*, data: dict, event_type: str) -
         ).strip()
         setup_payload["error"] = warning
         setup_payload["error_code"] = data.get("error_code") or setup_payload.get("error_code") or "article_system_setup_preview_not_exact"
-        setup_payload["retryable"] = data.get("retryable") if data.get("retryable") is not None else setup_payload.get("retryable", True)
+        from .website_failure_classes import failure_class
+        classification = failure_class(setup_payload["error_code"], {**data, "article_system_setup": setup_payload},
+            retryable=data.get("retryable", setup_payload.get("retryable", False)))
+        setup_payload["failure_class"] = classification
+        setup_payload["retryable"] = classification == "transient"
+        result["failure_class"] = classification
         result["status"] = "fallback_ready"
         result["preview_url"] = ""
         result.pop("approve_url", None)
@@ -3862,6 +3878,7 @@ class ContentFactoryCallbackView(APIView):
             'article_system_setup_revision_ready',
             'article_system_setup_progress',
             'article_system_setup_preview_failed',
+            'article_system_setup_failed',
             'article_system_setup_cancelled',
             'article_system_setup_completed',
             'article_system_setup_pr_created',

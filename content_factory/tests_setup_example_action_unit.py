@@ -26,6 +26,7 @@ from . import website_operations as operations
 from . import vibe_marketing_views as views
 from .models import OrganizationContentConfig
 from .website_connections import contract_for
+from .website_contract import WebsiteAuthorityError
 from .website_models import WebsiteConnection, WebsiteConnectionOperation, WebsiteScanSnapshot
 
 
@@ -166,7 +167,8 @@ class SetupExampleCleanupActionTests(SimpleTestCase):
         with self.scope():
             prepare._retain_setup_example_cleanup(self.op, self.child)
         with patch.object(prepare, "authority_guard", return_value=nullcontext(self.website)), \
-                patch.object(WebsiteConnectionOperation.objects, "get_or_create", return_value=(self.op, False)):
+                patch.object(WebsiteConnectionOperation.objects, "get_or_create", return_value=(self.op, False)), \
+                patch.object(ContentFactoryRun.objects, "filter", return_value=self.rows(first=self.child)):
             self.assertIs(prepare.start_prepare(self.config, expected=contract_for(self.website), retry=True), self.op)
         self.assertEqual(self.op.state, "pending")
         self.assertEqual(self.op.payload["attempt"], 2)
@@ -179,7 +181,8 @@ class SetupExampleCleanupActionTests(SimpleTestCase):
 
     def test_other_needs_user_children_and_unrequested_cleanup_retry_stay_saved(self):
         for retry, action_id in ((False, "remove_setup_example"), (True, "merge_pr"), (True, "review_setup"),
-                (True, "review_github_permissions")):
+                (True, "review_github_permissions"), (True, "authorize_github"), (True, "deploy_site"),
+                (True, "choose_articles_page")):
             self.op.state = "needs_user"
             self.op.receipt.update(user_action={**self.action, "id": action_id}, reason_code="SETUP_EXAMPLE_CLEANUP_REQUIRED")
             with self.subTest(retry=retry, action=action_id), \
@@ -187,7 +190,40 @@ class SetupExampleCleanupActionTests(SimpleTestCase):
                     patch.object(WebsiteConnectionOperation.objects, "get_or_create", return_value=(self.op, False)):
                 prepare.start_prepare(self.config, expected=contract_for(self.website), retry=retry)
             self.assertEqual(self.op.receipt["child_run_id"], "old-setup")
+            self.assertEqual(self.op.payload["attempt"], 1)
+            self.assertNotIn("retry_epoch", self.op.payload)
             self.assertNotIn("manual_setup_example_cleanup_retry", self.op.payload)
+
+    def test_explicit_failed_work_does_not_inherit_owner_wait_from_its_step(self):
+        for action_id, step, failure_class in (("retry", "verify", None), ("open_run", "merge", None),
+                ("review_setup", "setup", "repairable")):
+            self.setUp()
+            self.op.state = "needs_user"
+            self.op.receipt.update(user_action={"id": action_id}, current_step=step, failure_class=failure_class)
+            with self.subTest(action=action_id), \
+                    patch.object(prepare, "authority_guard", return_value=nullcontext(self.website)), \
+                    patch.object(WebsiteConnectionOperation.objects, "get_or_create", return_value=(self.op, False)), \
+                    patch.object(ContentFactoryRun.objects, "filter", return_value=self.rows(first=self.child)):
+                prepare.start_prepare(self.config, expected=contract_for(self.website), retry=True)
+            self.assertIsNone(self.op.receipt["child_run_id"])
+            self.assertEqual(self.op.payload["attempt"], 2)
+            self.assertTrue(self.op.payload["retry_epoch"])
+
+    def test_real_permission_failure_recheck_preserves_child_and_dispatch_epoch(self):
+        self.op.payload["retry_epoch"] = "saved-epoch"
+        grants = {"settingsUrl": "https://github.com/settings/installations/4"}
+        with patch("content_factory.website_github_permissions.installation_grants", return_value=grants):
+            prepare.prepare_failure(self.op, "setup", WebsiteAuthorityError(
+                "github_workflow_permission_required", "Approve workflow-file access."))
+        self.assertEqual(self.op.receipt["failure_class"], "needs_user")
+        self.assertEqual(self.op.receipt["user_action"]["id"], "review_github_permissions")
+        with patch.object(prepare, "authority_guard", return_value=nullcontext(self.website)), \
+                patch.object(WebsiteConnectionOperation.objects, "get_or_create", return_value=(self.op, False)):
+            prepare.start_prepare(self.config, expected=contract_for(self.website), retry=True)
+        self.assertEqual(self.op.receipt["child_run_id"], "old-setup")
+        self.assertEqual(self.op.payload["attempt"], 1)
+        self.assertEqual(self.op.payload["retry_epoch"], "saved-epoch")
+        self.assertEqual(self.op.receipt["dispatch_outcome"], "replayed")
 
     @skipUnless("user" in signature(prepare._owner_request).parameters, "Requires the earlier Phase 1.2 frozen-context fix")
     def test_real_chain_cleanup_and_owner_retry(self):
@@ -354,6 +390,8 @@ class SetupExampleCleanupActionTests(SimpleTestCase):
             self.assertEqual(request.data["website_connection_id"], str(self.website.pk))
             self.assertEqual(request.data["connection_generation"], 3)
             self.assertEqual(request.data["repository_id"], 123)
-            self.assertEqual(request.data["idempotency_key"], f"prepare:{self.op.pk}:setup:2")
+            self.assertEqual(request.data["idempotency_key"], f"prepare:{self.op.pk}:setup:2:{self.op.payload['retry_epoch']}")
+            self.assertRegex(self.op.payload["retry_epoch"], r"^[a-f0-9]{32}$")
+            self.assertEqual(request.data["retry_epoch"], self.op.payload["retry_epoch"])
             self.assertEqual(context.company.pk, 9)
             self.assertNotIn("prepare_user", context.__dict__)

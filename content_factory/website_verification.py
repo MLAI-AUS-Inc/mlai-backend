@@ -227,7 +227,7 @@ def verify_live_deployment(config, *, data):
         body, headers = fetch_live_route(public_url, website.organization.domain, expected_status=expected_status)
         marker = headers.get("x-mlai-artifact-digest") or ""
         if expected_status == 200 and marker != artifact_digest and not re.search(rb'<meta\s+name=["\x27]mlai-artifact-digest["\x27]\s+content=["\x27]' + artifact_digest.encode() + rb'["\x27]', body):
-            raise WebsiteAuthorityError("deployment_source_unverified", "The public listing or article detail does not contain this reviewed integration artifact.")
+            raise WebsiteAuthorityError("live_route_unavailable", "The public listing or article detail has not deployed this reviewed integration artifact yet.")
         observations.append({"kind": kind, "path": routes[kind], "status": expected_status})
     receipt = {"status": "passed", "source_sha": data["source_sha"], "connection_generation": website.generation,
         "target_id": data["target_id"], "public_url": url, "checked_at": timezone.now().isoformat(), "ci_evidence_digest": data["evidence_digest"],
