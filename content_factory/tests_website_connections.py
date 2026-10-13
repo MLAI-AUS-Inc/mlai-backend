@@ -49,6 +49,16 @@ class WebsiteContractTests(SimpleTestCase):
         run.workflow = 'repo_scan'
         self.assertEqual(workflow_operation_state(run), 'blocked')
 
+    def test_structured_repair_status_projects_without_failing_the_callback(self):
+        # Vyavos setup b1437a92: a dict repair_status raised TypeError and 500'd the callback.
+        from .website_operations import workflow_operation_state
+        for workflow in ('article_system_setup', 'article_generation'):
+            run = SimpleNamespace(run_id='setup-run', workflow=workflow, status='blocked',
+                result={'precondition_status': 'precondition_failed', 'scan_run_id': 'repair-child',
+                    'repair_status': {'status': 'queued', 'attempts': 1}})
+            with self.subTest(workflow=workflow):
+                self.assertEqual(workflow_operation_state(run), 'blocked')
+
     def test_setup_revision_uses_original_run_consent_before_charge_or_feedback(self):
         from .vibe_marketing_views import VibeMarketingArticleSystemRevisionsView
         original = {'website_connection_id': str(uuid.uuid4()), 'connection_generation': 1}
