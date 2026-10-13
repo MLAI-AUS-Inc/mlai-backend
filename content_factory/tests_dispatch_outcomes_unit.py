@@ -33,32 +33,40 @@ class PrepareRetryReceiptTests(SimpleTestCase):
         return SimpleNamespace(pk="prepare", action="prepare", state="running", payload={},
             receipt={"current_step": "setup"}, next_attempt_at=None, updated_at=timezone.now(), save=Mock())
 
-    def test_third_generic_failure_stops_promising_automatic_retry(self):
+    def test_transient_budget_exhaustion_stops_promising_automatic_retry(self):
         op = self.operation()
         error = WebsiteAuthorityError("website_prepare_unavailable",
             "Website preparation is temporarily unavailable. It will retry automatically.", retryable=True)
-        for attempt in range(1, 4):
-            website_prepare.prepare_failure(op, "setup", error)
-            self.assertEqual(op.state, "pending" if attempt < 3 else "needs_attention")
-            if attempt < 3:
+        now = timezone.now()
+        for attempt in range(1, 5):
+            website_prepare.prepare_failure(op, "setup", error, now=now if attempt < 4 else now + timedelta(hours=24))
+            self.assertEqual(op.state, "pending" if attempt < 4 else "needs_attention")
+            if attempt < 4:
                 self.assertIsNotNone(op.next_attempt_at)
                 self.assertIn("retry automatically", op.receipt["message"])
             else:
                 self.assertIsNone(op.next_attempt_at)
                 self.assertNotIn("automatically", op.receipt["message"])
-                self.assertIn("3 attempts", op.receipt["message"])
+                self.assertIn("4 attempts", op.receipt["message"])
                 self.assertIn("Try again", op.receipt["message"])
 
     def test_every_terminal_failure_transition_has_no_retry_promise(self):
         for code, step, retryable, limit in (("deployment_source_unverified", "verify", True, 6),
                 ("worker_unavailable", "setup", False, 1), ("worker_unavailable", "scan", True, 3)):
             op = self.operation()
+            op.connection = SimpleNamespace(capabilities={})
+            now = timezone.now()
+            op.receipt.update(transient_started_at=(now - timedelta(hours=24)).isoformat(),
+                deployment_wait_started_at=(now - timedelta(hours=24)).isoformat())
             error = WebsiteAuthorityError(code, "Provider unavailable. It will retry automatically.", retryable=retryable)
             for _ in range(limit):
-                website_prepare.prepare_failure(op, step, error)
+                website_prepare.prepare_failure(op, step, error, now=now)
             with self.subTest(code=code, retryable=retryable):
-                self.assertEqual(op.state, "needs_attention")
-                self.assertIsNone(op.next_attempt_at)
+                self.assertEqual(op.state, "needs_user" if code == "deployment_source_unverified" else "needs_attention")
+                if code == "deployment_source_unverified":
+                    self.assertEqual(op.next_attempt_at, now + timedelta(hours=2))
+                else:
+                    self.assertIsNone(op.next_attempt_at)
                 self.assertNotIn("automatically", op.receipt["message"])
 
     def test_old_terminal_and_unscheduled_receipts_are_sanitized_without_row_writes(self):

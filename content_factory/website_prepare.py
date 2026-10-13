@@ -1,23 +1,25 @@
 """Persisted, bounded orchestration of the existing website readiness journey."""
 import logging
 import re
+from uuid import uuid4
 from datetime import timedelta
 from types import SimpleNamespace
 from urllib.parse import quote
 
 from django.db import transaction
-from django.db.models import F
+from django.db.models import F, Q
 from django.utils import timezone
 
 from .website_connections import authority_guard, contract_for
 from .website_contract import WebsiteAuthorityError, evidence_digest, connection_contract
 from .website_journey import journey_for_context
 from .website_models import WebsiteConnectionOperation
+from .website_failure_classes import failure_class
 
 logger = logging.getLogger(__name__)
 
-RETRY_MINUTES = (1, 2, 5, 10)
-DEPLOYMENT_RETRY_MINUTES = (2, 5, 10, 20, 40)
+RETRY_MINUTES = (1, 2, 5, 10, 20, 40, 60)
+DEPLOYMENT_RETRY_MINUTES = (2, 5, 10, 20, 40, 60, 120)
 PERMISSION_CODES = frozenset({"github_workflow_permission_required", "github_ci_evidence_permission_required"})
 PERMISSION_STEPS = {
     "github_workflow_permission_required": frozenset({"permissions", "setup"}),
@@ -95,11 +97,41 @@ def _retain_setup_example_cleanup(op, child):
 
 def _cleanup_retry_journey(op, context, config, journey):
     """Refresh source facts before dispatching the owner's new cleanup attempt."""
-    if op.payload.get("manual_setup_example_cleanup_retry") and not op.receipt.get("scan_run_id"):
+    if (op.payload.get("manual_setup_example_cleanup_retry") or op.payload.get("source_reverify")) and not op.receipt.get("scan_run_id"):
         from .vibe_marketing_views import _article_capabilities_for_context
         capabilities = _article_capabilities_for_context(context, config, force=True)
         return journey_for_context(context, config, capabilities=capabilities)
     return journey
+
+
+def _cancel_prepare_child(op, config):
+    """Fence a stalled child through the ordinary durable cancellation control."""
+    from workflow_runs.models import ContentFactoryRun
+    from .website_operations import cancel_operation, deletion_epoch
+    child_id = op.receipt.get("child_run_id") or op.payload.get("run_id")
+    if not child_id:
+        return
+    child = ContentFactoryRun.objects.filter(run_id=child_id, organization_id=op.connection.organization_id).first()
+    if child is None or child.status in {"completed", "failed", "blocked", "cancelled", "denied"}:
+        return
+    saved = child.run_request if isinstance(child.run_request, dict) else {}
+    cancel_operation(config, data={**contract_for(op.connection), "operation_id": saved.get("operation_id"),
+        "operation_attempt": saved.get("operation_attempt", 1), "deletion_epoch": deletion_epoch(op.connection)},
+        idempotency_key=f"prepare-retry:{op.pk}:{op.payload.get('attempt', 1)}")
+
+
+def _checking_owner_wait(op):
+    """A permission, review, merge or deploy recheck preserves its saved child."""
+    if op.state != "needs_user" or op.receipt.get("failure_class") in {"repairable", "strategy", "unsupported"}:
+        return False
+    action = op.receipt.get("user_action") or {}
+    action_id = action.get("id") if isinstance(action, dict) else None
+    if action_id in {"merge_pr", "review_setup", "review_github_permissions", "authorize_github",
+            "deploy_site", "choose_articles_page"}:
+        return True
+    # Older receipts can lack the action object. Do not let an explicit retry or
+    # failed-run action inherit this compatibility treatment from its step name.
+    return action_id is None and op.receipt.get("current_step") in {"merge", "permissions", "verify", "ci-attestation"}
 
 
 def start_prepare(config, *, expected=None, company_id=None, user=None, retry=False):
@@ -118,28 +150,41 @@ def start_prepare(config, *, expected=None, company_id=None, user=None, retry=Fa
                 "receipt": {"status": "working", "current_step": "verify-access", "message": "Preparing your website for articles."}})
         if op.action != "prepare" or op.generation != current.generation:
             raise WebsiteAuthorityError("operation_key_conflict", "The saved preparation belongs to another website.")
-        if not created and retry and op.state in {"needs_attention", "needs_user", "cancelled"}:
+        if not created and retry and op.state in {"needs_attention", "needs_user", "cancelled", "stopped"}:
             cleanup_retry = (op.state == "needs_user" and op.receipt.get("reason_code") == SETUP_EXAMPLE_CLEANUP_CODE
                 and _setup_example_cleanup_action(op.receipt.get("user_action"), current) is not None)
-            reset_child = op.state in {"cancelled", "needs_attention"} or cleanup_retry
+            check_again = _checking_owner_wait(op)
+            if not check_again:
+                _cancel_prepare_child(op, config)
             op.state, op.next_attempt_at = "pending", None
             op.receipt = {**op.receipt, "step_failures": {}, "status": "working", "user_action": None, "last_completed": None,
-                "child_run_id": None if reset_child else op.receipt.get("child_run_id"), "reason_code": "", "blocked_step": None}
-            op.payload = {**op.payload, "attempt": op.payload.get("attempt", 1) + 1, "user_clicks": op.payload.get("user_clicks", 1) + 1}
-            if reset_child:
+                "child_run_id": op.receipt.get("child_run_id") if check_again else None,
+                "reason_code": "", "blocked_step": None, "deployment_attempts": 0,
+                "dispatch_outcome": "replayed" if check_again else "new_attempt"}
+            for key in ("deployment_wait_started_at", "transient_started_at", "child_resume_pending", "failure_class"):
+                op.receipt.pop(key, None)
+            op.payload = {**op.payload, "attempt": op.payload.get("attempt", 1) + (0 if check_again else 1),
+                "user_clicks": op.payload.get("user_clicks", 1) + 1}
+            if not check_again:
+                op.payload["retry_epoch"] = uuid4().hex
                 op.payload.pop("run_id", None)
             if cleanup_retry:
                 op.payload["manual_setup_example_cleanup_retry"] = True
                 for key in ("scan_run_id", "setup_run_id", "completed_steps"):
                     op.receipt.pop(key, None)
             op.save(update_fields=["state", "next_attempt_at", "receipt", "payload", "updated_at"])
+        elif not created:
+            op.receipt = {**op.receipt, "dispatch_outcome": "replayed"}
+            # A response replay must not invalidate a worker's updated_at lease.
+            op.save(update_fields=["receipt"])
     return op
 
 
 def _claim_prepare(identifier, now):
     with transaction.atomic():
         op = WebsiteConnectionOperation.objects.select_for_update().select_related("connection__organization").filter(
-            pk=getattr(identifier, "pk", identifier), action="prepare", state__in=["pending", "running"]).first()
+            Q(state__in=["pending", "running"]) | Q(state="needs_user", receipt__user_action__id="deploy_site"),
+            pk=getattr(identifier, "pk", identifier), action="prepare").first()
         if op is None or op.next_attempt_at and op.next_attempt_at > now:
             return None
         if op.generation != op.connection.generation or op.connection.state != "connected":
@@ -176,9 +221,9 @@ def _persist_prepare(op, *, now):
 
 
 def _finish_prepare(op, *, now):
-    logger.info("website_prepare operation=%s company=%s connection=%s generation=%s step=%s state=%s reason=%s attempt=%s next_attempt=%s",
+    logger.info("website_prepare operation=%s company=%s connection=%s generation=%s step=%s state=%s reason=%s attempt=%s next_attempt=%s dispatch_outcome=%s",
         op.pk, op.payload.get("company_id"), op.connection_id, op.generation, op.receipt.get("current_step"),
-        op.state, op.receipt.get("reason_code", ""), op.attempts, op.next_attempt_at)
+        op.state, op.receipt.get("reason_code", ""), op.attempts, op.next_attempt_at, op.receipt.get("dispatch_outcome", ""))
     return _persist_prepare(op, now=now)
 
 
@@ -197,40 +242,71 @@ def prepare_failure(op, step, error, *, now=None):
     step = str(step or op.receipt.get("current_step") or "prepare")
     permission_needed = step in PERMISSION_STEPS.get(code, ())
     failures[step] = failures.get(step, 0) + 1
+    classification = failure_class(code, getattr(error, "result", None),
+        retryable=getattr(error, "retryable", False), status=getattr(error, "status", None))
     op.receipt = {**op.receipt, "step_failures": failures, "reason_code": code, "message": message,
-        "retryable": bool(getattr(error, "retryable", True))}
-    if getattr(error, "user_action", None) and (code not in PERMISSION_CODES or permission_needed):
+        "failure_class": classification, "retryable": classification == "transient"}
+    if (getattr(error, "user_action", None) and (classification == "needs_user" or getattr(error, "result", None) is None)
+            and (code not in PERMISSION_CODES or permission_needed)):
         op.state, op.next_attempt_at = "needs_user", None
-        op.receipt.update(status="needs_you", user_action=error.user_action)
+        op.receipt.update(status="needs_you", user_action=error.user_action, failure_class="needs_user", retryable=False)
     elif permission_needed:
         op.state, op.next_attempt_at = "needs_user", None
-        op.receipt.update(status="needs_you", user_action=_permission_action(op.connection))
+        op.receipt.update(status="needs_you", user_action=_permission_action(op.connection), failure_class="needs_user", retryable=False)
     elif code in AUTHORIZATION_CODES and code not in PERMISSION_CODES:
         op.state = "needs_user"
-        op.receipt.update(status="needs_you", user_action={"id": "authorize_github", "label": "Authorize GitHub"})
+        op.receipt.update(status="needs_you", user_action={"id": "authorize_github", "label": "Authorize GitHub"},
+            failure_class="needs_user", retryable=False)
         op.next_attempt_at = None
-    elif code in DEPLOYMENT_WAIT_CODES or step in {"verify", "ci-attestation"} and getattr(error, "retryable", False):
+    elif code in DEPLOYMENT_WAIT_CODES or classification == "waiting":
         count = op.receipt.get("deployment_attempts", 0) + 1
         op.receipt["deployment_attempts"] = count
-        op.state = "pending" if count <= len(DEPLOYMENT_RETRY_MINUTES) else "needs_attention"
-        op.receipt["status"] = "waiting_for_deployment" if op.state == "pending" else "needs_attention"
-        op.next_attempt_at = now + timedelta(minutes=DEPLOYMENT_RETRY_MINUTES[min(count - 1, 4)]) if op.state == "pending" else None
-    elif failures[step] >= 3 or not getattr(error, "retryable", True):
+        started = op.receipt.setdefault("deployment_wait_started_at", now.isoformat())
+        from datetime import datetime
+        deadline = datetime.fromisoformat(started) + timedelta(hours=24)
+        op.receipt["failure_class"] = "waiting"
+        op.state = "pending" if now < deadline else "needs_user"
+        op.receipt["status"] = "waiting_for_deployment" if op.state == "pending" else "needs_you"
+        op.next_attempt_at = min(deadline, now + timedelta(minutes=DEPLOYMENT_RETRY_MINUTES[min(count - 1, len(DEPLOYMENT_RETRY_MINUTES) - 1)])) if op.state == "pending" else None
+        if op.state == "needs_user":
+            provider = (getattr(op.connection, "capabilities", {}) or {}).get("hosting_provider") or "your hosting provider"
+            op.receipt.update(message=f"Deploy your site with {provider}, then check again.",
+                user_action={"id": "deploy_site", "label": "Deploy your site", "hosting_provider": provider})
+            # Keep a quiet observer after the owner prompt, so a manual deploy
+            # resumes without requiring another button click.
+            op.next_attempt_at = now + timedelta(hours=2)
+    elif classification == "transient":
+        from datetime import datetime
+        started = op.receipt.setdefault("transient_started_at", now.isoformat())
+        deadline = datetime.fromisoformat(started) + timedelta(hours=24)
+        op.state = "pending" if now < deadline else "needs_attention"
+        op.next_attempt_at = min(deadline, now + timedelta(minutes=RETRY_MINUTES[min(failures[step] - 1, len(RETRY_MINUTES) - 1)])) if op.state == "pending" else None
+        op.receipt["status"] = "working" if op.state == "pending" else "needs_attention"
+    elif classification == "needs_user":
+        op.state, op.next_attempt_at = "needs_user", None
+        op.receipt.update(status="needs_you", user_action={"id": "open_run", "label": "Open setup run", "run_id": op.receipt.get("child_run_id")})
+    elif classification == "unsupported":
+        op.state, op.next_attempt_at = "stopped", None
+        op.receipt.update(status="stopped", channel_options=["hosted", "portable"],
+            user_action={"id": "choose_article_channel", "label": "Choose an articles channel"})
+    else:
         op.state, op.next_attempt_at = "needs_attention", None
         op.receipt.update(status="needs_attention", user_action={"id": "retry", "label": "Try again"})
-    else:
-        op.state = "pending"
-        op.next_attempt_at = now + timedelta(minutes=RETRY_MINUTES[min(failures[step] - 1, 3)])
-        op.receipt["status"] = "working"
     from .website_operations import prepare_receipt
     op.receipt = prepare_receipt(op)
+
+
+def _canonical_article_route(route):
+    """Compare equivalent listing paths while retaining root as a valid route."""
+    route = str(route or "")
+    return re.sub(r"/+", "/", route).rstrip("/") or "/"
 
 
 def _setup_surface(config, journey):
     """Respect a saved owner choice, then use the current scan's listing route."""
     pending = (config.article_system or {}).get("pending_article_system_setup") or {}
     if pending.get("mode") in {"existing", "none"} and pending.get("route_path"):
-        return pending["mode"], pending["route_path"]
+        return pending["mode"], _canonical_article_route(pending["route_path"])
     discovery = (journey or {}).get("discovery") or {}
     resolution = discovery.get("resolution") or {}
     def route(item):
@@ -266,12 +342,13 @@ def _owner_request(op, context, config, step, *, user, journey=None):
     connection = config.website_connection
     data = {**contract_for(connection), "company_id": str(context.company.pk),
         "configuration_revision": connection.configuration_version,
-        "idempotency_key": f"prepare:{op.pk}:{step}:{op.payload.get('attempt', 1)}",
+        "idempotency_key": f"prepare:{op.pk}:{step}:{op.payload.get('attempt', 1)}:{op.payload.get('retry_epoch', 'initial')}",
+        "retry_epoch": op.payload.get("retry_epoch", "initial"),
         "force_refresh": True}
     if step == "setup":
         mode, surface = _setup_surface(config, journey or journey_for_context(context, config))
         pending = (config.article_system or {}).get("pending_article_system_setup") or {}
-        if op.payload.get("manual_setup_example_cleanup_retry"):
+        if op.payload.get("manual_setup_example_cleanup_retry") or op.payload.get("source_reverify"):
             pending = {**pending, "source_scan_run_id": op.receipt.get("scan_run_id") or ""}
         data.update(article_surface_mode=mode, article_surface_url=surface,
             source_scan_run_id=pending.get("source_scan_run_id") or op.receipt.get("scan_run_id") or "")
@@ -295,7 +372,7 @@ def _selected_setup_child(op, config, *, run=None):
     identifier = pending.get("setup_run_id") or pending.get("setupRunId")
     route = pending.get("route_path") or pending.get("routePath")
     candidates = (op.receipt.get("user_action") or {}).get("candidates") or []
-    if not identifier or pending.get("mode") != "existing" or route not in candidates:
+    if not identifier or not route or pending.get("mode") != "existing" or _canonical_article_route(route) not in {_canonical_article_route(item) for item in candidates}:
         return None
     if run is None:
         from workflow_runs.models import ContentFactoryRun
@@ -306,7 +383,7 @@ def _selected_setup_child(op, config, *, run=None):
         return None
     saved = run.run_request if isinstance(run.run_request, dict) else {}
     hint = saved.get("article_surface_hint") or {}
-    if (not isinstance(hint, dict) or hint.get("route_path") != route
+    if (not isinstance(hint, dict) or not hint.get("route_path") or _canonical_article_route(hint.get("route_path")) != _canonical_article_route(route)
             or saved.get("domain") and str(saved["domain"]).casefold().strip() != website.organization.domain.casefold().strip()):
         return None
     try:
@@ -378,13 +455,42 @@ def _dispatch_prepare_step(op, context, config, step, *, user, journey=None):
     receipt = current_ci_attestation(website, target, capabilities={"repositorySourceSha": repository.get("observedSourceSha"),
         "repositoryBranch": repository.get("branch")}) if step == "verify" else None
     if receipt is None:
-        proof = discover_source_attestation(website, target, website.verified_sha)
+        from .website_connections import observed_source_sha
+        source_sha = observed_source_sha(website) or repository.get("observedSourceSha") or website.verified_sha
+        proof = discover_source_attestation(website, target, source_sha)
         ci = record_ci_attestation(proof)
         receipt = ci.receipt
     if step == "verify":
         deployment = verify_live_deployment(config, data=receipt)
         return {"status": "completed", "operation_id": str(deployment.pk)}
     return {"status": "completed", "operation_id": str(ci.pk)}
+
+
+def _resume_prepare_child(op, child, *, user, context):
+    """Resume the saved run through existing guarded control and attempt fencing."""
+    from .vibe_marketing_views import VibeMarketingRunControlView
+    from .website_connections import scoped_run_contract
+    request = SimpleNamespace(method="POST", user=user, META={}, query_params={}, headers={},
+        data={**scoped_run_contract(child), "company_id": str(context.company.pk)})
+    response = VibeMarketingRunControlView().post(request, child.run_id, "resume")
+    if response.status_code >= 400:
+        raise WebsiteAuthorityError(response.data.get("code") or "worker_unavailable",
+            response.data.get("detail") or "The saved setup could not resume.",
+            status=response.status_code, retryable=response.status_code >= 500)
+
+
+def _setup_owner_action(child, setup, connection):
+    status = setup.get("status")
+    if status == "code_review_ready":
+        return {"id": "review_setup", "label": "Review setup", "run_id": child.run_id,
+            "url": setup.get("pr_url") or (child.result or {}).get("pr_url")}
+    if status == "manual_merge_required":
+        from .vibe_marketing_views import _pull_request_number_from_run
+        number = _pull_request_number_from_run(child)
+        return {"id": "merge_pr", "label": "Merge setup PR", "run_id": child.run_id,
+            "pr_number": number, "url": setup.get("pr_url") or (child.result or {}).get("pr_url") or
+                (f"https://github.com/{connection.github_repo}/pull/{number}" if number else None)}
+    return None
 
 
 def advance_prepare(identifier, *, now=None, handlers=None):
@@ -421,6 +527,12 @@ def advance_prepare(identifier, *, now=None, handlers=None):
             from workflow_runs.models import ContentFactoryRun
             child = child or ContentFactoryRun.objects.filter(run_id=child_id, organization_id=op.connection.organization_id).first()
             setup = ((child.result or {}).get("article_system_setup") or {}) if child else {}
+            owner_action = _setup_owner_action(child, setup, op.connection) if child and child.workflow == "article_system_setup" else None
+            if owner_action:
+                op.state, op.next_attempt_at = "needs_user", None
+                op.receipt.update(status="needs_you", failure_class="needs_user", user_action=owner_action,
+                    message="Review the articles setup." if owner_action["id"] == "review_setup" else "Merge the articles setup pull request.")
+                return _finish_prepare(op, now=now)
             setup_review_ready = bool(child and child.workflow == "article_system_setup" and
                 child.status in {"needs_review", "awaiting_approval", "approval_required", "pr_opened", "publish_bundle_ready"} and
                 setup.get("status") in {"preview_ready", "pr_created", "completed", "ready", "adopted_existing_surface", "adopted"})
@@ -430,16 +542,24 @@ def advance_prepare(identifier, *, now=None, handlers=None):
             if child and child.status in {"failed", "blocked", "cancelled", "denied"}:
                 if _retain_setup_example_cleanup(op, child):
                     return _finish_prepare(op, now=now)
-                code = (child.result or {}).get("error_code") or "website_prepare_step_failed"
                 result = child.result or {}
-                retryable = result.get("retryable") is True or code in {"worker_unavailable", "github_unavailable", "HOSTED_PREVIEW_UNAVAILABLE"}
+                code = result.get("error_code") or setup.get("error_code") or "website_prepare_step_failed"
+                classification = failure_class(code, result, retryable=result.get("retryable") is True)
                 message = getattr(child, "error", "") or result.get("error") or result.get("message") or "The website step could not finish."
-                if retryable or code in AUTHORIZATION_CODES:
-                    op.receipt.pop("child_run_id", None)
-                    op.payload = {**op.payload, "attempt": op.payload.get("attempt", 1) + 1}
-                    raise WebsiteAuthorityError(code, message, retryable=retryable)
-                prepare_failure(op, step, WebsiteAuthorityError(code, message, retryable=False), now=now)
-                op.receipt["user_action"] = {"id": "open_run", "label": "Open setup run", "run_id": child_id}
+                if classification == "transient" and op.receipt.get("child_resume_pending"):
+                    _resume_prepare_child(op, child, user=user, context=context)
+                    op.receipt.pop("child_resume_pending", None)
+                    op.state, op.next_attempt_at = "pending", now + timedelta(minutes=1)
+                    op.receipt.update(status="working", message="Resuming the saved website setup.")
+                    return _finish_prepare(op, now=now)
+                error = WebsiteAuthorityError(code, message, retryable=classification == "transient")
+                error.result = {**result, "failure_class": classification}
+                error.user_action = result.get("user_action") or setup.get("user_action")
+                prepare_failure(op, step, error, now=now)
+                if classification == "transient" and op.state == "pending":
+                    op.receipt["child_resume_pending"] = True
+                elif op.state == "needs_attention":
+                    op.receipt["user_action"] = {"id": "open_run", "label": "Open setup run", "run_id": child_id}
                 return _finish_prepare(op, now=now)
             if child and child.workflow == "article_system_setup":
                 merge = maybe_merge_prepared_setup(child, context, config, user=user)
@@ -535,10 +655,16 @@ def wake_prepare_for_source(connection_id, *, organization_id):
     if config is None or company is None:
         return None
     op = start_prepare(config, company_id=company.pk, user=connection.authorized_by)
-    WebsiteConnectionOperation.objects.filter(pk=op.pk, generation=connection.generation,
-        state__in=["completed", "needs_user", "pending"]).update(state="pending", next_attempt_at=timezone.now(),
-            receipt={**op.receipt, "status": "working", "current_step": "verify", "deployment_attempts": 0,
-                "step_failures": {}, "user_action": None}, updated_at=timezone.now())
+    receipt = {key: value for key, value in op.receipt.items()
+        if key not in {"scan_run_id", "setup_run_id", "completed_steps", "deployment_wait_started_at", "transient_started_at", "child_resume_pending"}}
+    reopened = WebsiteConnectionOperation.objects.filter(pk=op.pk, generation=connection.generation,
+        state__in=["completed", "needs_user", "needs_attention", "pending", "stopped"]).update(state="pending", next_attempt_at=timezone.now(),
+            receipt={**receipt, "status": "working", "current_step": "scan", "deployment_attempts": 0,
+                "step_failures": {}, "user_action": None, "last_completed": None, "child_run_id": None},
+            payload={**{key: value for key, value in op.payload.items() if key != "run_id"},
+                "source_reverify": True, "attempt": op.payload.get("attempt", 1) + 1, "retry_epoch": uuid4().hex}, updated_at=timezone.now())
+    if not reopened:
+        return None
     connection.operations.filter(generation=connection.generation, action="source-reverify", state="pending").update(
         state="completed", receipt={"status": "managed_by_prepare", "prepare_operation_id": str(op.pk),
             "repository_modified": False}, updated_at=timezone.now())
@@ -546,12 +672,8 @@ def wake_prepare_for_source(connection_id, *, organization_id):
 
 
 def maybe_merge_prepared_setup(run, context, config, *, user):
-    """Auto-merge only after exact preview proof and confirmed absence of reviewers."""
-    from urllib.parse import quote
-    from integrations import http_client
-    from integrations.services.github_app import create_installation_access_token
-    from .website_connections import validate_setup_merge_source, require_unlocked_remote_call
-    from .vibe_marketing_views import _pull_request_number_from_run, _merge_setup_pr_for_run
+    """Use the shared merge path after exact preview and current consent checks."""
+    from .vibe_marketing_views import _pull_request_number_from_run, _attempt_setup_publish_merge
     setup = (run.result or {}).get("article_system_setup") or {}
     number = _pull_request_number_from_run(run)
     if setup.get("merge_status") == "merged" or (run.result or {}).get("merge_status") == "merged":
@@ -560,59 +682,21 @@ def maybe_merge_prepared_setup(run, context, config, *, user):
         if run.status == "completed" and (run.result or {}).get("adopted") is True:
             return {"status": "completed"}
         return approve_prepared_setup(run, context, config, user=user)
-    website = config.website_connection
     action = {"id": "merge_pr", "label": f"Merge PR #{number}", "pr_number": number,
-        "url": f"https://github.com/{website.github_repo}/pull/{number}"}
+        "url": f"https://github.com/{config.website_connection.github_repo}/pull/{number}"}
     if config.requires_review:
         return {"status": "needs_user", "user_action": action}
-    credential = None
-    headers = {}
-    try:
-        binding = {**contract_for(website), "domain": website.organization.domain, "github_repo": website.github_repo}
-        with authority_guard(binding, action="setup"):
-            pass
-        require_unlocked_remote_call()
-        credential = create_installation_access_token(installation_id=website.installation_id,
-            repository=website.github_repo, repository_id=website.repository_id, permission_mode="read", use_cache=False)
-        headers = {"Authorization": f"Bearer {credential.token}", "Accept": "application/vnd.github+json"}
-        base = f"https://api.github.com/repos/{website.github_repo}"
-        pull_response = http_client.get(f"{base}/pulls/{number}", headers=headers, timeout=(3, 15))
-        pull_response.raise_for_status()
-        pull = pull_response.json()
-        if pull.get("merged"):
-            return {"status": "completed"}
-        head = (pull.get("head") or {}).get("sha")
-        validate_setup_merge_source(run, head)
-        rules = http_client.get(f"{base}/rules/branches/{quote(website.branch, safe='')}", headers=headers, timeout=(3, 15))
-        rules.raise_for_status()
-        inventory = rules.json()
-        if not isinstance(inventory, list) or any(rule.get("type") == "pull_request" and
-                (rule.get("parameters") or {}).get("required_approving_review_count", 0) > 0 for rule in inventory):
-            return {"status": "needs_user", "user_action": action}
-        protection = http_client.get(f"{base}/branches/{quote(website.branch, safe='')}/protection", headers=headers, timeout=(3, 15))
-        if protection.status_code != 404:
-            protection.raise_for_status()
-            review = protection.json().get("required_pull_request_reviews") or {}
-            if review.get("required_approving_review_count", 0) > 0:
-                return {"status": "needs_user", "user_action": action}
-        with authority_guard(binding, action="setup"):
-            pass
-        _, error = _merge_setup_pr_for_run(run=run, context=context)
-        return {"status": "pending"} if error is None else {"status": "needs_user", "user_action": action}
-    except WebsiteAuthorityError as exc:
-        if exc.code in AUTHORIZATION_CODES:
-            raise
-        # Unproven preview/source is retried before requesting a founder action.
-        raise WebsiteAuthorityError("setup_preview_verification_required", "Waiting for exact setup preview proof.", retryable=True) from exc
-    except Exception:
-        # Ambiguous provider policy must never be treated as 'zero reviewers'.
-        return {"status": "needs_user", "user_action": action}
-    finally:
-        if credential:
-            try:
-                http_client.delete("https://api.github.com/installation/token", headers=headers, timeout=(3, 10))
-            except Exception:
-                pass
+    outcome = _attempt_setup_publish_merge(run=run, context=context, automatic=True)
+    kind = outcome.get("outcome")
+    if kind in {"merged", "waiting", "auto_merge_pending"}:
+        return {"status": "pending"}
+    if kind == "checks_failed":
+        raise WebsiteAuthorityError("setup_checks_failed", outcome.get("detail") or "Setup checks failed.", retryable=False)
+    if kind == "error":
+        code = outcome.get("code") or "github_temporarily_unavailable"
+        raise WebsiteAuthorityError(code, outcome.get("detail") or "Waiting for GitHub setup merge.",
+            retryable=outcome.get("retryable", code == "github_temporarily_unavailable"))
+    return {"status": "needs_user", "user_action": action}
 
 
 def _setup_preview_proven_for_review(run, head_sha):

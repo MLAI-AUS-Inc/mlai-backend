@@ -33,6 +33,20 @@ def _open_pull(merged=False, node_id="PR_node_1"):
         "base": {"ref": "main", "repo": {"id": 12345, "full_name": REPO}}, "node_id": node_id}
 
 
+def _branch_policy_get(url, **kwargs):
+    """Replace the shared policy's provider reads, retaining its real decisions."""
+    response = mock.Mock(headers={})
+    if url == f"https://api.github.com/repos/{REPO}/rules/branches/main":
+        response.status_code = 200
+        response.json.return_value = []
+    elif url == f"https://api.github.com/repos/{REPO}/branches/main/protection":
+        response.status_code = 403
+        response.json.return_value = {"message": PERMISSION_ERROR}
+    else:
+        raise AssertionError(f"Unexpected branch policy read: {url}")
+    return response
+
+
 class SetupMergeBase(TestCase):
     def setUp(self):
         self.org = Organization.objects.create(domain="theproductbus.com", name="TPB")
@@ -49,6 +63,7 @@ class SetupMergeBase(TestCase):
             mock.patch("content_factory.website_connections.verify_repository_head", return_value="a" * 40),
             mock.patch("content_factory.website_connections.read_repository_native_target", return_value={"id": 12345, "full_name": REPO, "default_branch": "main"}),
             mock.patch("content_factory.website_connections.read_setup_merge_pull", side_effect=lambda connection, number: _open_pull(merged=True)),
+            mock.patch.object(views.http_client, "get", side_effect=_branch_policy_get),
         ):
             patcher.start()
             self.addCleanup(patcher.stop)

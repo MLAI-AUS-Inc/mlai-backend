@@ -707,7 +707,8 @@ class OwnedMergeWebhookRaceTests(SimpleTestCase):
             def filter(self, **kwargs):
                 if "result__merge_status" in kwargs:
                     return Rows([run] if run.result.get("merge_status") == "merged"
-                        and (run.result.get("merge_response") or {}).get("sha") == kwargs["result__merge_response__sha"] else [])
+                        and (run.result.get("merge_sha") == kwargs.get("result__merge_sha") if "result__merge_sha" in kwargs
+                            else (run.result.get("merge_response") or {}).get("sha") == kwargs["result__merge_response__sha"]) else [])
                 return Rows([run] if run.result.get("publish_merge_intent") else [])
             def first(self): return self[0] if self else None
             def order_by(self, *args): return self
@@ -803,7 +804,15 @@ class OwnedMergeWebhookRaceTests(SimpleTestCase):
             stack.enter_context(patch.object(views, "_get_config", return_value=self.config))
             stack.enter_context(patch.object(views, "_pull_request_number_from_run", return_value=17))
             stack.enter_context(patch.object(views, "_github_token_for_repo_operation", return_value=("synthetic-write-token", "fixture")))
-            stack.enter_context(patch.object(views, "_github_pull_checks_state_lenient", return_value=({**self.pull, "merged": False}, {"state": "passed"})))
+            stack.enter_context(patch.object(views, "_github_pull_checks_state_lenient", return_value=({**self.pull, "state": "open", "merged": False}, {"state": "passed"})))
+            original_get = get.side_effect or (lambda *a, **kw: get.return_value)
+            def policy_read(url, **kwargs):
+                if "/rules/branches/" in url:
+                    return SimpleNamespace(status_code=200, headers={}, raise_for_status=lambda: None, json=lambda: [])
+                if url.endswith("/protection"):
+                    return SimpleNamespace(status_code=403, headers={})
+                return original_get(url, **kwargs)
+            get.side_effect = policy_read
             verified = stack.enter_context(patch.object(authority, "validate_setup_merge_source"))
             stack.enter_context(patch.object(views, "_apply_setup_merge_result", return_value=self.run))
             def merge_request(*args, **kwargs):
@@ -815,7 +824,7 @@ class OwnedMergeWebhookRaceTests(SimpleTestCase):
         self.assertEqual(result["outcome"], "merged")
         verified.assert_called_once_with(self.run, "c" * 40)
         self.assertFalse(queued.call_args.kwargs["defaults"]["payload"]["scan_required"])
-        get.assert_called_once()
+        self.assertEqual(get.call_count, 3)
 
     def test_unrelated_or_changed_pr_remains_external_and_requires_scan(self):
         invalid_pulls = []
