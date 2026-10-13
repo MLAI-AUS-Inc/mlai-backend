@@ -1204,6 +1204,10 @@ VALLEY_HARNESS_API_KEY = os.getenv('VALLEY_HARNESS_API_KEY', '')
 MESSAGE_SYNC_ENABLED = os.getenv('MESSAGE_SYNC_ENABLED', 'false').lower() == 'true'
 # Metadata scheduling can ship before relay unread; history counts keep their own gate.
 MESSAGE_SYNC_TARGETED_READ_POLLING = _env_is_true('MESSAGE_SYNC_TARGETED_READ_POLLING', False)
+# Open priority is reversible; unread prefetch requires a measured rollout.
+MESSAGE_SYNC_OPEN_PRIORITY_ENABLED = _env_is_true('MESSAGE_SYNC_OPEN_PRIORITY_ENABLED', True)
+MESSAGE_SYNC_UNREAD_PREFETCH_ENABLED = _env_is_true('MESSAGE_SYNC_UNREAD_PREFETCH_ENABLED', False)
+MESSAGE_SYNC_UNREAD_PREFETCH_PER_HOUR = int(os.getenv('MESSAGE_SYNC_UNREAD_PREFETCH_PER_HOUR', '6'))
 MESSAGE_SYNC_INBOX_READ_EXPORT = _env_is_true('MESSAGE_SYNC_INBOX_READ_EXPORT', False)
 MESSAGE_SYNC_INBOX_CURSOR_PUSH = _env_is_true('MESSAGE_SYNC_INBOX_CURSOR_PUSH', False)
 MESSAGE_SYNC_INBOX_MENTIONS = _env_is_true('MESSAGE_SYNC_INBOX_MENTIONS', False)

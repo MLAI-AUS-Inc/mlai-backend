@@ -1,6 +1,8 @@
 """Content-free diagnostics and worker liveness for the durable sync lanes."""
 import json
 import socket
+import math
+from collections import Counter
 from datetime import timedelta
 
 from django.conf import settings
@@ -9,10 +11,12 @@ from django.db.models import Count, Max, Min
 from django.utils import timezone
 from integrations.models import (
     BridgeApiBudget, BridgeSyncInbox, BridgeSyncJob, BridgeSyncState,
-    BridgeWorkerHeartbeat, CommunityBridgeDelivery, SlackDmMirrorDelivery,
+    BridgeWorkerHeartbeat, CommunityBridgeDelivery, SlackDmMirrorDelivery, SlackDmMirrorGrant,
 )
 from integrations.services.message_sync import telemetry
-from integrations.services.message_sync.scheduler import eligible_states
+from integrations.services.message_sync.scheduler import eligible_states, safe_error_code
+from integrations.services.message_sync.discovery import KEY as DISCOVERY_KEY, due_discovery_grants
+from integrations.services.slack_open_requests import KEY as OPEN_KEY
 from integrations.services.message_sync.slack_client import provider_interval
 
 
@@ -88,9 +92,21 @@ class Command(BaseCommand):
                               reliability='best_effort_lower_bound; observed buckets do not prove all requests were recorded')
         except Exception:
             throughput = {'available': False}
+        active_grants = SlackDmMirrorGrant.objects.filter(status="active", revoked_at__isnull=True, connection__isnull=False)
+        discovery, opens = summarize_open_discovery(active_grants.values_list("connection__sync_cursor", flat=True), now=now.timestamp())
+        discovery.update(
+            heartbeat_age_seconds=age(lane_times.get("discovery")) if lane_times.get("discovery") else None,
+            due_grants=due_discovery_grants(300, now=now).count(),
+        )
+        try:
+            latency = telemetry.latency_snapshot(minutes=options['window_minutes'], hours=options['window_hours'])
+            latency['available'] = True
+        except Exception:
+            latency = {'available': False}
         result = {
             'enabled': enabled, 'checked_at': now.isoformat(), 'stale_lanes': stale,
             'provider_throughput': throughput,
+            'discovery': discovery, 'open_requests': opens, 'open_latency': latency,
             'inbox_pending': inbox.count(),
             'oldest_inbox_age_seconds': age(inbox.aggregate(value=Min('received_at'))['value']),
             'inbox_retrying': inbox.exclude(last_error_code='').count(),
@@ -105,3 +121,36 @@ class Command(BaseCommand):
             )),
         }
         self.stdout.write(json.dumps(result, default=str, sort_keys=True))
+
+
+def summarize_open_discovery(cursors, *, now):
+    """Aggregate queue health without returning keys, source IDs or contents."""
+    errors, opens, oldest = Counter(), Counter(), {"pending": 0, "importing": 0}
+    leased = 0
+    def finite(value):
+        return float(value) if type(value) in (int, float) and math.isfinite(value) else 0
+    for cursor in cursors:
+        if not isinstance(cursor, dict):
+            continue
+        discovery = cursor.get(DISCOVERY_KEY) or {}
+        if isinstance(discovery, dict):
+            leased += int(finite(discovery.get("expires")) > now)
+            if discovery.get("error"):
+                errors[safe_error_code(discovery['error'])] += 1
+        requests = cursor.get(OPEN_KEY) or {}
+        if not isinstance(requests, dict):
+            continue
+        for request in requests.values():
+            if not isinstance(request, dict) or finite(request.get("until")) <= now:
+                continue
+            state = request.get("state")
+            if state not in {"pending", "importing", "error"}:
+                continue
+            opens[state] += 1
+            stamp = finite(request.get("requested_at"))
+            if state in oldest and stamp > 0:
+                oldest[state] = max(oldest[state], max(0, int(now - stamp)))
+    deferred = errors.pop("BudgetDeferred", 0)
+    return ({"leased_grants": leased, "budget_deferred_grants": deferred, "error_codes": dict(errors)},
+            {**{name: opens[name] for name in ("pending", "importing", "error")},
+             **{f"oldest_{name}_age_seconds": value for name, value in oldest.items()}})

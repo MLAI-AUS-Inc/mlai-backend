@@ -1,4 +1,8 @@
-"""Classify provider work without changing Slack's shared method allowance."""
+"""Classify provider work without changing Slack's shared method allowance.
+
+Scheduled read re-probes use background admission. Pending hints, explicit
+marks/receipts and newly observed source activity retain foreground priority.
+"""
 from contextlib import contextmanager
 from contextvars import ContextVar
 

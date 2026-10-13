@@ -1,5 +1,6 @@
 """Bounded always-on synchronization; no user login is needed to populate work."""
 import logging
+from django.conf import settings
 from contextlib import contextmanager
 from contextvars import ContextVar
 
@@ -47,7 +48,11 @@ def process_history_once(*, seed=True, prefer_import=False):
         state = states.select_related(
             "public_channel", "private_conversation__grant__connection",
         ).get(pk=lease.state_id)
-        priority = "foreground" if lease.kind == "head" and state.foreground_refresh else "background"
+        from .presentation import awaiting_presentation
+        foreground = state.foreground_refresh and (lease.kind == "head" or (
+            lease.kind == "archive" and getattr(settings, "MESSAGE_SYNC_OPEN_PRIORITY_ENABLED", True)
+            and awaiting_presentation(state)))
+        priority = "foreground" if foreground else "background"
         with job_context(lease), request_priority(priority):
             if state.private_conversation_id:
                 private_page(lease, state)

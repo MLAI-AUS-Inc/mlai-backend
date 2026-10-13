@@ -171,3 +171,44 @@ def hourly_snapshot(scopes, *, hours=24, now=None):
         }
     return {"window_start": (end - hours) * 3600, "window_end": end * 3600,
             "bucket_seconds": 3600, "observed_hours": observed, "scopes": result}
+
+
+LATENCY_KINDS = ("open_provisioned", "open_presented", "open_ready")
+LATENCY_COUNTERS = ("count", "sum_ms", "over_30s", "over_120s")
+
+
+def record_latency(kind, ms):
+    """Queue aggregate open timings without any request, source or owner IDs."""
+    if kind not in LATENCY_KINDS:
+        raise ValueError("Unknown open latency kind")
+    try:
+        ms = max(0, int(ms))
+        now = time()
+        for counter, amount in (("count", 1), ("sum_ms", ms),
+                                ("over_30s", int(ms > 30000)), ("over_120s", int(ms > 120000))):
+            _enqueue((f"latency:{kind}", counter, amount, int(now // 60), int(now // 3600)))
+    except Exception:
+        pass  # Same nonblocking bounded sink as provider telemetry.
+
+
+def latency_snapshot(*, minutes=5, hours=None, now=None):
+    """Read completed minute or hour latency buckets; missing remains unknown."""
+    width, periods = (3600, hours) if hours is not None else (60, minutes)
+    if type(periods) is not int or not 1 <= periods <= (168 if hours is not None else 15):
+        raise ValueError("Invalid open latency window")
+    end = int((time() if now is None else now) // width)
+    key_fn = _hour_key if hours is not None else _key
+    keys = {(kind, bucket, counter): key_fn(f"latency:{kind}", bucket, counter)
+            for kind in LATENCY_KINDS for bucket in range(end - periods, end)
+            for counter in LATENCY_COUNTERS}
+    values = cache.get_many(list(keys.values()))
+    result, observed = {}, {}
+    for kind in LATENCY_KINDS:
+        selected = {item: values[key] for item, key in keys.items() if item[0] == kind and key in values}
+        observed[kind] = len({bucket for _, bucket, _ in selected})
+        result[kind] = None if not selected else {
+            counter: sum(value for (_, _, name), value in selected.items() if name == counter)
+            for counter in LATENCY_COUNTERS
+        }
+    return {"window_start": (end - periods) * width, "window_end": end * width,
+            "bucket_seconds": width, "observed_buckets": observed, "kinds": result}

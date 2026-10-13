@@ -268,6 +268,7 @@ class InitialImportPriorityTests(SlackDmIoAuthorityFixture, TransactionTestCase)
             call_command('message_sync_status', window_minutes=1, stdout=output)
         payload = output.getvalue()
         self.assertNotIn('TSECRET', payload)
+        self.assertTrue({'discovery', 'open_requests', 'open_latency'} <= json.loads(payload).keys())
         row = json.loads(payload)['provider_throughput']['measured_scopes'][0]
         self.assertEqual(row['requests_per_minute'], 20)
         output = StringIO()
@@ -278,3 +279,37 @@ class InitialImportPriorityTests(SlackDmIoAuthorityFixture, TransactionTestCase)
         self.assertIsNone(partial['measured_scopes'][0]['requests_per_minute'])
         self.assertIsNone(partial['measured_scopes'][0]['configured_budget_used_percent'])
         self.assertIn('best_effort', partial['reliability'])
+
+
+    @override_settings(MESSAGE_SYNC_OPEN_PRIORITY_ENABLED=True)
+    def test_explicit_open_bypasses_older_owner_only_in_import_slot_and_stops_after_proof(self):
+        from integrations.models import SlackDmMirrorDelivery
+        from integrations.services.slack_chat_refresh import FOREGROUND_STATE_ID
+        from uuid import uuid4
+        user = get_user_model().objects.create_user(email='open-priority-other@example.invalid')
+        connection = ExternalServiceConnection.objects.create(user=user, provider='slack', access_token='synthetic')
+        grant = SlackDmMirrorGrant.objects.create(user=user, connection=connection, slack_workspace_id=self.grant.slack_workspace_id, slack_user_id='UOTHEROWNER', consented_at=timezone.now())
+        other = ensure_state(SlackDmMirrorConversation.objects.create(grant=grant, slack_workspace_id=grant.slack_workspace_id, slack_conversation_id='DOTHEROWNER', status='live'))
+        self.recent.mlai_channel_id = uuid4()
+        self.recent.save(update_fields=['mlai_channel_id'])
+        SlackDmMirrorDelivery.objects.create(conversation=self.recent, source_platform='slack', source_message_id=FOREGROUND_STATE_ID, operation='create', encrypted_text='', status='completed', available_at=timezone.now() + timedelta(minutes=5))
+        BridgeSyncJob.objects.filter(state__private_conversation__grant=self.grant).update(last_served_at=timezone.now())
+        ordinary = claim_job(prefer_import=False)
+        self.assertEqual(ordinary.state_id, other.pk)
+        finish_job(ordinary, checkpoint={}, delay_seconds=3600)
+        opened = claim_job(prefer_import=True)
+        self.assertEqual((opened.state_id, opened.kind), (self.pending.pk, 'archive'))
+        finish_job(opened, checkpoint={})
+        self.pending.verified_ranges = {'presentation': {'scope': 'current-proof'}}
+        self.pending.save(update_fields=['verified_ranges'])
+        BridgeSyncJob.objects.filter(state=other).update(last_served_at=None, due_at=timezone.now())
+        self.assertEqual(claim_job(prefer_import=True).state_id, other.pk)
+
+    @override_settings(MESSAGE_SYNC_OPEN_PRIORITY_ENABLED=True)
+    def test_expired_open_marker_rejoins_ordinary_owner_fairness(self):
+        from integrations.models import SlackDmMirrorDelivery
+        from integrations.services.slack_chat_refresh import FOREGROUND_STATE_ID
+        SlackDmMirrorDelivery.objects.create(conversation=self.recent, source_platform='slack', source_message_id=FOREGROUND_STATE_ID, operation='create', encrypted_text='', status='completed', available_at=timezone.now() - timedelta(seconds=1))
+        # A foreground mark that has expired must not outrank the unserved public owner.
+        public = ensure_state(CommunityBridgeChannel.objects.create(slack_workspace_id=self.grant.slack_workspace_id, slack_channel_id='CEXPIRED', destination_platform='buzz', destination_workspace_id='test.invalid', destination_channel_id='expired-priority-public'))
+        self.assertEqual(claim_job(prefer_import=True).state_id, public.pk)

@@ -1,5 +1,6 @@
 """Background page/restart/permission tests using synthetic provider responses."""
 import json
+from datetime import timedelta
 from unittest.mock import MagicMock, patch
 
 from django.test import TransactionTestCase, override_settings
@@ -713,3 +714,21 @@ class PrivateDeliveryFairnessTests(SlackDmIoAuthorityFixture, TransactionTestCas
         SlackDmMirrorDelivery.objects.filter(pk=first[0].pk).update(status="completed")
         second = dm._claim_ready_private_delivery_batch(limit=1)
         self.assertEqual(second[0].conversation_id, other.pk)
+
+
+    @override_settings(MESSAGE_SYNC_OPEN_PRIORITY_ENABLED=True)
+    def test_opened_room_delivers_first_then_returns_to_rotation_after_presentation(self):
+        from integrations.models import BridgeSyncState, SlackDmMirrorConversation, SlackDmMirrorDelivery
+        from integrations.services.message_sync.private_delivery import fair_private_candidate
+        from integrations.services.slack_chat_refresh import FOREGROUND_STATE_ID
+        now = timezone.now()
+        other = SlackDmMirrorConversation.objects.create(grant=self.grant, slack_workspace_id=self.grant.slack_workspace_id, slack_conversation_id='DOPENFAIR', status='live')
+        opened_state = BridgeSyncState.objects.create(private_conversation=self.conversation, workspace_id=self.grant.slack_workspace_id, source_channel_id=self.conversation.slack_conversation_id, last_served_at=now)
+        BridgeSyncState.objects.create(private_conversation=other, workspace_id=self.grant.slack_workspace_id, source_channel_id=other.slack_conversation_id)
+        for index, conversation in enumerate((self.conversation, other)):
+            SlackDmMirrorDelivery.objects.create(conversation=conversation, source_platform='slack', source_message_id=f'{int(now.timestamp())}.{index:06d}', operation='create', encrypted_text='fixture', available_at=now)
+        SlackDmMirrorDelivery.objects.create(conversation=self.conversation, source_platform='slack', source_message_id=FOREGROUND_STATE_ID, operation='create', encrypted_text='', status='completed', available_at=now + timedelta(minutes=5))
+        self.assertEqual(fair_private_candidate(now, 'registration-state:'), self.conversation.pk)
+        opened_state.verified_ranges = {'presentation': {'scope': 'acknowledged'}}
+        opened_state.save(update_fields=['verified_ranges'])
+        self.assertEqual(fair_private_candidate(now, 'registration-state:'), other.pk)

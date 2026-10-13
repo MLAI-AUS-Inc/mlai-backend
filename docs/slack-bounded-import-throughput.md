@@ -60,9 +60,21 @@ Foreground requests are not capped by this preference: continuous foreground
 saturation can still delay background completion. The import-share estimate is
 a planning assumption, not a guaranteed reservation.
 
-Open-chat head checks, new activity/read hints, and discovery needed to validate
-staged live private messages retain foreground priority. Opening a conversation
-does not promote its entire archive or thread-repair queue. Public wakeups are
+Open-chat head checks, new activity/read hints, explicit marks/receipts and
+staged live private discovery retain foreground priority. Scheduled re-probes of
+already-unread conversations use background admission, including targeted read
+polling. `MESSAGE_SYNC_OPEN_PRIORITY_ENABLED` (default `true`) gives pending
+opens three of every four discovery turns; the fourth retains ordinary fairness.
+Owner opens remain FIFO and provider admission deferrals return unused turns
+without shortening Retry-After. Turning the flag off also restores the previous
+open cooldown/admission turn penalty.
+
+The two import slots can prefer an opened private room across owners, using the
+same workspace advisory lock and state/job leases. An opened archive page uses
+foreground admission only until the current presentation or publication scope
+acknowledges its first message. Pending private delivery prefers that room until
+its presentation proof exists, then resumes ordinary rotation. The foreground
+marker expires after five minutes; thread repair retains background admission. Public wakeups are
 optional, bounded and skip busy state rows so they do not hold up cached reads.
 Client startup, rendering, subscription limits and consent-selected history are
 unchanged by these scheduling changes.
@@ -141,3 +153,33 @@ skipping the reset would break history availability or audience verification.
 
 Regression coverage lives in
 [`integrations.tests_message_sync_history`](../integrations/tests_message_sync_history.py).
+
+
+## Open responsiveness measurements and gated prefetch
+
+The `discovery`, `open_requests` and `open_latency` status sections expose
+heartbeat age, due/leased grants, machine error counts (budget deferrals
+separately), live request counts and oldest pending/importing ages. Completed
+minute/hour latency buckets provide `count`, `sum_ms`, `over_30s` and
+`over_120s` for provisioning, first presentation and ready responses. Logs use
+only grant/request IDs and latency; the first presentation scope keeps its open
+correlation fields on later proof rewrites. They neither establish complete
+history coverage nor expose message content or Slack IDs.
+
+Both discovery entrypoints emit an aggregated heartbeat at most once every five
+seconds. `BudgetDeferred` is not a failed turn. Discovery is intentionally absent
+from `--check` lanes until a deployed heartbeat has been observed; adding it
+requires the separate healthcheck rollout in the responsiveness plan.
+
+`MESSAGE_SYNC_UNREAD_PREFETCH_ENABLED=false` keeps unread prefetch disabled.
+After open-priority latency has been measured, an approved rollout can enable it
+with `MESSAGE_SYNC_UNREAD_PREFETCH_PER_HOUR=6`. One eligible, consented unread
+source without a mirror can be provisioned per turn, after explicit opens and
+device recovery. A fresh Slack archive flag is rejected for bounded-history consent even when
+the directory row still says unarchived. The source is revalidated through Slack and all verified owner
+devices use the normal audience fences. No foreground marker is added.
+Hourly creation reservations and per-source retries are content-free and bounded
+to 256 entries. An unused reservation is returned on admission deferral; a
+created room retains its charge if later staged delivery defers. Source 4xx
+failures cool down for one hour and 5xx failures for five minutes. Neither flag
+changes consent-selected history or the shared Slack allowance.

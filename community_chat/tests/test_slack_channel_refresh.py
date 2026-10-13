@@ -99,8 +99,14 @@ class SlackChannelRefreshTests(SimpleTestCase):
         self.request(conversation).assert_not_called()
 
     def test_rapid_reopen_coalesces_even_after_completion(self):
+        now = timezone.now()
         self.request(
-            self.conversation(), SimpleNamespace(updated_at=timezone.now())
+            self.conversation(),
+            SimpleNamespace(
+                updated_at=now,
+                available_at=now + timedelta(seconds=30),
+                metadata={},
+            ),
         ).assert_not_called()
 
     def test_priority_uses_only_unexpired_completed_control_rows(self):

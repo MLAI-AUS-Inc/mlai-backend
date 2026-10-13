@@ -215,10 +215,12 @@ def request_conversation_refresh(user, channel_id, *, public_key):
             reset_deliveries=False,
             reconcile_current_state=True,
         )
+    preserved = {key: marker.metadata[key] for key in ("open_request_id", "open_requested_at")
+                 if marker is not None and marker.available_at > now and key in (marker.metadata or {})}
     marker = _ensure_history_state(
         conversation,
         source_message_id=FOREGROUND_STATE_ID,
-        metadata={"history_scan_state": "foreground-refresh"},
+        metadata={"history_scan_state": "foreground-refresh", **preserved},
     )
     marker.available_at = now + timedelta(minutes=5)
     marker.save(update_fields=("available_at", "updated_at"))

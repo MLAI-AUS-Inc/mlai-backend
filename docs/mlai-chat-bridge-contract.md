@@ -847,6 +847,18 @@ conversation view immediately and retry this endpoint after its reported delay;
 they do not need to load the full Slack directory between the inbox and the chat.
 Polling coalesces with the same intent and never resets its provider backoff.
 
+An importing `202` response can additionally contain
+`provisional_channel_id: "<room UUID>"`; `mlai_channel_id` remains `null`, and
+only `state: "ready"` claims ready history. The provisional field requires a
+live importing request for the exact verified device and current inventory
+epoch, a live provisioned mirror, and an existing nonlegacy ACTIVE adapter
+registration for its room, consent generation, participant hash/Slack audience
+and device key. Any pending registration cleanup withholds the field. This
+read-only check never creates a legacy registration. Existing clients retain
+the importing contract; new clients still verify catalog kind, membership,
+consent and epoch before displaying a provisional room. Inventory/catalog
+responses are unchanged and continue reporting `ready_for_display: false`.
+
 Inventory items include `openable`, an owner/device-scoped availability hint.
 The unread-only directory retains every eligible, known unread independently of
 this hint; fresh/provisional unread totals count conversations rather than import
@@ -1639,3 +1651,28 @@ behavior, even though they are also represented as read-target conversations.
 Provider admission, Retry-After handling, export shares and safety-sweep quotas
 remain unchanged. Rolling back the flag restores history probing without deleting
 cursors or source observations.
+
+
+### Slack open scheduling and diagnostics
+
+`MESSAGE_SYNC_OPEN_PRIORITY_ENABLED` defaults to `true` and can restore the
+previous scheduling preference when disabled. Pending owner opens receive three
+of every four discovery turns, preserve FIFO during provider delays and return
+unused admission turns. The two import slots may prefer an opened private room
+across members until its first presentation/publication proof. Its first archive
+page and pending private message delivery receive priority, bounded by the
+five-minute foreground marker. Shared method admission, consent-selected history
+and current-device/audience checks are unchanged.
+
+Provisioning, first presentation and ready responses emit content-free
+`slack_open_provisioned`, `slack_open_presented` and `slack_open_ready` logs with
+only grant/request IDs and latency. Aggregate minute/hour counters and discovery
+heartbeat/open queue health appear in `message_sync_status`. Discovery is not yet
+a required `--check` lane: activate that separately after a production heartbeat
+exists.
+
+Optional unread source prefetch defaults off, with six rooms per member per hour.
+It follows explicit opens and device recovery, validates eligible cached unread
+sources against Slack, and uses all verified owner devices at normal import
+priority. Its flags/cursor contain no message bodies; privacy and metadata
+consent fences remain unchanged. Enable it only after open-priority measurements.
