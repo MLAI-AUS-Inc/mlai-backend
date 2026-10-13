@@ -31,6 +31,7 @@ from .models import (
     RewardsCatalog, RewardRedemption, TaskTemplate, PointsRequest, PointsPurchase,
 )
 
+from .purchase_tax import inclusive_gst_snapshot, validate_gst_payment
 from .services import (
     PointsService, PointsPurchaseService, CoworkingService, CoworkingBatchBookingError,
     BoostPostAdmissionService, BoostPostPayloadConflictError, InvalidBoostPostError,
@@ -453,6 +454,8 @@ class StripeWebhookView(APIView):
                     'reason': f'purchase_{purchase.status}',
                 }
 
+            tax_payment = validate_gst_payment(session, purchase)
+
             ledger, credited = PointsService.credit_purchased_topup(
                 user=purchase.user,
                 delta=purchase.points_amount,
@@ -474,6 +477,9 @@ class StripeWebhookView(APIView):
                 'ledger_entry',
                 'updated_at',
             ]
+            if tax_payment is not None:
+                purchase.metadata = {**(purchase.metadata or {}), 'tax_payment': tax_payment}
+                purchase_update_fields.append('metadata')
             if checkout_consent_mode == 'stripe':
                 purchase.terms_version_accepted = str(
                     session_metadata.get('terms_version')
@@ -502,7 +508,7 @@ class StripeWebhookView(APIView):
                         'metadata',
                     ]
                 )
-            purchase.save(update_fields=purchase_update_fields)
+            purchase.save(update_fields=list(dict.fromkeys(purchase_update_fields)))
             should_post_slack_confirmation = True
 
         if should_post_slack_confirmation:
@@ -514,6 +520,20 @@ class StripeWebhookView(APIView):
             'credited': credited,
             'slack_confirmation_sent': slack_confirmation_sent,
         }
+
+    def _handle_checkout_failed(self, session):
+        session_id = session.get('id')
+        if not session_id:
+            raise ValueError('Stripe checkout session id is required')
+        with transaction.atomic():
+            purchase = self._find_purchase_for_session(session)
+            if purchase.stripe_checkout_session_id != session_id:
+                raise ValueError('Stripe checkout session does not match the purchase')
+            if purchase.status != 'pending':
+                return {'received': True, 'ignored': True, 'reason': f'purchase_{purchase.status}'}
+            purchase.status = 'failed'
+            purchase.save(update_fields=['status', 'updated_at'])
+        return {'received': True, 'purchase_id': str(purchase.id), 'failed': True}
 
     def post(self, request):
         payload = request.body
@@ -529,12 +549,19 @@ class StripeWebhookView(APIView):
             return Response({'error': str(exc)}, status=status.HTTP_400_BAD_REQUEST)
 
         event_type = event.get('type')
-        if event_type != 'checkout.session.completed':
+        if event_type not in (
+            'checkout.session.completed',
+            'checkout.session.async_payment_succeeded',
+            'checkout.session.async_payment_failed',
+        ):
             return Response({'received': True, 'ignored': True})
 
         session = (event.get('data') or {}).get('object') or {}
         try:
-            result = self._handle_checkout_completed(session)
+            if event_type == 'checkout.session.async_payment_failed':
+                result = self._handle_checkout_failed(session)
+            else:
+                result = self._handle_checkout_completed(session)
         except (PointsPurchase.DoesNotExist, ValidationError):
             return Response({'error': 'Points purchase not found'}, status=status.HTTP_404_NOT_FOUND)
         except ValueError as exc:
@@ -2557,6 +2584,7 @@ class PointsPurchaseViewSet(viewsets.ViewSet):
             'pack_id': purchase.pack_id,
             'points_amount': purchase.points_amount,
             'amount_cents': purchase.amount_cents,
+            'tax': (purchase.metadata or {}).get('tax') or (purchase.metadata or {}).get('tax_quote'),
             'currency': purchase.currency,
             'expires_at': purchase.expires_at.isoformat(),
             'paid_at': purchase.paid_at.isoformat() if purchase.paid_at else None,
@@ -2758,6 +2786,7 @@ class PointsPacksView(APIView):
                 'pack_id': pack_id,
                 'points': cfg['points'],
                 'amount_cents': cfg['amount_cents'],
+                'tax': inclusive_gst_snapshot(cfg['amount_cents'], cfg['currency']),
                 'currency': cfg['currency'],
                 'label': cfg['label'],
             }

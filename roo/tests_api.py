@@ -52,8 +52,16 @@ class RewardsCatalogAPITests(APITestCase):
         self.assertEqual(rewards_by_code['WORKSHOP_FREE']['stock_remaining'], 5)
 
 
+@override_settings(ROO_POINTS_GST_TAX_RATE_ID='txr_testGst')
 class PointsPurchaseViewSetTests(APITestCase):
     def setUp(self):
+        rate_patcher = patch('roo.services.requests.get')
+        self.mock_tax_get = rate_patcher.start()
+        self.addCleanup(rate_patcher.stop)
+        self.mock_tax_get.return_value = Mock(status_code=200, json=Mock(return_value={
+            'id': 'txr_testGst', 'active': True, 'inclusive': True,
+            'country': 'AU', 'percentage': 10, 'tax_type': 'gst', 'display_name': 'GST',
+        }))
         self.url = reverse('points-purchase-list')
         self.slack_user_id = 'UTOPUPAPI123'
         self.user = User.objects.create_user(
@@ -139,6 +147,24 @@ class PointsPurchaseViewSetTests(APITestCase):
         self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
         self.assertIn('Points purchase not found', response.data['error'])
 
+    @override_settings(STRIPE_SECRET_KEY='rk_test_fixture', ROO_POINTS_GST_TAX_RATE_ID='')
+    def test_checkout_missing_gst_rate_returns_customer_facing_error(self):
+        purchase = PointsPurchase.objects.create(
+            user=self.user, slack_user_id=self.slack_user_id,
+            pack_id='topup_5', points_amount=10, amount_cents=1999,
+        )
+        response = self.client.post(
+            reverse('points-purchase-checkout', kwargs={'pk': purchase.id}),
+            {'terms_version_accepted': 'terms-test', 'privacy_version_accepted': 'privacy-test'},
+            format='json',
+        )
+        self.assertEqual(response.status_code, status.HTTP_503_SERVICE_UNAVAILABLE)
+        self.assertIn('temporarily unavailable', response.data['error'])
+        self.assertNotIn('ROO_POINTS_GST_TAX_RATE_ID', response.data['error'])
+        self.mock_tax_get.assert_not_called()
+        purchase.refresh_from_db()
+        self.assertIsNone(purchase.stripe_checkout_session_id)
+
     @override_settings(DEFAULT_FRONTEND_URL='https://mlai.test', STRIPE_SECRET_KEY='sk_test_roo')
     @patch('roo.services.requests.post')
     def test_checkout_creates_stripe_session_for_pending_purchase(self, mock_post):
@@ -194,6 +220,9 @@ class PointsPurchaseViewSetTests(APITestCase):
         stripe_data = kwargs['data']
         self.assertEqual(stripe_data['mode'], 'payment')
         self.assertEqual(stripe_data['client_reference_id'], str(purchase.id))
+        self.assertEqual(stripe_data['line_items[0][tax_rates][0]'], 'txr_testGst')
+        self.assertEqual(stripe_data['line_items[0][price_data][tax_behavior]'], 'inclusive')
+        self.assertEqual(purchase.metadata['tax']['amount_cents'], 336)
         self.assertEqual(stripe_data['success_url'], f'https://mlai.test/roo/topup/{purchase.id}?checkout=success')
         self.assertEqual(stripe_data['cancel_url'], f'https://mlai.test/roo/topup/{purchase.id}?checkout=cancelled')
         self.assertEqual(stripe_data['line_items[0][price_data][currency]'], 'aud')
@@ -741,6 +770,60 @@ class StripeWebhookViewTests(APITestCase):
         self.assertEqual(second_response.status_code, status.HTTP_200_OK)
         mock_send_message.assert_called_once()
         self.assertTrue(second_response.data['already_paid'])
+
+    def _gst_payload(self, *, amount_total=3699, amount_tax=336, event_type='checkout.session.completed'):
+        from .purchase_tax import inclusive_gst_snapshot
+        self.purchase.metadata = {'tax': inclusive_gst_snapshot(3699, 'aud', 'txr_testGst')}
+        self.purchase.save(update_fields=['metadata'])
+        return self._payload(session={
+            'id': 'cs_test_roo_paid', 'status': 'complete', 'payment_status': 'paid',
+            'amount_total': amount_total, 'currency': 'aud',
+            'total_details': {'amount_tax': amount_tax}, 'payment_intent': 'pi_testGst',
+            'metadata': {'points_purchase_id': str(self.purchase.id),
+                         'gst_policy_version': self.purchase.metadata['tax']['policy_version']},
+        }, event_type=event_type)
+
+    @override_settings(STRIPE_WEBHOOK_SECRET=webhook_secret)
+    def test_gst_checkout_records_tax_evidence_with_real_points_ledger(self):
+        response = self._post_webhook(self._gst_payload())
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.purchase.refresh_from_db()
+        self.assertEqual(self.purchase.metadata['tax_payment']['gst_cents'], 336)
+        self.assertEqual(self.purchase.metadata['tax_payment']['total_cents'], 3699)
+        self.assertEqual(PointsAccount.objects.get(user=self.user).purchased_topup_balance, 10)
+        self.assertEqual(Ledger.objects.count(), 1)
+
+    @override_settings(STRIPE_WEBHOOK_SECRET=webhook_secret)
+    def test_gst_amount_mismatch_cannot_credit_real_points_ledger(self):
+        response = self._post_webhook(self._gst_payload(amount_total=3799))
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.purchase.refresh_from_db()
+        self.assertEqual(self.purchase.status, 'pending')
+        self.assertFalse(Ledger.objects.exists())
+
+    @override_settings(STRIPE_WEBHOOK_SECRET=webhook_secret)
+    def test_gst_async_success_is_idempotent_in_real_points_ledger(self):
+        payload = self._gst_payload(event_type='checkout.session.async_payment_succeeded')
+        first = self._post_webhook(payload)
+        duplicate = self._post_webhook(payload)
+        self.assertEqual(first.status_code, status.HTTP_200_OK)
+        self.assertTrue(first.data['credited'])
+        self.assertTrue(duplicate.data['already_paid'])
+        self.assertEqual(Ledger.objects.count(), 1)
+        self.purchase.refresh_from_db()
+        self.assertEqual(self.purchase.metadata['tax_payment']['gst_cents'], 336)
+
+    @override_settings(STRIPE_WEBHOOK_SECRET=webhook_secret)
+    def test_async_failure_never_creates_a_points_ledger_entry(self):
+        payload = self._payload(session={
+            'id': 'cs_test_roo_paid', 'status': 'complete', 'payment_status': 'unpaid',
+            'metadata': {'points_purchase_id': str(self.purchase.id)},
+        }, event_type='checkout.session.async_payment_failed')
+        response = self._post_webhook(payload)
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.purchase.refresh_from_db()
+        self.assertEqual(self.purchase.status, 'failed')
+        self.assertFalse(Ledger.objects.exists())
 
 
 class CurrentUserBalanceViewTests(APITestCase):
