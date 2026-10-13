@@ -4,6 +4,9 @@ from __future__ import annotations
 
 from typing import Any
 
+from django.core.cache import cache
+import hashlib
+
 from integrations import http_client
 from integrations.models import ReconciliationProfile
 from integrations.services.xero_reconciliation import (
@@ -11,6 +14,8 @@ from integrations.services.xero_reconciliation import (
     ReconciliationValidationError,
     _xero_headers,
 )
+
+CATALOG_CACHE_SECONDS = 60
 
 
 def _normalized_id(value: Any) -> str:
@@ -51,12 +56,23 @@ def fetch_active_xero_bank_accounts(profile: ReconciliationProfile) -> list[dict
     connection = profile.xero_connection
     if connection is None:
         raise ReconciliationValidationError("A Xero connection must be selected.")
+    identity = f"{profile.organization_id}:{connection.pk}:{connection.external_account_id}"
+    cache_key = "xero:active-bank-catalog:v1:" + hashlib.sha256(identity.encode()).hexdigest()
+    cached_accounts = cache.get(cache_key)
+    if cached_accounts is not None:
+        return [dict(account) for account in cached_accounts]
     try:
         response = http_client.get(
             f"{XERO_API_URL}/Accounts",
             headers=_xero_headers(connection),
             timeout=(3, 30),
         )
+        if response.status_code == 429:
+            seconds = http_client._retry_after_seconds(response.headers.get("Retry-After"))
+            raise ReconciliationValidationError(
+                f"Xero API rate limit reached; retry after {seconds} seconds. "
+                "The active bank-account catalogue still requires Xero validation."
+            )
         response.raise_for_status()
         payload = response.json()
     except (http_client.RequestException, ValueError) as exc:
@@ -64,9 +80,11 @@ def fetch_active_xero_bank_accounts(profile: ReconciliationProfile) -> list[dict
             "The active Xero bank-account catalogue could not be refreshed."
         ) from exc
     rows = payload.get("Accounts") if isinstance(payload, dict) else []
-    return _normalise_accounts(
+    accounts = _normalise_accounts(
         [item for item in rows or [] if isinstance(item, dict)]
     )
+    cache.set(cache_key, accounts, timeout=CATALOG_CACHE_SECONDS)
+    return [dict(account) for account in accounts]
 
 
 def active_bank_account(
