@@ -54,6 +54,30 @@ preserves the signed installation for reconnection; installation revocation
 removes it. Reconnection preserves operator budgets, and daily invocation and
 reply limits apply across installation generations.
 
+## Mentions from multiple owner devices
+
+The mention worker scans every currently verified, unrevoked Chat device
+belonging to the installation owner. A later browser sign-in must not silently
+fall outside an arbitrary device limit. Each relay request still contains at
+most 20 caller public keys, including the original installation device. Other
+owners' devices, pending devices and revoked devices are excluded. Relay
+membership checks and current-device validation still apply at admission, tool
+use and reply dispatch.
+
+Every batch starts at the same saved source cursor. The worker commits only
+the smallest completed sequence across all batches, so a newer relay head or
+a paginated batch cannot skip a message for an earlier caller group. Duplicate
+event IDs are admitted once; the durable installation/source constraint also
+deduplicates retries on subsequent polls. If any batch fails or changes epoch,
+no partial admission or cursor advancement is committed. An epoch reset keeps
+the existing explicit gap and pause/resume recovery behavior.
+
+This is a code-only change: there is no new migration, permission, channel
+scope or historical replay. The existing 15-minute mention lifetime and live
+subscription requirement still apply. Verify a release with a fresh mention
+from a verified device beyond the first 20, without passing an invocation ID
+to the provider manually.
+
 ## Disabled-by-default rollout
 
 The existing MLAI availability requirements remain in force. A deployment must

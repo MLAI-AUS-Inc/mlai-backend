@@ -13,7 +13,7 @@ from django.test import SimpleTestCase, override_settings
 from rest_framework.exceptions import PermissionDenied, ValidationError
 from rest_framework.test import APIRequestFactory, force_authenticate
 
-from agent_runtime import broker, native_crypto, native_installations, native_invocations, native_sources, policy, serializers
+from agent_runtime import broker, native_crypto, native_installations, native_invocations, native_mention_scan, native_sources, policy, serializers
 from agent_runtime.mcp import input_schema
 from agent_runtime.native_views import NativeAppsView, NativeInstallationsView, NativeRegistryView
 from agent_runtime.webhook_transport import CallbackEndpointError, WebhookResponse
@@ -41,6 +41,84 @@ def fixture():
         source_event_id="a" * 64, thread_id="b" * 64, owner_public_key=device.public_key,
         expires_at=NOW + timedelta(minutes=15), status="pending")
     return installation, grant, invocation
+
+
+class NativeMentionScanTests(SimpleTestCase):
+    owner = "0" * 64
+
+    def setUp(self):
+        self.keys = [f"{n:064x}" for n in range(1, 34)]
+        self.epoch = str(uuid4())
+        self.cursor = {"epoch": self.epoch, "sequence": 5}
+
+    def page(self, sequence=6, events=None, epoch=None):
+        return {"cursor": {"epoch": epoch or self.epoch, "sequence": sequence}, "events": events or []}
+
+    def test_all_devices_are_covered_with_bound_owner_and_twenty_caller_ceiling(self):
+        batches = list(native_mention_scan.caller_batches(self.owner, [self.owner, *self.keys, self.keys[0]]))
+        self.assertEqual(len(batches), 2)
+        self.assertTrue(all(batch[0] == self.owner and len(batch) <= 20 for batch in batches))
+        self.assertEqual([key for batch in batches for key in batch[1:]], self.keys)
+
+    def test_bound_owner_alone_still_gets_one_scan(self):
+        self.assertEqual(list(native_mention_scan.caller_batches(self.owner, [])), [[self.owner]])
+        self.assertEqual(list(native_mention_scan.caller_batches(self.owner, [self.owner])), [[self.owner]])
+
+    def test_device_beyond_first_twenty_is_discovered(self):
+        event = {"event_id": "a" * 64, "author_pubkey": self.keys[-1]}
+        query = MagicMock(side_effect=lambda **args: self.page(events=[event] if self.keys[-1] in args["caller_pubkeys"] else []))
+        events, cursor = native_mention_scan.scan_mentions(self.owner, iter(self.keys), self.cursor, query)
+        self.assertEqual(events, [event])
+        self.assertEqual(cursor["sequence"], 6)
+        self.assertEqual(query.call_count, 2)
+
+    def test_newer_batch_head_cannot_skip_an_earlier_batch_message(self):
+        query = MagicMock(side_effect=[self.page(10), self.page(12)])
+        _, cursor = native_mention_scan.scan_mentions(self.owner, self.keys, self.cursor, query)
+        self.assertEqual(cursor, {"epoch": self.epoch, "sequence": 10})
+        self.assertTrue(all(call.kwargs["after_sequence"] == 5 and call.kwargs["epoch"] == self.epoch
+                            for call in query.call_args_list))
+
+    def test_paginated_batch_limits_shared_progress(self):
+        _, cursor = native_mention_scan.scan_mentions(self.owner, self.keys, self.cursor,
+            MagicMock(side_effect=[self.page(7), self.page(100)]))
+        self.assertEqual(cursor["sequence"], 7)
+
+    def test_repeated_bound_owner_event_is_returned_once(self):
+        event = {"event_id": "a" * 64, "author_pubkey": self.owner}
+        events, _ = native_mention_scan.scan_mentions(self.owner, self.keys, self.cursor,
+            MagicMock(return_value=self.page(events=[event])))
+        self.assertEqual(events, [event])
+
+    def test_changed_duplicate_is_rejected(self):
+        query = MagicMock(side_effect=[self.page(events=[{"event_id": "a" * 64, "author_pubkey": self.owner}]),
+            self.page(events=[{"event_id": "a" * 64, "author_pubkey": self.keys[-1]}])])
+        with self.assertRaises(ValueError):
+            native_mention_scan.scan_mentions(self.owner, self.keys, self.cursor, query)
+
+    def test_late_query_failure_returns_no_partial_result(self):
+        with self.assertRaises(native_sources.SourceUnavailable):
+            native_mention_scan.scan_mentions(self.owner, self.keys, self.cursor,
+                MagicMock(side_effect=[self.page(), native_sources.SourceUnavailable()]))
+
+    def test_epoch_change_requires_explicit_cursor_reset(self):
+        with self.assertRaises(native_sources.NativeCursorReset):
+            native_mention_scan.scan_mentions(self.owner, self.keys, self.cursor,
+                MagicMock(side_effect=[self.page(), self.page(epoch=str(uuid4()))]))
+
+    def test_initial_scan_uses_shared_head_without_requesting_history(self):
+        query = MagicMock(side_effect=[self.page(10), self.page(12)])
+        _, cursor = native_mention_scan.scan_mentions(self.owner, self.keys, {}, query)
+        self.assertEqual(cursor["sequence"], 10)
+        self.assertTrue(all("after_sequence" not in call.kwargs for call in query.call_args_list))
+
+    def test_invalid_transport_pages_cannot_advance_cursor(self):
+        invalid = [self.page(4), self.page(True), {"cursor": self.cursor, "events": [{}]},
+            self.page(events=[{"event_id": "a" * 64}] * 101),
+            {"cursor": {"epoch": "not-an-epoch", "sequence": 6}, "events": []}]
+        for page in invalid:
+            with self.subTest(page=page), self.assertRaises(ValueError):
+                native_mention_scan.scan_mentions(self.owner, self.keys, self.cursor, MagicMock(return_value=page))
 
 
 class NativeCryptoTests(SimpleTestCase):
