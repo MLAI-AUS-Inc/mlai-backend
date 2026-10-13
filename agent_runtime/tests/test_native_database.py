@@ -242,7 +242,7 @@ class NativeDatabaseTests(unittest.TestCase):
             except PermissionDenied:
                 return "quota_denied"
             finally:
-                close_old_connections()
+                connection.close()
         with ThreadPoolExecutor(max_workers=2) as pool:
             result = list(pool.map(claim, range(2)))
         self.assertEqual(result.count("quota_denied"), 1)
@@ -274,7 +274,7 @@ class NativeDatabaseTests(unittest.TestCase):
             try:
                 return AgentInstallation.objects.get(pk=installation.pk).profile_events
             finally:
-                close_old_connections()
+                connection.close()
         with ThreadPoolExecutor(max_workers=1) as pool:
             self.assertEqual(pool.submit(committed_profiles).result(timeout=10), profiles)
         retry_event, retry_tag = self.proof(enrollment)
@@ -519,14 +519,14 @@ class NativeDatabaseTests(unittest.TestCase):
             try:
                 return event_webhooks.dispatch_webhooks(transport=callback)
             finally:
-                close_old_connections()
+                connection.close()
         def revoke():
             close_old_connections()
             try:
                 revoking.set()
                 return runtime.revoke_installation(installation.pk, owner=self.owner)
             finally:
-                close_old_connections()
+                connection.close()
         with ThreadPoolExecutor(max_workers=2) as pool:
             delivery = pool.submit(dispatch)
             try:
@@ -613,7 +613,7 @@ class NativeDatabaseTests(unittest.TestCase):
                     invocation = native_invocations.admit_metadata(runtime._grant(grant.pk), metadata)
                 return str(invocation.pk) if invocation else None
             finally:
-                close_old_connections()
+                connection.close()
         with ThreadPoolExecutor(max_workers=2) as pool:
             results = list(pool.map(request, range(2)))
         self.assertEqual(results.count(None), 1)

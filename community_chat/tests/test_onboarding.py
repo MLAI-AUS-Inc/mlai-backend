@@ -288,7 +288,7 @@ class MemberOnboardingConcurrencyTests(TransactionTestCase):
                     client_id=challenge.client_id, installation_id=challenge.installation_id)
                 return user.pk
             finally:
-                close_old_connections()
+                connection.close()
 
         with ThreadPoolExecutor(max_workers=2) as pool:
             users = list(pool.map(verify, challenges))
@@ -312,7 +312,7 @@ class MemberOnboardingConcurrencyTests(TransactionTestCase):
                 save_onboarding(authenticated_session=credentials.session, values={"step": "complete",
                     "city": "Melbourne", "interests": ["research"], "marketing_opt_in": True})
             finally:
-                close_old_connections()
+                connection.close()
 
         with ThreadPoolExecutor(max_workers=2) as pool:
             list(pool.map(complete, credentials))
