@@ -264,6 +264,11 @@ class StripeAttributionTests(SimpleTestCase):
 
 class XeroReconciliationWorkflowTests(TestCase):
     def setUp(self):
+        from django.core.cache import cache
+        # TestCase rolls back fixture IDs, but shared catalogue caches survive.
+        # Each case represents a new tenant/catalogue observation.
+        cache.clear()
+        self.addCleanup(cache.clear)
         self.organization = Organization.objects.create(name="MLAI", domain="mlai.au")
         self.user = User.objects.create_user(email="finance@example.com", slack_id="UFIN")
         self.connection = ExternalServiceConnection.objects.create(
