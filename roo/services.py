@@ -32,6 +32,7 @@ from .models import (
     OfficeManagerAssignment, OfficeManagerClaimAttempt, OfficeManagerDay,
     RewardsCatalog, RewardRedemption, PointsAdmin, PointsPurchase
 )
+from .purchase_tax import inclusive_gst_snapshot, validate_gst_rate
 from .permissions import (
     is_points_admin, require_admin, 
     PermissionDeniedError, InsufficientBalanceError, IdempotencyConflictError
@@ -169,6 +170,7 @@ class PointsPurchaseService:
             'amount_cents': pack['amount_cents'],
             'currency': pack['currency'],
             'purchase_from': origin,
+            'metadata': {'tax_quote': inclusive_gst_snapshot(pack['amount_cents'], pack['currency'])},
         }
         if cleaned_request_id:
             purchase, created = PointsPurchase.objects.get_or_create(
@@ -222,6 +224,7 @@ class PointsPurchaseService:
             amount_cents=pack['amount_cents'],
             currency=pack['currency'],
             purchase_from=origin,
+            metadata={'tax_quote': inclusive_gst_snapshot(pack['amount_cents'], pack['currency'])},
         )
 
     @staticmethod
@@ -277,7 +280,26 @@ class PointsPurchaseService:
         if not stripe_secret_key:
             raise RuntimeError("Stripe is not configured for Roo Points top-ups")
 
+        tax_rate_id = (getattr(settings, 'ROO_POINTS_GST_TAX_RATE_ID', '') or '').strip()
+        if not re.fullmatch(r'txr_[A-Za-z0-9]+', tax_rate_id):
+            raise RuntimeError("Roo Points GST is not configured; set ROO_POINTS_GST_TAX_RATE_ID")
+        try:
+            tax_response = requests.get(
+                f'https://api.stripe.com/v1/tax_rates/{tax_rate_id}',
+                auth=(stripe_secret_key, ''),
+                timeout=20,
+            )
+            if tax_response.status_code >= 400:
+                raise RuntimeError("Roo Points GST rate could not be verified with Stripe")
+            validate_gst_rate(tax_response.json(), tax_rate_id)
+        except (requests.RequestException, ValueError) as exc:
+            raise RuntimeError("Roo Points GST rate could not be verified with Stripe") from exc
+        tax_snapshot = inclusive_gst_snapshot(purchase.amount_cents, purchase.currency, tax_rate_id)
+
         metadata = {
+            'gst_policy_version': tax_snapshot['policy_version'],
+            'gst_amount_cents': str(tax_snapshot['amount_cents']),
+            'gst_inclusive': 'true',
             'points_purchase_id': str(purchase.id),
             'mlai_user_id': str(purchase.user_id),
             'slack_user_id': purchase.slack_user_id,
@@ -298,6 +320,8 @@ class PointsPurchaseService:
             'line_items[0][quantity]': '1',
             'line_items[0][price_data][currency]': purchase.currency,
             'line_items[0][price_data][unit_amount]': str(purchase.amount_cents),
+            'line_items[0][price_data][tax_behavior]': 'inclusive',
+            'line_items[0][tax_rates][0]': tax_rate_id,
             'line_items[0][price_data][product_data][name]': pack['label'],
         }
         if collect_terms_in_checkout:
@@ -350,6 +374,10 @@ class PointsPurchaseService:
             'stripe_checkout_session_url',
             'updated_at',
         ]
+        purchase_metadata = dict(purchase.metadata or {})
+        purchase_metadata['tax'] = tax_snapshot
+        purchase.metadata = purchase_metadata
+        update_fields.append('metadata')
         if collect_terms_in_checkout:
             purchase_metadata = dict(purchase.metadata or {})
             purchase_metadata.update(
@@ -360,7 +388,6 @@ class PointsPurchaseService:
                 }
             )
             purchase.metadata = purchase_metadata
-            update_fields.append('metadata')
         else:
             purchase.terms_version_accepted = cleaned_terms_version
             purchase.terms_accepted_at = timezone.now()

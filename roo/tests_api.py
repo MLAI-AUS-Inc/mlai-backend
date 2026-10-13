@@ -52,8 +52,16 @@ class RewardsCatalogAPITests(APITestCase):
         self.assertEqual(rewards_by_code['WORKSHOP_FREE']['stock_remaining'], 5)
 
 
+@override_settings(ROO_POINTS_GST_TAX_RATE_ID='txr_testGst')
 class PointsPurchaseViewSetTests(APITestCase):
     def setUp(self):
+        rate_patcher = patch('roo.services.requests.get')
+        self.mock_tax_get = rate_patcher.start()
+        self.addCleanup(rate_patcher.stop)
+        self.mock_tax_get.return_value = Mock(status_code=200, json=Mock(return_value={
+            'id': 'txr_testGst', 'active': True, 'inclusive': True,
+            'country': 'AU', 'percentage': 10, 'tax_type': 'gst', 'display_name': 'GST',
+        }))
         self.url = reverse('points-purchase-list')
         self.slack_user_id = 'UTOPUPAPI123'
         self.user = User.objects.create_user(
@@ -194,6 +202,9 @@ class PointsPurchaseViewSetTests(APITestCase):
         stripe_data = kwargs['data']
         self.assertEqual(stripe_data['mode'], 'payment')
         self.assertEqual(stripe_data['client_reference_id'], str(purchase.id))
+        self.assertEqual(stripe_data['line_items[0][tax_rates][0]'], 'txr_testGst')
+        self.assertEqual(stripe_data['line_items[0][price_data][tax_behavior]'], 'inclusive')
+        self.assertEqual(purchase.metadata['tax']['amount_cents'], 336)
         self.assertEqual(stripe_data['success_url'], f'https://mlai.test/roo/topup/{purchase.id}?checkout=success')
         self.assertEqual(stripe_data['cancel_url'], f'https://mlai.test/roo/topup/{purchase.id}?checkout=cancelled')
         self.assertEqual(stripe_data['line_items[0][price_data][currency]'], 'aud')

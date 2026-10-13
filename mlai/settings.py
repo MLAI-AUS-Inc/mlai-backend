@@ -1442,6 +1442,9 @@ STRIPE_VIBE_RAISING_KEY = _env_first(
     "STRIPE_VIBE_RAISING_SECRET_KEY",
 )
 STRIPE_WEBHOOK_SECRET = os.environ.get("STRIPE_WEBHOOK_SECRET", "")
+# Existing AUD pack prices include GST. New Checkout sessions fail closed until
+# the configured Stripe TaxRate is verified as active, inclusive, AU GST at 10%.
+ROO_POINTS_GST_TAX_RATE_ID = os.environ.get("ROO_POINTS_GST_TAX_RATE_ID", "").strip()
 ROO_POINTS_TERMS_VERSION = os.environ.get(
     "ROO_POINTS_TERMS_VERSION",
     "roo-points-terms-2026-05-04",
