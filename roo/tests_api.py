@@ -753,6 +753,60 @@ class StripeWebhookViewTests(APITestCase):
         mock_send_message.assert_called_once()
         self.assertTrue(second_response.data['already_paid'])
 
+    def _gst_payload(self, *, amount_total=3699, amount_tax=336, event_type='checkout.session.completed'):
+        from .purchase_tax import inclusive_gst_snapshot
+        self.purchase.metadata = {'tax': inclusive_gst_snapshot(3699, 'aud', 'txr_testGst')}
+        self.purchase.save(update_fields=['metadata'])
+        return self._payload(session={
+            'id': 'cs_test_roo_paid', 'status': 'complete', 'payment_status': 'paid',
+            'amount_total': amount_total, 'currency': 'aud',
+            'total_details': {'amount_tax': amount_tax}, 'payment_intent': 'pi_testGst',
+            'metadata': {'points_purchase_id': str(self.purchase.id),
+                         'gst_policy_version': self.purchase.metadata['tax']['policy_version']},
+        }, event_type=event_type)
+
+    @override_settings(STRIPE_WEBHOOK_SECRET=webhook_secret)
+    def test_gst_checkout_records_tax_evidence_with_real_points_ledger(self):
+        response = self._post_webhook(self._gst_payload())
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.purchase.refresh_from_db()
+        self.assertEqual(self.purchase.metadata['tax_payment']['gst_cents'], 336)
+        self.assertEqual(self.purchase.metadata['tax_payment']['total_cents'], 3699)
+        self.assertEqual(PointsAccount.objects.get(user=self.user).purchased_topup_balance, 10)
+        self.assertEqual(Ledger.objects.count(), 1)
+
+    @override_settings(STRIPE_WEBHOOK_SECRET=webhook_secret)
+    def test_gst_amount_mismatch_cannot_credit_real_points_ledger(self):
+        response = self._post_webhook(self._gst_payload(amount_total=3799))
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.purchase.refresh_from_db()
+        self.assertEqual(self.purchase.status, 'pending')
+        self.assertFalse(Ledger.objects.exists())
+
+    @override_settings(STRIPE_WEBHOOK_SECRET=webhook_secret)
+    def test_gst_async_success_is_idempotent_in_real_points_ledger(self):
+        payload = self._gst_payload(event_type='checkout.session.async_payment_succeeded')
+        first = self._post_webhook(payload)
+        duplicate = self._post_webhook(payload)
+        self.assertEqual(first.status_code, status.HTTP_200_OK)
+        self.assertTrue(first.data['credited'])
+        self.assertTrue(duplicate.data['already_paid'])
+        self.assertEqual(Ledger.objects.count(), 1)
+        self.purchase.refresh_from_db()
+        self.assertEqual(self.purchase.metadata['tax_payment']['gst_cents'], 336)
+
+    @override_settings(STRIPE_WEBHOOK_SECRET=webhook_secret)
+    def test_async_failure_never_creates_a_points_ledger_entry(self):
+        payload = self._payload(session={
+            'id': 'cs_test_roo_paid', 'status': 'complete', 'payment_status': 'unpaid',
+            'metadata': {'points_purchase_id': str(self.purchase.id)},
+        }, event_type='checkout.session.async_payment_failed')
+        response = self._post_webhook(payload)
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.purchase.refresh_from_db()
+        self.assertEqual(self.purchase.status, 'failed')
+        self.assertFalse(Ledger.objects.exists())
+
 
 class CurrentUserBalanceViewTests(APITestCase):
     def setUp(self):
