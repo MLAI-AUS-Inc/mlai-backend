@@ -13,6 +13,18 @@ API and returns the exact active `BANK` account catalogue for the connected
 tenant. The endpoint is read-only and uses the same Roo API-key, Points Admin,
 and organisation gates as other reconciliation administration routes.
 
+Successful catalogue responses are reused for at most 60 seconds, scoped to the
+organisation, connection and tenant. This avoids one Accounts API call per
+account during a coherent capture while bounding account-change freshness.
+Expired or failed responses are never used to authorize a capture or posting.
+
+Accounting API HTTP 429 responses establish a shared app/tenant cooldown using
+Xero's `Retry-After` interval. Subsequent bounded HTTP requests return a 429
+locally until that deadline instead of repeatedly calling Xero. Capture errors
+report the remaining wait explicitly and continue to require a verified account
+catalogue. A cooldown does not authorize stale data, offline fallback, or a
+change to Xero posting gates. No credential is retained in the cooldown cache.
+
 An official Xero Uncoded Statement Lines CSV is imported as one schema-version
 2 capture with one scan per active account, including accounts with zero rows.
 Every scan binds the tenant, account position, exact active-account ID list,
