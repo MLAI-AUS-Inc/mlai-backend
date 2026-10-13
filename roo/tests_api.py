@@ -147,6 +147,24 @@ class PointsPurchaseViewSetTests(APITestCase):
         self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
         self.assertIn('Points purchase not found', response.data['error'])
 
+    @override_settings(STRIPE_SECRET_KEY='rk_test_fixture', ROO_POINTS_GST_TAX_RATE_ID='')
+    def test_checkout_missing_gst_rate_returns_customer_facing_error(self):
+        purchase = PointsPurchase.objects.create(
+            user=self.user, slack_user_id=self.slack_user_id,
+            pack_id='topup_5', points_amount=10, amount_cents=1999,
+        )
+        response = self.client.post(
+            reverse('points-purchase-checkout', kwargs={'pk': purchase.id}),
+            {'terms_version_accepted': 'terms-test', 'privacy_version_accepted': 'privacy-test'},
+            format='json',
+        )
+        self.assertEqual(response.status_code, status.HTTP_503_SERVICE_UNAVAILABLE)
+        self.assertIn('temporarily unavailable', response.data['error'])
+        self.assertNotIn('ROO_POINTS_GST_TAX_RATE_ID', response.data['error'])
+        self.mock_tax_get.assert_not_called()
+        purchase.refresh_from_db()
+        self.assertIsNone(purchase.stripe_checkout_session_id)
+
     @override_settings(DEFAULT_FRONTEND_URL='https://mlai.test', STRIPE_SECRET_KEY='sk_test_roo')
     @patch('roo.services.requests.post')
     def test_checkout_creates_stripe_session_for_pending_purchase(self, mock_post):

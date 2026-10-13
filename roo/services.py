@@ -282,7 +282,8 @@ class PointsPurchaseService:
 
         tax_rate_id = (getattr(settings, 'ROO_POINTS_GST_TAX_RATE_ID', '') or '').strip()
         if not re.fullmatch(r'txr_[A-Za-z0-9]+', tax_rate_id):
-            raise RuntimeError("Roo Points GST is not configured; set ROO_POINTS_GST_TAX_RATE_ID")
+            logger.warning("ROO_POINTS_GST_TAX_RATE_ID is missing or invalid for purchase %s", purchase.id)
+            raise RuntimeError("Roo Points checkout is temporarily unavailable. Please try again later.")
         try:
             tax_response = requests.get(
                 f'https://api.stripe.com/v1/tax_rates/{tax_rate_id}',
@@ -292,8 +293,9 @@ class PointsPurchaseService:
             if tax_response.status_code >= 400:
                 raise RuntimeError("Roo Points GST rate could not be verified with Stripe")
             validate_gst_rate(tax_response.json(), tax_rate_id)
-        except (requests.RequestException, ValueError) as exc:
-            raise RuntimeError("Roo Points GST rate could not be verified with Stripe") from exc
+        except (requests.RequestException, ValueError, RuntimeError) as exc:
+            logger.warning("Roo Points GST rate verification failed for purchase %s: %s", purchase.id, exc.__class__.__name__)
+            raise RuntimeError("Roo Points checkout is temporarily unavailable. Please try again later.") from exc
         tax_snapshot = inclusive_gst_snapshot(purchase.amount_cents, purchase.currency, tax_rate_id)
 
         metadata = {

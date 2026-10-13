@@ -112,7 +112,7 @@ class CheckoutTaxTests(SimpleTestCase):
 
     @override_settings(ROO_POINTS_GST_TAX_RATE_ID='')
     def test_missing_gst_configuration_cannot_create_untaxed_checkout(self):
-        with self.assertRaisesRegex(RuntimeError, 'GST is not configured'):
+        with self.assertRaisesRegex(RuntimeError, 'temporarily unavailable'):
             self.checkout()
         self.rate_get.assert_not_called()
         self.session_post.assert_not_called()
@@ -127,7 +127,7 @@ class CheckoutTaxTests(SimpleTestCase):
 
     def test_rate_lookup_failure_cannot_create_a_session(self):
         self.rate_get.side_effect = requests.Timeout()
-        with self.assertRaisesRegex(RuntimeError, 'could not be verified'):
+        with self.assertRaisesRegex(RuntimeError, 'temporarily unavailable'):
             self.checkout()
         self.session_post.assert_not_called()
 
