@@ -444,8 +444,11 @@ def advance_prepare(identifier, *, now=None, handlers=None):
             if child and child.workflow == "article_system_setup":
                 merge = maybe_merge_prepared_setup(child, context, config, user=user)
                 if merge.get("status") == "needs_user":
+                    review = merge["user_action"].get("id") == "review_setup"
                     op.state, op.next_attempt_at = "needs_user", None
-                    op.receipt.update(status="needs_you", current_step="merge", message="Merge the articles setup pull request.",
+                    op.receipt.update(status="needs_you", current_step="setup" if review else "merge",
+                        message=("Review the articles setup preview, then approve it to open the setup pull request."
+                            if review else "Merge the articles setup pull request."),
                         user_action=merge["user_action"])
                     return _finish_prepare(op, now=now)
                 if merge.get("status") == "pending":
@@ -612,18 +615,48 @@ def maybe_merge_prepared_setup(run, context, config, *, user):
                 pass
 
 
+def _setup_preview_proven_for_review(run, head_sha):
+    """True once a pending setup's exact preview proof has passed for its branch head.
+
+    Automatic approval can still be ineligible (a platform-deployed preview skips the
+    local build, or the verified source moved). Waiting longer cannot change that.
+    """
+    result = run.result if isinstance(run.result, dict) else {}
+    setup = result.get("article_system_setup") or {}
+    gates = result.get("directory_quality_gates") or {}
+    proof = result.get("directory_quality_verification") or {}
+    preview = result.get("live_preview") or result.get("livePreview") or {}
+    if not all(isinstance(item, dict) for item in (setup, gates, proof, preview)):
+        return False
+    return bool(
+        head_sha
+        and run.workflow == "article_system_setup"
+        and run.status in {"awaiting_approval", "approval_required"} and run.approval_state == "approval_required"
+        and result.get("status") == "preview_ready" and setup.get("status") == "preview_ready"
+        and setup.get("setup_run_id") == run.run_id
+        and result.get("branch_commit_sha") == head_sha and setup.get("branch_commit_sha") == head_sha
+        and preview.get("exactRender") is True and preview.get("commitSha") == head_sha
+        and proof.get("status") == "passed" and proof.get("commit_sha") == head_sha
+        and proof.get("preview_identity") == f"commit:{head_sha}" and proof.get("completed_at")
+        and gates.get("status") == "passed"
+    )
+
+
 def approve_prepared_setup(run, context, config, *, user):
     """Use the existing setup control only after exact automatic preview proof."""
     from .website_connections import _verified_setup_run_base, scoped_run_contract, verify_repository_head
     from .vibe_marketing_views import VibeMarketingRunControlView
     website = config.website_connection
     preview = (run.result or {}).get("live_preview") or {}
+    review = {"status": "needs_user", "user_action": {"id": "review_setup", "label": "Review setup",
+        "url": preview.get("url") or (run.result or {}).get("preview_url"), "run_id": run.run_id}}
     if config.requires_review:
-        return {"status": "needs_user", "user_action": {"id": "review_setup", "label": "Review setup",
-            "url": preview.get("url") or (run.result or {}).get("preview_url"), "run_id": run.run_id}}
+        return review
     head = str((run.result or {}).get("branch_commit_sha") or "")
     base = _verified_setup_run_base(run, head, website, automatic_approval=True)
     if not base:
+        if _setup_preview_proven_for_review(run, head):
+            return review
         raise WebsiteAuthorityError("setup_preview_verification_required", "Waiting for exact setup preview proof.", retryable=True)
     verify_repository_head(website, base)
     data = {**scoped_run_contract(run), "company_id": str(context.company.pk), "configuration_revision": website.configuration_version}
