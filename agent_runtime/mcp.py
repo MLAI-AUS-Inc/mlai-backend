@@ -35,7 +35,10 @@ def input_schema(name):
     if name in {"get_invocation", "read_invocation_thread", "reply_to_invocation", "get_invocation_status"}:
         props["invocation_id"] = {"type": "string", "format": "uuid",
                                   "description": "Request ID from this installation's agent.mentioned event."}
-        required.append("invocation_id")
+        if name != "get_invocation":
+            required.append("invocation_id")
+        else:
+            props["invocation_id"]["description"] += " Omit only to resolve the sole live pending owner mention."
     if name == "read_invocation_thread":
         props.update({"cursor": {"type": "string", "maxLength": 2048},
                       "limit": {"type": "integer", "minimum": 1, "maximum": 100}})

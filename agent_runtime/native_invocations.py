@@ -72,7 +72,20 @@ def payload(invocation):
 
 
 @transaction.atomic
-def get_invocation(principal, invocation_id):
+def get_invocation(principal, invocation_id=None):
+    """Resolve an explicit request or the sole live pending request for this grant."""
+    if invocation_id is None:
+        principal = _current_principal(principal)
+        if "messages:read" not in principal.credential.scopes:
+            raise AgentPermissionDenied("scope_denied")
+        candidates = list(runtime.locked(AgentInvocation.objects.all()).filter(
+            grant=principal.grant, installation=principal.grant.installation,
+            generation=principal.credential.generation, resource__in=principal.grant.resources,
+            status="pending", expires_at__gt=timezone.now(),
+        ).order_by("created_at", "pk").values_list("pk", flat=True)[:2])
+        if len(candidates) != 1:
+            raise ValidationError("Provide invocation_id unless exactly one live pending owner mention exists.")
+        invocation_id = candidates[0]
     _, invocation = _authorized_invocation(principal, invocation_id, "messages:read", allow_replied=True)
     return payload(invocation)
 

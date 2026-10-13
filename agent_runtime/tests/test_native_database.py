@@ -293,6 +293,47 @@ class NativeDatabaseTests(unittest.TestCase):
             native_invocations.read_invocation_thread(principal, invocation.pk)
         self.assertFalse(AgentInvocationReply.objects.filter(invocation=invocation).exists())
 
+    def test_implicit_lookup_resolves_only_one_live_current_grant_mention(self):
+        _installation, grant, principal = self.active()
+        with self.assertRaises(ValidationError):
+            broker.execute(principal, "get_invocation", {})
+        expired = self.invocation(grant)
+        AgentInvocation.objects.filter(pk=expired.pk).update(expires_at=timezone.now() - timedelta(seconds=1))
+        answered = self.invocation(grant)
+        AgentInvocation.objects.filter(pk=answered.pk).update(status="replied")
+        other_generation = self.invocation(grant)
+        AgentInvocation.objects.filter(pk=other_generation.pk).update(generation=grant.generation + 1)
+        other_resource = self.invocation(grant)
+        AgentInvocation.objects.filter(pk=other_resource.pk).update(resource=RESOURCE.replace(CHANNEL, str(uuid4())))
+        foreign_owner = get_user_model().objects.create(email=f"foreign-dot-{uuid4().hex}@example.test")
+        foreign_installation = AgentInstallation.objects.create(owner=foreign_owner, app_id="openai-dot", community_id=COMMUNITY)
+        foreign_grant = AgentGrant.objects.create(installation=foreign_installation, scopes=grant.scopes,
+            resources=grant.resources, expires_at=grant.expires_at)
+        AgentInvocation.objects.create(installation=foreign_installation, grant=foreign_grant,
+            generation=foreign_grant.generation, resource=RESOURCE, source_event_id=uuid4().hex * 2,
+            thread_id="f" * 64, owner_public_key=self.device.public_key, expires_at=grant.expires_at)
+        invocation = self.invocation(grant)
+        self.assertEqual(broker.execute(principal, "get_invocation", {})["invocation_id"], str(invocation.pk))
+        self.invocation(grant)
+        with self.assertRaises(ValidationError):
+            broker.execute(principal, "get_invocation", {})
+        self.assertEqual(broker.execute(principal, "get_invocation", {"invocation_id": str(invocation.pk)})["invocation_id"], str(invocation.pk))
+
+    def test_implicit_lookup_keeps_live_membership_device_and_scope_checks(self):
+        _installation, grant, principal = self.active()
+        self.invocation(grant)
+        self.membership = False
+        with self.assertRaises(AgentPermissionDenied):
+            broker.execute(principal, "get_invocation", {})
+        self.membership = True
+        CommunityChatDevice.objects.filter(pk=self.device.pk).update(status="revoked", revoked_at=timezone.now())
+        with self.assertRaises(PermissionDenied):
+            broker.execute(principal, "get_invocation", {})
+        CommunityChatDevice.objects.filter(pk=self.device.pk).update(status="verified", revoked_at=None)
+        AgentCredential.objects.filter(pk=principal.credential.pk).update(scopes=["events:read"])
+        with self.assertRaises(AgentPermissionDenied):
+            broker.execute(principal, "get_invocation", {})
+
     def test_pause_revoke_cancel_outbox_and_fence_credentials_callbacks(self):
         installation, grant, principal = self.active()
         subscription = self.subscription(principal)

@@ -47,6 +47,10 @@ class InvocationSerializer(StrictSerializer):
     invocation_id = serializers.UUIDField()
 
 
+class InvocationLookupSerializer(StrictSerializer):
+    invocation_id = serializers.UUIDField(required=False)
+
+
 class InvocationReadSerializer(InvocationSerializer):
     cursor = serializers.CharField(max_length=2048, required=False, allow_blank=True, default="")
     limit = serializers.IntegerField(min_value=1, max_value=100, default=100)

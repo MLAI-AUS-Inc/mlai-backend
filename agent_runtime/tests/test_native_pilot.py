@@ -14,6 +14,7 @@ from rest_framework.exceptions import PermissionDenied, ValidationError
 from rest_framework.test import APIRequestFactory, force_authenticate
 
 from agent_runtime import broker, native_crypto, native_installations, native_invocations, native_sources, policy, serializers
+from agent_runtime.mcp import input_schema
 from agent_runtime.native_views import NativeAppsView, NativeInstallationsView, NativeRegistryView
 from agent_runtime.webhook_transport import CallbackEndpointError, WebhookResponse
 
@@ -154,6 +155,17 @@ class NativeResourceTests(SimpleTestCase):
 
 @override_settings(AGENT_RUNTIME_ENABLED=True)
 class InvocationAuthorityTests(SimpleTestCase):
+    def test_only_invocation_lookup_can_omit_its_request_id(self):
+        self.assertEqual(serializers.validated(serializers.InvocationLookupSerializer, {}), {})
+        self.assertNotIn("invocation_id", input_schema("get_invocation")["required"])
+        for arguments in ({"invocation_id": None}, {"invocation_id": ""}, {"channel_id": CHANNEL}):
+            with self.subTest(arguments=arguments), self.assertRaises(ValidationError):
+                serializers.validated(serializers.InvocationLookupSerializer, arguments)
+        for name in ("read_invocation_thread", "reply_to_invocation", "get_invocation_status"):
+            self.assertIn("invocation_id", input_schema(name)["required"])
+        with self.assertRaises(ValidationError):
+            serializers.validated(serializers.InvocationSerializer, {})
+
     def test_valid_invocation_and_cross_authority_rejections(self):
         _, grant, invocation = fixture()
         native_invocations.validate_invocation(invocation, grant, now=NOW)
