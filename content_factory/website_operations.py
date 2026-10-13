@@ -26,7 +26,10 @@ def workflow_operation_state(run):
     This projection never reopens an already terminal operation.
     """
     result = run.result if isinstance(run.result, dict) else {}
-    pending_repair = result.get("repair_status") in {
+    # Worker snapshots may carry a structured repair_status; only a status name
+    # can mark a pending repair, and the callback must not fail on the shape.
+    repair_status = result.get("repair_status")
+    pending_repair = isinstance(repair_status, str) and repair_status in {
         "queued", "running", "setup_queued", "awaiting_approval",
         "awaiting_confirmation", "awaiting_merge",
     }
