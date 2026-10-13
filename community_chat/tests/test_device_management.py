@@ -6,6 +6,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from django.contrib.auth import get_user_model
+from django.core.cache import cache
 from django.test import TestCase, override_settings
 from django.urls import reverse
 from django.utils import timezone
@@ -20,6 +21,10 @@ from community_chat.models import CommunityChatDevice, DeviceBindingStatus
     COMMUNITY_CHAT_ALLOWED_ORIGINS=["https://chat.mlai.au"])
 class AccountDeviceManagementTests(TestCase):
     def setUp(self):
+        # SQLite reuses fixture user IDs after rollback. Keep the account
+        # throttle buckets isolated from other cases and API test modules.
+        cache.clear()
+        self.addCleanup(cache.clear)
         self.user = get_user_model().objects.create_user(email="device-owner@example.com")
         self.other = get_user_model().objects.create_user(email="other-device-owner@example.com")
         self.current = self.device(self.user, "1" * 64)
