@@ -126,6 +126,29 @@ class PrepareJourneyTests(SimpleTestCase):
         merge.assert_called_once()
         self.assertEqual(op.state, "needs_user")
         self.assertEqual(op.receipt["user_action"]["pr_number"], 42)
+        self.assertEqual((op.receipt["current_step"], op.receipt["message"]),
+            ("merge", "Merge the articles setup pull request."))
+
+    def test_setup_review_prompt_describes_review_not_a_missing_pull_request(self):
+        from . import website_prepare as prepare
+        from workflow_runs.models import ContentFactoryRun
+        op = self.operation()
+        op.receipt = {"child_run_id": "setup-child", "current_step": "setup"}
+        child = SimpleNamespace(status="awaiting_approval", workflow="article_system_setup", result={
+            "article_system_setup": {"status": "preview_ready"}})
+        review = {"id": "review_setup", "label": "Review setup", "url": None, "run_id": "setup-child"}
+        with patch.object(prepare, "_claim_prepare", return_value=op), \
+                patch.object(prepare, "_prepare_context", return_value=(Mock(), Mock(), Mock())), \
+                patch.object(prepare, "journey_for_context", return_value={"nextAction": {"id": "verify"}}), \
+                patch.object(prepare, "_persist_prepare", side_effect=lambda operation, **kw: operation), \
+                patch.object(prepare, "maybe_merge_prepared_setup",
+                    return_value={"status": "needs_user", "user_action": review}), \
+                patch.object(ContentFactoryRun.objects, "filter") as runs:
+            runs.return_value.first.return_value = child
+            prepare.advance_prepare(op.pk)
+        self.assertEqual((op.state, op.receipt["status"], op.receipt["current_step"]), ("needs_user", "needs_you", "setup"))
+        self.assertEqual(op.receipt["user_action"], review)
+        self.assertIn("Review the articles setup preview", op.receipt["message"])
 
     def test_prepare_callback_waits_for_commit(self):
         from . import website_prepare as prepare
