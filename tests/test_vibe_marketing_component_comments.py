@@ -7,7 +7,7 @@ from django.contrib.auth import get_user_model
 from django.core.cache import cache
 from django.test import TestCase, override_settings
 from django.utils import timezone
-from tests.website_fixtures import WebsiteBoundAPIClient, certify_live_target_fixture
+from tests.website_fixtures import WebsiteBoundAPIClient, certify_live_target_fixture, setup_branch_policy_get_fixture
 from content_factory.website_connections import contract_for
 from content_factory.website_models import WebsiteConnectionTarget, WebsiteRepositoryMutation
 
@@ -5802,6 +5802,7 @@ class VibeMarketingComponentCommentTests(_PublishRetryApprovalFixture, TestCase)
                 ),
             ),
             patch("content_factory.vibe_marketing_views._github_api_request", side_effect=ValueError("At least 1 approving review is required.")),
+            patch("content_factory.vibe_marketing_views.http_client.get", side_effect=setup_branch_policy_get_fixture),
             patch("content_factory.vibe_marketing_views._enable_native_auto_merge", return_value={"status": "enabled", "message": "ok"}) as native_auto_merge,
         ):
             response = self.client.post(f"/api/v1/vibe-marketing/runs/{setup_run.run_id}/merge-setup-pr", {}, format="json")
@@ -5848,6 +5849,7 @@ class VibeMarketingComponentCommentTests(_PublishRetryApprovalFixture, TestCase)
                 ),
             ),
             patch("content_factory.vibe_marketing_views._github_api_request", side_effect=ValueError("Merge blocked by branch protection.")),
+            patch("content_factory.vibe_marketing_views.http_client.get", side_effect=setup_branch_policy_get_fixture),
             patch(
                 "content_factory.vibe_marketing_views._enable_native_auto_merge",
                 return_value={"status": "unavailable", "message": "Auto-merge is not allowed for this repository"},
@@ -5999,6 +6001,7 @@ class VibeMarketingComponentCommentTests(_PublishRetryApprovalFixture, TestCase)
                 ),
             ),
             patch("content_factory.vibe_marketing_views._github_api_request", return_value={"merged": True, "sha": "abc123"}),
+            patch("content_factory.vibe_marketing_views.http_client.get", side_effect=setup_branch_policy_get_fixture),
         ):
             response = self.client.post(f"/api/v1/vibe-marketing/runs/{setup_run.run_id}/merge-setup-pr", {}, format="json")
 

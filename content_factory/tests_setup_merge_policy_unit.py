@@ -102,8 +102,11 @@ class SetupMergePolicyUnitTests(SimpleTestCase):
         self.assertEqual(self.run.result["merge_status"], "merged")
 
     def test_checks_read_403_still_uses_policy_and_attempts_fenced_merge(self):
+        from tests.website_fixtures import setup_branch_policy_get_fixture
         original_provider = self.provider
         def provider(method, url, **kwargs):
+            if "/rules/branches/" in url or url.endswith("/protection"):
+                return setup_branch_policy_get_fixture(url, **kwargs)
             if url.endswith(("/status", "/check-runs")):
                 return response({"message": "Resource not accessible by integration"}, 403)
             return original_provider(method, url, **kwargs)
