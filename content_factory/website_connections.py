@@ -185,7 +185,8 @@ def guarded_setup_merge_observation(method):
         try:
             with setup_merge_observation_guard(run) as receipt:
                 if receipt is not None and method.__name__ == "_apply_setup_merge_result":
-                    kwargs["merge_response"] = {"source": "github_pr_status", "pull": receipt}
+                    kwargs["merge_response"] = {"source": "github_pr_status", "pull": receipt,
+                        "sha": receipt["merge_commit_sha"]}
                 return method(*args, **kwargs)
         except WebsiteAuthorityError as exc:
             logger.info("setup_merge_observation_denied run_id=%s code=%s", run.run_id, exc.code)
@@ -998,7 +999,7 @@ def record_scan_evidence(connection, data):
         for accepted in accepted_targets:
             verified |= bool(accepted.capabilities.get("publishingReady"))
             preview |= bool((accepted.contract.get("verification") or {}).get("preview_capable"))
-        if verified:
+        if verified or preview:
             check_source_identity(connection, {"source_sha": sha}, required=True)
             if (str(connection.pk), connection.generation, sha) not in _verified_heads.get():
                 if transaction.get_connection().in_atomic_block:
@@ -1210,7 +1211,8 @@ def guarded_backend_run_action(action):
                 finally:
                     _backend_provider_scope.reset(marker)
             except WebsiteAuthorityError as exc:
-                return {"outcome": "error", "detail": str(exc), "code": exc.code, "checks": {}, "run": run}
+                return {"outcome": "error", "detail": str(exc), "code": exc.code,
+                    "retryable": exc.retryable, "checks": {}, "run": run}
         return wrapped
     return decorate
 

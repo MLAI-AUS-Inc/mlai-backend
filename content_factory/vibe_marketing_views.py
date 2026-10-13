@@ -5975,6 +5975,10 @@ def _apply_setup_merge_result(*, run, context, checks_status="success", merge_re
     result["currentStep"] = "merged"
     if merge_response is not None:
         result["merge_response"] = merge_response
+        merge_sha = merge_response.get("sha") or (merge_response.get("pull") or {}).get("merge_commit_sha")
+        if merge_sha:
+            result["merge_sha"] = merge_sha
+            setup["merge_sha"] = merge_sha
     setup["status"] = "merged"
     setup["setup_status"] = "merged"
     setup["setupStatus"] = "merged"
@@ -6120,19 +6124,19 @@ def _apply_setup_auto_merge_pending(*, run, config, reason=""):
 SETUP_MERGE_TERMINAL_CHECK_STATES = {"failed", "failure", "error", "closed"}
 
 
-def _attempt_setup_publish_merge(*, run, context):
-    outcome = _attempt_setup_publish_merge_authorized(run=run, context=context)
+def _attempt_setup_publish_merge(*, run, context, automatic=False):
+    outcome = _attempt_setup_publish_merge_authorized(run=run, context=context, automatic=automatic)
     if outcome.get("outcome") == "merged":
         outcome["run"] = _maybe_verify_merged_setup_for_blocked_articles(run=outcome["run"], context=context)
     return outcome
 
 
 @guarded_backend_run_action("setup")
-def _attempt_setup_publish_merge_authorized(*, run, context):
+def _attempt_setup_publish_merge_authorized(*, run, context, automatic=False):
     """Merge the setup PR under current consent and an exact GitHub head fence.
 
     Protected pull requests remain available for review and an explicit retry.
-    Shared by the manual Publish action and the hands-off auto-publish hook.
+    Shared by explicit Publish actions and the preparation worker.
 
     Returns {"outcome": "merged"|"auto_merge_pending"|"checks_failed"|"manual_required"
     |"no_repo"|"no_pr"|"error", "detail": str, "checks": dict, "run": run}."""
@@ -6177,6 +6181,15 @@ def _attempt_setup_publish_merge_authorized(*, run, context):
         _mark_setup_merge_blocked(run=run, config=config, reason=reason, status_value="checks_failed")
         return {"outcome": "checks_failed", "detail": reason, "checks": checks, "run": run}
 
+    from .website_setup_merge_policy import setup_merge_policy, setup_merge_refusal
+    policy = setup_merge_policy(config.website_connection, pull, token=token, checks=checks,
+        requires_review=automatic and bool(config.requires_review))
+    if policy["decision"] == "wait":
+        return {"outcome": "waiting", "detail": policy["reason"], "checks": checks, "run": run}
+    if policy["decision"] == "needs_user":
+        _mark_setup_merge_blocked(run=run, config=config, reason=policy["reason"])
+        return {"outcome": "manual_required", "detail": policy["reason"], "checks": checks, "run": run}
+
     # 1) Direct squash merge — works on an unprotected main or when the App is a ruleset
     #    bypass actor. pull_requests:write (which the token has) is enough here.
     merge_payload = {
@@ -6184,52 +6197,26 @@ def _attempt_setup_publish_merge_authorized(*, run, context):
         "commit_title": f"Merge Content Factory articles setup from {run.run_id}",
         "merge_method": "squash",
     }
-    merge_error = ""
     try:
         from .website_connections import record_publish_merge_intent
         record_publish_merge_intent(run, pull, pr_number, action="setup")
         merged = _github_api_request(
-            "PUT",
-            f"/repos/{repo}/pulls/{pr_number}/merge",
-            token=token,
-            body=merge_payload,
-            expected=(200, 201),
+            "PUT", f"/repos/{repo}/pulls/{pr_number}/merge", token=token,
+            body=merge_payload, expected=(200, 201),
         )
-        return {
-            "outcome": "merged",
-            "detail": "Published to production.",
-            "checks": checks,
-            "run": _apply_setup_merge_result(run=run, context=context, checks_status="success", merge_response=merged),
-        }
+        if merged.get("merged") is not True:
+            refusal = setup_merge_refusal(merged.get("message"))
+        else:
+            return {"outcome": "merged", "detail": "Setup pull request merged.", "checks": checks,
+                "run": _apply_setup_merge_result(run=run, context=context, checks_status="success", merge_response=merged)}
     except (ValueError, http_client.RequestException) as exc:
-        merge_error = str(exc)
-        logger.info("vibe_marketing_setup_direct_merge_failed run_id=%s repo=%s detail=%s", run.run_id, repo, merge_error)
-
-    # Protected branches require review and an explicit retry under live consent.
-    # A pending GitHub-native auto-merge cannot obey a later website disconnect.
-    # Keep protected PRs reviewable; the explicit merge action can be retried.
-    auto = {"status": "manual_required", "detail": "Review the protected pull request and retry publishing after required checks pass."}
-    if auto.get("status") == "already_merged":
-        return {
-            "outcome": "merged",
-            "detail": "Pull request is already merged.",
-            "checks": checks,
-            "run": _apply_setup_merge_result(run=run, context=context, checks_status="merged"),
-        }
-    if auto.get("status") == "enabled":
-        reason = "Publishing to production. GitHub will merge automatically once required checks pass."
-        run = _apply_setup_auto_merge_pending(run=run, config=config, reason=reason)
-        return {"outcome": "auto_merge_pending", "detail": reason, "checks": checks, "run": run}
-
-    # 3) Neither worked → manual.
-    detail = merge_error or auto.get("message") or "GitHub did not allow this PR to be merged from Content Factory."
-    _mark_setup_merge_blocked(run=run, config=config, reason=detail, status_value="manual_merge_required")
-    return {
-        "outcome": "manual_required",
-        "detail": detail,
-        "checks": {"state": "manual_merge_required", "ready": False, "message": detail},
-        "run": run,
-    }
+        refusal = setup_merge_refusal(exc)
+    if refusal["decision"] == "wait":
+        return {"outcome": "waiting", "detail": refusal["reason"],
+            "checks": {"state": "pending", "ready": False, "message": refusal["reason"]}, "run": run}
+    _mark_setup_merge_blocked(run=run, config=config, reason=refusal["reason"])
+    return {"outcome": "manual_required", "detail": refusal["reason"],
+        "checks": {"state": "manual_merge_required", "ready": False, "message": refusal["reason"]}, "run": run}
 
 
 def _merge_setup_pr_for_run(*, run, context):
@@ -6238,7 +6225,7 @@ def _merge_setup_pr_for_run(*, run, context):
     (None, error Response)."""
     outcome = _attempt_setup_publish_merge(run=run, context=context)
     kind = outcome.get("outcome")
-    if kind in ("merged", "auto_merge_pending"):
+    if kind in ("merged", "auto_merge_pending", "waiting"):
         return outcome.get("run") or run, None
     if kind == "no_repo":
         return None, Response({"detail": outcome.get("detail")}, status=status.HTTP_400_BAD_REQUEST)
@@ -6265,9 +6252,10 @@ def _setup_pending_status_allows_auto_publish(run):
 
 
 def _maybe_auto_publish_setup(*, run, context):
-    """Hands-off auto-publish: when the org opted into auto_publish, publish the setup PR
-    to production (direct merge or native auto-merge) without a manual click. Best-effort;
-    never raises into the caller (a status poll)."""
+    """Explicit worker hook using the shared policy for an opted-in organisation.
+
+    Status GET handlers must never invoke this mutation hook.
+    """
     if run is None or getattr(run, "workflow", "") != "article_system_setup":
         return
     if not _org_config_enables_auto_publish(context):
@@ -6275,7 +6263,7 @@ def _maybe_auto_publish_setup(*, run, context):
     if not _setup_pending_status_allows_auto_publish(run):
         return
     try:
-        outcome = _attempt_setup_publish_merge(run=run, context=context)
+        outcome = _attempt_setup_publish_merge(run=run, context=context, automatic=True)
         logger.info("vibe_marketing_setup_auto_publish run_id=%s outcome=%s", run.run_id, outcome.get("outcome"))
     except Exception as exc:
         logger.warning("vibe_marketing_setup_auto_publish_failed run_id=%s error=%s", run.run_id, exc)
@@ -6297,7 +6285,8 @@ def _github_api_request(method, path, *, token, body=None, expected=(200,)):
     record_backend_provider_outcome(operation_id, accepted=response.status_code in expected, payload=payload)
     if response.status_code not in expected:
         detail = payload.get("message") if isinstance(payload, dict) else ""
-        raise ValueError(detail or f"GitHub returned {response.status_code}.")
+        from .website_setup_merge_policy import GitHubResponseError
+        raise GitHubResponseError(detail or f"GitHub returned {response.status_code}.", status_code=response.status_code)
     return payload
 
 
@@ -6591,10 +6580,8 @@ def _refresh_pending_article_system_setup_pr_status(
         return run, False
 
     if not pull.get("merged"):
-        # Hands-off auto-publish: for orgs that opted into auto_publish, publish the
-        # freshly-created setup PR without a manual click (fires once, best-effort).
-        if setup_run is not None:
-            _maybe_auto_publish_setup(run=setup_run, context=context)
+        # Status GETs observe provider state. The prepare worker owns automatic
+        # merges; an explicit owner action uses that same merge policy.
         return run, False
 
     if setup_run is not None:
@@ -6661,6 +6648,7 @@ def _check_and_merge_publish_pr(*, run, context):
             result["merge_status"] = "merged"
             result["checks_status"] = "merged"
             result["merge_response"] = {"merged": True, "sha": pull.get("merge_commit_sha")}
+            result["merge_sha"] = pull.get("merge_commit_sha")
             result.pop("merge_blocked_reason", None)
             result.pop("publish_auto_merge_state", None)
             run.result = result
@@ -6701,6 +6689,7 @@ def _check_and_merge_publish_pr(*, run, context):
     result["checks_status"] = "success"
     result["merged_at"] = timezone.now().isoformat()
     result["merge_response"] = merged
+    result["merge_sha"] = merged.get("sha")
     result.pop("merge_blocked_reason", None)
     result.pop("publish_auto_merge_state", None)
     run.result = result
@@ -7779,6 +7768,7 @@ PUBLISH_MERGE_EVIDENCE_RESULT_KEYS = (
     "merge_blocked_reason",
     "merged_at",
     "merge_response",
+    "merge_sha",
     "publish_merge_intent",
     "publish_auto_merge",
     "publish_auto_merge_state",
@@ -7806,7 +7796,7 @@ DJANGO_OWNED_ARTICLE_RESULT_PREFIXES = (
 
 def _merge_django_owned_article_result(local_result, remote_result):
     local = _run_mapping(local_result)
-    backend_merge_keys = {"publish_merge_intent", "merge_response", "merge_status", "merged_at"}
+    backend_merge_keys = {"publish_merge_intent", "merge_response", "merge_status", "merge_sha", "merged_at"}
     merged = {key: value for key, value in _run_mapping(remote_result).items()
         if key not in backend_merge_keys or key in local}
     remote_quality = _run_mapping(merged.get("article_preview_quality"))
@@ -15868,6 +15858,8 @@ class VibeMarketingScanView(APIView):
             "force_refresh": force_refresh,
         }
         payload["client_request_id"] = str(request.headers.get("Idempotency-Key") or request.data.get("idempotency_key") or request.data.get("clientRequestId") or _mint_dispatch_client_request_id("repo_scan"))
+        if getattr(request, "_website_prepare_dispatch", False):
+            payload["retry_epoch"] = request.data.get("retry_epoch", "initial")
         _mark_roo_points_gate_authorized(
             payload,
             domain=context.organization.domain,
@@ -15981,6 +15973,8 @@ class VibeMarketingArticleSystemSetupView(APIView):
             "analytics_article_manifest": analytics_article_manifest(context.organization),
         }
         payload["client_request_id"] = str(request.headers.get("Idempotency-Key") or request.data.get("idempotency_key") or request.data.get("clientRequestId") or _mint_dispatch_client_request_id("article_system_setup"))
+        if getattr(request, "_website_prepare_dispatch", False):
+            payload["retry_epoch"] = request.data.get("retry_epoch", "initial")
         _mark_roo_points_gate_authorized(
             payload,
             domain=context.organization.domain,
