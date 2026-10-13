@@ -104,6 +104,26 @@ class RetryIdentityTests(SimpleTestCase):
 
 
 class DeploymentPolicyTests(SimpleTestCase):
+    def test_real_prepare_rejects_wrong_marker_without_saving_live_receipt(self):
+        fixture = verification_fixtures.PrepareVerificationRuntimeTests()
+        fixture.setUp()
+        with fixture.boundaries():
+            fixture.fetch.side_effect = [(b"", {"x-mlai-artifact-digest": "e" * 64}),
+                (b"", {"x-mlai-artifact-digest": "f" * 64})]
+            prepare.advance_prepare(fixture.prepare.pk, now=fixture.now)
+            self.assertEqual(fixture.prepare.receipt["reason_code"], "live_route_unavailable")
+            self.assertEqual(fixture.prepare.receipt["failure_class"], "waiting")
+            self.assertEqual(fixture.prepare.state, "pending")
+            self.assertIsNone(fixture.live)
+            self.assertEqual(fixture.fetch.call_count, 2)
+            next_poll = fixture.prepare.next_attempt_at
+            fixture.fetch.side_effect = None
+            fixture.fetch.return_value = (b"", {"x-mlai-artifact-digest": "e" * 64})
+            prepare.advance_prepare(fixture.prepare.pk, now=next_poll)
+            self.assertEqual(fixture.live.receipt["status"], "passed")
+            self.assertEqual(fixture.live.receipt["artifact_digest"], "e" * 64)
+            self.assertEqual(fixture.fetch.call_count, 5)
+
     def test_24_hour_deploy_window_ends_in_one_owner_action(self):
         op = journey_fixtures.fixtures.PrepareJourneyTests().operation()
         now = timezone.now()
