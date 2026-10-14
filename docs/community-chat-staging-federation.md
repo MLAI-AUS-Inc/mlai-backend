@@ -182,3 +182,33 @@ Its supplied private password must verify against the unchanged existing hash.
 Active, unmarked, privileged accounts or incomplete cleanup are refused. No
 password reset or new consent is performed. This supports rollback rehearsal
 without leaving the approved synthetic pilot unusable.
+
+## Verified independent pilot, 14 October 2026
+
+API `https://api-staging.mlai.au` is live on the isolated staging Droplet
+`170.64.215.174`, using source `abd0b06fd555f67825e93aea9b04a8fde4ed128a` and
+image `sha256:7c72214902cc94ce57da944769df3d4d362d5c9372271f43531a9e1a06406a41`.
+The confirmed new empty database was `staging_account_api`, with vector0.8.7
+available. Its exact PostgreSQL plan, all 364 migration file identities and
+Django/pgvector helper hashes matched the separately approved inventory digest
+`9d72cf35d7c61de8bf1e969b504dc3178ca01f8d760f71c9be560d0fe97959ed` before
+application; applied history matches exactly afterward. No migration was
+modified, faked, skipped or reversed. Startup remains check-only.
+
+Password sign-in was initially disabled (404) while API HTTPS health passed,
+then the approved synthetic ordinary `pilot@staging.mlai.au` was previewed and
+created with a private unique password. Provisioning used an ephemeral operator
+container with its private owner-only manifest mounted read-only; no email was
+sent. Password mode is enabled and both federation roles disabled. Previous
+API secrets were preserved; the new independent keyring satisfies startup.
+
+Live browser/native auth, refresh/logout, key proof, member-only confirmation,
+real relay message/read, protected file upload/read and device removal passed.
+Full operator removal disabled account/session access and revoked one live
+membership with zero pending cleanup. Disabled login and relay reads failed;
+explicit same-password recovery succeeded. The actual browser login also
+verified its device. Focused failure-reporting tests cover adapter outage;
+no outage was deliberately induced on the live environment. Production access,
+remote CI, Flutter SDK/compile/device checks and unprovisioned integrations
+remain outside this completed rollout. Later receipt commits do not change the
+recorded deployed image.
