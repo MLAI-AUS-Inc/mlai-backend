@@ -133,6 +133,8 @@ def refresh_goal(goal, proofs, *, scope, source_sha, now):
         if old and (not passed or any(mapping(old).get(key) != mapping(candidate).get(key)
                                      for key in ("kind", "scope", "source_sha", "sha", "run_id", "evidence_digest"))):
             history.append({"name": name, "evidence_digest": mapping(old).get("evidence_digest"), "invalidated_at": now.isoformat()})
+        if passed and item.get("state") != "passed":
+            item["observed_at"] = now.isoformat()
         item["proof"] = deepcopy(candidate) if passed else None
         item["state"] = "passed" if passed else "not_required" if not item["required"] else "invalidated" if old else "pending"
     result["proof_history"] = history[-MAX_HISTORY:]

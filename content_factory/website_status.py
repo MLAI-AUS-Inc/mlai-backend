@@ -126,8 +126,12 @@ def status_for_context(context, config, *, journey, now=None):
             "connectionGeneration": connection.generation, "goalId": None, "target": None,
             "configurationRevision": connection.configuration_version,
             "milestones": [], "expectedTime": None, "mode": "goal"}
-    return project_status(op, scope=goals.scope_for(connection, context.company.pk),
-        source_sha=source_for(connection, journey), journey=journey, now=now)
+    scope, source = goals.scope_for(connection, context.company.pk), source_for(connection, journey)
+    result = project_status(op, scope=scope, source_sha=source, journey=journey, now=now)
+    if getattr(settings, "ARTICLES_WEBSITE_DOCTOR_ENABLED", False):
+        from .website_doctor import read_doctor
+        result["doctor"] = read_doctor(op, scope=scope, source_sha=source, milestones=result["milestones"])
+    return result
 
 
 def add_status(payload, context, config, *, journey):

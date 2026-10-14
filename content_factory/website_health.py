@@ -24,7 +24,7 @@ def summarize_website_runs(rows):
 
 def website_connection_health(*, domain=None, now=None, hours=24, row_limit=2000):
     """Return bounded counts and alerts without exposing templates, tokens or source."""
-    from django.db.models import Count, Min
+    from django.db.models import Count, Min, Q
     from django.utils import timezone
     from workflow_runs.models import ContentFactoryRun
     from .models import OrganizationContentConfig
@@ -42,13 +42,17 @@ def website_connection_health(*, domain=None, now=None, hours=24, row_limit=2000
         configs = configs.filter(organization__domain=domain)
         runs = runs.filter(organization__domain=domain)
     operations = WebsiteConnectionOperation.objects.filter(connection__in=connections)
-    pending = operations.exclude(state__in=["completed", "review_required", "cancelled", "failed", "denied", "deleted"])
+    pending = operations.exclude(state__in=["completed", "review_required", "needs_user", "cancelled", "failed", "denied", "deleted", "stopped"])
     oldest = pending.aggregate(value=Min("created_at"))["value"]
     rows = list(runs.order_by("-created_at").values("status", "result__error_code", "created_at", "updated_at")[:row_limit + 1])
     truncated = len(rows) > row_limit
     scans = summarize_website_runs(rows[:row_limit])
     failed = scans["statuses"].get("failed", 0) + scans["statuses"].get("blocked", 0)
-    overdue = pending.filter(created_at__lt=now - timedelta(minutes=15)).count()
+    # Owner waits are not abandoned scheduler work. Waiting has its saved goal deadline.
+    waiting_rows=list(pending.filter(receipt__failure_class="waiting").values("state","receipt","created_at")[:row_limit+1])
+    truncated = truncated or len(waiting_rows) > row_limit
+    waiting_overdue=sum(waiting_is_overdue(row,now=now) for row in waiting_rows[:row_limit])
+    overdue = pending.filter(Q(receipt__failure_class__isnull=True) | ~Q(receipt__failure_class="waiting")).filter(created_at__lt=now - timedelta(minutes=15)).count() + waiting_overdue
     selected = configs.exclude(website_connection=None)
     canonical_ready = selected.filter(website_connection__state="connected", website_connection__capabilities__publishingReady=True).count()
     # This projection is deliberately read-only: legacy readiness is counted for
@@ -70,3 +74,17 @@ def website_connection_health(*, domain=None, now=None, hours=24, row_limit=2000
         "scans": {**scans, "sampleLimit": row_limit, "truncated": truncated}, "alerts": alerts,
         "oneClick": one_click_outcomes(since=since, domain=domain, row_limit=row_limit),
     }
+
+
+def waiting_is_overdue(row, *, now):
+    """A waiting state is overdue only at its actual saved goal/legacy deadline."""
+    from . import website_goal as goals
+    from django.conf import settings
+    if row.get("state")=="needs_user":return False
+    receipt=goals.mapping(row.get("receipt"));goal=goals.mapping(receipt.get("goal"))
+    valid = goals.valid_goal(goal,goal.get("scope"))
+    start=goals.stamp(goal.get("started_at")) if valid else goals.stamp(receipt.get("waiting_started_at") or receipt.get("deployment_wait_started_at") or row.get("created_at"))
+    if start is None:return True
+    seconds=getattr(settings,"ARTICLES_GOAL_WALL_SECONDS",172800) if valid else 86400
+    from .website_doctor import number
+    return number(seconds) is None or seconds<=0 or (now-start).total_seconds()>=seconds

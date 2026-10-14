@@ -1119,6 +1119,30 @@
       "site_sha256": "87d0fa7a25d90e44af12275e15c03636a1c3e4486c6b9aaad6ac71c5d795f3e5",
       "source": "saved or authenticated v0 result/capability observation; strict B1 metadata goes through validate_failure/resolve_failure before policy",
       "test": "content_factory.tests_failure_contract_unit.ScannerTests.test_dynamic_audits_are_exact_and_bounded"
+    },
+    {
+      "adapter": "audited_v0_observation",
+      "allowed_codes_ref": "contracts/failure-codes.json#/codes",
+      "expression": "safe_code(receipt.get('reason_code'))",
+      "field": "reason_code",
+      "function": "inspection_report",
+      "owner": "backend.website_doctor",
+      "path": "content_factory/management/commands/inspect_website_prepare.py",
+      "site_sha256": "d1477205315d5746f12a60d7fcc0e1c5bc30472f965364397d092446ca56a3c8",
+      "source": "Saved diagnostic observation through safe_code; never authorizes failure policy, dispatch or readiness. Arbitrary bodies and credentials omitted.",
+      "test": "content_factory.tests_website_doctor_unit.DoctorTests.test_inspector_omits_secrets_even_in_old_legacy_fields"
+    },
+    {
+      "adapter": "audited_v0_observation",
+      "allowed_codes_ref": "contracts/failure-codes.json#/codes",
+      "expression": "safe_code(failure.get('code') or receipt.get('reason_code'))",
+      "field": "code",
+      "function": "project_doctor",
+      "owner": "backend.website_doctor",
+      "path": "content_factory/website_doctor.py",
+      "site_sha256": "c521f2afb9479b78362540aa092e66f98696decffaa1cf34172e69b6105d15fc",
+      "source": "Saved diagnostic observation through safe_code; never authorizes failure policy, dispatch or readiness. Arbitrary bodies and credentials omitted.",
+      "test": "content_factory.tests_website_doctor_unit.DoctorTests.test_inspector_omits_secrets_even_in_old_legacy_fields"
     }
   ],
   "entry_points": [

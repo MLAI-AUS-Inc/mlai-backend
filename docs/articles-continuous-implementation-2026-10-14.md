@@ -186,3 +186,81 @@ and push handling live in website_reconciliation.py.
 Continue B6 implementation, B7, C, D, E, F and G without stopping for design approval.
 No production release, customer write, credential change, migration or notification
 has been performed. All runtime flags stay off. The active goal remains unfinished.
+
+
+## B6 completion and B7 start checkpoint
+
+B2 backend #1014 final head 5a820857 passed all remote checks, postgres-search,
+migration-tests and validation-route; deploy skipped. CF #985 head 2527acd6 passed
+all remote tests/corpus/builds; deploy skipped. Local CF complete suite passed
+8550, skipped10, subtests4 in22m51s; actual corpus+real broker passed35. Backend
+B3/B4 #1016 final head294c244e: migration and postgres-search passed; checks still
+in progress at last query. B3/B4 local all19 database-free checks-job lanes passed.
+Chat #465 latest4763624ca: frontend checks passed, critical E2E in progress; other
+unchanged paths skipped. Full local justci, types, desktop units and browser6
+passed earlier. No runtime flag or enrollment/release was enabled.
+
+B6 is now implemented and pushed/attached as backend #1017, head
+b251bddfc78eeced9bae49491a40da2cbac1bbdf, branch feat/goal-wakeups, base B3/B4.
+Nine wake/event/source/lock/coalescing/malformed-payload tests and nine budget
+neighbours passed; earlier104 combined and all19 DB-free lanes passed. Model drift
+passed without a database. New website_wakeups.py uses one durable goal-wake
+operation per conn/gen and a bounded 4-worker immediate executor with cache lock.
+The operation scheduler has a flag-gated goal-wake handler. Running parent claims
+retain their state/lease; durable wake waits. Event hints never prove milestones.
+Installation additions/permissions, bound PR close/merge, completed checks and
+same-branch/source deployments wake only current scoped work. Deterministic,
+terminal and exhausted budgets remain inert. Flag ARTICLES_WEBSITE_EVENT_WAKES_ENABLED
+is false. CI stack base trigger includes the runbook branch feat/goal-wakeups.
+
+website_goal_scope.py records Django-owned completed goal-source-scope revision
+edges from webhook source changes and authenticated CI source changes. Only a
+complete same-identity edge chain ending at verified current source rebinds an
+active goal, invalidates proof and preserves counters/start/budget. Terminal goals
+are not rebound; source handling retains their successor path. CI after-commit
+source wake was added. Historical child references are retained for cumulative
+metering after source/repair changes (also fixes B3's new-goal-copy overwrite).
+These changes are in B6, so merge all dependencies in order before rollout.
+
+The backend implementation worktree is now on new branch
+codex/articles-b7-doctor-metrics, based on B6 b251bddf. B7 has ONLY an ignored
+uncommitted design note so far: docs/articles-b7-design-2026-10-14.md. No B7 code.
+Plan: bounded server doctor inside websiteStatus, fixed whitelist and redaction;
+Chat What we checked/Copy diagnostics uses only that contract; inspect command
+adds safe child/CI/deploy/source/goal references; one-click outcomes gain reason/
+step/class/time/cost with unknown samples distinct; health excludes owner waits
+from overdue and evaluates waiting against goal budgets. Actual existing files:
+content_factory/one_click_metrics.py, website_health.py, website_status.py,
+management/commands/inspect_website_prepare.py and report_website_connections.py.
+
+Chat worktree still on uncommitted codex/articles-b3-b4-channel-action, two small
+changes (normalize choose_article_channel and scoped preferences Link) with typecheck
+passed; companion tests/PR pending. CF worktree clean on B3/B4 branch, fulltests
+completed. B2 CI worktree remains onB2branch for final CI followups. Active goal
+unfinished; proceed B7, then C1-C5, D1-D3, E1-E5/retained v2 CMS+hosted, F1-F3,
+G1-G5. No per-step approval stops. No exact new migration is authorized. Production,
+customer writes, releases and credentials remain separate owner work. Do not claim
+nightly90% or live customer publication without qualifying full-flow evidence.
+
+
+B7 implementation checkpoint: the fixed website_doctor projection is added behind
+ARTICLES_WEBSITE_DOCTOR_ENABLED=false. It validates original proof scope/source,
+whitelists identifiers/classes/digests/times, omits credential-shaped references
+and never copies arbitrary receipt/result/message/URL fields. Local child status
+is scoped by organization, connection, generation, repository and deletion epoch;
+CI/deploy reads are bounded and current-source only. The read-only PostgreSQL
+inspector uses the same projection. Goal milestone observed_at is recorded when
+backend proof is accepted. Metrics report causal class counts, reason/step counts,
+start-to-observation percentiles and conservative USD bounds with missing samples
+separate. Health excludes needs_user and applies the saved goal/legacy wait deadline.
+
+Validation: all19 database-free CI commands passed; focused33 plus new flag-off
+case covered scoped DAO, canary redaction, malformed containers, unknown cost/time,
+owner waits and deadlines. Model drift passed (no migrations or database access).
+Test assignment346 fully selected/10 partial/123 existing omissions/0 new omissions;
+credential scan passed; exact failure inventory632 audited emissions passed offline.
+Two new diagnostic observations are recorded in the exact emitter manifest.
+Chat14 relevant unit tests and12 browser cases passed, including clipboard success/
+failure,4 state screens, missing usage and hosted-channel navigation. Four screenshots
+have distinct hashes and the working panel was visually inspected. Full Chat justci
+is running before its PR. No runtime flag, release, customer or production write.
