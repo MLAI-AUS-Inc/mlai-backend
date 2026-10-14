@@ -178,7 +178,8 @@ def ready(op, journey):
     """Preserve legacy behavior only for operations with no reserved goal."""
     if owns_goal(op):
         return goals.complete(goals.mapping(op.receipt).get("goal"))
-    return goals.mapping(journey.get("capabilities")).get("canPublishArticle") is True
+    from .article_publication_policy import journey_can_publish
+    return journey_can_publish(journey)
 
 
 def finish_goal(op, *, now=None):

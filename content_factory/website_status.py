@@ -49,6 +49,7 @@ def _action(raw, operation_id, *, owner=False, run_ids=(), repository=""):
 def project_status(op, *, scope, source_sha, journey, now=None):
     """Project only persisted schedules and current proof, with terminal precedence."""
     from .website_failure_redaction import redact_secret_text
+    from .article_publication_policy import journey_can_publish
     now = now or timezone.now()
     receipt = goals.mapping(op.receipt)
     goal = receipt.get("goal")
@@ -66,7 +67,7 @@ def project_status(op, *, scope, source_sha, journey, now=None):
     disconnected = op.action == "disconnect" and op.state == "completed"
     done = disconnected or (op.state == "completed" and current_access and (valid
         and all(not item["required"] or item["state"] == "passed" for item in milestones)
-        or legacy and goals.mapping(journey.get("capabilities")).get("canPublishArticle") is True))
+        or legacy and journey_can_publish(journey)))
     action = _action(receipt.get("user_action") or {**goals.mapping(receipt.get("prompt")), "id": goals.mapping(receipt.get("prompt")).get("action")}, str(op.pk), owner=True,
         run_ids=(receipt.get("setup_run_id"), receipt.get("child_run_id"),receipt.get("first_article_run_id"),receipt.get("first_article_publish_run_id")), repository=op.connection.github_repo) if op.state == "needs_user" else None
     schedule = op.next_attempt_at if op.state in {"pending", "running"} else None
