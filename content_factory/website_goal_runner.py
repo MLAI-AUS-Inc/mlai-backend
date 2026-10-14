@@ -11,13 +11,27 @@ def owns_goal(op):
     return "goal" in goals.mapping(op.receipt)
 
 
-def start_goal(current, *, company_id, user, retry, target, now, force_successor=False):
+def start_goal(current, *, company_id, user, retry, target, now, force_successor=False, consent=None):
     """Select/create one current goal while the caller holds the connection lock."""
     from .website_models import WebsiteConnectionOperation
     scope = goals.scope_for(current, company_id)
     latest = current.operations.select_for_update().filter(generation=current.generation, action="prepare").order_by("-created_at", "-pk").first()
     goal = goals.mapping(getattr(latest, "receipt", None)).get("goal")
+    from . import website_setup_consent as setup_consent
+    selected = None
+    if setup_consent.enabled(current.organization_id) and consent is not None:
+        from .billing import get_content_factory_article_cost_points
+        selected = setup_consent.answers(consent, expected_points=get_content_factory_article_cost_points(current.organization.domain))
+    if target == "first_article_live" and not selected and not (isinstance(goal,dict) and setup_consent.valid(goal)):
+        raise WebsiteAuthorityError("website_prepare_blocked", "Review the first-article choices before starting.", status=422)
     compatible = goals.valid_goal(goal, scope) and goal.get("target") == target
+    if compatible and selected is not None and setup_consent.valid(goal) and selected != goal["consent"]["answers"]:
+        force_successor = True
+    if compatible and selected is not None and not setup_consent.valid(goal):
+        # Explicit owner submission can enroll an existing ready goal without a new run.
+        goal = {**goal, "consent": setup_consent.seal(goal, selected, user_id=user.pk, now=now), "revision": goal["revision"]+1}
+        latest.receipt = {**latest.receipt, "goal": goal}
+        latest.save(update_fields=["receipt", "updated_at"])
     source = getattr(current, "verified_sha", "")
     if latest and compatible and latest.state not in TERMINAL and not force_successor:
         if retry and latest.state == "needs_user":
@@ -31,9 +45,17 @@ def start_goal(current, *, company_id, user, retry, target, now, force_successor
             not item["required"] or goals.valid_proof(item["name"], item.get("proof"), scope=scope, source_sha=source, now=now)
             for item in goal["milestones"]):
         return latest
+    if setup_consent.enabled(current.organization_id) and selected is None:
+        if compatible and setup_consent.valid(goal):
+            selected = goal["consent"]["answers"]
+        else:
+            raise WebsiteAuthorityError("website_prepare_blocked", "Review the setup choices before starting a new articles goal.", status=422)
     if latest and latest.state not in TERMINAL and not owns_goal(latest) and not force_successor:
         # Enrollment invalidates any old claim before it can overwrite the ledger.
-        latest.receipt = {**latest.receipt, "goal": goals.new_goal(str(latest.pk), scope, target=target, now=now)}
+        enrolled_goal = goals.new_goal(str(latest.pk), scope, target=target, now=now)
+        if selected is not None:
+            enrolled_goal["consent"] = setup_consent.seal(enrolled_goal, selected, user_id=user.pk, now=now)
+        latest.receipt = {**latest.receipt, "goal": enrolled_goal}
         if latest.next_attempt_at is None and latest.state in {"pending", "running"}:
             latest.next_attempt_at = now
         latest.save(update_fields=["receipt", "next_attempt_at", "updated_at"])
@@ -54,6 +76,8 @@ def start_goal(current, *, company_id, user, retry, target, now, force_successor
         "receipt": {"status": "working", "current_step": "verify-access", "message": "Preparing your website for articles."}})
     if created:
         goal = goals.new_goal(str(op.pk), scope, target=target, now=now)
+        if selected is not None:
+            goal["consent"] = setup_consent.seal(goal, selected, user_id=user.pk, now=now)
         goal["predecessor_goal_id"] = predecessor
         goal["current_source_sha"] = source
         op.receipt = {**op.receipt, "goal": goal}
@@ -70,6 +94,9 @@ def goal_journey(op, context, config, journey, *, now):
     goal = goals.mapping(op.receipt).get("goal")
     if not goals.valid_goal(goal, scope):
         raise WebsiteAuthorityError("website_operation_changed", "Website goal authority changed. Refresh the current website.")
+    from .website_setup_consent import valid as valid_consent
+    if goal.get("consent") is not None and not valid_consent(goal) or goal.get("target") == "first_article_live" and not valid_consent(goal):
+        raise WebsiteAuthorityError("website_prepare_blocked", "The saved setup consent has changed. Review the current goal choices.")
     try:
         proofs, source = collect_proofs(op, context, config, journey, now=now)
     except (ValueError, TypeError, OverflowError) as exc:
@@ -121,6 +148,18 @@ def goal_journey(op, context, config, journey, *, now):
         if not op.receipt.get("setup_run_id"):
             raise WebsiteAuthorityError("website_prepare_blocked", "No reserved setup proposal proves this goal's approval or merge.")
         op.receipt["child_run_id"] = op.receipt["setup_run_id"]
+    from .website_setup_consent import required_grants
+    if milestone and milestone != "access" and valid_consent(goal):
+        answers = goal["consent"]["answers"]
+        grants = goals.mapping(journey.get("githubPermissions"))
+        required = required_grants(ci_mode=answers["ci_mode"], strategy=goals.mapping(goal.get("strategy_pin")).get("rung"))
+        missing = [name for name in required if grants.get(name) is not True]
+        if missing:
+            if grants.get("retryable") is True:
+                raise WebsiteAuthorityError("github_unavailable", "GitHub permission checks are temporarily unavailable.", retryable=True)
+            action = "permissions"
+            journey = {**journey, "prerequisites": {**goals.mapping(journey.get("prerequisites")), "permissions": {
+                "status": "blocked", "reasonCode": "github_workflow_permission_required", "reason": "Approve the GitHub access shown in your articles setup choices."}}}
     prerequisite = goals.mapping(goals.mapping(journey.get("prerequisites")).get("permissions"))
     if action in {"setup", "ci-attestation", "verify", "merge"} and prerequisite.get("status") not in {None, "complete"}:
         action = "permissions"

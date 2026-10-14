@@ -138,5 +138,9 @@ def add_status(payload, context, config, *, journey):
     """Add the shared server contract only when the status rollout is enabled."""
     result = status_for_context(context, config, journey=journey)
     if result is not None:
+        from .website_setup_consent import setup_plan
+        plan = setup_plan(context, config, journey)
+        if plan is not None:
+            result["setupPlan"] = plan
         payload["websiteStatus"] = result
     return payload

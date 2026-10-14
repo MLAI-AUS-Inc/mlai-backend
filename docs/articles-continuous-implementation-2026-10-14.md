@@ -264,3 +264,30 @@ Chat14 relevant unit tests and12 browser cases passed, including clipboard succe
 failure,4 state screens, missing usage and hosted-channel navigation. Four screenshots
 have distinct hashes and the working panel was visually inspected. Full Chat justci
 is running before its PR. No runtime flag, release, customer or production write.
+
+
+B7 backend PR1018 is attached, head edabee45a765832bee892b358c6c995269477f16,
+base feat/goal-wakeups. Chat companion PR468 is attached, head
+e7bd2905322f8c900b68706c03d4271a86d784a5, base B2 status branch. Full Chat justci
+and required signed-commit/push hooks passed including desktop5606/mobile2731.
+Generated B7 CI output preserved in ~/.codex/artifacts/articles-b7-workspace-ci-output.
+Backend B6 #1017 and Chat B2 #465 exact current remote checks are all green.
+
+C1/C2 backend is implemented on codex/articles-c1-c2-consent-page with a design note.
+One sealed owner answer set per goal; strict price/types/routes; repeat resumes reuse,
+explicit changes reserve a successor, source-only B6 edges rebind the consent scope
+without altering answers or accepted time. Plan grants include every future repo
+write up front and in-repo CI until C3 hosted verification becomes available. A
+separate rich v2 permission cache avoids reading legacy missing fields; permission
+webhooks clear both. Before scanning, the planner checks all selected grants. C2
+prefers a listing with detail children and a confidence margin; /articles is the
+missing-listing default; only explicit pick policy asks about true ambiguity.
+
+All19 DB-free CI commands, model drift, credential/639-emitter/assignment checks
+passed. Focused70 neighbors and56 consent/planner/source/first-goal cases passed;
+final46 consent/permissions/wakeup cases passed after cache change. No migrations.
+Chat C1 sheet is under development on codex/articles-c1-setup-sheet based PR468;
+parser/types/13 relevant units passed,15 browser cases running. It posts only the
+server-priced choice fields and automatically closes/refreshes after success.
+Continue C3 exact hosted build proof and consent approval, C4 deployment signals,
+C5 durable deduplicated notifications, then D/E/F/G without approval pauses.

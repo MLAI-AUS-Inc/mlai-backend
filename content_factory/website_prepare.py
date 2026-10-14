@@ -134,7 +134,7 @@ def _checking_owner_wait(op):
     return action_id is None and op.receipt.get("current_step") in {"merge", "permissions", "verify", "ci-attestation"}
 
 
-def start_prepare(config, *, expected=None, company_id=None, user=None, retry=False, target="ready", force_successor=False):
+def start_prepare(config, *, expected=None, company_id=None, user=None, retry=False, target="ready", force_successor=False, consent=None):
     """Reuse one prepare receipt for the current consent generation."""
     connection = config.website_connection
     if connection is None:
@@ -144,12 +144,15 @@ def start_prepare(config, *, expected=None, company_id=None, user=None, retry=Fa
         binding.update(domain=connection.organization.domain, github_repo=connection.github_repo)
     with authority_guard(binding, action="read") as current:
         from .website_goal import enrolled
-        if target != "ready":
+        from django.conf import settings
+        if target != "ready" and not (target == "first_article_live" and enrolled(current.organization_id)
+            and getattr(settings, "ARTICLES_FIRST_ARTICLE_GOAL_ENABLED", False)
+            and getattr(settings, "ARTICLES_SETUP_CONSENT_ENABLED", False)):
             raise WebsiteAuthorityError("website_prepare_blocked", "Only the ready goal is available until first-article publication is enabled.", status=422)
         if enrolled(current.organization_id):
             from .website_goal_runner import start_goal
             return start_goal(current, company_id=company_id, user=user, retry=retry, target=target,
-                now=timezone.now(), force_successor=force_successor)
+                now=timezone.now(), force_successor=force_successor, consent=consent)
         if hasattr(current, "operations"):
             from .website_goal_runner import owns_goal
             reserved = WebsiteConnectionOperation.objects.filter(connection_id=current.pk, generation=current.generation, action="prepare",
@@ -399,11 +402,30 @@ def _canonical_article_route(route):
     return re.sub(r"/+", "/", route).rstrip("/") or "/"
 
 
-def _setup_surface(config, journey):
+def _setup_surface(config, journey, *, goal=None):
     """Respect a saved owner choice, then use the current scan's listing route."""
+    from django.conf import settings
+    from .website_goal import mapping
+    answers = mapping(mapping(mapping(goal).get("consent")).get("answers"))
+    if getattr(settings, "ARTICLES_AUTO_PAGE_ENABLED", False) and goal is not None and answers.get("page_policy") == "explicit":
+        return "existing" if answers.get("page_mode") == "existing" else "none", _canonical_article_route(answers["page_route"])
     pending = (config.article_system or {}).get("pending_article_system_setup") or {}
     if pending.get("mode") in {"existing", "none"} and pending.get("route_path"):
         return pending["mode"], _canonical_article_route(pending["route_path"])
+    from django.conf import settings
+    if getattr(settings, "ARTICLES_AUTO_PAGE_ENABLED", False) and goal is not None:
+        from .website_article_page import choose_page
+        from .website_goal import mapping
+        consent = mapping(mapping(goal).get("consent"))
+        answers = mapping(consent.get("answers"))
+        if answers.get("page_policy") == "explicit":
+            return "existing" if answers.get("page_mode") == "existing" else "none", _canonical_article_route(answers["page_route"])
+        selection = choose_page(mapping(journey).get("discovery"), pick_when_ambiguous=answers.get("page_policy") == "pick")
+        if selection["requiresChoice"]:
+            error = WebsiteAuthorityError("articles_page_choice_required", "Choose the articles page to prepare.", retryable=False)
+            error.user_action = {"id": "choose_articles_page", "candidates": selection["candidates"]}
+            raise error
+        return selection["mode"], selection["route"]
     discovery = (journey or {}).get("discovery") or {}
     resolution = discovery.get("resolution") or {}
     def route(item):
@@ -455,7 +477,7 @@ def _owner_request(op, context, config, step, *, user, journey=None):
         from .website_strategy import request_pin
         data.update(request_pin(op.receipt["goal"]))
     if step == "setup":
-        mode, surface = _setup_surface(config, journey or journey_for_context(context, config))
+        mode, surface = _setup_surface(config, journey or journey_for_context(context, config), goal=op.receipt.get("goal"))
         pending = (config.article_system or {}).get("pending_article_system_setup") or {}
         if op.payload.get("manual_setup_example_cleanup_retry") or op.payload.get("source_reverify"):
             pending = {**pending, "source_scan_run_id": op.receipt.get("scan_run_id") or ""}

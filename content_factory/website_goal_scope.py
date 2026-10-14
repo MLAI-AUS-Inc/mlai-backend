@@ -54,6 +54,11 @@ def rebind_source_scope(goal, connection, *, company_id, now=None):
     if chain is None:
         return None
     result=deepcopy(goal)
+    from .website_setup_consent import rebind_trusted_source
+    if goal.get("consent") is not None:
+        rebound = rebind_trusted_source(goal, current)
+        if rebound is None:return None
+        result["consent"] = rebound
     result["scope"]=current
     result=goals.refresh_goal(result,{},scope=current,source_sha=connection.verified_sha,now=now)
     result["scope_history"]=(list(result.get("scope_history") or [])+[{"from_revision":old["configuration_revision"],

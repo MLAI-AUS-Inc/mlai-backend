@@ -145,7 +145,7 @@ class WebsiteConnectionActionView(APIView):
             if action == "prepare":
                 from .website_prepare import start_prepare, advance_prepare
                 operation = start_prepare(config, expected=dict(request.data), company_id=context.company.pk,
-                    user=request.user, retry=True, target=request.data.get("goal_target", "ready"))
+                    user=request.user, retry=True, target=request.data.get("goal_target", "ready"), consent=request.data.get("setup_consent"))
                 advance_prepare(operation.pk)
                 operation.refresh_from_db()
             elif action == "disconnect":
