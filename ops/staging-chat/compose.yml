@@ -20,6 +20,8 @@ services:
       SECRET_KEY: ${STAGING_API_SECRET_KEY:?private key required}
       DATABASE_URL: postgresql://staging_account_api:${STAGING_API_DATABASE_PASSWORD:?database credential required}@postgres-api:5432/staging_account_api
       REDIS_URL: redis://:${STAGING_API_REDIS_PASSWORD:?cache credential required}@redis-api:6379/0
+      CONNECTOR_CREDENTIAL_KEYS: ${CONNECTOR_CREDENTIAL_KEYS:?independent keyring required}
+      CONNECTOR_CREDENTIAL_ACTIVE_KEY_ID: ${CONNECTOR_CREDENTIAL_ACTIVE_KEY_ID:?keyring ID required}
       COMMUNITY_CHAT_FEDERATION_CLIENT_SECRET: ${COMMUNITY_CHAT_FEDERATION_CLIENT_SECRET:?client credential required}
       COMMUNITY_CHAT_FEDERATION_STAGING_ENABLED: ${COMMUNITY_CHAT_FEDERATION_STAGING_ENABLED:-false}
       COMMUNITY_CHAT_ADAPTER_URL: http://membership-adapter:3100
@@ -44,7 +46,8 @@ services:
       retries: 5
     networks: [default, chat]
   postgres-api:
-    image: postgres:18-alpine
+    # pgvector0.8.7/PostgreSQL18, verified immutable linux/amd64 staging image.
+    image: pgvector/pgvector@sha256:ad249f9fb9572979643a47694e59b9a8cdcdf6abc6accebf49bb80ad5f20ff9b
     restart: unless-stopped
     environment:
       POSTGRES_DB: staging_account_api

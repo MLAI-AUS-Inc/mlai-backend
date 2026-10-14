@@ -1,5 +1,26 @@
 # Staging account federation
 
+## Independent staging pilot rollout
+
+The isolated API runtime now uses a pinned PostgreSQL18/pgvector image and an
+independent connector-encryption keyring. Existing private API configurations
+must run `python3 ops/staging-chat/config.py upgrade-keyring --output
+ops/staging-chat/.env` before validation; it adds only missing keyring fields,
+preserves all other credentials and refuses partial/invalid keyrings. No key
+is printed. The private database and cache have no host ports.
+
+`ops/staging-chat/run.sh plan` inspects the full pending schema without applying
+it. Fresh installation includes inherited backend and Django migrations, not
+only the federation migration. On 14 October2026 the user approved the exact
+364-migration inventory whose ordered checksum is
+`9d72cf35d7c61de8bf1e969b504dc3178ca01f8d760f71c9be560d0fe97959ed`, solely for
+the NEW `staging_account_api` database on staging Droplet170.64.215.174 and
+disposable focused-test databases. Compare final PostgreSQL history, migration
+file hashes and helper identities before application. Any changed inventory,
+nonempty target or unexpected historical guard requires stopping. Production
+is excluded. Preserve the schema on rollback; do not reverse irreversible
+credential backfills.
+
 Prepared source; disabled by default. Focused local browser/backend checks passed; live rollout remains pending. Broader platform testing is deferred at the user's request.
 
 ## Cookie cutover

@@ -17,7 +17,7 @@ case "${1:-help}" in
   check)
     load_config
     compose config --quiet ;;
-  build|start|migrate)
+  build|start|migrate|plan)
     load_config
     metadata=$(mktemp)
     trap 'rm -f "$metadata"' EXIT
@@ -32,7 +32,9 @@ case "${1:-help}" in
       docker image inspect "mlai-chat-staging-api:$STAGING_API_SOURCE_SHA" > "$metadata"
       python3 config.py check-image --output .env --metadata "$metadata"
       compose up -d --no-build --wait postgres-api redis-api
-      if [[ "$1" == migrate ]]; then
+      if [[ "$1" == plan ]]; then
+        compose run --rm --no-deps staging-api python manage.py migrate --plan --noinput
+      elif [[ "$1" == migrate ]]; then
         compose run --rm --no-deps staging-api python manage.py migrate --noinput
       else
         compose up -d --no-build --pull never --wait staging-api
@@ -41,5 +43,5 @@ case "${1:-help}" in
   status|stop)
     load_config
     if [[ "$1" == status ]]; then compose ps; else compose stop; fi ;;
-  *) echo 'Usage: ./run.sh init --chat-env /path/to/staging-chat/.env | check | build | migrate | start | status | stop' ;;
+  *) echo 'Usage: ./run.sh init --chat-env /path/to/staging-chat/.env | check | build | plan | migrate | start | status | stop' ;;
 esac
