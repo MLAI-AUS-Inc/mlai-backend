@@ -210,7 +210,10 @@ def _original_spend(receipt, *, allow_refunded=False):
     if not isinstance(identifier, str) or not identifier.isdecimal() or len(identifier) > 19:
         _deny()
     key = receipt["client_request_id"]
-    ledger = Ledger.objects.select_for_update().select_related("user").filter(pk=identifier).first()
+    # Ledger.user is nullable for legacy rows. PostgreSQL rejects an unscoped
+    # FOR UPDATE across that outer join, so lock only the ledger row itself.
+    # The payer relation is read for its active-account check, not locked.
+    ledger = Ledger.objects.select_for_update(of=("self",)).select_related("user").filter(pk=identifier).first()
     if (not ledger or str(ledger.user_id) != receipt["payer_user_id"] or ledger.kind != "SPEND"
         or ledger.source != "CONTENT_FACTORY" or ledger.reference_type != "CONTENT_FACTORY"
         or ledger.reference_id != key or ledger.idempotency_key != f"content_factory:charge:{key}"

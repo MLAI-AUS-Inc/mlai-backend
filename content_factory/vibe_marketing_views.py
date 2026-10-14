@@ -16855,12 +16855,13 @@ def start_article_generation(*, user, context, data, request_hash=None, website_
         payload.update(website_contract)
     if request_hash:
         payload["mcp_request_hash"] = request_hash
-    charged_user, _charge_ledger, article_request, billing_error = _charge_roo_points_for_article(
-        command,
-        context=context,
-        payload=payload,
-        goal_operation_id=goal_operation_id,
-    )
+    billing_kwargs = {"context": context, "payload": payload}
+    # Preserve the ordinary charging seam for all non-goal callers. The private
+    # goal selector is only meaningful to the internal controller and must not
+    # become part of its public/mock-facing call contract.
+    if goal_operation_id is not None:
+        billing_kwargs["goal_operation_id"] = goal_operation_id
+    charged_user, _charge_ledger, article_request, billing_error = _charge_roo_points_for_article(command, **billing_kwargs)
     if billing_error is not None:
         return billing_error
     logger.info(
