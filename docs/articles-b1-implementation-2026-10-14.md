@@ -103,12 +103,13 @@ CI invokes `scripts/check_failure_contract.py --remote` against the immutable
 source commit and compares the exact bytes of all three files. Mutable refs,
 missing read access and unavailable private-source data fail the check; local
 offline validation explicitly says remote provenance was not rechecked.
-`drsamdonegan/content-factory` is private. A read-only contents credential must be
-installed as the backend repository secret `CONTENT_FACTORY_CONTRACT_READ_TOKEN`.
-The available secret names were inspected; that dedicated secret is absent.
-No credential values were inspected, copied or printed. This access requirement
-must be resolved for the mandatory remote parity job; offline success does not
-replace it.
+`drsamdonegan/content-factory` is private. On 14 October 2026, the owner authorized
+a 90-day token restricted to read-only Contents access for that one repository.
+It was saved as backend Actions secret `CONTENT_FACTORY_CONTRACT_READ_TOKEN` and
+expires on 12 January 2027. The remote pinned-contract step passed in workflow
+run `38483258513`, verifying all three canonical files through the dedicated
+credential. Credential values were kept out of source, logs and documentation.
+Offline success still does not replace the mandatory remote parity check.
 
 Rollback is a code revert with both flags off and enrollment empty. There is no
 schema migration or production activation in this implementation.

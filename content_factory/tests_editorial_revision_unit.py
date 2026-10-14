@@ -37,7 +37,7 @@ class Query(list):
 class EditorialRevisionTests(unittest.TestCase):
     def setUp(self):
         self.strategy = approved_catalog()
-        self.org = SimpleNamespace(id=1, domain="example.test")
+        self.org = SimpleNamespace(id=1, pk=1, domain="example.test")
         self.context = SimpleNamespace(organization=self.org)
         self.run = SimpleNamespace(run_id="source", organization_id=1, domain="example.test",
                                    workflow="article_generation", status="completed", github_repo="fixture/site",
@@ -58,6 +58,7 @@ class EditorialRevisionTests(unittest.TestCase):
         # Website consent is exercised with real DB row locks in
         # tests_website_connections; this AST harness isolates editorial policy.
         self.ns = {
+            "__name__": "content_factory.vibe_marketing_views", "__package__": "content_factory",
             "guarded_owner_operation": lambda *args, **kwargs: lambda method: method,
             "guarded_service_write": lambda *args, **kwargs: lambda method: method,
             "REPOSITORY_WORKFLOWS": frozenset(),
@@ -167,7 +168,9 @@ class EditorialRevisionTests(unittest.TestCase):
 
     def test_policy_outage_is_not_legacy_permission(self):
         self.strategy = DatabaseError("fixture outage")
-        self.assertEqual(self.submit().status_code, 503)
+        response = self.submit()
+        self.assertEqual(response.status_code, 503)
+        self.assertEqual(response.data["code"], "editorial_catalog_unavailable")
         self.reuse.assert_not_called()
         self.remote.assert_not_called()
 
