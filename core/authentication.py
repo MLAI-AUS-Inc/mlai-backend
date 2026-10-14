@@ -22,8 +22,9 @@ class CustomJWTAuthentication(JWTAuthentication):
     def authenticate(self, request):
         # Hosted staging uses its independent account sessions throughout the
         # ordinary route tree; domain permissions still decide what a user can do.
-        if (getattr(settings,'SETTINGS_MODULE','') == 'mlai.settings_staging_chat'
-                and getattr(settings,'APP_ENV','') == 'chat-staging'):
+        if getattr(settings,'SETTINGS_MODULE','') == 'mlai.settings_staging_chat':
+            if getattr(settings,'APP_ENV','') != 'chat-staging':
+                raise exceptions.AuthenticationFailed('Hosted staging configuration is invalid.')
             from community_chat.staging_password import StagingAccountAuthentication
             return StagingAccountAuthentication().authenticate(request)
         # First try to get token from Authorization header

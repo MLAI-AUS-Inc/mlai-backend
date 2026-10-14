@@ -24,6 +24,7 @@ class Command(BaseCommand):
     def add_arguments(self,parser):
         parser.add_argument('--manifest',required=True)
         parser.add_argument('--apply',action='store_true')
+        parser.add_argument('--preserve-existing',action='store_true',help='Idempotent replay only for marked ordinary synthetic accounts with the unchanged private password.')
         parser.add_argument('--reactivate',action='store_true',help='Explicitly reactivate a disabled synthetic pilot after completed membership cleanup; never reset its password.')
     def handle(self,*args,**options):
         try:require_password_pilot()
@@ -57,6 +58,27 @@ class Command(BaseCommand):
                     for user in users:
                         user.is_active=True;user.save(update_fields=['is_active'])
             self.stdout.write(f'{"Reactivated" if options["apply"] else "Would reactivate"} {len(users)} synthetic pilot account(s). Passwords unchanged.'+(' No changes made.' if not options['apply'] else ''))
+            return
+        if options['preserve_existing']:
+            from roo.staging_fixtures import require_fixture_database,EMAILS
+            try:require_fixture_database()
+            except (ValueError,ImproperlyConfigured):raise CommandError('Unexpected fixture target.') from None
+            if len(checked)!=8 or {row[0] for row in checked}!=set(EMAILS):raise CommandError('Exactly the eight approved synthetic aliases are required.')
+            with transaction.atomic():
+                existing={}
+                for email,first,last,password in checked:
+                    user=get_user_model().objects.select_for_update().filter(email__iexact=email).first()
+                    if user:
+                        profile=CommunityMemberProfile.objects.filter(user=user).first()
+                        if user.is_staff or user.is_superuser or not user.is_active or not user.check_password(password) or not profile or 'synthetic_staging_pilot' not in profile.review_reasons:
+                            raise CommandError('Conflicting synthetic identity/password; no takeover or reset.')
+                        existing[email]=user
+                if options['apply']:
+                    for email,first,last,password in checked:
+                        if email not in existing:
+                            user=get_user_model().objects.create_user(email=email,password=password,first_name=first,last_name=last,is_staff=False,is_superuser=False)
+                            CommunityMemberProfile.objects.create(user=user,status=CommunityMemberProfile.Status.APPROVED,review_reasons=['synthetic_staging_pilot'])
+            self.stdout.write(('Provisioned/preserved' if options['apply'] else 'Would provision/preserve')+' eight ordinary synthetic accounts; passwords and edits preserved.')
             return
         if any(get_user_model().objects.filter(email__iexact=row[0]).exists() for row in checked):
             raise CommandError('An account already exists; takeover and password reset are refused.')

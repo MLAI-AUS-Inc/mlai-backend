@@ -9,4 +9,5 @@ def live(request):
 
 urlpatterns=[path('healthz/live',live),
              path('api/v1/community-chat/',include('community_chat.staging_urls')),
-             path('',include('mlai.urls'))]
+             path('api/v1/points/',include('roo.staging_urls')),
+    path('',include('mlai.urls'))]

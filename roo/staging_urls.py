@@ -1,0 +1,3 @@
+from django.urls import path
+from .staging_member_views import RoomsView,AvailabilityView,BookView,MyBookingsView,CancelView,OwnLedgerView,RewardsView,PurchaseView,PurchaseOutcomeView
+urlpatterns=[path('meeting-rooms/rooms/',RoomsView.as_view()),path('meeting-rooms/availability/',AvailabilityView.as_view()),path('meeting-rooms/book/',BookView.as_view()),path('meeting-rooms/my-bookings/',MyBookingsView.as_view()),path('meeting-rooms/cancel/',CancelView.as_view()),path('me/ledger/',OwnLedgerView.as_view()),path('me/rewards/',RewardsView.as_view()),path('me/purchases/',PurchaseView.as_view()),path('me/purchases/outcome/',PurchaseOutcomeView.as_view())]

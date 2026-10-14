@@ -93,5 +93,12 @@ class StagingPlatformTests(TestCase):
 
     def test_general_api_keeps_service_key_authority(self):
         response=self.login('ios');self.client.credentials(HTTP_AUTHORIZATION='Bearer '+response.data['session']['access_token'],HTTP_ORIGIN=NATIVE)
-        result=self.client.post('/api/v1/points/meeting-rooms/book/',{'slack_user_id':'another-user'},format='json')
+        result=self.client.post('/api/v1/points/kimi/calls/dispatch/',{'slack_user_id':'another-user'},format='json')
         self.assertIn(result.status_code,(401,403))
+
+    @override_settings(APP_ENV='production')
+    def test_wrong_hosted_profile_environment_never_uses_jwt(self):
+        from core.authentication import CustomJWTAuthentication
+        from rest_framework.test import APIRequestFactory
+        from rest_framework.exceptions import AuthenticationFailed
+        with self.assertRaises(AuthenticationFailed):CustomJWTAuthentication().authenticate(APIRequestFactory().get('/api/'))

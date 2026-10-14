@@ -73,3 +73,5 @@ pricing, admin target identity, repeated access checks, private denials, default
 list filtering, inactive/missing rooms, replay and cancellation. It runs in the
 existing meeting-room CI selection. The existing room API regressions protect
 authentication, conflicts, refunds, daily limits and signature/request binding.
+
+The isolated staging member adapter uses this service with session-derived ownership and a signed ten-minute preview rather than distributing the trusted Roo service key. Synthetic room UI/API procedures are in [backend staging contracts](backend-staging-points.md). Production trusted Slack/service authorization remains unchanged.

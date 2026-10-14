@@ -2,6 +2,7 @@
 from .settings import *
 from .settings import _env_is_true
 
+if APP_ENV!='chat-staging':raise ImproperlyConfigured('Hosted staging requires APP_ENV=chat-staging.')
 ROOT_URLCONF='mlai.urls_staging_chat'
 COMMUNITY_CHAT_FEDERATION_ISSUER_ENABLED=False
 COMMUNITY_CHAT_FEDERATION_STAGING_ENABLED=_env_is_true('COMMUNITY_CHAT_FEDERATION_STAGING_ENABLED',False)
