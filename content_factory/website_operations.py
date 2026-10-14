@@ -201,8 +201,11 @@ def reserve_workflow_operation(connection, *, workflow, payload):
     from .website_connections import authority_guard
     # Request keys survive reload in the operation row. An in-flight logical
     # scan/setup also resumes when an older client minted a replacement key.
+    # Billing appends its free-domain verdict after this operation is reserved.
+    # Like the Roo authorization fields, it is separately validated billing
+    # metadata and must not change the original execution identity at dispatch.
     digest = evidence_digest({key: value for key, value in payload.items() if not key.startswith("roo_points_") and key not in {
-        "client_request_id", "idempotency_key", "roo_points_gate", "roo_points_authorized", "operation_id", "operation_attempt", "deletion_epoch", "dispatch_outbox_reserved"}})
+        "client_request_id", "idempotency_key", "roo_points_gate", "roo_points_authorized", "free_domain", "operation_id", "operation_attempt", "deletion_epoch", "dispatch_outbox_reserved"}})
     key = f"{connection.pk}:workflow:{payload['client_request_id']}"
     with authority_guard(payload, action="read"):
         active = None
