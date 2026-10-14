@@ -785,6 +785,35 @@ def approve_cleanup_proposal(config, *, user, data):
             pass
 
 
+# A rescan reserved in one of these states can never replay under its key.
+SETTLED_SOURCE_RESCAN_STATES = frozenset({"failed", "cancelled", "denied", "deleted"})
+
+
+def _source_rescan_request(op, website, attempt):
+    """Name this source's rescan dispatch, moving past a settled failed one.
+
+    The first dispatch keeps ``source-rescan:<op>`` so an in-flight, completed
+    or running rescan still replays idempotently. Once its reserved operation
+    failed or was cancelled, that key is spent; retrying it only conflicts
+    forever. Count up instead and persist the count under this claim.
+    Returns the request identity and its existing reserved operation, if any.
+    """
+    count = op.payload.get("rescan_dispatch", 0)
+    count = count if type(count) is int and count >= 0 else 0
+    request_id = f"source-rescan:{op.pk}:{count}" if count else f"source-rescan:{op.pk}"
+    prior = WebsiteConnectionOperation.objects.filter(
+        idempotency_key=f"{website.pk}:workflow:{request_id}").first()
+    if prior is None or prior.state not in SETTLED_SOURCE_RESCAN_STATES:
+        return request_id, prior
+    from .website_contract import WebsiteAuthorityError
+    updated = {**op.payload, "rescan_dispatch": count + 1}
+    if WebsiteConnectionOperation.objects.filter(pk=op.pk, attempts=attempt, state="pending").update(
+            payload=updated, updated_at=timezone.now()) != 1:
+        raise WebsiteAuthorityError("website_operation_cancelled", "The source verification operation changed.")
+    op.payload = updated
+    return f"source-rescan:{op.pk}:{count + 1}", None
+
+
 def _process_source_reverification(identifier, now):
     """Re-scan external changes and then authenticate current CI/live proof."""
     from .website_connections import authority_guard, require_unlocked_remote_call
@@ -844,13 +873,22 @@ def _process_source_reverification(identifier, now):
                 domain=website.organization.domain, action="repo_scan")
             if points_error is not None:
                 raise WebsiteAuthorityError("roo_points_required", "The website owner needs sufficient Roo points to verify this integration.", retryable=True)
-            scan_payload = {**binding, "client_request_id": f"source-rescan:{op.pk}", "force_refresh": True,
+            request_id, prior = _source_rescan_request(op, website, attempt)
+            scan_payload = {**binding, "client_request_id": request_id, "force_refresh": True,
                 "request_source": CONTENT_FACTORY_REQUEST_SOURCE, "slack_user_id": founder_actor_id_for_user(owner),
                 "scan_purpose": "setup", "scaffold_if_missing": False,
                 "auto_setup_preview": False, "generate_components": False}
             _mark_roo_points_gate_authorized(scan_payload, domain=website.organization.domain,
                 action="repo_scan", current_balance=balance)
-            scan_op = reserve_workflow_operation(website, workflow="repo_scan", payload=scan_payload)
+            try:
+                scan_op = reserve_workflow_operation(website, workflow="repo_scan", payload=scan_payload)
+            except WebsiteAuthorityError as exc:
+                if exc.authority_code == "operation_key_conflict" and prior is not None and prior.state in {"running", "pending"}:
+                    # Different, still-active work owns this key. It completes,
+                    # or settles and the next attempt takes a fresh identity.
+                    raise WebsiteAuthorityError("source_reverification_unavailable",
+                        "Waiting for the earlier repository scan to settle.", retryable=True) from exc
+                raise
             response = http_client.post(f"{remote['base_url']}/api/runs/scan", json=scan_payload,
                 headers=_content_factory_headers(), timeout=(3, 30))
             response.raise_for_status()
@@ -873,6 +911,13 @@ def _process_source_reverification(identifier, now):
         receipt.update(status="verification_pending", code=exc.code, retryable=exc.retryable)
         if exc.code in {"website_disconnected", "website_connection_changed", "website_operation_cancelled"}:
             state = "cancelled"
+        elif exc.authority_code == "operation_key_conflict":
+            # A settled rescan already moved to a fresh identity, so this key
+            # belongs to finished or different work: retrying cannot repair it.
+            # Stop; the source blocker stays until a new scan re-verifies.
+            state = "needs_attention"
+            receipt.update(status="needs_attention", code="operation_key_conflict", retryable=False,
+                message="The repository scan for this change could not be restarted. Scan the repository again.")
     except Exception:
         receipt.update(status="verification_pending", code="source_reverification_unavailable", retryable=True)
     WebsiteConnectionOperation.objects.filter(pk=identifier, attempts=attempt, state="pending").update(

@@ -280,7 +280,7 @@ class SetupSourceReverificationUnitTests(SimpleTestCase):
                 "owned_merge_run_id": "setup-1"}, receipt={}, attempts=0,
             next_attempt_at=None, save=Mock())
 
-    def process(self, *, now=None, points_error=None):
+    def process(self, *, now=None, points_error=None, prior=None, reserve_error=None):
         from . import website_reconciliation as reconciliation, website_operations as operations
         from . import website_verification as verification
         # Load decorated view dependencies before replacing the shared transaction seam.
@@ -291,6 +291,8 @@ class SetupSourceReverificationUnitTests(SimpleTestCase):
             claimed.return_value.select_related.return_value.filter.return_value.first.return_value = self.op
             stored = stack.enter_context(patch.object(reconciliation.WebsiteConnectionOperation.objects, "filter"))
             stored.return_value.update.return_value = 1
+            # The workflow operation previously reserved under this source's rescan key.
+            stored.return_value.first.return_value = prior
             stack.enter_context(patch.object(authority, "authority_guard", side_effect=lambda *a, **kw: nullcontext(self.website)))
             stack.enter_context(patch.object(authority, "require_unlocked_remote_call"))
             owned = stack.enter_context(patch.object(reconciliation, "_find_owned_merge"))
@@ -303,7 +305,7 @@ class SetupSourceReverificationUnitTests(SimpleTestCase):
             actor = stack.enter_context(patch("content_factory.vibe_marketing_views.founder_actor_id_for_user", return_value="mlai_user:8"))
             create = stack.enter_context(patch("content_factory.vibe_marketing_views._create_local_run",
                 return_value=SimpleNamespace(run_id="current-source-scan")))
-            reserve = stack.enter_context(patch.object(operations, "reserve_workflow_operation"))
+            reserve = stack.enter_context(patch.object(operations, "reserve_workflow_operation", side_effect=reserve_error))
             bind = stack.enter_context(patch.object(operations, "bind_operation_run"))
             post = stack.enter_context(patch("integrations.http_client.post", return_value=SimpleNamespace(
                 raise_for_status=lambda: None, json=lambda: {"run_id": "current-source-scan"})))
@@ -314,7 +316,8 @@ class SetupSourceReverificationUnitTests(SimpleTestCase):
             live = stack.enter_context(patch.object(verification, "verify_live_deployment",
                 return_value=SimpleNamespace(pk="live-1")))
             result = reconciliation._process_source_reverification(self.op.pk, now or timezone.now())
-        return SimpleNamespace(result=result, receipt=stored.return_value.update.call_args.kwargs["receipt"],
+        final = stored.return_value.update.call_args.kwargs
+        return SimpleNamespace(result=result, receipt=final["receipt"], state=final["state"], stored=stored,
             reserve=reserve, bind=bind, post=post, create=create, discover=discover, ci=ci, live=live, owned=owned,
             points=points, actor=actor)
 
@@ -386,3 +389,86 @@ class SetupSourceReverificationUnitTests(SimpleTestCase):
                 observed.bind.assert_not_called()
                 observed.ci.assert_not_called()
                 observed.live.assert_not_called()
+
+    # TalaThrive (9 Oct): the reserved rescan failed with dispatch_child_missing,
+    # then every hourly retry of the same key raised operation_key_conflict and
+    # the repository_source_changed blocker never cleared.
+
+    def rescan_id(self, observed):
+        return observed.reserve.call_args.kwargs["payload"]["client_request_id"]
+
+    def lookup_key(self, observed):
+        return next(call.kwargs["idempotency_key"] for call in observed.stored.call_args_list
+            if "idempotency_key" in call.kwargs)
+
+    def test_a_failed_reserved_rescan_dispatches_under_a_fresh_identity(self):
+        self.op.attempts = 124
+        observed = self.process(prior=SimpleNamespace(state="failed"))
+        first = f"source-rescan:{self.op.pk}"
+        self.assertEqual(self.lookup_key(observed), f"{self.website.pk}:workflow:{first}")
+        self.assertEqual(self.rescan_id(observed), f"{first}:1")
+        self.assertEqual(observed.post.call_args.kwargs["json"]["client_request_id"], f"{first}:1")
+        self.assertEqual((observed.result, observed.receipt["scan_run_id"]), ("pending", "current-source-scan"))
+        # The count is persisted under this attempt's claim before dispatch.
+        saved = observed.stored.return_value.update.call_args_list[0].kwargs["payload"]
+        self.assertEqual(saved["rescan_dispatch"], 1)
+        claimed = {"pk": self.op.pk, "attempts": 125, "state": "pending"}
+        self.assertEqual([call.kwargs for call in observed.stored.call_args_list].count(claimed), 2)
+        # A later attempt replays the fresh identity while its rescan is in flight.
+        self.op.receipt = {}
+        observed = self.process(prior=SimpleNamespace(state="running"), now=timezone.now() + timedelta(minutes=6))
+        self.assertEqual(self.lookup_key(observed), f"{self.website.pk}:workflow:{first}:1")
+        self.assertEqual(self.rescan_id(observed), f"{first}:1")
+        self.assertEqual(self.op.payload["rescan_dispatch"], 1)
+
+    def test_cancelled_denied_and_deleted_rescans_also_move_on(self):
+        for state in ("cancelled", "denied", "deleted"):
+            with self.subTest(state=state):
+                self.setUp()
+                self.op.payload["rescan_dispatch"] = 2
+                observed = self.process(prior=SimpleNamespace(state=state))
+                self.assertEqual(self.rescan_id(observed), f"source-rescan:{self.op.pk}:3")
+
+    def test_completed_running_or_new_rescans_keep_the_original_identity(self):
+        for prior in (None, SimpleNamespace(state="completed"), SimpleNamespace(state="running"),
+                      SimpleNamespace(state="pending"), SimpleNamespace(state="blocked")):
+            with self.subTest(prior=prior):
+                self.setUp()
+                observed = self.process(prior=prior)
+                self.assertEqual(self.rescan_id(observed), f"source-rescan:{self.op.pk}")
+                self.assertNotIn("rescan_dispatch", self.op.payload)
+                self.assertEqual(observed.stored.return_value.update.call_count, 1)
+
+    def test_a_conflict_retries_cannot_repair_stops_instead_of_hourly_retries(self):
+        from .website_contract import WebsiteAuthorityError
+        conflict = WebsiteAuthorityError("operation_key_conflict", "This request identity belongs to different or cancelled work.")
+        for prior in (None, SimpleNamespace(state="completed")):
+            with self.subTest(prior=prior):
+                self.setUp()
+                observed = self.process(prior=prior, reserve_error=conflict)
+                self.assertEqual((observed.result, observed.state), ("needs_attention", "needs_attention"))
+                self.assertEqual(observed.receipt["status"], "needs_attention")
+                self.assertEqual(observed.receipt["code"], "operation_key_conflict")
+                self.assertIs(observed.receipt["retryable"], False)
+                self.assertIn("Scan the repository again", observed.receipt["message"])
+                observed.post.assert_not_called()
+                observed.bind.assert_not_called()
+
+    def test_a_conflict_with_a_still_active_rescan_waits_for_it_to_settle(self):
+        from .website_contract import WebsiteAuthorityError
+        conflict = WebsiteAuthorityError("operation_key_conflict", "This request identity belongs to different or cancelled work.")
+        observed = self.process(prior=SimpleNamespace(state="running"), reserve_error=conflict)
+        self.assertEqual((observed.result, observed.state), ("pending", "pending"))
+        self.assertEqual(observed.receipt["code"], "source_reverification_unavailable")
+        self.assertIs(observed.receipt["retryable"], True)
+        observed.post.assert_not_called()
+
+    def test_a_claim_lost_before_the_fresh_identity_is_saved_never_dispatches(self):
+        from . import website_reconciliation as reconciliation
+        with patch.object(reconciliation.WebsiteConnectionOperation.objects, "filter") as stored:
+            stored.return_value.first.return_value = SimpleNamespace(state="failed")
+            stored.return_value.update.return_value = 0
+            with self.assertRaises(WebsiteAuthorityError) as raised:
+                reconciliation._source_rescan_request(self.op, self.website, 1)
+        self.assertEqual(raised.exception.code, "website_operation_cancelled")
+        self.assertNotIn("rescan_dispatch", self.op.payload)

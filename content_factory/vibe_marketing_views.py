@@ -6201,12 +6201,15 @@ def _setup_pr_changes_outcome(*, run, context, config, pull, pr_number, checks, 
     head_sha = str((pull.get("head") or {}).get("sha") or "")
     if not head_sha or head_sha == str((run.result or {}).get("branch_commit_sha") or ""):
         return None
-    verified_sha = verified_setup_head(run)
-    if not verified_sha or not head_sha or head_sha == verified_sha:
-        return None
+    # A check already running for this exact head waits. Content Factory marks
+    # the run running while it rebuilds the preview, so the run's own proof is
+    # unavailable until then; it must not turn a second Publish into a refusal.
     record = _setup_pr_reverification_record(run)
     if record.get("head_sha") == head_sha and record.get("status") in SETUP_PR_REVERIFY_ACTIVE:
         return {"outcome": "waiting", "detail": SETUP_PR_CHECKING_DETAIL, "checks": checks, "run": run}
+    verified_sha = verified_setup_head(run)
+    if not verified_sha or not head_sha or head_sha == verified_sha:
+        return None
     if automatic:
         # The exact-head guard refuses it as before; only an owner's Publish checks the changes.
         return None
@@ -6296,13 +6299,19 @@ def _attempt_setup_publish_merge_authorized(*, run, context, automatic=False):
         # Refused as before, unless a refreshed proof now covers this head.
         validate_setup_merge_source(run, (pull.get("head") or {}).get("sha"))
 
+    from .website_setup_merge_policy import (setup_merge_policy, setup_merge_refusal,
+        setup_pr_adds_verification_kit, verification_kit_checks)
+    if str(checks.get("state") or "").lower() == "unknown" and setup_pr_adds_verification_kit(run):
+        # The merge credential cannot read Checks. The MLAI verification job this
+        # PR adds must not be merged past while running or after it failed.
+        checks = verification_kit_checks(config.website_connection, (pull.get("head") or {}).get("sha")) or checks
+
     # Genuinely failed checks (visible) → don't merge; surface it.
     if str(checks.get("state") or "").lower() in SETUP_MERGE_TERMINAL_CHECK_STATES:
         reason = checks.get("message") or "GitHub checks did not pass."
         _mark_setup_merge_blocked(run=run, config=config, reason=reason, status_value="checks_failed")
         return {"outcome": "checks_failed", "detail": reason, "checks": checks, "run": run}
 
-    from .website_setup_merge_policy import setup_merge_policy, setup_merge_refusal
     policy = setup_merge_policy(config.website_connection, pull, token=token, checks=checks,
         requires_review=automatic and bool(config.requires_review))
     if policy["decision"] == "wait":

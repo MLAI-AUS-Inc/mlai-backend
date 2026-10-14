@@ -318,3 +318,62 @@ class MergeGuardOrderTests(SimpleTestCase):
         outcome, guard, changed = self.merge(guard_errors=["setup_verification_required"] * 2)
         self.assertEqual(outcome.code, "setup_verification_required")
         self.assertEqual(guard.call_count, 2)
+
+
+class SecondPublishDuringRecheckTests(SimpleTestCase):
+    """A second Publish while Content Factory re-checks the changed head waits.
+
+    Rebuilding the preview mirrors ``status=running`` onto the run, so the run's
+    own proof is unavailable. The active check for that exact head must still
+    answer "waiting" instead of the exact-head guard's 409.
+    """
+
+    def setUp(self):
+        self.run = static_setup_run()
+        self.run.status = "running"
+        self.run.result["setup_pr_reverification"] = {"head_sha": NEW, "status": "building"}
+        self.website = SimpleNamespace(id=CONNECTION, pk=CONNECTION, generation=2, repository_id=123,
+            github_repo="example/site", state="connected", verified_sha="",
+            organization=SimpleNamespace(domain="example.test"), targets=Mock())
+        self.website.targets.filter.return_value = []
+        self.config = SimpleNamespace(website_connection=SimpleNamespace(generation=2), github_repo="example/site",
+            article_system={}, save=Mock())
+        self.context = SimpleNamespace(organization=SimpleNamespace(domain="example.test"),
+            profile=SimpleNamespace(user_id=7), company=SimpleNamespace(pk=3))
+
+    def publish(self):
+        from .website_contract import WebsiteAuthorityError
+        refused = WebsiteAuthorityError("setup_verification_required",
+            "The setup pull request changed or its exact preview has not passed verification.")
+        with patch.object(views, "_get_config", return_value=self.config), \
+                patch.object(views, "_pull_request_number_from_run", return_value=40), \
+                patch.object(views, "_github_token_for_repo_operation", return_value=("token", "fixture")), \
+                patch.object(views, "_github_pull_checks_state_lenient", return_value=(
+                    {"head": {"sha": NEW}, "merged": False, "state": "open"}, {"state": "unknown", "ready": True})), \
+                patch.object(authority, "authority_guard", side_effect=lambda *a, **kw: nullcontext(self.website)), \
+                patch.object(authority.WebsiteConnection.objects, "get", return_value=self.website), \
+                patch.object(authority, "validate_setup_merge_source", side_effect=refused) as guard, \
+                patch.object(views, "_request_setup_pr_reverification",
+                             side_effect=AssertionError("An active check must not be requested again")), \
+                patch.object(views, "_schedule_setup_pr_merge") as schedule:
+            proven = authority.verified_setup_head(self.run)
+            merged, error = views._merge_setup_pr_for_run(run=self.run, context=self.context)
+        return proven, merged, error, guard, schedule
+
+    def test_second_publish_while_the_head_is_rechecked_waits_instead_of_409(self):
+        proven, merged, error, guard, schedule = self.publish()
+        self.assertEqual(proven, "")  # The trigger: no proof while the run is running.
+        self.assertIsNone(error)
+        self.assertIs(merged, self.run)
+        self.assertEqual(guard.call_count, 1)
+        schedule.assert_not_called()
+        self.run.save.assert_not_called()
+
+    def test_a_finished_or_other_head_check_still_uses_the_exact_head_guard(self):
+        for record in ({"head_sha": NEW, "status": "failed"}, {"head_sha": "d" * 40, "status": "building"}):
+            with self.subTest(record=record):
+                self.run.result["setup_pr_reverification"] = record
+                _, merged, error, guard, _ = self.publish()
+                self.assertIsNone(merged)
+                self.assertEqual(error.status_code, 409)
+                self.assertEqual(guard.call_count, 2)
