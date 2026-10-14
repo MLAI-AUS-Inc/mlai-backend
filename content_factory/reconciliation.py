@@ -100,6 +100,12 @@ def _setting_int(name: str, default: int) -> int:
     return value if value > 0 else default
 
 
+def _legacy_delivery_rows(json_field):
+    """Keep absent JSON paths: SQL NOT-equality alone also excludes NULL paths."""
+    path = f"{json_field}__setup_delivery_v1__schema_version"
+    return Q(**{path + "__isnull": True}) | ~Q(**{path: 1})
+
+
 def _stale_after() -> timedelta:
     return timedelta(minutes=_setting_int("CONTENT_FACTORY_RECONCILIATION_STALE_MINUTES", 10))
 
@@ -305,6 +311,7 @@ def run_content_factory_reconciliation_sweep(*, limit: Optional[int] = None, now
             Q(run_id__startswith=PLACEHOLDER_RUN_ID_PREFIX)
             | Q(workflow__in=DURABLY_READABLE_WORKFLOWS)
         )
+        .filter(_legacy_delivery_rows("run_request"))
         .order_by("updated_at")[:limit]
     )
 
@@ -319,6 +326,8 @@ def run_content_factory_reconciliation_sweep(*, limit: Optional[int] = None, now
         "recovery_requested": 0,
         "failed_stalled": 0,
     }
+    from .setup_delivery_reconciliation import run_setup_delivery_reconciliation_sweep
+    summary.update(run_setup_delivery_reconciliation_sweep(limit=limit, now=now))
     summary.update(_reconcile_orphan_operations(limit=limit, now=now))
     summary["settled_restart_receipts"] = _reconcile_restart_receipts(limit=limit, now=now)
     summary["redriven"] = _redrive_fixed_runs(limit=limit, now=now)
@@ -604,7 +613,7 @@ def _refund_failed_run(run, *, reason):
 
 
 def _settle_sweep_refunds(*, limit):
-    for run in ContentFactoryRun.objects.filter(status__in=["failed", "cancelled"], result__reconciliation_refund_pending=True)[:limit]:
+    for run in ContentFactoryRun.objects.filter(status__in=["failed", "cancelled"], result__reconciliation_refund_pending=True).filter(_legacy_delivery_rows("run_request"))[:limit]:
         try:
             if (run.run_request or {}).get("pending_billing_refund"):
                 from .vibe_marketing_views import _process_pending_dispatch_refund
@@ -621,14 +630,14 @@ def _reconcile_orphan_operations(*, limit, now):
     from .dispatch_outbox import dispatch_failure_details
     count = 0
     pending_refunds = WebsiteConnectionOperation.objects.filter(action__in=["workflow", "restart"], state="failed",
-        receipt__refund_pending=True).select_related("connection__organization")[:limit]
+        receipt__refund_pending=True).filter(_legacy_delivery_rows("payload")).select_related("connection__organization")[:limit]
     for op in pending_refunds:
         try:
             _refund_orphan_operation(op)
         except Exception:
             logger.warning("content_factory_orphan_refund_pending operation_id=%s", op.pk)
     operations = WebsiteConnectionOperation.objects.filter(action__in=["workflow", "restart"], state__in=["pending", "running"],
-        created_at__lt=now - timedelta(minutes=10)).filter(Q(payload__run_id__isnull=True) | Q(payload__run_id="")).select_related("connection__organization")[:limit]
+        created_at__lt=now - timedelta(minutes=10)).filter(_legacy_delivery_rows("payload")).filter(Q(payload__run_id__isnull=True) | Q(payload__run_id="")).select_related("connection__organization")[:limit]
     for op in operations:
         key = op.payload.get("client_request_id")
         if key and ContentFactoryDispatchOutbox.objects.filter(client_request_id=key,
@@ -686,7 +695,7 @@ def _reconcile_restart_receipts(*, limit, now):
     from .dispatch_outbox import dispatch_failure_details
     settled = 0
     candidates = ContentFactoryRun.objects.filter(result__restart_receipt__state="pending",
-        updated_at__lt=now - timedelta(minutes=10))[:limit]
+        updated_at__lt=now - timedelta(minutes=10)).filter(_legacy_delivery_rows("run_request"))[:limit]
     for original in candidates:
         receipt = (original.result or {}).get("restart_receipt") or {}
         key = str(receipt.get("client_request_id") or "")
@@ -797,7 +806,7 @@ def _redrive_fixed_runs(*, limit, now):
     if not base_url:
         return 0
     candidates = list(ContentFactoryRun.objects.filter(status="blocked", updated_at__lt=now - timedelta(minutes=10),
-        workflow__in=DURABLY_READABLE_WORKFLOWS).filter(Q(result__sweep_redrive_attempted__isnull=True) | Q(result__sweep_redrive_attempted=False))[:limit])
+        workflow__in=DURABLY_READABLE_WORKFLOWS).filter(_legacy_delivery_rows("run_request")).filter(Q(result__sweep_redrive_attempted__isnull=True) | Q(result__sweep_redrive_attempted=False))[:limit])
     if not candidates:
         return 0
     try:

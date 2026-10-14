@@ -16,7 +16,7 @@ CODE_CLASSES = {
 }
 
 
-def failure_class(code, result=None, *, retryable=False, status=None):
+def legacy_failure_class(code, result=None, *, retryable=False, status=None):
     """Prefer explicit classes, then deterministic codes over legacy retry flags."""
     result = result if isinstance(result, dict) else {}
     nested = result.get("article_system_setup")
@@ -33,3 +33,12 @@ def failure_class(code, result=None, *, retryable=False, status=None):
     if isinstance(provider_status, int) and 500 <= provider_status <= 599:
         return "transient"
     return "transient" if retryable else "repairable"
+
+
+def failure_class(code, result=None, *, retryable=False, status=None):
+    """Decode B1 before policy; legacy receipts retain the bounded A7 adapter."""
+    from .website_failure_scope import taxonomy_enabled
+    from .website_failure_contract import resolve_failure
+    decision = resolve_failure(code, result, retryable=retryable, status=status,
+        apply=taxonomy_enabled(), observe=taxonomy_enabled(observe=True))
+    return decision["failure_class"]

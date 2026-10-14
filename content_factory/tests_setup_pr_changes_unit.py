@@ -161,11 +161,15 @@ class ChangedSetupHeadTests(SimpleTestCase):
         schedule.assert_not_called()
 
     def test_an_unreachable_content_factory_is_a_retryable_error(self):
+        self.run.result["failure"] = {"code": "DIRECTORY_STYLE_REVIEW_FAILED", "failure_class": "repairable"}
+        saved_result = deepcopy(self.run.result)
         with patch.object(authority, "verified_setup_head", return_value=OLD), \
                 patch.object(views, "_request_setup_pr_reverification", side_effect=ValueError("down")):
             outcome = views._setup_pr_changes_outcome(run=self.run, context=self.context, config=self.config,
                 pull=self.pull, pr_number=40, checks={}, automatic=False)
         self.assertEqual((outcome["outcome"], outcome["retryable"]), ("error", True))
+        self.assertEqual(outcome["code"], "setup_reverification_unavailable")
+        self.assertEqual(self.run.result, saved_result)
         self.run.save.assert_not_called()
 
     def test_merge_is_scheduled_once_per_head_and_reopened_by_a_later_publish(self):
@@ -200,7 +204,7 @@ class SetupPrMergeFollowupTests(SimpleTestCase):
         self.context = SimpleNamespace(organization=SimpleNamespace(domain="example.test"))
         self.config = SimpleNamespace(article_system={})
 
-    def process(self, record, merge=None, now=None):
+    def process(self, record, merge=None, now=None, context_error=None):
         from .website_models import WebsiteConnectionOperation
         self.run.result["setup_pr_reverification"] = record
         self.operation.next_attempt_at = None  # due now; a previous pass pushed it forward
@@ -210,7 +214,8 @@ class SetupPrMergeFollowupTests(SimpleTestCase):
                 patch.object(reconciliation.transaction, "atomic", nullcontext), \
                 patch("django.contrib.auth.get_user_model") as users, \
                 patch("workflow_runs.models.ContentFactoryRun.objects") as runs, \
-                patch.object(views, "get_founder_company_context", return_value=self.context) as context, \
+                patch.object(views, "get_founder_company_context", return_value=self.context,
+                             side_effect=context_error) as context, \
                 patch.object(views, "_get_config", return_value=self.config), \
                 patch.object(views, "_call_content_factory_run_status", return_value={"run_id": "setup-1"}), \
                 patch.object(views, "_sync_local_run_from_remote", side_effect=lambda run, remote: run), \
@@ -241,11 +246,25 @@ class SetupPrMergeFollowupTests(SimpleTestCase):
         state, final, attempt, blocked, _ = self.process({"head_sha": NEW, "status": "failed",
             "error": "The updated pull request did not build: npm run build exited 1", "error_code": "PREVIEW_BUILD_FAILED"})
         self.assertEqual((state, final["receipt"]["status"]), ("completed", "verification_failed"))
+        self.assertEqual(final["receipt"]["code"], "PREVIEW_BUILD_FAILED")
         attempt.assert_not_called()
         reason = blocked.call_args.kwargs["reason"]
         self.assertIn("npm run build exited 1", reason)
         self.assertIn("Fix it on GitHub, then publish again.", reason)
         self.assertEqual(blocked.call_args.kwargs["status_value"], "setup_changes_failed")
+
+    def test_revoked_authority_keeps_its_registered_code_without_changing_the_run(self):
+        from .website_contract import WebsiteAuthorityError
+        saved_result = deepcopy(self.run.result)
+        state, final, attempt, blocked, _ = self.process({}, context_error=WebsiteAuthorityError(
+            "website_disconnected", "This website is disconnected."))
+        self.assertEqual((state, final["receipt"]["status"]), ("cancelled", "authority_revoked"))
+        self.assertEqual(final["receipt"]["code"], "website_disconnected")
+        self.assertFalse(final["receipt"]["repository_modified"])
+        self.assertEqual(self.run.result, {**saved_result, "setup_pr_reverification": {}})
+        self.run.save.assert_not_called()
+        attempt.assert_not_called()
+        blocked.assert_not_called()
 
     def test_a_newer_publish_or_a_stuck_check_ends_the_followup(self):
         state, final, _, _, _ = self.process({"head_sha": "d" * 40, "status": "queued"})

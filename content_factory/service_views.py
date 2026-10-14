@@ -34,6 +34,7 @@ from content_factory.article_system import (
     resolve_article_system,
 )
 from content_factory.website_connections import guarded_service_write, contract_for
+from content_factory.setup_delivery_parsers import DELIVERY_PARSERS
 from content_factory.article_setup_reset import (
     carry_reset_markers,
     clear_article_setup_reset_markers,
@@ -3731,9 +3732,16 @@ class ContentFactoryCallbackView(APIView):
     """
     authentication_classes = []
     permission_classes = [HasRooApiKey]
+    parser_classes = DELIVERY_PARSERS
+
+    def post(self, request):
+        from .setup_delivery_receiver import is_setup_delivery, receive_setup_delivery
+        if not isinstance(request.data, dict) or is_setup_delivery(request.data):
+            return receive_setup_delivery(request.data, expected_kind="setup_callback")
+        return self._post_legacy(request)
 
     @guarded_service_write("config_write", only_repository=True, portable=True)
-    def post(self, request):
+    def _post_legacy(self, request):
         data = request.data.copy()
         # WhatsApp/email research has no Slack delivery route. JSON null must
         # not reach the non-null job column or block notification callbacks.
@@ -8713,9 +8721,12 @@ def _merge_django_owned_run_result(existing_result, incoming_result):
 
     existing = existing_result if isinstance(existing_result, dict) else {}
     incoming = incoming_result if isinstance(incoming_result, dict) else {}
-    backend_merge_keys = {"publish_merge_intent", "merge_response", "merge_status", "merged_at", "article_review_updates"}
+    backend_merge_keys = {"publish_merge_intent", "merge_response", "merge_status", "merged_at", "article_review_updates", "delivery_v1"}
     merged = {key: value for key, value in incoming.items() if key not in backend_merge_keys or key in existing}
     for key, value in existing.items():
+        if key == "delivery_v1":
+            merged[key] = value
+            continue
         django_owned = key in _DJANGO_OWNED_RUN_RESULT_KEYS or key.startswith(
             _DJANGO_OWNED_RUN_RESULT_PREFIXES
         )
@@ -8756,8 +8767,13 @@ def _merge_django_owned_run_request(existing_request, incoming_request):
     existing = existing_request if isinstance(existing_request, dict) else {}
     incoming = incoming_request if isinstance(incoming_request, dict) else {}
     merged = {key: deepcopy(value) for key, value in incoming.items()
+              if key != "setup_delivery_v1" or key in existing}
+    merged = {key: value for key, value in merged.items()
               if not (key.startswith("roo_points_") or key in {"article_publish_approval_receipt", "article_publish_approval_revoked", "website_access_lost"}) or key in existing}
     for key, value in existing.items():
+        if key == "setup_delivery_v1":
+            merged[key] = deepcopy(value)
+            continue
         if not (key.startswith("roo_points_") or key in {"article_publish_approval_receipt", "article_publish_approval_revoked", "website_access_lost"}):
             continue
         if key in incoming and incoming[key] != value:
@@ -9002,6 +9018,7 @@ class ContentFactoryRunView(APIView):
 
     authentication_classes = []
     permission_classes = [HasRooApiKey]
+    parser_classes = DELIVERY_PARSERS
 
     def get(self, request, run_id: str):
         run = ContentFactoryRun.objects.filter(run_id=run_id).first()
@@ -9009,8 +9026,14 @@ class ContentFactoryRunView(APIView):
             return Response({"error": "Run not found"}, status=status.HTTP_404_NOT_FOUND)
         return Response(_serialize_content_factory_run(run), status=status.HTTP_200_OK)
 
-    @guarded_service_write("config_write", only_repository=True, portable=True, cancellation_receipts=True, observation_fallback=True)
     def put(self, request, run_id: str):
+        from .setup_delivery_receiver import is_setup_delivery, receive_setup_delivery
+        if not isinstance(request.data, dict) or is_setup_delivery(request.data):
+            return receive_setup_delivery(request.data, expected_kind="run_snapshot", path_run_id=run_id)
+        return self._put_legacy(request, run_id=run_id)
+
+    @guarded_service_write("config_write", only_repository=True, portable=True, cancellation_receipts=True, observation_fallback=True)
+    def _put_legacy(self, request, run_id: str):
         return _apply_run_snapshot(run_id, request.data)
 
 

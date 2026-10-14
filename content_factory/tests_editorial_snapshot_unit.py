@@ -262,10 +262,18 @@ class EditorialSnapshotPersistenceSeamTests(unittest.TestCase):
         from unittest.mock import patch
         island = ModuleType("content_factory.island_research")
         island.refund_empty_or_failed_research = Mock()
-        seam = patch.dict(sys.modules, {"content_factory.island_research": island})
+        # Use the real pure routing predicate without importing the receiver's
+        # Django models. Versioned delivery has its own endpoint/receipt suite.
+        root = Path(__file__).resolve().parent
+        delivery = ModuleType("content_factory.setup_delivery_receiver")
+        receiver_tree = ast.parse((root / "setup_delivery_receiver.py").read_text())
+        predicate = next(n for n in receiver_tree.body if isinstance(n, ast.FunctionDef) and n.name == "is_setup_delivery")
+        exec(compile(ast.Module(body=[predicate], type_ignores=[]), "delivery-routing-under-test", "exec"), delivery.__dict__)
+        delivery.receive_setup_delivery = Mock(side_effect=AssertionError("Editorial snapshots must use the legacy receiver"))
+        seam = patch.dict(sys.modules, {"content_factory.island_research": island,
+                                      "content_factory.setup_delivery_receiver": delivery})
         seam.start()
         self.addCleanup(seam.stop)
-        root = Path(__file__).resolve().parent
         names = {"_apply_run_snapshot", "_sync_content_factory_run_snapshot", "_content_factory_run_snapshot_unchanged", "_merge_django_owned_run_result", "_merge_django_owned_run_request"}
         tree = ast.parse((root / "service_views.py").read_text())
         nodes = [n for n in tree.body if (isinstance(n, ast.FunctionDef) and n.name in names) or
@@ -274,10 +282,15 @@ class EditorialSnapshotPersistenceSeamTests(unittest.TestCase):
         put = next(n for n in view.body if isinstance(n, ast.FunctionDef) and n.name == "put")
         put.name = "_snapshot_put_under_test"
         nodes.append(put)
+        legacy_put = next(n for n in view.body if isinstance(n, ast.FunctionDef) and n.name == "_put_legacy")
+        legacy_put.name = "_snapshot_put_legacy_under_test"
+        nodes.append(legacy_put)
         bind_tree = ast.parse((root / "dispatch_binding.py").read_text())
         nodes.extend(n for n in bind_tree.body if isinstance(n, ast.FunctionDef) and n.name in {"bind_dispatch_token_run", "run_is_dispatch_token_keyed", "_merge_provisional_into_real"})
         nodes.insert(0, ast.ImportFrom(module="__future__", names=[ast.alias(name="annotations")], level=0))
         exec(compile(ast.fix_missing_locations(ast.Module(body=nodes, type_ignores=[])), "snapshot-functions-under-test", "exec"), self.ns)
+        self.view = SimpleNamespace(_put_legacy=lambda request, **kwargs:
+                                    self.ns["_snapshot_put_legacy_under_test"](None, request, **kwargs))
         self.existing = self.add_row("run-1", snapshot())
 
     @contextmanager
@@ -330,7 +343,7 @@ class EditorialSnapshotPersistenceSeamTests(unittest.TestCase):
         return self.ns["_sync_content_factory_run_snapshot"](run_id="run-1", data=incoming, step_states={})
 
     def put(self, payload, run_id="run-1"):
-        return self.ns["_snapshot_put_under_test"](None, SimpleNamespace(data=payload), run_id)
+        return self.ns["_snapshot_put_under_test"](self.view, SimpleNamespace(data=payload), run_id)
 
     def test_actual_snapshot_preserves_the_brief_and_exact_retry_is_a_noop(self):
         incoming = {"workflow": "article_generation", "domain": "example.test", "status": "running", "run_request": {"worker_only": 1}}

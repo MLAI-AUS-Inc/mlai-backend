@@ -235,30 +235,81 @@ def _permission_action(connection, *, grants=None):
 
 def prepare_failure(op, step, error, *, now=None):
     """Classify failures without asking the founder to repeat retryable work."""
+    from .website_failure_scope import taxonomy_enabled
+    from .website_failure_contract import resolve_failure
     now = now or timezone.now()
     code = getattr(error, "code", "website_prepare_unavailable")
     message = str(error) or "Website preparation is temporarily unavailable."
     failures = dict(op.receipt.get("step_failures") or {})
     step = str(step or op.receipt.get("current_step") or "prepare")
+    policy_enabled = taxonomy_enabled(op.connection.organization_id)
+    observation_enabled = taxonomy_enabled(op.connection.organization_id, observe=True)
+    decision = resolve_failure(getattr(error, "causal_code", code) if observation_enabled or policy_enabled else code, getattr(error, "result", None),
+        retryable=getattr(error, "retryable", False), status=getattr(error, "status", None),
+        stage=step, action=getattr(error, "user_action", None), findings=getattr(error, "findings", None),
+        apply=policy_enabled, observe=observation_enabled, local=getattr(error, "result", None) is None)
+    if observation_enabled and not policy_enabled and getattr(error, "result", None) is None and getattr(error, "legacy_projection", None):
+        from .website_failure_classes import legacy_failure_class
+        original = error.legacy_projection
+        decision = {**decision, "code": original["code"], "failure_class": legacy_failure_class(original["code"],
+            retryable=original["retryable"], status=getattr(error, "status", None))}
+    code, classification = decision["code"], decision["failure_class"]
+    strict_policy = bool(policy_enabled or decision["contract_invalid"])
     permission_needed = step in PERMISSION_STEPS.get(code, ())
-    failures[step] = failures.get(step, 0) + 1
-    classification = failure_class(code, getattr(error, "result", None),
-        retryable=getattr(error, "retryable", False), status=getattr(error, "status", None))
+    if not (strict_policy and classification == "waiting"):
+        failures[step] = failures.get(step, 0) + 1
+    if strict_policy and decision["failure"] is not None:
+        message = decision["failure"]["user_message"]
     op.receipt = {**op.receipt, "step_failures": failures, "reason_code": code, "message": message,
         "failure_class": classification, "retryable": classification == "transient"}
-    if (getattr(error, "user_action", None) and (classification == "needs_user" or getattr(error, "result", None) is None)
+    if decision["failure"] is not None and (strict_policy or decision["versioned"]):
+        op.receipt["failure"] = decision["failure"]
+        op.receipt["failure_fingerprint"] = decision["failure"]["failure_fingerprint"]
+        op.receipt["failure_taxonomy_policy_applied"] = strict_policy
+        # A pushed/pulled observation retains the producer's occurrence. Local
+        # preparation outcomes bind to the existing lease/attempt, not delivery
+        # IDs or a fabricated site goal. B2/B4 still own goal-wide counters.
+        from uuid import UUID, NAMESPACE_URL, uuid5
+        source = getattr(error, "result", None) or {}
+        nested = source.get("article_system_setup") if isinstance(source, dict) else {}
+        nested = nested if isinstance(nested, dict) else {}
+        occurrence = source.get("failure_occurrence_id") or nested.get("failure_occurrence_id")
+        if isinstance(occurrence, str):
+            try:
+                UUID(occurrence)
+            except ValueError:
+                occurrence = None
+        else:
+            occurrence = None
+        if not occurrence:
+            occurrence = str(uuid5(NAMESPACE_URL, f"mlai:prepare-failure:v1:{op.pk}:{op.generation}:{op.payload.get('attempt', 1)}:{op.attempts}:{step}"))
+        op.receipt["failure_occurrence_id"] = occurrence
+    if observation_enabled:
+        op.receipt["failure_taxonomy_observation"] = {"failure": decision["failure"], "classification": decision["failure"]["failure_class"] if decision["failure"] else None,
+            "policy_classification": classification, "contract_invalid": decision["contract_invalid"]}
+    if (getattr(error, "user_action", None) and (classification == "needs_user" or not strict_policy and getattr(error, "result", None) is None)
             and (code not in PERMISSION_CODES or permission_needed)):
         op.state, op.next_attempt_at = "needs_user", None
         op.receipt.update(status="needs_you", user_action=error.user_action, failure_class="needs_user", retryable=False)
-    elif permission_needed:
+    elif permission_needed and (not strict_policy or classification == "needs_user"):
         op.state, op.next_attempt_at = "needs_user", None
         op.receipt.update(status="needs_you", user_action=_permission_action(op.connection), failure_class="needs_user", retryable=False)
-    elif code in AUTHORIZATION_CODES and code not in PERMISSION_CODES:
+    elif code in AUTHORIZATION_CODES and code not in PERMISSION_CODES and (not strict_policy or classification == "needs_user"):
         op.state = "needs_user"
         op.receipt.update(status="needs_you", user_action={"id": "authorize_github", "label": "Authorize GitHub"},
             failure_class="needs_user", retryable=False)
         op.next_attempt_at = None
-    elif code in DEPLOYMENT_WAIT_CODES or classification == "waiting":
+    elif strict_policy and classification == "waiting" and code not in DEPLOYMENT_WAIT_CODES:
+        from datetime import datetime
+        count = op.receipt.get("waiting_observations", 0) + 1
+        op.receipt["waiting_observations"] = count
+        started = op.receipt.setdefault("waiting_started_at", now.isoformat())
+        deadline = datetime.fromisoformat(started) + timedelta(hours=24)
+        op.state = "pending" if now < deadline else "needs_attention"
+        op.receipt["status"] = "waiting_for_step" if op.state == "pending" else "needs_attention"
+        op.next_attempt_at = min(deadline, now + timedelta(minutes=DEPLOYMENT_RETRY_MINUTES[min(count - 1, len(DEPLOYMENT_RETRY_MINUTES) - 1)])) if op.state == "pending" else None
+        op.receipt.pop("user_action", None)
+    elif (not strict_policy and code in DEPLOYMENT_WAIT_CODES) or classification == "waiting":
         count = op.receipt.get("deployment_attempts", 0) + 1
         op.receipt["deployment_attempts"] = count
         started = op.receipt.setdefault("deployment_wait_started_at", now.isoformat())
@@ -283,12 +334,25 @@ def prepare_failure(op, step, error, *, now=None):
         op.next_attempt_at = min(deadline, now + timedelta(minutes=RETRY_MINUTES[min(failures[step] - 1, len(RETRY_MINUTES) - 1)])) if op.state == "pending" else None
         op.receipt["status"] = "working" if op.state == "pending" else "needs_attention"
     elif classification == "needs_user":
-        op.state, op.next_attempt_at = "needs_user", None
-        op.receipt.update(status="needs_you", user_action={"id": "open_run", "label": "Open setup run", "run_id": op.receipt.get("child_run_id")})
+        if strict_policy and (code in PERMISSION_CODES or not decision["failure"] or not decision["failure"]["action"]):
+            op.state, op.next_attempt_at = "needs_attention", None
+            op.receipt.update(status="needs_attention")
+            op.receipt.pop("user_action", None)
+        else:
+            op.state, op.next_attempt_at = "needs_user", None
+            op.receipt.update(status="needs_you", user_action=decision["failure"]["action"] if strict_policy else {
+                "id": "open_run", "label": "Open setup run", "run_id": op.receipt.get("child_run_id")})
     elif classification == "unsupported":
-        op.state, op.next_attempt_at = "stopped", None
-        op.receipt.update(status="stopped", channel_options=["hosted", "portable"],
-            user_action={"id": "choose_article_channel", "label": "Choose an articles channel"})
+        op.next_attempt_at = None
+        if strict_policy:
+            op.state = "needs_attention"
+            op.receipt.update(status="needs_attention")
+            op.receipt.pop("user_action", None)
+            op.receipt.pop("channel_options", None)
+        else:
+            op.state = "stopped"
+            op.receipt.update(status="stopped", channel_options=["hosted", "portable"],
+                user_action={"id": "choose_article_channel", "label": "Choose an articles channel"})
     else:
         op.state, op.next_attempt_at = "needs_attention", None
         op.receipt.update(status="needs_attention", user_action={"id": "retry", "label": "Try again"})
@@ -499,6 +563,13 @@ def advance_prepare(identifier, *, now=None, handlers=None):
     op = _claim_prepare(identifier, now)
     if op is None:
         return None
+    from .website_failure_scope import failure_scope
+    with failure_scope(op.connection.organization_id):
+        return _advance_claimed_prepare(op, now=now, handlers=handlers)
+
+
+def _advance_claimed_prepare(op, *, now, handlers):
+    """Advance the original lease inside its saved organization's B1 scope."""
     step = op.receipt.get("current_step") or "verify-access"
     try:
         context, config, user = _prepare_context(op)
@@ -622,7 +693,14 @@ def advance_prepare(identifier, *, now=None, handlers=None):
         logger.exception("website_prepare unexpected operation=%s company=%s connection=%s generation=%s step=%s error_type=%s",
             op.pk, op.payload.get("company_id"), op.connection_id, op.generation, step, type(exc).__name__,
             exc_info=(RuntimeError, RuntimeError("Unexpected prepare dispatch failure"), exc.__traceback__))
-        prepare_failure(op, step, WebsiteAuthorityError("website_prepare_unavailable",
+        code = "website_prepare_unavailable"
+        from .website_github_failure import taxonomy_active
+        if taxonomy_active():
+            from django.db import OperationalError
+            from integrations import http_client
+            code = "website_prepare_dependency_transient" if isinstance(exc, (http_client.exceptions.Timeout,
+                http_client.exceptions.ConnectionError, OperationalError, TimeoutError)) else "website_prepare_contract_invalid"
+        prepare_failure(op, step, WebsiteAuthorityError(code,
             "Website preparation is temporarily unavailable. It will retry automatically.", retryable=True), now=now)
     return _finish_prepare(op, now=now)
 

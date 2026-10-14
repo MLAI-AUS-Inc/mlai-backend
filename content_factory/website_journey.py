@@ -61,7 +61,9 @@ def project_journey(*, company_id, domain, website=None, capabilities=None, disc
     # A grant probe covers both profiles. Its older permission diagnostic may
     # describe a grant this action does not use; only provider failures carry
     # over to the action-specific fact.
-    grant_lookup_failed = grants.get("reasonCode") in {"github_unavailable", "github_access_required"}
+    grant_lookup_failed = grants.get("reasonCode") in {"github_unavailable", "github_access_required", "github_repository_transient",
+        "github_permission_payload_invalid", "github_permission_identity_mismatch", "github_platform_credentials_invalid",
+        "github_access_unverified", "github_provider_payload_invalid"}
     permission_code = grants.get("reasonCode") if grant_lookup_failed else (
         "github_workflow_permission_required" if workflow_missing else "github_ci_evidence_permission_required")
     missing_ci = [name for key, name in (("checks", "Checks: read"), ("statuses", "Commit statuses: read")) if grants.get(key) is not True]

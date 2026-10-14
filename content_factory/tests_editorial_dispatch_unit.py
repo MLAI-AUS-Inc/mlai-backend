@@ -149,7 +149,8 @@ class ArticleDispatchControlFlowTests(unittest.TestCase):
             seam = patch.object(dispatch_outbox, target, value); seam.start(); self.addCleanup(seam.stop)
         model_seam = patch.object(dispatch_models, "ContentFactoryDispatchOutbox", SimpleNamespace(objects=Mock()))
         model_seam.start(); self.addCleanup(model_seam.stop)
-        self.ns = {"transaction": SimpleNamespace(atomic=nullcontext),
+        self.ns = {"__name__": "content_factory.vibe_marketing_views", "__package__": "content_factory",
+            "transaction": SimpleNamespace(atomic=nullcontext),
             "Organization": SimpleNamespace(objects=SimpleNamespace(select_for_update=lambda: SimpleNamespace(get=lambda **kw: self.org))),
             "ContentFactoryRun": SimpleNamespace(objects=SimpleNamespace(select_for_update=lambda: SimpleNamespace(get=lambda **kw: self.run))),
             "_reserve_article_start_connection": lambda *args: None,
@@ -589,6 +590,7 @@ class ArticleDispatchControlFlowTests(unittest.TestCase):
             return settled(**kwargs)
         refunder.side_effect = refund_attempt
         due = Mock()
+        due.filter.return_value = due
         due.__getitem__ = Mock(return_value=[child])
         with patch("django.contrib.auth.get_user_model", return_value=users), \
                 patch.object(views, "_process_pending_dispatch_refund", self.ns["_process_pending_dispatch_refund"]), \

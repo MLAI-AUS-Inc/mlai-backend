@@ -4,7 +4,7 @@ from types import SimpleNamespace
 from unittest.mock import Mock, patch
 from uuid import uuid4
 
-from django.test import SimpleTestCase
+from django.test import SimpleTestCase, override_settings
 from rest_framework.response import Response
 
 from workflow_runs.models import ContentFactoryRun
@@ -77,6 +77,27 @@ class WebsiteOperationRecoveryTests(SimpleTestCase):
                     payload={"client_request_id": "fresh", "domain": "fixture.test"})
             self.assertEqual(error.exception.code, "website_operation_changed")
             self.op.save.assert_not_called()
+
+    @override_settings(CONTENT_FACTORY_SETUP_DELIVERY_V1_APPLY_ENABLED=True,
+                       CONTENT_FACTORY_SETUP_DELIVERY_ENROLLED_ORGANIZATIONS=["42"])
+    def test_enrolled_duplicate_saves_original_scope_with_dispatch_receipt(self):
+        self.website.organization = SimpleNamespace(domain="fixture.test")
+        self.website.github_repo = "fixture/site"
+        self.run.status = "running"
+        self.op.payload["request_digest"] = operations.evidence_digest({"domain": "fixture.test"})
+        with patch.object(authority, "authority_guard", side_effect=lambda *a, **k: nullcontext()), \
+                patch.object(authority, "extend_owner_operation_contract"), \
+                patch.object(ContentFactoryRun.objects, "select_for_update") as runs, \
+                patch.object(operations.WebsiteConnectionOperation.objects, "get_or_create", return_value=(self.op, False)):
+            self.website.operations.select_for_update.return_value.filter.return_value = [self.op]
+            runs.return_value.filter.return_value.first.return_value = self.run
+            payload = {"client_request_id": "replacement-key", "domain": "fixture.test"}
+            operations.reserve_workflow_operation(self.website, workflow="article_system_setup", payload=payload)
+        self.op.save.assert_called_once_with(update_fields=["payload", "receipt", "updated_at"])
+        self.assertEqual(self.op.payload["setup_delivery_scope"]["client_request_id"], "old-request")
+        self.assertEqual(self.op.payload["setup_delivery_scope"]["operation_id"], str(self.op.pk))
+        self.assertEqual(self.op.payload["setup_delivery_request"]["setup_delivery_v1"], {"schema_version": 1})
+        self.assertEqual(self.op.receipt["dispatch_outcome"], "replayed")
 
     def test_cancelled_request_identity_cannot_be_reused(self):
         self.op.state = "cancelled"

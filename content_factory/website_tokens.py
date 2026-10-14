@@ -76,9 +76,11 @@ def mint_ci_evidence_token(*, installation_id, repository, repository_id):
     except GitHubCIEvidencePermissionRequired as exc:
         raise WebsiteAuthorityError("github_ci_evidence_permission_required", CI_EVIDENCE_PERMISSION_DETAIL) from exc
     except (GitHubPermissionLookupUnavailable, RequestException) as exc:
-        raise WebsiteAuthorityError("github_temporarily_unavailable", "GitHub CI evidence is temporarily unavailable. Retry shortly.", status=503, retryable=True) from exc
+        from .website_github_failure import github_failure
+        raise github_failure(exc, legacy_code="github_temporarily_unavailable", legacy_message="GitHub CI evidence is temporarily unavailable. Retry shortly.", legacy_retryable=True, source=True) from exc
     except GitHubAppTokenError as exc:
-        raise WebsiteAuthorityError("github_repository_unavailable", "GitHub access could not be verified. Reconnect the selected repository.") from exc
+        from .website_github_failure import github_failure
+        raise github_failure(exc, legacy_code="github_repository_unavailable", legacy_message="GitHub access could not be verified. Reconnect the selected repository.") from exc
 
 
 def read_ci_provider_json(url, *, headers):
@@ -89,19 +91,23 @@ def read_ci_provider_json(url, *, headers):
     try:
         response = http_client.get(url, headers=headers, timeout=(3, 15))
     except http_client.RequestException as exc:
-        raise WebsiteAuthorityError("github_temporarily_unavailable", "GitHub CI evidence is temporarily unavailable. Retry shortly.", status=503, retryable=True) from exc
+        from .website_github_failure import github_failure
+        raise github_failure(exc, legacy_code="github_temporarily_unavailable", legacy_message="GitHub CI evidence is temporarily unavailable. Retry shortly.", legacy_retryable=True, source=True) from exc
     provider_headers = getattr(response, "headers", {}) or {}
     if (response.status_code == 429 or response.status_code >= 500
             or (response.status_code == 403 and (provider_headers.get("Retry-After") or provider_headers.get("X-RateLimit-Remaining") == "0"))):
         raise WebsiteAuthorityError("github_temporarily_unavailable", "GitHub CI evidence is temporarily unavailable. Retry shortly.", status=503, retryable=True)
     if response.status_code != 200:
-        raise WebsiteAuthorityError("github_repository_unavailable", "GitHub CI access could not be verified for the selected repository.")
+        from .website_github_failure import github_failure
+        raise github_failure(ValueError("Unproved provider access"), legacy_code="github_repository_unavailable", legacy_message="GitHub CI access could not be verified for the selected repository.", response=response, source=True)
     try:
         payload = response.json()
     except (ValueError, TypeError) as exc:
-        raise WebsiteAuthorityError("github_ci_evidence_unavailable", "GitHub returned invalid CI evidence. Retry shortly.", status=503, retryable=True) from exc
+        from .website_github_failure import github_failure
+        raise github_failure(exc, legacy_code="github_ci_evidence_unavailable", legacy_message="GitHub returned invalid CI evidence. Retry shortly.", legacy_retryable=True, source=True) from exc
     if not isinstance(payload, dict):
-        raise WebsiteAuthorityError("github_ci_evidence_unavailable", "GitHub returned invalid CI evidence. Retry shortly.", status=503, retryable=True)
+        from .website_github_failure import github_failure
+        raise github_failure(ValueError("Invalid provider evidence"), legacy_code="github_ci_evidence_unavailable", legacy_message="GitHub returned invalid CI evidence. Retry shortly.", legacy_retryable=True, source=True)
     return payload
 
 
@@ -139,7 +145,8 @@ def read_ci_provider_checks(url, *, headers):
         and (count == len(rows) or (len(rows) == 100 and count > len(rows))))
     if (not isinstance(rows, list) or len(rows) > 100 or not valid_count
             or any(not _valid_ci_check_row(row) for row in rows)):
-        raise WebsiteAuthorityError("github_ci_evidence_unavailable", "GitHub returned invalid CI evidence. Retry shortly.", status=503, retryable=True)
+        from .website_github_failure import github_failure
+        raise github_failure(ValueError("Invalid provider evidence"), legacy_code="github_ci_evidence_unavailable", legacy_message="GitHub returned invalid CI evidence. Retry shortly.", legacy_retryable=True, source=True)
     return payload
 
 
@@ -239,15 +246,18 @@ def mint_website_token(data, *, permission_mode="read", action="read"):
             kwargs["permission_profile"] = profile
         token = create_installation_access_token(**kwargs)
     except RequestException as exc:
-        raise WebsiteAuthorityError("github_temporarily_unavailable", "GitHub could not issue a repository credential. Retry shortly.", status=503, retryable=True) from exc
+        from .website_github_failure import github_failure
+        raise github_failure(exc, legacy_code="github_temporarily_unavailable", legacy_message="GitHub could not issue a repository credential. Retry shortly.", legacy_retryable=True) from exc
     except GitHubPermissionLookupUnavailable as exc:
-        raise WebsiteAuthorityError("github_temporarily_unavailable", "GitHub permission evidence is temporarily unavailable. Retry shortly.", status=503, retryable=True) from exc
+        from .website_github_failure import github_failure
+        raise github_failure(exc, legacy_code="github_temporarily_unavailable", legacy_message="GitHub permission evidence is temporarily unavailable. Retry shortly.", legacy_retryable=True) from exc
     except GitHubWorkflowPermissionRequired as exc:
         raise _workflow_permission_denial() from exc
     except GitHubCIEvidencePermissionRequired as exc:
         raise WebsiteAuthorityError("github_ci_evidence_permission_required", CI_EVIDENCE_PERMISSION_DETAIL) from exc
     except GitHubAppTokenError as exc:
-        raise WebsiteAuthorityError("github_repository_unavailable", "GitHub access could not be verified. Reconnect the selected repository.") from exc
+        from .website_github_failure import github_failure
+        raise github_failure(exc, legacy_code="github_repository_unavailable", legacy_message="GitHub access could not be verified. Reconnect the selected repository.") from exc
     try:
         with authority_guard(binding, action=action) as connection:
             if profile == "workflow_files":

@@ -21,12 +21,38 @@ class WebsiteAuthorityError(ValueError):
 
     def __init__(self, code, message, *, status=409, field_errors=None, retryable=False):
         self.code, self.status = code, status
+        # B5 may acknowledge an authority fence separately from the causal B1
+        # failure. Retain only a bounded identifier, never arbitrary foreign text.
+        self.authority_code = code if isinstance(code, str) and re.fullmatch(r"[A-Za-z][A-Za-z0-9_]{0,127}", code) else "UNREGISTERED_FAILURE_CODE"
         self.field_errors = field_errors or []
         self.retryable = retryable
+        self.failure = None
+        self.causal_code = code
+        from .website_failure_scope import taxonomy_enabled
+        self.taxonomy_policy = taxonomy_enabled()
+        self.taxonomy_observe = taxonomy_enabled(observe=True)
+        if self.taxonomy_policy or self.taxonomy_observe:
+            from .website_failure_contract import classify_failure
+            self.failure = classify_failure(code, "website_authority")
+            self.causal_code = self.failure["code"]
+            if self.taxonomy_policy:
+                self.code = self.failure["code"]
+                self.retryable = self.failure["retryable"]
+                if self.failure["failure_class"] == "unsupported":
+                    message = self.failure["user_message"]
+            else:
+                from .website_failure_contract import legacy_view
+                legacy = legacy_view(self.failure)
+                if legacy["code"] != code:
+                    self.code, self.retryable = legacy["code"], legacy["retryable"]
         super().__init__(message)
 
     def as_dict(self):
-        return {"allowed": False, "error": self.code, "code": self.code, "detail": str(self), "retryable": self.retryable, "fieldErrors": self.field_errors}
+        result = {"allowed": False, "error": self.code, "code": self.code, "detail": str(self), "retryable": self.retryable, "fieldErrors": self.field_errors}
+        if self.taxonomy_policy:
+            result.update(error_code=self.code, failure=self.failure, failure_class=self.failure["failure_class"],
+                          failure_fingerprint=self.failure["failure_fingerprint"])
+        return result
 
 
 def positive_integer(value, *, name, optional=False):
