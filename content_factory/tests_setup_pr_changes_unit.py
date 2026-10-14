@@ -173,7 +173,13 @@ class ChangedSetupHeadTests(SimpleTestCase):
         self.run.save.assert_not_called()
 
     def test_merge_is_scheduled_once_per_head_and_reopened_by_a_later_publish(self):
+        import json
+        from uuid import UUID
         from .website_models import WebsiteConnectionOperation
+        # Production company keys are UUIDs (TalaThrive's Publish failed with
+        # "Object of type UUID is not JSON serializable" on 14 Oct).
+        company = UUID("83b7b463-cebc-4743-bd9f-562429e273b5")
+        self.context.company = SimpleNamespace(pk=company)
         created = SimpleNamespace(pk="op-1", state="pending")
         with patch.object(WebsiteConnectionOperation.objects, "get_or_create", return_value=(created, True)) as create:
             views._schedule_setup_pr_merge(run=self.run, context=self.context, config=self.config,
@@ -181,10 +187,11 @@ class ChangedSetupHeadTests(SimpleTestCase):
         kwargs = create.call_args.kwargs
         self.assertEqual(kwargs["idempotency_key"], f"setup-pr-merge:setup-1:{NEW}")
         self.assertEqual(kwargs["defaults"]["action"], "setup-pr-merge")
-        self.assertEqual({key: kwargs["defaults"]["payload"][key] for key in
+        payload = json.loads(json.dumps(kwargs["defaults"]["payload"]))
+        self.assertEqual({key: payload[key] for key in
                           ("run_id", "head_sha", "verified_sha", "company_id", "requested_by_user_id")},
-                         {"run_id": "setup-1", "head_sha": NEW, "verified_sha": OLD, "company_id": 3,
-                          "requested_by_user_id": 7})
+                         {"run_id": "setup-1", "head_sha": NEW, "verified_sha": OLD, "company_id": str(company),
+                          "requested_by_user_id": "7"})
         finished = SimpleNamespace(pk="op-1", state="completed")
         with patch.object(WebsiteConnectionOperation.objects, "get_or_create", return_value=(finished, False)), \
                 patch.object(WebsiteConnectionOperation.objects, "filter") as reopen:
