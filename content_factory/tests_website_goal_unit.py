@@ -42,7 +42,7 @@ class GoalProofTests(SimpleTestCase):
 
     def test_wrong_kind_scope_source_digest_or_future_timestamp_never_passes(self):
         original = proof_set(self.now)["previewed"]
-        for update in ({"kind": "worker_completed"}, {"scope": {**scope(), "company_id": "other"}},
+        for update in ({"kind": []}, {"kind": {}}, {"kind": "worker_completed"}, {"scope": {**scope(), "company_id": "other"}},
                        {"scope": {**scope(), "connection_generation": True}}, {"source_sha": "b" * 40},
                        {"sha": None}, {"evidence_digest": "invalid"}, {"at": "invalid"},
                        {"at": (self.now + timedelta(hours=1)).isoformat()},
@@ -57,6 +57,10 @@ class GoalProofTests(SimpleTestCase):
         self.assertFalse(goals.complete(goal))
         goal = goals.refresh_goal(goal, proof_set(self.now, target="first_article_live"), scope=scope(), source_sha="a" * 40, now=self.now)
         self.assertTrue(goals.complete(goal))
+
+    def test_malformed_container_target_is_rejected_without_throwing(self):
+        for target in ([], {}, True, None):
+            self.assertFalse(goals.valid_goal({**self.goal, "target": target}, scope()))
 
     def test_source_movement_invalidates_proof_and_preserves_bounded_history(self):
         goal = goals.refresh_goal(self.goal, proof_set(self.now), scope=scope(), source_sha="a" * 40, now=self.now)

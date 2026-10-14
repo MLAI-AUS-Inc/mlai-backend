@@ -45,6 +45,8 @@ class SetupExampleCleanupActionTests(SimpleTestCase):
         return query
 
     def setUp(self):
+        # B2 also reads reserved goal rows before allowing legacy redispatch.
+        self.enterContext(patch.object(WebsiteConnectionOperation.objects, "filter", return_value=self.rows()))
         self.user = get_user_model()(pk=4, is_active=True, email="founder@example.test")
         self.org = Organization(pk=7, domain="fixture.test")
         self.website = WebsiteConnection(organization=self.org, authorized_by=self.user,

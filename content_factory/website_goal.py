@@ -81,7 +81,7 @@ def valid_goal(goal, scope):
     return (isinstance(goal, dict) and type(goal.get("schema_version")) is int and goal["schema_version"] == 1
         and isinstance(goal.get("goal_id"), str) and 0 < len(goal["goal_id"]) <= 100
         and type(goal.get("revision")) is int and goal["revision"] >= 0
-        and goal.get("target") in {"ready", "first_article_live"} and scope_matches(goal.get("scope"), scope)
+        and isinstance(goal.get("target"), str) and goal["target"] in {"ready", "first_article_live"} and scope_matches(goal.get("scope"), scope)
         and isinstance(goal.get("attempts_by_class"), dict)
         and all(type(goal["attempts_by_class"].get(name)) is int and goal["attempts_by_class"][name] >= 0 for name in CLASSES)
         and isinstance(goal.get("failure_occurrences"), list) and len(goal["failure_occurrences"]) <= MAX_OCCURRENCES
@@ -105,7 +105,7 @@ def make_proof(name, kind, *, scope, source_sha, sha, run_id, evidence, at):
 def valid_proof(name, proof, *, scope, source_sha, now, max_age=timedelta(days=7)):
     """Validate scope, phase identity, digest and freshness; a message proves nothing."""
     if (not isinstance(proof, dict) or set(proof) != {"kind", "scope", "source_sha", "sha", "run_id", "evidence_digest", "at"}
-            or proof.get("kind") not in PROOF_KINDS.get(name, ())):
+            or not isinstance(proof.get("kind"), str) or proof["kind"] not in PROOF_KINDS.get(name, ())):
         return False
     at = stamp(proof.get("at"))
     durable = name in {"understood", "integrated", "approved", "merged"}

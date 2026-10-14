@@ -2,7 +2,8 @@ name: Deploy to Digital Ocean
 
 on:
   pull_request:
-    branches: [ main ]
+    # Stacked Articles implementation PRs need the same validation lanes.
+    branches: [ main, "codex/articles-*" ]
   push:
     branches: [ main ]
   workflow_dispatch:
