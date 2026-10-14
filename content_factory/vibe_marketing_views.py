@@ -6173,8 +6173,9 @@ def _schedule_setup_pr_merge(*, run, context, config, head_sha, verified_sha, pr
     """Merge for the owner once the changed head passes; reopened by a later Publish."""
     from .website_models import WebsiteConnectionOperation
     connection = config.website_connection
+    # Company primary keys are UUIDs; the JSON payload stores them as text.
     payload = {"run_id": run.run_id, "head_sha": head_sha, "verified_sha": verified_sha, "pr_number": pr_number,
-        "company_id": context.company.pk, "requested_by_user_id": context.profile.user_id,
+        "company_id": str(context.company.pk), "requested_by_user_id": str(context.profile.user_id),
         "requested_at": timezone.now().isoformat()}
     op, created = WebsiteConnectionOperation.objects.get_or_create(
         idempotency_key=f"setup-pr-merge:{run.run_id}:{head_sha}",
