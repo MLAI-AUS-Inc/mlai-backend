@@ -87,4 +87,9 @@ def waiting_is_overdue(row, *, now):
     if start is None:return True
     seconds=getattr(settings,"ARTICLES_GOAL_WALL_SECONDS",172800) if valid else 86400
     from .website_doctor import number
-    return number(seconds) is None or seconds<=0 or (now-start).total_seconds()>=seconds
+    paused = 0
+    if valid:
+        from .website_goal_budget import owner_wait_seconds
+        try:paused = owner_wait_seconds(goal,now=now)
+        except ValueError:return True
+    return number(seconds) is None or seconds<=0 or (now-start).total_seconds()-paused>=seconds

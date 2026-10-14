@@ -127,6 +127,10 @@ class OwnerWaitBudgetTests(SimpleTestCase):
         self.assertIsNone(budget.exhaustion(resumed,now=now+timedelta(days=4,hours=46)))
         self.assertEqual(budget.exhaustion(resumed,now=now+timedelta(days=4,hours=47)),"wall_time")
         self.assertEqual(budget.exhaustion(goals.new_goal("provider-wait",scope(),now=now),now=now+timedelta(hours=48)),"wall_time")
+        from .website_health import waiting_is_overdue
+        row={"state":"pending","receipt":{"goal":resumed},"created_at":now}
+        self.assertFalse(waiting_is_overdue(row,now=now+timedelta(days=4,hours=46)))
+        self.assertTrue(waiting_is_overdue(row,now=now+timedelta(days=4,hours=47)))
 
     def test_invalid_owner_intervals_never_grant_more_budget(self):
         now=timezone.now();goal=goals.new_goal("goal",scope(),now=now)
