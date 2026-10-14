@@ -46,8 +46,9 @@ class IntegrationTests(SimpleTestCase):
         base.update(SECRET_KEY=secrets.token_hex(48),REDIS_URL='redis://127.0.0.1:65451/0',DEBUG='false')
         for profile,environment,database,api,relay in [('mlai.settings_staging_chat','chat-staging','staging_account_api','https://api-staging.mlai.au','wss://chat-staging.mlai.au'),('mlai.settings_staging_local','staging-local','local_mlai','http://127.0.0.1:8000','ws://127.0.0.1:3000')]:
             env={**base,'DJANGO_SETTINGS_MODULE':profile,'APP_ENV':environment,'DATABASE_URL':f'postgresql://{database}:unused@127.0.0.1:65450/{database}'}
-            code="import importlib,json; s=importlib.import_module('"+profile+"'); print(json.dumps({'api':s.TOKEN_USAGE_API_BASE,'relay':s.COMMUNITY_CHAT_RELAY_URL,'tokenmaxer':s.TOKENMAXER_FEDERATION_ENABLED,'apple':s.APPLE_IAP_ENABLED}))"
+            code="import importlib,json; s=importlib.import_module('"+profile+"'); print(json.dumps({'api':s.TOKEN_USAGE_API_BASE,'relay':s.COMMUNITY_CHAT_RELAY_URL,'audience':s.COMMUNITY_CHAT_API_AUDIENCE,'tokenmaxer':s.TOKENMAXER_FEDERATION_ENABLED,'apple':s.APPLE_IAP_ENABLED}))"
             result=subprocess.run([sys.executable,'-c',code],env=env,capture_output=True,text=True)
             self.assertEqual(result.returncode,0,result.stderr[-500:]);values=json.loads(result.stdout)
             self.assertEqual(values['api'],api+'/api/v1/community-chat/usage');self.assertEqual(values['relay'],relay)
+            self.assertEqual(values['audience'],api)
             self.assertFalse(values['tokenmaxer']);self.assertFalse(values['apple'])

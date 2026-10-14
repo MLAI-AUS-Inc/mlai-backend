@@ -235,7 +235,7 @@ class AutoDeployTests(unittest.TestCase):
         candidate=self.state/'candidate.env';check.check_candidate('sha256:'+'a'*64,candidate)
         self.assertIn('network-policy.py',calls[0][1]);self.assertEqual(calls[0][-1],'verify')
         run=calls[1];self.assertEqual(run[run.index('--network')+1],'mlai-staging-api-internal')
-        self.assertIn('172.28.240.11',run);self.assertIn('check=True',run[-1]);self.assertIn('dry_run=True',run[-1]);self.assertNotIn("call_command('migrate',interactive",run[-1]);self.assertFalse((self.state/'runtime.env').exists())
+        self.assertIn('require_password_pilot()',run[-1]);self.assertIn('172.28.240.11',run);self.assertIn('check=True',run[-1]);self.assertIn('dry_run=True',run[-1]);self.assertNotIn("call_command('migrate',interactive",run[-1]);self.assertFalse((self.state/'runtime.env').exists())
 
     def test_cleanup_preserves_current_previous_and_unowned_directories(self):
         releases=self.state/'releases';cfg={**self.cfg,'state_dir':str(self.state)}

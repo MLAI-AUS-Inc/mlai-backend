@@ -62,6 +62,6 @@ def pin_isolated_destinations(namespace, *, local=False):
         if name.isupper() and isinstance(value,str) and value.startswith(('https://','http://','wss://','ws://')):
             old=urlsplit(value)
             if old.hostname and (old.hostname=='mlai.au' or old.hostname.endswith('.mlai.au')):
-                target=urlsplit(relay if old.scheme in {'ws','wss'} else api if old.hostname.startswith('api.') else frontend)
+                target=urlsplit(relay if old.scheme in {'ws','wss'} else api if old.hostname.startswith(('api.','api-staging.')) else frontend)
                 namespace[name]=urlunsplit((target.scheme,target.netloc,old.path,old.query,''))
     namespace.update(TOKEN_USAGE_API_BASE=api+'/api/v1/community-chat/usage',COMMUNITY_CHAT_RELAY_URL=relay,TOKENMAXER_FEDERATION_ENABLED=False,TOKENMAXER_PUBLIC_API_BASE='',APPLE_IAP_ENABLED=False)
