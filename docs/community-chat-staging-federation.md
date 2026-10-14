@@ -111,3 +111,13 @@ regression failed before the fix and passed afterward; the complete affected
 backend auth/device/federation suites passed 100 tests, and the separate-database
 handler integration passed one test. These checks do not establish live TLS,
 proxy, cookie cutover or successful real-relay messaging/upload behavior.
+
+
+On 14 October 2026, local validation resumed after disk cleanup with about
+14 GiB free. Main Rust and native Tauri formatting/clippy, desktop checks,
+web/type checks and 12 analyzer tests passed. The full command was stopped
+before disk exhaustion during first-time Flutter SDK installation; mobile
+checks and later unit/build gates were not reached. The incomplete SDK and
+its download were cleaned up. Full release validation remains pending; aim
+for around 25 GiB of free working headroom before the next complete local run.
+No remote CI, push or deployment was performed.
