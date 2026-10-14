@@ -16048,7 +16048,7 @@ class VibeMarketingArticleSystemSetupView(APIView):
         payload["client_request_id"] = str(request.headers.get("Idempotency-Key") or request.data.get("idempotency_key") or request.data.get("clientRequestId") or _mint_dispatch_client_request_id("article_system_setup"))
         if getattr(request, "_website_prepare_dispatch", False):
             payload["retry_epoch"] = request.data.get("retry_epoch", "initial")
-            for field in ("strategy_pin", "strategy_goal_id", "strategy_revision", "strategy_binding", "goal_budget"):
+            for field in ("strategy_pin", "strategy_goal_id", "strategy_revision", "strategy_binding", "goal_budget", "verification_mode"):
                 if field in request.data:
                     payload[field] = request.data[field]
         _mark_roo_points_gate_authorized(

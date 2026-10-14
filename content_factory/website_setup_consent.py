@@ -78,7 +78,7 @@ def setup_plan(context, config, journey):
     from .billing import get_content_factory_article_cost_points
     selection=choose_page(goals.mapping(journey).get("discovery"))
     grants=goals.mapping(goals.mapping(journey).get("githubPermissions"))
-    ci_mode="hosted" if getattr(settings,"ARTICLES_HOSTED_VERIFICATION_ENABLED",False) else "repository"
+    ci_mode="hosted" if getattr(settings,"ARTICLES_HOSTED_ATTESTATION_ENABLED",False) else "repository"
     required=required_grants(ci_mode=ci_mode)
     url=grants.get("settingsUrl")
     from urllib.parse import urlsplit

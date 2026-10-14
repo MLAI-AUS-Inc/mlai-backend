@@ -1121,6 +1121,12 @@ def _verified_setup_run_base(run, head_sha, website, *, automatic_approval=False
         return ""
     base_sha = str(saved.get("expected_source_sha") or "")
     generation = result.get("resume_generation")
+    from .website_hosted_build import enabled as hosted_enabled, current_scan_source, valid_hosted_build
+    hosted = hosted_enabled(website)
+    source_matches = base_sha == current_scan_source(website) if hosted else not website.verified_sha or website.verified_sha == base_sha
+    build_passed = gates.get("local_build") is True and gates.get("local_build_skipped") is False
+    if hosted and gates.get("local_build_skipped") is True:
+        build_passed = valid_hosted_build(run, preview, head_sha, website)
     approved_setup = (run.approval_state == "approved" and result.get("status") == "setup_pr_created"
         and setup.get("status") == "pr_created")
     pending_setup = (automatic_approval and run.status == "awaiting_approval" and run.approval_state == "approval_required"
@@ -1136,7 +1142,7 @@ def _verified_setup_run_base(run, head_sha, website, *, automatic_approval=False
         or not (run.status == "completed" and (approved_setup or adopted_kit) or pending_setup)
         or setup.get("setup_run_id") != run.run_id
         or not SHA_PATTERN.fullmatch(base_sha)
-        or (website.verified_sha and website.verified_sha != base_sha)
+        or not source_matches
         or result.get("source_sha") != base_sha or setup.get("source_sha") != base_sha
         or result.get("branch_commit_sha") != head_sha or setup.get("branch_commit_sha") != head_sha
         or preview.get("exactRender") is not True or preview.get("commitSha") != head_sha
@@ -1148,10 +1154,10 @@ def _verified_setup_run_base(run, head_sha, website, *, automatic_approval=False
         or proof.get("resume_generation") != generation or setup.get("resume_generation") != generation
         or gates.get("status") != "passed"
         or any(gates.get(key) is not True for key in (
-            "dependency_validation", "static_policy", "local_build", "dom_slot_compliance",
+            "dependency_validation", "static_policy", "dom_slot_compliance",
             "publish_surface", "browser", "visual_style",
         ))
-        or gates.get("local_build_skipped") is not False
+        or not build_passed
         or result.get("manual_quality_gate_override") or setup.get("manual_quality_gate_override")
     ):
         return ""

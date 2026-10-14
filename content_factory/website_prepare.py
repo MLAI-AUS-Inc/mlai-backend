@@ -476,6 +476,10 @@ def _owner_request(op, context, config, step, *, user, journey=None):
     if "goal" in op.receipt and step == "setup":
         from .website_strategy import request_pin
         data.update(request_pin(op.receipt["goal"]))
+        from .website_setup_consent import valid as valid_consent
+        from .website_hosted_build import enabled as hosted_enabled
+        if valid_consent(op.receipt["goal"]) and hosted_enabled(connection):
+            data["verification_mode"] = op.receipt["goal"]["consent"]["answers"]["ci_mode"]
     if step == "setup":
         mode, surface = _setup_surface(config, journey or journey_for_context(context, config), goal=op.receipt.get("goal"))
         pending = (config.article_system or {}).get("pending_article_system_setup") or {}
@@ -714,7 +718,7 @@ def _advance_claimed_prepare(op, *, now, handlers):
                 if owns_goal(op) and not any(item["name"] == "previewed" and item["state"] == "passed"
                         for item in op.receipt["goal"]["milestones"]):
                     raise WebsiteAuthorityError("setup_preview_verification_required", "Waiting for the exact setup preview proof.", retryable=True)
-                merge = maybe_merge_prepared_setup(child, context, config, user=user)
+                merge = maybe_merge_prepared_setup(child, context, config, user=user, goal=op.receipt.get("goal"))
                 if merge.get("status") == "needs_user":
                     review = merge["user_action"].get("id") == "review_setup"
                     op.state, op.next_attempt_at = "needs_user", None
@@ -841,7 +845,7 @@ def wake_prepare_for_source(connection_id, *, organization_id):
     return op
 
 
-def maybe_merge_prepared_setup(run, context, config, *, user):
+def maybe_merge_prepared_setup(run, context, config, *, user, goal=None):
     """Use the shared merge path after exact preview and current consent checks."""
     from .vibe_marketing_views import _pull_request_number_from_run, _attempt_setup_publish_merge
     setup = (run.result or {}).get("article_system_setup") or {}
@@ -851,7 +855,7 @@ def maybe_merge_prepared_setup(run, context, config, *, user):
     if not number:
         if run.status == "completed" and (run.result or {}).get("adopted") is True:
             return {"status": "completed"}
-        return approve_prepared_setup(run, context, config, user=user)
+        return approve_prepared_setup(run, context, config, user=user, goal=goal)
     action = {"id": "merge_pr", "label": f"Merge PR #{number}", "pr_number": number,
         "url": f"https://github.com/{config.website_connection.github_repo}/pull/{number}"}
     if config.requires_review:
@@ -896,7 +900,7 @@ def _setup_preview_proven_for_review(run, head_sha):
     )
 
 
-def approve_prepared_setup(run, context, config, *, user):
+def approve_prepared_setup(run, context, config, *, user, goal=None):
     """Use the existing setup control only after exact automatic preview proof."""
     from .website_connections import _verified_setup_run_base, scoped_run_contract, verify_repository_head
     from .vibe_marketing_views import VibeMarketingRunControlView
@@ -906,10 +910,21 @@ def approve_prepared_setup(run, context, config, *, user):
         "url": preview.get("url") or (run.result or {}).get("preview_url"), "run_id": run.run_id}}
     if config.requires_review:
         return review
+    from .website_hosted_build import enabled as hosted_enabled, current_scan_source
+    from .website_setup_consent import valid as valid_consent
+    from .website_goal import scope_matches, scope_for, mapping
+    hosted = hosted_enabled(website)
+    if hosted and goal is not None:
+        if not valid_consent(goal) or not scope_matches(mapping(goal).get("scope"), scope_for(website, context.company.pk)):
+            raise WebsiteAuthorityError("website_operation_changed", "Setup approval requires the original owner choices for this website.")
+        if goal["consent"]["answers"]["publish_mode"] == "review":
+            return review
+    if hosted and current_scan_source(website) != mapping(run.run_request).get("expected_source_sha"):
+        raise WebsiteAuthorityError("website_source_changed", "The setup source changed. Refresh its scan and preview before approval.")
     head = str((run.result or {}).get("branch_commit_sha") or "")
     base = _verified_setup_run_base(run, head, website, automatic_approval=True)
     if not base:
-        if _setup_preview_proven_for_review(run, head):
+        if _setup_preview_proven_for_review(run, head) and not (hosted and goal is not None):
             return review
         raise WebsiteAuthorityError("setup_preview_verification_required", "Waiting for exact setup preview proof.", retryable=True)
     verify_repository_head(website, base)

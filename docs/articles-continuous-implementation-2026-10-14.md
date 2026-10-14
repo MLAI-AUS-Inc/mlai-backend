@@ -291,3 +291,28 @@ parser/types/13 relevant units passed,15 browser cases running. It posts only th
 server-priced choice fields and automatically closes/refreshes after success.
 Continue C3 exact hosted build proof and consent approval, C4 deployment signals,
 C5 durable deduplicated notifications, then D/E/F/G without approval pauses.
+
+
+C1/C2 backend PR1019 attached, head663f0c2a273fc56d51b0861e7ea74783bfb3b9b2,
+base B7. Chat C1 PR470 attached, heada29dd41ca93fd2992ea87a9fd4fe21f0dfa87d6f,
+base B7 PR468. Chat fulljustci passed on rerun with RUST_TEST_THREADS=2 after an
+unrelated TokenMaxer process-timeout; exact failed test passed alone. Final desktop
+5609, Tauri2179 and mobile2731 tests passed, as did signed commit/push hooks,13
+focused units and15 browser cases. Two sheet captures distinct; auto sheet inspected.
+The form action selected-company bootstrap bug is fixed and covered by startup B
+while A is cached. B7 backend #1018 remote checks all green, deploy skipped.
+
+C3 is active, NOT complete. Both backend and CF worktrees are on
+codex/articles-c3-hosted-verification. Static receipt/approval code is implemented;
+backend5 hosted receipt tests plus90 neighboring chain/merge/permissions tests and
+all19 DB-free commands passed. Model/credential checks still need final repeat after
+this C3 change. CF50 focused and213 broader neighbors passed;1108-emitter audit
+passed. Original request verification_mode is strict/immutable, hosted mode omits
+customer workflow reservations, and callbacks mint only a saved nonce-bound exact
+builder receipt. Backend accepts skipped build only for this receipt and current
+scan source; auto consent repairs missing evidence, review consent asks once.
+Default hosted proof stays behind ARTICLES_HOSTED_ATTESTATION_ENABLED=false until
+post-merge actual native attestation is implemented. Continue that work using the
+reusable CF isolated/native verification and backend full NativeEvidence validators;
+keep every output Boolean and original source/operation fence. Do not mark C3 done
+or enable flags. All remaining C4-C5/D/E/F/G agent work still required.
