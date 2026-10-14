@@ -15926,6 +15926,7 @@ class VibeMarketingScanView(APIView):
             "auto_setup_preview": auto_setup_preview,
             "generate_components": False,
             "article_surface_mode": article_surface_mode,
+            **({"goal_budget": request.data["goal_budget"]} if getattr(request, "_website_prepare_dispatch", False) and "goal_budget" in request.data else {}),
             "scan_purpose": scan_purpose,
             "force_refresh": force_refresh,
         }
@@ -16047,6 +16048,9 @@ class VibeMarketingArticleSystemSetupView(APIView):
         payload["client_request_id"] = str(request.headers.get("Idempotency-Key") or request.data.get("idempotency_key") or request.data.get("clientRequestId") or _mint_dispatch_client_request_id("article_system_setup"))
         if getattr(request, "_website_prepare_dispatch", False):
             payload["retry_epoch"] = request.data.get("retry_epoch", "initial")
+            for field in ("strategy_pin", "strategy_goal_id", "strategy_revision", "strategy_binding", "goal_budget"):
+                if field in request.data:
+                    payload[field] = request.data[field]
         _mark_roo_points_gate_authorized(
             payload,
             domain=context.organization.domain,

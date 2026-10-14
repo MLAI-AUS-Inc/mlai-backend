@@ -250,7 +250,7 @@ def _persist_prepare(op, *, now):
 def _finish_prepare(op, *, now):
     from .website_goal_runner import owns_goal, finish_goal
     if owns_goal(op):
-        finish_goal(op)
+        finish_goal(op, now=now)
     logger.info("website_prepare operation=%s company=%s connection=%s generation=%s step=%s state=%s reason=%s attempt=%s next_attempt=%s dispatch_outcome=%s",
         op.pk, op.payload.get("company_id"), op.connection_id, op.generation, op.receipt.get("current_step"),
         op.state, op.receipt.get("reason_code", ""), op.attempts, op.next_attempt_at, op.receipt.get("dispatch_outcome", ""))
@@ -314,6 +314,9 @@ def prepare_failure(op, step, error, *, now=None):
         if not occurrence:
             occurrence = str(uuid5(NAMESPACE_URL, f"mlai:prepare-failure:v1:{op.pk}:{op.generation}:{op.payload.get('attempt', 1)}:{op.attempts}:{step}"))
         op.receipt["failure_occurrence_id"] = occurrence
+        from . import website_strategy as goal_strategy
+        if "goal" in op.receipt and goal_strategy.enabled() and isinstance(source, dict) and "strategy_exhausted" in source:
+            op.receipt["strategy_observation_invalid"] = not goal_strategy.valid_exhaustion(op.receipt["goal"], source["strategy_exhausted"])
     if observation_enabled:
         op.receipt["failure_taxonomy_observation"] = {"failure": decision["failure"], "classification": decision["failure"]["failure_class"] if decision["failure"] else None,
             "policy_classification": classification, "contract_invalid": decision["contract_invalid"]}
@@ -439,6 +442,18 @@ def _owner_request(op, context, config, step, *, user, journey=None):
         "idempotency_key": f"prepare:{op.pk}:{step}:{op.payload.get('attempt', 1)}:{op.payload.get('retry_epoch', 'initial')}",
         "retry_epoch": op.payload.get("retry_epoch", "initial"),
         "force_refresh": True}
+    from . import website_goal_budget as goal_budget, website_goal as goals
+    if "goal" in op.receipt and goal_budget.enabled() and step in {"setup", "scan"}:
+        goal = op.receipt["goal"]
+        used = goals.mapping(goal.get("budget_used"))
+        from django.conf import settings
+        data["goal_budget"] = {"version": 1, "goal_id": goal["goal_id"],
+            "scope_digest": goals.digest(goal["scope"]),
+            "remaining_active_seconds": settings.ARTICLES_GOAL_ACTIVE_SECONDS - (used.get("active_seconds") or 0),
+            "remaining_model_usd": settings.ARTICLES_GOAL_MODEL_USD - (used.get("model_cost") or 0)}
+    if "goal" in op.receipt and step == "setup":
+        from .website_strategy import request_pin
+        data.update(request_pin(op.receipt["goal"]))
     if step == "setup":
         mode, surface = _setup_surface(config, journey or journey_for_context(context, config))
         pending = (config.article_system or {}).get("pending_article_system_setup") or {}
@@ -608,6 +623,8 @@ def _advance_claimed_prepare(op, *, now, handlers):
         from .website_goal_runner import owns_goal, goal_journey, ready
         if owns_goal(op):
             journey = goal_journey(op, context, config, journey, now=now)
+            if getattr(op, "_goal_wait", False):
+                return _finish_prepare(op, now=now)
         if ready(op, journey):
             op.state, op.next_attempt_at = "completed", None
             op.receipt.update(status="ready", message="Your website is ready for articles.", current_step="ready", user_action=None)

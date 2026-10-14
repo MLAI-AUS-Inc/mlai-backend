@@ -74,14 +74,47 @@ def goal_journey(op, context, config, journey, *, now):
         proofs, source = collect_proofs(op, context, config, journey, now=now)
     except (ValueError, TypeError, OverflowError) as exc:
         raise WebsiteAuthorityError("website_prepare_blocked", "Recorded milestone proof is malformed. Review the current goal details.") from exc
+    if goal.get("strategy_requires_candidate"):
+        from .website_goal_evidence import _child
+        child = _child(op, config.website_connection)
+        original = goals.mapping(getattr(child, "run_request", None))
+        pin = goals.mapping(goal.get("strategy_pin"))
+        fresh_candidate = (goals.mapping(proofs.get("integrated")).get("kind") == "setup_candidate"
+            and original.get("strategy_goal_id") == goal["goal_id"]
+            and original.get("strategy_revision") == pin.get("revision")
+            and original.get("strategy_binding") == pin.get("binding"))
+        if fresh_candidate:
+            goal = {**goal, "strategy_requires_candidate": False}
+        else:
+            proofs = {name: proof for name, proof in proofs.items() if name in {"access", "understood"}}
     goal = goals.refresh_goal(goal, proofs, scope=scope, source_sha=source, now=now)
     goal["current_source_sha"] = source
+    from . import website_strategy as strategy, website_goal_budget as budget
+    if budget.enabled():
+        goal = account_child_usage(op, goal)
+    try:
+        goal = strategy.ensure_pin(goal, journey, source=source, now=now)
+    except ValueError as exc:
+        raise WebsiteAuthorityError("website_prepare_blocked", "The saved strategy does not match current website proof.") from exc
     if goals.complete(goal):
         goal["completed_source_sha"] = source
     op.receipt = {**op.receipt, "goal": goal}
     milestone = goals.next_milestone(goal)
     op._goal_milestone = milestone
     action = goals.ACTION_FOR.get(milestone)
+    if milestone and budget.enabled():
+        reason = budget.exhaustion(goal, now=now, action=None if getattr(op, "_goal_has_active_child", False) else action)
+        if reason:
+            if getattr(op, "_goal_has_active_child", False):
+                from .website_prepare import _cancel_prepare_child
+                _cancel_prepare_child(op, config)
+            stop_goal(op, goal, reason=reason, now=now)
+            op._goal_wait = True
+            return {**journey, "capabilities": {**goals.mapping(journey.get("capabilities")), "canPublishArticle": False}, "nextAction": None}
+    if milestone and goals.mapping(goal.get("strategy_pin")).get("rung") == "hosted":
+        wait_for_channel(op, goal)
+        op._goal_wait = True
+        return {**journey, "capabilities": {**goals.mapping(journey.get("capabilities")), "canPublishArticle": False}, "nextAction": None}
     if milestone and not action:
         raise WebsiteAuthorityError("website_prepare_blocked", "This goal's article publication handler is not available yet.", status=422)
     if milestone in {"approved", "merged"}:
@@ -103,18 +136,54 @@ def ready(op, journey):
     return goals.mapping(journey.get("capabilities")).get("canPublishArticle") is True
 
 
-def finish_goal(op):
+def finish_goal(op, *, now=None):
     """Attach deduplicated class accounting without changing causal outcomes."""
+    from django.utils import timezone
+    now = now or timezone.now()
     goal = goals.mapping(op.receipt.get("goal"))
     if not goals.valid_goal(goal, goals.scope_for(op.connection, op.payload.get("company_id"))):
+        return
+    if op.receipt.get("strategy_observation_invalid"):
+        op.state, op.next_attempt_at = "needs_attention", None
+        op.receipt.update(status="stopped", message="Strategy evidence does not match the saved website goal.",
+            user_action={"id": "inspect_goal", "label": "Review goal evidence"})
         return
     failure = goals.mapping(op.receipt.get("failure"))
     classification = failure.get("failure_class") or op.receipt.get("failure_class")
     occurrence = op.receipt.get("failure_occurrence_id")
     if occurrence and classification:
         try:
+            fresh = occurrence not in goal.get("failure_occurrences", [])
             goal = goals.record_failure(goal, failure_class=classification,
                 fingerprint=failure.get("failure_fingerprint"), occurrence=occurrence)
+            from . import website_goal_budget as budget, website_strategy as strategy
+            effective = classification
+            if budget.enabled():
+                goal, effective, fresh = budget.record_policy_occurrence(goal, occurrence=occurrence,
+                    fingerprint=failure.get("failure_fingerprint"), classification=classification)
+                op.receipt["effective_failure_class"] = effective
+            reason = budget.exhaustion(goal, now=now) if budget.enabled() else None
+            if reason:
+                stop_goal(op, goal, reason=reason, now=now)
+                return
+            if fresh and effective == "repairable" and (budget.enabled() or strategy.enabled()):
+                retry_goal_action(op, goal, now=now, occurrence=occurrence)
+            elif fresh and strategy.enabled() and effective == "strategy" and goal.get("strategy_pin"):
+                goal = strategy.advance(goal, source=goal.get("current_source_sha"), now=now, reason="strategy_exhausted")
+                goal["strategy_requires_candidate"] = True
+                if goal["strategy_pin"]["rung"] == "hosted":
+                    wait_for_channel(op, goal)
+                else:
+                    retry_goal_action(op, goal, now=now, occurrence=occurrence, step="setup")
+                    op.receipt["message"] = "Trying the next articles integration strategy."
+            elif fresh and strategy.enabled() and effective == "unsupported" and classification in {"transient", "repairable", "strategy"} and strategy.valid_pin(goal.get("strategy_pin")):
+                goal = strategy.set_pin(goal, len(strategy.RUNGS) - 1, source=goal.get("current_source_sha"),
+                    fingerprint=goal["strategy_pin"]["fingerprint_digest"], now=now, reason="fingerprint_guard")
+                wait_for_channel(op, goal)
+            elif fresh and strategy.enabled() and effective in {"strategy", "unsupported"} and not goal.get("strategy_pin"):
+                goal = strategy.set_pin(goal, len(strategy.RUNGS) - 1, source=goal.get("current_source_sha"),
+                    fingerprint=goals.digest({"scope": goal["scope"], "failure": failure.get("failure_fingerprint")}), now=now, reason="inventory_exhausted")
+                wait_for_channel(op, goal)
             op.receipt = {**op.receipt, "goal": goal}
         except ValueError:
             op.state, op.next_attempt_at = "needs_attention", None
@@ -154,3 +223,75 @@ def wake_goal_for_source(config, *, company_id, user, now):
         latest.state, latest.next_attempt_at = "pending", now
         latest.save(update_fields=["receipt", "payload", "state", "next_attempt_at", "updated_at"])
         return latest
+
+
+def wait_for_channel(op, goal):
+    """Keep unavailable hosted fallback explicit until E5 supplies its handler."""
+    op.state, op.next_attempt_at = "needs_user", None
+    op.receipt = {**op.receipt, "goal": goal, "status": "needs_you", "channel_options": ["hosted", "portable"],
+        "message": "The repository strategies are exhausted. Choose an articles channel.",
+        "user_action": {"id": "choose_article_channel", "label": "Choose articles channel"}}
+
+
+def stop_goal(op, goal, *, reason, now):
+    """Record one bounded budget stop and durable alert reference, without sending."""
+    if not goal.get("budget_alert"):
+        goal["budget_alert"] = {"id": goals.digest({"goal": goal["goal_id"], "reason": reason}),
+            "reason": reason, "at": now.isoformat(), "state": "pending"}
+    op.state, op.next_attempt_at = "needs_attention", None
+    op.receipt = {**op.receipt, "goal": goal, "status": "stopped", "budget_stop_reason": reason,
+        "message": "The articles goal reached its execution budget. Review its recorded usage.",
+        "user_action": {"id": "inspect_goal", "label": "Review goal budget"}}
+
+
+def account_child_usage(op, goal):
+    """Read metering only from original scoped children; missing reports stay unknown."""
+    from workflow_runs.models import ContentFactoryRun
+    from .website_operations import deletion_epoch
+    from . import website_goal_budget as budget
+    result = goal
+    op._goal_has_active_child = False
+    identifiers = {value for key in ("child_run_id", "scan_run_id", "setup_run_id")
+        if isinstance(value := goals.mapping(op.receipt).get(key), str) and value}
+    for identifier in sorted(identifiers):
+        child = ContentFactoryRun.objects.filter(run_id=identifier, organization_id=op.connection.organization_id).first()
+        saved = goals.mapping(getattr(child, "run_request", None))
+        if not child or (saved.get("website_connection_id") != str(op.connection_id)
+                or saved.get("connection_generation") != op.generation or saved.get("repository_id") != op.connection.repository_id
+                or saved.get("deletion_epoch") != deletion_epoch(op.connection)):
+            continue
+        if child.status not in {"failed", "completed", "blocked", "cancelled", "denied"}:
+            op._goal_has_active_child = True
+        report = goals.mapping(child.result).get("usage")
+        if report is None:
+            if child.status not in {"failed", "completed", "blocked", "cancelled", "denied"}:
+                continue
+            missing = list(result.get("missing_usage_run_ids") or [])
+            if identifier not in missing:
+                result = {**result, "missing_usage_run_ids": (missing + [identifier])[-64:]}
+            continue
+        try:
+            result = budget.account_usage(result, report, run_id=identifier)
+            result["missing_usage_run_ids"] = [value for value in result.get("missing_usage_run_ids", []) if value != identifier]
+        except ValueError:
+            result = {**result, "usage_invalid": True}
+    return result
+
+
+def retry_goal_action(op, goal, *, now, occurrence, step=None):
+    """Retry a repairable action on its rung with a distinct, durable attempt key."""
+    step = step or op.receipt.get("current_step") or "setup"
+    op.payload = {**op.payload, "attempt": op.payload.get("attempt", 1) + 1,
+        "retry_epoch": goals.digest({"goal": goal["goal_id"], "strategy": goal.get("strategy_pin"), "occurrence": occurrence})}
+    op.payload.pop("run_id", None)
+    cleared = {"child_resume_pending"}
+    if step in {"scan", "setup"}:
+        cleared.update({"child_run_id", "completed_steps"})
+    if step == "scan":
+        cleared.add("scan_run_id")
+    elif step == "setup":
+        cleared.add("setup_run_id")
+    op.receipt = {key: value for key, value in op.receipt.items() if key not in cleared}
+    op.receipt.update(status="working", current_step=step, user_action=None,
+        message="Repairing the articles setup on the saved integration strategy.")
+    op.state, op.next_attempt_at = "pending", now

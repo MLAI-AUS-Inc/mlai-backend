@@ -7,7 +7,7 @@ from . import website_goal as goals
 from .website_goal_evidence import source_for
 
 OWNER_ACTIONS = {"authorize_github", "review_github_permissions", "review_setup", "merge_pr", "deploy_site",
-                 "choose_articles_page", "remove_setup_example"}
+                 "choose_articles_page", "remove_setup_example", "choose_article_channel"}
 
 
 def _action(raw, operation_id, *, owner=False, run_ids=(), repository=""):
@@ -18,7 +18,7 @@ def _action(raw, operation_id, *, owner=False, run_ids=(), repository=""):
         return {"id": "inspect_goal", "label": "View details", "operationId": operation_id}
     labels = {"authorize_github": "Authorize GitHub", "review_github_permissions": "Review GitHub permissions",
         "review_setup": "Review setup", "merge_pr": "Merge setup PR", "deploy_site": "Deploy your site",
-        "choose_articles_page": "Choose articles page", "remove_setup_example": "Review example cleanup"}
+        "choose_article_channel": "Choose articles channel", "choose_articles_page": "Choose articles page", "remove_setup_example": "Review example cleanup"}
     result = {"id": identifier if identifier in OWNER_ACTIONS else "inspect_goal", "label": labels.get(identifier, "View details")}
     run_id = value.get("run_id")
     if not run_id and identifier in {"review_setup", "merge_pr", "deploy_site", "remove_setup_example"}:
@@ -87,6 +87,8 @@ def project_status(op, *, scope, source_sha, journey, now=None):
             message = "The saved goal does not match the current website. Refresh the website details."
         elif op.state in {"pending", "running"} and not schedule:
             message = "The goal has no recorded recovery schedule. Review its recorded details."
+        elif receipt.get("budget_stop_reason"):
+            message = "The articles goal reached its execution budget. Review its recorded usage."
         elif op.state == "completed":
             message = "Current website proof has changed or expired. Refresh website verification."
         elif not terminal and not goals.enrolled(op.connection.organization_id):

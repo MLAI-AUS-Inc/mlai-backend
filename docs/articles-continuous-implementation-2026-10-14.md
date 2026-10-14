@@ -54,3 +54,75 @@ only; add status/scope/cancellation/source/replay tests; add CI assignments;
 finish Chat action handling and scheduled refresh tests/E2E; run required
 checks; update draft PR evidence and create/attach Chat PR. Then continue B3
 and subsequent agent steps without ending for design approval.
+
+
+## Checkpoint after B2 and during B3/B4
+
+B2 backend PR #1014 is implemented, still stacked on B1/B5 #1013. Its head was
+`a60277d5` before a cleanup-fixture follow-up. A `codex/articles-*` PR-base CI
+trigger now runs checks for this stack; deploy remains push/manual main only.
+Remote checks found the old setup-example unit fixtures omitted the new reserved
+row lookup. The DAO seam is being added without replacing the real orchestrators.
+CI job #115681542313 on run #38511719645 contained that failure. Native proof,
+status and goal tests pass (21 tests after malformed-container coverage), as do
+the previously complete 416 journey tests. No local database was constructed.
+
+B2 Chat PR #465 is open and attached. Latest pushed head before the manual-refresh
+follow-up was `44daf5898`; the follow-up is `4763624ca`. Full `just ci` passed on
+runtime B2, including 2,179 Tauri Rust and 2,731 mobile tests. 5,602 desktop unit
+tests, typecheck and six native browser cases passed. The recovery control now
+invalidates the goal/bootstrap read instead of calling the disabled legacy poller.
+Its typecheck and all push hooks passed. Remote final-head CI must be checked.
+
+A full build first filled disk. Only this worktree's generated targets were
+removed. The completed Phase A Chat managed worktree was archived after preserving
+its test artifacts at `/Users/samdonegan/.codex/artifacts/articles-phase-a-chat-evidence`.
+Its recoverable Git snapshot remains attached. About 13 GB was freed. Chat checks
+use CARGO_TARGET_DIR at its worktree `/target`, CARGO_BUILD_JOBS=2,
+CARGO_INCREMENTAL=0 and dev/test debug=0. `just ci` produced untracked screenshot
+`output/`; preserve or remove only those generated files before later commits.
+
+B3/B4 backend edits are uncommitted in the B2 implementation worktree on new branch
+`codex/articles-b3-b4-strategy-budgets`, currently based on B2 `52b0505e`. An extra
+B2 CI worktree at `.codex-worktrees/articles-b2-ci` owns the B2 branch. Reconcile
+its newer CI/container/fixture commits into B3 after checkpointing the current work.
+New backend modules: `website_strategy.py`, `website_goal_budget.py`,
+`tests_website_strategy_budget_unit.py`; design `articles-b3-b4-design-2026-10-14.md`.
+Runner/prepare/setup view/settings/env/status/CI assignment edits are being wired.
+Eight policy tests and 28 combined B3/B4/B2 tests passed before the latest edits.
+Strategies are monotonic and source-bound; fresh repairable outcomes retry on the
+same rung, repeated transient fingerprints escalate, duplicate observations do
+not advance. New rungs require a fresh matching candidate before old native proof
+can complete them. Budgets default off, 48h/7200s/25USD/20 transient/6 repairable.
+Unknown metrics never become zero; missing terminal-child metrics stop further
+model work. Hosted pin currently waits for channel selection (E5/C1/B7 pending).
+Chat does not yet support `choose_article_channel`; wire this before completing B3.
+
+CF B3/B4 edits are uncommitted at `/Users/samdonegan/Documents/Code/cf-articles-phase-b`
+on branch `codex/articles-b3-b4-strategy-budgets`, based on B1/B5 `a1280ef4`.
+New `backend/harness/goal_usage.py` and `backend/tests/test_goal_usage.py` meter
+admitted goal-scoped execution through the existing durable model reservations.
+Original goal budget and strategy metadata are immutable across resume. Status
+writers emit cumulative numeric usage; durable outbox retains it. Active time is
+conservative task elapsed/provider time; build/preview counters are step attempts.
+The original source pin/revision/binding is recorded in exhausted-rung evidence.
+The new usage flag defaults off. Latest focused CF run passed 122 tests. A missing
+B5 taxonomy-emission flag in the new delivery fixture was fixed; that lane passed
+62. Goal metadata/schema additions are not yet fully regression-tested.
+
+CF canonical and Docker-packaged `setup-delivery-v1.schema.json` now include optional
+strict `usage` and `strategy_exhausted`. Backend schema/pin has NOT been copied or
+updated yet. Commit/push the canonical CF revision first, then copy bytes and update
+backend `contracts/failure-codes.lock.json` source revision and schema digest; retain
+unchanged registry digests. Reaudit production emitters and remote immutable parity.
+CF full pytest, regression corpus and the real broker need rerunning when relevant.
+CF Python: `/Users/samdonegan/Documents/Code/content-factory/backend/.venv/bin/python`.
+Run in the CF worktree with dotenv disabled and synthetic environment; never load
+owner credentials. Existing settings have 3600 scaffold provider seconds/72 calls.
+
+Next: fix backend CI fixture seam; finish typed exhausted-pin acceptance and owned
+source fences; complete metering/terminal/cancellation tests; run broader safe lanes;
+commit/push CF, pin schema on backend, finish companion channel action UI; create
+and attach B3/B4 draft PRs with evidence. Then B6, B7, C, D, E, F and G without a
+per-step approval stop. Owner production/releases/migrations/provider credentials
+remain outside authorized agent scope. The active goal remains unfinished.
