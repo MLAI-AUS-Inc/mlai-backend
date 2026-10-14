@@ -789,6 +789,7 @@ def _charge_roo_points_for_article(request, *, context, payload: dict, goal_oper
         from .website_first_article_billing import generation_key
         try:
             payload["client_request_id"] = generation_key(goal_operation_id, context=context, user=request.user)
+            payload.update(first_article_goal_operation_id=str(goal_operation_id),first_article_goal_id=str(goal_operation_id))
         except WebsiteAuthorityError as exc:
             return None, None, None, Response(exc.as_dict(), status=exc.status)
     quote_error = (_quoted_price_response(request, cost_points=get_content_factory_article_cost_points(context.organization.domain))
@@ -6661,6 +6662,10 @@ def _check_and_merge_publish_pr(*, run, context):
         )
         pull, checks = _github_pull_checks_state(repo=repo, pr_number=pr_number, token=token)
         if pull.get("merged"):
+            if (run.run_request or {}).get("first_article_goal_operation_id"):
+                from .website_connections import validate_publish_merge_source,record_publish_merge_intent
+                validate_publish_merge_source(run,(pull.get("head") or {}).get("sha"),(pull.get("head") or {}).get("ref"))
+                record_publish_merge_intent(run,pull,pr_number,action="read",source_sha=(run.run_request or {}).get("expected_source_sha"))
             result = dict(run.result or {})
             result["merge_status"] = "merged"
             result["checks_status"] = "merged"
@@ -6683,9 +6688,25 @@ def _check_and_merge_publish_pr(*, run, context):
                 "detail": checks.get("message") or "Publish PR checks are not ready.",
                 "checks": checks,
             }
+        from .website_first_article import goal_auto_merge
+        source_run=_publish_source_run_for_child(run,context)
+        goal_merge=goal_auto_merge((source_run,run)) is True
         from .website_connections import validate_publish_merge_source, record_publish_merge_intent
-        validate_publish_merge_source(run, (pull.get("head") or {}).get("sha"), (pull.get("head") or {}).get("ref"))
-        record_publish_merge_intent(run, pull, pr_number)
+        if goal_merge:
+            validate_publish_merge_source(run,(pull.get("head") or {}).get("sha"),(pull.get("head") or {}).get("ref"))
+            record_publish_merge_intent(run,pull,pr_number)
+            from .website_setup_merge_policy import setup_merge_policy
+            policy=setup_merge_policy(config.website_connection,pull,token=token,checks=checks)
+            if policy["decision"]!="merge":
+                result=dict(run.result or {})
+                result.update(merge_status="manual_merge_required" if policy["decision"]=="needs_user" else "pending",
+                    merge_blocked_reason=policy["reason"],checks_status=checks.get("state"))
+                run.result=result;run.save(update_fields=["result","updated_at"])
+                return {"outcome":"manual_required" if policy["decision"]=="needs_user" else "pending",
+                    "detail":policy["reason"],"checks":checks}
+        if not goal_merge:
+            validate_publish_merge_source(run, (pull.get("head") or {}).get("sha"), (pull.get("head") or {}).get("ref"))
+            record_publish_merge_intent(run, pull, pr_number)
         merge_payload = {
             "sha": (pull.get("head") or {}).get("sha"),
             "commit_title": f"Publish Content Factory article from {run.run_id}",
@@ -6699,8 +6720,23 @@ def _check_and_merge_publish_pr(*, run, context):
             expected=(200, 201),
         )
     except (ArticleGenerationError, TokenRefreshError, ValueError, http_client.RequestException) as exc:
+        if (run.run_request or {}).get("first_article_goal_operation_id"):
+            from .website_setup_merge_policy import setup_merge_refusal
+            refusal=setup_merge_refusal(exc)
+            result=dict(run.result or {})
+            result.update(merge_status="manual_merge_required" if refusal["decision"]=="needs_user" else "pending",
+                merge_blocked_reason=refusal["reason"])
+            run.result=result;run.save(update_fields=["result","updated_at"])
+            return {"outcome":"manual_required" if refusal["decision"]=="needs_user" else "pending","detail":refusal["reason"],"checks":{}}
         return {"outcome": "error", "detail": str(exc), "checks": {}}
 
+    if merged.get("merged") is not True:
+        from .website_setup_merge_policy import setup_merge_refusal
+        refusal=setup_merge_refusal(merged.get("message"))
+        result=dict(run.result or {})
+        result.update(merge_status="manual_merge_required" if refusal["decision"]=="needs_user" else "pending",merge_blocked_reason=refusal["reason"])
+        run.result=result;run.save(update_fields=["result","updated_at"])
+        return {"outcome":"manual_required" if refusal["decision"]=="needs_user" else "pending","detail":refusal["reason"],"checks":checks}
     result = dict(run.result or {})
     result["merge_status"] = "merged"
     result["checks_status"] = "success"
@@ -8091,6 +8127,9 @@ def _publish_auto_merge_enabled(*runs):
 
     run_request is the durable home (remote status syncs replace result);
     result is checked too because annotations mirror the flag there."""
+    from .website_first_article import goal_auto_merge
+    goal_permission=goal_auto_merge(runs)
+    if goal_permission is not None:return goal_permission
     for run in runs:
         if not run:
             continue
@@ -8317,6 +8356,9 @@ def _ensure_local_publish_child_from_known_id(
         "delivery_mode": "publish_code",
         "delivery_mode_confirmed": True,
     }
+    original_request=_run_mapping(source_run.run_request)
+    for key in ("operation_id","operation_attempt","deletion_epoch","first_article_goal_operation_id","first_article_goal_id","goal_budget"):
+        if key in original_request:publish_payload[key]=original_request[key]
     # The worker creates this child by copying the source request. Mirror that
     # exact identity rather than adding today's optional consent fields.
     for key in CONNECTION_FIELDS:
@@ -8381,6 +8423,8 @@ def _sync_publish_child_from_control_response(
         ("delivery_mode", "publish_code"),
         ("delivery_mode_confirmed", True),
         ("review_source_run_id", review_source_run_id),
+        ("first_article_goal_operation_id",_run_mapping(remote_run.run_request).get("first_article_goal_operation_id")),
+        ("first_article_goal_id",_run_mapping(remote_run.run_request).get("first_article_goal_id")),
     ):
         if value not in (None, "") and publish_request.get(key) != value:
             publish_request[key] = value
@@ -18060,6 +18104,9 @@ def _record_article_publish_approval_receipt(run, *, actor_id, expected_identity
         current.run_request = run_request
         current.save(update_fields=["run_request", "updated_at"])
         run.run_request = run_request
+        if run_request.get("first_article_goal_operation_id") and run_request.get("website_connection_id"):
+            from .website_prepare import wake_prepare_after_commit
+            wake_prepare_after_commit(run_request["website_connection_id"])
     return True
 
 

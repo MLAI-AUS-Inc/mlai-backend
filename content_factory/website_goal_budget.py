@@ -120,7 +120,7 @@ def exhaustion(goal, *, now, action=None):
     """Stop before new work at exact limits; unknown measurements stay unknown."""
     if goal.get("usage_invalid"):
         return "invalid_usage_report"
-    if action in {"setup", "scan", "ci-attestation"} and goal.get("missing_usage_run_ids"):
+    if action in {"setup", "scan", "ci-attestation", "first-article-generation"} and goal.get("missing_usage_run_ids"):
         return "usage_unknown"
     started = goals.stamp(goal.get("started_at"))
     limits = {"wall": getattr(settings, "ARTICLES_GOAL_WALL_SECONDS", 172800),

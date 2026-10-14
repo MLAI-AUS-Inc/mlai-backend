@@ -86,3 +86,56 @@ full-chain tests. Also cover switching choices while the previous goal's credit
 is pending: new setup must wait automatically for that original credit instead
 of rolling back withdrawal of old publication consent or requiring a repeat click.
 This slice is a checkpoint, not a complete or releasable D1 implementation.
+
+
+Controller checkpoint (not D1 completion): website_first_article.py now journals
+its topic selection before the canonical generation call, reloads the held
+payment, and recovers lost responses from the durable dispatch outbox. It uses
+existing exact preview/quality identities and canonical approve/publish controls;
+mandatory or selected review produces the bounded review_draft owner action.
+The parent stores a goal/draft/source/approval-receipt binding before auto merge.
+Goal runs cannot fall through to legacy auto_publish or auto_merge flags without
+that binding. Publishing PRs use A11's policy and do not mark a rejected merge
+successful. A read-only observer handles an externally reviewed/merged exact PR.
+Owner review/merge states retain a quiet five-minute observer schedule.
+
+Article operations persist their original parent goal before initial billing and
+dispatch reservation, so cancellation also fences a child whose response was
+lost. Worker snapshots cannot introduce/change that parent identity. Publish
+children inherit the original operation and parent fields. Backend approval and
+worker observations wake the goal after commit. Article/source and publish runs
+are both included in cumulative usage; new generation cannot bypass missing
+usage reports, and the worker inherits remaining goal budgets.
+
+The live check reuses the exact saved-body HTTP verifier, restricted to this
+article's source/publish runs so an older queue cannot starve it. Completion
+requires bound approval, backend-owned PR intent/merge, current source, a fresh
+matching body hash/response digest, and a public non-root URL on this website.
+The final proof digests the exact receipt required by C5. Integration/source
+reverification still uses the existing C3/B6 path; no proof is minted from a
+merge message or preview URL.
+
+Changed choices now cancel the old goal and wait for its independently queued
+credit. The credit worker re-holds the successor's accepted quote in the same
+transaction, so the original funds are not exposed between those two allocations.
+Payment writes invalidate stale prepare leases rather than letting a waiting
+snapshot erase the new hold. This path has a focused original-credit/rehold test.
+
+Current evidence: 50 focused billing/topic/controller tests, 136 neighboring
+controller/approval/operation/wake cases, all 19 database-free workflow commands,
+model check with no changes, credential scan, 677 audited emissions and 355 fully
+assigned test modules (zero new omissions). These are component tests; controller
+transition tests fake canonical action calls. Do not substitute them for the
+required complete Ready-to-live provider-chain test or mark D1 complete.
+
+Next required work: author the real database-backed provider-chain test using
+OneClickBillingFixture/TransactionTestCase and existing PostgreSQL CI coverage.
+Run the actual planner, canonical generation, charge/outbox, canonical approval,
+merge and live verifier; fake only provider I/O and genuine record boundaries.
+Do not run local database/migration tests without the specific AGENTS.md approval.
+The existing CI schema/migration set stays unchanged. Add the new suite to its
+existing test lane and use a draft PR for CI feedback once the fixture is concrete.
+Also validate the own-merge C3/B6 source transition and all D1 failure/restart cases.
+The Chat companion adds review_draft decoding and 9-milestone completion/browser
+coverage on codex/articles-d1-first-article-goal; its full just ci is running.
+ARTICLES_FIRST_ARTICLE_GOAL_ENABLED remains false; no production work occurred.

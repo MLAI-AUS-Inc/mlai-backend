@@ -198,7 +198,7 @@ def start_prepare(config, *, expected=None, company_id=None, user=None, retry=Fa
 def _claim_prepare(identifier, now):
     with transaction.atomic():
         op = WebsiteConnectionOperation.objects.select_for_update().select_related("connection__organization").filter(
-            Q(state__in=["pending", "running"]) | Q(state="needs_user", receipt__user_action__id="deploy_site"),
+            Q(state__in=["pending", "running"]) | Q(state="needs_user", receipt__user_action__id__in=["deploy_site","merge_pr","review_draft"]),
             pk=getattr(identifier, "pk", identifier), action="prepare").first()
         if op is None or op.next_attempt_at and op.next_attempt_at > now:
             return None
@@ -682,6 +682,11 @@ def _advance_claimed_prepare(op, *, now, handlers):
     step = op.receipt.get("current_step") or "verify-access"
     try:
         context, config, user = _prepare_context(op)
+        from .website_first_article_billing import reservation_ready
+        if not reservation_ready(op):
+            op.state,op.next_attempt_at="pending",now+timedelta(minutes=1)
+            op.receipt.update(status="working",message="Completing the previous article credit.",user_action=None)
+            return _finish_prepare(op,now=now)
         journey = journey_for_context(context, config)
         journey = _cleanup_retry_journey(op, context, config, journey)
         from .website_goal_runner import owns_goal, goal_journey, ready
@@ -693,6 +698,11 @@ def _advance_claimed_prepare(op, *, now, handlers):
             op.state, op.next_attempt_at = "completed", None
             op.receipt.update(status="ready", message="Your website is ready for articles.", current_step="ready", user_action=None)
             return _finish_prepare(op, now=now)
+        if (journey.get("nextAction") or {}).get("id")=="first-article":
+            from .website_first_article import advance as advance_first_article
+            step="first-article"
+            advance_first_article(op,context,config,user=user,now=now)
+            return _finish_prepare(op,now=now)
         child_id = op.receipt.get("child_run_id")
         if (owns_goal(op) and getattr(op, "_goal_milestone", None) in {"access", "understood"}
                 and child_id == op.receipt.get("setup_run_id")):

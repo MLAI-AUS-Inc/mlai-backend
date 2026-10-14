@@ -148,4 +148,7 @@ def collect_proofs(op, context, config, journey, *, now):
                 evidence={"target_id": target.target_key, "contract_digest": contract_digest,
                           "ci_evidence_digest": ci.get("evidence_digest")},
                 at=proofs["previewed"]["at"])
+    if mapping(op.receipt.get("goal")).get("target")=="first_article_live":
+        from .website_first_article import proofs as article_proofs
+        proofs.update(article_proofs(op,context,config,source=source,now=now))
     return proofs, source

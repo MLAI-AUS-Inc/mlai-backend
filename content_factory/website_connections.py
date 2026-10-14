@@ -1215,10 +1215,12 @@ def validate_publish_merge_source(run, head_sha, branch):
         raise WebsiteAuthorityError("publish_commit_unverified", "The publication pull request changed or its exact commit has no applied ownership receipt. Review and regenerate it before merging.")
 
 
-def record_publish_merge_intent(run, pull, pr_number, *, action="merge"):
+def record_publish_merge_intent(run, pull, pr_number, *, action="merge", source_sha=None):
     """Save the approved PR identity before GitHub can emit its merge webhook."""
     from workflow_runs.models import ContentFactoryRun
     binding = scoped_run_contract(run)
+    if source_sha is not None and source_sha!=(run.run_request or {}).get("expected_source_sha"):
+        raise WebsiteAuthorityError("publish_commit_unverified","The original publication source changed.")
     head, base = pull.get("head") or {}, pull.get("base") or {}
     with authority_guard(binding, action=action) as website:
         for side in (head, base):
@@ -1230,7 +1232,7 @@ def record_publish_merge_intent(run, pull, pr_number, *, action="merge"):
             raise WebsiteAuthorityError("publish_commit_unverified", "The publication PR targets a different branch.")
         intent = {**contract_for(website), "run_id": run.run_id, "pr_number": pr_number,
             "github_repo": website.github_repo, "base_branch": website.branch,
-            "source_sha": website.verified_sha, "head_sha": head.get("sha"), "head_branch": head.get("ref"),
+            "source_sha": source_sha or website.verified_sha, "head_sha": head.get("sha"), "head_branch": head.get("ref"),
             "operation_id": binding.get("operation_id"), "recorded_at": timezone.now().isoformat()}
         locked = ContentFactoryRun.objects.select_for_update().get(pk=run.pk)
         locked.result = {**dict(locked.result or {}), "publish_merge_intent": intent}

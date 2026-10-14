@@ -69,7 +69,8 @@ def _approved_publish_child_continuation(connection, operation, run):
     return bool(
         known_child == run.run_id and run.organization_id == source.organization_id
         and run.github_repo == source.github_repo == connection.github_repo
-        and source_request.get("delivery_mode") == "review_draft"
+        and (source_request.get("delivery_mode") == "review_draft"
+            or source_request.get("delivery_mode")=="publish_code" and source_request.get("first_article_goal_operation_id"))
         and source_request.get("delivery_mode_confirmed") is True
         and source_request.get("operation_id") == str(operation.pk)
         and source_request.get("operation_attempt") == operation.payload.get("attempt", 1)
@@ -108,6 +109,20 @@ def validate_operation(connection, payload, *, worker_cleanup=False, restoration
     op = connection.operations.filter(pk=identifier).first()
     if op is None:
         raise WebsiteAuthorityError("website_operation_changed", "The operation does not belong to this website.")
+    parent_id=op.payload.get("first_article_goal_operation_id")
+    if parent_id and not (worker_cleanup or restoration or cancellation or cancellation_receipt):
+        from . import website_goal as goals
+        from .website_setup_consent import valid as valid_consent
+        parent=connection.operations.filter(pk=parent_id,action="prepare",generation=connection.generation).first()
+        goal=goals.mapping(getattr(parent,"receipt",None)).get("goal")
+        current_scope=goals.scope_for(connection,goals.mapping(getattr(parent,"payload",None)).get("company_id"))
+        latest=connection.operations.filter(action="prepare",generation=connection.generation).order_by("-created_at","-pk").first()
+        if (parent is None or latest is None or latest.pk!=parent.pk or parent.state not in {"pending","running","needs_user","completed"}
+            or not goals.valid_goal(goal,goals.mapping(goal).get("scope")) or not valid_consent(goal)
+            or goal.get("goal_id")!=str(parent.pk) or goal.get("target")!="first_article_live"
+            or any(type(goal["scope"].get(key)) is not type(value) or goal["scope"].get(key)!=value
+                for key,value in current_scope.items() if key!="configuration_revision")):
+            raise WebsiteAuthorityError("website_operation_cancelled","The original first-article goal is no longer active.")
     try:
         from .website_contract import positive_integer
         attempt = positive_integer(payload.get("operation_attempt", 1), name="operation_attempt")
@@ -223,6 +238,7 @@ def reserve_workflow_operation(connection, *, workflow, payload):
                 "payload": {"workflow": workflow, "attempt": 1, "deletion_epoch": deletion_epoch(connection), "request_digest": digest,
                     "installation_id": connection.installation_id, "repository_id": connection.repository_id,
                     "original_connection_generation": connection.generation,
+                    **({"first_article_goal_operation_id":payload["first_article_goal_operation_id"]} if payload.get("first_article_goal_operation_id") else {}),
                     "client_request_id": payload["client_request_id"]}})
         if (op.generation != connection.generation or op.payload.get("workflow") != workflow
                 or op.payload.get("request_digest") != digest or op.state in {"cancelled", "deleted", "denied"}):
@@ -367,7 +383,9 @@ def cancel_operation(config, *, data, idempotency_key):
         if op.action == "prepare":
             from .website_first_article_refunds import reserve_refund
             reserve_refund(op)
-        run_ids = list(ContentFactoryRun.objects.filter(organization=connection.organization, run_request__operation_id=str(op.pk)).values_list("run_id", flat=True))
+        from django.db.models import Q
+        run_ids = list(ContentFactoryRun.objects.filter(organization=connection.organization).filter(
+            Q(run_request__operation_id=str(op.pk)) | Q(run_request__first_article_goal_operation_id=str(op.pk))).values_list("run_id", flat=True))
         child_operations = []
         if op.action == "prepare":
             child_id = op.receipt.get("child_run_id") or op.payload.get("run_id")
@@ -418,6 +436,9 @@ def observe_workflow_status(run, payload=None):
     op.payload = {**op.payload, "resume_pending": False}
     op.receipt = {**(op.receipt or {}), "status": state, "run_id": run.run_id, "remote_outcome_unknown": False}
     op.save(update_fields=["state", "payload", "receipt", "updated_at"])
+    if op.payload.get("first_article_goal_operation_id"):
+        from .website_prepare import wake_prepare_after_commit
+        wake_prepare_after_commit(op.connection_id)
 
 
 def advance_workflow_attempt(run):

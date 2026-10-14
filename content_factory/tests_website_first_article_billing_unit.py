@@ -351,3 +351,37 @@ class FirstArticleBillingTests(SimpleTestCase):
             refunds.finish_purged_connection("website");candidate.delete.assert_not_called()
             outstanding.return_value=False
             refunds.finish_purged_connection("website");candidate.delete.assert_called_once()
+
+    def test_changed_choices_with_no_spare_points_wait_then_rehold_original_credit(self):
+        original=self.reserve();self.op.state="cancelled"
+        goal=goals.new_goal("replacement",scope(),target="first_article_live",now=self.now)
+        goal["consent"]=consent.seal(goal,answers(publish_mode="review"),user_id=4,now=self.now)
+        replacement=SimpleNamespace(pk="replacement",connection=self.connection,generation=3,action="prepare",
+            state="pending",payload={"company_id":"9","requested_by_user_id":"4"},receipt={"goal":goal},save=Mock())
+        self.assertIsNone(billing.reserve_or_wait(replacement,user=self.user,now=self.now,predecessor=self.op))
+        self.assertEqual(self.spend.call_count,1)
+        self.assertFalse(billing.reservation_ready(replacement))
+        self.assertEqual(self.op.state,"cancelled")
+        # The credit worker runs both allocations inside its database transaction.
+        billing._save(self.op,{**original,"status":"refunded"})
+        self.rows.return_value.select_related.return_value.filter.return_value.order_by.return_value.first.return_value=replacement
+        next_ledger=SimpleNamespace(**{**vars(self.ledger),"pk":12,"id":12,
+            "reference_id":billing.request_key(goal),"idempotency_key":"content_factory:charge:"+billing.request_key(goal)})
+        self.spend.return_value=(next_ledger,True)
+        from django.contrib.auth import get_user_model
+        with patch.object(get_user_model().objects,"filter") as users, \
+            patch("django.db.transaction.atomic",side_effect=lambda:nullcontext()), \
+            patch("content_factory.billing.get_content_factory_article_cost_points",return_value=99):
+            users.return_value.first.return_value=self.user
+            billing.reserve_replacement_after_credit(self.op,now=self.now)
+        self.assertTrue(billing.reservation_ready(replacement))
+        self.assertEqual(self.spend.call_count,2)
+        self.assertNotEqual(original["client_request_id"],replacement.receipt["first_article_billing"]["client_request_id"])
+        self.assertEqual(replacement.receipt["first_article_billing"]["cost_points"],6)
+        self.rows.return_value.select_related.return_value.filter.return_value.first.return_value=replacement
+        self.connection.operations.filter.return_value.order_by.return_value.first.return_value=replacement
+        self.ledger_rows.return_value.select_related.return_value.filter.return_value.first.return_value=next_ledger
+        payer,ledger,cost=billing.consume(replacement.pk,context=self.context,user=self.user,payload={
+            "client_request_id":billing.request_key(goal),"delivery_mode":"review_draft","website_connection_id":"website",
+            "connection_generation":3,"repository_id":"12","branch":"main","app_root":""})
+        self.assertEqual((payer,ledger,cost),(self.payer,next_ledger,6))

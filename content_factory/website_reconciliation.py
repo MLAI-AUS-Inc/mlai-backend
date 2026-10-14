@@ -367,7 +367,7 @@ def process_website_connection_operations(*, limit=20, now=None, connection_id=N
     notices_enabled=getattr(settings,"ARTICLES_GOAL_NOTIFICATIONS_ENABLED",False)
     due = WebsiteConnectionOperation.objects.filter(Q(next_attempt_at__isnull=True) | Q(next_attempt_at__lte=now),
         Q(state="pending") | Q(action="prepare", state="running") | Q(action=notice_action,state="running") | Q(action=refund_action,state="running") |
-        Q(action="prepare", state="needs_user", receipt__user_action__id="deploy_site")).exclude(action__in=["workflow"] if notices_enabled else ["workflow",notice_action])
+        Q(action="prepare", state="needs_user", receipt__user_action__id__in=["deploy_site","merge_pr","review_draft"])).exclude(action__in=["workflow"] if notices_enabled else ["workflow",notice_action])
     if connection_id:
         due = due.filter(connection_id=connection_id)
     ids = list(due.order_by("next_attempt_at").values_list("id", flat=True)[:limit])

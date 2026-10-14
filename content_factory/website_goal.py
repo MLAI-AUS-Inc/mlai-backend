@@ -9,7 +9,8 @@ import re
 MILESTONES = ("access", "understood", "integrated", "previewed", "approved", "merged", "live", "first_draft", "first_article_live")
 CLASSES = ("transient", "waiting", "repairable", "strategy", "needs_user", "unsupported")
 SCOPE_FIELDS = ("company_id", "organization_id", "connection_id", "connection_generation", "repository_id", "branch", "app_root", "configuration_revision", "deletion_epoch")
-ACTION_FOR = {"access": "verify-access", "understood": "scan", "integrated": "setup", "previewed": "ci-attestation", "approved": "setup", "merged": "merge", "live": "verify"}
+ACTION_FOR = {"access": "verify-access", "understood": "scan", "integrated": "setup", "previewed": "ci-attestation", "approved": "setup", "merged": "merge", "live": "verify",
+    "first_draft":"first-article","first_article_live":"first-article"}
 PROOF_KINDS = {
     "access": {"repository_access"}, "understood": {"repository_scan"},
     "integrated": {"verified_target", "setup_candidate"},

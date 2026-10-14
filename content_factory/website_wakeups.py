@@ -84,14 +84,15 @@ def matches(connection, op, signal, child=None):
         return bool(signal.get("installation_id"))
     saved = goals.mapping(getattr(child,"run_request",None))
     result = goals.mapping(getattr(child,"result",None))
+    intent=goals.mapping(result.get("publish_merge_intent"))
     owned = (child is not None and saved.get("website_connection_id")==str(connection.pk)
         and saved.get("connection_generation")==connection.generation and saved.get("repository_id")==connection.repository_id)
     if signal.get("branch") and signal["branch"] != connection.branch:
         return False
     if signal.get("milestone")=="merged":
-        return owned and result.get("pr_number")==signal.get("pr_number") and result.get("branch_commit_sha")==signal.get("sha")
+        return owned and (result.get("pr_number") or intent.get("pr_number"))==signal.get("pr_number") and (result.get("branch_commit_sha") or intent.get("head_sha"))==signal.get("sha")
     current = goals.mapping(goals.mapping(op.receipt).get("goal")).get("current_source_sha") or connection.verified_sha
-    return signal.get("sha")==current or owned and signal.get("sha")==result.get("branch_commit_sha")
+    return signal.get("sha")==current or owned and signal.get("sha")==(result.get("branch_commit_sha") or intent.get("head_sha"))
 
 
 def queue_wake(connection_id, *, signal, expected_generation=None):
@@ -213,7 +214,7 @@ def wake_from_event(event, payload):
         op=connection.operations.filter(generation=connection.generation,action="prepare").order_by("-created_at","-pk").first()
         if not op:
             continue
-        child_id=goals.mapping(op.receipt).get("setup_run_id")
+        child_id=goals.mapping(op.receipt).get("first_article_publish_run_id") or goals.mapping(op.receipt).get("setup_run_id")
         child=ContentFactoryRun.objects.filter(run_id=child_id,organization_id=connection.organization_id).first() if child_id else None
         if matches(connection,op,signal,child) and queue_wake(connection.pk,signal=signal,expected_generation=connection.generation):
             count+=1

@@ -14,7 +14,7 @@ def owns_goal(op):
 def start_goal(current, *, company_id, user, retry, target, now, force_successor=False, consent=None):
     """Select/create one current goal while the caller holds the connection lock."""
     from .website_models import WebsiteConnectionOperation
-    from .website_first_article_billing import reserve
+    from .website_first_article_billing import reserve_or_wait
     scope = goals.scope_for(current, company_id)
     latest = current.operations.select_for_update().filter(generation=current.generation, action="prepare").order_by("-created_at", "-pk").first()
     goal = goals.mapping(getattr(latest, "receipt", None)).get("goal")
@@ -39,7 +39,7 @@ def start_goal(current, *, company_id, user, retry, target, now, force_successor
             latest.state, latest.next_attempt_at = "pending", now
             latest.receipt = {**latest.receipt, "status": "working", "user_action": None, "dispatch_outcome": "replayed"}
             latest.save(update_fields=["state", "next_attempt_at", "receipt", "updated_at"])
-        reserve(latest, user=user, now=now)
+        reserve_or_wait(latest, user=user, now=now)
         return latest
     if latest and latest.state not in TERMINAL and str(latest.payload.get("company_id")) != str(company_id):
         raise WebsiteAuthorityError("website_operation_changed", "A current website goal belongs to another selected company.")
@@ -61,7 +61,7 @@ def start_goal(current, *, company_id, user, retry, target, now, force_successor
         if latest.next_attempt_at is None and latest.state in {"pending", "running"}:
             latest.next_attempt_at = now
         latest.save(update_fields=["receipt", "next_attempt_at", "updated_at"])
-        reserve(latest, user=user, now=now)
+        reserve_or_wait(latest, user=user, now=now)
         return latest
     if latest and latest.state not in TERMINAL:
         from .website_prepare import _cancel_prepare_child
@@ -89,7 +89,7 @@ def start_goal(current, *, company_id, user, retry, target, now, force_successor
         op.save(update_fields=["receipt", "updated_at"])
     elif not goals.valid_goal(goals.mapping(op.receipt).get("goal"), scope):
         raise WebsiteAuthorityError("website_operation_changed", "The saved website goal has changed. Refresh its current status.")
-    reserve(op, user=user, now=now)
+    reserve_or_wait(op, user=user, now=now,predecessor=latest)
     return op
 
 
@@ -309,7 +309,7 @@ def account_child_usage(op, goal):
     from . import website_goal_budget as budget
     result = goal
     op._goal_has_active_child = False
-    identifiers = set(result.get("child_run_history") or []) | {value for key in ("child_run_id", "scan_run_id", "setup_run_id")
+    identifiers = set(result.get("child_run_history") or []) | {value for key in ("child_run_id", "scan_run_id", "setup_run_id", "first_article_run_id", "first_article_publish_run_id")
         if isinstance(value := goals.mapping(op.receipt).get(key), str) and value}
     for identifier in sorted(identifiers):
         child = ContentFactoryRun.objects.filter(run_id=identifier, organization_id=op.connection.organization_id).first()
@@ -361,7 +361,7 @@ def retry_goal_action(op, goal, *, now, occurrence, step=None):
 def retain_child_references(goal, receipt):
     """Preserve cumulative metering references before replacing a child attempt."""
     history=list(goal.get("child_run_history") or [])
-    for key in ("child_run_id","scan_run_id","setup_run_id","hosted_verification_run_id"):
+    for key in ("child_run_id","scan_run_id","setup_run_id","hosted_verification_run_id","first_article_run_id","first_article_publish_run_id"):
         identifier=goals.mapping(receipt).get(key)
         if isinstance(identifier,str) and identifier not in history:
             if len(history)>=64:

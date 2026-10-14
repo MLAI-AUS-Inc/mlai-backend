@@ -77,13 +77,14 @@ def _reservation(op, goal):
 def _save(op, receipt):
     receipt = {**receipt, "digest": goals.digest({key: value for key, value in receipt.items() if key != "digest"})}
     op.receipt = {**op.receipt, "first_article_billing": receipt}
-    # The caller holds the original connection/goal locks. Do not invalidate an
-    # in-flight prepare claim merely by attaching its payment receipt.
-    op.save(update_fields=["receipt"])
+    # A credit worker can attach a successor's hold while a prepare claim is
+    # waiting. Invalidate that snapshot so it cannot erase the new held receipt.
+    # Ordinary generation consumption never mutates this parent receipt.
+    op.save(update_fields=["receipt","updated_at"])
     return receipt
 
 
-def reserve(op, *, user, now):
+def reserve(op, *, user, now, accepted_quote=False):
     """Debit the accepted price inside the goal acceptance transaction, once."""
     goal = goals.mapping(op.receipt).get("goal")
     if goals.mapping(goal).get("target") != "first_article_live" or not enabled(op.connection):
@@ -98,7 +99,7 @@ def reserve(op, *, user, now):
     from roo.services import PointsService
 
     cost = goal["consent"]["answers"]["billing"]["expected_points"]
-    if cost != get_content_factory_article_cost_points(op.connection.organization.domain):
+    if not accepted_quote and cost != get_content_factory_article_cost_points(op.connection.organization.domain):
         raise WebsiteAuthorityError("roo_points_required", "Review the current first-article price before starting.", status=409)
     payer = billing_user_for_organization(op.connection.organization, user)
     key = request_key(goal)
@@ -116,6 +117,87 @@ def reserve(op, *, user, now):
     return _save(op, {"version": 1, "binding": _binding(goal), "client_request_id": key,
         "payer_user_id": str(payer.pk), "requester_user_id": str(user.pk), "cost_points": cost,
         "spend_ledger_id": str(ledger.pk) if ledger else None, "reserved_at": now.isoformat(), "status": "reserved"})
+
+
+def reserve_or_wait(op, *, user, now, predecessor=None):
+    """Withdraw old consent immediately while its held payment funds a successor."""
+    goal=goals.mapping(op.receipt.get("goal"))
+    if not enabled(op.connection) or goal.get("target")!="first_article_live" or op.receipt.get("first_article_billing"):
+        return reserve(op,user=user,now=now)
+    if op.receipt.get("first_article_billing_wait"):
+        return None
+    if predecessor is not None:
+        previous=goals.mapping(predecessor.receipt.get("first_article_billing"))
+        inherited=goals.mapping(predecessor.receipt.get("first_article_billing_wait"))
+        from .company_billing import billing_user_for_organization
+        payer=billing_user_for_organization(op.connection.organization,user)
+        if inherited:
+            waiting=deepcopy(inherited)
+        elif (predecessor.state=="cancelled" and previous.get("status")=="reserved"
+            and previous.get("payer_user_id")==str(payer.pk)
+            and type(previous.get("cost_points")) is int
+            and previous["cost_points"]>=goal["consent"]["answers"]["billing"]["expected_points"]
+            and not any(item["name"]=="first_draft" and item["state"]=="passed"
+                for item in goals.mapping(predecessor.receipt.get("goal")).get("milestones",[]))):
+            waiting={"predecessor_operation_id":str(predecessor.pk),"client_request_id":previous["client_request_id"],
+                "payer_user_id":previous["payer_user_id"]}
+        else:
+            waiting=None
+        if waiting:
+            op.receipt={**op.receipt,"first_article_billing_wait":waiting}
+            op.save(update_fields=["receipt"])
+            return None
+    return reserve(op,user=user,now=now)
+
+
+def reserve_replacement_after_credit(parent, *, now):
+    """Credit and re-hold in one transaction, without exposing the funds between goals."""
+    from .website_models import WebsiteConnectionOperation
+    if not enabled(parent.connection):
+        return
+    replacement=WebsiteConnectionOperation.objects.select_for_update().select_related("connection__organization").filter(
+        connection_id=parent.connection.pk,generation=parent.connection.generation,action="prepare").order_by("-created_at","-pk").first()
+    if replacement is None or replacement.state not in ACTIVE or replacement.pk==parent.pk:
+        return
+    wait=goals.mapping(replacement.receipt.get("first_article_billing_wait"))
+    if wait.get("predecessor_operation_id")!=str(parent.pk):
+        return
+    previous=_reservation(parent,goals.mapping(parent.receipt.get("goal")))
+    if (previous["status"]!="refunded" or wait.get("client_request_id")!=previous["client_request_id"]
+        or wait.get("payer_user_id")!=previous["payer_user_id"]):
+        _deny()
+    from django.contrib.auth import get_user_model
+    user=get_user_model().objects.filter(pk=replacement.payload.get("requested_by_user_id"),is_active=True).first()
+    if user is None:
+        return
+    # Recheck the same approved payer and quote before spending the just-credited
+    # allocation. The initial owner transaction validated this accepted quote.
+    from .company_billing import billing_user_for_organization
+    from django.db import transaction
+    try:
+        with transaction.atomic():
+            payer=billing_user_for_organization(replacement.connection.organization,user)
+            goal=_goal(replacement,user=user)
+            if (str(payer.pk)!=previous["payer_user_id"]
+                or goal["consent"]["answers"]["billing"]["expected_points"]>previous["cost_points"]):
+                _deny()
+            reserve(replacement,user=user,now=now,accepted_quote=True)
+    except WebsiteAuthorityError:
+        replacement.receipt={**replacement.receipt,"first_article_billing_wait_error":"roo_points_required"}
+        replacement.save(update_fields=["receipt","updated_at"])
+
+
+def reservation_ready(op):
+    """A replacement waits quietly for its independently durable credit/hold."""
+    if not enabled(op.connection) or goals.mapping(op.receipt.get("goal")).get("target")!="first_article_live":
+        return True
+    if op.receipt.get("first_article_billing"):
+        return True
+    if op.receipt.get("first_article_billing_wait_error"):
+        raise WebsiteAuthorityError("roo_points_required","Review the billing account for this article goal.",status=402)
+    if not op.receipt.get("first_article_billing_wait"):
+        _deny()
+    return False
 
 
 def _original_spend(receipt, *, allow_refunded=False):

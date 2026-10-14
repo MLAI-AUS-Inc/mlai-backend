@@ -422,3 +422,21 @@ old credit is pending before opening a D1 PR. All rollout flags remain false.
 C5 Chat companion is draft PR472 at ab05eff4514ed03e80fdbd89f6176c50478b6c30.
 Backend PR1023 gained CI trigger commit293181f0 because its C4 base is a feat
 branch; checks are now running. CF986 e0e9726e checks are green; deployment skipped.
+
+
+D1 controller checkpoint, still incomplete: first-article action/evidence readers,
+topic ranking against approved profiles/offers, original held-price dispatch,
+canonical approval/publish handoff, goal-bound merge opt-in, A11 publish policy,
+read-only manual-merge observation, scoped live-body evidence and C5 receipt.
+Parent identity is recorded before workflow reservation and protected against
+worker introduction/replacement. Cancellation can fence lost queue responses.
+Review/merge owner waits have quiet observer schedules. Source/publish usage is
+included; remaining goal budget is passed to generation. Changed choices wait for
+an atomic old-credit/new-hold allocation, preserving consent withdrawal.
+50 focused tests and 136 neighboring cases pass; all 19 database-free workflow
+commands pass, model drift is empty, credential/emitter(677)/assignment(355 full)
+checks pass. Full canonical Ready-to-live chain is STILL REQUIRED: use the existing
+PostgreSQL CI test lane with OneClickBillingFixture/TransactionTestCase, no new
+migration or local database run. Keep D1 in progress, flags off, then finish D2/D3,
+E/F/G. Chat branch codex/articles-d1-first-article-goal: 10 status tests and20 browser
+cases pass; full just ci running at /tmp/articles-d1-chat-just-ci.log.

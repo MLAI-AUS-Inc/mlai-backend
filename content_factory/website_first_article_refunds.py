@@ -53,6 +53,9 @@ def advance_refund(identifier, *, now=None):
             receipt = release(parent, reason="Articles goal ended before publication.")
             if receipt is None:
                 raise WebsiteAuthorityError("website_operation_changed", "The original article refund receipt is unavailable.")
+            from .website_first_article_billing import reserve_replacement_after_credit
+            if receipt["status"]=="refunded":
+                reserve_replacement_after_credit(parent,now=now)
             row.state, row.next_attempt_at = "completed", None
             row.receipt = {"status":"credited" if receipt["status"] == "refunded" else "retained_after_draft",
                 "goal_operation_id":str(parent.pk), "completed_at":now.isoformat()}
