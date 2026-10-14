@@ -12,13 +12,14 @@ Source plan: the 13 October one-shot runbook in the attached files and
 | Work | Current state |
 | --- | --- |
 | B1 and initial B5 | Implemented, backend #1013 and CF #982; all final-head CI passed; flags off |
-| B2 | Implementation in progress on backend #1014, stacked on #1013; Chat worktree created |
-| B3, B4, B6, B7 | Pending |
-| C1 through C5 | Pending |
-| D1 through D3 | Pending |
+| B2 | Implemented in backend #1014 and Chat #465; draft stack, rollout off |
+| B3, B4, B6, B7 | Implemented in backend #1016–#1018, CF #985 and Chat #468; draft stack, rollout off |
+| C1 through C5 | Implemented in backend #1019–#1023, CF #986, Chat #470–#472; final CI green, rollout off |
+| D1 | Backend #1024 under real-record chain CI; Chat #473 green; CF #988 handoff fix with 161 focused tests, full CI pending |
+| D2, D3 | Pending; D2 recovery boundaries inspected |
 | E1 through E5 and retained v2 channel/CMS/hosted work | Pending; fixture/provider owner inputs may be needed |
 | F1 through F3 | Pending |
-| G1 through G5 | Pending; owner operational steps remain separate |
+| G1 through G6 | Pending; owner operational steps remain separate |
 
 B2 backend worktree:
 `/Users/samdonegan/Documents/Code/mlai-backend/.codex-worktrees/articles-b2-design`,

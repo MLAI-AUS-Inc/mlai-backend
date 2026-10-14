@@ -1,7 +1,6 @@
 # D1: continue a site goal through the first live article
 
-14 October 2026. Continuous implementation authorisation applies. D1 is active. The first billing/refund slice is implemented locally; the
-Ready-to-live runner is still required. ARTICLES_FIRST_ARTICLE_GOAL_ENABLED remains false. No migration
+14 October 2026, updated 15 October. Continuous implementation authorisation applies. D1 is active. The billing/refund and Ready-to-live runner changes are in backend draft #1024; the complete provider-chain test is under CI validation. ARTICLES_FIRST_ARTICLE_GOAL_ENABLED remains false. No migration
 or real charge, generation, merge, deployment or customer operation is authorised
 by this note.
 
@@ -151,3 +150,25 @@ A draft PR is a CI checkpoint for this fixture, not a claim that D1 is finished.
 Extend this actual fixture through canonical approval, merge, source
 reverification and HTTP live-body proof before D1 completion. All rollout flags
 remain false. Backend and Chat C5 PR checks are now fully green (deploy skipped).
+
+15 October checkpoint: the PostgreSQL fixture now exercises canonical approval,
+PR creation, merge policy, protected merge intent, authenticated source advancement,
+live native verification, a delayed article body, final proof planning, and the
+queued C5 notice's public article URL. Content Factory, GitHub and public HTTP are
+simulated; wallet, goal, operation, dispatch, approval and publication records use
+the real disposable CI database. The fixture starts from an already verified
+Ready deployment. It has not run locally and does not certify a full zoo flow.
+
+CI exposed two implementation defects: locking a nullable ledger/user outer join,
+and the billing-derived free_domain field changing an already reserved workflow
+digest before dispatch. The ledger lock is scoped to the ledger row; payer checks
+remain. Billing metadata is excluded from the execution digest. Real generation
+recovery and atomic credit/re-hold tests now pass in PostgreSQL. The full chain is
+still being validated at current head. Its test runs in a separate early step in
+the existing PostgreSQL job so failures surface before migration regressions.
+
+Content Factory companion #988 preserves operation/source/goal budget and paired
+first-article parent identifiers when the real queue creates durable pipeline
+requests. Its regression failed before the fix; 85 queue/dispatch/budget and 76
+connection/operation/publication recovery cases pass locally, with full CI pending.
+Chat companion #473 is green, including full local just ci and remote checks.
