@@ -3,7 +3,9 @@
 Do not run this locally without the AGENTS.md migration approval. No migration
 files are added; the existing test database schema is used unchanged.
 """
+from contextlib import ExitStack
 from copy import deepcopy
+import socket
 from types import SimpleNamespace
 from unittest.mock import Mock,patch
 
@@ -20,9 +22,17 @@ from .activation import article_capabilities
 from .dispatch_models import ContentFactoryDispatchOutbox
 from .tests_one_click_database import OneClickBillingFixture
 from .tests_website_setup_consent_unit import answers
-from .website_contract import WebsiteAuthorityError
+from .website_contract import WebsiteAuthorityError,evidence_digest
 from .website_first_article_refunds import advance_refund
-from .website_models import WebsiteConnectionOperation
+from .website_models import WebsiteConnectionOperation,WebsiteConnectionTarget,WebsiteRepositoryMutation,WebsiteScanSnapshot
+
+
+def provider_response(payload=None, *, status=200, body=b"{}"):
+    """Only the external HTTP transport is simulated; validators remain real."""
+    response=Mock(status_code=status,content=body,headers={})
+    response.json.return_value=deepcopy(payload)
+    response.iter_content.side_effect=lambda *_args,**_kwargs:iter([body])
+    return response
 
 
 class FirstArticleProviderChainTests(OneClickBillingFixture,TransactionTestCase):
@@ -62,6 +72,187 @@ class FirstArticleProviderChainTests(OneClickBillingFixture,TransactionTestCase)
             account={"owned":True,"saved":True},
             evidence={"verified":True,"publishingVerified":True,"branch":"main","sha":self.website.verified_sha},
             repository_access={"verified":True,"writable":True,"branch":"main","sha":self.website.verified_sha})
+
+    def advance_article(self,op):
+        op.refresh_from_db()
+        op.next_attempt_at=timezone.now();op.save(update_fields=["next_attempt_at"])
+        claimed=prepare._claim_prepare(op.pk,timezone.now())
+        self.assertIsNotNone(claimed)
+        article.advance(claimed,self.context,self.config,user=self.requester,now=timezone.now())
+        self.assertIsNotNone(prepare._finish_prepare(claimed,now=timezone.now()))
+        op.refresh_from_db()
+
+    def native_target(self):
+        contract={"target_id":"native","contract_digest":"c"*64,"route_path":"/articles",
+            "route_template":"/articles/{slug}","live_marker":{"kind":"artifact_digest","schema_version":1,
+                "meta_name":"mlai-artifact-digest","value":"f"*64}}
+        WebsiteConnectionTarget.objects.create(connection=self.website,generation=self.website.generation,
+            target_key="native",adapter="react_article_system",source_sha=self.website.verified_sha,
+            verified_at=timezone.now(),contract=contract,capabilities={"publishingReady":True})
+        self.config.default_publish_target_id="native";self.config.publish_targets=[contract]
+        self.config.save(update_fields=["default_publish_target_id","publish_targets"])
+
+    def test_ready_goal_uses_canonical_approval_merge_reverification_and_exact_live_body(self):
+        """Ready is the precondition; everything through live uses owning records."""
+        from django.core.cache import cache
+        from .article_publish_approval import article_publish_approval_receipt_matches
+        from .models import ArticlePublishStatus,WrittenArticle
+        from .website_goal_evidence import collect_proofs
+        from .website_verification import BOOLEAN_PROOFS,record_ci_attestation,validated_ci_identity,verify_live_deployment
+
+        cache.delete(f"vibe-marketing:auto-merge:first-publish")
+        cache.delete(f"article-publish-status:sitemap:{self.org.domain}")
+        self.native_target()
+        op=self.start();self.ready(op)
+        public_url=f"https://{self.org.domain}/articles/first"
+        expected_html=("<article><h1>Evidence of tested work</h1><p>"
+            "A reliable article workflow carries the original customer choices through every stage. "
+            "Its recorded evidence proves the draft was reviewed, the correct repository commit was "
+            "merged, and the same complete content was served from the expected public address."
+            "</p></article>")
+        remote={"merged":False,"merge_calls":0,"posts":[]}
+        repo={"id":self.website.repository_id,"full_name":self.website.github_repo}
+
+        def pull():
+            return {"number":42,"state":"closed" if remote["merged"] else "open","merged":remote["merged"],
+                "html_url":"https://github.com/example/site/pull/42",
+                "head":{"sha":"d"*40,"ref":"cf/first-article","repo":repo},
+                "base":{"ref":"main","repo":repo},"merge_commit_sha":"e"*40 if remote["merged"] else None,
+                "merged_at":timezone.now().isoformat() if remote["merged"] else None}
+
+        def worker_post(url,**kwargs):
+            self.assertFalse(connection.in_atomic_block)
+            remote["posts"].append(url)
+            if url.endswith("/api/runs/article"):
+                self.assertEqual(kwargs["json"]["topic_candidate_id"],"best")
+                self.assertEqual(kwargs["json"]["delivery_mode"],"publish_code")
+                return provider_response({"run_id":"first-article","status":"queued"},status=202)
+            if url.endswith("/first-article/approve"):
+                return provider_response({"run_id":"first-article","status":"completed","approval_state":"approved"})
+            if url.endswith("/first-article/publish-pr"):
+                source=ContentFactoryRun.objects.get(run_id="first-article")
+                WebsiteRepositoryMutation.objects.create(connection=self.website,generation=self.website.generation,
+                    operation_id="synthetic-first-publication",run_id="first-publish",base_sha="a"*40,head_sha="d"*40,
+                    branch="cf/first-article",patch_digest="d"*64,status="applied",files=[])
+                return provider_response({"run_id":"first-publish","status":"completed","source_run_id":source.run_id,
+                    "result":{"pr_number":42,"pr_url":"https://github.com/example/site/pull/42",
+                        "branch_commit_sha":"d"*40,"branch":"cf/first-article","slug":"first"},
+                    "slug":"first","route_path":"/articles/first"},status=202)
+            self.fail(f"Unexpected worker action: {url}")
+
+        def github_request(method,url,**kwargs):
+            self.assertFalse(connection.in_atomic_block)
+            if method=="GET" and url.endswith("/pulls/42"):return provider_response(pull())
+            if method=="GET" and url.endswith("/status"):return provider_response({"state":"success","total_count":0})
+            if method=="GET" and url.endswith("/check-runs"):return provider_response({"check_runs":[]})
+            if method=="PUT" and url.endswith("/pulls/42/merge"):
+                self.assertEqual(kwargs["json"]["sha"],"d"*40)
+                remote["merge_calls"]+=1;remote["merged"]=True
+                return provider_response({"merged":True,"sha":"e"*40})
+            self.fail(f"Unexpected GitHub write/read: {method} {url}")
+
+        def provider_get(url,**kwargs):
+            self.assertFalse(connection.in_atomic_block)
+            if "/rules/branches/" in url:return provider_response([])
+            if url.endswith("/protection"):return provider_response({},status=403)
+            if "/compare/" in url:
+                self.assertTrue(url.endswith("d"*40+"..."+"e"*40))
+                return provider_response({"status":"ahead"})
+            if url.endswith("/pulls/42"):return provider_response(pull())
+            if url.endswith("/sitemap.xml"):
+                return provider_response(body=f"<urlset><url><loc>{public_url}</loc></url></urlset>".encode())
+            if url==public_url:
+                live=f'<html><head><link rel="canonical" href="{public_url}"></head><body>{expected_html}</body></html>'
+                return provider_response(body=live.encode())
+            self.fail(f"Unexpected public/provider read: {url}")
+
+        with ExitStack() as stack:
+            stack.enter_context(patch.object(views,"_topic_selection_candidate_pool",return_value=[{
+                "id":"best","title":"Evidence of tested work","keyword":"tested work","opportunityScore":700}]))
+            stack.enter_context(patch.object(views,"_article_capabilities_for_context",side_effect=self.capabilities))
+            stack.enter_context(patch.object(views,"analytics_config_for_content_factory",return_value={}))
+            stack.enter_context(patch.object(views,"_github_app_token_payload_for_domain",return_value={"github_token":"synthetic"}))
+            stack.enter_context(patch("integrations.services.github_app.create_installation_access_token",return_value=SimpleNamespace(token="synthetic")))
+            stack.enter_context(patch("content_factory.article_publish_status._github_read_token",return_value="synthetic"))
+            stack.enter_context(patch.object(views.http_client,"post",side_effect=worker_post))
+            stack.enter_context(patch.object(views.http_client,"request",side_effect=github_request))
+            stack.enter_context(patch.object(views.http_client,"get",side_effect=provider_get))
+            stack.enter_context(patch.object(views.http_client,"delete",return_value=provider_response()))
+            stack.enter_context(patch("content_factory.article_live_evidence.socket.getaddrinfo",return_value=[
+                (socket.AF_INET,socket.SOCK_STREAM,6,"",("93.184.216.34",443))]))
+            self.advance_article(op)
+            run=ContentFactoryRun.objects.get(run_id="first-article")
+            # This is the simulated Content Factory checkpoint. Approval and
+            # merge receipts below must be written by their canonical handlers.
+            run.status="completed"
+            run.result={"generation":1,"livePreview":{"previewUrl":"https://preview.test/article","exactRender":True,
+                "proof":{"commitSha":"b"*40},"resume_generation":0},
+                "article_preview_quality":{"status":"passed","preview_url":"https://preview.test/article",
+                    "inputs_sha256":"c"*64,"resume_generation":0},"slug":"first",
+                "content_package":{"slug":"first","article_html":expected_html}}
+            run.save(update_fields=["status","result","updated_at"])
+            written=WrittenArticle.objects.create(organization=self.org,title="Evidence of tested work",slug="first",
+                category="Testing",primary_keyword="tested work",source_run_id=run.run_id)
+            self.advance_article(op)  # canonical approval, then canonical PR creation
+            run.refresh_from_db()
+            self.assertTrue(article_publish_approval_receipt_matches(run))
+            self.assertTrue(article.approval_matches(op,run))
+            self.advance_article(op)  # real merge policy and protected merge intent
+            child=ContentFactoryRun.objects.get(run_id="first-publish")
+            self.assertEqual(child.result["merge_response"],{"merged":True,"sha":"e"*40})
+            self.assertEqual(remote["merge_calls"],1)
+            self.assertNotIn("first_article_live_receipt",op.receipt)
+            self.assertEqual(op.receipt["goal"]["current_source_sha"],"a"*40)
+            self.assertFalse(goals.complete(op.receipt["goal"]))
+
+            body={**{key:run.run_request[key] for key in ("website_connection_id","connection_generation",
+                "repository_id","operation_id","operation_attempt","deletion_epoch")},"schema_version":2,
+                "github_repo":self.website.github_repo,"source_sha":"e"*40,"target_id":"native",
+                "adapter_id":"react_article_system","adapter_version":1,"contract_digest":"c"*64,
+                "source_tree_sha":"e"*40,"environment_fingerprint":"f"*64,"lockfile_digests":{},"artifact_digest":"f"*64,
+                "baseline_build":"passed","patched_build":"passed",**{key:True for key in BOOLEAN_PROOFS},
+                "verified_routes":{"listing":"/articles","detail":"/articles/first","unknown_slug":"/articles/not-a-real-article"}}
+            proof={**body,"evidence_digest":evidence_digest(body)}
+            def ci_provider(website,requested):
+                self.assertFalse(connection.in_atomic_block)
+                return validated_ci_identity(requested,proof)
+            with override_settings(ARTICLES_WEBSITE_EVENT_WAKES_ENABLED=True,ARTICLES_DEPLOYMENT_DETECTION_ENABLED=False), \
+                patch("content_factory.website_wakeups.submit_immediate"), \
+                patch("content_factory.website_verification.read_ci_proof",side_effect=ci_provider), \
+                patch("content_factory.website_live_fetch.fetch_live_route",return_value=(b"",{"x-mlai-artifact-digest":"f"*64})):
+                record_ci_attestation({**proof,"run_id":child.run_id})
+                self.website.refresh_from_db();self.config.refresh_from_db();op.refresh_from_db()
+                self.assertEqual(op.receipt["goal"]["current_source_sha"],"e"*40)
+                self.assertEqual(op.receipt["first_article_billing"]["spend_ledger_id"],str(Ledger.objects.get(kind="SPEND").pk))
+                verify_live_deployment(self.config,data=proof)
+            WebsiteScanSnapshot.objects.create(connection=self.website,generation=self.website.generation,
+                run_id="post-merge-scan",source_sha="e"*40,fingerprint="f"*64,detector_version="synthetic_worker",
+                evidence={"repository_inventory":{"discovery_complete":True}})
+            self.advance_article(op)  # actual HTTP capture and exact saved-body comparison
+            self.assertEqual(op.receipt["first_article_live_receipt"]["public_url"],public_url)
+            written.refresh_from_db();self.assertEqual(written.publish_status,ArticlePublishStatus.LIVE)
+            journey={"connectionId":str(self.website.pk),"connectionGeneration":self.website.generation,
+                "prerequisites":{"account":{"status":"complete"},"repository":{"status":"complete"}},
+                "repository":{"observedSourceSha":"e"*40},"capabilities":self.capabilities(),
+                "githubPermissions":{"contents":True,"pull_requests":True,"workflows":True,"checks":True,"statuses":True}}
+            proofs,source=collect_proofs(op,self.context,self.config,journey,now=timezone.now())
+            self.assertEqual(set(proofs),set(goals.MILESTONES))
+            self.assertEqual(source,"e"*40)
+            # Finish through the actual prepare runner and canonical proof
+            # planner; the substituted journey is a provider-read projection.
+            op.next_attempt_at=timezone.now();op.save(update_fields=["next_attempt_at"])
+            with patch.object(prepare,"journey_for_context",return_value=journey):
+                finished=prepare.advance_prepare(op.pk,now=timezone.now())
+                self.assertIsNotNone(finished)
+                self.assertEqual(finished.state,"completed")
+        op.refresh_from_db()
+        self.assertTrue(goals.complete(op.receipt["goal"]))
+        self.assertEqual(op.receipt["goal"]["completed_source_sha"],"e"*40)
+        self.assertEqual(Ledger.objects.filter(kind="SPEND",source="CONTENT_FACTORY").count(),1)
+        self.assertFalse(Ledger.objects.filter(kind="REFUND",source="CONTENT_FACTORY").exists())
+        self.assertEqual(self.balance(self.payer),14_000_000)
+        self.assertEqual(remote["posts"],["https://synthetic-worker.test/api/runs/article",
+            "https://synthetic-worker.test/api/runs/first-article/approve","https://synthetic-worker.test/api/runs/first-article/publish-pr"])
 
     def test_canonical_generation_reserves_once_and_lost_response_reuses_owned_records(self):
         op=self.start();self.ready(op)
