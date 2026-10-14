@@ -64,3 +64,5 @@ Clients can group active keys by the returned `public_id` in mention pickers,
 preferring a key already in the current channel. Display names and self-published
 profile metadata do not prove that two keys belong to the same person. This is
 presentation metadata; relay permission checks still authorize every action.
+
+Hosted staging enables the same strict versioned PATCH contract through its independent account session and exact browser/native transport. Default-auth ordinary backend endpoints use that staging session too; their domain permissions are unchanged.

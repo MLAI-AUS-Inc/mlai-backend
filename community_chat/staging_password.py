@@ -89,12 +89,10 @@ def require_credential_transport(request):
 
 class StagingAccountAuthentication(CommunityChatAccountAuthentication):
     def authenticate(self,request):
-        result=super().authenticate(request)
-        if result:require_credential_transport(request)
-        return result
+        if request.headers.get('Authorization') and not request.headers.get('Authorization','').startswith('Bearer mlai_session_access_'):
+            raise AuthenticationFailed('Hosted staging requires its own account session.')
+        return super().authenticate(request)
 
 class StagingBootstrapAuthentication(CommunityChatBootstrapAuthentication):
     def authenticate(self,request):
-        result=super().authenticate(request)
-        if result:require_credential_transport(request)
-        return result
+        return super().authenticate(request)

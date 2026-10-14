@@ -28,7 +28,8 @@ from corsheaders.defaults import default_headers
 import dj_database_url
 from django.core.exceptions import ImproperlyConfigured
 from django.db.backends.signals import connection_created
-load_dotenv()
+if os.environ.get("DJANGO_SETTINGS_MODULE") not in {"mlai.settings_staging_chat", "mlai.settings_staging_local"}:
+    load_dotenv()
 
 # Roll out the private Progress dashboard independently of existing updates.
 STARTUP_PROGRESS_ENABLED = os.getenv("STARTUP_PROGRESS_ENABLED", "0").lower() in {"1", "true"}
@@ -188,7 +189,7 @@ DEBUG_DEFAULT = False if RAW_APP_ENV in {'production', 'prod'} else True
 DEBUG = _env_is_true('DEBUG', DEBUG_DEFAULT)
 APP_ENV = _resolve_app_env(debug=DEBUG, raw_env=RAW_APP_ENV)
 APP_RELEASE = _resolve_app_release(BASE_DIR)
-IS_LOCAL_ENV = APP_ENV in {'local', 'development', 'dev', 'test'}
+IS_LOCAL_ENV = APP_ENV in {'local', 'development', 'dev', 'test', 'staging-local'}
 IS_PRODUCTION_ENV = not IS_LOCAL_ENV
 # The isolated chat profile does not expose Roo/Health Hack integration routes.
 IS_CHAT_STAGING_ENV = APP_ENV == "chat-staging" and os.getenv("DJANGO_SETTINGS_MODULE") == "mlai.settings_staging_chat"

@@ -90,7 +90,7 @@ class StagingRefreshView(StagingView):
 
 
 class StagingAccountView(views.AccountView):
-    http_method_names=['get','head','options']
+    http_method_names=['get','patch','head','options']
     authentication_classes=[StagingAccountAuthentication]
 
 class StagingProfileBatchView(views.PublicProfileBatchView):

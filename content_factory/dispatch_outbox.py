@@ -32,6 +32,8 @@ def exhausted_dispatch_outcome(key_outcome):
 
 
 def reserve_dispatch(*, organization, payload, endpoint="article", workflow="article_generation", billing_user_id=None, actor_id=""):
+    from mlai.staging_integrations import require_staging_capability
+    require_staging_capability('background_queue')
     """Write this row inside the transaction that creates its Roo spend."""
     if not transaction.get_connection().in_atomic_block:
         raise RuntimeError("Article dispatch and its Roo charge must share a transaction.")

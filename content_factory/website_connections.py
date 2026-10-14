@@ -611,6 +611,8 @@ def guarded_service_write(action, *, only_repository=False, remote_actions=(), p
 
 
 def queue_website_followup(kind, *, data, arguments):
+    from mlai.staging_integrations import require_staging_capability
+    require_staging_capability('background_queue')
     """Persist a callback follow-up without worker HTTP inside the callback lock."""
     if kind not in {"publish_article", "trigger_article_generation", "confirm_topic"}:
         raise ValueError("Unsupported website follow-up")

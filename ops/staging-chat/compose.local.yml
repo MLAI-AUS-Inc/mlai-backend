@@ -1,0 +1,18 @@
+name: mlai-backend-local
+services:
+  postgres:
+    image: pgvector/pgvector@sha256:ad249f9fb9572979643a47694e59b9a8cdcdf6abc6accebf49bb80ad5f20ff9b
+    environment:
+      POSTGRES_DB: local_mlai
+      POSTGRES_USER: local_mlai
+      POSTGRES_PASSWORD: ${LOCAL_DATABASE_PASSWORD:?private local credential required}
+    ports: ["127.0.0.1:65450:5432"]
+    volumes: [local-postgres:/var/lib/postgresql]
+  redis:
+    image: redis:7-alpine
+    environment:
+      REDIS_PASSWORD: ${LOCAL_REDIS_PASSWORD:?private local credential required}
+    command: [/bin/sh, -ec, 'exec redis-server --requirepass "$$REDIS_PASSWORD"']
+    ports: ["127.0.0.1:65451:6379"]
+volumes:
+  local-postgres:

@@ -47,6 +47,8 @@ def decrypt_signup_email(encrypted):
 def send_community_chat_email_code(user, code):
     """Send one code through the dedicated Customer.io transaction."""
 
+    from mlai.staging_integrations import require_staging_capability
+    require_staging_capability('email')
     api_key = str(settings.CUSTOMERIO_API_KEY).strip()
     message_id = str(settings.CUSTOMERIO_COMMUNITY_CHAT_CODE_MESSAGE_ID).strip()
     if not api_key or not message_id:

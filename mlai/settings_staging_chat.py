@@ -34,3 +34,20 @@ STRIPE_SECRET_KEY=''
 
 # Private container readiness must not redirect to an unavailable HTTPS socket.
 SECURE_REDIRECT_EXEMPT=['^healthz/live$']
+
+# Hold the shared user/session boundary through ordinary domain mutations.
+DATABASES['default']['ATOMIC_REQUESTS']=True
+
+# Source may use ordinary domain routes; no live credentials/defaults survive.
+STAGING_CAPABILITIES={}
+MIDDLEWARE=['mlai.staging_integrations.IntegrationMiddleware',*MIDDLEWARE]
+REST_FRAMEWORK={**REST_FRAMEWORK,'EXCEPTION_HANDLER':'mlai.staging_integrations.exception_handler'}
+for _name in list(globals()):
+    if _name.isupper() and any(word in _name for word in ('API_KEY','BOT_TOKEN','WEBHOOK_SECRET','OAUTH_CLIENT_SECRET','SENTRY_DSN','OTEL_EXPORTER','SERVICE_ACCOUNT')):
+        globals()[_name]=''
+DEFAULT_FRONTEND_URL=COMMUNITY_CHAT_FRONTEND_URL
+for _name in ('MEDHACK_URL','ESAFETY_URL','WATT_THE_HACK_URL','VIBE_RAISING_URL','CONTENT_FACTORY_FRONTEND_URL'):
+    globals()[_name]=COMMUNITY_CHAT_FRONTEND_URL
+MEDIA_ROOT='/app/staging-media'
+EMAIL_BACKEND='django.core.mail.backends.locmem.EmailBackend'
+MEETING_ROOM_BOOKING_ENABLED=True

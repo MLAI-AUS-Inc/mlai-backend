@@ -2,6 +2,8 @@ import hashlib
 import hmac
 
 from django.conf import settings
+from django.db import connection
+from django.contrib.auth import get_user_model
 from django.utils import timezone
 from rest_framework.authentication import BaseAuthentication
 from rest_framework.exceptions import AuthenticationFailed
@@ -92,7 +94,8 @@ class CommunityChatBootstrapAuthentication(BaseAuthentication):
         request.community_chat_origin = token.origin
         request.community_chat_platform = token.platform
         request.community_chat_device_name = token.name
-        return token.user, token
+        _check_staging_transport(request)
+        return getattr(request,"staging_locked_user",token.user), getattr(request,"community_chat_bootstrap_token",token)
 
     def authenticate_header(self, request):
         return "Bearer"
@@ -146,7 +149,8 @@ class CommunityChatAccountAuthentication(BaseAuthentication):
         request.community_chat_origin = session.origin
         request.community_chat_platform = session.platform
         request.community_chat_device_name = session.name
-        return session.user, session
+        _check_staging_transport(request)
+        return getattr(request,"staging_locked_user",session.user), getattr(request,"community_chat_account_session",session)
 
     def authenticate_header(self, request):
         return "Bearer"
@@ -156,3 +160,23 @@ class CommunityChatOnboardingAuthentication(CommunityChatAccountAuthentication):
     """Pending members may access only explicitly opted-in own-account views."""
 
     allow_pending_membership = True
+
+
+def _check_staging_transport(request):
+    """Share the exact hosted transport gate without delegating authentication."""
+    if (getattr(settings,'SETTINGS_MODULE','')=='mlai.settings_staging_chat'
+            and getattr(settings,'APP_ENV','')=='chat-staging'):
+        from .staging_password import require_credential_transport
+        require_credential_transport(request)
+        if request.method not in {'GET','HEAD','OPTIONS','TRACE'}:
+            # ATOMIC_REQUESTS in the hosted profile keeps these locks until the
+            # domain mutation completes. Non-atomic writers fail closed.
+            if not connection.in_atomic_block:
+                raise AuthenticationFailed('Hosted staging mutations require an atomic request.')
+            credential=getattr(request,'community_chat_account_session',None) or getattr(request,'community_chat_bootstrap_token',None)
+            user=get_user_model().objects.select_for_update().get(pk=credential.user_id)
+            from .views import _require_current_chat_credential_locked
+            from rest_framework.exceptions import PermissionDenied
+            try:_require_current_chat_credential_locked(request,user)
+            except PermissionDenied as exc:raise AuthenticationFailed('Staging credential is no longer current.') from exc
+            request.staging_locked_user=user

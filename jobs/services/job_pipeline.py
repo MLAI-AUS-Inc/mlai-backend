@@ -347,6 +347,8 @@ def _all_attempted_live_sources_failed(
 
 
 def enqueue_run_from_request(validated: dict[str, Any], *, trigger_source: str = "manual_api") -> JobRun:
+    from mlai.staging_integrations import require_staging_capability
+    require_staging_capability('background_queue')
     return create_run(
         collect_live=validated.get("collect_live", True),
         post_to_slack=validated.get("post_to_slack", False),

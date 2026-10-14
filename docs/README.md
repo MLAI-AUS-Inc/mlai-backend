@@ -129,3 +129,6 @@ identified as current by a maintained architecture document.
 - [Chat startup updates](community-chat-startup-updates.md): founder setup, draft, review, approval and community API.
 
 - [Website connection lifecycle and repository consent](website-connections.md) — schema, API, revocation, reviewed cleanup, and local verification.
+
+- [Real backend staging development](backend-staging-development.md): normal domain routes, isolated local setup and automatic staging deployment.
+- [Backend staging contracts](backend-staging-points.md): staged authentication and initial synthetic workflows.

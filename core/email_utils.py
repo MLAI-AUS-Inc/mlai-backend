@@ -4,7 +4,8 @@ from django.core.signing import TimestampSigner, BadSignature, SignatureExpired
 from customerio import APIClient
 from dotenv import load_dotenv
 
-load_dotenv()
+if os.environ.get("DJANGO_SETTINGS_MODULE") not in {"mlai.settings_staging_chat", "mlai.settings_staging_local"}:
+    load_dotenv()
 
 logger = logging.getLogger(__name__)
 signer = TimestampSigner()
@@ -58,6 +59,8 @@ def send_magic_link_email_to_address(
     """
     Sends the magic link email using Customer.io.
     """
+    from mlai.staging_integrations import require_staging_capability
+    require_staging_capability('email')
     if not CUSTOMER_IO_API_KEY:
         logger.error("CUSTOMER_IO_API_KEY not set in environment.")
         return
