@@ -110,7 +110,7 @@ class FirstArticleProviderChainTests(OneClickBillingFixture,TransactionTestCase)
             "Its recorded evidence proves the draft was reviewed, the correct repository commit was "
             "merged, and the same complete content was served from the expected public address."
             "</p></article>")
-        remote={"merged":False,"merge_calls":0,"posts":[]}
+        remote={"merged":False,"merge_calls":0,"posts":[],"content_deployed":False}
         repo={"id":self.website.repository_id,"full_name":self.website.github_repo}
 
         def pull():
@@ -162,7 +162,8 @@ class FirstArticleProviderChainTests(OneClickBillingFixture,TransactionTestCase)
             if url.endswith("/sitemap.xml"):
                 return provider_response(body=f"<urlset><url><loc>{public_url}</loc></url></urlset>".encode())
             if url==public_url:
-                live=f'<html><head><link rel="canonical" href="{public_url}"></head><body>{expected_html}</body></html>'
+                article_html=expected_html if remote["content_deployed"] else expected_html.replace("reliable","previous")
+                live=f'<html><head><link rel="canonical" href="{public_url}"></head><body>{article_html}</body></html>'
                 return provider_response(body=live.encode())
             self.fail(f"Unexpected public/provider read: {url}")
 
@@ -228,23 +229,37 @@ class FirstArticleProviderChainTests(OneClickBillingFixture,TransactionTestCase)
             WebsiteScanSnapshot.objects.create(connection=self.website,generation=self.website.generation,
                 run_id="post-merge-scan",source_sha="e"*40,fingerprint="f"*64,detector_version="synthetic_worker",
                 evidence={"repository_inventory":{"discovery_complete":True}})
-            self.advance_article(op)  # actual HTTP capture and exact saved-body comparison
-            self.assertEqual(op.receipt["first_article_live_receipt"]["public_url"],public_url)
-            written.refresh_from_db();self.assertEqual(written.publish_status,ArticlePublishStatus.LIVE)
             journey={"connectionId":str(self.website.pk),"connectionGeneration":self.website.generation,
                 "prerequisites":{"account":{"status":"complete"},"repository":{"status":"complete"}},
                 "repository":{"observedSourceSha":"e"*40},"capabilities":self.capabilities(),
                 "githubPermissions":{"contents":True,"pull_requests":True,"workflows":True,"checks":True,"statuses":True}}
+            op.next_attempt_at=timezone.now();op.save(update_fields=["next_attempt_at"])
+            with patch.object(prepare,"journey_for_context",return_value=journey):
+                waiting=prepare.advance_prepare(op.pk,now=timezone.now())
+                self.assertIsNotNone(waiting);self.assertEqual(waiting.state,"pending")
+            op.refresh_from_db()
+            self.assertNotIn("first_article_live_receipt",op.receipt)
+            self.assertEqual(op.receipt["status"],"waiting_for_deployment")
+            self.assertFalse(goals.complete(op.receipt["goal"]))
+            remote["content_deployed"]=True
+            self.advance_article(op)  # actual HTTP capture and exact saved-body comparison
+            self.assertEqual(op.receipt["first_article_live_receipt"]["public_url"],public_url)
+            written.refresh_from_db();self.assertEqual(written.publish_status,ArticlePublishStatus.LIVE)
             proofs,source=collect_proofs(op,self.context,self.config,journey,now=timezone.now())
             self.assertEqual(set(proofs),set(goals.MILESTONES))
             self.assertEqual(source,"e"*40)
             # Finish through the actual prepare runner and canonical proof
             # planner; the substituted journey is a provider-read projection.
             op.next_attempt_at=timezone.now();op.save(update_fields=["next_attempt_at"])
-            with patch.object(prepare,"journey_for_context",return_value=journey):
+            with patch.object(prepare,"journey_for_context",return_value=journey), \
+                override_settings(ARTICLES_GOAL_NOTIFICATIONS_ENABLED=True,COMMUNITY_CHAT_FRONTEND_URL="https://chat.mlai.au"):
                 finished=prepare.advance_prepare(op.pk,now=timezone.now())
                 self.assertIsNotNone(finished)
                 self.assertEqual(finished.state,"completed")
+            notice=WebsiteConnectionOperation.objects.get(action="goal-notification")
+            self.assertEqual(notice.payload["notice"]["link"],public_url)
+            self.assertEqual(notice.payload["notice"]["text"],"Your first article is live.")
+            self.assertEqual(notice.state,"pending")  # delivery is deliberately outside this provider-chain test
         op.refresh_from_db()
         self.assertTrue(goals.complete(op.receipt["goal"]))
         self.assertEqual(op.receipt["goal"]["completed_source_sha"],"e"*40)
