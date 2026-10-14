@@ -74,6 +74,9 @@ class FixtureTests(TestCase):
             for _ in range(2):
                 call_command('provision_staging_pilot',manifest=str(manifest),apply=True,preserve_existing=True,stdout=io.StringIO())
                 call_command('seed_staging_points',manifest=str(manifest),apply=True,stdout=io.StringIO())
+            self.user.refresh_from_db();self.user.set_password('Changed-synthetic-921!');self.user.save(update_fields=['password']);changed_password=self.user.password
+            call_command('provision_staging_pilot',manifest=str(manifest),apply=True,preserve_existing=True,stdout=io.StringIO())
+            self.user.refresh_from_db();self.assertEqual(self.user.password,changed_password)
             self.assertEqual(get_user_model().objects.filter(email__in=EMAILS).count(),8)
             hashes=set(get_user_model().objects.filter(email__in=EMAILS).values_list('password',flat=True));self.assertEqual(len(hashes),8)
             pilot.refresh_from_db();self.assertEqual(pilot.password,original)

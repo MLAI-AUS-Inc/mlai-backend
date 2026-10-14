@@ -24,7 +24,7 @@ class Command(BaseCommand):
     def add_arguments(self,parser):
         parser.add_argument('--manifest',required=True)
         parser.add_argument('--apply',action='store_true')
-        parser.add_argument('--preserve-existing',action='store_true',help='Idempotent replay only for marked ordinary synthetic accounts with the unchanged private password.')
+        parser.add_argument('--preserve-existing',action='store_true',help='Idempotent replay only for marked ordinary synthetic accounts; existing passwords are preserved.')
         parser.add_argument('--reactivate',action='store_true',help='Explicitly reactivate a disabled synthetic pilot after completed membership cleanup; never reset its password.')
     def handle(self,*args,**options):
         try:require_password_pilot()
@@ -70,7 +70,7 @@ class Command(BaseCommand):
                     user=get_user_model().objects.select_for_update().filter(email__iexact=email).first()
                     if user:
                         profile=CommunityMemberProfile.objects.filter(user=user).first()
-                        if user.is_staff or user.is_superuser or not user.is_active or not user.check_password(password) or not profile or 'synthetic_staging_pilot' not in profile.review_reasons:
+                        if user.is_staff or user.is_superuser or not user.is_active or not profile or 'synthetic_staging_pilot' not in profile.review_reasons:
                             raise CommandError('Conflicting synthetic identity/password; no takeover or reset.')
                         existing[email]=user
                 if options['apply']:
