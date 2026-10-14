@@ -346,7 +346,11 @@ class PrepareJourneyReplayTests(SimpleTestCase):
         run.result = {"article_system_setup": {"status": "preview_ready", "pr_number": 42}, "pr_number": 42}
         self.advance(child=run)
         self.assertEqual(self.op.state, "needs_user")
-        self.assertEqual(self.op.receipt["user_action"]["id"], "merge_pr")
+        # A required review happens in MLAI Chat, whose Publish merges the PR.
+        self.assertEqual(self.op.receipt["user_action"]["id"], "review_setup")
+        self.assertEqual(self.op.receipt["user_action"]["run_id"], run.run_id)
+        self.assertEqual(self.op.receipt["user_action"]["pr_number"], 42)
+        self.assertEqual(self.op.receipt["current_step"], "merge")
         self.assertEqual(self.op.receipt["child_run_id"], run.run_id)
         run.status = "completed"
         run.result["article_system_setup"]["merge_status"] = "merged"

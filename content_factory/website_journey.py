@@ -15,9 +15,10 @@ def fact(complete=False, *, code="", reason="", status=None, verified_at=None, o
         "reason": "" if complete else reason, "verifiedAt": verified_at, "operationId": operation}
 
 
-def project_journey(*, company_id, domain, website=None, capabilities=None, discovery=None, target=None, operation=None, epoch=0, proof=None, source_runs=None, ci_source_runs=None, permissions=None):
+def project_journey(*, company_id, domain, website=None, capabilities=None, discovery=None, target=None, operation=None, epoch=0, proof=None, source_runs=None, ci_source_runs=None, permissions=None, setup_pull_request=None):
     """Project verified facts without interpreting legacy completion ticks."""
     website, capabilities, target = mapping(website), mapping(capabilities), mapping(target)
+    setup_pr = mapping(setup_pull_request)
     discovery = discovery or discovery_snapshot({})
     target_contract = mapping(target.get("contract"))
     proof = mapping(proof)
@@ -40,6 +41,10 @@ def project_journey(*, company_id, domain, website=None, capabilities=None, disc
     if not authoring_supported:
         reason_code = "publishing_adapter_required"
         reason = "Build proof only; articles stay portable until a publishing adapter is connected."
+    elif setup_pr and not verified:
+        # The open setup pull request is the integration; publishing it comes before any rescan.
+        reason_code = "setup_pr_unmerged"
+        reason = "Your articles setup pull request is ready. Review the changes, then publish."
     running = operation and operation.get("state") in {"pending", "running", "verifying", "applying"}
     op_id = operation.get("id") if operation else None
     adapter = target.get("adapter") or target_contract.get("delivery_adapter") or proof.get("verifiedAdapter")
@@ -127,6 +132,11 @@ def project_journey(*, company_id, domain, website=None, capabilities=None, disc
     action_id = {"github": "verify-access", "repository": "verify-access", "scan": "scan", "permissions": "permissions", "integration": "setup",
         "preview": "ci-attestation" if verification_stale else "verify", "activation": "verify"}.get(next_step["id"] if next_step else "")
     next_action = {"id": action_id, "label": next_step["reason"] or next_step["label"], "step": next_step["id"]} if next_step and action_id in allowed else None
+    if next_action and setup_pr and next_step["id"] in {"scan", "integration"}:
+        # MLAI Chat opens the saved setup run for "Review setup changes", where Publish
+        # lives. Until preparation returns to this PR, the setup page's Prepare does.
+        next_action = {**next_action, "setupRunId": setup_pr.get("runId"),
+            "label": "Review setup changes" if setup_pr.get("savedSetup") else "Return to your setup pull request"}
     repository = {"id": website.get("repositoryId"), "name": website.get("githubRepo", ""), "branch": website.get("branch", ""),
         "appRoot": website.get("appRoot", ""), "sourceSha": website.get("verifiedSha") or discovery.get("sourceSha"), "targetId": target.get("key"),
         "observedSourceSha": capabilities.get("repositorySourceSha"),
@@ -148,6 +158,7 @@ def project_journey(*, company_id, domain, website=None, capabilities=None, disc
             "canGeneratePortableDraft": bool(capabilities.get("canGeneratePortableDraft", company_id)), "canGenerateArticle": verified, "canOpenPublicationPr": verified,
             "canPublishArticle": live_ready, "canMerge": bool(write_allowed and proof.get("reviewedMergeReady")), "canDisconnect": bool(website), "canPurge": bool(website), "canCleanup": "cleanup" in allowed},
         "allowedActions": list(dict.fromkeys(allowed)), "actions": actions, "nextAction": next_action,
+        "setupPullRequest": setup_pr or None,
         "discovery": discovery, "githubPermissions": grants, "operation": operation, "sourceRuns": source_runs or [], "ciSourceRuns": ci_source_runs or source_runs or [],
         "support": {"native": {"available": native_certified or native_path.get("status") == "available", "certified": native_certified,
                 "reasonCode": "" if native_certified else "native_verification_required" if native_path.get("status") == "available" else "adapter_required",
@@ -263,5 +274,19 @@ def journey_for_context(context, config, *, capabilities=None):
             if (projection := ci_source_run(row, connection, verifier_operations.get(row.run_request.get("operation_id"))))] + source_runs
     from .website_github_permissions import installation_grants
     grants = installation_grants(connection) if connection else None
+    setup_pull_request = None
+    if connection:
+        from .website_connections import open_setup_pr_run
+        from .vibe_marketing_views import _pull_request_number_from_run
+        run = open_setup_pr_run(connection, source_sha=mapping(capabilities).get("repositorySourceSha") or "")
+        if run:
+            result = mapping(run.result)
+            setup = mapping(result.get("article_system_setup"))
+            pending = mapping(mapping(getattr(config, "article_system", None)).get("pending_article_system_setup"))
+            setup_pull_request = {"runId": run.run_id, "prNumber": _pull_request_number_from_run(run),
+                "prUrl": result.get("pr_url") or setup.get("pr_url") or None, "status": setup.get("status"),
+                "blockedReason": result.get("merge_blocked_reason") or None,
+                "savedSetup": (pending.get("setup_run_id") or pending.get("setupRunId")) == run.run_id}
     return project_journey(company_id=context.company.pk, domain=context.organization.domain, website=website,
-        capabilities=capabilities, discovery=discovery, target=target, operation=operation, epoch=epoch, proof=proof, source_runs=source_runs, ci_source_runs=ci_source_runs, permissions=grants)
+        capabilities=capabilities, discovery=discovery, target=target, operation=operation, epoch=epoch, proof=proof, source_runs=source_runs, ci_source_runs=ci_source_runs, permissions=grants,
+        setup_pull_request=setup_pull_request)

@@ -6242,7 +6242,7 @@ def _attempt_setup_publish_merge_authorized(*, run, context, automatic=False):
     Shared by explicit Publish actions and the preparation worker.
 
     Returns {"outcome": "merged"|"auto_merge_pending"|"checks_failed"|"manual_required"
-    |"no_repo"|"no_pr"|"error", "detail": str, "checks": dict, "run": run}."""
+    |"closed"|"no_repo"|"no_pr"|"error", "detail": str, "checks": dict, "run": run}."""
     if run.workflow != "article_system_setup":
         return {"outcome": "error", "detail": "This action is only available for article system setup runs.", "checks": {}, "run": run}
     config = _get_config(context.organization)
@@ -6274,6 +6274,11 @@ def _attempt_setup_publish_merge_authorized(*, run, context, automatic=False):
             "checks": checks,
             "run": _apply_setup_merge_result(run=run, context=context, checks_status="merged"),
         }
+    if pull.get("state") == "closed":
+        # A closed setup PR is never re-verified or resumed; preparing again opens a new one.
+        reason = "This setup pull request was closed on GitHub. Prepare your website again to open a new one."
+        _mark_setup_merge_blocked(run=run, config=config, reason=reason, status_value="pr_closed")
+        return {"outcome": "closed", "detail": reason, "checks": checks, "run": run}
 
     from .website_connections import validate_setup_merge_source
     try:

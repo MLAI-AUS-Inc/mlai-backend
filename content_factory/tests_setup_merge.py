@@ -310,3 +310,44 @@ class MaybeAutoPublishSetupTests(SetupMergeBase):
         with mock.patch.object(views, "_attempt_setup_publish_merge") as attempt:
             views._maybe_auto_publish_setup(run=self.run, context=self.context)
         attempt.assert_not_called()
+
+
+class OpenSetupPullRequestDatabaseTests(TestCase):
+    """The open setup PR lookup and stale-source observation use real JSON and snapshot queries."""
+
+    def setUp(self):
+        from content_factory.website_models import WebsiteScanSnapshot
+        self.org = Organization.objects.create(domain="talathrive.example.test", name="Synthetic")
+        self.website = WebsiteConnection.objects.create(organization=self.org, github_repo="Example/Stories",
+            repository_id=777, installation_id="45", branch="main", verified_sha="d" * 40)
+        WebsiteScanSnapshot.objects.create(connection=self.website, generation=self.website.generation,
+            run_id="github-head:" + "a" * 40, source_sha="a" * 40, detector_version="github_head", fingerprint="head")
+
+    def setup_run(self, run_id, *, generation=None, base="a" * 40, status="completed", setup_status="pr_created", merge="not_merged"):
+        return ContentFactoryRun.objects.create(run_id=run_id, workflow="article_system_setup", domain=self.org.domain,
+            organization=self.org, github_repo="example/stories", status=status, approval_state="approved",
+            run_request={"website_connection_id": str(self.website.pk), "connection_generation":
+                self.website.generation if generation is None else generation, "expected_source_sha": base},
+            result={"status": "setup_pr_created", "pr_number": 40, "merge_status": merge,
+                "article_system_setup": {"status": setup_status, "pr_number": 40, "merge_status": merge}})
+
+    def test_lookup_returns_the_current_generation_open_pull_request(self):
+        from content_factory.website_connections import open_setup_pr_run
+        self.setup_run("open-pr")
+        self.setup_run("other-generation", generation=self.website.generation + 1)
+        self.setup_run("cancelled-retry", status="cancelled")
+        self.assertEqual(open_setup_pr_run(self.website, source_sha="a" * 40).run_id, "open-pr")
+        self.assertIsNone(open_setup_pr_run(self.website, source_sha="b" * 40))
+
+    def test_merged_and_closed_pull_requests_are_not_returned(self):
+        from content_factory.website_connections import open_setup_pr_run
+        self.setup_run("merged", merge="merged")
+        self.setup_run("closed", setup_status="pr_closed")
+        self.assertIsNone(open_setup_pr_run(self.website, source_sha="a" * 40))
+
+    def test_only_this_generations_observed_head_stands_in_for_a_stale_verified_source(self):
+        from content_factory.website_connections import _source_observed
+        self.assertTrue(_source_observed(self.website, "a" * 40))
+        self.assertFalse(_source_observed(self.website, "b" * 40))
+        self.website.generation += 1
+        self.assertFalse(_source_observed(self.website, "a" * 40))

@@ -305,6 +305,7 @@
     }
   ],
   "nextAction": null,
+  "setupPullRequest": null,
   "discovery": {
     "version": 1,
     "complete": true,

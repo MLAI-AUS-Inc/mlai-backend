@@ -1130,6 +1130,47 @@ def _hosted_build_proven(gates, preview, head_sha):
         and proof.get("commitSha") == head_sha)
 
 
+def _source_observed(website, source_sha):
+    """This generation recorded the exact branch head, from a GitHub push or a scan.
+
+    A connection last verified before the customer's own later commits keeps an
+    older verified_sha until its next full verification. A setup built on the
+    newer observed head is still exact; the merge rechecks the live head.
+    """
+    return bool(isinstance(website, WebsiteConnection) and source_sha and WebsiteScanSnapshot.objects.filter(
+        connection_id=website.pk, generation=website.generation, source_sha=source_sha).exists())
+
+
+def setup_pr_open(run):
+    """An approved setup whose pull request is recorded open and not yet merged."""
+    result = run.result if isinstance(run.result, dict) else {}
+    setup = result.get("article_system_setup") if isinstance(result.get("article_system_setup"), dict) else {}
+    return bool(run.workflow == "article_system_setup" and run.status == "completed"
+        and run.approval_state == "approved"
+        and result.get("status") in SETUP_PR_OPEN_STATUSES and setup.get("status") in SETUP_PR_OPEN_STATUSES
+        and "merged" not in {result.get("merge_status"), setup.get("merge_status")}
+        and (result.get("pr_url") or setup.get("pr_url") or result.get("pr_number") or setup.get("pr_number")))
+
+
+def open_setup_pr_run(connection, *, source_sha):
+    """The current generation's newest open setup pull request, if built on source_sha.
+
+    Its exact proof is checked again when the owner publishes. An open pull
+    request built on an older branch head is stale; a new setup replaces it.
+    """
+    from workflow_runs.models import ContentFactoryRun
+    if not source_sha:
+        return None
+    rows = ContentFactoryRun.objects.filter(organization_id=connection.organization_id, workflow="article_system_setup",
+        status="completed", approval_state="approved", run_request__website_connection_id=str(connection.pk),
+        run_request__connection_generation=connection.generation).order_by("-updated_at")[:10]
+    run = next((row for row in rows if setup_pr_open(row)
+        and str(row.github_repo or "").casefold() == str(connection.github_repo or "").casefold()), None)
+    if run is None or str((run.run_request or {}).get("expected_source_sha") or "") != source_sha:
+        return None
+    return run
+
+
 def _verified_setup_run_base(run, head_sha, website, *, automatic_approval=False):
     """Read the worker's exact approved setup proof before a target exists."""
     from .website_contract import SHA_PATTERN
@@ -1158,7 +1199,10 @@ def _verified_setup_run_base(run, head_sha, website, *, automatic_approval=False
         or not (run.status == "completed" and (approved_setup or adopted_kit) or pending_setup)
         or setup.get("setup_run_id") != run.run_id
         or not SHA_PATTERN.fullmatch(base_sha)
-        or (website.verified_sha and website.verified_sha != base_sha)
+        # A person approved (or adopted) this setup, so a newer branch head this
+        # generation observed may stand in for an older verified source.
+        or (website.verified_sha and website.verified_sha != base_sha
+            and not ((approved_setup or adopted_kit) and _source_observed(website, base_sha)))
         or result.get("source_sha") != base_sha or setup.get("source_sha") != base_sha
         or result.get("branch_commit_sha") != head_sha or setup.get("branch_commit_sha") != head_sha
         or preview.get("exactRender") is not True or preview.get("commitSha") != head_sha
