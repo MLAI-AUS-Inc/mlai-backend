@@ -108,7 +108,9 @@ class WebsiteConnectionView(APIView):
         if error:
             return error
         from .website_journey import journey_for_context
-        return Response({"websiteConnection": summary_for(config, company_id=context.company.pk), "websiteJourney": journey_for_context(context, config)})
+        from .website_status import add_status
+        payload = {"websiteConnection": summary_for(config, company_id=context.company.pk), "websiteJourney": journey_for_context(context, config)}
+        return Response(add_status(payload, context, config, journey=payload["websiteJourney"]))
 
     def post(self, request):
         context, config, error = _context(request)
@@ -143,7 +145,7 @@ class WebsiteConnectionActionView(APIView):
             if action == "prepare":
                 from .website_prepare import start_prepare, advance_prepare
                 operation = start_prepare(config, expected=dict(request.data), company_id=context.company.pk,
-                    user=request.user, retry=True)
+                    user=request.user, retry=True, target=request.data.get("goal_target", "ready"))
                 advance_prepare(operation.pk)
                 operation.refresh_from_db()
             elif action == "disconnect":
@@ -206,8 +208,10 @@ class WebsiteConnectionActionView(APIView):
             config.refresh_from_db()
             from .website_journey import journey_for_context
             from .website_operations import operation_summary
-            return Response({"websiteConnection": summary_for(config, company_id=context.company.pk), "websiteJourney": journey_for_context(context, config),
-                "operation": operation_summary(operation) if operation else None})
+            from .website_status import add_status
+            payload = {"websiteConnection": summary_for(config, company_id=context.company.pk), "websiteJourney": journey_for_context(context, config),
+                "operation": operation_summary(operation) if operation else None}
+            return Response(add_status(payload, context, config, journey=payload["websiteJourney"]))
         except WebsiteAuthorityError as exc:
             return Response(exc.as_dict(), status=exc.status)
 

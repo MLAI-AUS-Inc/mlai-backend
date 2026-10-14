@@ -134,7 +134,7 @@ def _checking_owner_wait(op):
     return action_id is None and op.receipt.get("current_step") in {"merge", "permissions", "verify", "ci-attestation"}
 
 
-def start_prepare(config, *, expected=None, company_id=None, user=None, retry=False):
+def start_prepare(config, *, expected=None, company_id=None, user=None, retry=False, target="ready", force_successor=False):
     """Reuse one prepare receipt for the current consent generation."""
     connection = config.website_connection
     if connection is None:
@@ -143,6 +143,19 @@ def start_prepare(config, *, expected=None, company_id=None, user=None, retry=Fa
     if getattr(connection, "organization", None):
         binding.update(domain=connection.organization.domain, github_repo=connection.github_repo)
     with authority_guard(binding, action="read") as current:
+        from .website_goal import enrolled
+        if target != "ready":
+            raise WebsiteAuthorityError("website_prepare_blocked", "Only the ready goal is available until first-article publication is enabled.", status=422)
+        if enrolled(current.organization_id):
+            from .website_goal_runner import start_goal
+            return start_goal(current, company_id=company_id, user=user, retry=retry, target=target,
+                now=timezone.now(), force_successor=force_successor)
+        if hasattr(current, "operations"):
+            from .website_goal_runner import owns_goal
+            reserved = WebsiteConnectionOperation.objects.filter(connection_id=current.pk, generation=current.generation, action="prepare",
+                receipt__has_key="goal").order_by("-created_at", "-pk").first()
+            if reserved and owns_goal(reserved):
+                raise WebsiteAuthorityError("website_prepare_blocked", "Goal execution is disabled; reserved work is retained instead of redispatched.")
         op, created = WebsiteConnectionOperation.objects.get_or_create(
             idempotency_key=f"{current.pk}:prepare:{current.generation}", defaults={
                 "connection": current, "generation": current.generation, "action": "prepare",
@@ -187,6 +200,10 @@ def _claim_prepare(identifier, now):
             pk=getattr(identifier, "pk", identifier), action="prepare").first()
         if op is None or op.next_attempt_at and op.next_attempt_at > now:
             return None
+        from .website_goal_runner import owns_goal
+        from .website_goal import enrolled
+        if owns_goal(op) and not enrolled(op.connection.organization_id):
+            return None
         if op.generation != op.connection.generation or op.connection.state != "connected":
             op.state = "cancelled"
             op.receipt = {**op.receipt, "status": "authority_changed", "message": "Website access changed."}
@@ -196,6 +213,9 @@ def _claim_prepare(identifier, now):
         op.next_attempt_at = now + timedelta(minutes=5)
         op.save(update_fields=["state", "attempts", "next_attempt_at", "updated_at"])
         op._claimed_at = op.updated_at
+        if owns_goal(op):
+            from .website_goal import mapping as goal_mapping
+            op._claimed_goal_revision = goal_mapping(op.receipt.get("goal")).get("revision")
         return op
 
 
@@ -214,13 +234,23 @@ def _prepare_context(op):
 
 def _persist_prepare(op, *, now):
     # Compare the lease and generation after remote work. A disconnect always wins.
-    WebsiteConnectionOperation.objects.filter(pk=op.pk, action="prepare", state="running", attempts=op.attempts,
-        updated_at=op._claimed_at, connection__generation=op.generation, connection__state="connected").update(
+    query = WebsiteConnectionOperation.objects.filter(pk=op.pk, action="prepare", state="running", attempts=op.attempts,
+        updated_at=op._claimed_at, connection__generation=op.generation, connection__state="connected")
+    from .website_goal_runner import owns_goal
+    if owns_goal(op):
+        query = query.filter(receipt__goal__revision=op._claimed_goal_revision,
+            connection__configuration_version=op.connection.configuration_version)
+    changed = query.update(
             state=op.state, receipt=op.receipt, payload=op.payload, next_attempt_at=op.next_attempt_at, updated_at=now)
+    if owns_goal(op) and changed != 1:
+        return None
     return op
 
 
 def _finish_prepare(op, *, now):
+    from .website_goal_runner import owns_goal, finish_goal
+    if owns_goal(op):
+        finish_goal(op)
     logger.info("website_prepare operation=%s company=%s connection=%s generation=%s step=%s state=%s reason=%s attempt=%s next_attempt=%s dispatch_outcome=%s",
         op.pk, op.payload.get("company_id"), op.connection_id, op.generation, op.receipt.get("current_step"),
         op.state, op.receipt.get("reason_code", ""), op.attempts, op.next_attempt_at, op.receipt.get("dispatch_outcome", ""))
@@ -575,11 +605,17 @@ def _advance_claimed_prepare(op, *, now, handlers):
         context, config, user = _prepare_context(op)
         journey = journey_for_context(context, config)
         journey = _cleanup_retry_journey(op, context, config, journey)
-        if journey.get("capabilities", {}).get("canPublishArticle"):
+        from .website_goal_runner import owns_goal, goal_journey, ready
+        if owns_goal(op):
+            journey = goal_journey(op, context, config, journey, now=now)
+        if ready(op, journey):
             op.state, op.next_attempt_at = "completed", None
             op.receipt.update(status="ready", message="Your website is ready for articles.", current_step="ready", user_action=None)
             return _finish_prepare(op, now=now)
         child_id = op.receipt.get("child_run_id")
+        if (owns_goal(op) and getattr(op, "_goal_milestone", None) in {"access", "understood"}
+                and child_id == op.receipt.get("setup_run_id")):
+            child_id = None
         child = None
         if not child_id:
             child = _selected_setup_child(op, config)
@@ -600,6 +636,9 @@ def _advance_claimed_prepare(op, *, now, handlers):
             setup = ((child.result or {}).get("article_system_setup") or {}) if child else {}
             owner_action = _setup_owner_action(child, setup, op.connection) if child and child.workflow == "article_system_setup" else None
             if owner_action:
+                if owns_goal(op) and not any(item["name"] == "previewed" and item["state"] == "passed"
+                        for item in op.receipt["goal"]["milestones"]):
+                    raise WebsiteAuthorityError("setup_preview_verification_required", "Waiting for the exact setup preview proof.", retryable=True)
                 op.state, op.next_attempt_at = "needs_user", None
                 op.receipt.update(status="needs_you", failure_class="needs_user", user_action=owner_action,
                     message="Review the articles setup." if owner_action["id"] == "review_setup" else "Merge the articles setup pull request.")
@@ -633,6 +672,9 @@ def _advance_claimed_prepare(op, *, now, handlers):
                     op.receipt["user_action"] = {"id": "open_run", "label": "Open setup run", "run_id": child_id}
                 return _finish_prepare(op, now=now)
             if child and child.workflow == "article_system_setup":
+                if owns_goal(op) and not any(item["name"] == "previewed" and item["state"] == "passed"
+                        for item in op.receipt["goal"]["milestones"]):
+                    raise WebsiteAuthorityError("setup_preview_verification_required", "Waiting for the exact setup preview proof.", retryable=True)
                 merge = maybe_merge_prepared_setup(child, context, config, user=user)
                 if merge.get("status") == "needs_user":
                     review = merge["user_action"].get("id") == "review_setup"
@@ -676,8 +718,10 @@ def _advance_claimed_prepare(op, *, now, handlers):
             forced = (outcome or {}).get("capabilities") if step == "verify-access" else None
             if forced is not None:
                 journey = journey_for_context(context, config, capabilities=forced)
+                if owns_goal(op):
+                    journey = goal_journey(op, context, config, journey, now=now)
                 digest = evidence_digest({"prerequisites": journey.get("prerequisites"), "capabilities": journey.get("capabilities")})
-            if journey.get("capabilities", {}).get("canPublishArticle"):
+            if ready(op, journey):
                 op.state, op.next_attempt_at = "completed", None
                 op.receipt.update(status="ready", message="Your website is ready for articles.", current_step="ready", user_action=None)
                 return _finish_prepare(op, now=now)
@@ -732,6 +776,12 @@ def wake_prepare_for_source(connection_id, *, organization_id):
         profile__user_id=connection.authorized_by_id).first()
     if config is None or company is None:
         return None
+    from .website_goal_runner import wake_goal_for_source, owns_goal
+    from .website_goal import enrolled
+    if enrolled(connection.organization_id):
+        latest = connection.operations.filter(generation=connection.generation, action="prepare").order_by("-created_at", "-pk").first()
+        if latest and owns_goal(latest):
+            return wake_goal_for_source(config, company_id=company.pk, user=connection.authorized_by, now=timezone.now())
     op = start_prepare(config, company_id=company.pk, user=connection.authorized_by)
     receipt = {key: value for key, value in op.receipt.items()
         if key not in {"scan_run_id", "setup_run_id", "completed_steps", "deployment_wait_started_at", "transient_started_at", "child_resume_pending"}}

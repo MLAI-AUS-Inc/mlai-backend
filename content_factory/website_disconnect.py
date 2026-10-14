@@ -66,7 +66,8 @@ def start_disconnect(config, *, user, data):
         saved.receipt = {**saved.receipt, "keep_pages": not remove, "remove_setup": remove,
             "completed_steps": ["authority_revoked", "local_runs_cancelled"], "status": "working",
             "message": "Disconnecting your website.", "disconnect_steps_pending": True}
-        saved.save(update_fields=["payload", "receipt", "updated_at"])
+        saved.next_attempt_at = timezone.now()
+        saved.save(update_fields=["payload", "receipt", "next_attempt_at", "updated_at"])
     return saved
 
 

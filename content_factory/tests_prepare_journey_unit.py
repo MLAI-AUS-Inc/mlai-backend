@@ -211,7 +211,8 @@ class PrepareJourneyReplayTests(SimpleTestCase):
         self.assertEqual(self.op.receipt["status"], "cancelled_by_user")
         self.assertIsNone(self.op.next_attempt_at)
         with patch.object(prepare, "authority_guard", return_value=nullcontext(self.op.connection)), \
-                patch.object(prepare.WebsiteConnectionOperation.objects, "get_or_create", return_value=(self.op, False)):
+                patch.object(prepare.WebsiteConnectionOperation.objects, "get_or_create", return_value=(self.op, False)), \
+                patch.object(prepare.WebsiteConnectionOperation.objects, "filter", return_value=FrozenPrepareContextTests.rows(first=None)):
             prepare.start_prepare(self.config, expected={}, retry=True)
         self.assertEqual(self.op.state, "pending")
         self.assertEqual(self.op.payload["attempt"], 2)
