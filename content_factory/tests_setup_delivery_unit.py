@@ -696,6 +696,17 @@ class ArticleDeliveryChainTests(SimpleTestCase):
 
 
 class SetupDeliveryContractTests(SimpleTestCase):
+    def test_usage_schema_accepts_explicit_unknown_numbers_and_rejects_strings(self):
+        from .website_goal_budget import COUNTERS
+        report={"version":1,"run_id":"setup-1","generation":1,"state_version":1,
+            **{key:0 for key in COUNTERS}}
+        for value in (0,None):
+            with self.subTest(value=value):
+                report["model_usd"]=value
+                self.assertEqual(validate_envelope(envelope(result={"usage":report}))["body"]["state_projection"]["result"]["usage"]["model_usd"],value)
+        report["model_usd"]="unknown"
+        with self.assertRaises(DeliveryContractError):validate_envelope(envelope(result={"usage":report}))
+
     def test_hashes_bind_identity_scope_and_kind(self):
         value = envelope()
         validate_envelope(value)
