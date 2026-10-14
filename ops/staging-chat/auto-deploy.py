@@ -22,7 +22,7 @@ REF='refs/heads/staging'
 HOST='ubuntu-s-4vcpu-8gb-syd1'
 CONFIG=Path('/etc/mlai-backend-staging-auto-deploy/config.json')
 SHA=re.compile(r'[0-9a-f]{40}')
-OPERATIONAL=['ops','scripts','Dockerfile','.dockerignore','.gitattributes','.gitmodules','requirements.txt','requirements-engine.txt','requirements.lock','manage.py','mlai/settings.py','mlai/settings_staging_chat.py','mlai/settings_staging_local.py','mlai/staging_integrations.py','mlai/wsgi.py','mlai/asgi.py','core/authentication.py','core/refresh_sessions.py','core/password_auth.py','community_chat/account_sessions.py','community_chat/tokens.py','community_chat/bootstrap.py','community_chat/federation.py','community_chat/authentication.py','community_chat/staging_password.py','community_chat/staging_views.py','community_chat/staging_urls.py','mlai/urls_staging_chat.py']
+OPERATIONAL=['ops','scripts','Dockerfile','.dockerignore','.gitattributes','.gitmodules','requirements.txt','requirements-engine.txt','requirements.lock','manage.py','mlai/settings.py','mlai/settings_staging_chat.py','mlai/settings_staging_local.py','mlai/staging_integrations.py','mlai/wsgi.py','mlai/asgi.py','core/authentication.py','core/permissions.py','core/account_bans.py','core/models.py','community_chat/onboarding.py','community_chat/account_cookies.py','community_chat/credential_boundary.py','community_chat/session_tokens.py','community_chat/signatures.py','core/refresh_sessions.py','core/password_auth.py','community_chat/account_sessions.py','community_chat/tokens.py','community_chat/bootstrap.py','community_chat/federation.py','community_chat/authentication.py','community_chat/staging_password.py','community_chat/staging_views.py','community_chat/staging_urls.py','mlai/urls_staging_chat.py']
 
 class Failure(Exception):
     """An attempt failed without making its candidate the successful release."""
@@ -109,6 +109,8 @@ class Controller:
         for directory in [self.root,self.releases]:
             if directory.is_symlink() or not directory.is_dir() or directory.stat().st_uid!=0 or directory.stat().st_mode & 0o077:raise Failure('private-directory')
         for path in [self.env,Path(self.cfg['ssh_key']),Path(self.cfg['known_hosts'])]:private_file(path)
+        if not {'config.py','compose.yml','network-policy.py','start-api.py'} <= self.cfg['helper_hashes'].keys():raise Failure('missing-helper-inventory')
+        if hashlib.sha256(Path(__file__).read_bytes()).hexdigest()!=self.cfg.get('controller_hash'):raise Failure('installed-controller')
         for name,digest in self.cfg['helper_hashes'].items():
             if Path(name).name!=name:raise Failure('helper-name')
             path=self.profile/name
@@ -210,6 +212,7 @@ class Controller:
         private_file(path);self.write_bytes(self.env,Path(path).read_bytes())
 
     def activate(self,path):
+        self.run(['python3',str(self.profile/'network-policy.py'),'verify'])
         values=self.values(path)
         metadata=self.root/'activation-image.json';self.write_bytes(metadata,self.run(['docker','image','inspect',values['STAGING_API_IMAGE_ID']]).encode())
         self.run(['python3',str(self.profile/'config.py'),'check-image','--output',str(path),'--metadata',str(metadata)])

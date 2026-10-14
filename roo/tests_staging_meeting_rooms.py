@@ -29,6 +29,8 @@ class MemberRoomTests(TestCase):
         self.assertEqual(self.post('book',body).status_code,200)
         self.assertEqual(PointsService.get_available_microroo(self.user),11_000_000)
         self.assertEqual(PointsAccount.objects.get(user=self.user).digital_balance_microroo,24_000_000)
+        wallet=self.client.get('/api/v1/community-chat/apple-iap/')
+        self.assertEqual(wallet.status_code,200);self.assertEqual(wallet.data['digital_balance_microroo'],24_000_000);self.assertFalse(wallet.data['available'])
         booking=first.data['booking']['id']
         with patch('django.core.signing.time.time',return_value=__import__('time').time()+3600):
             self.assertEqual(self.post('book',body).status_code,200)

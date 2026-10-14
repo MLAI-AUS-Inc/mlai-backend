@@ -60,11 +60,14 @@ class StagingPasswordTests(TestCase):
                     self.assertFalse(response.cookies)
 
     @override_settings(COMMUNITY_CHAT_STAGING_PASSWORD_ENABLED=False)
-    def test_default_off_and_production_routes_absent(self):
-        self.assertEqual(self.login().status_code,404)
-        for path in ('auth/email-code/request/','account/signup/','account/onboarding/','slack/','account/deletion/'):
-            self.assertEqual(self.client.post(ROOT+path,{},format='json').status_code,404)
-        self.assertEqual(self.client.get('/api/v1/auth/me/').status_code,404)
+    def test_default_off_keeps_normal_auth_and_disabled_provider_boundaries(self):
+        from django.conf import settings
+        with override_settings(SETTINGS_MODULE='mlai.settings_staging_chat',APP_ENV='chat-staging',ROOT_URLCONF='mlai.urls_staging_chat',MIDDLEWARE=['mlai.staging_integrations.IntegrationMiddleware',*settings.MIDDLEWARE]):
+            self.assertEqual(self.login().status_code,404)
+            for route in ('auth/email-code/request/','account/onboarding/','slack/'):
+                self.assertEqual(self.client.post(ROOT+route,{},format='json').status_code,503)
+            self.assertEqual(self.client.post(ROOT+'account/signup/',{},format='json').status_code,404)
+            self.assertEqual(self.client.get('/api/v1/auth/me/').status_code,401)
 
     def test_invalid_disabled_and_unknown_accounts_denied(self):
         self.assertEqual(self.login(password='bad').status_code,401)

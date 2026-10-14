@@ -1,0 +1,15 @@
+[Unit]
+Description=Start or repair the current MLAI staging API behind isolation policy
+After=docker.service mlai-staging-network-policy.service
+Requires=docker.service mlai-staging-network-policy.service
+PartOf=docker.service
+[Service]
+Type=oneshot
+User=root
+UMask=0077
+ExecStart=/usr/bin/python3 /opt/mlai-backend-staging/ops/staging-chat/start-api.py
+Restart=on-failure
+RestartSec=15s
+TimeoutStartSec=4min
+[Install]
+WantedBy=docker.service

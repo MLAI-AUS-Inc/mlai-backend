@@ -35,3 +35,6 @@ for _name in list(globals()):
 DEFAULT_FRONTEND_URL='http://localhost:5173'
 COMMUNITY_CHAT_FRONTEND_URL=DEFAULT_FRONTEND_URL
 COMMUNITY_CHAT_API_AUDIENCE='http://127.0.0.1:8000'
+
+from .staging_integrations import pin_isolated_destinations
+pin_isolated_destinations(globals(),local=True)

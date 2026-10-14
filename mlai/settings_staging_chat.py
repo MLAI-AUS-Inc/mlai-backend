@@ -59,3 +59,6 @@ for _name in list(globals()):
         _parsed=_urlsplit(_value)
         if _parsed.hostname and _parsed.hostname.endswith('.mlai.au'):
             globals()[_name]=_urlunsplit((_parsed.scheme,'api-staging.mlai.au' if _parsed.hostname.startswith('api.') else 'chat-staging.mlai.au',_parsed.path,'',''))
+
+from .staging_integrations import pin_isolated_destinations
+pin_isolated_destinations(globals(),local=False)

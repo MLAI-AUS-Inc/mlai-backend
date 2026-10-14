@@ -87,6 +87,8 @@ def _fold_source_payloads(payloads):
 
 def fetch_public_tokenmaxer_entries(window):
     """Fetch a normalized public board, with fresh and stale cache fallback."""
+    from mlai.staging_integrations import require_staging_capability
+    require_staging_capability('tokenmaxer')
     if not settings.TOKENMAXER_FEDERATION_ENABLED:
         return []
 

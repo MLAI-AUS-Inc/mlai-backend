@@ -5,8 +5,8 @@ spec=importlib.util.spec_from_file_location('policy',Path(__file__).with_name('n
 class PolicyTests(unittest.TestCase):
     def setUp(self):
         self.p=importlib.util.module_from_spec(spec);spec.loader.exec_module(self.p)
-        self.network={'Name':self.p.NETWORK,'Internal':True,'EnableIPv6':False,'IPAM':{'Config':[{'Subnet':self.p.SUBNET}]}}
-        self.container={'Name':'/api','Config':{'Labels':{'au.mlai.environment':'chat-staging-api'}},'HostConfig':{'Privileged':False,'NetworkMode':self.p.NETWORK,'CapAdd':[]},'Mounts':[],'NetworkSettings':{'Networks':{self.p.NETWORK:{'IPAddress':'172.28.240.10','GlobalIPv6Address':''}},'Ports':{}}}
+        self.network={'Name':self.p.NETWORK,'Internal':True,'EnableIPv6':False,'IPAM':{'Config':[{'Subnet':self.p.SUBNET}]},'Options':{'com.docker.network.bridge.name':self.p.BRIDGE}}
+        self.container={'Name':'/api','Config':{'Labels':{'au.mlai.environment':'chat-staging-api'}},'HostConfig':{'Privileged':False,'NetworkMode':self.p.NETWORK,'CapAdd':[],'CapDrop':['ALL']},'Mounts':[],'NetworkSettings':{'Networks':{self.p.NETWORK:{'IPAddress':'172.28.240.10','GlobalIPv6Address':''}},'Ports':{}}}
     def test_network_and_identity_fail_closed(self):
         self.p.validate_network(self.network)
         self.p.validate_api(self.container)
@@ -25,3 +25,17 @@ class PolicyTests(unittest.TestCase):
         self.assertTrue(any('ESTABLISHED,RELATED' in rule for rule in rules))
         for port in ('5432','6379','3100'):self.assertTrue(any(port in rule for rule in rules))
         self.assertEqual(rules[-1][-1],'DROP')
+    def test_bridge_option_must_be_explicit(self):
+        missing={**self.network,'Options':{}}
+        with self.assertRaises(ValueError):self.p.validate_network(missing)
+    def test_rules_and_parent_anchors_must_have_effective_order(self):
+        from unittest.mock import patch
+        import types
+        def output(args):
+            chain=args[1]
+            if chain==self.p.CHAIN:rules=list(reversed(self.p.rules()))
+            elif chain==self.p.HOST_CHAIN:rules=[['-j','DROP']]
+            else:rules=[['-j','ACCEPT'],dict(self.p.anchors())[chain]]
+            return '\n'.join('-A '+chain+' '+' '.join(r) for r in rules)
+        with patch.object(self.p,'ipt',side_effect=lambda *args,**kwargs:types.SimpleNamespace(returncode=0,stdout=output(args) if args[0]=='-S' else '')):
+            with self.assertRaises(ValueError):self.p.verify_rules()

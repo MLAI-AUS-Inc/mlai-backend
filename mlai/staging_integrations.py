@@ -39,7 +39,8 @@ class IntegrationMiddleware(MiddlewareMixin):
         if name in {'SendMagicLinkView','CreateUserView','MagicLinkVerifyView','MyTokenObtainPairView','CookieTokenRefreshView','PasswordResetRequestView','PasswordResetConfirmView','GetOrCreateSlackUserView','EmailCodeRequestView','EmailCodeVerifyView','DeviceAuthStartView','DeviceAuthAuthorizeView','DeviceAuthExchangeView','MemberOnboardingView'}:
             capability='account_creation'
         elif 'Webhook' in name or 'NotificationView' in name or 'Callback' in name and module!='community_chat.staging_views':capability='provider_callback'
-        elif module in {'community_chat.apple_iap_views','community_chat.slack_views','community_chat.slack_action_views'}:capability='apple_iap' if 'apple' in module else 'slack'
+        elif module=='community_chat.apple_iap_views' and not (name=='AppleIapView' and request.method in {'GET','HEAD','OPTIONS'}):capability='apple_iap'
+        elif module in {'community_chat.slack_views','community_chat.slack_action_views'}:capability='slack'
         if capability:
             try:require_staging_capability(capability)
             except StagingIntegrationUnavailable as exc:return JsonResponse(exc.detail,status=503)
@@ -49,3 +50,18 @@ class IntegrationMiddleware(MiddlewareMixin):
             import requests,httpx
             if isinstance(exception,(requests.RequestException,httpx.HTTPError,ConnectionError,TimeoutError)):
                 return JsonResponse({'code':'staging_integration_unavailable','capability':'external_network'},status=503)
+
+
+def pin_isolated_destinations(namespace, *, local=False):
+    """No first-party reporter/callback defaults escape via a non-URL suffix."""
+    from urllib.parse import urlsplit,urlunsplit
+    api='http://127.0.0.1:8000' if local else 'https://api-staging.mlai.au'
+    frontend='http://localhost:5173' if local else 'https://chat-staging.mlai.au'
+    relay='ws://127.0.0.1:3000' if local else 'wss://chat-staging.mlai.au'
+    for name,value in list(namespace.items()):
+        if name.isupper() and isinstance(value,str) and value.startswith(('https://','http://','wss://','ws://')):
+            old=urlsplit(value)
+            if old.hostname and (old.hostname=='mlai.au' or old.hostname.endswith('.mlai.au')):
+                target=urlsplit(relay if old.scheme in {'ws','wss'} else api if old.hostname.startswith('api.') else frontend)
+                namespace[name]=urlunsplit((target.scheme,target.netloc,old.path,old.query,''))
+    namespace.update(TOKEN_USAGE_API_BASE=api+'/api/v1/community-chat/usage',COMMUNITY_CHAT_RELAY_URL=relay,TOKENMAXER_FEDERATION_ENABLED=False,TOKENMAXER_PUBLIC_API_BASE='',APPLE_IAP_ENABLED=False)

@@ -10,7 +10,8 @@ services:
       labels:
         org.opencontainers.image.revision: ${STAGING_API_SOURCE_SHA:?source commit required}
         au.mlai.environment: chat-staging-api
-    restart: unless-stopped
+    # Startup is gated by the installed systemd policy check, including reboot.
+    restart: "no"
     environment:
       DJANGO_SETTINGS_MODULE: mlai.settings_staging_chat
       APP_ENV: chat-staging

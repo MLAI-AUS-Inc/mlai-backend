@@ -175,7 +175,7 @@ def _check_staging_transport(request):
                 raise AuthenticationFailed('Hosted staging mutations require an atomic request.')
             credential=getattr(request,'community_chat_account_session',None) or getattr(request,'community_chat_bootstrap_token',None)
             user=get_user_model().objects.select_for_update().get(pk=credential.user_id)
-            from .views import _require_current_chat_credential_locked
+            from .credential_boundary import _require_current_chat_credential_locked
             from rest_framework.exceptions import PermissionDenied
             try:_require_current_chat_credential_locked(request,user)
             except PermissionDenied as exc:raise AuthenticationFailed('Staging credential is no longer current.') from exc

@@ -1,0 +1,7 @@
+[Unit]
+Description=Keep the pinned current staging API healthy after policy verification
+[Timer]
+OnBootSec=45s
+OnUnitInactiveSec=45s
+[Install]
+WantedBy=timers.target

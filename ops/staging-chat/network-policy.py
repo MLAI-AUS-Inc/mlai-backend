@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Pinned staging-only egress policy. Never fetched/executed by app updates."""
-import argparse,json,os,socket,subprocess
+import argparse,json,os,socket,subprocess,shlex
+from pathlib import Path
 NETWORK='mlai-staging-api-internal'
 SUBNET='172.28.240.0/24'
 BRIDGE='mlai-stage-api'
@@ -17,13 +18,13 @@ def validate_network(n):
         configs=n.get('IPAM',{}).get('Config',[])
         if not (n.get('Name')==NETWORK and n.get('Internal') is True and not n.get('EnableIPv6') and len(configs)==1 and configs[0].get('Subnet')==SUBNET and set(configs[0])<={'Subnet','Gateway'}):
             raise ValueError('Unexpected internal network identity/topology.')
-    if n.get('Options',{}).get('com.docker.network.bridge.name',BRIDGE)!=BRIDGE:raise ValueError('Unexpected bridge identity.')
+    if n.get('Options',{}).get('com.docker.network.bridge.name')!=BRIDGE:raise ValueError('Unexpected bridge identity.')
 
 def validate_api(c):
     networks=c.get('NetworkSettings',{}).get('Networks',{})
     h=c.get('HostConfig',{})
     if (set(networks)!={NETWORK} or c.get('Config',{}).get('Labels',{}).get('au.mlai.environment')!='chat-staging-api'
-        or h.get('Privileged') or h.get('CapAdd') or h.get('NetworkMode') in {'host','none'}
+        or h.get('Privileged') or h.get('CapAdd') or set(h.get('CapDrop') or [])!={'ALL'} or h.get('NetworkMode') in {'host','none'}
         or any(port for port in c.get('NetworkSettings',{}).get('Ports',{}).values())
         or any(m.get('Source') in {'/var/run/docker.sock','/run/docker.sock','/'} for m in c.get('Mounts',[]))):
         raise ValueError('API identity, mounts, privilege or attachment changed.')
@@ -41,18 +42,40 @@ def ensure_rule(chain,rule,position=False):
 def anchors():
     source=['-i',BRIDGE,'-m','iprange','--src-range',SOURCE]
     return [('DOCKER-USER',source+['-j',CHAIN]),('INPUT',source+['-j',HOST_CHAIN])]
+def normalized_rule(tokens):
+    result=[];i=0
+    while i<len(tokens):
+        if tokens[i:i+2] in (['-m','tcp'],['-m','udp']):i+=2;continue
+        token=tokens[i]
+        if token.endswith('/32'):token=token[:-3]
+        if i and tokens[i-1]=='--ctstate':token=','.join(sorted(token.split(',')))
+        result.append(token);i+=1
+    return result
+
+def chain_rules(chain):
+    lines=ipt('-S',chain).stdout.splitlines()
+    return [normalized_rule(shlex.split(line)[2:]) for line in lines if line.startswith('-A '+chain+' ')]
+
 def verify_rules():
-    for chain,rule in anchors():ipt('-C',chain,*rule)
-    for rule in rules():ipt('-C',CHAIN,*rule)
-    ipt('-C',HOST_CHAIN,'-j','DROP')
-    # No unexpected ACCEPT/RETURN can precede installed rules.
+    for chain,rule in anchors():
+        actual=chain_rules(chain)
+        if not actual or actual[0]!=normalized_rule(rule):raise ValueError('Owned protection must be the first effective parent rule.')
     for chain,expected in [(CHAIN,rules()),(HOST_CHAIN,[['-j','DROP']])]:
-        actual=[line for line in ipt('-S',chain).stdout.splitlines() if line.startswith('-A ')]
-        if len(actual)!=len(expected):raise ValueError('Owned chain contains unexpected rules.')
+        if chain_rules(chain)!=[normalized_rule(rule) for rule in expected]:raise ValueError('Owned chain order or content drifted.')
+
+def verify_bridge():
+    if not (Path('/sys/class/net')/BRIDGE/'bridge').is_dir():raise ValueError('Expected Linux bridge is absent.')
+    interface=json.loads(run(['ip','-j','address','show','dev',BRIDGE]).stdout)
+    if len(interface)!=1 or interface[0].get('ifname')!=BRIDGE or not any(a.get('family')=='inet' and a.get('local')=='172.28.240.1' and a.get('prefixlen')==24 for a in interface[0].get('addr_info',[])):
+        raise ValueError('Bridge address identity differs from the installed staging network.')
+
 def topology():
-    validate_network(inspect('network',NETWORK))
+    validate_network(inspect('network',NETWORK));verify_bridge()
     ids=run(['docker','ps','-q','--filter','label=au.mlai.environment=chat-staging-api']).stdout.split()
-    for identifier in ids:validate_api(inspect('container',identifier))
+    for identifier in ids:
+        validate_api(inspect('container',identifier))
+        ipv6=run(['docker','exec',identifier,'cat','/proc/net/if_inet6']).stdout
+        if any(line.split()[-1]!='lo' for line in ipv6.splitlines() if line.strip()):raise ValueError('Unexpected non-loopback IPv6 interface on API.')
     # Fixed dependency destinations must belong to the exact staging services.
     expected={'postgres-api':'172.28.240.2','redis-api':'172.28.240.3','membership-adapter':'172.28.240.4','caddy':'172.28.240.5'}
     n=inspect('network',NETWORK)
@@ -69,7 +92,7 @@ def main():
     p=argparse.ArgumentParser();p.add_argument('action',choices=['install','verify','remove-owned']);a=p.parse_args()
     if os.geteuid()!=0 or socket.gethostname()!='ubuntu-s-4vcpu-8gb-syd1':raise SystemExit('Only the approved staging host may install this policy.')
     if a.action=='install':
-        validate_network(inspect('network',NETWORK))
+        validate_network(inspect('network',NETWORK));verify_bridge()
         for chain in (CHAIN,HOST_CHAIN):
             ipt('-N',chain,check=False)
         # Never flush any chain. Refuse drift instead of altering other rules.

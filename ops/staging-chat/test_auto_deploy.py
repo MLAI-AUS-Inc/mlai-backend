@@ -188,11 +188,11 @@ class AutoDeployTests(unittest.TestCase):
         repo=self.root/'git';repo.mkdir()
         def git(*args):return subprocess.check_output(['git','-C',str(repo),*args],text=True).strip()
         git('init');git('config','user.name','Test');git('config','user.email','test@example.invalid')
-        for name in ['ops/staging-chat/config.py','roo/migrations/0001.py','core/authentication.py','roo/new_function.py','mlai/urls.py']:
+        for name in ['ops/staging-chat/config.py','roo/migrations/0001.py','core/authentication.py','roo/new_function.py','mlai/urls.py','core/permissions.py','community_chat/onboarding.py']:
             path=repo/name;path.parent.mkdir(parents=True,exist_ok=True);path.write_text('original')
         git('add','.');git('commit','-m','base');base=git('rev-parse','HEAD')
         cfg={**self.cfg,'source_sha':base,'base_source_sha':base,'migration_hashes':{}}
-        for name,allowed in [('roo/new_function.py',True),('mlai/urls.py',True),('ops/staging-chat/config.py',False),('roo/migrations/0001.py',False),('core/authentication.py',False)]:
+        for name,allowed in [('roo/new_function.py',True),('mlai/urls.py',True),('ops/staging-chat/config.py',False),('roo/migrations/0001.py',False),('core/authentication.py',False),('core/permissions.py',False),('community_chat/onboarding.py',False)]:
             git('reset','--hard',base);(repo/name).write_text('new');git('add','.');git('commit','-m','change')
             check=module.Controller(cfg)
             if allowed:check.compatible(repo)
@@ -248,3 +248,11 @@ class AutoDeployTests(unittest.TestCase):
         self.assertEqual(len([p for p in releases.iterdir() if len(p.name)==40]),3)
 
 if __name__=='__main__':unittest.main()
+
+class RequiredHelperInventoryTests(unittest.TestCase):
+    def test_missing_executed_helper_inventory_refuses(self):
+        cfg={'state_dir':'/var/lib/mlai-backend-staging-auto-deploy','profile':'/opt/mlai-backend-staging/ops/staging-chat','repo':module.REPOSITORY,'ref':module.REF,'hostname':module.HOST,'machine_id':'f'*32,'source_sha':'c'*40,'ssh_key':'/etc/mlai-backend-staging-auto-deploy/id_ed25519','known_hosts':'/etc/mlai-backend-staging-auto-deploy/known_hosts','helper_hashes':{}}
+        c=module.Controller(cfg)
+        stat=type('Stat',(),{'st_uid':0,'st_mode':0o700})()
+        with patch.object(module.os,'geteuid',return_value=0),patch.object(module.socket,'gethostname',return_value=module.HOST),patch.object(module.Path,'read_text',return_value='f'*32),patch.object(module.Path,'stat',return_value=stat),patch.object(module.Path,'is_symlink',return_value=False),patch.object(module.Path,'is_dir',return_value=True),patch.object(module,'private_file'):
+            with self.assertRaisesRegex(module.Failure,'missing-helper-inventory'):c.validate()
