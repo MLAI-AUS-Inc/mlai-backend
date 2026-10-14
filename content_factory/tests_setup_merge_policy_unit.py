@@ -207,3 +207,111 @@ class SetupMergePolicyUnitTests(SimpleTestCase):
         self.assertEqual(raised.exception.code, "setup_checks_failed")
         self.assertFalse(raised.exception.retryable)
         self.assertEqual(self.merge_calls, [])
+
+    # Vyavos PR #3 (14 Oct): the merge credential cannot read Checks, so the
+    # MLAI verification job the setup PR adds looked "unknown" and the PR merged
+    # while that job was still running; it then concluded failure.
+
+    def kit_merge(self, *verify_runs, ci_error=None):
+        from integrations.services import github_app
+        self.run.result["adoption"] = {"kit_paths": [".github/workflows/mlai-articles-verification.yml",
+            ".mlai/articles-verification.py", ".mlai/articles-verification.json"]}
+        original_provider = self.provider
+        self.ci_reads = []
+        def provider(method, url, **kwargs):
+            if "/check-runs?" in url:
+                self.ci_reads.append((url, kwargs["headers"]["Authorization"]))
+                return response({"total_count": len(verify_runs), "check_runs": list(verify_runs)})
+            if url.endswith(("/status", "/check-runs")):
+                return response({"message": "Resource not accessible by integration"}, 403)
+            return original_provider(method, url, **kwargs)
+        self.provider = provider
+        def credential(**kwargs):
+            if kwargs.get("permission_profile") == "ci_evidence" and ci_error:
+                raise ci_error
+            return github_app.GitHubInstallationToken(
+                "ci-evidence" if kwargs.get("permission_profile") == "ci_evidence" else "merge", None, "4",
+                self.website.github_repo)
+        with self.merge_boundaries():
+            tokens = patch.object(github_app, "create_installation_access_token", side_effect=credential)
+            with tokens as minted:
+                try:
+                    return prepare.maybe_merge_prepared_setup(self.run, self.context, self.config, user=self.user)
+                finally:
+                    self.profiles = [call.kwargs.get("permission_profile") for call in minted.call_args_list]
+
+    def verify_run(self, status, conclusion=None, **fields):
+        return {"name": "verify", "head_sha": self.head, "status": status, "conclusion": conclusion,
+            "app": {"slug": "github-actions"}, **fields}
+
+    def test_kit_setup_waits_while_its_verify_check_runs(self):
+        for status in ("queued", "in_progress"):
+            with self.subTest(status=status):
+                self.merge_calls = []
+                result = self.kit_merge(self.verify_run(status))
+                self.assertEqual(result["status"], "pending")
+                self.assertEqual(self.merge_calls, [])
+                self.assertIn("ci_evidence", self.profiles)
+                url, authorization = self.ci_reads[-1]
+                self.assertIn(f"/commits/{self.head}/check-runs?check_name=verify", url)
+                self.assertEqual(authorization, "Bearer ci-evidence")
+
+    def test_kit_setup_with_a_failed_verify_check_is_blocked_not_merged(self):
+        with self.assertRaises(prepare.WebsiteAuthorityError) as raised:
+            self.kit_merge(self.verify_run("completed", "success"), self.verify_run("completed", "failure"))
+        self.assertEqual(raised.exception.code, "setup_checks_failed")
+        self.assertFalse(raised.exception.retryable)
+        self.assertEqual(self.merge_calls, [])
+        self.assertEqual(self.run.result["merge_status"], "checks_failed")
+        self.assertIn("MLAI articles verification failed", self.run.result["merge_blocked_reason"])
+
+    def test_kit_setup_merges_once_its_verify_check_passed(self):
+        result = self.kit_merge(self.verify_run("completed", "success"),
+            # Another app's or another commit's "verify" never decides this head.
+            self.verify_run("completed", "failure", app={"slug": "other-ci"}),
+            self.verify_run("in_progress", head_sha="d" * 40))
+        self.assertEqual(result["status"], "pending")
+        self.assertEqual(len(self.merge_calls), 1)
+        self.assertEqual(self.merge_calls[0]["sha"], self.head)
+        self.assertEqual(self.run.result["merge_status"], "merged")
+
+    def test_unreadable_verification_stops_the_merge_with_its_permission_code(self):
+        from integrations.services import github_app
+        with self.assertRaises(prepare.WebsiteAuthorityError) as raised:
+            self.kit_merge(self.verify_run("completed", "failure"),
+                ci_error=github_app.GitHubCIEvidencePermissionRequired("Missing fixture CI read grants"))
+        self.assertEqual(raised.exception.code, "github_ci_evidence_permission_required")
+        self.assertEqual(self.merge_calls, [])
+        self.assertNotEqual(self.run.result.get("merge_status"), "merged")
+
+    def test_setups_without_the_kit_keep_the_existing_merge(self):
+        self.run.result.pop("adoption", None)
+        from integrations.services import github_app
+        original_provider = self.provider
+        def provider(method, url, **kwargs):
+            self.assertNotIn("/check-runs?", url)
+            if url.endswith(("/status", "/check-runs")):
+                return response({"message": "Resource not accessible by integration"}, 403)
+            return original_provider(method, url, **kwargs)
+        self.provider = provider
+        with self.merge_boundaries():
+            result = prepare.maybe_merge_prepared_setup(self.run, self.context, self.config, user=self.user)
+            profiles = [call.kwargs.get("permission_profile") for call in github_app.create_installation_access_token.call_args_list]
+        self.assertEqual(result["status"], "pending")
+        self.assertEqual(len(self.merge_calls), 1)
+        self.assertNotIn("ci_evidence", profiles)
+
+    def test_kit_detection_reads_the_setup_result(self):
+        from .website_setup_merge_policy import setup_pr_adds_verification_kit
+        from types import SimpleNamespace
+        detect = lambda result: setup_pr_adds_verification_kit(SimpleNamespace(result=result))
+        self.assertTrue(detect({"verification_kit_required": True}))
+        self.assertTrue(detect({"article_system_setup": {"adoption": {"kit_paths": [".mlai/articles-verification.py"]}}}))
+        self.assertTrue(detect({"files_created": ["src/articles.tsx", ".github/workflows/mlai-articles-verification.yml"]}))
+        self.assertTrue(detect({"files_updated": [".mlai/articles-verification.json"]}))
+        for result in (None, {}, {"verification_kit_required": "yes"}, {"adoption": {"kit_paths": []}},
+                       {"adoption": ["bad"]}, {"files_created": "not-a-list"},
+                       {"files_created": [".github/workflows/ci.yml", ".mlai/other.json", None]},
+                       {"article_system_setup": "invalid"}):
+            with self.subTest(result=result):
+                self.assertFalse(detect(result))
