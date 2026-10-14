@@ -1,0 +1,12 @@
+[Unit]
+Description=Restore the reviewed MLAI staging API firewall anchors
+After=docker.service
+Requires=docker.service
+PartOf=docker.service
+Before=mlai-backend-staging-auto-deploy.service
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/python3 /opt/mlai-backend-staging/ops/staging-chat/network-policy.py install
+RemainAfterExit=yes
+[Install]
+WantedBy=docker.service

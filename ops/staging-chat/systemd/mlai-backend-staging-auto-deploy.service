@@ -1,0 +1,10 @@
+[Unit]
+Description=Deploy compatible MLAI backend staging commits
+After=docker.service network-online.target mlai-staging-network-policy.service
+Requires=docker.service mlai-staging-network-policy.service
+[Service]
+Type=oneshot
+User=root
+UMask=0077
+ExecStart=/usr/bin/python3 /etc/mlai-backend-staging-auto-deploy/auto-deploy.py tick
+TimeoutStartSec=55min
