@@ -110,7 +110,8 @@ class FirstArticleProviderChainTests(OneClickBillingFixture,TransactionTestCase)
     def test_ready_goal_uses_canonical_approval_merge_reverification_and_exact_live_body(self):
         self.ready_article_chain()
 
-    @override_settings(ARTICLES_ARTICLE_RECOVERY_ENABLED=True,ARTICLES_WEBSITE_GOAL_BUDGETS_ENABLED=True)
+    @override_settings(ARTICLES_ARTICLE_RECOVERY_ENABLED=True,ARTICLES_WEBSITE_GOAL_BUDGETS_ENABLED=True,
+        CONTENT_FACTORY_ARTICLE_DELIVERY_V1_APPLY_ENABLED=True)
     def test_failed_article_recovers_original_paid_run_then_finishes_the_live_chain(self):
         self.ready_article_chain(repair=True)
 
@@ -153,6 +154,9 @@ class FirstArticleProviderChainTests(OneClickBillingFixture,TransactionTestCase)
             if url.endswith("/api/runs/article"):
                 self.assertEqual(kwargs["json"]["topic_candidate_id"],"best")
                 self.assertEqual(kwargs["json"]["delivery_mode"],"publish_code")
+                if repair:
+                    self.assertEqual(kwargs["json"]["article_delivery_v1"],{"schema_version":1})
+                    self.assertEqual(kwargs["json"]["first_article_goal_id"],str(op.pk))
                 return provider_response({"run_id":"first-article","status":"queued"},status=202)
             if url.endswith("/first-article/approve"):
                 return provider_response({"run_id":"first-article","status":"completed","approval_state":"approved"})
@@ -217,13 +221,24 @@ class FirstArticleProviderChainTests(OneClickBillingFixture,TransactionTestCase)
             if repair:
                 from uuid import uuid4
                 from .website_failure_contract import attach_failure_projection,classify_failure
-                from .website_operations import observe_workflow_status
-                from django.db import transaction
-                run.status="failed"
-                run.result={"generation":1,"state_version":2,"usage":usage(run.run_id),**attach_failure_projection({},
-                    classify_failure("DIRECTORY_STYLE_REVIEW_FAILED","article_style"),str(uuid4()))}
-                run.save(update_fields=["status","result","updated_at"])
-                with transaction.atomic():observe_workflow_status(run)
+                from .setup_delivery_enrollment import SCOPE_FIELDS
+                from .setup_delivery_receiver import receive_setup_delivery
+                from .tests_setup_delivery_unit import envelope,signed
+                worker=envelope(kind="run_snapshot",status="failed",event_id="first-article-failure")
+                worker.update(run_id=run.run_id,workflow="direct_generate",scope={
+                    key:run.run_request[key] for key in SCOPE_FIELDS if run.run_request.get(key) not in (None,"")},
+                    execution={"generation":1,"state_version":2})
+                projection=worker["body"]["state_projection"]
+                causal=attach_failure_projection({},classify_failure("DIRECTORY_STYLE_REVIEW_FAILED","article_style"),str(uuid4()))
+                projection.update(generation=1,state_version=2,current_step="article_style",
+                    failure=causal["failure"],failure_occurrence_id=causal["failure_occurrence_id"],
+                    result={"usage":usage(run.run_id),**causal})
+                signed(worker)
+                accepted=receive_setup_delivery(worker,expected_kind="run_snapshot",path_run_id=run.run_id)
+                self.assertEqual(accepted.status_code,200,accepted.data)
+                self.assertEqual(accepted.data["disposition"],"applied")
+                self.assertEqual(receive_setup_delivery(worker).data["disposition"],"duplicate")
+                run.refresh_from_db();self.assertEqual(run.result["failure"],causal["failure"])
                 held=deepcopy(op.receipt["first_article_billing"])
                 self.advance_article(op,record_failure=True)
                 self.assertEqual(op.receipt["article_recovery"]["state"],"pending")
@@ -251,6 +266,7 @@ class FirstArticleProviderChainTests(OneClickBillingFixture,TransactionTestCase)
             self.assertTrue(article.approval_matches(op,run))
             self.advance_article(op)  # real merge policy and protected merge intent
             child=ContentFactoryRun.objects.get(run_id="first-publish")
+            if repair:self.assertEqual(child.run_request["article_delivery_v1"],{"schema_version":1})
             self.assertEqual(child.result["merge_response"],{"merged":True,"sha":"e"*40})
             self.assertEqual(remote["merge_calls"],1)
             self.assertNotIn("first_article_live_receipt",op.receipt)

@@ -33,8 +33,21 @@ failure accounting, canonical resume, reserved attempt, approval, merge, live
 verification and final notification alongside D1's successful chain. Run this
 only in the existing authorized disposable CI lane; no migration/model changes.
 
-D2 remains incomplete until Content Factory article B1/B5 outcome delivery and
-automatic stale-proposal rebuilding are implemented and tested. Refreshes must
+D2's bounded-resume slice passed all CI checks in #1028, including the new
+PostgreSQL paid-run recovery-to-live chain. The next slice adds a separate
+server-reserved article delivery marker, validated against that original goal.
+It shares B5's durable receipt, ordering and pull reconciliation while accepting
+only bounded article outcomes/usage. Worker snapshots cannot enroll a stream or
+replace its marker; incoming sparse outcomes preserve richer canonical article
+evidence. Setup and article apply flags remain independent and default off.
+
+Local evidence for the delivery extension: 111 backend tests pass, alongside
+183 Content Factory delivery/queue/attempt/usage/failure tests in #990. The
+schema is pinned to immutable Content Factory revision d7f88b54. CI also now
+tests server enrollment in the real PostgreSQL paid-run recovery chain.
+
+D2 remains incomplete until automatic stale-proposal rebuilding and article
+strategy escalation are implemented and tested. Refreshes must
 use a fresh owned branch/current base, preserve deterministic consent only and
 require a new review for model-generated changes. No rollout or customer actions
 are part of this change.

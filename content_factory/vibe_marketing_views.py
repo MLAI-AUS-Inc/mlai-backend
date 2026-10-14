@@ -8357,7 +8357,7 @@ def _ensure_local_publish_child_from_known_id(
         "delivery_mode_confirmed": True,
     }
     original_request=_run_mapping(source_run.run_request)
-    for key in ("operation_id","operation_attempt","deletion_epoch","first_article_goal_operation_id","first_article_goal_id","goal_budget"):
+    for key in ("operation_id","operation_attempt","deletion_epoch","first_article_goal_operation_id","first_article_goal_id","goal_budget","article_delivery_v1"):
         if key in original_request:publish_payload[key]=original_request[key]
     # The worker creates this child by copying the source request. Mirror that
     # exact identity rather than adding today's optional consent fields.
@@ -8425,6 +8425,7 @@ def _sync_publish_child_from_control_response(
         ("review_source_run_id", review_source_run_id),
         ("first_article_goal_operation_id",_run_mapping(remote_run.run_request).get("first_article_goal_operation_id")),
         ("first_article_goal_id",_run_mapping(remote_run.run_request).get("first_article_goal_id")),
+        ("article_delivery_v1",_run_mapping(remote_run.run_request).get("article_delivery_v1")),
     ):
         if value not in (None, "") and publish_request.get(key) != value:
             publish_request[key] = value

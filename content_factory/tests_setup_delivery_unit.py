@@ -645,6 +645,56 @@ class SetupDeliveryEnrollmentTests(SimpleTestCase):
         self.assertTrue(enroll_setup_delivery(existing, scope, website, "article_system_setup"))
 
 
+@override_settings(CONTENT_FACTORY_ARTICLE_DELIVERY_V1_APPLY_ENABLED=True,ROO_API_KEY="fixture-service-key")
+class ArticleDeliveryChainTests(SimpleTestCase):
+    def setUp(self):
+        self.chain=SetupDeliveryChainTests("runTest")
+        self.chain.setUp();self.addCleanup(self.chain.doCleanups)
+        self.input=signed({**envelope(status="failed"),"workflow":"direct_generate"})
+        goal="44444444-4444-4444-8444-444444444444"
+        original={**self.input["scope"],"article_delivery_v1":{"schema_version":1},
+            "first_article_goal_id":goal,"first_article_goal_operation_id":goal}
+        self.chain.operation.payload={**self.chain.operation.payload,"workflow":"article_generation",
+            "article_delivery_v1":{"schema_version":1},"article_delivery_workflow":"direct_generate",
+            "article_delivery_scope":deepcopy(self.input["scope"]),"article_delivery_request":deepcopy(original)}
+        self.chain.operation.payload.pop("setup_delivery_v1")
+        self.chain.run.workflow="article_generation";self.chain.run.run_request=original
+        self.chain.run.result={"article_quality":{"saved_identity":"original"},"user_action_count":0}
+
+    def test_failed_article_commits_same_cause_replay_and_keeps_rich_saved_evidence(self):
+        result=self.chain.post(self.input)
+        self.assertEqual(result.status_code,200);self.assertEqual(result.data["disposition"],"applied")
+        self.assertEqual(self.chain.run.status,"failed")
+        self.assertEqual(self.chain.run.result["failure"],self.input["body"]["state_projection"]["failure"])
+        self.assertEqual(self.chain.run.result["article_quality"],{"saved_identity":"original"})
+        self.assertEqual(self.chain.run.result["user_action_count"],0)
+        self.assertEqual(self.chain.post(self.input).data["disposition"],"duplicate")
+        self.chain.legacy.assert_not_called();self.chain.snapshot.assert_not_called()
+
+    def test_setup_stream_cannot_receive_article_and_foreign_goal_cannot_bind(self):
+        self.chain.operation.payload.pop("article_delivery_v1")
+        response=self.chain.post(self.input)
+        self.assertEqual(response.status_code,409);self.assertFalse(response.data["acknowledged"])
+        self.chain.operation.payload["article_delivery_v1"]={"schema_version":1}
+        self.chain.run.run_request["first_article_goal_id"]="other-goal"
+        response=self.chain.post(self.input)
+        self.assertEqual(response.status_code,409);self.assertFalse(response.data["acknowledged"])
+        self.assertEqual(self.chain.run.status,"running")
+
+    def test_article_apply_flag_does_not_borrow_enabled_setup_flag(self):
+        with override_settings(CONTENT_FACTORY_ARTICLE_DELIVERY_V1_APPLY_ENABLED=False,
+            CONTENT_FACTORY_SETUP_DELIVERY_V1_APPLY_ENABLED=True):
+            response=self.chain.post(self.input)
+        self.assertEqual(response.status_code,503);self.assertEqual(self.chain.run.status,"running")
+
+    def test_worker_snapshot_cannot_enroll_or_replace_article_marker(self):
+        merged=service_views._merge_django_owned_run_request({}, {"article_delivery_v1":{"schema_version":1}})
+        self.assertNotIn("article_delivery_v1",merged)
+        original=self.chain.run.run_request
+        merged=service_views._merge_django_owned_run_request(original,{"article_delivery_v1":{"schema_version":2}})
+        self.assertEqual(merged["article_delivery_v1"],{"schema_version":1})
+
+
 class SetupDeliveryContractTests(SimpleTestCase):
     def test_hashes_bind_identity_scope_and_kind(self):
         value = envelope()

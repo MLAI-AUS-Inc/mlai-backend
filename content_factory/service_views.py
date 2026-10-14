@@ -8767,11 +8767,11 @@ def _merge_django_owned_run_request(existing_request, incoming_request):
     existing = existing_request if isinstance(existing_request, dict) else {}
     incoming = incoming_request if isinstance(incoming_request, dict) else {}
     merged = {key: deepcopy(value) for key, value in incoming.items()
-              if key != "setup_delivery_v1" or key in existing}
+              if key not in {"setup_delivery_v1","article_delivery_v1"} or key in existing}
     merged = {key: value for key, value in merged.items()
               if not (key.startswith("roo_points_") or key in {"article_publish_approval_receipt", "article_publish_approval_revoked", "website_access_lost", "first_article_goal_operation_id", "first_article_goal_id"}) or key in existing}
     for key, value in existing.items():
-        if key == "setup_delivery_v1":
+        if key in {"setup_delivery_v1","article_delivery_v1"}:
             merged[key] = deepcopy(value)
             continue
         if not (key.startswith("roo_points_") or key in {"article_publish_approval_receipt", "article_publish_approval_revoked", "website_access_lost", "first_article_goal_operation_id", "first_article_goal_id"}):

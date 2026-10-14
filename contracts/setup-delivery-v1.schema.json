@@ -55,6 +55,16 @@
             "generation_blocked",
             "generation_failed",
             "generation_recovering",
+            "article_progress",
+            "article_review_ready",
+            "article_review_fallback_ready",
+            "article_review_preview_not_available",
+            "article_review_preview_failed",
+            "content_ready",
+            "generation_pr_opened",
+            "style_review_failed",
+            "preview_ready",
+            "draft_pr_created",
             "scaffold_complete",
             "scan_complete",
             "scan_progress"
@@ -69,6 +79,8 @@
     "workflow": {
       "enum": [
         "article_system_setup",
+        "direct_generate",
+        "confirmed_topic",
         "repo_scan"
       ]
     },
