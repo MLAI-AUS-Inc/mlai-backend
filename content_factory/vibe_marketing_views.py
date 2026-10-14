@@ -11333,6 +11333,8 @@ def _overlay_live_bootstrap_fields(payload, *, context, request):
     payload["articleCapabilities"] = capabilities
     from .website_journey import journey_for_context
     payload["websiteJourney"] = journey_for_context(context, website_config, capabilities=capabilities)
+    from .website_status import add_status
+    add_status(payload, context, website_config, journey=payload["websiteJourney"])
     # Older clients also consume these flags; keep per-user permissions live on
     # cached bootstrap responses rather than exposing credential-only readiness.
     scaffold = (payload.get("checks") or {}).get("scaffold")

@@ -29,6 +29,8 @@ from roo.coding import reconcile_coding_reservations
 from roo.models import ScheduledDiscoveryHeartbeat
 from startup_updates.monthly_update_reminders import run_monthly_update_reminder_scheduler
 
+from content_factory.website_consistency import run_website_consistency_sweep
+
 logger = logging.getLogger(__name__)
 
 
@@ -99,6 +101,7 @@ class Command(BaseCommand):
             # interval + batch cap), so it is safe to tick every loop.
             ("github_installation_reconciliation", run_github_installation_reconciliation_sweep),
             ("website_connection_operations", process_website_connection_operations),
+            ("website_consistency", run_website_consistency_sweep),
             ("article_dispatch_outbox", process_dispatch_outbox),
             # Refreshes the durable Stripe payout ledger once per local day.
             # This never posts to Xero; posting always requires admin approval.

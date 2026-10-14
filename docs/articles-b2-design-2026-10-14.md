@@ -1,6 +1,6 @@
 # Articles B2 goal runner design
 
-14 October 2026. Proposed for owner approval.
+14 October 2026. Implementation approved by the owner’s instruction to keep progressing through every phase without per-step stops.
 
 The backend will maintain one current Articles goal for each connected website
 and advance it from validated milestone proofs. A worker message or a completed
@@ -11,10 +11,9 @@ and the next scheduled check.
 This extends the approved [Phase 2 status and consistency design](articles-phase2-design-notes-2026-10-12.md#21-one-backend-status-owner-and-consistency-sweep)
 with the B2 goal receipt in the owner's 13 October one-shot runbook. Implementation
 depends on [B1/B5 backend PR #1013](https://github.com/MLAI-AUS-Inc/mlai-backend/pull/1013).
-This design branch starts at `origin/main` commit
-`c7ab8369170e98b57107abdbcd499c621a6d8ef0`; it does not duplicate or merge that
-pending implementation. Implementation should start from fresh main after the
-dependency is merged, or use an explicitly identified stack if the owner chooses.
+The implementation is explicitly stacked on its unmerged final head
+`51ee937b71d148ad0704f2588e807bb8ae8d5f33`. Backend PR #1014 targets the B1/B5
+branch. No dependency has been merged or released by this task.
 
 ## Scope and decisions
 
