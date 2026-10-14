@@ -405,3 +405,20 @@ its synthetic repo. Test identity is now explicit;27 native/task cases passed wi
 hostile enclosing Actions identity. Fix e0e9726e is pushed to CF PR986; remote rerun
 pending. Production source identity validation is unchanged. C4 PR1021 remote
 checks/migration-tests/postgres-search are green; deployment skipped.
+
+
+D1 billing/refund foundation checkpoint (14 October): feat/first-article-goal.
+21 new focused billing/refund tests and all 19 database-free workflow commands
+pass. Original quote/payer/ledger survive retries and source-only rebinding;
+HTTP cannot grant held-payment authority. Credits have a durable operation outbox
+independent of feature flags, cancellation and connection generations. Revocation
+preserves payment proof and never waits for credit execution. Erasure retains
+only financial proof until settlement. No model/migration change; credential,
+emitter (661) and assignment (353 full/0 new omissions) checks pass.
+D1 is not complete: continue topic/profile selection, generation, review/approval,
+merge/live proof and real-chain coverage. Cover changed owner choices while an
+old credit is pending before opening a D1 PR. All rollout flags remain false.
+
+C5 Chat companion is draft PR472 at ab05eff4514ed03e80fdbd89f6176c50478b6c30.
+Backend PR1023 gained CI trigger commit293181f0 because its C4 base is a feat
+branch; checks are now running. CF986 e0e9726e checks are green; deployment skipped.

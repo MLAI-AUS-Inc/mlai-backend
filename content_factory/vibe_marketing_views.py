@@ -782,8 +782,17 @@ def _validate_article_start_reservation(context, payload):
     validate_operation(website, payload)
 
 
-def _charge_roo_points_for_article(request, *, context, payload: dict):
-    quote_error = _quoted_price_response(request, cost_points=get_content_factory_article_cost_points(context.organization.domain))
+def _charge_roo_points_for_article(request, *, context, payload: dict, goal_operation_id=None):
+    # Only the internal goal dispatcher can supply this argument. HTTP/MCP body
+    # fields cannot bypass the normal current-price and wallet checks.
+    if goal_operation_id is not None:
+        from .website_first_article_billing import generation_key
+        try:
+            payload["client_request_id"] = generation_key(goal_operation_id, context=context, user=request.user)
+        except WebsiteAuthorityError as exc:
+            return None, None, None, Response(exc.as_dict(), status=exc.status)
+    quote_error = (_quoted_price_response(request, cost_points=get_content_factory_article_cost_points(context.organization.domain))
+        if goal_operation_id is None else None)
     if quote_error is not None:
         return None, None, None, quote_error
     editorial_error = _refresh_article_editorial_payload(organization=context.organization, payload=payload)
@@ -815,13 +824,19 @@ def _charge_roo_points_for_article(request, *, context, payload: dict):
     with transaction.atomic():
         try:
             _validate_article_start_reservation(context, payload)
-            charged_user, charge_ledger, charge_amount = charge_content_factory_request_for_user(
-                user=request.user,
-                actor_id=actor_id,
-                article_request=article_request,
-                resolved_domain=domain,
-                prevalidated_admission=True,
-            )
+            if goal_operation_id is not None:
+                from .website_first_article_billing import consume
+                charged_user, charge_ledger, charge_amount = consume(goal_operation_id,
+                    context=context, user=request.user, payload=article_request)
+                payload.update({key: article_request[key] for key in ("first_article_goal_operation_id", "first_article_goal_id")})
+            else:
+                charged_user, charge_ledger, charge_amount = charge_content_factory_request_for_user(
+                    user=request.user,
+                    actor_id=actor_id,
+                    article_request=article_request,
+                    resolved_domain=domain,
+                    prevalidated_admission=True,
+                )
         except InsufficientRooPointsError as exc:
             return None, None, None, Response(
                 getattr(exc, "payload", None) or build_roo_points_payload(
@@ -16541,7 +16556,7 @@ def _article_selection_conflicts(*, submitted, resolved):
     return conflicts
 
 
-def start_article_generation(*, user, context, data, request_hash=None, website_contract=None):
+def start_article_generation(*, user, context, data, request_hash=None, website_contract=None, goal_operation_id=None):
     """Execute the canonical owned operation for HTTP and MCP transports."""
     command = ContentCommand(user=user, data=data)
     config = _get_config(context.organization)
@@ -16800,6 +16815,7 @@ def start_article_generation(*, user, context, data, request_hash=None, website_
         command,
         context=context,
         payload=payload,
+        goal_operation_id=goal_operation_id,
     )
     if billing_error is not None:
         return billing_error

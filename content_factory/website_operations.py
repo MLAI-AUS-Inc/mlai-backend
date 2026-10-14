@@ -364,6 +364,9 @@ def cancel_operation(config, *, data, idempotency_key):
         op.receipt = {**op.receipt, "status": "cancelled_by_user" if op.action == "prepare" else "cancelled", "repository_modified": bool(effects) or None, "remote_effects": effects,
             "remote_outcome_unknown": not bool(effects), "cancellation_undoes_remote_writes": False, "remote_cleanup_pending": True}
         op.save(update_fields=["state", "receipt", "next_attempt_at", "updated_at"])
+        if op.action == "prepare":
+            from .website_first_article_refunds import reserve_refund
+            reserve_refund(op)
         run_ids = list(ContentFactoryRun.objects.filter(organization=connection.organization, run_request__operation_id=str(op.pk)).values_list("run_id", flat=True))
         child_operations = []
         if op.action == "prepare":

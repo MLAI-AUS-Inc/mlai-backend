@@ -14,6 +14,7 @@ def owns_goal(op):
 def start_goal(current, *, company_id, user, retry, target, now, force_successor=False, consent=None):
     """Select/create one current goal while the caller holds the connection lock."""
     from .website_models import WebsiteConnectionOperation
+    from .website_first_article_billing import reserve
     scope = goals.scope_for(current, company_id)
     latest = current.operations.select_for_update().filter(generation=current.generation, action="prepare").order_by("-created_at", "-pk").first()
     goal = goals.mapping(getattr(latest, "receipt", None)).get("goal")
@@ -38,6 +39,7 @@ def start_goal(current, *, company_id, user, retry, target, now, force_successor
             latest.state, latest.next_attempt_at = "pending", now
             latest.receipt = {**latest.receipt, "status": "working", "user_action": None, "dispatch_outcome": "replayed"}
             latest.save(update_fields=["state", "next_attempt_at", "receipt", "updated_at"])
+        reserve(latest, user=user, now=now)
         return latest
     if latest and latest.state not in TERMINAL and str(latest.payload.get("company_id")) != str(company_id):
         raise WebsiteAuthorityError("website_operation_changed", "A current website goal belongs to another selected company.")
@@ -59,6 +61,7 @@ def start_goal(current, *, company_id, user, retry, target, now, force_successor
         if latest.next_attempt_at is None and latest.state in {"pending", "running"}:
             latest.next_attempt_at = now
         latest.save(update_fields=["receipt", "next_attempt_at", "updated_at"])
+        reserve(latest, user=user, now=now)
         return latest
     if latest and latest.state not in TERMINAL:
         from .website_prepare import _cancel_prepare_child
@@ -68,6 +71,8 @@ def start_goal(current, *, company_id, user, retry, target, now, force_successor
         latest.state, latest.next_attempt_at = "cancelled", None
         latest.receipt = {**latest.receipt, "status": "superseded", "user_action": None}
         latest.save(update_fields=["state", "next_attempt_at", "receipt", "updated_at"])
+        from .website_first_article_refunds import reserve_refund
+        reserve_refund(latest, now=now)
     predecessor = str(latest.pk) if latest else None
     key = goals.digest({"scope": scope, "target": target, "source": source, "predecessor": predecessor})
     op, created = WebsiteConnectionOperation.objects.get_or_create(idempotency_key=f"{current.pk}:prepare:goal:{key}", defaults={
@@ -84,6 +89,7 @@ def start_goal(current, *, company_id, user, retry, target, now, force_successor
         op.save(update_fields=["receipt", "updated_at"])
     elif not goals.valid_goal(goals.mapping(op.receipt).get("goal"), scope):
         raise WebsiteAuthorityError("website_operation_changed", "The saved website goal has changed. Refresh its current status.")
+    reserve(op, user=user, now=now)
     return op
 
 

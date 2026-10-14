@@ -834,8 +834,11 @@ def transition_connection(config, *, action, expected, idempotency_key="", verif
                     "setup_run_ids": list(connection.repository_mutations.exclude(run_id="").values_list("run_id", flat=True)), "attempt": 1},
                 receipt={"status": "proposal_requested", "requires_review": True, "repository_modified": False})
         old_generation = connection.generation
+        from .website_first_article_billing import cancel_held_goals
+        cancel_held_goals(connection)
         connection.operations.filter(generation=old_generation).exclude(
             action__in=["disconnect", "revoke", "purge", "cancel-operation"]
+        ).exclude(action="prepare", receipt__has_key="first_article_billing"
         ).exclude(state__in=["completed", "failed", "blocked", "cancelled", "deleted", "denied"]).update(
             state="cancelled", receipt={"status": "authority_revoked", "repository_modified": False}, updated_at=timezone.now())
         connection.generation += 1
@@ -920,6 +923,8 @@ def offboard_website_connections(organization, *, user=None, purge=False):
         if not purge:
             websites = websites.filter(authorized_by=user)
         for website in list(websites):
+            from .website_first_article_billing import cancel_held_goals
+            cancel_held_goals(website)
             if config and config.website_connection_id == website.pk:
                 transition_connection(config, action="revoke", expected=contract_for(website))
                 website.refresh_from_db()
@@ -940,9 +945,12 @@ def offboard_website_connections(organization, *, user=None, purge=False):
             website.targets.all().delete()
             website.repository_mutations.all().delete()
             # Cleanup approval ceases when the owning company is deleted.
-            website.operations.filter(Q(action__in=["cleanup", "worker_followup"]) | ~Q(state="pending")).delete()
+            from .website_first_article_refunds import retain_financial_refunds_for_erasure
+            financial_pending=retain_financial_refunds_for_erasure(website)
             pending = list(website.operations.filter(state="pending"))
             for operation in pending:
+                if operation.action=="goal-refund":
+                    continue
                 operation.payload = {key: operation.payload[key] for key in
                     ("previous_generation", "cancel_run_ids", "stop_preview_run_ids", "disable_auto_merge_prs") if key in operation.payload}
                 operation.payload["purge_after_reconciliation"] = True
@@ -952,7 +960,7 @@ def offboard_website_connections(organization, *, user=None, purge=False):
                         "categories": ["worker_run_artifacts", "worker_checkpoints", "generated_media", "repository_copies"]},
                     "repository_modified": False, "remote_cleanup_pending": True}
                 operation.save(update_fields=["payload", "receipt", "updated_at"])
-            if pending:
+            if pending or financial_pending:
                 website.authorized_by = None
                 website.site_url = ""
                 website.app_root = ""

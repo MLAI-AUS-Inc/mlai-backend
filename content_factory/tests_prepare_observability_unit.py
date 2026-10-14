@@ -52,6 +52,11 @@ class PrepareObservabilityTests(SimpleTestCase):
                 patch("content_factory.website_prepare.advance_prepare", return_value=op):
             rows.return_value.exclude.return_value.order_by.return_value.values_list.return_value = list(range(25))
             rows.return_value.exists.return_value = True
+            def selected(*args, **kwargs):
+                if kwargs.get("action") and kwargs["action"] != "prepare":
+                    absent=Mock();absent.exists.return_value=False;return absent
+                return rows.return_value
+            rows.side_effect=selected
             report = reconciliation.process_website_connection_operations(limit=25)
         self.assertEqual(report["processed"], 25)
         self.assertEqual(len(report["operations"]), 20)

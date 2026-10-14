@@ -950,6 +950,10 @@ def _refund_content_factory_request(
     from roo.services import PointsService
     from roo.models import Ledger
 
+    from content_factory.website_first_article_billing import defer_child_refund
+    if defer_child_refund(article_request, resolved_domain=resolved_domain):
+        return None
+
     client_request_id = _get_client_request_id(article_request)
     original = Ledger.objects.filter(user=user, kind="SPEND", source=CONTENT_FACTORY_LEDGER_SOURCE,
         idempotency_key=f"content_factory:charge:{client_request_id}").first()
@@ -1310,6 +1314,11 @@ def maybe_auto_refund_terminal_failure(
     refundable: Optional[bool] = None,
 ) -> tuple[bool, int]:
     if not job:
+        return False, 0
+
+    from content_factory.website_first_article_billing import defer_child_refund
+    if defer_child_refund(dict(getattr(job, "request_meta", {}) or {}),
+        resolved_domain=getattr(job, "domain", "")):
         return False, 0
 
     # content-factory owns the refundability decision and may flag a no-value

@@ -363,9 +363,10 @@ def process_website_connection_operations(*, limit=20, now=None, connection_id=N
     now = now or timezone.now()
     from django.conf import settings
     from .website_notification_outbox import ACTION as notice_action
+    from .website_first_article_refunds import ACTION as refund_action
     notices_enabled=getattr(settings,"ARTICLES_GOAL_NOTIFICATIONS_ENABLED",False)
     due = WebsiteConnectionOperation.objects.filter(Q(next_attempt_at__isnull=True) | Q(next_attempt_at__lte=now),
-        Q(state="pending") | Q(action="prepare", state="running") | Q(action=notice_action,state="running") |
+        Q(state="pending") | Q(action="prepare", state="running") | Q(action=notice_action,state="running") | Q(action=refund_action,state="running") |
         Q(action="prepare", state="needs_user", receipt__user_action__id="deploy_site")).exclude(action__in=["workflow"] if notices_enabled else ["workflow",notice_action])
     if connection_id:
         due = due.filter(connection_id=connection_id)
@@ -376,6 +377,19 @@ def process_website_connection_operations(*, limit=20, now=None, connection_id=N
     monitor_cleanup_pull_requests(limit=limit, connection_id=connection_id)
     from .website_wakeups import enabled as event_wakes_enabled
     for identifier in ids:
+        if WebsiteConnectionOperation.objects.filter(pk=identifier,action=refund_action).exists():
+            from .website_first_article_refunds import advance_refund
+            outcome=advance_refund(identifier,now=now)
+            if outcome is not None:
+                result["processed"]+=1
+                result["pending" if outcome=="pending" else "completed"]+=1
+                if len(result["operations"])<20:result["operations"].append({"id":str(identifier),"action":refund_action,"outcome":outcome})
+                if outcome=="completed":
+                    row=WebsiteConnectionOperation.objects.filter(pk=identifier,action=refund_action).first()
+                    if row and row.payload.get("purge_after_reconciliation"):
+                        from .website_first_article_refunds import finish_purged_connection
+                        finish_purged_connection(row.connection_id)
+            continue
         if notices_enabled and WebsiteConnectionOperation.objects.filter(pk=identifier,action=notice_action).exists():
             from .website_notification_outbox import advance_notice
             outcome=advance_notice(identifier,now=now)
@@ -555,14 +569,8 @@ def process_website_connection_operations(*, limit=20, now=None, connection_id=N
         if purge_connection_id:
             # Follow the same org -> connection lock order as owner lifecycle
             # writes, after releasing the operation lock to avoid inversion.
-            from organizations.models import Organization
-            candidate = WebsiteConnection.objects.filter(pk=purge_connection_id).first()
-            if candidate:
-                with transaction.atomic():
-                    Organization.objects.select_for_update().get(pk=candidate.organization_id)
-                    candidate = WebsiteConnection.objects.select_for_update().filter(pk=purge_connection_id, authorized_by__isnull=True, state="revoked").first()
-                    if candidate and not candidate.operations.filter(state="pending").exists():
-                        candidate.delete()
+            from .website_first_article_refunds import finish_purged_connection
+            finish_purged_connection(purge_connection_id)
     return result
 
 

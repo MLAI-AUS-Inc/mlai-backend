@@ -240,6 +240,8 @@ class OutboxTests(SimpleTestCase):
         job=self.job();query=rows(values=[job.pk]);query.exclude.return_value=query
         def operations(*args,**kwargs):
             if kwargs.get("action")==outbox.ACTION:return rows(job)
+            if kwargs.get("action"):
+                absent=rows();absent.exists.return_value=False;return absent
             return query
         with patch.object(WebsiteConnectionOperation.objects,"filter",side_effect=operations) as select,patch("content_factory.website_support.reconcile_support_verifications"),patch.object(reconciliation,"monitor_cleanup_pull_requests"),patch.object(outbox,"advance_notice",return_value="completed") as advance,patch("content_factory.website_prepare.advance_prepare") as site:
             result=reconciliation.process_website_connection_operations(now=self.now)
@@ -260,3 +262,4 @@ class OutboxTests(SimpleTestCase):
         self.assertTrue(all(matches(item,due) for item in predicates))
         self.assertFalse(all(matches(item,{**due,"next_attempt_at":self.now+timedelta(minutes=1)}) for item in predicates))
         self.assertFalse(all(matches(item,{**due,"action":"unrelated"}) for item in predicates))
+        self.assertTrue(all(matches(item,{**due,"action":"goal-refund"}) for item in predicates))
