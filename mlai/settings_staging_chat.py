@@ -51,3 +51,10 @@ for _name in ('MEDHACK_URL','ESAFETY_URL','WATT_THE_HACK_URL','VIBE_RAISING_URL'
 MEDIA_ROOT='/app/staging-media'
 EMAIL_BACKEND='django.core.mail.backends.locmem.EmailBackend'
 MEETING_ROOM_BOOKING_ENABLED=True
+for _name in list(globals()):
+    _value=globals()[_name]
+    if _name.isupper() and _name.endswith(('URL','ORIGIN','BASE_URL')) and isinstance(_value,str) and 'mlai.au' in _value and 'staging.mlai.au' not in _value:
+        from urllib.parse import urlsplit as _urlsplit,urlunsplit as _urlunsplit
+        _parsed=_urlsplit(_value)
+        if _parsed.hostname and _parsed.hostname.endswith('.mlai.au'):
+            globals()[_name]=_urlunsplit((_parsed.scheme,'api-staging.mlai.au' if _parsed.hostname.startswith('api.') else 'chat-staging.mlai.au',_parsed.path,'',''))

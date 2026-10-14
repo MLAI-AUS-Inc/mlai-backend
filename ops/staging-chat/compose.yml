@@ -45,7 +45,14 @@ services:
       interval: 15s
       timeout: 5s
       retries: 5
-    networks: [default, chat]
+    labels:
+      au.mlai.environment: chat-staging-api
+    security_opt: [no-new-privileges:true]
+    cap_drop: [ALL]
+    volumes: [api-media:/app/staging-media]
+    networks:
+      default:
+        ipv4_address: 172.28.240.10
   postgres-api:
     # pgvector0.8.7/PostgreSQL18, verified immutable linux/amd64 staging image.
     image: pgvector/pgvector@sha256:ad249f9fb9572979643a47694e59b9a8cdcdf6abc6accebf49bb80ad5f20ff9b
@@ -55,6 +62,9 @@ services:
       POSTGRES_USER: staging_account_api
       POSTGRES_PASSWORD: ${STAGING_API_DATABASE_PASSWORD:?database credential required}
     volumes: [api-postgres:/var/lib/postgresql]
+    networks:
+      default:
+        ipv4_address: 172.28.240.2
     healthcheck:
       test: [CMD-SHELL, pg_isready -U staging_account_api -d staging_account_api]
       interval: 5s
@@ -67,6 +77,9 @@ services:
       REDIS_PASSWORD: ${STAGING_API_REDIS_PASSWORD:?cache credential required}
     command: [/bin/sh, -ec, 'exec redis-server --appendonly yes --requirepass "$$REDIS_PASSWORD"']
     volumes: [api-redis:/data]
+    networks:
+      default:
+        ipv4_address: 172.28.240.3
     healthcheck:
       test: [CMD-SHELL, 'REDISCLI_AUTH="$$REDIS_PASSWORD" redis-cli ping | grep -q PONG']
       interval: 5s
@@ -75,8 +88,8 @@ services:
 volumes:
   api-postgres:
   api-redis:
+  api-media:
 networks:
   default:
-  chat:
     external: true
-    name: mlai-chat-staging_chat
+    name: mlai-staging-api-internal
