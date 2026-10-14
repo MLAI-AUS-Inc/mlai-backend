@@ -351,3 +351,31 @@ class OpenSetupPullRequestDatabaseTests(TestCase):
         self.assertFalse(_source_observed(self.website, "b" * 40))
         self.website.generation += 1
         self.assertFalse(_source_observed(self.website, "a" * 40))
+
+
+class SettledSetupDatabaseTests(TestCase):
+    """A merged setup is found by its own merge commit with real JSON queries."""
+
+    def setUp(self):
+        self.org = Organization.objects.create(domain="vyavos.example.test", name="Synthetic")
+        self.website = WebsiteConnection.objects.create(organization=self.org, github_repo="Example/Site",
+            repository_id=888, installation_id="45", branch="main", verified_sha="")
+
+    def merged_run(self, run_id, merge_sha, *, generation=None):
+        return ContentFactoryRun.objects.create(run_id=run_id, workflow="article_system_setup", domain=self.org.domain,
+            organization=self.org, github_repo="example/site", status="completed", approval_state="approved",
+            run_request={"website_connection_id": str(self.website.pk), "connection_generation":
+                self.website.generation if generation is None else generation, "expected_source_sha": "a" * 40},
+            result={"status": "merged", "merge_status": "merged", "merge_sha": merge_sha, "pr_number": 3,
+                "article_system_setup": {"status": "merged", "merge_status": "merged"}})
+
+    def test_settled_setup_and_owned_merge_use_this_generations_merge_commit(self):
+        from content_factory.website_connections import settled_setup_run
+        from content_factory.website_verification import _setup_merged_at
+        self.merged_run("merged-pr-3", "b" * 40)
+        self.merged_run("older-generation", "c" * 40, generation=self.website.generation + 1)
+        self.assertEqual(settled_setup_run(self.website, source_sha="b" * 40).run_id, "merged-pr-3")
+        self.assertIsNone(settled_setup_run(self.website, source_sha="c" * 40))
+        self.assertTrue(_setup_merged_at(self.website, "merged-pr-3", "b" * 40))
+        self.assertFalse(_setup_merged_at(self.website, "merged-pr-3", "c" * 40))
+        self.assertFalse(_setup_merged_at(self.website, "older-generation", "c" * 40))
