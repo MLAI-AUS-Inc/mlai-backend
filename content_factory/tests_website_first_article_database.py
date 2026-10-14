@@ -91,6 +91,15 @@ class FirstArticleProviderChainTests(OneClickBillingFixture,TransactionTestCase)
             verified_at=timezone.now(),contract=contract,capabilities={"publishingReady":True})
         self.config.default_publish_target_id="native";self.config.publish_targets=[contract]
         self.config.save(update_fields=["default_publish_target_id","publish_targets"])
+        # The test begins at Ready, including the publishing guard's owning
+        # deployment record. Seeding only goal milestones would leave the
+        # existing integration unverified and correctly deny article approval.
+        WebsiteConnectionOperation.objects.create(connection=self.website,generation=self.website.generation,
+            action="deployment-verify",state="completed",idempotency_key="synthetic-ready-deployment",
+            payload={"source_sha":self.website.verified_sha,"target_id":"native"},
+            receipt={"status":"passed","provider_verified":True,"source_sha":self.website.verified_sha,
+                "connection_generation":self.website.generation,"target_id":"native","contract_digest":"c"*64,
+                "artifact_digest":"f"*64,"public_url":f"https://{self.org.domain}/articles","checked_at":timezone.now().isoformat()})
 
     def test_ready_goal_uses_canonical_approval_merge_reverification_and_exact_live_body(self):
         """Ready is the precondition; everything through live uses owning records."""
