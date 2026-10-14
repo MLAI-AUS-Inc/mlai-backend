@@ -31,6 +31,7 @@ def rows(*, first=None, items=()):
 class PrepareRetryReceiptTests(SimpleTestCase):
     def operation(self):
         return SimpleNamespace(pk="prepare", action="prepare", state="running", payload={},
+            connection=SimpleNamespace(organization_id=42, capabilities={}),
             receipt={"current_step": "setup"}, next_attempt_at=None, updated_at=timezone.now(), save=Mock())
 
     def test_transient_budget_exhaustion_stops_promising_automatic_retry(self):
@@ -54,7 +55,6 @@ class PrepareRetryReceiptTests(SimpleTestCase):
         for code, step, retryable, limit in (("deployment_source_unverified", "verify", True, 6),
                 ("worker_unavailable", "setup", False, 1), ("worker_unavailable", "scan", True, 3)):
             op = self.operation()
-            op.connection = SimpleNamespace(capabilities={})
             now = timezone.now()
             op.receipt.update(transient_started_at=(now - timedelta(hours=24)).isoformat(),
                 deployment_wait_started_at=(now - timedelta(hours=24)).isoformat())
