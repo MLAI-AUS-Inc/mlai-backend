@@ -316,3 +316,21 @@ post-merge actual native attestation is implemented. Continue that work using th
 reusable CF isolated/native verification and backend full NativeEvidence validators;
 keep every output Boolean and original source/operation fence. Do not mark C3 done
 or enable flags. All remaining C4-C5/D/E/F/G agent work still required.
+
+C3 post-merge implementation now uses a durable CF hosted-native job and a distinct
+backend authenticated_hosted proof origin. Controller config stays outside customer
+source; adoption uses its actual installed detail and revised artifact marker.
+Pending polls do not complete steps, run IDs are checked, cancellation wins, and
+usage history stays bounded without dropping old charges. Backend independently
+fetches completed native proof and applies full source/environment/renderer gates.
+Chat presents organisation-required review up front and accepts the new doctor proof
+kind. Three distinct setup-sheet captures were inspected (organisation review).
+
+All19 backend DB-free CI commands passed; model drift,653-emitter audit,349 full
+module assignments/0 new omissions and tracked credential scan passed. Focused12
+native/receipt cases plus55 neighboring consent/goal/permissions tests passed.
+CF140 focused native/adoption/cleanup/broker/receipt cases passed;9 opt-in real-Docker
+checks skipped. Real committed local static renderer fixture passed the native gates
+with a test-only uid override. Chat4 plan units and16 browser cases passed. CF full
+suite and Chat justci are still running; record outcomes before claiming validation
+complete. Rollout flags are false. C4-C5/D/E/F/G work remains.

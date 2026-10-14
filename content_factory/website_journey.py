@@ -52,9 +52,10 @@ def project_journey(*, company_id, domain, website=None, capabilities=None, disc
     verification_stale = proof.get("verificationStale") is True
     # Current verification paths use in-repository CI. Once its proof is
     # current, publishing needs neither workflow-file writes nor CI reads.
-    workflow_needed = not proof.get("integrationVerified", verified)
+    hosted_selected = proof.get("hostedVerificationSelected") is True
+    workflow_needed = not hosted_selected and not proof.get("integrationVerified", verified)
     ci_attestation_needed = proof.get("ciAttestationRequired") is True and not deployed
-    ci_read_needed = not proof.get("buildVerified", verified) or verification_stale or ci_attestation_needed
+    ci_read_needed = not hosted_selected and (not proof.get("buildVerified", verified) or verification_stale or ci_attestation_needed)
     workflow_missing = workflow_needed and grants.get("workflows") is not True
     ci_missing = ci_read_needed and not (grants.get("checks") is True and grants.get("statuses") is True)
     permissions_ready = not (workflow_missing or ci_missing)
@@ -240,6 +241,12 @@ def journey_for_context(context, config, *, capabilities=None):
         proof["reviewedMergeReady"] = connection.repository_mutations.filter(generation=connection.generation, status="applied").exclude(head_sha="").exists() and bool(connection.capabilities.get("previewSupported"))
         composite = connection.operations.filter(generation=connection.generation, action__in=["prepare", "disconnect"]).exclude(state="cancelled").order_by("-created_at").first()
         latest = composite or connection.operations.filter(generation=connection.generation).order_by("-created_at").first()
+        from .website_hosted_verification import enabled as hosted_enabled
+        from .website_setup_consent import valid as valid_consent
+        from .website_goal import scope_matches, scope_for
+        saved_goal = mapping(mapping(getattr(composite, "receipt", None)).get("goal"))
+        if hosted_enabled(connection) and valid_consent(saved_goal) and scope_matches(saved_goal.get("scope"), scope_for(connection, context.company.pk)):
+            proof["hostedVerificationSelected"] = saved_goal["consent"]["answers"]["ci_mode"] == "hosted"
         operation = operation_summary(latest) if latest else None
         epoch = deletion_epoch(connection)
         from workflow_runs.models import ContentFactoryRun

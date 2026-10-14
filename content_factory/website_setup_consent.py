@@ -78,7 +78,7 @@ def setup_plan(context, config, journey):
     from .billing import get_content_factory_article_cost_points
     selection=choose_page(goals.mapping(journey).get("discovery"))
     grants=goals.mapping(goals.mapping(journey).get("githubPermissions"))
-    ci_mode="hosted" if getattr(settings,"ARTICLES_HOSTED_ATTESTATION_ENABLED",False) else "repository"
+    ci_mode="hosted" if getattr(settings,"ARTICLES_HOSTED_ATTESTATION_ENABLED",False) and getattr(settings,"ARTICLES_HOSTED_VERIFICATION_ENABLED",False) else "repository"
     required=required_grants(ci_mode=ci_mode)
     url=grants.get("settingsUrl")
     from urllib.parse import urlsplit
@@ -90,4 +90,4 @@ def setup_plan(context, config, journey):
         "configurationRevision":connection.configuration_version,"goalTarget":"first_article_live" if getattr(settings,"ARTICLES_FIRST_ARTICLE_GOAL_ENABLED",False) else "ready",
         "articlePoints":get_content_factory_article_cost_points(context.organization.domain),"page":selection,
         "github":{"approvalUrl":url,"required":required,"missing":[name for name in required if grants.get(name) is not True],"lookupUnavailable":grants.get("retryable") is True},
-        "ciMode":ci_mode}
+        "ciMode":ci_mode,"requiresReview":getattr(config,"requires_review",False) is True}

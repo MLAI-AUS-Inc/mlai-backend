@@ -70,8 +70,16 @@ def read_ci_proof(connection, data):
             pass
 
 
-def record_ci_attestation(data, *, owner_review=False):
+def record_ci_attestation(data, *, owner_review=False, origin="authenticated_ci"):
     """Two-phase provider verification with a final cancellation/consent fence."""
+    attestation_origin = origin
+    if attestation_origin not in {"authenticated_ci", "authenticated_hosted"}:
+        raise ValueError("Unknown native attestation origin")
+    if attestation_origin == "authenticated_hosted":
+        from .website_hosted_verification import enabled
+        from .website_models import WebsiteConnection
+        if not enabled(WebsiteConnection.objects.get(pk=data.get("website_connection_id"))):
+            raise WebsiteAuthorityError("ci_attestation_required", "Hosted native attestation is disabled.")
     data = {**data, "expected_source_sha": data.get("source_sha")}
     with authority_guard(data, action="read") as website:
         target = website.targets.filter(generation=website.generation, target_key=data.get("target_id")).first()
@@ -86,15 +94,19 @@ def record_ci_attestation(data, *, owner_review=False):
         binding = {**data, **contract_for(website)}
         changed_source = website.verified_sha != data.get("source_sha")
         reviewed_heads = list(website.repository_mutations.filter(generation=website.generation, status="applied",
-            run_id=data.get("run_id")).exclude(head_sha="").values_list("head_sha", flat=True))
+            run_id=data.get("source_run_id") if attestation_origin == "authenticated_hosted" else data.get("run_id")).exclude(head_sha="").values_list("head_sha", flat=True))
         if changed_source and not owner_review and not reviewed_heads:
             raise WebsiteAuthorityError("website_source_review_required", "Review the changed source and its CI evidence before activating articles.")
     from .website_connections import verify_repository_head
     verify_repository_head(website, data["source_sha"])
     if changed_source and not owner_review:
         verify_reviewed_source_lineage(website, reviewed_heads, data["source_sha"])
-    proof = read_ci_proof(website, binding)
-    receipt = {**proof, "allowed": True, "attestation_origin": "authenticated_ci", "checked_at": timezone.now().isoformat()}
+    if attestation_origin == "authenticated_hosted":
+        from .website_hosted_verification import read_completed_proof
+        proof = validated_ci_identity(binding, read_completed_proof(website, binding))
+    else:
+        proof = read_ci_proof(website, binding)
+    receipt = {**proof, "allowed": True, "attestation_origin": attestation_origin, "checked_at": timezone.now().isoformat()}
     with authority_guard(binding, action="read") as website:
         if custom_verified:
             origin.refresh_from_db()
@@ -189,7 +201,7 @@ def current_ci_attestation(connection, target, *, capabilities=None):
         receipt = ci_attestation_for(connection, proof)
         now = timezone.now()
         stamp = proof_stamp(receipt, now=now)
-        if (receipt.get("allowed") is not True or receipt.get("attestation_origin") != "authenticated_ci"
+        if (receipt.get("allowed") is not True or receipt.get("attestation_origin") not in {"authenticated_ci", "authenticated_hosted"}
                 or not stamp or not now - VERIFICATION_MAX_AGE <= stamp <= now + timedelta(minutes=5)):
             return None
         operation = validate_operation(connection, {field: receipt[field] for field in IDENTITY_FIELDS})

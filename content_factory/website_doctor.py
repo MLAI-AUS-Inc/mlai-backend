@@ -118,7 +118,7 @@ def read_doctor(op, *, scope, source_sha, milestones=None):
     from workflow_runs.models import ContentFactoryRun
     from .website_operations import deletion_epoch
     children=[]
-    for key in ("child_run_id","setup_run_id","scan_run_id"):
+    for key in ("hosted_verification_run_id","child_run_id","setup_run_id","scan_run_id"):
         identifier=safe_identifier(goals.mapping(op.receipt).get(key))
         if not identifier or any(item["runId"]==identifier for item in children):
             continue
@@ -126,6 +126,7 @@ def read_doctor(op, *, scope, source_sha, milestones=None):
         saved=goals.mapping(getattr(child,"run_request",None))
         if child and saved.get("website_connection_id")==str(op.connection_id) and saved.get("connection_generation")==op.generation and saved.get("repository_id")==op.connection.repository_id and saved.get("deletion_epoch")==deletion_epoch(op.connection):
             children.append({"runId":identifier,"status":child.status})
+    children = children[:3]
     receipts=[]
     for action,kind in (("ci-verify","ci"),("deployment-verify","deployment")):
         row=op.connection.operations.filter(generation=op.connection.generation,action=action,state="completed",receipt__source_sha=source_sha).order_by("-created_at","-pk").first()

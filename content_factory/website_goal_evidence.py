@@ -91,7 +91,7 @@ def collect_proofs(op, context, config, journey, *, now):
             put("integrated", "verified_target", sha=source, evidence={"target_id": target.target_key,
                 "contract_digest": contract_digest}, at=target.updated_at)
         if ci and build_proof_fresh(connection, target, {"repositorySourceSha": source, "repositoryBranch": connection.branch}, now=now):
-            put("previewed", "authenticated_ci", sha=source, run_id=ci.get("run_id"), evidence=ci,
+            put("previewed", "authenticated_hosted" if ci.get("attestation_origin") == "authenticated_hosted" else "authenticated_ci", sha=source, run_id=ci.get("run_id"), evidence=ci,
                 at=ci.get("checked_at") or ci.get("verified_at"))
             deployment = connection.operations.filter(generation=connection.generation, action="deployment-verify", state="completed",
                 payload__source_sha=source, payload__target_id=target.target_key).order_by("-created_at", "-pk").first()

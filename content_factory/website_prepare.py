@@ -108,16 +108,15 @@ def _cancel_prepare_child(op, config):
     """Fence a stalled child through the ordinary durable cancellation control."""
     from workflow_runs.models import ContentFactoryRun
     from .website_operations import cancel_operation, deletion_epoch
-    child_id = op.receipt.get("child_run_id") or op.payload.get("run_id")
-    if not child_id:
-        return
-    child = ContentFactoryRun.objects.filter(run_id=child_id, organization_id=op.connection.organization_id).first()
-    if child is None or child.status in {"completed", "failed", "blocked", "cancelled", "denied"}:
-        return
-    saved = child.run_request if isinstance(child.run_request, dict) else {}
-    cancel_operation(config, data={**contract_for(op.connection), "operation_id": saved.get("operation_id"),
-        "operation_attempt": saved.get("operation_attempt", 1), "deletion_epoch": deletion_epoch(op.connection)},
-        idempotency_key=f"prepare-retry:{op.pk}:{op.payload.get('attempt', 1)}")
+    identifiers = list(dict.fromkeys(identifier for identifier in (op.receipt.get("hosted_verification_run_id"), op.receipt.get("child_run_id") or op.payload.get("run_id")) if identifier))
+    for child_id in identifiers:
+        child = ContentFactoryRun.objects.filter(run_id=child_id, organization_id=op.connection.organization_id).first()
+        if child is None or child.status in {"completed", "failed", "blocked", "cancelled", "denied"}:
+            continue
+        saved = child.run_request if isinstance(child.run_request, dict) else {}
+        cancel_operation(config, data={**contract_for(op.connection), "operation_id": saved.get("operation_id"),
+            "operation_attempt": saved.get("operation_attempt", 1), "deletion_epoch": deletion_epoch(op.connection)},
+            idempotency_key=f"prepare-retry:{op.pk}:{op.payload.get('attempt', 1)}:{child_id}")
 
 
 def _checking_owner_wait(op):
@@ -592,9 +591,21 @@ def _dispatch_prepare_step(op, context, config, step, *, user, journey=None):
     if receipt is None:
         from .website_connections import observed_source_sha
         source_sha = observed_source_sha(website) or repository.get("observedSourceSha") or website.verified_sha
-        proof = discover_source_attestation(website, target, source_sha)
-        ci = record_ci_attestation(proof)
-        receipt = ci.receipt
+        from .website_hosted_verification import enabled as hosted_attestation_enabled, advance as advance_hosted
+        if hosted_attestation_enabled(website):
+            from .website_setup_consent import valid as valid_consent
+            if valid_consent(op.receipt.get("goal")) and op.receipt["goal"]["consent"]["answers"]["ci_mode"] == "hosted":
+                outcome = advance_hosted(op, context, config, target, source_sha)
+                if outcome["status"] != "completed":return outcome
+                if step == "ci-attestation":return outcome
+                website.refresh_from_db()
+                target.refresh_from_db()
+                receipt = current_ci_attestation(website, target, capabilities={"repositorySourceSha": source_sha, "repositoryBranch": website.branch})
+                if receipt is None:raise WebsiteAuthorityError("ci_attestation_required", "Waiting for saved hosted source proof.", retryable=True)
+        if receipt is None:
+            proof = discover_source_attestation(website, target, source_sha)
+            ci = record_ci_attestation(proof)
+            receipt = ci.receipt
     if step == "verify":
         deployment = verify_live_deployment(config, data=receipt)
         return {"status": "completed", "operation_id": str(deployment.pk)}
@@ -754,6 +765,9 @@ def _advance_claimed_prepare(op, *, now, handlers):
                 op.receipt.update(child_run_id=run_id, **{f"{step}_run_id": run_id})
                 op.payload = {**op.payload, "run_id": run_id}
                 break
+            if (outcome or {}).get("status") == "pending":
+                op.state, op.next_attempt_at = "pending", now + timedelta(minutes=1)
+                return _finish_prepare(op, now=now)
             steps = list(op.receipt.get("completed_steps") or [])
             if step not in steps:
                 steps.append(step)

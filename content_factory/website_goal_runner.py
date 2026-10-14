@@ -258,7 +258,7 @@ def wake_goal_for_source(config, *, company_id, user, now):
         goal = goals.refresh_goal(goal, {}, scope=goal["scope"], source_sha=connection.verified_sha, now=now)
         goal["current_source_sha"] = connection.verified_sha
         receipt = {key: value for key, value in latest.receipt.items() if key not in
-            {"scan_run_id", "setup_run_id", "child_run_id", "completed_steps", "child_resume_pending"}}
+            {"scan_run_id", "setup_run_id", "child_run_id", "hosted_verification_run_id", "completed_steps", "child_resume_pending"}}
         latest.receipt = {**receipt, "goal": goal, "status": "working", "current_step": "scan", "user_action": None,
             "last_completed": None, "reason_code": "", "message": "Rechecking the changed website source."}
         latest.payload = {**{key: value for key, value in latest.payload.items() if key != "run_id"},
@@ -347,7 +347,7 @@ def retry_goal_action(op, goal, *, now, occurrence, step=None):
 def retain_child_references(goal, receipt):
     """Preserve cumulative metering references before replacing a child attempt."""
     history=list(goal.get("child_run_history") or [])
-    for key in ("child_run_id","scan_run_id","setup_run_id"):
+    for key in ("child_run_id","scan_run_id","setup_run_id","hosted_verification_run_id"):
         identifier=goals.mapping(receipt).get(key)
         if isinstance(identifier,str) and identifier not in history:
             if len(history)>=64:

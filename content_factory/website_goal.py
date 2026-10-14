@@ -13,7 +13,7 @@ ACTION_FOR = {"access": "verify-access", "understood": "scan", "integrated": "se
 PROOF_KINDS = {
     "access": {"repository_access"}, "understood": {"repository_scan"},
     "integrated": {"verified_target", "setup_candidate"},
-    "previewed": {"authenticated_ci", "setup_preview"},
+    "previewed": {"authenticated_ci", "authenticated_hosted", "setup_preview"},
     "approved": {"backend_approval", "no_mutation_required"},
     "merged": {"backend_merge", "no_mutation_required"}, "live": {"deployment_marker"},
     "first_draft": {"article_draft"}, "first_article_live": {"article_deployment_marker"},

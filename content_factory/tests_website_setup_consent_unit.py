@@ -80,6 +80,12 @@ class ConsentTests(SimpleTestCase):
         self.assertEqual(plan["github"]["missing"],["pull_requests"])
         self.assertEqual(plan["articlePoints"],6)
         self.assertEqual(plan["goalTarget"],"ready")
+        self.assertFalse(plan["requiresReview"])
+        with override_settings(ARTICLES_HOSTED_ATTESTATION_ENABLED=True,ARTICLES_HOSTED_VERIFICATION_ENABLED=True),patch("content_factory.billing.get_content_factory_article_cost_points",return_value=6):
+            reviewed=consent.setup_plan(context,SimpleNamespace(website_connection=op.connection,requires_review=True),{})
+        self.assertEqual(reviewed["ciMode"],"hosted")
+        self.assertTrue(reviewed["requiresReview"])
+        self.assertEqual(set(reviewed["github"]["required"]),{"contents","pull_requests"})
 
 
 class PageChoiceTests(SimpleTestCase):

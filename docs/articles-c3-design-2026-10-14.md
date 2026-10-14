@@ -47,23 +47,32 @@ and213 broader static/native/inventory/lifecycle neighbors passed; immutable fai
 contract bytes and1108 emissions passed. The missing config import caught by the
 first callback run was fixed before the passing run.
 
-C3 IS NOT COMPLETE. Post-merge hosted native attestation remains to implement. The
-new ARTICLES_HOSTED_ATTESTATION_ENABLED flag is false and controls the setup plan's
-default verification mode independently of ARTICLES_HOSTED_VERIFICATION_ENABLED.
-Until native hosted attestation is implemented and validated, the plan keeps the
-full in-repository grants and existing CI path. Never reinterpret an unavailable
-measurement or a build-success field as all native-render checks. Never claim a
-branch-head build is an exact merged-source build without new accepted proof.
+Post-merge native verification is implemented as a durable read-only child job.
+Backend reserves the original operation/parent/source identity, polls its saved
+state, and fetches completed proof again through the authenticated service before
+promotion. Pending work cannot mark a prepare step complete. Foreign responses,
+changed source, cancelled operations and incomplete native evidence cannot promote.
+The new authenticated_hosted origin uses the existing full NativeEvidence validator,
+reviewed mutation lineage and live marker gate; it needs no customer CI read grants.
 
-Existing reusable primitives: CF native_tasks.py, website_lifecycle_api.py,
-harness/native_integration.py, harness/primitives.py (WorkspaceRunner isolated
-build/preview), native_ci_contract.py and ci_templates/articles_verification.py.
-Backend website_verification.py owns full NativeEvidence identity, source/tree/
-environment/lockfile/artifact checks and authenticated_ci receipt origin. C3 must
-add a distinct authenticated hosted origin and original operation fences without
-weakening any required proof booleans or readiness predicates. Build the actual
-post-merge verification, cancellation, usage and callback recovery path; no fake
-zero measurements, inferred render success or arbitrary model result authority.
+CF seals generated native commands in its controller store and runs the existing
+controlled CI verifier inside the disposable Docker broker, at the exact merged
+commit. Repository subprocesses use uid 1000 and cannot write the controller proof.
+The broker strips checkout credentials, binds source/tree identity, and records the
+environment and lockfiles. Tracked file bytes, modes and symlink targets are checked
+independently of mutable Git metadata. Private build environment values are rejected.
+The result persists usage and terminal state, and replay/lost queue delivery reuse
+the original job. Adoption also retains the correct installed witness/marker config
+and omits customer verifier/workflow files. Required organisation review is shown
+up front in Chat and cannot be submitted as automatic publication.
+
+Both independent backend hosted flags and CF's flag remain false. The hosted plan
+is offered only when both backend flags are enabled for an enrolled goal. A local
+committed static fixture passed the real native renderer checks, including marker,
+canonical routes, unknown-slug 404 and both browser widths. Its uid-drop override
+was explicitly limited to that local fixture; real Docker isolation tests remain
+opt-in and are not claimed as executed. Broader suites are recorded in the progress
+log after completion. No customer repository or production service was contacted.
 
 Follow-up correctness checks for C4/C5/F3: pause goal wall-budget time while waiting
 for a required owner action (current B4 wall budget counts all elapsed time); capture
