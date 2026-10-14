@@ -357,7 +357,15 @@ class PrepareJourneyReplayTests(SimpleTestCase):
         self.journey = lambda *a, **kw: project_journey(company_id=9, domain="fixture.test", website={"status": "connected", "repositoryId": 123,
             "writePolicy": {"allowed": True}}, capabilities={"repositoryAccessVerified": True, "canGenerateArticle": True}, discovery={"complete": True})
         verify = Mock(return_value={"status": "completed"})
+        attempt = self.op.payload.get("attempt", 1)
         self.advance({"verify": verify}, child=run)
+        # The merge pass only renews the request identity; the next pass verifies.
+        verify.assert_not_called()
+        self.assertEqual((self.op.payload["attempt"], self.op.receipt["merged_setup_run_id"]), (attempt + 1, run.run_id))
+        self.assertTrue(self.op.payload["source_reverify"])
+        # source_reverify re-reads the merged head; the replay journey stands in for it.
+        with patch.object(prepare, "_cleanup_retry_journey", side_effect=lambda op, context, config, journey: journey):
+            self.advance({"verify": verify}, child=run)
         verify.assert_called_once()
         self.assertNotIn("child_run_id", self.op.receipt)
         queue.assert_called_once()

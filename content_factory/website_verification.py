@@ -86,12 +86,21 @@ def record_ci_attestation(data, *, owner_review=False):
         changed_source = website.verified_sha != data.get("source_sha")
         reviewed_heads = list(website.repository_mutations.filter(generation=website.generation, status="applied",
             run_id=data.get("run_id")).exclude(head_sha="").values_list("head_sha", flat=True))
+        # Setup PRs are squash-merged, so the merge commit never contains the
+        # reviewed head. The platform's own recorded merge of that run is the lineage.
+        owned_merge = False
         if changed_source and not owner_review and not reviewed_heads:
-            raise WebsiteAuthorityError("website_source_review_required", "Review the changed source and its CI evidence before activating articles.")
+            owned_merge = _setup_merged_at(website, data.get("run_id"), data.get("source_sha"))
+            if not owned_merge:
+                raise WebsiteAuthorityError("website_source_review_required", "Review the changed source and its CI evidence before activating articles.")
     from .website_connections import verify_repository_head
     verify_repository_head(website, data["source_sha"])
-    if changed_source and not owner_review:
-        verify_reviewed_source_lineage(website, reviewed_heads, data["source_sha"])
+    if changed_source and not owner_review and not owned_merge:
+        try:
+            verify_reviewed_source_lineage(website, reviewed_heads, data["source_sha"])
+        except WebsiteAuthorityError as exc:
+            if exc.code != "website_source_review_required" or not _setup_merged_at(website, data.get("run_id"), data.get("source_sha")):
+                raise
     proof = read_ci_proof(website, binding)
     receipt = {**proof, "allowed": True, "attestation_origin": "authenticated_ci", "checked_at": timezone.now().isoformat()}
     with authority_guard(binding, action="read") as website:
@@ -128,6 +137,21 @@ def record_ci_attestation(data, *, owner_review=False):
         from .website_prepare import wake_prepare_after_commit
         wake_prepare_after_commit(website.pk)
         return op
+
+
+def _setup_merged_at(website, run_id, source_sha):
+    """The current generation's setup run whose own recorded merge produced source_sha."""
+    from workflow_runs.models import ContentFactoryRun
+    from .website_connections import setup_settled_at
+    if not run_id or not source_sha:
+        return False
+    run = ContentFactoryRun.objects.filter(run_id=run_id, organization_id=website.organization_id,
+        workflow="article_system_setup", run_request__website_connection_id=str(website.pk),
+        run_request__connection_generation=website.generation).first()
+    result = run.result if run and isinstance(run.result, dict) else {}
+    setup = result.get("article_system_setup") if isinstance(result.get("article_system_setup"), dict) else {}
+    return bool(run and str(run.github_repo or "").casefold() == str(website.github_repo or "").casefold()
+        and "merged" in {result.get("merge_status"), setup.get("merge_status")} and setup_settled_at(run, source_sha))
 
 
 def verify_reviewed_source_lineage(website, reviewed_heads, source_sha):

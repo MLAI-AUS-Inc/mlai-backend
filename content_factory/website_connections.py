@@ -1171,6 +1171,36 @@ def open_setup_pr_run(connection, *, source_sha):
     return run
 
 
+def setup_settled_at(run, source_sha):
+    """This setup already delivered source_sha: its own merge, or an adopted kit with no PR."""
+    result = run.result if isinstance(run.result, dict) else {}
+    setup = result.get("article_system_setup") if isinstance(result.get("article_system_setup"), dict) else {}
+    response = result.get("merge_response") if isinstance(result.get("merge_response"), dict) else {}
+    if not source_sha or run.workflow != "article_system_setup" or run.status != "completed":
+        return False
+    if "merged" in {result.get("merge_status"), setup.get("merge_status")}:
+        return source_sha in {result.get("merge_sha"), response.get("sha")}
+    return bool(result.get("adopted") is True and not (result.get("pr_number") or result.get("pr_url")
+        or setup.get("pr_number") or setup.get("pr_url"))
+        and str((run.run_request or {}).get("expected_source_sha") or "") == source_sha)
+
+
+def settled_setup_run(connection, *, source_sha):
+    """The current generation's setup that already delivered the observed branch head.
+
+    Another setup on that head would only re-stamp its own marker and open a new
+    PR; the next step is verifying what is on the branch.
+    """
+    from workflow_runs.models import ContentFactoryRun
+    if not source_sha:
+        return None
+    rows = ContentFactoryRun.objects.filter(organization_id=connection.organization_id, workflow="article_system_setup",
+        status="completed", run_request__website_connection_id=str(connection.pk),
+        run_request__connection_generation=connection.generation).order_by("-updated_at")[:10]
+    return next((row for row in rows if setup_settled_at(row, source_sha)
+        and str(row.github_repo or "").casefold() == str(connection.github_repo or "").casefold()), None)
+
+
 def _verified_setup_run_base(run, head_sha, website, *, automatic_approval=False):
     """Read the worker's exact approved setup proof before a target exists."""
     from .website_contract import SHA_PATTERN

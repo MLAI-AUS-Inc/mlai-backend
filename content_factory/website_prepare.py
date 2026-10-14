@@ -181,6 +181,7 @@ def start_prepare(config, *, expected=None, company_id=None, user=None, retry=Fa
             if not check_again:
                 op.payload["retry_epoch"] = uuid4().hex
                 op.payload.pop("run_id", None)
+                op.payload["repair_setup"] = True
             if cleanup_retry:
                 op.payload["manual_setup_example_cleanup_retry"] = True
                 for key in ("scan_run_id", "setup_run_id", "completed_steps"):
@@ -690,6 +691,12 @@ def _advance_claimed_prepare(op, *, now, handlers):
                 if merge.get("status") == "pending":
                     op.state, op.next_attempt_at = "pending", now + timedelta(minutes=2)
                     return _finish_prepare(op, now=now)
+                if merge.get("status") == "completed" and op.receipt.get("merged_setup_run_id") != child.run_id and (
+                        "merged" in {(child.result or {}).get("merge_status"), setup.get("merge_status")}):
+                    # Re-read the merged branch head (source_reverify forces it) before choosing a step.
+                    _begin_post_merge_attempt(op, child)
+                    op.state, op.next_attempt_at = "pending", now
+                    return _finish_prepare(op, now=now)
                 # "superseded": the pull request was closed on GitHub, so a new setup replaces it below.
             op.receipt.pop("child_run_id", None)
         # Access probes may change the next requirement immediately; bound the
@@ -703,6 +710,12 @@ def _advance_claimed_prepare(op, *, now, handlers):
                 op.receipt.update(current_step=step, blocked_step=step)
                 raise WebsiteAuthorityError(blocked.get("reasonCode") or blocked.get("reason_code") or journey.get("reasonCode") or "website_prepare_blocked",
                     blocked.get("reason") or blocked.get("message") or journey.get("reason") or "Website preparation needs attention.", retryable=False)
+            if step == "setup" and not op.payload.get("repair_setup"):
+                from .website_connections import settled_setup_run
+                if settled_setup_run(op.connection, source_sha=(journey.get("repository") or {}).get("observedSourceSha") or ""):
+                    # Another setup on this head would re-stamp its marker and open
+                    # another PR. Wait for the branch's own CI proof instead.
+                    step = "ci-attestation"
             digest = evidence_digest({"prerequisites": journey.get("prerequisites"), "capabilities": journey.get("capabilities")})
             if op.receipt.get("last_completed") == {"step": step, "facts_digest": digest}:
                 raise WebsiteAuthorityError("prepare_no_progress", blocked.get("reason") or next_action.get("label") or "Website preparation needs attention.", retryable=False)
@@ -793,7 +806,7 @@ def wake_prepare_for_source(connection_id, *, organization_id):
         state__in=["completed", "needs_user", "needs_attention", "pending", "stopped"]).update(state="pending", next_attempt_at=timezone.now(),
             receipt={**receipt, "status": "working", "current_step": "scan", "deployment_attempts": 0,
                 "step_failures": {}, "user_action": None, "last_completed": None, "child_run_id": None},
-            payload={**{key: value for key, value in op.payload.items() if key != "run_id"},
+            payload={**{key: value for key, value in op.payload.items() if key not in {"run_id", "repair_setup"}},
                 "source_reverify": True, "attempt": op.payload.get("attempt", 1) + 1, "retry_epoch": uuid4().hex}, updated_at=timezone.now())
     if not reopened:
         return None
@@ -801,6 +814,19 @@ def wake_prepare_for_source(connection_id, *, organization_id):
         state="completed", receipt={"status": "managed_by_prepare", "prepare_operation_id": str(op.pk),
             "repository_modified": False}, updated_at=timezone.now())
     return op
+
+
+def _begin_post_merge_attempt(op, child):
+    """Give the steps after this worker's own setup merge a fresh request identity.
+
+    The merge's push webhook cannot reopen an operation this worker still holds,
+    so a rescan or check reusing the pre-merge keys would conflict.
+    """
+    op.payload = {**{key: value for key, value in op.payload.items() if key not in {"run_id", "repair_setup"}},
+        "attempt": op.payload.get("attempt", 1) + 1, "retry_epoch": uuid4().hex, "source_reverify": True}
+    for key in ("scan_run_id", "setup_run_id", "completed_steps", "last_completed"):
+        op.receipt.pop(key, None)
+    op.receipt["merged_setup_run_id"] = child.run_id
 
 
 def _return_to_open_setup_pr(op, config, journey):
