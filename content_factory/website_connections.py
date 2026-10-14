@@ -1185,11 +1185,20 @@ def setup_settled_at(run, source_sha):
         and str((run.run_request or {}).get("expected_source_sha") or "") == source_sha)
 
 
+def setup_installed_kit(run):
+    """The setup carried the verification kit, so its branch's own CI can prove it."""
+    result = run.result if isinstance(run.result, dict) else {}
+    setup = result.get("article_system_setup") if isinstance(result.get("article_system_setup"), dict) else {}
+    adoption = result.get("adoption") if isinstance(result.get("adoption"), dict) else setup.get("adoption")
+    return bool(isinstance(adoption, dict) and adoption.get("kit_paths"))
+
+
 def settled_setup_run(connection, *, source_sha):
-    """The current generation's setup that already delivered the observed branch head.
+    """The current generation's kit-carrying setup that already delivered the observed head.
 
     Another setup on that head would only re-stamp its own marker and open a new
-    PR; the next step is verifying what is on the branch.
+    PR; the next step is the branch's own CI proof. A setup without the kit
+    (native CI needed configuration) is not settled: installing the kit is next.
     """
     from workflow_runs.models import ContentFactoryRun
     if not source_sha:
@@ -1197,7 +1206,7 @@ def settled_setup_run(connection, *, source_sha):
     rows = ContentFactoryRun.objects.filter(organization_id=connection.organization_id, workflow="article_system_setup",
         status="completed", run_request__website_connection_id=str(connection.pk),
         run_request__connection_generation=connection.generation).order_by("-updated_at")[:10]
-    return next((row for row in rows if setup_settled_at(row, source_sha)
+    return next((row for row in rows if setup_settled_at(row, source_sha) and setup_installed_kit(row)
         and str(row.github_repo or "").casefold() == str(connection.github_repo or "").casefold()), None)
 
 

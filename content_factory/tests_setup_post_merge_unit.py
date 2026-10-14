@@ -22,9 +22,12 @@ from . import tests_prepare_journey_unit as replay
 BASE, HEAD, OTHER = "a" * 40, "b" * 40, "c" * 40
 
 
-def setup_run(run_id="setup-3", *, merged=True, merge_sha=HEAD, adopted=False, pr=True, base=BASE, **fields):
+KIT = [".mlai/articles-verification.json", ".mlai/articles-verification.py", ".github/workflows/mlai-articles-verification.yml"]
+
+
+def setup_run(run_id="setup-3", *, merged=True, merge_sha=HEAD, adopted=False, pr=True, base=BASE, kit=True, **fields):
     result = {"status": "merged" if merged else "adopted", "merge_status": "merged" if merged else None,
-        "merge_sha": merge_sha if merged else None, "adopted": adopted,
+        "merge_sha": merge_sha if merged else None, "adopted": adopted, "adoption": {"kit_paths": KIT if kit else []},
         "article_system_setup": {"status": "merged" if merged else "adopted", "merge_status": "merged" if merged else None}}
     if pr:
         result.update(pr_number=3, pr_url="https://github.com/fixture/site/pull/3")
@@ -68,6 +71,9 @@ class SettledSetupTests(SimpleTestCase):
             self.assertEqual(authority.settled_setup_run(connection, source_sha=HEAD).run_id, "setup-3")
             self.assertIsNone(authority.settled_setup_run(connection, source_sha=OTHER))
         self.assertEqual(rows.call_args.kwargs["run_request__connection_generation"], 3)
+        # TalaThrive PR #40 carried no kit (native CI needed configuration): the kit is next, not CI proof.
+        with patch("workflow_runs.models.ContentFactoryRun.objects.filter", return_value=newest_first(setup_run(kit=False))):
+            self.assertIsNone(authority.settled_setup_run(connection, source_sha=HEAD))
         with patch("workflow_runs.models.ContentFactoryRun.objects.filter") as rows:
             self.assertIsNone(authority.settled_setup_run(connection, source_sha=""))
         rows.assert_not_called()
@@ -134,6 +140,11 @@ class PostMergePrepareTests(SimpleTestCase):
     def test_an_owner_retry_may_repair_a_settled_setup(self):
         self.op.payload["repair_setup"] = True
         self.advance()
+        self.handlers["setup"].assert_called_once()
+        self.handlers["ci-attestation"].assert_not_called()
+
+    def test_a_merged_setup_without_the_kit_still_installs_it(self):
+        self.advance(settled=(setup_run(kit=False),))
         self.handlers["setup"].assert_called_once()
         self.handlers["ci-attestation"].assert_not_called()
 

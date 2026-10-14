@@ -367,6 +367,7 @@ class SettledSetupDatabaseTests(TestCase):
             run_request={"website_connection_id": str(self.website.pk), "connection_generation":
                 self.website.generation if generation is None else generation, "expected_source_sha": "a" * 40},
             result={"status": "merged", "merge_status": "merged", "merge_sha": merge_sha, "pr_number": 3,
+                "adoption": {"kit_paths": [".mlai/articles-verification.json"]},
                 "article_system_setup": {"status": "merged", "merge_status": "merged"}})
 
     def test_settled_setup_and_owned_merge_use_this_generations_merge_commit(self):
