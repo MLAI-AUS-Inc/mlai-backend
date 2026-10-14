@@ -167,14 +167,14 @@ def finish_goal(op, *, now=None):
                 stop_goal(op, goal, reason=reason, now=now)
                 return
             if fresh and effective == "repairable" and (budget.enabled() or strategy.enabled()):
-                retry_goal_action(op, goal, now=now, occurrence=occurrence)
+                goal = retry_goal_action(op, goal, now=now, occurrence=occurrence)
             elif fresh and strategy.enabled() and effective == "strategy" and goal.get("strategy_pin"):
                 goal = strategy.advance(goal, source=goal.get("current_source_sha"), now=now, reason="strategy_exhausted")
                 goal["strategy_requires_candidate"] = True
                 if goal["strategy_pin"]["rung"] == "hosted":
                     wait_for_channel(op, goal)
                 else:
-                    retry_goal_action(op, goal, now=now, occurrence=occurrence, step="setup")
+                    goal = retry_goal_action(op, goal, now=now, occurrence=occurrence, step="setup")
                     op.receipt["message"] = "Trying the next articles integration strategy."
             elif fresh and strategy.enabled() and effective == "unsupported" and classification in {"transient", "repairable", "strategy"} and strategy.valid_pin(goal.get("strategy_pin")):
                 goal = strategy.set_pin(goal, len(strategy.RUNGS) - 1, source=goal.get("current_source_sha"),
@@ -209,7 +209,12 @@ def wake_goal_for_source(config, *, company_id, user, now):
         if latest.state in TERMINAL:
             return start_prepare(config, company_id=company_id, user=user, force_successor=True, target=goal.get("target", "ready"))
         if not goals.valid_goal(goal, goals.scope_for(connection, company_id)):
-            return None
+            from .website_goal_scope import rebind_source_scope
+            rebound = rebind_source_scope(goal, connection, company_id=company_id, now=now)
+            if rebound is None:
+                return None
+            goal = rebound
+        goal = retain_child_references(goal, latest.receipt)
         _cancel_prepare_child(latest, config)
         goal = goals.refresh_goal(goal, {}, scope=goal["scope"], source_sha=connection.verified_sha, now=now)
         goal["current_source_sha"] = connection.verified_sha
@@ -251,7 +256,7 @@ def account_child_usage(op, goal):
     from . import website_goal_budget as budget
     result = goal
     op._goal_has_active_child = False
-    identifiers = {value for key in ("child_run_id", "scan_run_id", "setup_run_id")
+    identifiers = set(result.get("child_run_history") or []) | {value for key in ("child_run_id", "scan_run_id", "setup_run_id")
         if isinstance(value := goals.mapping(op.receipt).get(key), str) and value}
     for identifier in sorted(identifiers):
         child = ContentFactoryRun.objects.filter(run_id=identifier, organization_id=op.connection.organization_id).first()
@@ -280,6 +285,7 @@ def account_child_usage(op, goal):
 
 def retry_goal_action(op, goal, *, now, occurrence, step=None):
     """Retry a repairable action on its rung with a distinct, durable attempt key."""
+    goal = retain_child_references(goal, op.receipt)
     step = step or op.receipt.get("current_step") or "setup"
     op.payload = {**op.payload, "attempt": op.payload.get("attempt", 1) + 1,
         "retry_epoch": goals.digest({"goal": goal["goal_id"], "strategy": goal.get("strategy_pin"), "occurrence": occurrence})}
@@ -292,6 +298,20 @@ def retry_goal_action(op, goal, *, now, occurrence, step=None):
     elif step == "setup":
         cleared.add("setup_run_id")
     op.receipt = {key: value for key, value in op.receipt.items() if key not in cleared}
+    op.receipt["goal"] = goal
     op.receipt.update(status="working", current_step=step, user_action=None,
         message="Repairing the articles setup on the saved integration strategy.")
     op.state, op.next_attempt_at = "pending", now
+    return goal
+
+
+def retain_child_references(goal, receipt):
+    """Preserve cumulative metering references before replacing a child attempt."""
+    history=list(goal.get("child_run_history") or [])
+    for key in ("child_run_id","scan_run_id","setup_run_id"):
+        identifier=goals.mapping(receipt).get(key)
+        if isinstance(identifier,str) and identifier not in history:
+            if len(history)>=64:
+                raise ValueError("The bounded child accounting journal is full")
+            history.append(identifier)
+    return {**goal,"child_run_history":history}

@@ -160,13 +160,17 @@ def handle_website_github_event(event_type, payload):
                     run_id=f"github-head:{source_sha}", fingerprint=evidence_digest({"source_sha": source_sha}),
                     defaults={"source_sha": source_sha, "detector_version": "github_head", "evidence": {"source": "github_push", "branch": website.branch}})
                 if created:
+                    previous_revision = website.configuration_version
                     website.configuration_version += 1
+                    from .website_goal_scope import record_source_transition
+                    record_source_transition(website, previous_revision=previous_revision, source_sha=source_sha)
                     if not owned_merge:
                         website.capabilities = {**website.capabilities, "publishingReady": False, "previewSupported": False}
                     WebsiteConnectionOperation.objects.get_or_create(
                         idempotency_key=f"{website.pk}:source-reverify:{website.generation}:{source_sha}", defaults={
                             "connection": website, "generation": website.generation, "action": "source-reverify",
                             "payload": {"source_sha": source_sha, "target_id": config.default_publish_target_id,
+                                "previous_configuration_revision": previous_revision, "configuration_revision": website.configuration_version,
                                 "owned_merge_run_id": owned_merge["run_id"] if owned_merge else "", "scan_required": not bool(owned_merge)},
                             "receipt": {"status": "verification_queued", "repository_modified": False}})
                     if not owned_merge:
@@ -367,7 +371,17 @@ def process_website_connection_operations(*, limit=20, now=None, connection_id=N
     from .website_support import reconcile_support_verifications
     reconcile_support_verifications(limit=limit, connection_id=connection_id)
     monitor_cleanup_pull_requests(limit=limit, connection_id=connection_id)
+    from .website_wakeups import enabled as event_wakes_enabled
     for identifier in ids:
+        if event_wakes_enabled() and WebsiteConnectionOperation.objects.filter(pk=identifier, action="goal-wake").exists():
+            from .website_wakeups import advance_wake
+            outcome = advance_wake(identifier, now=now)
+            if outcome is not None:
+                result["processed"] += 1
+                result["pending" if outcome == "pending" else "completed"] += 1
+                if len(result["operations"]) < 20:
+                    result["operations"].append({"id": str(identifier), "action": "goal-wake", "outcome": outcome})
+            continue
         if WebsiteConnectionOperation.objects.filter(pk=identifier, action="prepare").exists():
             from .website_prepare import advance_prepare
             operation = advance_prepare(identifier, now=now)

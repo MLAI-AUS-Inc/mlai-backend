@@ -768,6 +768,9 @@ def _advance_claimed_prepare(op, *, now, handlers):
 
 def advance_prepares_for_connection(connection_id):
     """Wake current preparation after scan, setup or CI callbacks commit."""
+    from .website_wakeups import enabled as event_wakes_enabled, queue_wake
+    if event_wakes_enabled():
+        return int(queue_wake(connection_id, signal={"kind": "trusted_callback", "success": True}) is not None)
     current = WebsiteConnectionOperation.objects.filter(connection_id=connection_id, action="prepare",
         state__in=["pending", "needs_user"], connection__generation=F("generation"))
     current.update(state="pending", next_attempt_at=timezone.now(), updated_at=timezone.now())

@@ -126,3 +126,63 @@ commit/push CF, pin schema on backend, finish companion channel action UI; creat
 and attach B3/B4 draft PRs with evidence. Then B6, B7, C, D, E, F and G without a
 per-step approval stop. Owner production/releases/migrations/provider credentials
 remain outside authorized agent scope. The active goal remains unfinished.
+
+
+## Latest continuation checkpoint
+
+B2 backend final local head is `5a82085766d9da7297e95d1e06cb281c486fa6cc` on its
+separate CI worktree/branch. All 19 database-free checks-job lanes passed locally
+after adding the old cleanup fixture's missing DAO seam. Remote #1014 checks are
+running again; do not assume final-head green. Chat #465 latest runtime head
+`4763624ca` includes manual recovery refresh; hooks passed. Full workspace CI
+previously passed on runtime B2. Chat worktree now uses uncommitted branch
+`codex/articles-b3-b4-channel-action`: it accepts choose_article_channel and links
+to the scoped existing article preferences screen. Typecheck passed; tests/PR for
+that companion remain pending. The full-CI-generated root output screenshots were
+preserved under `.codex/artifacts/articles-b2-workspace-ci-output` and removed
+from the checkout.
+
+CF #985 was created with gh CLI because the GitHub connector returns 404 for the
+personal private repo; the CLI is already authorized and works. It is attached.
+Head `2527acd610600ef7f6cf4f9be37ceaf2926374fb`, stack base B1/B5 #982. 122 focused
+tests and 1,107 emission audit passed. Full pytest session 15121 is still running;
+last log `/tmp/articles-b3-b4-cf-full.log` was ~89%. New canonical schema bytes
+were copied to the Docker package. Backend schema and lock now pin this exact CF
+revision. No registry bytes changed. Remote CF build/test/corpus jobs also run.
+
+Backend #1016 is created/attached, base B2 branch. Head
+`294c244e0ffc42d99c4b424082f4701f439cf0d9`. Its earlier signed policy commit was
+`f465c16f`; a merge from current B2 was amended with signoff (`d7d74a6`). Nine
+policy tests pass; 71 combined B3/B4/B2/delivery tests pass; emitter audit 630,
+CI assignments and vendored digests pass. Remote #1016 CI is running. Full broader
+B3/B4 lanes, model drift, cost/meter cancellation races and proper exhaustion
+validation still need evidence. The runtime is already source-bound; strategy
+advancement sets strategy_requires_candidate so old native proof cannot complete
+its new rung. Repair retries keep the rung, distinct key; repeated transient
+fingerprints escalate too. No parallel agents were spawned.
+
+The backend implementation worktree is now on runbook branch `feat/goal-wakeups`,
+stacked on #1016. Only ignored, uncommitted `docs/articles-b6-design-2026-10-14.md`
+and this progress update exist for B6 so far. B6 design uses a bounded immediate
+executor/cache lock plus a durable goal-wake operation on the existing table.
+A signal must not flip a running parent to pending or invalidate its lease. The
+ordinary operation scheduler is fallback. Raw webhooks only wake, never prove
+merge/approval/CI/live. Match immutable install/repo IDs, current source/branch,
+or a bound original setup PR. Recover needs_attention only under explicit goal
+policy; deterministic/exhausted/malformed/cancelled/denied/deleted work stays inert.
+
+Important source-transition bug discovered for B6: github push handling in
+website_reconciliation.handle_website_github_event increments configuration_version
+before source reverify, while wake_goal_for_source currently requires the old goal
+scope to equal the new configuration revision and therefore rejects it. Record
+previous/current configuration revisions in the trusted source-reverify operation;
+rebind active goals only for that exact source-only transition, preserve budgets,
+record history, invalidate proof and fence old child. Identity changes stay separate.
+Terminal goals retain history and create deterministic successors. The relevant
+GitHub dispatcher is content_factory/github_webhook.py; existing installation
+permissions path calls advance_prepares_for_connection directly. Lifecycle events
+and push handling live in website_reconciliation.py.
+
+Continue B6 implementation, B7, C, D, E, F and G without stopping for design approval.
+No production release, customer write, credential change, migration or notification
+has been performed. All runtime flags stay off. The active goal remains unfinished.

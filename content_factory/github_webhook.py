@@ -148,6 +148,10 @@ def process_github_event(event_type, payload) -> dict:
     """Dispatch a verified GitHub event to its handler."""
     event_type = str(event_type or "").strip().lower()
     payload = payload if isinstance(payload, dict) else {}
+    from .website_wakeups import wake_from_event, enabled as event_wakes_enabled
+    if event_wakes_enabled() and any(payload.get(key) is not None and not isinstance(payload[key], dict) for key in ("installation", "repository", "pull_request", "check_run", "check_suite", "deployment", "deployment_status")):
+        return {"event": event_type, "ignored": True, "reason": "malformed_event"}
+    wakes = wake_from_event(event_type, payload) if event_wakes_enabled() else 0
     if event_type == "installation" and payload.get("action") == "new_permissions_accepted":
         from django.db.models import F
         from .website_models import WebsiteConnection
@@ -159,17 +163,19 @@ def process_github_event(event_type, payload) -> dict:
         invalidate_installation_grants(identifier)
         connections = WebsiteConnection.objects.filter(installation_id=identifier, state="connected",
             operations__action="prepare", operations__state="needs_user", operations__generation=F("generation"))
-        count = sum(advance_prepares_for_connection(key) for key in connections.values_list("id", flat=True).distinct())
+        count = wakes if event_wakes_enabled() else sum(advance_prepares_for_connection(key) for key in connections.values_list("id", flat=True).distinct())
         return {"event": event_type, "action": "new_permissions_accepted", "prepares_woken": count}
     if event_type == "ping":
         return {"event": "ping"}
     if event_type in {"installation", "installation_repositories", "repository"}:
         from .website_reconciliation import handle_website_github_event
-        return handle_website_github_event(event_type, payload)
+        return {**handle_website_github_event(event_type, payload), **({"prepares_woken": wakes} if event_wakes_enabled() else {})}
     if event_type == "pull_request":
-        return handle_pull_request(payload)
+        return {**handle_pull_request(payload), **({"prepares_woken": wakes} if event_wakes_enabled() else {})}
     if event_type == "push":
         from .website_reconciliation import handle_website_github_event
         lifecycle = handle_website_github_event(event_type, payload)
         return {**handle_push(payload), "website_connections_invalidated": lifecycle.get("invalidated", 0)}
+    if event_wakes_enabled() and event_type in {"deployment_status", "check_run", "check_suite"}:
+        return {"event": event_type, "prepares_woken": wakes}
     return {"event": event_type or "unknown", "ignored": True}

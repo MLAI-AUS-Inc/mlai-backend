@@ -6,6 +6,7 @@ import re
 from datetime import timedelta
 from urllib.parse import quote
 
+from django.db import transaction
 from django.utils import timezone
 from rest_framework.response import Response
 from rest_framework.views import APIView
@@ -117,7 +118,10 @@ def record_ci_attestation(data, *, owner_review=False):
             config.publish_targets = [row for row in config.publish_targets if row.get("target_id") != target.target_key] + [target.contract]
             config.save(update_fields=["default_publish_target_id", "publish_targets", "updated_at"])
         if website.verified_sha != proof["source_sha"]:
+            previous_revision = website.configuration_version
             website.configuration_version += 1
+            from .website_goal_scope import record_source_transition
+            record_source_transition(website, previous_revision=previous_revision, source_sha=proof["source_sha"])
         website.verified_sha, website.last_verified_at = proof["source_sha"], timezone.now()
         website.blockers = [row for row in website.blockers if row.get("code") != "repository_source_changed"]
         website.capabilities = {**website.capabilities, "publishingReady": website.state == "connected" and not custom_verified,
@@ -127,6 +131,11 @@ def record_ci_attestation(data, *, owner_review=False):
             "connection": website, "generation": website.generation, "action": "ci-verify", "state": "completed", "payload": dict(data), "receipt": receipt})
         from .website_prepare import wake_prepare_after_commit
         wake_prepare_after_commit(website.pk)
+        if changed_source:
+            from .website_wakeups import enabled as event_wakes_enabled
+            if event_wakes_enabled():
+                from .website_prepare import wake_prepare_for_source
+                transaction.on_commit(lambda: wake_prepare_for_source(website.pk, organization_id=website.organization_id), robust=True)
         return op
 
 
