@@ -630,6 +630,9 @@ def _advance_claimed_prepare(op, *, now, handlers):
                     # setup before its saved child identity is confirmed.
                     raise WebsiteAuthorityError("website_setup_dispatch_pending",
                         "Waiting for the selected articles setup request to finish queuing.", retryable=True)
+            elif not owns_goal(op):
+                child = _return_to_open_setup_pr(op, config, journey)
+                child_id = child.run_id if child else None
         if child_id:
             from workflow_runs.models import ContentFactoryRun
             child = child or ContentFactoryRun.objects.filter(run_id=child_id, organization_id=op.connection.organization_id).first()
@@ -677,16 +680,17 @@ def _advance_claimed_prepare(op, *, now, handlers):
                     raise WebsiteAuthorityError("setup_preview_verification_required", "Waiting for the exact setup preview proof.", retryable=True)
                 merge = maybe_merge_prepared_setup(child, context, config, user=user)
                 if merge.get("status") == "needs_user":
-                    review = merge["user_action"].get("id") == "review_setup"
+                    review = merge["user_action"].get("id") == "review_setup" and not merge["user_action"].get("pr_number")
                     op.state, op.next_attempt_at = "needs_user", None
                     op.receipt.update(status="needs_you", current_step="setup" if review else "merge",
-                        message=("Review the articles setup preview, then approve it to open the setup pull request."
+                        message=merge.get("message") or ("Review the articles setup preview, then approve it to open the setup pull request."
                             if review else "Merge the articles setup pull request."),
                         user_action=merge["user_action"])
                     return _finish_prepare(op, now=now)
                 if merge.get("status") == "pending":
                     op.state, op.next_attempt_at = "pending", now + timedelta(minutes=2)
                     return _finish_prepare(op, now=now)
+                # "superseded": the pull request was closed on GitHub, so a new setup replaces it below.
             op.receipt.pop("child_run_id", None)
         # Access probes may change the next requirement immediately; bound the
         # same-pass continuation to one probe plus one actual work dispatch.
@@ -799,6 +803,49 @@ def wake_prepare_for_source(connection_id, *, organization_id):
     return op
 
 
+def _return_to_open_setup_pr(op, config, journey):
+    """Resume the owner's open setup pull request instead of starting over.
+
+    Retrying or preparing again must not replace an approved setup that only
+    waits to be published. A pull request built on an older branch head is
+    stale and is not resumed.
+    """
+    from .website_connections import open_setup_pr_run
+    source_sha = (journey.get("repository") or {}).get("observedSourceSha") or ""
+    run = open_setup_pr_run(op.connection, source_sha=source_sha)
+    if run is None:
+        return None
+    op.receipt = {**op.receipt, "child_run_id": run.run_id, "setup_run_id": run.run_id, "current_step": "merge",
+        "status": "working", "message": "Returning to your articles setup pull request.", "user_action": None,
+        "reason_code": "", "blocked_step": None, "step_failures": {}, "last_completed": None, "retryable": False}
+    op.payload = {**op.payload, "run_id": run.run_id}
+    _restore_pending_setup_pr(config, run)
+    return run
+
+
+def _restore_pending_setup_pr(config, run):
+    """Point the saved setup back at the open pull request the owner will publish."""
+    from .vibe_marketing_views import _pull_request_number_from_run
+    result = run.result if isinstance(run.result, dict) else {}
+    setup = result.get("article_system_setup") if isinstance(result.get("article_system_setup"), dict) else {}
+    article_system = dict(config.article_system or {})
+    pending = dict(article_system.get("pending_article_system_setup") or {})
+    status = str(setup.get("status") or result.get("status") or "pr_created")
+    merge = str(setup.get("merge_status") or result.get("merge_status") or "not_merged")
+    pr_url = str(result.get("pr_url") or setup.get("pr_url") or "")
+    number = _pull_request_number_from_run(run)
+    stamp = timezone.now().isoformat()
+    pending.update({"setupRunId": run.run_id, "setup_run_id": run.run_id, "prUrl": pr_url, "pr_url": pr_url,
+        "prNumber": number, "pr_number": number, "status": status, "setupStatus": status, "setup_status": status,
+        "mergeStatus": merge, "merge_status": merge, "currentStep": "create_pull_request",
+        "current_step": "create_pull_request", "setupCurrentStep": "create_pull_request",
+        "setup_current_step": "create_pull_request", "retryAvailable": False, "retry_available": False,
+        "updatedAt": stamp, "updated_at": stamp})
+    article_system["pending_article_system_setup"] = pending
+    config.article_system = article_system
+    config.save(update_fields=["article_system", "updated_at"])
+
+
 def maybe_merge_prepared_setup(run, context, config, *, user):
     """Use the shared merge path after exact preview and current consent checks."""
     from .vibe_marketing_views import _pull_request_number_from_run, _attempt_setup_publish_merge
@@ -810,14 +857,23 @@ def maybe_merge_prepared_setup(run, context, config, *, user):
         if run.status == "completed" and (run.result or {}).get("adopted") is True:
             return {"status": "completed"}
         return approve_prepared_setup(run, context, config, user=user)
-    action = {"id": "merge_pr", "label": f"Merge PR #{number}", "pr_number": number,
-        "url": f"https://github.com/{config.website_connection.github_repo}/pull/{number}"}
+    url = f"https://github.com/{config.website_connection.github_repo}/pull/{number}"
+    action = {"id": "merge_pr", "label": f"Merge PR #{number}", "pr_number": number, "url": url}
+    # The setup run's Publish (in MLAI Chat) verifies and merges this pull request.
+    publish = {"status": "needs_user", "message": f"Your articles setup pull request #{number} is ready. Open the setup to publish it.",
+        "user_action": {"id": "review_setup", "label": "Review and publish", "run_id": run.run_id, "pr_number": number, "url": url}}
     if config.requires_review:
-        return {"status": "needs_user", "user_action": action}
+        return publish
     outcome = _attempt_setup_publish_merge(run=run, context=context, automatic=True)
     kind = outcome.get("outcome")
     if kind in {"merged", "waiting", "auto_merge_pending"}:
         return {"status": "pending"}
+    if kind == "closed":
+        return {"status": "superseded"}
+    if kind == "error" and outcome.get("code") == "setup_verification_required":
+        # Only the owner's Publish re-verifies a pull request whose head changed
+        # after its preview passed. Preparation waits for them; it never retries.
+        return publish
     if kind == "checks_failed":
         raise WebsiteAuthorityError("setup_checks_failed", outcome.get("detail") or "Setup checks failed.", retryable=False)
     if kind == "error":

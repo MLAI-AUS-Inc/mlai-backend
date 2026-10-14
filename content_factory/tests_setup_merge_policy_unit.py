@@ -193,10 +193,11 @@ class SetupMergePolicyUnitTests(SimpleTestCase):
         self.assertNotEqual(self.run.result.get("merge_status"), "merged")
 
     def test_changed_preview_head_never_merges(self):
+        # Preparation never merges or re-checks a changed head; the owner's Publish does.
         self.pull["head"]["sha"] = "d" * 40
-        with self.assertRaises(prepare.WebsiteAuthorityError) as raised:
-            self.merge()
-        self.assertFalse(raised.exception.retryable)
+        result = self.merge()
+        self.assertEqual(result["status"], "needs_user")
+        self.assertEqual((result["user_action"]["id"], result["user_action"]["run_id"]), ("review_setup", "setup-1"))
         self.assertEqual(self.merge_calls, [])
 
     def test_failed_checks_are_repairable_instead_of_an_owner_merge_action(self):

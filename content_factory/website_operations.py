@@ -370,6 +370,11 @@ def cancel_operation(config, *, data, idempotency_key):
             child_id = op.receipt.get("child_run_id") or op.payload.get("run_id")
             if child_id and child_id not in run_ids:
                 run_ids.append(child_id)
+            # Stopping preparation keeps an open setup pull request publishable.
+            from .website_connections import setup_pr_open
+            kept = {row.run_id for row in ContentFactoryRun.objects.filter(run_id__in=run_ids,
+                organization=connection.organization, workflow="article_system_setup", status="completed") if setup_pr_open(row)}
+            run_ids = [item for item in run_ids if item not in kept]
             child_operations = list(connection.operations.filter(generation=connection.generation, action="workflow",
                 payload__run_id__in=run_ids).values_list("id", flat=True)) if run_ids else []
             connection.operations.filter(pk__in=child_operations).exclude(state__in=["completed", "failed", "denied", "deleted"]).update(
