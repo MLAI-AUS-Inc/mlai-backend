@@ -96,9 +96,20 @@ class StagingPlatformTests(TestCase):
         result=self.client.post('/api/v1/points/kimi/calls/dispatch/',{'slack_user_id':'another-user'},format='json')
         self.assertIn(result.status_code,(401,403))
 
-    @override_settings(APP_ENV='production')
+    @override_settings(SETTINGS_MODULE='mlai.settings_staging_chat',APP_ENV='production')
     def test_wrong_hosted_profile_environment_never_uses_jwt(self):
         from core.authentication import CustomJWTAuthentication
         from rest_framework.test import APIRequestFactory
         from rest_framework.exceptions import AuthenticationFailed
         with self.assertRaises(AuthenticationFailed):CustomJWTAuthentication().authenticate(APIRequestFactory().get('/api/'))
+
+    def test_original_company_scope_denies_another_founders_company(self):
+        from django.contrib.auth import get_user_model
+        from founder_tools.models import VibeRaisingProfile,VibeRaisingCompany
+        other=get_user_model().objects.create_user(email='other-founder@staging.mlai.au')
+        foreign_profile=VibeRaisingProfile.objects.create(user=other,role=VibeRaisingProfile.ROLE_FOUNDER)
+        foreign=VibeRaisingCompany.objects.create(profile=foreign_profile,name='Synthetic other org',domain='other-staging.example')
+        VibeRaisingProfile.objects.create(user=self.user,role=VibeRaisingProfile.ROLE_FOUNDER)
+        response=self.login('android');self.client.credentials(HTTP_AUTHORIZATION='Bearer '+response.data['session']['access_token'],HTTP_ORIGIN=NATIVE)
+        result=self.client.post('/api/v1/founder-tools/active-company/',{'companyId':str(foreign.pk)},format='json')
+        self.assertEqual(result.status_code,404)

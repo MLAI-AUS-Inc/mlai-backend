@@ -22,7 +22,7 @@ REF='refs/heads/staging'
 HOST='ubuntu-s-4vcpu-8gb-syd1'
 CONFIG=Path('/etc/mlai-backend-staging-auto-deploy/config.json')
 SHA=re.compile(r'[0-9a-f]{40}')
-OPERATIONAL=['ops','scripts','Dockerfile','.dockerignore','.gitattributes','.gitmodules','requirements.txt','requirements-engine.txt','requirements.lock','manage.py','mlai/settings.py','mlai/settings_staging_chat.py','mlai/settings_staging_local.py','mlai/staging_integrations.py','mlai/wsgi.py','mlai/asgi.py','core/authentication.py','community_chat/authentication.py','community_chat/staging_password.py','community_chat/staging_views.py','community_chat/staging_urls.py','mlai/urls_staging_chat.py']
+OPERATIONAL=['ops','scripts','Dockerfile','.dockerignore','.gitattributes','.gitmodules','requirements.txt','requirements-engine.txt','requirements.lock','manage.py','mlai/settings.py','mlai/settings_staging_chat.py','mlai/settings_staging_local.py','mlai/staging_integrations.py','mlai/wsgi.py','mlai/asgi.py','core/authentication.py','core/refresh_sessions.py','core/password_auth.py','community_chat/account_sessions.py','community_chat/tokens.py','community_chat/bootstrap.py','community_chat/federation.py','community_chat/authentication.py','community_chat/staging_password.py','community_chat/staging_views.py','community_chat/staging_urls.py','mlai/urls_staging_chat.py']
 
 class Failure(Exception):
     """An attempt failed without making its candidate the successful release."""
