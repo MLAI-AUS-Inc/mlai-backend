@@ -1,6 +1,6 @@
 # Staging account federation
 
-Prepared source; disabled by default. Live rollout and full monorepo validation remain pending.
+Prepared source; disabled by default. Focused local browser/backend checks passed; live rollout remains pending. Broader platform testing is deferred at the user's request.
 
 ## Cookie cutover
 
@@ -118,6 +118,8 @@ On 14 October 2026, local validation resumed after disk cleanup with about
 web/type checks and 12 analyzer tests passed. The full command was stopped
 before disk exhaustion during first-time Flutter SDK installation; mobile
 checks and later unit/build gates were not reached. The incomplete SDK and
-its download were cleaned up. Full release validation remains pending; aim
-for around 25 GiB of free working headroom before the next complete local run.
+its download were cleaned up. The user chose the completed focused browser/backend
+checks for this browser-only pilot. Additional all-platform/mobile testing is
+deferred; this does not represent a successful full `just ci` run. Live pilot
+verification and rollout approval remain separate.
 No remote CI, push or deployment was performed.
