@@ -689,6 +689,12 @@ jobs:
         python -m pip install --upgrade pip
         pip install --require-hashes -r requirements.lock
 
+    # Exercise the article chain before the expensive graph-rewind regressions,
+    # so a controller/billing failure has a short, separately named CI result.
+    # This uses the same disposable PostgreSQL schema and never deploys.
+    - name: Run first-article provider-chain PostgreSQL tests
+      run: python manage.py test content_factory.tests_website_first_article_database --verbosity 2
+
     - name: Run migration tests
       run: |
         python manage.py test \
@@ -704,7 +710,6 @@ jobs:
           content_factory.tests_customer_profile_persistence \
           content_factory.tests_article_publish_status \
           content_factory.tests_written_article_discard \
-          content_factory.tests_website_first_article_database \
           roo.tests_apple_migrations \
           --verbosity 2
 
