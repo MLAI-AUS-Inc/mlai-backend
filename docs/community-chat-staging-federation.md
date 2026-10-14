@@ -174,3 +174,11 @@ Update existing private configuration with `config.py upgrade-keyring`. After
 source/schema/account readiness, `config.py enable-password --output <env>`
 atomically activates only the password mode; `disable-password` turns it off.
 Restart only the API afterward. Production identity federation stays disabled.
+
+After an explicit removal rehearsal, `provision_staging_pilot --manifest
+/private/accounts.json --reactivate` previews recovery of the same disabled
+synthetic account; `--apply` reactivates it only after all devices are revoked.
+Its supplied private password must verify against the unchanged existing hash.
+Active, unmarked, privileged accounts or incomplete cleanup are refused. No
+password reset or new consent is performed. This supports rollback rehearsal
+without leaving the approved synthetic pilot unusable.

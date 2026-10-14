@@ -70,3 +70,15 @@ class StagingPilotAccountsTests(TestCase):
         with patch('community_chat.adapter.revoke_relay_membership',return_value=('revoked',uuid.uuid4())):
             call_command('remove_staging_identity',email=user.email,apply=True,stdout=output)
         self.assertFalse(CommunityChatDevice.objects.filter(revoked_at__isnull=True).exists())
+
+    def test_explicit_reactivation_preserves_password_and_requires_completed_cleanup(self):
+        self.run_command(apply=True)
+        user=get_user_model().objects.get(email='pilot@staging.mlai.au');password_hash=user.password
+        user.is_active=False;user.save(update_fields=['is_active'])
+        device=CommunityChatDevice.objects.create(user=user,public_key='2'*64,installation_id=uuid.uuid4(),status='verified')
+        with self.assertRaises(CommandError):self.run_command(reactivate=True,apply=True)
+        device.delete()
+        self.run_command(reactivate=True);user.refresh_from_db();self.assertFalse(user.is_active)
+        self.run_command(reactivate=True,apply=True);user.refresh_from_db()
+        self.assertTrue(user.is_active);self.assertEqual(user.password,password_hash)
+        with self.assertRaises(CommandError):self.run_command(reactivate=True,apply=True)
