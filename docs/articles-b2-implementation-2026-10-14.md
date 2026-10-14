@@ -1,5 +1,20 @@
 # B2 per-site goal runner implementation
 
+## Dependency refresh for owner-requested merge — 14 October 2026
+
+The owner requested merging backend #1013 and #1014 with admin override.
+B2 now includes B1/B5 head `4628dece`, including main's #1015 setup PR
+re-verification fix. The CI conflict was resolved by retaining the goal/status,
+setup delivery and changed-head regression modules together.
+
+The refreshed workflow selections pass 28 failure-contract, 438 journey and
+goal/lifecycle, 168 editorial and 14 setup-example cases. Database connections,
+network and dotenv loading were blocked. All 632 production emission sites
+pass the offline audit, test assignment has zero new omissions, and system/model
+checks find no issues or migration changes. All rollout defaults remain off.
+The earlier full GitHub run passed on `5a820857`; the refreshed head starts a
+new CI run. The requested admin merge bypasses pending required checks.
+
 The owner authorized continuing every implementation phase on 14 October 2026.
 Backend PR #1014 is stacked on B1/B5 #1013 (`51ee937b`); no merge, release,
 production command, migration or enrollment change has been performed here.
