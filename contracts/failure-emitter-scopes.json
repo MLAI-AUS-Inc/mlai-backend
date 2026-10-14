@@ -1167,6 +1167,18 @@
       "site_sha256": "fa8a898bb5b2f2414ea2eac529751b4014f0eeb051598467bb58edf2bac24aca",
       "source": "Owned generation/control response or original tenant-scoped run result; WebsiteAuthorityError classifies within the enrolled goal scope and prepare_failure revalidates canonical failure policy.",
       "test": "content_factory.tests_website_first_article_unit.FirstArticleControllerTests.test_unknown_control_failure_is_resolved_by_the_enrolled_registry_boundary"
+    },
+    {
+      "adapter": "authority_registry_boundary",
+      "allowed_codes_ref": "contracts/failure-codes.json#/codes",
+      "expression": "goals.mapping(child.result).get('error_code') or 'website_prepare_step_failed'",
+      "field": "error_code",
+      "function": "advance",
+      "owner": "backend.website_first_article",
+      "path": "content_factory/website_first_article.py",
+      "site_sha256": "607f3e7eda26cddf7eb14734dc55f720275c3d5d9fb0fef0f25c41671642f5f5",
+      "source": "The publication child is selected from this goal's owned source run; WebsiteAuthorityError and prepare_failure validate its B1 failure before recovery policy.",
+      "test": "content_factory.tests_website_article_recovery_unit.ArticleRecoveryControllerTests.test_unknown_publication_failure_stops_at_the_enrolled_registry_boundary"
     }
   ],
   "entry_points": [

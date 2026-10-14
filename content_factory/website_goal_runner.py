@@ -219,6 +219,9 @@ def finish_goal(op, *, now=None):
             if reason:
                 stop_goal(op, goal, reason=reason, now=now)
                 return
+            from .website_article_recovery import schedule as schedule_article_recovery
+            if schedule_article_recovery(op,goal,classification=effective,fresh=fresh,occurrence=occurrence,now=now):
+                return
             if fresh and effective == "repairable" and (budget.enabled() or strategy.enabled()):
                 goal = retry_goal_action(op, goal, now=now, occurrence=occurrence)
             elif fresh and strategy.enabled() and effective == "strategy" and goal.get("strategy_pin"):

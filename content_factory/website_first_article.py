@@ -263,6 +263,10 @@ def advance(op, context, config, *, user, now):
     if op.receipt.get("first_article_run_id")!=run.run_id:
         _save_fields(op,{"first_article_run_id":run.run_id,"child_run_id":run.run_id})
     if run.status in {"failed","blocked","cancelled","denied"}:
+        from .website_article_recovery import observe,resume
+        if run.status in {"failed","blocked"}:
+            if resume(op,run,context,user=user,now=now):return op
+            observe(op,run)
         error=WebsiteAuthorityError(goals.mapping(run.result).get("error_code") or "website_prepare_step_failed",
             "The first article is repairing its failed checks.",retryable=goals.mapping(run.result).get("retryable") is True)
         error.result=goals.mapping(run.result)
@@ -288,6 +292,14 @@ def advance(op, context, config, *, user, now):
         return _wait(op,now,"Opening the first article publication pull request.")
     if op.receipt.get("first_article_publish_run_id")!=child.run_id:
         _save_fields(op,{"first_article_publish_run_id":child.run_id,"child_run_id":child.run_id})
+    if child.status in {"failed","blocked"}:
+        from .website_article_recovery import observe,resume
+        if resume(op,child,context,user=user,now=now):return op
+        observe(op,child)
+        error=WebsiteAuthorityError(goals.mapping(child.result).get("error_code") or "website_prepare_step_failed",
+            "The article publication is repairing its failed checks.",retryable=goals.mapping(child.result).get("retryable") is True)
+        error.result=goals.mapping(child.result)
+        raise error
     views._maybe_auto_merge_publish_child(child=child,viewed_run=run,context=context)
     child.refresh_from_db()
     if goals.mapping(child.result).get("merge_status")=="manual_merge_required":

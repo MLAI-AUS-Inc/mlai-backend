@@ -18182,8 +18182,14 @@ def _project_setup_pr_creation_failure(run, config, remote_data):
     return detail
 
 
-def control_article_run(*, user, context, run, action, data, run_id=None):
+def control_article_run(*, user, context, run, action, data, run_id=None, goal_operation_id=None):
     """Execute the canonical owned operation for HTTP and MCP transports."""
+    if goal_operation_id is not None:
+        from .website_article_recovery import authorize_resume
+        try:
+            authorize_resume(goal_operation_id,run=run,context=context,user=user,action=action)
+        except WebsiteAuthorityError as exc:
+            return Response(exc.as_dict(),status=exc.status)
     command = ContentCommand(user=user, data=data)
     run_id = run_id or run.run_id
     gated_actions = {"restart", "resume", "revise", "regenerate-image", "regenerate-images", "retry-preview-quality", "promote-bundle", "publish-pr", "approve", "merge-publish-pr"}
@@ -18720,7 +18726,7 @@ def control_article_run(*, user, context, run, action, data, run_id=None):
             run.approval_state = ContentFactoryApprovalState.DENIED
             run.status = ContentFactoryRunStatus.DENIED
         elif action == "resume":
-            if run.workflow in ARTICLE_WORKFLOWS and not remote_data.get("already_queued"):
+            if run.workflow in ARTICLE_WORKFLOWS and not remote_data.get("already_queued") and goal_operation_id is None:
                 previous_actions = (run.result or {}).get("user_action_count")
                 run.result = {**(run.result or {}), "user_action_count":
                               (max(0, previous_actions) if type(previous_actions) is int else 0) + 1}
