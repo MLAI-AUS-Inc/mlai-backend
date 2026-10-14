@@ -107,4 +107,3 @@ class RealGoalChainTests(SimpleTestCase):
         with self.assertRaises(FrozenInstanceError):
             context.company = SimpleNamespace(pk=10)
         self.assertEqual(persistence.call_args.kwargs["connection__generation"], website.generation)
-
