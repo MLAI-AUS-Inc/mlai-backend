@@ -334,3 +334,28 @@ checks skipped. Real committed local static renderer fixture passed the native g
 with a test-only uid override. Chat4 plan units and16 browser cases passed. CF full
 suite and Chat justci are still running; record outcomes before claiming validation
 complete. Rollout flags are false. C4-C5/D/E/F/G work remains.
+
+C3 backend draft PR1020 and Chat draft PR471 are attached. Chat fulljustci and
+signed hooks passed (desktop5610/Tauri2179/mobile2731), head75f6a67cd8854c9a61b97b3f8a105cc13371cdc5.
+CF's first full run had8560 passes and12 failures: the new task lacked the standard
+connection-bound wrapper, now added;11 Node fixture failures came from Hermit's
+wrapper overriding fake npm. Underlying Node on test PATH fixes the hermetic test
+setup. All214 failed-case/native/task neighbors passed; a full rerun is active.
+
+C4 implementation on feat/deploy-detection identifies scoped config/header and
+Actions signals. Only a selected default-branch push without path filters proves
+an automatic workflow hint; provider config alone stays unknown. Reads use a fresh
+repository-read token, fixed source ref and bounded workflow inventory, then revoke
+it. Same-source cached hints avoid repeat calls. Public headers retain only provider
+signal labels. Original authority is checked after remote reads before saving.
+Manual workflows get one stable provider action immediately; unknown automation
+uses A10's propagation window and quiet observer. A real prepare chain resumed
+from the manual action when all live markers appeared, without another owner click.
+
+Required owner waits now open/close a replay-safe interval in the goal ledger and
+pause only the wall budget; compute, USD, provider waits and attempts still count.
+No schema migration.18 final focused tests and55 broader cases passed; all19 DB-free
+CI commands passed. Model drift,654-emitter audit,350 full assigned modules/0 new
+omissions, tracked credential scan and dependency input signature passed. The new
+YAML dependency is pinned6.0.3 and the shared hashed lock preserves existing pins.
+ARTICLES_DEPLOYMENT_DETECTION_ENABLED=false. No merge, deploy or live service action.

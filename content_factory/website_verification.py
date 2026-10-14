@@ -242,11 +242,14 @@ def verify_live_deployment(config, *, data):
         binding = {**data, **contract_for(website)}
     require_unlocked_remote_call()
     verify_repository_head(website, data["source_sha"])
+    from .website_deployment import ensure_fingerprint, observe_headers
+    ensure_fingerprint(website, binding)
     observations = []
     for kind in ("listing", "detail", "unknown_slug"):
         public_url = f"https://{website.organization.domain}{routes[kind]}"
         expected_status = 404 if kind == "unknown_slug" else 200
         body, headers = fetch_live_route(public_url, website.organization.domain, expected_status=expected_status)
+        if kind == "listing":observe_headers(website, binding, headers)
         marker = headers.get("x-mlai-artifact-digest") or ""
         if expected_status == 200 and marker != artifact_digest and not re.search(rb'<meta\s+name=["\x27]mlai-artifact-digest["\x27]\s+content=["\x27]' + artifact_digest.encode() + rb'["\x27]', body):
             raise WebsiteAuthorityError("live_route_unavailable", "The public listing or article detail has not deployed this reviewed integration artifact yet.")

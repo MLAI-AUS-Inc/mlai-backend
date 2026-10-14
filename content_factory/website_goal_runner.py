@@ -182,6 +182,14 @@ def finish_goal(op, *, now=None):
     goal = goals.mapping(op.receipt.get("goal"))
     if not goals.valid_goal(goal, goals.scope_for(op.connection, op.payload.get("company_id"))):
         return
+    from . import website_goal_budget as budget
+    if budget.enabled():
+        try:
+            goal = budget.update_owner_wait(goal, waiting=op.state == "needs_user" and bool(goals.mapping(op.receipt.get("user_action")).get("id")), now=now)
+            op.receipt["goal"] = goal
+        except ValueError:
+            stop_goal(op, goal, reason="invalid_budget_contract", now=now)
+            return
     if op.receipt.get("strategy_observation_invalid"):
         op.state, op.next_attempt_at = "needs_attention", None
         op.receipt.update(status="stopped", message="Strategy evidence does not match the saved website goal.",

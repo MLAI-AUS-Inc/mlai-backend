@@ -87,6 +87,35 @@ def record_policy_occurrence(goal, *, occurrence, fingerprint, classification):
     return result, effective, True
 
 
+def owner_wait_seconds(goal, *, now):
+    """Validate and measure required owner waits without forgiving compute/provider time."""
+    started = goals.stamp(goal.get("started_at"))
+    closed = goal.get("owner_wait_completed_seconds", 0)
+    opened = goals.stamp(goal.get("owner_wait_started_at"))
+    if (not started or not numeric(closed) or goal.get("owner_wait_started_at") is not None and not opened
+        or opened and not started <= opened <= now):
+        raise ValueError("Invalid owner wait ledger")
+    paused = closed + ((now - opened).total_seconds() if opened else 0)
+    if paused > max(0, (now - started).total_seconds()):
+        raise ValueError("Owner wait exceeds the goal lifetime")
+    return paused
+
+
+def update_owner_wait(goal, *, waiting, now):
+    """Open/close one durable owner interval; repeated state observations are inert."""
+    owner_wait_seconds(goal, now=now)
+    opened = goals.stamp(goal.get("owner_wait_started_at"))
+    if waiting == bool(opened):return goal
+    result = deepcopy(goal)
+    if waiting:
+        result["owner_wait_started_at"] = now.isoformat()
+    else:
+        result["owner_wait_completed_seconds"] = result.get("owner_wait_completed_seconds", 0) + (now - opened).total_seconds()
+        result.pop("owner_wait_started_at", None)
+    result["revision"] += 1
+    return result
+
+
 def exhaustion(goal, *, now, action=None):
     """Stop before new work at exact limits; unknown measurements stay unknown."""
     if goal.get("usage_invalid"):
@@ -101,7 +130,11 @@ def exhaustion(goal, *, now, action=None):
         "repairable": getattr(settings, "ARTICLES_GOAL_REPAIRABLE_ATTEMPTS", 6)}
     if not all(numeric(value) and value > 0 for value in limits.values()) or not started or started > now + timedelta(minutes=5):
         return "invalid_budget_contract"
-    if (now - started).total_seconds() >= limits["wall"]:
+    try:
+        paused = owner_wait_seconds(goal, now=now)
+    except ValueError:
+        return "invalid_budget_contract"
+    if (now - started).total_seconds() - paused >= limits["wall"]:
         return "wall_time"
     used = goals.mapping(goal.get("budget_used"))
     for key, limit, reason in (("active_seconds", limits["active"], "active_compute"), ("model_cost", limits["usd"], "model_cost")):

@@ -350,6 +350,12 @@ def prepare_failure(op, step, error, *, now=None):
         started = op.receipt.setdefault("deployment_wait_started_at", now.isoformat())
         from datetime import datetime
         deadline = datetime.fromisoformat(started) + timedelta(hours=24)
+        from .website_deployment import enabled as deploy_detection_enabled, valid as valid_deployment_hint, manual_action
+        from .website_goal import mapping
+        source = mapping(op.receipt.get("goal")).get("current_source_sha") or getattr(op.connection,"verified_sha",None)
+        deployment_hint = mapping(getattr(op.connection,"capabilities",None)).get("deploymentFingerprint")
+        if deploy_detection_enabled() and valid_deployment_hint(deployment_hint,op.connection,source) and deployment_hint["automation"] == "manual":
+            deadline = now
         op.receipt["failure_class"] = "waiting"
         op.state = "pending" if now < deadline else "needs_user"
         op.receipt["status"] = "waiting_for_deployment" if op.state == "pending" else "needs_you"
@@ -358,6 +364,9 @@ def prepare_failure(op, step, error, *, now=None):
             provider = (getattr(op.connection, "capabilities", {}) or {}).get("hosting_provider") or "your hosting provider"
             op.receipt.update(message=f"Deploy your site with {provider}, then check again.",
                 user_action={"id": "deploy_site", "label": "Deploy your site", "hosting_provider": provider})
+            if deploy_detection_enabled():
+                action = manual_action(op.connection,source)
+                op.receipt.update(user_action=action,message=action["instructions"] + " We’ll check the live site and continue when it is deployed.")
             # Keep a quiet observer after the owner prompt, so a manual deploy
             # resumes without requiring another button click.
             op.next_attempt_at = now + timedelta(hours=2)
