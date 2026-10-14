@@ -373,3 +373,12 @@ not an appropriate substitute. Email retries must respect Resend's24-hour window
 Customer.io send-email deduplication was not established from its reviewed docs.
 C5 notice IDs must gain a durable state-entry epoch in the outbox integration so
 working-to-needs-you transitions can notify again while repeated polls stay silent.
+
+C3 final checkpoint: CF draft PR986 is attached, head5bf09bf32897864fc571fdae1a48aa6955c3cbc7.
+Corrected fullsuite8572 tests/4 subtests passed,10 opt-in skips;1110 exact emissions
+passed, canonical bytes unchanged. Backend #1020 checks/migration-tests/postgres-search
+all passed remotely; deploy skipped. C4 #1021 remote checks are still pending at this
+checkpoint. Chat #471 attached; local full gate and hooks passed. C3 actual merged
+native proof is implemented across repos; rollout remains off. C5 implementation
+must continue from its passive notice projection through outbox/native DM/email,
+then D/E/F/G. No approval pause or production action is required for that code work.
