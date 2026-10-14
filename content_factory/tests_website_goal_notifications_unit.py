@@ -1,5 +1,6 @@
 """Fixed notice content and state identity; no transport or database access."""
 from datetime import timedelta
+from types import SimpleNamespace
 from django.test import SimpleTestCase,override_settings
 from django.utils import timezone
 from . import website_goal_notifications as notifications, website_goal as goals, tests_website_goal_unit as fixtures
@@ -53,3 +54,22 @@ class NoticeTests(SimpleTestCase):
         self.op.state="needs_user";self.op.receipt["user_action"]={"id":"review_setup"}
         for origin in ("https://evil.test","https://chat.mlai.au?token=secret","https://user:secret@chat.mlai.au","https://chat.mlai.au:invalid"):
             with override_settings(COMMUNITY_CHAT_FRONTEND_URL=origin):self.assertIsNone(notifications.notice_for(self.op,now=self.now))
+
+    def test_first_article_completion_links_only_to_receipt_sealed_live_url(self):
+        self.op.connection.organization=SimpleNamespace(domain="fixture.test")
+        scope=self.op.receipt["goal"]["scope"]
+        goal=goals.new_goal("goal",scope,target="first_article_live",now=self.now)
+        proofs=fixtures.proof_set(self.now)
+        receipt={"status":"passed","provider_verified":True,"source_sha":"a"*40,"public_url":"https://fixture.test/articles/first"}
+        proofs["first_draft"]=goals.make_proof("first_draft","article_draft",scope=scope,source_sha="a"*40,sha="a"*40,run_id="article",evidence={"run":"article"},at=self.now)
+        proofs["first_article_live"]=goals.make_proof("first_article_live","article_deployment_marker",scope=scope,source_sha="a"*40,sha="a"*40,run_id="article",evidence=receipt,at=self.now)
+        self.op.receipt["goal"]=goals.refresh_goal(goal,proofs,scope=scope,source_sha="a"*40,now=self.now)
+        self.op.receipt["goal"]["current_source_sha"]="a"*40;self.op.receipt["first_article_live_receipt"]=receipt;self.op.state="completed"
+        self.assertEqual(notifications.notice_for(self.op,now=self.now)["link"],receipt["public_url"])
+        self.op.receipt["first_article_live_receipt"]={**receipt,"public_url":"https://evil.test/article"}
+        self.assertIsNone(notifications.notice_for(self.op,now=self.now))
+        for changes in ({"public_url":"https://evil.test/article"},{"public_url":"https://fixture.test/article?token=secret"},{"public_url":"https://owner:secret@fixture.test/article"},{"public_url":"http://fixture.test/article"},{"provider_verified":False},{"source_sha":"b"*40}):
+            altered={**receipt,**changes}
+            self.op.receipt["first_article_live_receipt"]=altered
+            self.op.receipt["goal"]["milestones"][-1]["proof"]["evidence_digest"]=goals.digest(altered)
+            with self.subTest(changes=changes):self.assertIsNone(notifications.notice_for(self.op,now=self.now))

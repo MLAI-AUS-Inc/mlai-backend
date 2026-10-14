@@ -382,3 +382,26 @@ checkpoint. Chat #471 attached; local full gate and hooks passed. C3 actual merg
 native proof is implemented across repos; rollout remains off. C5 implementation
 must continue from its passive notice projection through outbox/native DM/email,
 then D/E/F/G. No approval pause or production action is required for that code work.
+
+C5 implementation now includes the operation-backed outbox, atomic goal state-entry
+reservation, current-owner/company/device/goal/lease fences and scheduler recovery
+for expired running notification rows. Native Chat uses saved signed Nostr message
+IDs with fresh NIP-98 auth; DM-open retry reuses the existing participant conversation.
+Per-channel checkpoints keep accepted Chat/email sends independent. Resend payloads
+and keys stay frozen; unknown email outcomes stop retrying at23h. No provider body
+or credential is exposed. A sealed first_article_live_receipt supplies D1's live URL.
+
+Final C5 backend validation:20 focused notice/delivery tests,35 routing/wake/observer
+cases,98 broader cases and all19 DB-free CI commands passed. Model drift,654 exact
+emissions,352 full module assignments/0 new omissions and tracked credential scan
+passed. Actual signing plus fake HTTP covers crash-after-acceptance and timeout
+replay; no real message was sent. Notification flag defaults false; no migrations.
+Chat canonical goal URL parsing and main-router navigation passed2 units and18
+browser cases, including a private DM and both left-click/context menu routes while
+another company was cached. Fulljustci passed (counts below when committed).
+
+C3 CF remote CI had one fixture error: enclosing GITHUB_REPOSITORY did not equal
+its synthetic repo. Test identity is now explicit;27 native/task cases passed with
+hostile enclosing Actions identity. Fix e0e9726e is pushed to CF PR986; remote rerun
+pending. Production source identity validation is unchanged. C4 PR1021 remote
+checks/migration-tests/postgres-search are green; deployment skipped.

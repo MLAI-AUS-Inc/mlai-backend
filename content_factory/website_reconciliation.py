@@ -361,9 +361,12 @@ def process_website_connection_operations(*, limit=20, now=None, connection_id=N
     from .vibe_marketing_views import _content_factory_remote_config, _content_factory_headers
     from .website_tokens import revoke_generation_tokens
     now = now or timezone.now()
+    from django.conf import settings
+    from .website_notification_outbox import ACTION as notice_action
+    notices_enabled=getattr(settings,"ARTICLES_GOAL_NOTIFICATIONS_ENABLED",False)
     due = WebsiteConnectionOperation.objects.filter(Q(next_attempt_at__isnull=True) | Q(next_attempt_at__lte=now),
-        Q(state="pending") | Q(action="prepare", state="running") |
-        Q(action="prepare", state="needs_user", receipt__user_action__id="deploy_site")).exclude(action="workflow")
+        Q(state="pending") | Q(action="prepare", state="running") | Q(action=notice_action,state="running") |
+        Q(action="prepare", state="needs_user", receipt__user_action__id="deploy_site")).exclude(action__in=["workflow"] if notices_enabled else ["workflow",notice_action])
     if connection_id:
         due = due.filter(connection_id=connection_id)
     ids = list(due.order_by("next_attempt_at").values_list("id", flat=True)[:limit])
@@ -373,6 +376,14 @@ def process_website_connection_operations(*, limit=20, now=None, connection_id=N
     monitor_cleanup_pull_requests(limit=limit, connection_id=connection_id)
     from .website_wakeups import enabled as event_wakes_enabled
     for identifier in ids:
+        if notices_enabled and WebsiteConnectionOperation.objects.filter(pk=identifier,action=notice_action).exists():
+            from .website_notification_outbox import advance_notice
+            outcome=advance_notice(identifier,now=now)
+            if outcome is not None:
+                result["processed"]+=1
+                result["pending" if outcome=="pending" else "completed"]+=1
+                if len(result["operations"])<20:result["operations"].append({"id":str(identifier),"action":notice_action,"outcome":outcome})
+            continue
         if event_wakes_enabled() and WebsiteConnectionOperation.objects.filter(pk=identifier, action="goal-wake").exists():
             from .website_wakeups import advance_wake
             outcome = advance_wake(identifier, now=now)

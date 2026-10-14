@@ -235,6 +235,18 @@ def _prepare_context(op):
 
 
 def _persist_prepare(op, *, now):
+    from .website_notification_outbox import enabled,track_transition,reserve_notice
+    from .website_goal_runner import owns_goal
+    if enabled(op.connection) and owns_goal(op):
+        with transaction.atomic():
+            notice=track_transition(op,now=now)
+            saved=_persist_prepare_state(op,now=now)
+            if saved is not None:reserve_notice(op,notice,now=now)
+            return saved
+    return _persist_prepare_state(op,now=now)
+
+
+def _persist_prepare_state(op, *, now):
     # Compare the lease and generation after remote work. A disconnect always wins.
     query = WebsiteConnectionOperation.objects.filter(pk=op.pk, action="prepare", state="running", attempts=op.attempts,
         updated_at=op._claimed_at, connection__generation=op.generation, connection__state="connected")

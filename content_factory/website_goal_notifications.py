@@ -1,4 +1,4 @@
-"""Pure C5 notice projection; delivery/outbox integration follows separately."""
+"""Fixed owner notices from accepted goal state and source-bound completion proof."""
 from urllib.parse import urlencode, urlsplit
 from django.conf import settings
 from . import website_goal as goals
@@ -34,7 +34,20 @@ def notice_for(op, *, now):
     except ValueError:return None
     if (parts.scheme != "https" or parts.hostname not in {"chat.mlai.au","www.chat.mlai.au"} or port not in {None,443}
         or parts.path not in {"","/"} or parts.username or parts.password or parts.query or parts.fragment):return None
-    link = origin + "/my-startup/create?" + urlencode({"company_id":scope["company_id"],"website_goal":goal["goal_id"]})
+    link = origin + "/my-startup/create?" + urlencode({"step":"articleSystem","company_id":scope["company_id"],"website_goal":goal["goal_id"]})
+    if state=="done" and goal["target"]=="first_article_live":
+        receipt=goals.mapping(op.receipt.get("first_article_live_receipt"))
+        proof=goal["milestones"][-1].get("proof")
+        try:
+            article=urlsplit(receipt.get("public_url",""))
+            apex=op.connection.organization.domain.lower().rstrip(".").removeprefix("www.")
+            if (receipt.get("status")!="passed" or receipt.get("provider_verified") is not True
+                or receipt.get("source_sha")!=source or goals.digest(receipt)!=proof["evidence_digest"]
+                or article.scheme!="https" or article.hostname not in {apex,"www."+apex} or article.port not in {None,443}
+                or article.username or article.password or article.query or article.fragment or not article.path or article.path=="/"):
+                return None
+            link=article.geturl()
+        except (ValueError,TypeError,AttributeError):return None
     authority = {name:value for name,value in scope.items() if name != "configuration_revision"}
     identity = {"goal_id":goal["goal_id"],"scope":authority,"state":state,**context}
     if state == "done":identity["source"] = source
