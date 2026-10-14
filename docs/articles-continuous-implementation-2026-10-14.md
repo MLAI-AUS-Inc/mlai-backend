@@ -440,3 +440,11 @@ PostgreSQL CI test lane with OneClickBillingFixture/TransactionTestCase, no new
 migration or local database run. Keep D1 in progress, flags off, then finish D2/D3,
 E/F/G. Chat branch codex/articles-d1-first-article-goal: 10 status tests and20 browser
 cases pass; full just ci running at /tmp/articles-d1-chat-just-ci.log.
+
+
+D1 real-record CI fixture added: canonical generation with the actual ledger,
+workflow reservation, dispatch outbox and lost-reference recovery; plus atomic
+successor re-hold/stale-lease settlement. Registered in the existing PostgreSQL
+lane; syntax checked only, no local DB/migration run. Draft PR will obtain CI
+feedback. Extend this fixture through canonical approve/merge/source/live checks
+before treating D1 as complete. C5 backend1023 and Chat472 are fully green.

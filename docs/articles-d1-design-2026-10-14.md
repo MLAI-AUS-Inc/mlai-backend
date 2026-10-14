@@ -139,3 +139,15 @@ Also validate the own-merge C3/B6 source transition and all D1 failure/restart c
 The Chat companion adds review_draft decoding and 9-milestone completion/browser
 coverage on codex/articles-d1-first-article-goal; its full just ci is running.
 ARTICLES_FIRST_ARTICLE_GOAL_ENABLED remains false; no production work occurred.
+
+
+The database-backed fixture now exists in tests_website_first_article_database.py
+and is selected in the existing PostgreSQL CI lane. It runs canonical generation
+and real wallet/operation/outbox persistence from a seeded Ready precondition,
+checks recovery after lost caller references, and exercises real old-credit/new-
+hold settlement against a stale prepare lease. Only the shared provider-read
+snapshot and provider I/O are faked. It was syntax checked, not run locally.
+A draft PR is a CI checkpoint for this fixture, not a claim that D1 is finished.
+Extend this actual fixture through canonical approval, merge, source
+reverification and HTTP live-body proof before D1 completion. All rollout flags
+remain false. Backend and Chat C5 PR checks are now fully green (deploy skipped).
