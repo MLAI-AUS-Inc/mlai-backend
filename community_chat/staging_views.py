@@ -18,6 +18,8 @@ from .federation import FederationUnavailable
 from .models import CommunityChatAccountSession, CommunityChatDevice, CommunityChatInviteAudit, DeviceBindingStatus
 from .serializers import public_chat_profile
 from .throttles import enforce_dimension_limit, client_ip
+from .staging_password import StagingAccountAuthentication, StagingBootstrapAuthentication, StagingPasswordRefreshView
+from .permission_views import ChatPermissionsView
 
 
 class StagingView(APIView):
@@ -57,7 +59,14 @@ class StagingCallbackView(StagingView):
 
 
 class StagingRefreshView(StagingView):
+    def initial(self,request,*args,**kwargs):
+        if getattr(settings,'COMMUNITY_CHAT_STAGING_PASSWORD_ENABLED',False):
+            APIView.initial(self,request,*args,**kwargs)
+        else:super().initial(request,*args,**kwargs)
+
     def post(self,request):
+        if getattr(settings,'COMMUNITY_CHAT_STAGING_PASSWORD_ENABLED',False):
+            return StagingPasswordRefreshView.post(self,request)
         origin=str(request.headers.get('Origin') or '').rstrip('/')
         if origin != settings.COMMUNITY_CHAT_FRONTEND_URL or request.data.get('refresh_token'):
             raise PermissionDenied('Staging browser refresh is required.')
@@ -82,23 +91,29 @@ class StagingRefreshView(StagingView):
 
 class StagingAccountView(views.AccountView):
     http_method_names=['get','head','options']
-    authentication_classes=[CommunityChatAccountAuthentication]
+    authentication_classes=[StagingAccountAuthentication]
+
+class StagingProfileBatchView(views.PublicProfileBatchView):
+    authentication_classes=[StagingAccountAuthentication]
+
+class StagingPermissionsView(ChatPermissionsView):
+    authentication_classes=[StagingAccountAuthentication]
 
 
 class StagingChallengeView(views.ChallengeView):
-    authentication_classes=[CommunityChatAccountAuthentication]
+    authentication_classes=[StagingBootstrapAuthentication,StagingAccountAuthentication]
 
 
 class StagingInviteView(views.InviteView):
-    authentication_classes=[CommunityChatAccountAuthentication]
+    authentication_classes=[StagingBootstrapAuthentication,StagingAccountAuthentication]
 
 
 class StagingSessionView(views.SessionView):
-    authentication_classes=[CommunityChatAccountAuthentication]
+    authentication_classes=[StagingBootstrapAuthentication,StagingAccountAuthentication]
 
 
 class StagingConfirmView(APIView):
-    authentication_classes=[CommunityChatAccountAuthentication]
+    authentication_classes=[StagingBootstrapAuthentication,StagingAccountAuthentication]
     permission_classes=[IsAuthenticated]
 
     def post(self,request):
@@ -122,13 +137,16 @@ class StagingConfirmView(APIView):
                 device.last_verified_membership_at=now
                 device.save(update_fields=['status','verified_at','last_verified_membership_at','updated_at'])
                 CommunityChatInviteAudit.objects.filter(device=device,confirmed_at__isnull=True).update(confirmed_at=now)
+                token=getattr(request,'community_chat_bootstrap_token',None)
+                if token:
+                    type(token).objects.filter(pk=token.pk,revoked_at__isnull=True).update(revoked_at=now)
         except adapter.MembershipAdapterUnavailable:
             raise FederationUnavailable() from None
         return Response({'status':'verified','device':views._device_payload(device),'public_profile':public_chat_profile(user)})
 
 
 class StagingDeviceView(APIView):
-    authentication_classes=[CommunityChatAccountAuthentication]
+    authentication_classes=[StagingBootstrapAuthentication,StagingAccountAuthentication]
     permission_classes=[IsAuthenticated]
 
     def delete(self,request,public_key):
@@ -151,6 +169,8 @@ class StagingDeviceView(APIView):
                 device.revoked_by=user
                 device.save(update_fields=['status','revoked_at','revoked_by','updated_at'])
                 CommunityChatAccountSession.objects.filter(user=user,public_key=key,revoked_at__isnull=True).update(revoked_at=now)
+                from .models import CommunityChatBootstrapToken
+                CommunityChatBootstrapToken.objects.filter(user=user,public_key=key,revoked_at__isnull=True).update(revoked_at=now)
         except adapter.MembershipAdapterUnavailable:
             raise FederationUnavailable() from None
         return Response({'status':'revoked','device':views._device_payload(device)})

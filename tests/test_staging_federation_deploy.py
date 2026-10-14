@@ -13,6 +13,31 @@ PROFILE=ROOT/'ops/staging-chat'
 
 
 class StagingFederationDeploymentTests(unittest.TestCase):
+    def test_pilot_upgrade_preserves_credentials_and_modes_are_exclusive(self):
+        with tempfile.TemporaryDirectory() as temp:
+            directory=Path(temp);chat=directory/'chat.env';target=directory/'api.env'
+            chat.write_text('CHAT_DOMAIN=chat-staging.mlai.au\nMLAI_MEMBERSHIP_ADAPTER_TOKEN='+'a'*64+'\n');chat.chmod(0o600)
+            command=[sys.executable,str(PROFILE/'config.py')]
+            subprocess.run(command+['init','--chat-env',str(chat),'--output',str(target),'--source-sha','b'*40],check=True,capture_output=True)
+            legacy=dict(line.split('=',1) for line in target.read_text().splitlines() if line and not line.startswith('#'))
+            del legacy['COMMUNITY_CHAT_STAGING_PASSWORD_ENABLED']
+            target.write_text(''.join(k+'='+v+'\n' for k,v in legacy.items()))
+            subprocess.run(command+['upgrade-keyring','--output',str(target)],check=True,capture_output=True)
+            current=dict(line.split('=',1) for line in target.read_text().splitlines() if line and not line.startswith('#'))
+            self.assertEqual({key:current[key] for key in legacy},legacy)
+            subprocess.run(command+['enable-password','--output',str(target)],check=True,capture_output=True)
+            self.assertIn('COMMUNITY_CHAT_STAGING_PASSWORD_ENABLED=true',target.read_text())
+            target.write_text(target.read_text().replace('COMMUNITY_CHAT_FEDERATION_STAGING_ENABLED=false','COMMUNITY_CHAT_FEDERATION_STAGING_ENABLED=true'))
+            self.assertNotEqual(subprocess.run(command+['validate','--output',str(target)],capture_output=True).returncode,0)
+
+    def test_pilot_settings_reject_wrong_environment_and_dual_sign_in_at_import(self):
+        env=dict(os.environ,PYTHON_DOTENV_DISABLED='1',DJANGO_SETTINGS_MODULE='mlai.settings_staging_chat',DEBUG='true',SECRET_KEY='synthetic-setting-check',DATABASE_URL='sqlite:///:memory:',REDIS_URL='redis://127.0.0.1:6379/0',COMMUNITY_CHAT_STAGING_PASSWORD_ENABLED='true')
+        command=[sys.executable,'-c','import mlai.settings_staging_chat']
+        for application,federation,expected in [('production','false',False),('chat-staging','true',False),('chat-staging','false',True)]:
+            env.update(APP_ENV=application,COMMUNITY_CHAT_FEDERATION_STAGING_ENABLED=federation)
+            result=subprocess.run(command,cwd=ROOT,env=env,capture_output=True,text=True)
+            self.assertEqual(result.returncode==0,expected,result.stderr)
+
     def test_initializer_preserves_credentials_and_rejects_production_input(self):
         with tempfile.TemporaryDirectory() as temp:
             directory=Path(temp)
@@ -30,6 +55,7 @@ class StagingFederationDeploymentTests(unittest.TestCase):
             values=dict(line.split('=',1) for line in before.decode().splitlines() if line and not line.startswith('#'))
             keys=json.loads(values['CONNECTOR_CREDENTIAL_KEYS'])
             self.assertEqual(len(base64.urlsafe_b64decode(keys[values['CONNECTOR_CREDENTIAL_ACTIVE_KEY_ID']])),32)
+            self.assertEqual(values['COMMUNITY_CHAT_STAGING_PASSWORD_ENABLED'],'false')
             self.assertNotEqual(subprocess.run(command,capture_output=True).returncode,0)
             self.assertEqual(target.read_bytes(),before)
             chat.write_text('CHAT_DOMAIN=chat.mlai.au\nMLAI_MEMBERSHIP_ADAPTER_TOKEN='+'a'*64+'\n')
@@ -57,6 +83,7 @@ class StagingFederationDeploymentTests(unittest.TestCase):
         self.assertTrue(services['postgres-api']['image'].startswith('pgvector/pgvector@sha256:'))
         self.assertEqual(api['CONNECTOR_CREDENTIAL_KEYS'],env['CONNECTOR_CREDENTIAL_KEYS'])
         self.assertEqual(api['CONNECTOR_CREDENTIAL_ACTIVE_KEY_ID'],'staging-v1')
+        self.assertEqual(api['COMMUNITY_CHAT_STAGING_PASSWORD_ENABLED'],'false')
 
     def test_keyring_upgrade_is_private_preserves_existing_values_and_refuses_partial_input(self):
         with tempfile.TemporaryDirectory() as temp:

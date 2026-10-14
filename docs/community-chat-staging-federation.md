@@ -6,7 +6,7 @@ The isolated API runtime now uses a pinned PostgreSQL18/pgvector image and an
 independent connector-encryption keyring. Existing private API configurations
 must run `python3 ops/staging-chat/config.py upgrade-keyring --output
 ops/staging-chat/.env` before validation; it adds only missing keyring fields,
-preserves all other credentials and refuses partial/invalid keyrings. No key
+preserves all other credentials, adds the default-off password-mode field and refuses partial/invalid keyrings. No key
 is printed. The private database and cache have no host ports.
 
 `ops/staging-chat/run.sh plan` inspects the full pending schema without applying
@@ -144,3 +144,33 @@ checks for this browser-only pilot. Additional all-platform/mobile testing is
 deferred; this does not represent a successful full `just ci` run. Live pilot
 verification and rollout approval remain separate.
 No remote CI, push or deployment was performed.
+
+## Independent password pilot
+
+This approved rollout uses a separate staging account database, never production
+accounts. `COMMUNITY_CHAT_STAGING_PASSWORD_ENABLED=false` is the default; enabling
+it requires the exact staging settings/environment and federation disabled. Web
+uses independent Secure/HttpOnly host-only cookies; iOS/Android use scoped bearer
+credentials with `Origin: mlaichat://callback`. Desktop is excluded. CORS/CSRF
+allow only the staging browser. Password authentication preserves normal key
+proof, installation binding and rate limits; confirm grants only member access.
+
+Provision with `provision_staging_pilot --manifest /private/accounts.json`
+(preview), then add `--apply`. The owner-only JSON list contains objects with
+`email`, `first_name`, `last_name`, and an absolute `password_file` referencing a
+separate owner-only operator-owned regular file. The command creates ordinary
+accounts, refuses existing accounts/reset/admin roles and creates no consent
+evidence or outgoing email. Distribute each private password directly to its
+intended tester, never through a repository or public chat.
+
+`remove_staging_identity --email pilot@staging.mlai.au` previews removal of a
+synthetic pilot; `--apply` disables its account and revokes account/bootstrap
+sessions before revoking pending invites and relay memberships. Incomplete
+adapter cleanup is reported and can be retried. Logout alone retains relay
+membership. Rollback preserves volumes/schema, disables the password flag and
+uses explicit pilot removal; do not reset existing accounts or reverse schema.
+
+Update existing private configuration with `config.py upgrade-keyring`. After
+source/schema/account readiness, `config.py enable-password --output <env>`
+atomically activates only the password mode; `disable-password` turns it off.
+Restart only the API afterward. Production identity federation stays disabled.

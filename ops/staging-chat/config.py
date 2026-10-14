@@ -29,7 +29,7 @@ def initialize(chat_env, output, source_sha):
     settings=dict(STAGING_API_SOURCE_SHA=source_sha,STAGING_API_SECRET_KEY=secrets.token_hex(48),
         STAGING_API_DATABASE_PASSWORD=secrets.token_hex(32),STAGING_API_REDIS_PASSWORD=secrets.token_hex(32),
         COMMUNITY_CHAT_FEDERATION_CLIENT_SECRET=secrets.token_hex(48),COMMUNITY_CHAT_ADAPTER_TOKEN=token,
-        COMMUNITY_CHAT_FEDERATION_STAGING_ENABLED='false',STAGING_API_IMAGE_ID='',**new_keyring())
+        COMMUNITY_CHAT_FEDERATION_STAGING_ENABLED='false',COMMUNITY_CHAT_STAGING_PASSWORD_ENABLED='false',STAGING_API_IMAGE_ID='',**new_keyring())
     output.parent.mkdir(parents=True,exist_ok=True)
     with os.fdopen(os.open(output,os.O_CREAT|os.O_EXCL|os.O_WRONLY,0o600),'w') as file:
         file.write('# Private staging API configuration. Never commit or print.\n')
@@ -38,9 +38,10 @@ def initialize(chat_env, output, source_sha):
 
 FIELDS={'STAGING_API_SOURCE_SHA','STAGING_API_SECRET_KEY','STAGING_API_DATABASE_PASSWORD',
     'STAGING_API_REDIS_PASSWORD','COMMUNITY_CHAT_FEDERATION_CLIENT_SECRET','COMMUNITY_CHAT_ADAPTER_TOKEN',
-    'COMMUNITY_CHAT_FEDERATION_STAGING_ENABLED','STAGING_API_IMAGE_ID',
+    'COMMUNITY_CHAT_FEDERATION_STAGING_ENABLED','COMMUNITY_CHAT_STAGING_PASSWORD_ENABLED','STAGING_API_IMAGE_ID',
     'CONNECTOR_CREDENTIAL_KEYS','CONNECTOR_CREDENTIAL_ACTIVE_KEY_ID'}
 KEYRING_FIELDS={'CONNECTOR_CREDENTIAL_KEYS','CONNECTOR_CREDENTIAL_ACTIVE_KEY_ID'}
+MODE_FIELDS={'COMMUNITY_CHAT_FEDERATION_STAGING_ENABLED','COMMUNITY_CHAT_STAGING_PASSWORD_ENABLED'}
 
 
 def new_keyring():
@@ -75,8 +76,10 @@ def write_private(path,values):
 
 def upgrade_keyring(path):
     values=read_config(path,allow_legacy_keyring=True)
-    if KEYRING_FIELDS <= values.keys():return
-    values.update(new_keyring());validate_keyring(values);write_private(path,values)
+    if KEYRING_FIELDS <= values.keys() and 'COMMUNITY_CHAT_STAGING_PASSWORD_ENABLED' in values:return
+    if not KEYRING_FIELDS <= values.keys():values.update(new_keyring())
+    values.setdefault('COMMUNITY_CHAT_STAGING_PASSWORD_ENABLED','false')
+    validate_keyring(values);write_private(path,values)
 
 
 def read_config(path,allow_legacy_keyring=False):
@@ -87,13 +90,15 @@ def read_config(path,allow_legacy_keyring=False):
         key,separator,value=line.partition('=')
         if not separator or key in values:raise ValueError('Invalid configuration.')
         values[key]=value
-    if set(values)!=FIELDS and not (allow_legacy_keyring and set(values)==FIELDS-KEYRING_FIELDS):raise ValueError('Unexpected configuration fields.')
+    legacy={frozenset(FIELDS-KEYRING_FIELDS),frozenset(FIELDS-{'COMMUNITY_CHAT_STAGING_PASSWORD_ENABLED'}),frozenset(FIELDS-KEYRING_FIELDS-{'COMMUNITY_CHAT_STAGING_PASSWORD_ENABLED'})}
+    if set(values)!=FIELDS and not (allow_legacy_keyring and frozenset(values) in legacy):raise ValueError('Unexpected configuration fields.')
     if not re.fullmatch('[0-9a-f]{40}',values['STAGING_API_SOURCE_SHA']):raise ValueError('Invalid source.')
-    for name in FIELDS-KEYRING_FIELDS-{'STAGING_API_SOURCE_SHA','STAGING_API_IMAGE_ID','COMMUNITY_CHAT_FEDERATION_STAGING_ENABLED'}:
+    for name in FIELDS-KEYRING_FIELDS-MODE_FIELDS-{'STAGING_API_SOURCE_SHA','STAGING_API_IMAGE_ID'}:
         length=96 if name in {'STAGING_API_SECRET_KEY','COMMUNITY_CHAT_FEDERATION_CLIENT_SECRET'} else 64
         if not re.fullmatch('[0-9a-f]{'+str(length)+'}',values[name]):raise ValueError('Invalid isolated credential.')
-    if len({values[name] for name in FIELDS-KEYRING_FIELDS if name not in {'STAGING_API_SOURCE_SHA','STAGING_API_IMAGE_ID','COMMUNITY_CHAT_FEDERATION_STAGING_ENABLED'}})!=5:raise ValueError('Credentials must be independent.')
-    if values['COMMUNITY_CHAT_FEDERATION_STAGING_ENABLED'] not in {'true','false'}:raise ValueError('Invalid federation flag.')
+    if len({values[name] for name in FIELDS-KEYRING_FIELDS-MODE_FIELDS if name not in {'STAGING_API_SOURCE_SHA','STAGING_API_IMAGE_ID'}})!=5:raise ValueError('Credentials must be independent.')
+    if any(values.get(name,'false') not in {'true','false'} for name in MODE_FIELDS):raise ValueError('Invalid sign-in flag.')
+    if all(values.get(name)=='true' for name in MODE_FIELDS):raise ValueError('Sign-in modes must be exclusive.')
     if values['STAGING_API_IMAGE_ID'] and not re.fullmatch('sha256:[0-9a-f]{64}',values['STAGING_API_IMAGE_ID']):raise ValueError('Invalid image identity.')
     if KEYRING_FIELDS <= values.keys():validate_keyring(values)
     return values
@@ -119,7 +124,7 @@ def record_build(path,metadata,source_sha):
 
 if __name__=='__main__':
     parser=argparse.ArgumentParser()
-    parser.add_argument('action',choices=['init','validate','record-build','check-image','upgrade-keyring'])
+    parser.add_argument('action',choices=['init','validate','record-build','check-image','upgrade-keyring','enable-password','disable-password'])
     parser.add_argument('--chat-env',type=Path)
     parser.add_argument('--output',type=Path,required=True)
     parser.add_argument('--source-sha')
@@ -131,6 +136,11 @@ if __name__=='__main__':
             initialize(args.chat_env,args.output,args.source_sha)
         elif args.action=='validate':read_config(args.output)
         elif args.action=='upgrade-keyring':upgrade_keyring(args.output)
+        elif args.action in {'enable-password','disable-password'}:
+            values=read_config(args.output)
+            if values['COMMUNITY_CHAT_FEDERATION_STAGING_ENABLED']!='false':raise ValueError('Federation must remain disabled.')
+            values['COMMUNITY_CHAT_STAGING_PASSWORD_ENABLED']='true' if args.action=='enable-password' else 'false'
+            write_private(args.output,values)
         elif args.action=='record-build':
             if not args.metadata or not args.source_sha:raise ValueError('Missing build context.')
             record_build(args.output,json.loads(args.metadata.read_text()),args.source_sha)
