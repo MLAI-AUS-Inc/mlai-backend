@@ -1119,6 +1119,30 @@
       "site_sha256": "87d0fa7a25d90e44af12275e15c03636a1c3e4486c6b9aaad6ac71c5d795f3e5",
       "source": "saved or authenticated v0 result/capability observation; strict B1 metadata goes through validate_failure/resolve_failure before policy",
       "test": "content_factory.tests_failure_contract_unit.ScannerTests.test_dynamic_audits_are_exact_and_bounded"
+    },
+    {
+      "adapter": "audited_v0_observation",
+      "allowed_codes_ref": "contracts/failure-codes.json#/codes",
+      "expression": "record.get('error_code') or ''",
+      "field": "code",
+      "function": "_process_setup_pr_merge",
+      "owner": "backend.website_reconciliation",
+      "path": "content_factory/website_reconciliation.py",
+      "site_sha256": "80c0e4c7e87f4a633b946888275a55317d5c95dc8793e16f645c81dadc75107b",
+      "source": "saved legacy setup PR re-verification diagnostic copied to the follow-up operation receipt; independent review executions remain outside initial B1/B5 enrollment",
+      "test": "content_factory.tests_setup_pr_changes_unit.SetupPrMergeFollowupTests.test_a_failed_check_tells_the_owner_why"
+    },
+    {
+      "adapter": "audited_v0_observation",
+      "allowed_codes_ref": "contracts/failure-codes.json#/codes",
+      "expression": "exc.code",
+      "field": "code",
+      "function": "_process_setup_pr_merge",
+      "owner": "backend.website_reconciliation",
+      "path": "content_factory/website_reconciliation.py",
+      "site_sha256": "7c654b9fed393d591b927015a1e965e0c2c8ee1e3efe3038d767569bcef53a7a",
+      "source": "registered WebsiteAuthorityError code copied to a cancelled legacy setup-pr-merge operation receipt; does not reclassify or replace the run failure",
+      "test": "content_factory.tests_setup_pr_changes_unit.SetupPrMergeFollowupTests.test_revoked_authority_keeps_its_registered_code_without_changing_the_run"
     }
   ],
   "entry_points": [
@@ -1909,6 +1933,19 @@
       "site_sha256": "728b41f338ca8708327a1023f95de14aa6d7143610f413c43bf3c0d0e959d453",
       "source": "audited terminal refund cause observation; B1 never changes billing authorization",
       "test": "content_factory.tests_failure_contract_unit.ScannerTests.test_dynamic_audits_are_exact_and_bounded"
+    },
+    {
+      "adapter": "nonfailure_category",
+      "allowed_codes_ref": "contracts/failure-codes.json#/codes",
+      "category": "legacy owner-requested setup PR re-verification submission diagnostic; not an Articles execution failure",
+      "expression": "'setup_reverification_unavailable'",
+      "field": "code",
+      "function": "_setup_pr_changes_outcome",
+      "owner": "backend.vibe_marketing_views",
+      "path": "content_factory/vibe_marketing_views.py",
+      "site_sha256": "ece0cddfe04cd360dc90d9dd1f961819bc2118e429604c25996aa5c3868d98d0",
+      "source": "retryable HTTP submission response outside the initial enrolled setup/scan executions; leaves the saved run and its causal failure unchanged",
+      "test": "content_factory.tests_setup_pr_changes_unit.ChangedSetupHeadTests.test_an_unreachable_content_factory_is_a_retryable_error"
     }
   ],
   "owner": "backend.content_factory",

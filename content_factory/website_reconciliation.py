@@ -351,6 +351,81 @@ def _process_worker_followup(identifier, now):
     return state
 
 
+SETUP_PR_MERGE_TIMEOUT = timedelta(minutes=60)
+
+
+def _process_setup_pr_merge(identifier, now):
+    """Merge an owner-published setup PR once Content Factory verified its changed head."""
+    import logging
+    from django.contrib.auth import get_user_model
+    from django.utils.dateparse import parse_datetime
+    from workflow_runs.models import ContentFactoryRun
+    from .website_contract import WebsiteAuthorityError
+    from .vibe_marketing_views import (_attempt_setup_publish_merge, _call_content_factory_run_status, _get_config,
+        _mark_setup_merge_blocked, _setup_pr_reverification_record, _sync_local_run_from_remote,
+        get_founder_company_context)
+    with transaction.atomic():
+        operation = WebsiteConnectionOperation.objects.select_for_update().filter(pk=identifier, state="pending").first()
+        if operation is None or (operation.next_attempt_at and operation.next_attempt_at > now):
+            return None
+        operation.attempts += 1
+        attempt = operation.attempts
+        operation.next_attempt_at = now + timedelta(seconds=30)
+        operation.save(update_fields=["attempts", "next_attempt_at", "updated_at"])
+        payload = dict(operation.payload)
+    state, receipt = "pending", {"status": "checking", "repository_modified": False}
+    try:
+        run = ContentFactoryRun.objects.filter(run_id=payload.get("run_id")).first()
+        if run is None:
+            state, receipt = "cancelled", {"status": "run_missing", "repository_modified": False}
+        else:
+            user = get_user_model().objects.get(pk=payload["requested_by_user_id"], is_active=True)
+            context = get_founder_company_context(user, company_id=payload["company_id"])
+            config = _get_config(context.organization)
+            remote = _call_content_factory_run_status(run.run_id, workflow=run.workflow)
+            if isinstance(remote, dict) and remote.get("run_id") == run.run_id:
+                run = _sync_local_run_from_remote(run, remote)
+            record = _setup_pr_reverification_record(run)
+            requested_at = parse_datetime(str(payload.get("requested_at") or "")) or now
+            if (run.result or {}).get("merge_status") == "merged":
+                state, receipt = "completed", {"status": "merged", "repository_modified": False}
+            elif record.get("head_sha") != payload.get("head_sha"):
+                state, receipt = "cancelled", {"status": "superseded", "repository_modified": False}
+            elif record.get("status") == "passed":
+                outcome = _attempt_setup_publish_merge(run=run, context=context, automatic=False)
+                kind = outcome.get("outcome")
+                detail = str(outcome.get("detail") or "")[:300]
+                if kind == "waiting" or (kind == "error" and outcome.get("retryable")
+                                         and now - requested_at < SETUP_PR_MERGE_TIMEOUT):
+                    receipt = {"status": "merge_waiting", "detail": detail, "repository_modified": False}
+                else:
+                    if kind == "error":
+                        _mark_setup_merge_blocked(run=outcome.get("run") or run, config=config,
+                            reason=detail or "The setup pull request could not be merged. Publish again to retry.")
+                    state, receipt = "completed", {"status": kind, "detail": detail,
+                        "repository_modified": kind in {"merged", "auto_merge_pending"}}
+            elif record.get("status") == "failed":
+                reason = str(record.get("error") or "Your changes to the setup pull request did not pass verification.")
+                _mark_setup_merge_blocked(run=run, config=config, status_value="setup_changes_failed",
+                    reason=f"{reason} Fix it on GitHub, then publish again.")
+                state, receipt = "completed", {"status": "verification_failed", "code": record.get("error_code") or "",
+                    "repository_modified": False}
+            elif now - requested_at >= SETUP_PR_MERGE_TIMEOUT:
+                _mark_setup_merge_blocked(run=run, config=config, status_value="setup_changes_failed",
+                    reason="Checking your changes to the setup pull request took too long. Publish again to retry.")
+                state, receipt = "completed", {"status": "timed_out", "repository_modified": False}
+    except WebsiteAuthorityError as exc:
+        state, receipt = "cancelled", {"status": "authority_revoked", "code": exc.code, "repository_modified": False}
+    except Exception:
+        logging.getLogger(__name__).warning("setup_pr_merge_followup_failed operation=%s", identifier, exc_info=True)
+        receipt["last_error"] = "setup_pr_merge_unavailable"
+    # Compare-and-set the claim: a duplicate reconciler cannot replace a newer receipt.
+    WebsiteConnectionOperation.objects.filter(pk=identifier, attempts=attempt, state="pending").update(
+        state=state, receipt=receipt, updated_at=timezone.now(),
+        next_attempt_at=now + timedelta(seconds=30) if state == "pending" else None)
+    return state
+
+
 def process_website_connection_operations(*, limit=20, now=None, connection_id=None):
     """Retry cancellation/token revocation, and build bounded cleanup proposals."""
     from integrations import http_client
@@ -383,6 +458,14 @@ def process_website_connection_operations(*, limit=20, now=None, connection_id=N
                 result["processed"] += 1
                 if len(result["operations"]) < 20:
                     result["operations"].append({"id": str(identifier), "action": "source-reverify", "outcome": outcome})
+                result["pending" if outcome == "pending" else "completed"] += 1
+            continue
+        if WebsiteConnectionOperation.objects.filter(pk=identifier, action="setup-pr-merge").exists():
+            outcome = _process_setup_pr_merge(identifier, now)
+            if outcome is not None:
+                result["processed"] += 1
+                if len(result["operations"]) < 20:
+                    result["operations"].append({"id": str(identifier), "action": "setup-pr-merge", "outcome": outcome})
                 result["pending" if outcome == "pending" else "completed"] += 1
             continue
         if WebsiteConnectionOperation.objects.filter(pk=identifier, action="worker_followup").exists():

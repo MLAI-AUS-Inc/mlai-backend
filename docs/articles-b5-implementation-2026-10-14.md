@@ -1,5 +1,30 @@
 # Articles B5 implementation evidence — 14 October 2026
 
+## Integration with updated main — 14 October 2026
+
+Main advanced to `0abc97e2` through setup PR re-verification fix #1015 after
+the earlier #1013 CI pass. Merging that commit conflicted only in the website
+journey CI selection. The resolution retains both `tests_setup_delivery_unit`
+and `tests_setup_pr_changes_unit`.
+
+The failure-emitter audit now records three exact sites introduced by #1015:
+the legacy re-verification submission diagnostic, saved follow-up verification
+code, and registered authority error copied into its operation receipt. The
+independent review execution remains outside initial B1/B5 enrollment. Tests
+confirm a submission outage does not replace the saved causal failure and
+revoked authority cancels the follow-up without modifying the run or merging.
+The immutable canonical registry/schema bytes and default-off flags are unchanged.
+
+Local validation passes the four affected CI selections: 28 failure-contract,
+417 journey/lifecycle, 168 editorial, and 14 setup-example cases. The editorial
+lane uses its canonical minimal-settings unittest initialization; loading full
+application settings instead changes its anonymous response from 403 to 401
+and is not the workflow's invocation. Database connections, sockets and dotenv
+loading were blocked throughout validation. All 620 production emission sites
+pass the offline audit, test assignment has zero new omissions, and system/model
+dry-run checks report no issues or migration changes. Remote pinned provenance
+and final-head CI remain to be rechecked by GitHub after the branch push.
+
 This implements the approved initial B5 delivery slice alongside B1. It is not
 the entire one-shot runbook or a release. The approved design is
 [backend design PR #1012](https://github.com/MLAI-AUS-Inc/mlai-backend/pull/1012);

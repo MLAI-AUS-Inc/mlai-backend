@@ -1108,6 +1108,28 @@ def dispatch_contract(domain, payload, *, action="read", source_run_id=""):
 
 
 
+# An approved setup's PR stays mergeable after a refused attempt marked it blocked.
+SETUP_PR_OPEN_STATUSES = frozenset({"setup_pr_created", "pr_created", "checks_failed", "manual_merge_required",
+    "setup_changes_failed"})
+
+
+def _hosted_build_proven(gates, preview, head_sha):
+    """The hosted platform build rendered this exact commit.
+
+    Static sites are verified on the hosted platform deployment and skip the
+    local build by design (``local_build_status: skipped``). Their exact render
+    of the PR head is the build proof; an environment- or baseline-blocked local
+    build is not.
+    """
+    proof = preview.get("proof") if isinstance(preview.get("proof"), dict) else {}
+    return bool(gates.get("local_build_skipped") is True and gates.get("local_build_status") == "skipped"
+        and gates.get("local_build_environment_blocked") is not True
+        and gates.get("local_build_baseline_blocked") is not True
+        and (preview.get("previewMode") or preview.get("preview_mode")) == "platform_deployment"
+        and preview.get("exactRender") is True and preview.get("commitSha") == head_sha
+        and proof.get("commitSha") == head_sha)
+
+
 def _verified_setup_run_base(run, head_sha, website, *, automatic_approval=False):
     """Read the worker's exact approved setup proof before a target exists."""
     from .website_contract import SHA_PATTERN
@@ -1121,8 +1143,8 @@ def _verified_setup_run_base(run, head_sha, website, *, automatic_approval=False
         return ""
     base_sha = str(saved.get("expected_source_sha") or "")
     generation = result.get("resume_generation")
-    approved_setup = (run.approval_state == "approved" and result.get("status") == "setup_pr_created"
-        and setup.get("status") == "pr_created")
+    approved_setup = (run.approval_state == "approved" and result.get("status") in SETUP_PR_OPEN_STATUSES
+        and setup.get("status") in SETUP_PR_OPEN_STATUSES)
     pending_setup = (automatic_approval and run.status == "awaiting_approval" and run.approval_state == "approval_required"
         and result.get("status") == "preview_ready" and setup.get("status") == "preview_ready")
     adopted_kit = (run.approval_state == "not_required" and result.get("status") == "adopted"
@@ -1151,11 +1173,25 @@ def _verified_setup_run_base(run, head_sha, website, *, automatic_approval=False
             "dependency_validation", "static_policy", "local_build", "dom_slot_compliance",
             "publish_surface", "browser", "visual_style",
         ))
-        or gates.get("local_build_skipped") is not False
+        # A person approved (or adopted) this setup, so the hosted build may
+        # prove it; automatic approval still requires a local build.
+        or not (gates.get("local_build_skipped") is False
+                or ((approved_setup or adopted_kit) and _hosted_build_proven(gates, preview, head_sha)))
         or result.get("manual_quality_gate_override") or setup.get("manual_quality_gate_override")
     ):
         return ""
     return base_sha
+
+
+def verified_setup_head(run):
+    """The exact setup commit this run's own proof verified, or "" without a valid proof."""
+    try:
+        binding = connection_contract(scoped_run_contract(run))
+        website = WebsiteConnection.objects.get(pk=binding["website_connection_id"]) if binding else None
+    except (WebsiteAuthorityError, WebsiteConnection.DoesNotExist):
+        return ""
+    head_sha = str((run.result or {}).get("branch_commit_sha") or "") if isinstance(run.result, dict) else ""
+    return head_sha if website and head_sha and _verified_setup_run_base(run, head_sha, website) else ""
 
 
 def validate_setup_merge_source(run, head_sha):

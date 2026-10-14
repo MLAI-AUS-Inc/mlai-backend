@@ -6124,6 +6124,107 @@ def _apply_setup_auto_merge_pending(*, run, config, reason=""):
 
 
 SETUP_MERGE_TERMINAL_CHECK_STATES = {"failed", "failure", "error", "closed"}
+SETUP_PR_REVERIFY_ACTIVE = {"queued", "building", "verifying"}
+SETUP_PR_CHECKING_DETAIL = "Checking your changes to the setup pull request before publishing."
+
+
+def _setup_pr_reverification_record(run):
+    result = run.result if isinstance(run.result, dict) else {}
+    record = result.get("setup_pr_reverification")
+    return record if isinstance(record, dict) else {}
+
+
+def _mark_setup_pr_changes_checking(*, run, config):
+    """Show the publish as in flight while Content Factory re-verifies the new head."""
+    result = dict(run.result or {})
+    setup = dict(result.get("article_system_setup") or {})
+    for payload in (result, setup):
+        payload.update(merge_status="publishing", mergeStatus="publishing",
+            merge_blocked_reason="", mergeBlockedReason="")
+    result["article_system_setup"] = setup
+    run.result = sanitize_json_for_postgres(result)
+    run.save(update_fields=["result", "updated_at"])
+    if config is not None:
+        article_system = dict(config.article_system or {})
+        pending = dict(article_system.get("pending_article_system_setup") or {})
+        if pending.get("setup_run_id") in (None, run.run_id):
+            pending.update(merge_status="publishing", mergeStatus="publishing",
+                merge_blocked_reason="", mergeBlockedReason="", updated_at=timezone.now().isoformat())
+            pending["updatedAt"] = pending["updated_at"]
+            article_system["pending_article_system_setup"] = pending
+            config.article_system = sanitize_json_for_postgres(article_system)
+            config.save(update_fields=["article_system", "updated_at"])
+
+
+def _request_setup_pr_reverification(*, run, head_sha, context):
+    remote = _content_factory_remote_config()
+    if not remote["enabled"]:
+        raise ValueError("Content Factory is not configured.")
+    user_id = getattr(getattr(context, "profile", None), "user_id", "") or ""
+    response = http_client.post(f"{remote['base_url']}/api/runs/{run.run_id}/setup-pr/reverify",
+        headers=_content_factory_headers(), json={"head_sha": head_sha, "requested_by": str(user_id)}, timeout=(3, 15))
+    if response.status_code not in {200, 202}:
+        raise ValueError(f"Content Factory refused the setup pull request check ({response.status_code}).")
+    body = response.json()
+    return body if isinstance(body, dict) else {}
+
+
+def _schedule_setup_pr_merge(*, run, context, config, head_sha, verified_sha, pr_number):
+    """Merge for the owner once the changed head passes; reopened by a later Publish."""
+    from .website_models import WebsiteConnectionOperation
+    connection = config.website_connection
+    payload = {"run_id": run.run_id, "head_sha": head_sha, "verified_sha": verified_sha, "pr_number": pr_number,
+        "company_id": context.company.pk, "requested_by_user_id": context.profile.user_id,
+        "requested_at": timezone.now().isoformat()}
+    op, created = WebsiteConnectionOperation.objects.get_or_create(
+        idempotency_key=f"setup-pr-merge:{run.run_id}:{head_sha}",
+        defaults={"connection": connection, "generation": connection.generation, "action": "setup-pr-merge",
+            "state": "pending", "payload": payload, "next_attempt_at": timezone.now() + timedelta(seconds=30)})
+    if not created and op.state != "pending":
+        WebsiteConnectionOperation.objects.filter(pk=op.pk).update(state="pending", attempts=0, receipt={},
+            payload=payload, next_attempt_at=timezone.now() + timedelta(seconds=30), updated_at=timezone.now())
+    return op
+
+
+def _setup_pr_changes_outcome(*, run, context, config, pull, pr_number, checks, automatic):
+    """Re-verify an approved setup PR whose head changed after its preview passed.
+
+    Returns None when the PR head is the verified commit, or when the run has no
+    valid proof to compare against; the exact-head guard then decides as before.
+    Only the owner's Publish starts a check: a background merge never accepts
+    changes pushed after review.
+    """
+    from .website_connections import verified_setup_head
+    if config is None or getattr(config, "website_connection", None) is None:
+        return None
+    head_sha = str((pull.get("head") or {}).get("sha") or "")
+    if not head_sha or head_sha == str((run.result or {}).get("branch_commit_sha") or ""):
+        return None
+    verified_sha = verified_setup_head(run)
+    if not verified_sha or not head_sha or head_sha == verified_sha:
+        return None
+    record = _setup_pr_reverification_record(run)
+    if record.get("head_sha") == head_sha and record.get("status") in SETUP_PR_REVERIFY_ACTIVE:
+        return {"outcome": "waiting", "detail": SETUP_PR_CHECKING_DETAIL, "checks": checks, "run": run}
+    if automatic:
+        # The exact-head guard refuses it as before; only an owner's Publish checks the changes.
+        return None
+    try:
+        remote = _request_setup_pr_reverification(run=run, head_sha=head_sha, context=context)
+    except (ValueError, http_client.RequestException) as exc:
+        logger.warning("vibe_marketing_setup_pr_reverify_unavailable run_id=%s error=%s", run.run_id, exc)
+        return {"outcome": "error", "code": "setup_reverification_unavailable", "retryable": True, "checks": checks,
+            "run": run, "detail": "Couldn't start checking your changes to the setup pull request. Try again in a moment."}
+    if remote.get("status") == "verified":
+        # Content Factory already holds the proof for this head; refresh the local copy.
+        _sync_local_run_from_remote(run, _call_content_factory_run_status(run.run_id, workflow=run.workflow))
+        return None
+    _schedule_setup_pr_merge(run=run, context=context, config=config, head_sha=head_sha,
+        verified_sha=verified_sha, pr_number=pr_number)
+    _mark_setup_pr_changes_checking(run=run, config=config)
+    logger.info("vibe_marketing_setup_pr_reverify_requested run_id=%s head_sha=%s verified_sha=%s",
+        run.run_id, head_sha, verified_sha)
+    return {"outcome": "waiting", "detail": SETUP_PR_CHECKING_DETAIL, "checks": checks, "run": run}
 
 
 def _attempt_setup_publish_merge(*, run, context, automatic=False):
@@ -6175,7 +6276,19 @@ def _attempt_setup_publish_merge_authorized(*, run, context, automatic=False):
         }
 
     from .website_connections import validate_setup_merge_source
-    validate_setup_merge_source(run, (pull.get("head") or {}).get("sha"))
+    try:
+        validate_setup_merge_source(run, (pull.get("head") or {}).get("sha"))
+    except WebsiteAuthorityError as exc:
+        if exc.code != "setup_verification_required":
+            raise
+        # The exact-head guard refused. If an approved setup's PR merely changed
+        # after its preview passed, check the new head instead of dead-ending.
+        changes = _setup_pr_changes_outcome(run=run, context=context, config=config, pull=pull,
+            pr_number=pr_number, checks=checks, automatic=automatic)
+        if changes is not None:
+            return changes
+        # Refused as before, unless a refreshed proof now covers this head.
+        validate_setup_merge_source(run, (pull.get("head") or {}).get("sha"))
 
     # Genuinely failed checks (visible) → don't merge; surface it.
     if str(checks.get("state") or "").lower() in SETUP_MERGE_TERMINAL_CHECK_STATES:
