@@ -359,3 +359,17 @@ CI commands passed. Model drift,654-emitter audit,350 full assigned modules/0 ne
 omissions, tracked credential scan and dependency input signature passed. The new
 YAML dependency is pinned6.0.3 and the shared hashed lock preserves existing pins.
 ARTICLES_DEPLOYMENT_DETECTION_ENABLED=false. No merge, deploy or live service action.
+
+C4 backend draft PR1021 is attached, head1f970eac601ed9b10575fdd8eb6f4051ee9d8de1.
+Final23 deployment/doctor/observability cases passed after applying owner intervals
+also to health deadlines. C5 branch codex/articles-c5-goal-notifications is active.
+Its design and passive notice projection are saved;4 no-service tests pass for
+state silence, replay/action identity, source-only rebind, fixed content, scope,
+proof-backed completion and hostile frontend configuration. Delivery/outbox hooks,
+Nostr DM transport, per-channel replay and email transport remain UNIMPLEMENTED.
+Do not claim C5 complete or enable a notification flag. Native transport must use
+existing Nostr events; bridge private-delivery requires real Slack identity and is
+not an appropriate substitute. Email retries must respect Resend's24-hour window;
+Customer.io send-email deduplication was not established from its reviewed docs.
+C5 notice IDs must gain a durable state-entry epoch in the outbox integration so
+working-to-needs-you transitions can notify again while repeated polls stay silent.
