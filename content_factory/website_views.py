@@ -230,9 +230,31 @@ class WebsiteConnectionOperationView(APIView):
         from .website_models import WebsiteConnectionOperation
         from .website_operations import operation_summary
         operation = WebsiteConnectionOperation.objects.filter(pk=operation_id, connection__organization=context.organization).first()
-        if operation is None:
+        if operation is None or operation.action in {"goal-usage", "goal-alert"}:
             return Response({"detail": "Operation not found."}, status=404)
         return Response({"operation": operation_summary(operation)})
+
+
+class WebsiteCostUsageView(APIView):
+    """Read recorded accounting for an explicitly selected authorized company."""
+
+    def get(self, request):
+        context, _, error = _context(request)
+        if error:
+            return error
+        from . import website_cost_ledger as ledger
+        if not ledger.enabled():
+            return Response({"detail": "Accounting not available."}, status=404)
+        goal_id = request.query_params.get("goal_id")
+        if goal_id is not None:
+            try:
+                parsed = str(uuid.UUID(goal_id))
+                if parsed != goal_id:
+                    raise ValueError("Noncanonical goal ID")
+            except (ValueError, AttributeError, TypeError):
+                return Response({"detail": "Invalid goal ID."}, status=400)
+        return Response({"usage": ledger.read(company_id=context.company.pk, organization_id=context.organization.pk, goal_id=goal_id)},
+            headers={"Cache-Control": "private, no-store"})
 
 
 class WebsiteConnectionAuthorizeView(APIView):

@@ -321,6 +321,8 @@ def account_child_usage(op, goal):
                 or saved.get("connection_generation") != op.generation or saved.get("repository_id") != op.connection.repository_id
                 or saved.get("deletion_epoch") != deletion_epoch(op.connection)):
             continue
+        from .website_cost_ledger import observe
+        observe(child)
         if child.status not in {"failed", "completed", "blocked", "cancelled", "denied"}:
             op._goal_has_active_child = True
         report = goals.mapping(child.result).get("usage")

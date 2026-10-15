@@ -139,6 +139,10 @@ class WebsiteConnectionView(MyStartupAccess, websites.WebsiteConnectionView):
     """Expose the selected company's canonical website binding to Chat sessions."""
 
 
+class WebsiteCostUsageView(MyStartupAccess, websites.WebsiteCostUsageView):
+    """Reuse explicit-company authorization for lazy Articles accounting reads."""
+
+
 class WebsiteConnectionActionView(MyStartupAccess, websites.WebsiteConnectionActionView):
     """Reuse website lifecycle consent and durable cancellation for Chat owners."""
 

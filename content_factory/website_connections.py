@@ -256,7 +256,7 @@ def summary_for(config, *, company_id=None):
     if target_blocked:
         capabilities.update(publishingReady=False, previewSupported=False)
         actions = [action for action in actions if action not in {"setup", "publish", "preview"}]
-    latest = connection.operations.order_by("-created_at").first()
+    latest = connection.operations.exclude(action__in=["goal-usage", "goal-alert"]).order_by("-created_at").first()
     summary = {
         "latestOperation": {"id": str(latest.pk), "action": latest.action, "state": latest.state, "receipt": latest.receipt} if latest else None,
         "connectionId": str(connection.pk), "connectionGeneration": connection.generation,

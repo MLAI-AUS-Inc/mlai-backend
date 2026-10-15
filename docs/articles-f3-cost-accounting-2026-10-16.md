@@ -58,6 +58,33 @@ produce explicit incomplete accounting. Keep null distinct from measured zero.
 Accounting observations never establish current repository or publication
 authority, including after a reconnect or source change.
 
+The initial ledger implementation uses `website_cost_ledger` and the pure
+`website_cost_usage` validator/reducer. It reads the original goal named by the
+worker's immutable `goal_budget`, checks its scope digest and saved repository,
+generation, branch, app root and deletion watermark, then locks the globally
+unique original-run ledger row. It does not acquire another prepare-goal lock
+while a goal is advancing. Replays avoid writes; settlement is validated using
+the B4 bound protocol. Contradictory snapshots preserve prior evidence and
+mark accounting incomplete. Missing/invalid reports also receive a coverage
+row. Accounting errors log a fixed code and cannot stop setup.
+
+`ARTICLES_COST_ACCOUNTING_ENABLED=false` gates observation and reads. The
+existing budget-enrolled goal runner observes scoped children, including
+missing meters. `GET /api/v1/vibe-marketing/website-connection/usage/` and its
+`/api/v1/my-startup/` facade require the selected company; optional canonical
+`goal_id` filters remain within that company. The response is private/no-store,
+reads at most 2,000 ledger rows plus a truncation sentinel, and reports
+`observed_goal_meter_runs` coverage. Truncated history cannot produce a complete
+total. Unattributed legacy work is not represented as zero or claimed as an
+all-time company ledger. Internal usage/alert rows are hidden from the latest
+lifecycle projection and generic operation receipt reads.
+
+Precise quality ingestion matches CF's optional version-1 accounting object:
+tokens/provider time expose known subtotals and call coverage; USD remains a
+configured bound. Legacy token reservations never become exact accounting.
+Actual build/preview invocations, a lazy client, durable backfill after an
+observation outage, and operational alerts remain subsequent F3 work.
+
 Exclude internal accounting/alert operations from lifecycle/latest-operation
 projections. Respect existing disconnect, purge and organization erasure rules.
 The projection describes retained recorded usage and its coverage, with an
