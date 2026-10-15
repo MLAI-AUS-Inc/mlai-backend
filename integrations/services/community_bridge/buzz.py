@@ -11,10 +11,36 @@ from django.conf import settings
 
 
 EVENT_ID_RE = re.compile(r"^[0-9a-f]{64}$")
+_ADAPTER_CODE_RE = re.compile(r"^[a-z0-9_]{1,64}$")
+
+
+def _adapter_error_detail(response) -> str:
+    """Extract only bounded content-free codes; never return adapter body text."""
+    try:
+        body = response.json()
+    except (ValueError, TypeError, AttributeError):
+        return ""
+    if not isinstance(body, dict):
+        return ""
+    return "/".join(
+        value for field in ("error", "reason")
+        if isinstance(value := body.get(field), str) and _ADAPTER_CODE_RE.fullmatch(value)
+    )
+
+
+def _with_detail(message: str, detail: str) -> str:
+    return f"{message} [{detail}]" if detail else message
 
 
 class BuzzBridgeError(RuntimeError):
+    """Retryable bridge failure carrying an optional content-free adapter code."""
+
     permanent = False
+
+    def __init__(self, message: str = "", *, adapter_error: str = ""):
+        """Retain the legacy message prefix and structured adapter error code."""
+        super().__init__(message)
+        self.adapter_error = adapter_error
 
 
 class BuzzBridgePermanentError(BuzzBridgeError):
@@ -111,11 +137,17 @@ class BuzzBridgeClient:
         except requests.RequestException as exc:
             raise BuzzBridgeError(f"MLAI Chat adapter request failed: {exc.__class__.__name__}") from exc
         if 400 <= response.status_code < 500 and response.status_code not in {408, 429}:
+            detail = _adapter_error_detail(response)
             raise BuzzBridgePermanentError(
-                f"MLAI Chat adapter rejected delivery with HTTP {response.status_code}"
+                _with_detail(f"MLAI Chat adapter rejected delivery with HTTP {response.status_code}", detail),
+                adapter_error=detail,
             )
         if not response.ok:
-            raise BuzzBridgeError(f"MLAI Chat adapter returned HTTP {response.status_code}")
+            detail = _adapter_error_detail(response)
+            raise BuzzBridgeError(
+                _with_detail(f"MLAI Chat adapter returned HTTP {response.status_code}", detail),
+                adapter_error=detail,
+            )
         try:
             result = response.json()
         except ValueError as exc:
@@ -471,11 +503,17 @@ class BuzzBridgeClient:
         except requests.RequestException as exc:
             raise BuzzBridgeError(f"MLAI Chat adapter request failed: {exc.__class__.__name__}") from exc
         if 400 <= response.status_code < 500 and response.status_code not in {408, 429}:
+            detail = _adapter_error_detail(response)
             raise BuzzBridgePermanentError(
-                f"MLAI Chat adapter rejected request with HTTP {response.status_code}"
+                _with_detail(f"MLAI Chat adapter rejected request with HTTP {response.status_code}", detail),
+                adapter_error=detail,
             )
         if not response.ok:
-            raise BuzzBridgeError(f"MLAI Chat adapter returned HTTP {response.status_code}")
+            detail = _adapter_error_detail(response)
+            raise BuzzBridgeError(
+                _with_detail(f"MLAI Chat adapter returned HTTP {response.status_code}", detail),
+                adapter_error=detail,
+            )
         try:
             result = response.json()
         except ValueError as exc:
@@ -520,14 +558,24 @@ class BuzzBridgeClient:
             408,
             429,
         }:
+            detail = _adapter_error_detail(response)
             raise BuzzBridgePermanentError(
-                "MLAI Chat adapter rejected unregister request with HTTP "
-                f"{response.status_code}"
+                _with_detail(
+                    "MLAI Chat adapter rejected unregister request with HTTP "
+                    f"{response.status_code}",
+                    detail,
+                ),
+                adapter_error=detail,
             )
         if not response.ok:
+            detail = _adapter_error_detail(response)
             raise BuzzBridgeError(
-                "MLAI Chat adapter unregister returned HTTP "
-                f"{response.status_code}"
+                _with_detail(
+                    "MLAI Chat adapter unregister returned HTTP "
+                    f"{response.status_code}",
+                    detail,
+                ),
+                adapter_error=detail,
             )
 
     @classmethod
@@ -586,12 +634,16 @@ class BuzzBridgeClient:
                 f"MLAI Chat adapter lookup failed: {exc.__class__.__name__}"
             ) from exc
         if 400 <= response.status_code < 500 and response.status_code not in {408, 429}:
+            detail = _adapter_error_detail(response)
             raise BuzzBridgePermanentError(
-                f"MLAI Chat adapter rejected lookup with HTTP {response.status_code}"
+                _with_detail(f"MLAI Chat adapter rejected lookup with HTTP {response.status_code}", detail),
+                adapter_error=detail,
             )
         if not response.ok:
+            detail = _adapter_error_detail(response)
             raise BuzzBridgeError(
-                f"MLAI Chat adapter lookup returned HTTP {response.status_code}"
+                _with_detail(f"MLAI Chat adapter lookup returned HTTP {response.status_code}", detail),
+                adapter_error=detail,
             )
         try:
             result = response.json()

@@ -375,9 +375,10 @@ class CommunityBridgeDiscordClient(discord.Client):
                 )
             except Exception as exc:
                 logger.exception(
-                    "community_bridge_delivery_failed delivery_id=%s target_platform=%s",
+                    "community_bridge_delivery_failed delivery_id=%s target_platform=%s adapter_error=%s",
                     delivery["id"],
                     delivery["target_platform"],
+                    getattr(exc, "adapter_error", "") or "-",
                 )
                 await asyncio.to_thread(
                     mark_delivery_retry,

@@ -171,7 +171,9 @@ this status check neither replays cancelled deliveries nor changes source reads.
 - Immutable unsupported operations, such as a reaction outside the supported
   Slack bridge set, enter the dead state immediately instead of retrying
   forever under durable sync. Transient provider failures retain their existing
-  retry policy.
+  retry policy. Both public and private adapters validate the exact signed
+  reaction string against the bundled emoji-mart Unicode set, the legacy seven,
+  and canonical Slack shortcodes; padded content fails closed.
 - Public Buzz edits/deletes whose create has not yet been mapped use the
   dependency queue. Completing the create wakes both replies and mutations.
 
