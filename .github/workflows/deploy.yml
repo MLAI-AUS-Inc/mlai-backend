@@ -339,6 +339,7 @@ jobs:
       run: |
         python manage.py test \
           tests.test_content_factory_run_sync \
+          tests.test_vibe_marketing_autofill \
           founder_tools.my_startup.test_database \
           roo.tests_rate_card \
           roo.tests_legacy_office_manager \
@@ -816,7 +817,6 @@ jobs:
           tests.test_startup_data_status \
           tests.test_topic_difficulty_metrics \
           tests.test_validate_startup_update_schema \
-          tests.test_vibe_marketing_autofill \
           vibe_raising.tests \
           vibe_raising.tests_admin \
           vibe_raising.tests_backfill_acn \

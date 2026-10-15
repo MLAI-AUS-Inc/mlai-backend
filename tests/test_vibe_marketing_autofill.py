@@ -10,6 +10,7 @@ from django.test import TestCase, TransactionTestCase, override_settings
 from django.test.utils import CaptureQueriesContext
 from django.utils import timezone
 from rest_framework.test import APIClient
+from tests.website_fixtures import WebsiteBoundAPIClient, bind_config_fixture, bind_verified_target_fixture, install_github_provider_fixture
 
 from content_factory.google_baseline import (
     GA4_SCOPE,
@@ -179,7 +180,7 @@ class VibeMarketingAutofillTransactionTests(TransactionTestCase):
 
 class VibeMarketingAutofillTests(TestCase):
     def setUp(self):
-        self.client = APIClient()
+        self.client = WebsiteBoundAPIClient()
         self.user = User.objects.create_user(
             email="founder@example.com",
             password="password",
@@ -203,6 +204,28 @@ class VibeMarketingAutofillTests(TestCase):
             defaults={"balance": 20, "earned_balance": 20},
         )
         self.client.force_authenticate(user=self.user)
+
+    def _connected_website_fixture(self, *, verified=False, run=None):
+        """Supply the real prior consent/proofs required by downstream tests."""
+        config, _ = OrganizationContentConfig.objects.get_or_create(organization=self.organization)
+        if not config.github_repo:
+            config.github_repo = 'acme/site'
+            config.save(update_fields=['github_repo'])
+        if verified:
+            bind_verified_target_fixture(config, user=self.user)
+        else:
+            bind_config_fixture(config)
+            config.website_connection.authorized_by = self.user
+            config.website_connection.save(update_fields=['authorized_by'])
+        self.client.website_fixture = config.website_connection
+        install_github_provider_fixture(self, config.website_connection)
+        if run is not None:
+            from content_factory.website_connections import contract_for
+            run.organization = self.organization
+            run.github_repo = config.github_repo
+            run.run_request = {**(run.run_request or {}), **contract_for(config.website_connection)}
+            run.save(update_fields=['organization', 'github_repo', 'run_request'])
+        return config
 
     def test_bootstrap_exposes_company_avatar_url(self):
         self.company.avatar_url = "https://cdn.example.com/company-avatar.jpg"
@@ -1101,6 +1124,7 @@ class VibeMarketingAutofillTests(TestCase):
                 raise OperationalError("database is locked")
             return original_update_or_create(*args, **kwargs)
 
+        self._connected_website_fixture(run=run)
         with patch("content_factory.vibe_marketing_views.http_client.get", return_value=_Response(status_code=200, payload=remote_payload)):
             with patch("content_factory.vibe_marketing_views.ContentFactoryRunStep.objects.update_or_create", side_effect=flaky_update_or_create):
                 with patch("content_factory.vibe_marketing_views.time.sleep"):
@@ -2067,6 +2091,7 @@ class VibeMarketingAutofillTests(TestCase):
             primary_keyword="founder seo automation",
         )
 
+        self._connected_website_fixture(verified=True)
         with patch("content_factory.vibe_marketing_views.http_client.post") as post:
             response = self.client.post(
                 "/api/v1/vibe-marketing/article/",
@@ -2094,6 +2119,7 @@ class VibeMarketingAutofillTests(TestCase):
             primary_keyword="what is artificial intelligence with example",
         )
 
+        self._connected_website_fixture(verified=True)
         with patch("content_factory.vibe_marketing_views.http_client.post") as post:
             response = self.client.post(
                 "/api/v1/vibe-marketing/article/",
@@ -2144,6 +2170,7 @@ class VibeMarketingAutofillTests(TestCase):
             captured.update(json or {})
             return _Response(status_code=202, payload={"run_id": "article-selected-1", "status": "queued"})
 
+        self._connected_website_fixture(verified=True)
         with patch("content_factory.vibe_marketing_views.http_client.post", side_effect=fake_post):
             response = self.client.post(
                 "/api/v1/vibe-marketing/article/",
@@ -2237,6 +2264,7 @@ class VibeMarketingAutofillTests(TestCase):
         )
         legacy_frontend_id = f"topic:keyword-{keyword.id}:doctor-jobs-sydney"
 
+        self._connected_website_fixture(verified=True)
         with patch("content_factory.vibe_marketing_views.http_client.post") as post:
             response = self.client.post(
                 "/api/v1/vibe-marketing/article/",
@@ -2283,6 +2311,7 @@ class VibeMarketingAutofillTests(TestCase):
             captured.update(json or {})
             return _Response(status_code=202, payload={"run_id": "article-review-draft-1", "status": "queued"})
 
+        self._connected_website_fixture(verified=True)
         with patch("content_factory.vibe_marketing_views.http_client.post", side_effect=fake_post):
             response = self.client.post(
                 "/api/v1/vibe-marketing/article/",
@@ -2351,6 +2380,7 @@ class VibeMarketingAutofillTests(TestCase):
         self.company.save(update_fields=["organization", "updated_at"])
         before_count = ContentFactoryRun.objects.count()
 
+        self._connected_website_fixture(verified=True)
         with patch("content_factory.vibe_marketing_views.http_client.post") as post:
             response = self.client.post("/api/v1/vibe-marketing/article/", {}, format="json")
 
@@ -2586,6 +2616,7 @@ class VibeMarketingAutofillTests(TestCase):
             },
         )
         ContentFactoryRun.objects.filter(run_id=setup_run.run_id).update(updated_at=timezone.now() - timedelta(days=1))
+        self._connected_website_fixture(verified=False)
         with patch("content_factory.vibe_marketing_views.http_client.post") as post:
             response = self.client.post(
                 "/api/v1/vibe-marketing/article-setup/reset",
@@ -2955,6 +2986,7 @@ class VibeMarketingAutofillTests(TestCase):
         config.baseline_skipped_at = timezone.now()
         config.save(update_fields=["github_repo", "baseline_skipped_at", "updated_at"])
 
+        self._connected_website_fixture(verified=True)
         with patch("content_factory.vibe_marketing_views.http_client.post") as post:
             response = self.client.post(
                 "/api/v1/vibe-marketing/article/",
@@ -2986,6 +3018,7 @@ class VibeMarketingAutofillTests(TestCase):
         config.baseline_skipped_at = timezone.now()
         config.save(update_fields=["github_repo", "baseline_skipped_at", "updated_at"])
 
+        self._connected_website_fixture(verified=True)
         with patch(
             "content_factory.vibe_marketing_views.http_client.post",
             return_value=_Response(status_code=202, payload={"run_id": "article-queued-1", "status": "queued"}),
@@ -3019,6 +3052,7 @@ class VibeMarketingAutofillTests(TestCase):
             current_step="fetch_org_config",
         )
 
+        self._connected_website_fixture(run=run)
         with patch("content_factory.vibe_marketing_views.http_client.get") as get:
             response = self.client.get(f"/api/v1/vibe-marketing/runs/{run.run_id}/")
 
@@ -3043,6 +3077,7 @@ class VibeMarketingAutofillTests(TestCase):
             current_step="fetch_org_config",
         )
 
+        self._connected_website_fixture(run=run)
         with patch("content_factory.vibe_marketing_views.http_client.get", return_value=_Response(status_code=404, payload={})):
             response = self.client.get(f"/api/v1/vibe-marketing/runs/{run.run_id}/")
 
@@ -3177,6 +3212,7 @@ class VibeMarketingAutofillTests(TestCase):
             "error": "Repository access token is missing.",
         }
 
+        self._connected_website_fixture(run=run)
         with (
             patch("content_factory.vibe_marketing_views.http_client.get", return_value=_Response(status_code=200, payload=remote_payload)),
             patch("content_factory.vibe_marketing_views._ensure_article_live_preview", side_effect=lambda current: current),
@@ -3401,7 +3437,7 @@ class VibeMarketingAutofillTests(TestCase):
         self.assertFalse(OrganizationContentConfig.objects.filter(organization__domain="acme.com").exists())
 
     def test_github_mutations_reject_repo_connected_to_sibling_company(self):
-        current_org = Organization.objects.create(domain="acme.com", name="Acme")
+        current_org = self.organization
         self.company.organization = current_org
         self.company.save(update_fields=["organization", "updated_at"])
         current_config = OrganizationContentConfig.objects.create(organization=current_org)
@@ -3680,6 +3716,7 @@ class VibeMarketingAutofillTests(TestCase):
             )
             return FakeResponse()
 
+        self._connected_website_fixture(verified=False)
         with patch("content_factory.vibe_marketing_views.http_client.post", side_effect=fake_post):
             response = self.client.post(
                 "/api/v1/vibe-marketing/scan/",
@@ -3740,6 +3777,7 @@ class VibeMarketingAutofillTests(TestCase):
             captured["mode"] = json["article_surface_mode"]
             return FakeResponse()
 
+        self._connected_website_fixture(verified=False)
         with patch("content_factory.vibe_marketing_views.http_client.post", side_effect=fake_post):
             response = self.client.post(
                 "/api/v1/vibe-marketing/scan/",
@@ -3818,6 +3856,7 @@ class VibeMarketingAutofillTests(TestCase):
             self.assertNotIn("article_surface_hint", json)
             return FakeResponse()
 
+        self._connected_website_fixture(verified=False)
         with patch("content_factory.vibe_marketing_views.http_client.post", side_effect=fake_post):
             response = self.client.post(
                 "/api/v1/vibe-marketing/scan/",
@@ -3846,6 +3885,7 @@ class VibeMarketingAutofillTests(TestCase):
             defaults={"github_repo": "acme/site"},
         )
 
+        self._connected_website_fixture(verified=False)
         response = self.client.post(
             "/api/v1/vibe-marketing/article-system-setup/",
             {
@@ -3892,6 +3932,7 @@ class VibeMarketingAutofillTests(TestCase):
             self.assertEqual(json["article_surface_hint"]["route_path"], "/articles")
             return FakeResponse()
 
+        self._connected_website_fixture(verified=False)
         with patch("content_factory.vibe_marketing_views.http_client.post", side_effect=fake_post):
             response = self.client.post(
                 "/api/v1/vibe-marketing/article-system-setup/",
@@ -3916,6 +3957,7 @@ class VibeMarketingAutofillTests(TestCase):
         self.assertEqual(pending["setupStatus"], ContentFactoryRunStatus.QUEUED)
 
     def test_scan_rejects_mismatched_article_surface_domain(self):
+        self._connected_website_fixture(verified=False)
         response = self.client.post(
             "/api/v1/vibe-marketing/scan/",
             {
@@ -3937,6 +3979,7 @@ class VibeMarketingAutofillTests(TestCase):
         config.daily_discovery_enabled = True
         config.save(update_fields=["daily_discovery_enabled", "updated_at"])
 
+        self._connected_website_fixture(verified=False)
         response = self.client.put(
             "/api/v1/vibe-marketing/settings/",
             {"githubRepo": "acme/site"},

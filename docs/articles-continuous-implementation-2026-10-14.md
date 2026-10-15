@@ -466,3 +466,14 @@ the actual certified contract; merge labels remain historical, not readiness.
 Boost verified-company fixture now records active ABR status. Database-backed
 cases are syntax checked locally and remain assigned to the existing CI lanes.
 No local database, migration or production operation was run.
+
+
+Restored Autofill fixture repair: twenty downstream generation/setup/scan/status
+cases now explicitly create the owned website consent they assume; generation
+cases additionally create current target/live records. Only GitHub provider I/O
+is faked. Initial onboarding and cross-company denial cases do not receive an
+implicit website. Status fixtures retain their original saved scope. Reuse the
+owned Acme organization in the sibling-company test. The whole Autofill module
+is selected in the existing SQLite CI lane because it injects SQLite lock
+failures; no test was skipped or removed. All 490 modules remain fully assigned.
+These database-backed cases are syntax checked locally and await remote CI.
