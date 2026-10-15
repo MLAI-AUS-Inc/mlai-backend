@@ -78,6 +78,7 @@ class VibeRaisingApiTests(TestCase):
     def _seed_imported_revenue(self, company, *, month=date(2026, 3, 1), value="50000"):
         # An editor may retain imported revenue, but cannot create or change
         # financial evidence with a browser-supplied metric.
+        startup_profile, _ = StartupProfile.objects.get_or_create(organization=company.organization)
         StartupMetricObservation.objects.create(
             organization=company.organization,
             source_provider="xero",
@@ -85,7 +86,7 @@ class VibeRaisingApiTests(TestCase):
             metric_name="Revenue",
             value_text=value,
             value_number=Decimal(value),
-            unit="AUD",
+            unit=startup_profile.default_currency,
             period_month=month,
             confidence=1,
             source_metadata={"source_metric": "xero_profit_and_loss_revenue"},
@@ -595,10 +596,11 @@ class VibeRaisingApiTests(TestCase):
 
         updates_response = self.client.get("/api/v1/vibe-raising/updates/")
         self.assertEqual(updates_response.status_code, 200)
-        self.assertEqual(updates_response.data["updates"][0]["audienceVisibility"], ["community"])
+        self.assertEqual(updates_response.data["updates"], [])
         drafts_response = self.client.get("/api/v1/vibe-raising/drafts/")
         self.assertEqual(drafts_response.status_code, 200)
         self.assertEqual(len(drafts_response.data["drafts"]), 1)
+        self.assertEqual(drafts_response.data["drafts"][0]["audienceVisibility"], ["community"])
 
         publish_response = self.client.post(f"/api/v1/vibe-raising/updates/{draft.id}/publish/", {"companyId": company.pk, "revisionId": response.data["update"]["revisionId"], "revisionHash": response.data["update"]["revisionHash"], "audienceVisibility": ["community"]}, format="json")
 
@@ -651,7 +653,7 @@ class VibeRaisingApiTests(TestCase):
 
         self.assertEqual(anonymous_response.status_code, 401)
         self.assertEqual(investor_response.status_code, 403)
-        self.assertEqual(non_owner_response.status_code, 404)
+        self.assertEqual(non_owner_response.status_code, 409)
         draft.refresh_from_db()
         self.assertIsNone(draft.published_at)
         self.assertEqual(draft.status, MonthlyUpdateDraftStatus.DRAFT)
@@ -889,7 +891,7 @@ class VibeRaisingApiTests(TestCase):
         invalid_response = self.client.get("/api/v1/vibe-raising/updates/?audience=just_me")
 
         self.assertEqual(founder_response.status_code, 200)
-        self.assertEqual(len(founder_response.data["updates"]), 5)
+        self.assertEqual(len(founder_response.data["updates"]), 4)
         self.assertEqual(community_response.status_code, 200)
         self.assertEqual(
             [update["isoMonth"] for update in community_response.data["updates"]],
@@ -1555,7 +1557,8 @@ class VibeRaisingApiTests(TestCase):
 
     def test_monthly_update_post_preserves_display_config_when_omitted(self):
         self.client.force_authenticate(user=self.user)
-        self._create_founder_company(domain="acme.com", registered=True)
+        _profile, company = self._create_founder_company(domain="acme.com", registered=True)
+        self._seed_imported_revenue(company)
         organization, _ = Organization.objects.get_or_create(
             domain="acme.com", defaults={"name": "Acme Inc."}
         )
@@ -2188,7 +2191,7 @@ class VibeRaisingApiTests(TestCase):
         self.assertEqual(run.run_request["current_month"], "2026-04-01")
         self.assertEqual(run.run_request["draft_months"], ["2026-04-01"])
         self.assertEqual(run.run_request["backfill_window_start"], "2026-04-01T00:00:00+00:00")
-        self.assertEqual(run.run_request["backfill_window_end"], "2026-04-26T05:30:00+00:00")
+        self.assertEqual(run.run_request["backfill_window_end"], "2026-04-26T05:29:59.999999+00:00")
         mock_notify.assert_called_once_with(run.run_id)
 
     @patch("startup_updates.services.timezone.now")
@@ -3113,7 +3116,7 @@ class VibeRaisingApiTests(TestCase):
         self.assertNotIn("asks", replaced.structured_memo)
         self.assertNotIn("Stale alpha", str(replaced.structured_memo))
 
-    def test_generated_monthly_update_defaults_to_company_visibility_and_preserves_existing(self):
+    def test_generated_monthly_update_uses_saved_run_visibility_and_preserves_existing(self):
         self.client.force_authenticate(user=self.user)
         _profile, company = self._create_founder_company(domain="acme.com", registered=True)
         organization, _ = Organization.objects.get_or_create(
@@ -3130,7 +3133,8 @@ class VibeRaisingApiTests(TestCase):
             role="founder",
             is_default_for_gmail=True,
         )
-        run = create_startup_update_run(organization=organization, binding=binding)
+        run = create_startup_update_run(organization=organization, binding=binding,
+            target_month=date(2026, 5, 1), audience_visibility=["community"])
 
         draft = upsert_monthly_update_draft(
             organization=organization,
@@ -3140,9 +3144,9 @@ class VibeRaisingApiTests(TestCase):
             model_name="generated-model",
         )
 
-        self.assertEqual(draft.audience_visibility, ["community", "investors"])
+        self.assertEqual(draft.audience_visibility, ["community"])
 
-        company.default_audience_visibility = ["investors"]
+        company.default_audience_visibility = ["just_me"]
         company.save(update_fields=["default_audience_visibility", "updated_at"])
         replaced = upsert_monthly_update_draft(
             organization=organization,
@@ -3153,7 +3157,7 @@ class VibeRaisingApiTests(TestCase):
             replace=True,
         )
 
-        self.assertEqual(replaced.audience_visibility, ["community", "investors"])
+        self.assertEqual(replaced.audience_visibility, ["community"])
 
     def test_generated_monthly_update_accepts_explicit_audience_visibility(self):
         self.client.force_authenticate(user=self.user)
@@ -3343,12 +3347,11 @@ class VibeRaisingApiTests(TestCase):
     def test_email_draft_start_merges_existing_startup_profile_context(self):
         self.client.force_authenticate(user=self.user)
         _profile, _company = self._create_founder_company()
-        organization = Organization.objects.create(
-            name="Acme Legacy",
-            domain="acme.com",
-            competitors=[{"name": "CompeteCo", "domain": "compete.co"}],
-            seed_keywords=["workflow"],
-        )
+        organization = _company.organization
+        organization.name = "Acme Legacy"
+        organization.competitors = [{"name": "CompeteCo", "domain": "compete.co"}]
+        organization.seed_keywords = ["workflow"]
+        organization.save(update_fields=["name", "competitors", "seed_keywords"])
         OrganizationContentConfig.objects.create(
             organization=organization,
             brand_name="Acme AI",

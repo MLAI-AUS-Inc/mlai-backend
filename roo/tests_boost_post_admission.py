@@ -85,6 +85,7 @@ class BoostPostAdmissionAPITests(APITestCase):
             registered=True,
             abn='89000000019',
             acn='000000019',
+            entity_type_code='PRV',
             abr_verified_at=timezone.now(),
         )
         MonthlyUpdateDraft.objects.create(

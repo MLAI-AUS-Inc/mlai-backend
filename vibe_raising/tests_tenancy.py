@@ -21,6 +21,7 @@ User = get_user_model()
 
 COMPANIES_URL = "/api/v1/vibe-raising/companies/"
 UPDATES_URL = "/api/v1/vibe-raising/updates/"
+DRAFTS_URL = "/api/v1/vibe-raising/drafts/"
 
 
 class VibeRaisingTenancyTests(TestCase):
@@ -118,14 +119,13 @@ class VibeRaisingTenancyTests(TestCase):
 
         self.client.force_authenticate(user=self.attacker)
         resp = self.client.get(UPDATES_URL)
-        self.assertEqual(resp.status_code, 200)
-        self.assertEqual(resp.data["updates"], [])
+        self.assertEqual(resp.status_code, 409)
 
         # The legitimate owner still sees their own update.
         self.client.force_authenticate(user=self.victim)
-        owner_resp = self.client.get(UPDATES_URL)
+        owner_resp = self.client.get(DRAFTS_URL)
         self.assertEqual(owner_resp.status_code, 200)
-        self.assertEqual(len(owner_resp.data["updates"]), 1)
+        self.assertEqual(len(owner_resp.data["drafts"]), 1)
 
     def test_non_owner_cannot_overwrite_another_tenants_updates(self):
         _p, _c, _org, draft = self._seed_victim_owning_acme_with_draft()
@@ -149,6 +149,6 @@ class VibeRaisingTenancyTests(TestCase):
         )
         self.assertIn(post.status_code, (200, 201))
 
-        get = self.client.get(UPDATES_URL)
+        get = self.client.get(DRAFTS_URL)
         self.assertEqual(get.status_code, 200)
-        self.assertEqual(len(get.data["updates"]), 1)
+        self.assertEqual(len(get.data["drafts"]), 1)

@@ -99,6 +99,13 @@ current four-topic charge, portable delivery requires explicit consent, and
 the reuse check now starts the first run through the real service before retry.
 No admission or ownership controller was replaced by a permissive mock.
 
+Further fixture repairs link paid research to the actual actor, retain the
+startup's configured currency for imported revenue, distinguish unpublished
+drafts from the published feed, and preserve a generation run's explicitly
+selected audience. Cached scaffold files and PR/merge labels do not mint a
+target; the positive linking case starts with an actual current verified native
+target record. These changes leave production policy and all rollout flags intact.
+
 D2 remains incomplete until automatic stale-proposal rebuilding and article
 strategy escalation are implemented and tested. Refreshes must
 use a fresh owned branch/current base, preserve deterministic consent only and
