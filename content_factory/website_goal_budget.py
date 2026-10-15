@@ -6,6 +6,8 @@ from django.conf import settings
 from . import website_goal as goals
 
 COUNTERS = ("model_calls", "tokens", "provider_seconds", "active_seconds", "model_usd", "builds", "previews")
+BOUND_SEMANTICS = "reservation_upper_bounds_v1"
+BOUND_COUNTERS = frozenset({"tokens", "provider_seconds", "active_seconds", "model_usd"})
 
 
 def enabled():
@@ -27,31 +29,74 @@ def valid_usage(report, run_id):
         and report.get("run_id") == run_id and isinstance(run_id, str) and 0 < len(run_id) <= 100
         and type(report.get("generation")) is int and report["generation"] >= 0
         and type(report.get("state_version")) is int and report["state_version"] >= 0
+        and (report.get("counter_semantics") is None or type(report["counter_semantics"]) is str and report["counter_semantics"] == BOUND_SEMANTICS)
         and all(key in report and (report[key] is None or numeric(report[key])) for key in COUNTERS)
         and all(report[key] is None or type(report[key]) is int for key in ("model_calls", "tokens", "builds", "previews")))
 
 
+def _usage_peaks(goal, reports):
+    """Retain only peaks needed across a settlement or a missing-meter gap."""
+    peaks = goal.get("usage_high_water", {})
+    if not isinstance(peaks, dict) or not set(peaks).issubset(reports):
+        raise ValueError("Stored usage upper bounds are malformed")
+    for row in peaks.values():
+        if (not isinstance(row, dict) or not set(row).issubset(COUNTERS)
+                or any(not numeric(value) or key in {"model_calls", "tokens", "builds", "previews"} and type(value) is not int
+                    for key, value in row.items())):
+            raise ValueError("Stored usage upper bounds are malformed")
+    return peaks
+
+
 def account_usage(goal, report, *, run_id):
-    """Deduplicate snapshots and refuse backwards counters or stale reports."""
+    """Deduplicate snapshots; settled bounds retain their conservative peak."""
     if not valid_usage(report, run_id):
         raise ValueError("Usage report is malformed")
     result = deepcopy(goal)
-    reports = goals.mapping(result.get("usage_reports"))
+    reports = result.get("usage_reports", {})
+    if not isinstance(reports, dict) or len(reports) > 64:
+        raise ValueError("Stored usage journal is malformed")
+    for identifier, snapshot in reports.items():
+        if not isinstance(snapshot, dict) or not valid_usage({"version": 1, "run_id": identifier, **snapshot}, identifier):
+            raise ValueError("Stored usage report is malformed")
+    peaks = _usage_peaks(result, reports)
     previous = reports.get(run_id)
     identity = (report["generation"], report["state_version"])
     if previous:
         old_identity = (previous["generation"], previous["state_version"])
         if identity <= old_identity:
-            if identity == old_identity and any(report[key] != previous[key] for key in COUNTERS):
+            if identity == old_identity and (any(report[key] != previous[key] for key in COUNTERS)
+                    or report.get("counter_semantics") != previous.get("counter_semantics")):
                 raise ValueError("The same usage report has contradictory counters")
             return result
-        if any(previous[key] is not None and report[key] is not None and report[key] < previous[key] for key in COUNTERS):
-            raise ValueError("Cumulative usage counters moved backwards")
     elif len(reports) >= 64:
         raise ValueError("The bounded usage journal is full")
+    current_peaks = dict(peaks.get(run_id, {}))
+    permits_settlement = (report.get("counter_semantics") == BOUND_SEMANTICS
+        and previous is not None and previous.get("counter_semantics") == BOUND_SEMANTICS)
+    for key in COUNTERS:
+        prior_values = [value for value in (current_peaks.get(key), (previous or {}).get(key)) if value is not None]
+        prior_peak = max(prior_values) if prior_values else None
+        value = report[key]
+        if prior_peak is not None and value is not None and value < prior_peak and not (permits_settlement and key in BOUND_COUNTERS):
+            raise ValueError("Cumulative usage counters moved backwards")
+        if prior_peak is not None and (value is None or value < prior_peak):
+            current_peaks[key] = prior_peak
+        else:
+            current_peaks.pop(key, None)
+    if current_peaks:
+        peaks[run_id] = current_peaks
+    else:
+        peaks.pop(run_id, None)
     reports[run_id] = {key: report[key] for key in (*COUNTERS, "generation", "state_version")}
+    if report.get("counter_semantics") is not None:
+        reports[run_id]["counter_semantics"] = report["counter_semantics"]
     result["usage_reports"] = reports
-    totals = {key: sum(item[key] for item in reports.values()) if all(item[key] is not None for item in reports.values()) else None for key in COUNTERS}
+    if peaks:
+        result["usage_high_water"] = peaks
+    else:
+        result.pop("usage_high_water", None)
+    totals = {key: sum(max(item[key], peaks.get(identifier, {}).get(key, item[key])) for identifier, item in reports.items())
+        if all(item[key] is not None for item in reports.values()) else None for key in COUNTERS}
     result["budget_used"] = {**goals.mapping(result.get("budget_used")), **totals, "model_cost": totals["model_usd"]}
     result["revision"] += 1
     return result

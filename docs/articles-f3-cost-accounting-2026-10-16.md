@@ -4,7 +4,7 @@
 
 B4's `website_goal_budget.account_usage` accepts cumulative original-run reports,
 orders them by generation/state version and refuses contradictory or backwards
-counters. It records model calls, tokens, provider/active seconds, model USD,
+counters in legacy reports. It records model calls, tokens, provider/active seconds, model USD,
 builds and previews. Unknown values remain null. `website_doctor.project_doctor`
 already exposes all seven budget counters; F3 should reuse that contract.
 
@@ -16,6 +16,20 @@ add explicit accounting quality/basis. Report actual tokens only when every
 contributing call supplied valid usage, label configured USD bounds as bounds,
 and instrument admitted build/preview invocations for their actual attempt
 counts. Keep legacy step estimates distinguishable from that new meter.
+
+The source audit reproduced a B4 protocol bug: the worker can report an admitted
+model reservation and later settle it to smaller provider-reported usage. The
+backend interpreted that legitimate decrease as invalid usage and stopped the
+goal. New producer reports label `counter_semantics` as
+`reservation_upper_bounds_v1`. When both snapshots carry that label, token,
+provider/active-time and USD bounds may settle downwards. The goal budget keeps
+each original run's highest observed bound, separately from its latest raw
+snapshot. Unknown values remain unknown, with a sparse peak retained for later
+known reports. Calls/builds/previews stay monotonic, including across null gaps;
+legacy reports retain strict monotonic validation. Snapshot identities cannot
+be replayed with changed semantics or counters. Enable the consumer before
+enrolling workers in goal metering. Existing default-off B4 flags govern this
+correctness fix; the separate accounting-quality stream remains future work.
 
 `website_goal_runner.stop_goal` reserves one pending `budget_alert` identity.
 The current owner-notification outbox covers genuine owner actions and proven
