@@ -100,6 +100,8 @@ VERIFICATION_WORKFLOW_PATH = ".github/workflows/mlai-articles-verification.yml"
 VERIFICATION_RUNNER_PREFIX = ".mlai/articles-verification."
 # The kit workflow's job id. GitHub names an unnamed job's check run after it.
 VERIFICATION_JOB_CHECK = "verify"
+# Recorded on a setup whose merge this kit's own check blocked.
+VERIFICATION_KIT_CHECKS = "verification_kit"
 
 
 def _paths(value):
@@ -146,8 +148,8 @@ def verification_kit_checks(website, head_sha):
     runs = [row for row in payload["check_runs"] if row.get("name") == VERIFICATION_JOB_CHECK
         and row.get("head_sha") == head_sha and (row.get("app") or {}).get("slug") == "github-actions"]
     if any(row.get("status") == "completed" and row.get("conclusion") not in {"success", "neutral", "skipped"} for row in runs):
-        return {"state": "failed", "ready": False, "message": "MLAI articles verification failed on GitHub for this "
-            "setup pull request. Fix the failing verify check, then publish again."}
+        return {"state": "failed", "ready": False, "source": VERIFICATION_KIT_CHECKS, "message": "MLAI articles "
+            "verification failed on GitHub for this setup pull request. Try again to rebuild the setup."}
     if any(row.get("status") != "completed" for row in runs):
         return {"state": "pending", "ready": False, "message": "Waiting for MLAI articles verification to finish on GitHub."}
     return None
