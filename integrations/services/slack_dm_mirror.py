@@ -214,6 +214,14 @@ class SlackDmMirrorRateLimited(SlackDmMirrorError):
     """A workspace/method is waiting for Slack's Retry-After deadline."""
 
 
+class SlackDmMirrorAuthorRefreshRequired(SlackDmMirrorError):
+    """The Slack author requires a membership refresh before retrying."""
+
+    def __init__(self, reason: str):
+        super().__init__(f"Slack author is not part of this owner mirror. [{reason}]")
+        self.reason = reason
+
+
 class SlackDmMirrorDependencyPending(SlackDmMirrorError):
     """A private operation is waiting for an earlier mirrored operation."""
 
@@ -1670,6 +1678,9 @@ def backfill_grant(
         updated_at=now,
     )
     _mark_backfill_rows_for_recovery_locked(conversation_ids, now=now)
+    if grant.consent_version != ALL_HISTORY_CONSENT:
+        from .slack_dm_author_resolution import retire_consent_excluded_rows_locked
+        retire_consent_excluded_rows_locked(grant, conversations)
     return len(conversation_ids)
 
 
@@ -3091,6 +3102,7 @@ def _discover_conversation(
         slack_conversation_id=channel_id,
         participant_slack_ids=participant_ids,
         channel_metadata={
+            "membership_confirmed_at": timezone.now().isoformat(),
             "kind": kind,
             "name": str(raw.get("name") or "")[:255],
             "source_archived": bool(raw.get("is_archived")),
@@ -4253,10 +4265,11 @@ def process_ready_deliveries(limit: int = 20, *, batch_size: int = 1) -> int:
         except Exception as exc:  # worker boundary; retry with bounded backoff
             for delivery in claimed:
                 _record_private_delivery_failure(delivery, exc)
-            logger.exception(
-                "slack_dm_mirror_delivery_failed delivery_ids=%s",
-                ",".join(str(delivery.pk) for delivery in claimed),
-            )
+            ids = ",".join(str(delivery.pk) for delivery in claimed)
+            if isinstance(exc, SlackDmMirrorAuthorRefreshRequired):
+                logger.info("slack_dm_mirror_author_refresh_requested delivery_ids=%s reason=%s", ids, exc.reason)
+            else:
+                logger.exception("slack_dm_mirror_delivery_failed delivery_ids=%s", ids)
             continue
         processed += len(claimed)
     return processed
@@ -4417,6 +4430,7 @@ def _private_delivery_batch_eligible(delivery: SlackDmMirrorDelivery) -> bool:
     thread_ts = str(metadata.get("thread_ts") or "").strip()
     return bool(
         delivery.source_platform == CommunityBridgePlatform.SLACK
+        and bool(_history_delivery_author_pubkey(delivery))
         and delivery.operation == CommunityBridgeDeliveryType.CREATE
         # Legacy queued Slackbot rows may need individual supersession rather
         # than poisoning a batch of otherwise deliverable human messages.
@@ -4589,6 +4603,17 @@ def _record_private_delivery_failure(
             and str((delivery.metadata or {}).get("participant_hash") or "")
             in {"", str(conversation.participant_hash or "")}
         )
+        if isinstance(exc, SlackDmMirrorAuthorRefreshRequired) and authorized and not permanent:
+            from .slack_dm_author_resolution import AUTHOR_REFRESH_RETRY_SECONDS, IDENTITY_STALE_RETRY_SECONDS
+            metadata = dict(delivery.metadata or {})
+            metadata.setdefault("author_refresh_requested_at", timezone.now().isoformat())
+            delivery.metadata = metadata
+            delivery.status = CommunityBridgeDeliveryStatus.PENDING
+            wait = IDENTITY_STALE_RETRY_SECONDS if exc.reason == "identity_stale" else AUTHOR_REFRESH_RETRY_SECONDS
+            delivery.available_at = timezone.now() + timedelta(seconds=max(_slack_retry_after_seconds(exc), wait))
+            delivery.last_error = f"{exc.__class__.__name__}: {exc}"[:2000]
+            delivery.save(update_fields=("attempts", "metadata", "status", "available_at", "last_error", "updated_at"))
+            return
         delivery.status = CommunityBridgeDeliveryStatus.PENDING
         if not authorized or permanent:
             delivery.status = CommunityBridgeDeliveryStatus.DEAD
@@ -6765,6 +6790,7 @@ def _upsert_history_delivery(
         from integrations.services.message_sync.parent_recovery import preserve_failed_children
         delivery.conversation = conversation
         preserve_failed_children(delivery)
+    from .slack_dm_author_resolution import author_resolves_for_observation
     if delivery.status in (
         CommunityBridgeDeliveryStatus.FAILED,
         CommunityBridgeDeliveryStatus.DEAD,
@@ -6778,7 +6804,10 @@ def _upsert_history_delivery(
                 and (delivery.metadata or {}).get("participant_hash") != conversation.participant_hash
             )
         )
-    ):
+    ) or (delivery.status == CommunityBridgeDeliveryStatus.COMPLETED
+          and bool((delivery.metadata or {}).get("undeliverable"))
+          and metadata.get("participant_hash") == conversation.participant_hash
+          and author_resolves_for_observation(conversation, author_id=author_id, metadata=metadata)):
         delivery.source_author_id = author_id
         delivery.encrypted_text = text
         delivery.metadata = metadata
@@ -8076,23 +8105,16 @@ def _deliver_to_mlai(delivery: SlackDmMirrorDelivery) -> None:
         raise SlackDmMirrorAuthorizationError(
             "The private conversation participants changed."
         )
-    linked_pubkey = _history_delivery_author_pubkey(delivery)
+    from .slack_dm_author_resolution import (resolve_author, author_refresh_observed,
+                                             mark_undeliverable_locked, TERMINAL_REASONS)
+    resolution = resolve_author(delivery)
+    linked_pubkey = resolution.pubkey
     if not linked_pubkey:
-        if (
-            delivery.source_platform == CommunityBridgePlatform.SLACK
-            and delivery.source_author_id == "USLACKBOT"
-            and (delivery.metadata or {}).get("backfill")
-            and conversation_kind(conversation) == "im"
-        ):
-            # Old head/thread scans admitted this system author even though
-            # archive scans exclude it from owner IMs. Stop retrying a parent
-            # that cannot be delivered so authorized human replies can use the
-            # existing unavailable-parent fallback. Never add a new recipient.
-            _complete_superseded_dependency_locked(
-                delivery, reason="Slackbot is not represented in this owner mirror."
-            )
+        if resolution.reason in TERMINAL_REASONS or (
+                resolution.reason == "non_participant_author" and author_refresh_observed(delivery)):
+            mark_undeliverable_locked(delivery, reason=resolution.reason, source="worker")
             return
-        raise SlackDmMirrorError("Slack author is not part of this owner mirror.")
+        raise SlackDmMirrorAuthorRefreshRequired(resolution.reason)
     profile = (
         (conversation.participant_profiles or {}).get(delivery.source_author_id)
         or (delivery.metadata or {}).get("history_author")

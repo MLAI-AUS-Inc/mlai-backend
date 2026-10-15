@@ -47,6 +47,12 @@ class DirectoryProgressTests(SlackDmIoAuthorityFixture, TransactionTestCase):
         self.connection.refresh_from_db()
         return self.connection.sync_cursor.get(KEY)
 
+    def test_membership_confirmation_is_written_for_each_successful_membership_read(self):
+        from django.utils.dateparse import parse_datetime
+        with patch.object(dm, '_call_slack_with_grant_authority', return_value=page(['UOWNER', 'UOTHER'])), patch.object(dm, '_store_conversation_membership_intent', return_value=(self.conversation, False)) as intent, patch.object(dm, '_complete_inactive_conversation_history'):
+            dm._discover_conversation(self.grant, self.authority, self.raw, profile_cache={}, force_backfill=False, reset_history=False, recent_activity=False)
+        self.assertIsNotNone(parse_datetime(intent.call_args.kwargs['channel_metadata']['membership_confirmed_at']))
+
     def test_more_than_200_members_resume_page_two_before_publishing_owner_membership(self):
         first = [f"UMEMBER{index:04}" for index in range(200)]
         raw = {"id": "GNEW", "is_private": True}
