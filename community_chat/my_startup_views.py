@@ -262,9 +262,9 @@ class ArticleRunActionView(MyStartupAccess, marketing.VibeMarketingRunControlVie
 
 class WebsiteMetricsView(MyStartupAccess, ContentWebsiteMetricsView):
     """Read bounded article outcomes only for the selected startup."""
-    startup_read_bucket = "settings"
+    startup_read_bucket = "read"
 
 
 class WebsiteConnectionOperationView(MyStartupAccess, websites.WebsiteConnectionOperationView):
     """Read a single persisted operation under the selected company's consent."""
-    startup_read_bucket = "run"
+    startup_read_bucket = "poll"
