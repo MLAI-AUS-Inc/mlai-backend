@@ -26,7 +26,7 @@ CORS_ALLOWED_ORIGINS=[COMMUNITY_CHAT_FRONTEND_URL]
 CSRF_TRUSTED_ORIGINS=[COMMUNITY_CHAT_FRONTEND_URL]
 SESSION_COOKIE_DOMAIN=None
 SESSION_COOKIE_SECURE=True
-COMMUNITY_CHAT_STARTUP_UPDATES_ENABLED=False
+COMMUNITY_CHAT_STARTUP_UPDATES_ENABLED=True
 COMMUNITY_CHAT_AI_PROVIDERS=[]
 CUSTOMERIO_API_KEY=''
 CUSTOMERIO_SITE_ID=''
@@ -62,3 +62,9 @@ for _name in list(globals()):
 
 from .staging_integrations import pin_isolated_destinations
 pin_isolated_destinations(globals(),local=False)
+
+# Ordinary local features use independent staging channel identities.
+from uuid import uuid5 as _uuid5, NAMESPACE_DNS as _dns
+COMMUNITY_CHAT_VOLUNTEER_ENABLED=True
+COMMUNITY_CHAT_VOLUNTEER_COMMUNITY="chat-staging.mlai.au"
+COMMUNITY_CHAT_VOLUNTEER_CHANNELS={name:str(_uuid5(_dns,"chat-staging.mlai.au/public-channel/v1/"+name)) for name in ("tech_volunteers","volunteer")}

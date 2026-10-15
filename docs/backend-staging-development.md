@@ -46,3 +46,28 @@ flutter run --dart-define=MLAI_STAGING_ENABLED=true --dart-define=MLAI_API_URL=h
 Use a fresh staging app/profile and an assigned synthetic login. The source supports ordinary same-origin `/api/` requests and the staging room screen. This rollout has source checks only; Flutter compilation/device validation remains pending. Installing a production app or changing a Git branch does not switch its environment.
 
 Authenticated GET `/api/v1/points/development/build/` returns the active staging backend release. It is a normal domain URL; anonymous callers cannot read it and authenticated non-staging callers receive404. Use it to confirm a completed backend timer deployment, rather than assuming a successful Git push is already live.
+
+### Volunteer and private startup examples
+
+The isolated hosted profile enables the ordinary startup facade and Volunteer
+feed. Generation/provider capabilities stay unavailable. Eight existing marked
+synthetic accounts receive one independently owned company each; Ashwin receives
+a second so that switching can be exercised. Each has a private, unpublished
+manual draft. No real domain, company registration, provider or schedule is set.
+
+After the reviewed public catalogue rollout, copy its owner-only receipt into
+the API container and run the existing runtime's native management command:
+
+```
+python manage.py seed_staging_features --channel-receipt <private-receipt-path>
+python manage.py seed_staging_features --channel-receipt <private-receipt-path> --apply
+```
+
+It checks the isolated profile, exact database, community, all 17 independent
+channel identities, and the eight existing ordinary marked synthetic accounts.
+It never resets company edits, passwords, existing draft revisions or balances.
+Two public Volunteer examples link to the staging `tech_volunteers` and
+`volunteer` starter conversations. The synthetic event uses only a local detail
+adapter; unknown staging events do not fall back to Luma. Existing contribution
+recognitions remain backed by their existing Roo ledger records, with no new
+awards. All rollout fixture changes use the existing schema.

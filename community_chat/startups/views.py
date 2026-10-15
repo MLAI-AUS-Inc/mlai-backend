@@ -1,5 +1,6 @@
 """Narrow Chat-session facade; shared founder views own domain mutations."""
 from django.conf import settings
+from mlai.staging_integrations import is_isolated_staging
 from django.core.exceptions import ValidationError as DjangoValidationError
 from django.shortcuts import get_object_or_404
 from django.urls import reverse
@@ -74,7 +75,7 @@ class BootstrapView(ChatStartupAccess, APIView):
             "enabled": True, "accountId": str(request.user.community_chat_profile_id),
             "relayUrl": settings.COMMUNITY_CHAT_RELAY_URL,
             "profile": FounderProfileSerializer(profile).data,
-            "capabilities": {"manual": True, "generation": True, "community": True, "public": True,
+            "capabilities": {"manual": True, "generation": not is_isolated_staging(), "community": True, "public": True,
                 "delete": True, "draftReadyPush": False},
         })
 

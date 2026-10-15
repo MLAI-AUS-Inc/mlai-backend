@@ -12,6 +12,10 @@ from integrations.services.luma import (
 
 def public_event(event_id):
     """Find an upcoming public event in the complete cached community calendar."""
+    from mlai.staging_integrations import is_isolated_staging
+    if is_isolated_staging():
+        from .staging_fixtures import synthetic_public_event
+        return synthetic_public_event(event_id)
     if not event_id:
         return None
     key = "community-chat:volunteer-public-events:v2"
