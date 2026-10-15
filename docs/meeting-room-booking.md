@@ -3,6 +3,31 @@
 The Roo-authenticated `/api/v1/points/meeting-rooms/` API owns room availability,
 booking confirmation, point debits, owner bookings and cancellations.
 
+## MLAI Chat account API
+
+MLAI Chat clients must use the account-authenticated facade at
+`/api/v1/community-chat/meeting-rooms/`;
+It binds every request to the signed-in Chat account and calls the same
+Roo service, so availability, point debits, idempotency and cancellations have
+one source of truth.
+It does not use Roo API Key. Intended to be used for UIs that are running outside
+of Roo Context.
+
+Todo - I think we need a generalised strategy for agent + api access, rather than a patchwork 
+of adapters. 
+
+| Method | Path | Purpose |
+| --- | --- | --- |
+| `GET` | `rooms/` | List the default active rooms. |
+| `POST` | `availability/` | Check a room for a date or exact interval. |
+| `POST` | `book/` | Confirm an account owner's booking. |
+| `GET` | `my-bookings/` | List the account owner's active future bookings. |
+| `POST` | `cancel/` | Cancel the account owner's booking. |
+
+The facade accepts the same room slug, timestamp, confirmation and expected
+price fields as the Roo API, except it derives the member identity from the
+account session and does not permit administrative target-member bookings.
+
 The default `rooms/` list contains active `small-meeting-room` and
 `big-meeting-room` records only. The distinct `conference-room` resource is
 accessed by an explicit room slug and is never included in the default list.
