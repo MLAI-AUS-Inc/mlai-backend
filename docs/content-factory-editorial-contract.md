@@ -606,13 +606,13 @@ Full and compact article run responses include a bounded `hostedQualityIssues` l
 ## Vibe Marketing response size
 
 The bootstrap defaults to `view=summary` and keeps compact recent runs in
-`latestRuns`; explicit `view=full` retains the complete legacy projection. Its
-capability checks read finite existing GitHub observations without probing,
+`latestRuns`; explicit `view=full` retains the complete legacy projection.
+Capability checks read finite existing GitHub observations without probing,
 minting credentials or acquiring probe leases. A missing observation remains
 unverified; admission and background verification own fresh provider checks.
 Current actor ownership and connection state, generation, repository,
 installation, branch and configuration revision fence cached observations.
-`latestRunsByWorkflow` field is a small index of the newest run per workflow,
+The `latestRunsByWorkflow` field is a small index of the newest run per workflow,
 carrying identifiers, status, approval and publish control state. Clients that
 need the run's result or review artifacts use the individual full run endpoint;
 the index does not repeat those large values. Both bootstrap views read stored
