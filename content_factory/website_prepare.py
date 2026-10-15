@@ -782,9 +782,10 @@ def wake_prepare_after_commit(connection_id):
 def wake_prepare_for_source(connection_id, *, organization_id, owned_merge_run_id=""):
     """Source changes reopen the current operation without granting new consent.
 
-    Stopping preparation keeps its setup pull request publishable, so MLAI's own
-    merge of a current-generation setup also reopens a cancelled preparation to
-    verify that setup. Any other push leaves stopped work stopped.
+    Stopping preparation keeps its setup pull request publishable, so an owned
+    merge of a current-generation setup (MLAI's Publish, or the owner merging
+    that verified pull request on GitHub) also reopens a cancelled preparation
+    to verify that setup. Any other push leaves stopped work stopped.
     """
     from .website_models import WebsiteConnection
     from .models import OrganizationContentConfig
