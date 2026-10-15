@@ -32,8 +32,8 @@ Existing grants and refresh tokens never acquire personal-agent authority.
 Dot-only consent uses the account revocation domain and requires no startup.
 Other explicitly selected MLAI capabilities retain their existing boundaries.
 
-The six added tools are `get_agent_account`, `list_agent_channels`,
-`get_invocation`, `read_invocation_thread`, `reply_to_invocation` and
+The seven added tools are `get_agent_account`, `list_agent_channels`,
+`get_invocation`, `list_pending_invocations`, `read_invocation_thread`, `reply_to_invocation` and
 `get_invocation_status`. The account profile exposes only string fields
 `id`, `name`, `email` and `nickname`, with the opaque installation UUID as `id`
 and `_meta.openai/profile: true`. Use that `id` as `installation_id` and the
@@ -73,8 +73,13 @@ no partial admission or cursor advancement is committed. An epoch reset keeps
 the existing explicit gap and pause/resume recovery behavior.
 
 This is a code-only change: there is no new migration, permission, channel
-scope or historical replay. The existing 15-minute mention lifetime and live
-subscription requirement still apply. Verify a release with a fresh mention
+scope or historical relay replay. With `AGENT_RUNTIME_NATIVE_ALWAYS_ADMIT=false`,
+the existing 15-minute mention lifetime and live subscription requirement still
+apply. With it enabled, eligible owner mentions are admitted without a live
+watch, expire after the configured queue TTL (24 hours by default, capped by
+grant expiry), and wait for the Dot to fetch them. This cannot wake a Dot that
+has no watch; automatic backlog webhook replay is a later, separately gated step.
+Verify a release with a fresh mention
 from a verified device beyond the first 20, without passing an invocation ID
 to the provider manually.
 
@@ -107,7 +112,8 @@ after each stage. Its Compose healthcheck allows a maximum age of 300 seconds.
 Diagnostics contain stage/error type and subscription ID where applicable;
 exception messages and stack locals are omitted to keep work content private.
 
-Invocation lifetime remains 15 minutes. Every thread/reply relay context is
+Invocation lifetime remains 15 minutes with always-admit disabled; the queue TTL
+applies when enabled. Every thread/reply relay context is
 capped at the earlier of invocation expiry or the call's clock plus 840 seconds.
 A queued reply keeps its exact signed event and is never re-signed. The dispatcher
 checks its signed deadline again after source authorization; elapsed windows fail
@@ -121,7 +127,25 @@ connection failures. Application failures return a structured error with status
 `invocation_cancelled`, `invocation_replied`, `invocation_ambiguous`,
 `reply_conflict` and `daily_limit_reached`. An expired mention or quota limit does
 not ask ChatGPT to obtain more OAuth permission. Mention webhook schemas and
-installation payload status values are unchanged.
+installation payload status values are unchanged by those safety fixes.
+
+With always-admit enabled, daily admission and reply caps share the configured
+timezone (Australia/Melbourne by default) and cap (200 by default). Exhaustion
+holds the source cursor and retries on a later accounting day. Temporary source
+problems and quota exhaustion are exposed through additive `delivery.problem`
+fields; an active installation stays mentionable. An expired or unavailable
+unified connection queues with `delivery.needs=reconnect_required`; explicit
+account/password/epoch revocation, grant revoke and disabled native authority
+still prevent admission. A reset records a visible history gap and a new baseline;
+it does not claim to recover messages no longer available from the relay cursor.
+
+`delivery` reports the live pending count, oldest pending timestamp, reconnect
+requirement, source problem and grant expiry. The last 20 `recent_invocations`
+contain IDs and derived queued/sent-to-Dot/fetched/replied/expired/failed states,
+never message text. A successful content fetch is distinct from webhook receipt.
+Refresh or rescan the MLAI connector after deployment to discover the pending
+tool and updated descriptions. Asking for no end date does not itself implement
+the later durable-watch policy or override the provider's ability to stop.
 
 The existing MLAI availability requirements remain in force. A deployment must
 configure the existing public MCP origin and shared Redis and explicitly enable

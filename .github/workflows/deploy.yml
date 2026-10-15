@@ -105,7 +105,7 @@ jobs:
 
     - name: Check personal agent gateway without database access
       # SQL suites skip here; they require the separately reviewed disposable runner.
-      run: python scripts/test_without_database.py agent_runtime.tests.test_core agent_runtime.tests.test_interface agent_runtime.tests.test_event_webhooks agent_runtime.tests.test_dot_protocol agent_runtime.tests.test_native_pilot agent_runtime.tests.test_native_safety agent_runtime.tests.test_model_budget agent_runtime.tests.test_model_proxy agent_runtime.tests.test_model_transport agent_runtime.tests.test_native_database agent_runtime.tests.test_unified_bridge_database
+      run: python scripts/test_without_database.py agent_runtime.tests.test_core agent_runtime.tests.test_interface agent_runtime.tests.test_event_webhooks agent_runtime.tests.test_dot_protocol agent_runtime.tests.test_native_pilot agent_runtime.tests.test_native_safety agent_runtime.tests.test_native_queue agent_runtime.tests.test_model_budget agent_runtime.tests.test_model_proxy agent_runtime.tests.test_model_transport agent_runtime.tests.test_native_database agent_runtime.tests.test_unified_bridge_database
 
     - name: Check inbox account bindings without database access
       run: python scripts/test_without_database.py community_chat.tests.test_inbox_accounts community_chat.tests.test_inbox_erasure integrations.tests_inbox_activity integrations.tests_inbox_targeted_selection integrations.tests_inbox_own_hints integrations.tests_inbox_coverage integrations.tests_read_coverage integrations.tests_inbox_exports integrations.tests_inbox_observations integrations.tests_inbox_mentions integrations.tests_inbox_relay_counts community_chat.tests.test_adapter

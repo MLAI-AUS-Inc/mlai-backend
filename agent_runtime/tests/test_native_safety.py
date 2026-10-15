@@ -319,7 +319,7 @@ class NativeMcpErrorTests(SimpleTestCase):
         for code in ("unified_grant_revoked", "scope_denied"):
             with self.subTest(code=code), self.assertRaises(PermissionDenied):
                 native_agents._api_errors(lambda: (_ for _ in ()).throw(AgentPermissionDenied(code)))()
-        for code in ("invocation_ambiguous", "reply_conflict"):
+        for code in ("invocation_ambiguous", "no_pending_invocation", "reply_conflict"):
             with self.subTest(code=code), self.assertRaises(native_agents.NativeAgentError) as failure:
                 native_agents._api_errors(lambda: (_ for _ in ()).throw(ValidationError("synthetic", code=code)))()
             self.assertEqual(failure.exception.default_code, code)

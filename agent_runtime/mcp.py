@@ -38,7 +38,9 @@ def input_schema(name):
         if name != "get_invocation":
             required.append("invocation_id")
         else:
-            props["invocation_id"]["description"] += " Omit only to resolve the sole live pending owner mention."
+            props["invocation_id"]["description"] += " Omit to resolve the oldest live pending owner mention without a reply row."
+    if name == "list_pending_invocations":
+        props["limit"] = {"type": "integer", "minimum": 1, "maximum": 20, "default": 20}
     if name == "read_invocation_thread":
         props.update({"cursor": {"type": "string", "maxLength": 2048},
                       "limit": {"type": "integer", "minimum": 1, "maximum": 100}})

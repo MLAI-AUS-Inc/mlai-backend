@@ -30,16 +30,16 @@ BOT_KEY = PrivateKey(bytes.fromhex("02" * 32))
 def fixture():
     device = SimpleNamespace(pk=uuid4(), public_key=native_crypto.public_key(OWNER_KEY))
     installation = SimpleNamespace(pk=uuid4(), community_id=COMMUNITY, app_id="openai-dot", name="My Dot",
-        is_active=True, state="active", owner=SimpleNamespace(pk=7, is_active=True),
+        is_active=True, state="active", owner=SimpleNamespace(pk=7, is_active=True, auth_version=1),
         owner_device=device, owner_device_id=device.pk, public_key=native_crypto.public_key(BOT_KEY),
         sealed_signing_key=native_crypto.seal_key(BOT_KEY.secret.hex()))
     grant = SimpleNamespace(pk=uuid4(), installation=installation, installation_id=installation.pk,
         scopes=native_installations.DOT_SCOPES, resources=[RESOURCE], generation=2,
-        expires_at=NOW + timedelta(days=1), revoked_at=None, daily_task_limit=20)
+        expires_at=NOW + timedelta(days=1), revoked_at=None, daily_task_limit=20, created_at=NOW - timedelta(days=1))
     invocation = SimpleNamespace(pk=uuid4(), grant=grant, grant_id=grant.pk,
         installation=installation, installation_id=installation.pk, generation=2, resource=RESOURCE,
         source_event_id="a" * 64, thread_id="b" * 64, owner_public_key=device.public_key,
-        expires_at=NOW + timedelta(minutes=15), status="pending")
+        expires_at=NOW + timedelta(minutes=15), status="pending", created_at=NOW)
     return installation, grant, invocation
 
 
@@ -321,7 +321,9 @@ class NativeDisabledBoundaryTests(SimpleTestCase):
         force_authenticate(request, user=owner)
         with patch("agent_runtime.native_views.AgentInstallation.objects") as rows, patch(
                 "agent_runtime.native_installations.AgentInvocationReply.objects") as replies, patch(
-                "agent_runtime.native_installations.limits", return_value={"personal_limit": 1, "personal_used": 0}):
+                "agent_runtime.native_installations.limits", return_value={"personal_limit": 1, "personal_used": 0}), patch(
+                "agent_runtime.native_delivery.AgentInvocation.objects") as invocations:
+            invocations.filter.return_value.select_related.return_value.order_by.return_value.__getitem__.return_value = []
             rows.filter.return_value.select_related.return_value.order_by.return_value = [revoked]
             replies.filter.return_value.order_by.return_value.first.return_value = None
             response = NativeInstallationsView.as_view()(request)

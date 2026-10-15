@@ -28,6 +28,7 @@ from . import oauth
 from .config import mlai_url
 
 NAMES = {"get_agent_account": "get_profile", "list_agent_channels": "list_channels",
+         "list_pending_invocations": "list_pending_invocations",
          "get_invocation": "get_invocation", "read_invocation_thread": "read_invocation_thread",
          "reply_to_invocation": "reply_to_invocation", "get_invocation_status": "get_invocation_status"}
 TOOL_SCOPES = {name: sorted(DOT_SCOPES) for name in NAMES}
@@ -91,7 +92,7 @@ def _api_errors(operation):
         except ValidationError as exc:
             codes = exc.get_codes()
             code = codes[0] if isinstance(codes, list) and len(codes) == 1 else None
-            if code in {"invocation_ambiguous", "reply_conflict"}:
+            if code in {"invocation_ambiguous", "no_pending_invocation", "reply_conflict"}:
                 raise NativeAgentError(code) from exc
             raise
         except PermissionDenied as exc:
