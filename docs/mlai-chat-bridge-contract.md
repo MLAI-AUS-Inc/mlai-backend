@@ -1744,3 +1744,10 @@ verified key are available. Pending is non-zero only for the current enrollment
 target and excludes cooling or unconsented sources. Other devices see zero
 pending. Only currently verified, non-revoked owner devices enter audiences;
 registration cleanup and consent checks remain mandatory under lock.
+
+Device retirement also sends preserved IM rooms through device-only fan-out.
+A provisioning room must retain its room id and completed history marker to
+qualify. It is repaired even when the surviving target key was already listed,
+and can recover without an enrollment hint. Both modes share the configured
+batch and per-minute cap. First-time provisioning and source-mutable private
+channels continue through normal discovery and source validation.

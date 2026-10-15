@@ -167,7 +167,10 @@ def device_only_candidates(grant, authority, public_key, *, statuses=("live",)):
         room.grant = grant
         kind = conversation_kind(room)
         row = inventory.get(room.slack_conversation_id)
-        if (kind not in dm.DEVICE_ONLY_AUDIENCE_KINDS or public_key in (room.participant_buzz_pubkeys or [])
+        preserved = room.status == "provisioning" and room.history_backfilled_at is not None
+        if (kind not in dm.DEVICE_ONLY_AUDIENCE_KINDS
+                or (room.status == "provisioning" and not preserved)
+                or (room.status == "live" and (not public_key or public_key in (room.participant_buzz_pubkeys or [])))
                 or not dm._history_required_scopes(room.slack_conversation_id, kind=kind).issubset(set(grant.connection.scopes or []))
                 or (hint.get("retry_after") or {}).get(str(room.pk), 0) > now
                 or row is None or not device_only_row_eligible(grant, row)):
@@ -204,9 +207,9 @@ def fan_out_device_audience(grant, authority, *, limit):
     limit = min(limit, fanout_batch())
     hint = (grant.connection.sync_cursor or {}).get(DEVICE_AUDIENCE_HINT) or {}
     key = str(hint.get("public_key") or "")
-    if not key or limit <= 0:
+    if limit <= 0:
         return 0
-    if dm._active_verified_device(grant.user_id, key) is None:
+    if key and dm._active_verified_device(grant.user_id, key) is None:
         _update_device_hint(authority, key)
         return 0
     now = timezone.now().timestamp()
@@ -217,10 +220,11 @@ def fan_out_device_audience(grant, authority, *, limit):
         return 0
     repaired = 0
     try:
-        for room in device_only_candidates(grant, authority, key)[:limit]:
+        statuses = ("live", "provisioning") if key else ("provisioning",)
+        for room in device_only_candidates(grant, authority, key, statuses=statuses)[:limit]:
             room.grant = grant
             try:
-                dm._provision_owner_conversation(room, required_owner_public_key=key, device_only_statuses=frozenset({"live"}))
+                dm._provision_owner_conversation(room, required_owner_public_key=key or None, device_only_statuses=frozenset({"live", "provisioning"}))
                 repaired += 1
             except dm.SlackDmDeviceOnlyIneligible:
                 continue
@@ -252,6 +256,8 @@ def device_audience_summary(grant, public_key):
     hint = (grant.connection.sync_cursor or {}).get(DEVICE_AUDIENCE_HINT) or {}
     if hint.get("public_key") != public_key:
         return {"pending": 0, "total": query.count()}
+    query = grant.conversations.filter(mlai_channel_id__isnull=False).filter(
+        Q(status="live") | Q(status="provisioning", history_backfilled_at__isnull=False))
     now = timezone.now().timestamp()
     rooms = []
     for room in recent_conversations(query, include_owner_inventory=True):
@@ -263,7 +269,7 @@ def device_audience_summary(grant, public_key):
                 or (hint.get("retry_after") or {}).get(str(room.pk), 0) > now):
             continue
         rooms.append(room)
-    return {"pending": sum(public_key not in (room.participant_buzz_pubkeys or []) for room in rooms), "total": len(rooms)}
+    return {"pending": sum(room.status == "provisioning" or public_key not in (room.participant_buzz_pubkeys or []) for room in rooms), "total": len(rooms)}
 
 
 def recover_recent_conversation(grant, authority, *, profile_cache, cycle_started_at):

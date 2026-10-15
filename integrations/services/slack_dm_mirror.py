@@ -4958,7 +4958,8 @@ def _prepare_owner_conversation_locked(
         )
     if device_only_statuses is not None and (
             conversation.status not in device_only_statuses or not conversation.mlai_channel_id
-            or conversation_kind(conversation) not in DEVICE_ONLY_AUDIENCE_KINDS):
+            or conversation_kind(conversation) not in DEVICE_ONLY_AUDIENCE_KINDS
+            or (conversation.status == "provisioning" and conversation.history_backfilled_at is None)):
         raise SlackDmDeviceOnlyIneligible("The private room no longer qualifies for a device-only update.")
     if grant.slack_user_id not in participant_ids or (
         not is_private_channel and not 2 <= len(participant_ids) <= 9

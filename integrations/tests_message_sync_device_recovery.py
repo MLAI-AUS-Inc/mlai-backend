@@ -658,3 +658,61 @@ class DeviceAudienceFanoutTests(SlackDmIoAuthorityFixture, TransactionTestCase):
         self.assertEqual(errored.status, 'error')
         self.connection.refresh_from_db()
         self.assertIn(str(errored.pk), self.connection.sync_cursor[DEVICE_AUDIENCE_HINT]['retry_after'])
+
+
+@override_settings(MESSAGE_SYNC_ENABLED=True, MESSAGE_SYNC_STABLE_PRIVATE_ROOMS=True, MESSAGE_SYNC_DEVICE_FANOUT_BATCH=10,
+                   SLACK_DM_MIRROR_SHADOW_SECRET='synthetic-enrollment-recovery')
+class PreservedImRetirementFanoutTests(DeviceAudienceFanoutTests):
+    def retire_old_device(self, *, hint=True):
+        from community_chat.device_revocation import revoke_device_authority
+        old = CommunityChatDevice.objects.get(user=self.user, public_key=self.owner_key)
+        revoke_device_authority(self.user, device_id=old.pk, public_key=self.owner_key, reason='test')
+        # discover_conversations repairs a revoked attribution before fan-out.
+        dm.ensure_owner_identity(self.grant, authenticated_public_key=self.new_key)
+        if not hint:
+            self.connection.refresh_from_db()
+            self.connection.sync_cursor.pop(DEVICE_AUDIENCE_HINT, None)
+            self.connection.save()
+        for room in self.rooms:
+            room.refresh_from_db()
+            self.assertEqual(room.status, 'provisioning')
+            self.assertIsNotNone(room.mlai_channel_id)
+            self.assertIsNotNone(room.history_backfilled_at)
+
+    def assert_retirement_repaired(self, *, hint):
+        self.retire_old_device(hint=hint)
+        def provision(*args, **kwargs):
+            return {'channel_id': kwargs['private_audience']['channel_id']}
+        with patch.object(dm, '_call_slack_with_grant_authority') as source, patch.object(dm.BuzzBridgeClient, 'private_delivery_receipts', return_value={}), patch.object(dm.BuzzBridgeClient, 'unregister_private_conversation'), patch.object(dm.BuzzBridgeClient, 'provision_private_conversation', side_effect=provision):
+            self.assertEqual(self.fanout(), 3)
+        source.assert_not_called()
+        for room in self.rooms:
+            room.refresh_from_db()
+            self.assertEqual(room.status, 'live')
+            self.assertNotIn(self.owner_key, room.participant_buzz_pubkeys)
+            self.assertIn(self.new_key, room.participant_buzz_pubkeys)
+
+    def test_revocation_repairs_preserved_ims_without_slack_with_or_without_hint(self):
+        self.assert_retirement_repaired(hint=False)
+
+    def test_revocation_hint_repairs_preserved_ims_without_slack(self):
+        self.assert_retirement_repaired(hint=True)
+
+    def test_preserved_room_already_listing_target_still_requires_repair(self):
+        from integrations.services.message_sync.device_recovery import device_only_candidates, device_audience_summary
+        for room in self.rooms:
+            room.status = 'provisioning'
+            room.participant_buzz_pubkeys.append(self.new_key)
+            room.save()
+        authority = dm._capture_slack_grant_api_authority(self.grant)
+        self.assertEqual(len(device_only_candidates(self.grant, authority, self.new_key, statuses=('live', 'provisioning'))), 3)
+        self.assertEqual(device_audience_summary(self.grant, self.new_key), {'pending': 3, 'total': 3})
+        self.rooms[0].history_backfilled_at = None
+        self.rooms[0].save()
+        self.assertEqual(len(device_only_candidates(self.grant, authority, self.new_key, statuses=('live', 'provisioning'))), 2)
+
+    def test_pending_registration_cleanup_blocks_fanout(self):
+        self.retire_old_device()
+        with patch.object(dm, '_reconcile_registration_cleanup'), patch.object(dm.BuzzBridgeClient, 'provision_private_conversation') as provision:
+            self.assertEqual(self.fanout(), 0)
+        provision.assert_not_called()
