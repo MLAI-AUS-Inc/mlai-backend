@@ -56,6 +56,23 @@ def _pull_from_selected_repository(website, head, base):
         for side in (head, base))
 
 
+def _owner_merge_vouch(website, run):
+    """The pull request number and previewed head an open, exactly verified setup vouches for."""
+    from .vibe_marketing_views import _pull_request_number_from_run
+    from .website_connections import _verified_setup_run_base, scoped_run_contract, setup_pr_open
+    from .website_contract import SHA_PATTERN, connection_contract
+    saved = connection_contract(scoped_run_contract(run))
+    head_sha = str(run.result.get("branch_commit_sha") or "") if isinstance(run.result, dict) else ""
+    number = _pull_request_number_from_run(run) if setup_pr_open(run) else None
+    eligible = bool(number and number > 0 and SHA_PATTERN.fullmatch(head_sha)
+        and saved.get("website_connection_id") == str(website.pk)
+        and saved.get("connection_generation") == website.generation
+        and saved.get("repository_id") == website.repository_id
+        and str(run.github_repo or "").casefold() == website.github_repo.casefold()
+        and _verified_setup_run_base(run, head_sha, website))
+    return (number, head_sha) if eligible else None
+
+
 def _owner_merge_setup_candidates(website, rows):
     """Approved setups whose own verified pull request MLAI has not merged.
 
@@ -63,22 +80,12 @@ def _owner_merge_setup_candidates(website, rows):
     owner may merge it on GitHub instead of with Publish. No merge intent exists
     then, so only the setup's exact preview proof can vouch for its head.
     """
-    from .vibe_marketing_views import _pull_request_number_from_run
-    from .website_connections import _verified_setup_run_base, scoped_run_contract, setup_pr_open
-    from .website_contract import SHA_PATTERN, WebsiteAuthorityError, connection_contract
+    from .website_contract import WebsiteAuthorityError
     found = []
     for run in rows.filter(workflow="article_system_setup", status="completed",
             approval_state="approved").order_by("-updated_at")[:10]:
         try:
-            saved = connection_contract(scoped_run_contract(run))
-            head_sha = str(run.result.get("branch_commit_sha") or "") if isinstance(run.result, dict) else ""
-            number = _pull_request_number_from_run(run) if setup_pr_open(run) else None
-            eligible = bool(number and number > 0 and SHA_PATTERN.fullmatch(head_sha)
-                and saved.get("website_connection_id") == str(website.pk)
-                and saved.get("connection_generation") == website.generation
-                and saved.get("repository_id") == website.repository_id
-                and str(run.github_repo or "").casefold() == website.github_repo.casefold()
-                and _verified_setup_run_base(run, head_sha, website))
+            vouch = _owner_merge_vouch(website, run)
         except WebsiteAuthorityError:
             continue
         except Exception as exc:
@@ -87,9 +94,19 @@ def _owner_merge_setup_candidates(website, rows):
             logger.warning("website_owner_setup_merge_unreadable connection=%s run_id=%s error_type=%s",
                 website.pk, run.run_id, type(exc).__name__)
             continue
-        if eligible:
-            found.append((run, number, head_sha))
+        if vouch:
+            found.append((run, *vouch))
     return found
+
+
+def _github_merged_at(pull):
+    """GitHub's aware merge time for a merged pull request, or "" when unusable."""
+    from django.utils.dateparse import parse_datetime
+    try:
+        merged_at = parse_datetime(pull["merged_at"]) if isinstance(pull.get("merged_at"), str) else None
+    except ValueError:
+        merged_at = None
+    return merged_at.isoformat() if merged_at and merged_at.tzinfo else ""
 
 
 def _setup_pull_merged_as(website, pull, *, number, head_sha, source_sha):
@@ -123,6 +140,7 @@ def _find_owner_merged_setup(website, rows, source_sha, identity):
     the setup previewed, and source_sha must have that head's tree. The new
     source is then exactly what was verified, whichever merge method was used.
     Unavailable or ambiguous evidence remains an external source change.
+    A match carries that evidence for record_owner_setup_merge.
     """
     from .website_connections import authority_guard, require_unlocked_remote_call
     from integrations import http_client
@@ -157,11 +175,13 @@ def _find_owner_merged_setup(website, rows, source_sha, identity):
                     logger.info("website_owner_setup_merge_changed connection=%s run_id=%s pr_number=%s source_sha=%s",
                         website.pk, run.run_id, number, source_sha)
                     continue
+                evidence = {"pr_number": number, "head_sha": head_sha, "merge_commit_sha": source_sha,
+                    "merged_at": _github_merged_at(pull), "request_digest": evidence_digest(run.run_request or {})}
                 with authority_guard(binding, action="read") as current:
                     if _merge_connection_identity(current) == identity:
                         logger.info("website_owner_setup_merge_matched connection=%s run_id=%s pr_number=%s source_sha=%s",
                             website.pk, run.run_id, number, source_sha)
-                        return {"run_id": run.run_id, "connection_identity": identity}
+                        return {"run_id": run.run_id, "connection_identity": identity, "owner_merge": evidence}
             except Exception as exc:
                 logger.warning("website_owner_setup_merge_unverified connection=%s run_id=%s error_type=%s",
                     website.pk, run.run_id, type(exc).__name__)
@@ -237,6 +257,74 @@ def _find_owned_merge(website, organization_id, source_sha):
     return _find_owner_merged_setup(website, rows, source_sha, identity)
 
 
+OWNER_SETUP_MERGE_SOURCE = "github_owner_merge"
+
+
+def _owner_merge_recordable(website, run, evidence):
+    """The run still vouches for the matched merge and records no merge commit.
+
+    It is either still the open setup whose exact proof vouched for the match,
+    or the same setup since marked merged without a commit. A recorded merge
+    commit is never replaced.
+    """
+    from .vibe_marketing_views import _pull_request_number_from_run
+    result = run.result if isinstance(run.result, dict) else {}
+    setup = result.get("article_system_setup") if isinstance(result.get("article_system_setup"), dict) else {}
+    response = result.get("merge_response") if isinstance(result.get("merge_response"), dict) else {}
+    if result.get("merge_sha") or setup.get("merge_sha") or response.get("sha"):
+        return False
+    number, head_sha = evidence["pr_number"], evidence["head_sha"]
+    if "merged" not in {result.get("merge_status"), setup.get("merge_status")}:
+        return _owner_merge_vouch(website, run) == (number, head_sha)
+    return bool(run.status == "completed" and run.approval_state == "approved"
+        and setup.get("setup_run_id") == run.run_id
+        and str(run.github_repo or "").casefold() == website.github_repo.casefold()
+        and evidence_digest(run.run_request or {}) == evidence["request_digest"]
+        and _pull_request_number_from_run(run) == number
+        and result.get("branch_commit_sha") == head_sha and setup.get("branch_commit_sha") == head_sha)
+
+
+def record_owner_setup_merge(website, owned_merge):
+    """Save the owner's tree-verified GitHub merge as its setup run's own merge.
+
+    Callers hold the organization and connection locks and have rechecked the
+    connection identity. Only _find_owner_merged_setup's match carries this
+    evidence; a recorded merge or a publish intent already has its own. The
+    run is locked before the saved pending setup, as MLAI's own merge does.
+    Settle and CI-lineage checks then accept it like MLAI's Publish merge,
+    while goal evidence still needs a publish intent to call it a backend
+    merge. Recording never fails the push: a refusal leaves the run as it was.
+    """
+    from workflow_runs.models import ContentFactoryRun
+    from .vibe_marketing_views import _mark_pending_article_system_setup_merged, _save_setup_merge_result
+    evidence = (owned_merge or {}).get("owner_merge")
+    if not isinstance(evidence, dict):
+        return False
+    run_id, source_sha = owned_merge.get("run_id"), evidence.get("merge_commit_sha")
+    try:
+        with transaction.atomic():
+            run = ContentFactoryRun.objects.select_for_update().filter(run_id=run_id,
+                organization_id=website.organization_id, workflow="article_system_setup",
+                run_request__website_connection_id=str(website.pk),
+                run_request__connection_generation=website.generation).first()
+            if run is None or not _owner_merge_recordable(website, run, evidence):
+                logger.info("website_owner_setup_merge_unrecorded connection=%s run_id=%s source_sha=%s reason=run_changed",
+                    website.pk, run_id, source_sha)
+                return False
+            config = OrganizationContentConfig.objects.select_for_update().filter(website_connection=website).first()
+            _save_setup_merge_result(run, checks_status="merged", merged_at=evidence["merged_at"] or None,
+                merge_response={"source": OWNER_SETUP_MERGE_SOURCE, "sha": source_sha, "pull": {
+                    "number": evidence["pr_number"], "merge_commit_sha": source_sha, "head_sha": evidence["head_sha"]}})
+            _mark_pending_article_system_setup_merged(config, run=run, result=run.result)
+    except Exception as exc:
+        logger.warning("website_owner_setup_merge_unrecorded connection=%s run_id=%s source_sha=%s error_type=%s",
+            website.pk, run_id, source_sha, type(exc).__name__)
+        return False
+    logger.info("website_owner_setup_merge_recorded connection=%s run_id=%s pr_number=%s source_sha=%s",
+        website.pk, run_id, evidence["pr_number"], source_sha)
+    return True
+
+
 def revoke_installation(installation_id, *, repository_ids=None, reason="github_authorization_revoked"):
     """Revoke exact GitHub identities; an install/reinstall event never reconnects."""
     rows = OrganizationContentConfig.objects.filter(website_connection__installation_id=str(installation_id),
@@ -290,6 +378,8 @@ def handle_website_github_event(event_type, payload):
                     continue
                 if owned_merge and owned_merge["connection_identity"] != _merge_connection_identity(website):
                     owned_merge = None
+                if owned_merge:
+                    record_owner_setup_merge(website, owned_merge)
                 _, created = WebsiteScanSnapshot.objects.get_or_create(connection=website, generation=website.generation,
                     run_id=f"github-head:{source_sha}", fingerprint=evidence_digest({"source_sha": source_sha}),
                     defaults={"source_sha": source_sha, "detector_version": "github_head", "evidence": {"source": "github_push", "branch": website.branch}})
@@ -995,6 +1085,7 @@ def _process_source_reverification(identifier, now):
                         raise WebsiteAuthorityError("website_operation_cancelled", "The source verification operation changed.")
                     op.payload = updated_payload
                     scan_required = False
+                    record_owner_setup_merge(current, owned_merge)
         if scan_required and not receipt.get("scan_run_id"):
             require_unlocked_remote_call()
             remote = _content_factory_remote_config()

@@ -5952,6 +5952,18 @@ def _maybe_verify_merged_setup_for_blocked_articles(*, run, context, force=False
 @guarded_setup_merge_observation
 def _apply_setup_merge_result(*, run, context, checks_status="success", merge_response=None):
     config = _get_config(context.organization)
+    _save_setup_merge_result(run, checks_status=checks_status, merge_response=merge_response)
+    _mark_pending_article_system_setup_merged(config, run=run, result=run.result)
+    return run
+
+
+def _save_setup_merge_result(run, *, checks_status, merge_response=None, merged_at=None):
+    """Save a setup run's merge receipt. Callers authenticate the merge first.
+
+    MLAI's own Publish and GitHub observations record through the guarded
+    _apply_setup_merge_result. The owner's tree-verified GitHub merge records
+    under the push webhook's connection lock (website_reconciliation).
+    """
     result = dict(run.result or {})
     setup = dict(result.get("article_system_setup") or {})
     pr_url = _pull_request_url_from_run(run)
@@ -5964,7 +5976,7 @@ def _apply_setup_merge_result(*, run, context, checks_status="success", merge_re
         result["pr_number"] = pr_number
         setup["pr_number"] = pr_number
         setup["prNumber"] = pr_number
-    merged_at = timezone.now().isoformat()
+    merged_at = merged_at or timezone.now().isoformat()
     result["status"] = "merged"
     result["setup_status"] = "merged"
     result["setupStatus"] = "merged"
@@ -5999,7 +6011,6 @@ def _apply_setup_merge_result(*, run, context, checks_status="success", merge_re
     run.current_step = "merged"
     run.approval_state = ContentFactoryApprovalState.APPROVED
     run.save(update_fields=["status", "current_step", "approval_state", "result", "updated_at"])
-    _mark_pending_article_system_setup_merged(config, run=run, result=result)
     return run
 
 
