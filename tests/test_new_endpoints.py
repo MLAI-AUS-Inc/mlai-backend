@@ -736,7 +736,7 @@ class ContentGenerateAutoWriteTests(TestCase):
         payload = mock_post.call_args.kwargs.get('json') or {}
         self.assertEqual(payload.get('delivery_mode'), 'content_only')
         self.assertTrue(payload.get('delivery_mode_confirmed'))
-        self.assertIsNone(payload.get('github_repo'))
+        self.assertEqual(payload.get('github_repo'), '')
 
     @patch('content_factory.content_views.trigger_article_generation')
     def test_generate_passes_slack_thread_context_to_service(self, mock_trigger):

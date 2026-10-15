@@ -89,6 +89,16 @@ remain unchanged, tests explicit keyed rejection separately from ambiguous HTTP
 refusal, and runs the complete callback/SQLite-lock suite in the existing SQLite
 lane. All 490 modules remain fully assigned. Later-head CI is still pending.
 
+At 4b2c1e47 the restored PostgreSQL lane ran 1,701 tests with 78 failures and
+40 errors. Reconciliation, purchase-policy and most closed-app/provider fixtures
+now pass. The next article-service repair seeds real owner/site/target/live
+records and original source-run consent, with GitHub transport stubs only.
+Delegated requesters use an actual internal alias of the same founder; an
+unowned alias must fail before HTTP or billing. Research checks retain the
+current four-topic charge, portable delivery requires explicit consent, and
+the reuse check now starts the first run through the real service before retry.
+No admission or ownership controller was replaced by a permissive mock.
+
 D2 remains incomplete until automatic stale-proposal rebuilding and article
 strategy escalation are implemented and tested. Refreshes must
 use a fresh owned branch/current base, preserve deterministic consent only and

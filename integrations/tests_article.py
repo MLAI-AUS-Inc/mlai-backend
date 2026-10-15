@@ -7,6 +7,7 @@ import requests
 
 from content_factory.article_system import resolve_article_system_with_source
 from content_factory.models import ContentFactoryJob, OrganizationContentConfig
+from founder_tools.models import VibeRaisingCompany, VibeRaisingProfile
 from core.models import User
 from organizations.models import Organization
 from workflow_runs.models import ContentFactoryRun
@@ -26,6 +27,7 @@ from integrations.services.article_generation import (
     trigger_article_generation,
 )
 from roo.models import PointsAccount
+from tests.website_fixtures import bind_verified_target_fixture, install_github_provider_fixture
 
 
 class ArticleGenerationServiceTest(TestCase):
@@ -40,6 +42,7 @@ class ArticleGenerationServiceTest(TestCase):
             first_name="Test",
             last_name="Writer",
         )
+        self.requester_actor_id = f"mlai_user:{self.user.pk}"
         PointsAccount.objects.create(user=self.user, balance=20)
 
         self.integration = UserIntegration.objects.create(
@@ -68,6 +71,26 @@ class ArticleGenerationServiceTest(TestCase):
                 "verified_at": "2026-03-08T00:00:00+00:00",
             },
         )
+        self.profile = VibeRaisingProfile.objects.create(user=self.user, role='founder')
+        self._own_verified_website(self.config)
+        install_github_provider_fixture(self, self.config.website_connection)
+
+    def _own_verified_website(self, config):
+        company = VibeRaisingCompany.objects.create(profile=self.profile,
+            organization=config.organization, name=config.organization.name,
+            domain=config.organization.domain)
+        if not self.profile.active_company_id:
+            self.profile.active_company = company
+            self.profile.save(update_fields=['active_company'])
+        return bind_verified_target_fixture(config, user=self.user)
+
+    def _source_job(self, **fields):
+        metadata = dict(fields.pop('request_meta', {}) or {})
+        if not (metadata.get('delivery_mode') == 'content_only' and metadata.get('delivery_mode_confirmed') is True):
+            from content_factory.website_connections import contract_for
+            metadata = {**contract_for(self.config.website_connection),
+                        'expected_source_sha': self.config.website_connection.verified_sha, **metadata}
+        return ContentFactoryJob.objects.create(**fields, request_meta=metadata)
 
     def _article_request(self, **overrides):
         request = {
@@ -134,7 +157,7 @@ class ArticleGenerationServiceTest(TestCase):
         mock_response.json.return_value = {"job_id": "job_delegated_123", "status": "queued"}
         mock_post.return_value = mock_response
 
-        article_request = self._article_request(requested_by_slack_user_id="U_REQUESTER")
+        article_request = self._article_request(requested_by_slack_user_id=self.requester_actor_id)
 
         with self.settings(CONTENT_FACTORY_API_KEY="test-key"):
             result = trigger_article_generation(self.slack_user_id, article_request)
@@ -142,10 +165,10 @@ class ArticleGenerationServiceTest(TestCase):
         self.assertEqual(result["job_id"], "job_delegated_123")
         payload = mock_post.call_args.kwargs["json"]
         self.assertEqual(payload["slack_user_id"], self.slack_user_id)
-        self.assertEqual(payload["requested_by_slack_user_id"], "U_REQUESTER")
+        self.assertEqual(payload["requested_by_slack_user_id"], self.requester_actor_id)
 
         job = ContentFactoryJob.objects.get(job_id="job_delegated_123")
-        self.assertEqual(job.request_meta["requested_by_slack_user_id"], "U_REQUESTER")
+        self.assertEqual(job.request_meta["requested_by_slack_user_id"], self.requester_actor_id)
 
     @patch("integrations.services.article_generation.http_requests.post")
     def test_trigger_generation_payload_includes_resolved_author(self, mock_post):
@@ -205,7 +228,7 @@ class ArticleGenerationServiceTest(TestCase):
     @patch("integrations.services.article_generation.http_requests.post")
     def test_trigger_generation_paid_domain_charges_six_points(self, mock_post):
         paid_org = Organization.objects.create(domain="example.com", name="Paid Org")
-        OrganizationContentConfig.objects.create(
+        paid_config = OrganizationContentConfig.objects.create(
             organization=paid_org,
             github_repo=self.repo_name,
             article_template="## Template Content",
@@ -220,6 +243,7 @@ class ArticleGenerationServiceTest(TestCase):
                 "source": "test",
             },
         )
+        self._own_verified_website(paid_config)
         mock_response = MagicMock()
         mock_response.status_code = 200
         mock_response.json.return_value = {"job_id": "job_paid_123", "status": "queued"}
@@ -242,7 +266,7 @@ class ArticleGenerationServiceTest(TestCase):
         self.assertEqual(self.user.points_account.balance, 14)
 
     @patch("integrations.services.article_generation.http_requests.post")
-    def test_trigger_discovery_requires_six_points_without_spending(self, mock_post):
+    def test_trigger_discovery_charges_for_four_requested_topics(self, mock_post):
         paid_org = Organization.objects.create(domain="example.com", name="Paid Org")
         OrganizationContentConfig.objects.create(
             organization=paid_org,
@@ -268,20 +292,20 @@ class ArticleGenerationServiceTest(TestCase):
 
         self.assertEqual(result["job_id"], "job_discovery_paid_123")
         payload = mock_post.call_args.kwargs["json"]
-        self.assertEqual(payload["roo_points_cost"], 0)
-        self.assertEqual(payload["roo_points_required"], 6)
-        self.assertEqual(payload["roo_points_balance"], 6)
+        self.assertEqual(payload["roo_points_cost"], 4)
+        self.assertEqual(payload["roo_points_required"], 4)
+        self.assertEqual(payload["roo_points_balance"], 2)
         job = ContentFactoryJob.objects.get(job_id="job_discovery_paid_123")
-        self.assertEqual(job.billing_status, "deferred")
-        self.assertEqual(job.billing_amount, 0)
+        self.assertEqual(job.billing_status, "charged")
+        self.assertEqual(job.billing_amount, 4)
         self.user.points_account.refresh_from_db()
-        self.assertEqual(self.user.points_account.balance, 6)
+        self.assertEqual(self.user.points_account.balance, 2)
 
     @patch("integrations.services.article_generation.http_requests.post")
-    def test_trigger_discovery_rejects_when_balance_below_six(self, mock_post):
+    def test_trigger_discovery_rejects_balance_below_four_topic_quote(self, mock_post):
         paid_org = Organization.objects.create(domain="example.com", name="Paid Org")
         OrganizationContentConfig.objects.create(organization=paid_org, github_repo=self.repo_name)
-        self.user.points_account.balance = 5
+        self.user.points_account.balance = 3
         self.user.points_account.save(update_fields=["balance"])
 
         article_request = self._article_request(
@@ -296,8 +320,8 @@ class ArticleGenerationServiceTest(TestCase):
                 trigger_article_generation(self.slack_user_id, article_request)
 
         self.assertEqual(exc.exception.payload["error_code"], "INSUFFICIENT_ROO_POINTS")
-        self.assertEqual(exc.exception.payload["required_points"], 6)
-        self.assertEqual(exc.exception.payload["current_balance"], 5)
+        self.assertEqual(exc.exception.payload["required_points"], 4)
+        self.assertEqual(exc.exception.payload["current_balance"], 3)
         mock_post.assert_not_called()
 
     @patch("integrations.services.article_generation.http_requests.post")
@@ -373,7 +397,7 @@ class ArticleGenerationServiceTest(TestCase):
                 domain="mlai.au",
                 confirmed_keyword="agentic ai",
                 slack_user_id=self.slack_user_id,
-                requested_by_slack_user_id="U_REQUESTER",
+                requested_by_slack_user_id=self.requester_actor_id,
                 custom_title="Agentic AI",
                 request_source="roo_slackbot",
             )
@@ -381,17 +405,17 @@ class ArticleGenerationServiceTest(TestCase):
         self.assertEqual(result["job_id"], "job_confirm_delegated_123")
         payload = mock_post.call_args.kwargs["json"]
         self.assertEqual(payload["slack_user_id"], self.slack_user_id)
-        self.assertEqual(payload["requested_by_slack_user_id"], "U_REQUESTER")
+        self.assertEqual(payload["requested_by_slack_user_id"], self.requester_actor_id)
 
     @patch("integrations.services.article_generation.http_requests.post")
     def test_confirm_topic_reuses_existing_non_terminal_child_without_post(self, mock_post):
-        source_job = ContentFactoryJob.objects.create(
+        source_job = self._source_job(
             job_id="job-source-active-123",
             domain="mlai.au",
             slack_user_id=self.slack_user_id,
             status="awaiting_confirmation",
         )
-        child_job = ContentFactoryJob.objects.create(
+        child_job = self._source_job(
             job_id="job-child-active-123",
             domain="mlai.au",
             slack_user_id=self.slack_user_id,
@@ -434,6 +458,8 @@ class ArticleGenerationServiceTest(TestCase):
 
     @patch("integrations.services.article_generation.http_requests.post")
     def test_publish_article(self, mock_post):
+        self._source_job(job_id="job_123", domain="mlai.au", slack_user_id=self.slack_user_id,
+                         status="awaiting_approval")
         mock_response = MagicMock()
         mock_response.status_code = 200
         mock_response.json.return_value = {
@@ -454,7 +480,7 @@ class ArticleGenerationServiceTest(TestCase):
 
     @patch("integrations.services.article_generation.http_requests.post")
     def test_promote_article_bundle_copies_thread_context_to_child_job(self, mock_post):
-        ContentFactoryJob.objects.create(
+        self._source_job(
             job_id="job_content_ready",
             domain="mlai.au",
             slack_user_id=self.slack_user_id,
@@ -462,7 +488,7 @@ class ArticleGenerationServiceTest(TestCase):
             slack_channel_id="C123",
             slack_thread_ts="123.456",
             slack_root_message_ts="123.456",
-            request_meta={"requested_by_slack_user_id": "U_REQUESTER"},
+            request_meta={"requested_by_slack_user_id": self.requester_actor_id},
         )
 
         mock_response = MagicMock()
@@ -487,7 +513,7 @@ class ArticleGenerationServiceTest(TestCase):
         self.assertEqual(child_job.slack_root_message_ts, "123.456")
         self.assertEqual(child_job.request_meta["source_run_id"], "job_content_ready")
         self.assertEqual(child_job.request_meta["promotion_source"], "promote_bundle")
-        self.assertEqual(child_job.request_meta["requested_by_slack_user_id"], "U_REQUESTER")
+        self.assertEqual(child_job.request_meta["requested_by_slack_user_id"], self.requester_actor_id)
 
     @patch("integrations.services.article_generation.promote_article_bundle")
     def test_publish_article_as_pr_delegates_to_promote_bundle(self, mock_promote_article_bundle):
@@ -499,7 +525,7 @@ class ArticleGenerationServiceTest(TestCase):
         result = publish_article_as_pr(
             "job_content_ready",
             slack_user_id=self.slack_user_id,
-            requested_by_slack_user_id="U_REQUESTER",
+            requested_by_slack_user_id=self.requester_actor_id,
             domain="mlai.au",
             slack_channel_id="C123",
             slack_thread_ts="123.456",
@@ -509,7 +535,7 @@ class ArticleGenerationServiceTest(TestCase):
         mock_promote_article_bundle.assert_called_once_with(
             "job_content_ready",
             slack_user_id=self.slack_user_id,
-            requested_by_slack_user_id="U_REQUESTER",
+            requested_by_slack_user_id=self.requester_actor_id,
             domain="mlai.au",
             slack_channel_id="C123",
             slack_thread_ts="123.456",
@@ -548,7 +574,7 @@ class ArticleGenerationServiceTest(TestCase):
 
     @patch("integrations.services.article_generation.http_requests.post")
     def test_promote_article_bundle_raises_structured_auth_required_on_content_factory_412(self, mock_post):
-        ContentFactoryJob.objects.create(
+        self._source_job(
             job_id="job_content_ready_auth",
             domain="mlai.au",
             slack_user_id=self.slack_user_id,
@@ -644,7 +670,7 @@ class ArticleGenerationServiceTest(TestCase):
                 "/api/v1/content/generate",
                 data={
                     "slack_user_id": self.slack_user_id,
-                    "requested_by_slack_user_id": "U_REQUESTER",
+                    "requested_by_slack_user_id": self.requester_actor_id,
                     "domain": "mlai.au",
                     "topic": "AI Agents",
                     "target_keyword": "agentic ai",
@@ -656,7 +682,7 @@ class ArticleGenerationServiceTest(TestCase):
 
         self.assertEqual(response.status_code, 412)
         payload = response.json()
-        self.assertEqual(payload["requested_by_slack_user_id"], "U_REQUESTER")
+        self.assertEqual(payload["requested_by_slack_user_id"], self.requester_actor_id)
         self.assertFalse(payload["pending_intent_stored"])
 
     @patch("integrations.services.article_generation.http_requests.post")
@@ -679,7 +705,7 @@ class ArticleGenerationServiceTest(TestCase):
         self.assertIsNone(payload.get("delivery_mode_confirmed"))
 
     @patch("integrations.services.article_generation.http_requests.post")
-    def test_trigger_generation_uses_saved_article_delivery_mode_without_repo(self, mock_post):
+    def test_trigger_generation_explicitly_confirms_portable_mode_without_repo(self, mock_post):
         self.config.github_repo = ""
         self.config.article_delivery_mode = "content_only"
         self.config.save(update_fields=["github_repo", "article_delivery_mode"])
@@ -689,14 +715,14 @@ class ArticleGenerationServiceTest(TestCase):
         mock_response.json.return_value = {"job_id": "job_saved_content_only_123", "status": "queued"}
         mock_post.return_value = mock_response
 
-        article_request = self._article_request()
+        article_request = self._article_request(delivery_mode="content_only", delivery_mode_confirmed=True)
         result = trigger_article_generation(self.slack_user_id, article_request)
 
         self.assertEqual(result["job_id"], "job_saved_content_only_123")
         payload = mock_post.call_args.kwargs["json"]
         self.assertEqual(payload["delivery_mode"], "content_only")
-        self.assertFalse(payload["delivery_mode_confirmed"])
-        self.assertIsNone(payload.get("github_repo"))
+        self.assertTrue(payload["delivery_mode_confirmed"])
+        self.assertEqual(payload.get("github_repo"), "")
 
     @patch("integrations.services.article_generation.http_requests.post")
     def test_trigger_generation_allows_repo_less_domain_without_scan_summary(self, mock_post):
@@ -718,13 +744,14 @@ class ArticleGenerationServiceTest(TestCase):
         mock_response.json.return_value = {"job_id": "job_repo_less_direct_123", "status": "queued"}
         mock_post.return_value = mock_response
 
-        result = trigger_article_generation(self.slack_user_id, self._article_request())
+        result = trigger_article_generation(self.slack_user_id,
+            self._article_request(delivery_mode="content_only", delivery_mode_confirmed=True))
 
         self.assertEqual(result["job_id"], "job_repo_less_direct_123")
         payload = mock_post.call_args.kwargs["json"]
         self.assertEqual(payload["delivery_mode"], "content_only")
-        self.assertFalse(payload["delivery_mode_confirmed"])
-        self.assertIsNone(payload.get("github_repo"))
+        self.assertTrue(payload["delivery_mode_confirmed"])
+        self.assertEqual(payload.get("github_repo"), "")
 
     @patch("integrations.services.article_generation.http_requests.post")
     def test_trigger_discovery_allows_repo_less_domain_without_scan_summary(self, mock_post):
@@ -778,7 +805,7 @@ class ArticleGenerationServiceTest(TestCase):
 
     @patch("integrations.services.article_generation.http_requests.post")
     def test_confirm_topic_reuses_saved_delivery_mode_from_source_job(self, mock_post):
-        source_job = ContentFactoryJob.objects.create(
+        source_job = self._source_job(
             job_id="job-source-123",
             domain="mlai.au",
             slack_user_id=self.slack_user_id,
@@ -869,22 +896,27 @@ class ArticleGenerationServiceTest(TestCase):
 
     @patch("integrations.services.article_generation.http_requests.post")
     def test_trigger_generation_reuses_existing_billed_job_for_same_client_request_id(self, mock_post):
-        ContentFactoryJob.objects.create(
-            job_id="existing-job-123",
-            domain="mlai.au",
-            slack_user_id=self.slack_user_id,
-            status="awaiting_confirmation",
-            client_request_id="content-factory-service-request",
-            billing_source_job_id="existing-job-123",
-            billing_amount=0,
-            billing_status="charged",
-            request_meta={"domain": "mlai.au"},
-        )
+        mock_post.return_value.status_code = 202
+        mock_post.return_value.json.return_value = {
+            "job_id": "existing-job-123", "status": "awaiting_confirmation"
+        }
+        first = trigger_article_generation(self.slack_user_id, self._article_request(topic=None))
+        self.assertEqual(first["job_id"], "existing-job-123")
+        mock_post.reset_mock()
 
         result = trigger_article_generation(self.slack_user_id, self._article_request(topic=None))
 
         self.assertEqual(result["job_id"], "existing-job-123")
         mock_post.assert_not_called()
+
+    @patch("integrations.services.article_generation.http_requests.post")
+    def test_unowned_requester_cannot_use_another_founders_verified_website(self, mock_post):
+        with self.assertRaises(ArticleGenerationError):
+            trigger_article_generation(self.slack_user_id,
+                self._article_request(requested_by_slack_user_id="U_UNAUTHORIZED"))
+        mock_post.assert_not_called()
+        self.user.points_account.refresh_from_db()
+        self.assertEqual(self.user.points_account.balance, 20)
 
     @patch("integrations.services.article_generation.http_requests.get")
     def test_check_generation_status_preserves_awaiting_delivery_mode(self, mock_get):
