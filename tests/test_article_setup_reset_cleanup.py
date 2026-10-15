@@ -10,6 +10,7 @@
 """
 from datetime import timedelta
 from unittest.mock import patch
+from django.contrib.auth import get_user_model
 
 from django.test import TestCase
 from django.utils import timezone
@@ -25,6 +26,7 @@ from content_factory.vibe_marketing_views import (
 )
 from organizations.models import Organization
 from workflow_runs.models import ContentFactoryRun, ContentFactoryRunStatus
+from tests.website_fixtures import bind_verified_target_fixture, install_github_provider_fixture
 
 
 class ArticleSetupResetBranchCleanupTests(TestCase):
@@ -200,6 +202,12 @@ class GenerationHistorySurvivesResetTests(TestCase):
     def test_article_setup_state_drops_generation_ready_after_reset(self):
         self._written_article(when=timezone.now() - timedelta(days=2))
 
+        history_only = _article_setup_state_for_config(self.config, organization=self.org)
+        self.assertFalse(history_only.get('generationReady'))
+        owner = get_user_model().objects.create_user(email='reset-owner@example.test')
+        bind_verified_target_fixture(self.config, user=owner)
+        install_github_provider_fixture(self, self.config.website_connection)
+
         before = _article_setup_state_for_config(self.config, organization=self.org)
         self.assertTrue(before.get("generationReady"))
 
@@ -248,7 +256,8 @@ class ResetThenRedetectionStaysUnpublishedTests(TestCase):
         self.config.save(update_fields=["article_system", "publish_targets", "updated_at"])
 
         readiness = compute_article_readiness(self.org, self.config, [])
-        self.assertFalse(readiness["proofs"]["article_system_published"])
+        self.assertFalse(readiness['generation_ready'])
+        self.assertFalse(readiness["proofs"]["integration_verified"])
 
         scaffold = _profile_checks(self.org, self.config, latest_runs=[])["scaffold"]
         self.assertFalse(scaffold["passed"])

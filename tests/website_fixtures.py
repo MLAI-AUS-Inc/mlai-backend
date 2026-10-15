@@ -49,8 +49,9 @@ def bind_config_fixture(config, *, repo=None):
         github_repo=repo or config.github_repo or 'example/site', repository_id=12345,
         installation_id=config.github_installation_id or '123', branch='main')
     config.github_repo = website.github_repo
+    config.github_installation_id = website.installation_id
     config.website_connection = website
-    config.save(update_fields=['github_repo', 'website_connection'])
+    config.save(update_fields=['github_repo', 'github_installation_id', 'website_connection'])
     return contract_for(website)
 
 
@@ -86,7 +87,12 @@ def install_github_provider_fixture(test_case, website):
     from unittest.mock import patch
     from urllib.parse import quote
     from requests import Response
+    from django.test import override_settings
     from integrations.services.github_app import GitHubInstallationToken, INSTALLATION_LIVE
+
+    provider_settings = override_settings(GITHUB_APP_ID='12', GITHUB_APP_PRIVATE_KEY='synthetic-provider-key')
+    provider_settings.enable()
+    test_case.addCleanup(provider_settings.disable)
 
     def response(payload, status=200):
         result = Response()
@@ -131,8 +137,9 @@ class WebsiteBoundAPIClient(APIClient):
         self.website_fixture = WebsiteConnection.objects.create(organization=config.organization,
             github_repo=repo, repository_id=12345, installation_id='123', branch='main')
         config.github_repo = repo
+        config.github_installation_id = self.website_fixture.installation_id
         config.website_connection = self.website_fixture
-        config.save(update_fields=['github_repo', 'website_connection'])
+        config.save(update_fields=['github_repo', 'github_installation_id', 'website_connection'])
 
     def _bound_payload(self, data):
         data = dict(data or {})

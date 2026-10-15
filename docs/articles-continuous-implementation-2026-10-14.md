@@ -500,3 +500,12 @@ case retains its denial; setup capability tests use actual founder context.
 Provider HEAD observations return a fixed source independently of whether the
 local connection has native proof. No credential or admission guard is mocked.
 These database cases remain syntax checked only pending the existing CI lanes.
+
+
+Current-site fixtures now mirror binding by co-stamping the selected App
+installation on config and connection. Provider tests configure synthetic App
+settings with a fake JWT transport; credential-presence checks remain real.
+The reset regression now proves historical articles alone cannot grant readiness,
+then starts with an actual verified target and verifies reset removes readiness.
+Redetection checks the current integration_verified proof field. Syntax checked
+only; existing disposable CI is the database validation authority.
