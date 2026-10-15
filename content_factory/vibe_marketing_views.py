@@ -6003,7 +6003,7 @@ def _apply_setup_merge_result(*, run, context, checks_status="success", merge_re
     return run
 
 
-def _mark_setup_merge_blocked(*, run, config, reason="", status_value="manual_merge_required"):
+def _mark_setup_merge_blocked(*, run, config, reason="", status_value="manual_merge_required", checks_source=None):
     result = dict(run.result or {})
     setup = dict(result.get("article_system_setup") or {})
     status_value = str(status_value or "manual_merge_required").strip()
@@ -6032,6 +6032,11 @@ def _mark_setup_merge_blocked(*, run, config, reason="", status_value="manual_me
     setup["currentStep"] = status_value
     setup.setdefault("setup_run_id", run.run_id)
     setup.setdefault("setupRunId", run.run_id)
+    for item in (result, setup):
+        if checks_source:
+            item["checks_source"] = checks_source
+        else:
+            item.pop("checks_source", None)
     result["article_system_setup"] = setup
     run.result = sanitize_json_for_postgres(result)
     run.current_step = status_value
@@ -6309,7 +6314,8 @@ def _attempt_setup_publish_merge_authorized(*, run, context, automatic=False):
     # Genuinely failed checks (visible) → don't merge; surface it.
     if str(checks.get("state") or "").lower() in SETUP_MERGE_TERMINAL_CHECK_STATES:
         reason = checks.get("message") or "GitHub checks did not pass."
-        _mark_setup_merge_blocked(run=run, config=config, reason=reason, status_value="checks_failed")
+        _mark_setup_merge_blocked(run=run, config=config, reason=reason, status_value="checks_failed",
+            checks_source=checks.get("source"))
         return {"outcome": "checks_failed", "detail": reason, "checks": checks, "run": run}
 
     policy = setup_merge_policy(config.website_connection, pull, token=token, checks=checks,
