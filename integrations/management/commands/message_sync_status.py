@@ -116,6 +116,9 @@ class Command(BaseCommand):
             'provider_cooldowns': list(BridgeApiBudget.objects.filter(cooldown_until__gt=now).exclude(method__startswith='priority:').values('method').annotate(count=Count('id'), until=Max('cooldown_until')).order_by('method')),
             'public_delivery': delivery(CommunityBridgeDelivery.objects.filter(target_platform='buzz')),
             'private_delivery': delivery(SlackDmMirrorDelivery.objects.all()),
+            'private_undeliverable_by_reason': dict(Counter(str(r or 'unknown') for r in
+                SlackDmMirrorDelivery.objects.filter(metadata__undeliverable=True, updated_at__gte=now - timedelta(days=7))
+                .values_list('metadata__undeliverable_reason', flat=True)[:5000])),
             'workers': list(BridgeWorkerHeartbeat.objects.values(
                 'worker_id', 'lane', 'heartbeat_at', 'progressed_at', 'completed_count', 'failed_count', 'last_error_code',
             )),

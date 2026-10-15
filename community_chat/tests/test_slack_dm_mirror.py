@@ -1359,6 +1359,11 @@ class SlackDmMirrorOwnerTests(APITestCase):
             [CommunityBridgeDeliveryStatus.COMPLETED] * 3,
         )
         self.assertEqual(status_payload(self.first)["backfill"]["imported_messages"], 3)
+        tombstone = conversation.deliveries.filter(operation="create", status="completed").first()
+        tombstone.metadata.update(undeliverable=True, dependency_superseded=True, undeliverable_reason="system_author")
+        tombstone.save(update_fields=("metadata", "updated_at"))
+        self.assertEqual(status_payload(self.first)["backfill"]["imported_messages"], 2)
+
 
     @patch(
         "integrations.services.slack_dm_mirror.BuzzBridgeClient.deliver_private"

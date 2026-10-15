@@ -1678,3 +1678,18 @@ It follows explicit opens and device recovery, validates eligible cached unread
 sources against Slack, and uses all verified owner devices at normal import
 priority. Its flags/cursor contain no message bodies; privacy and metadata
 consent fences remain unchanged. Enable it only after open-priority measurements.
+
+### Private refresh completion and skipped work
+
+Private refresh responses retain `status` in `syncing`, `complete`, or `error`.
+`failed_messages` counts retryable failed rows only; `queued_messages` excludes
+queued rows with three or more attempts. Those keep retrying in the background
+and appear in `stalled_messages`. Additive fields `skipped_messages`,
+`undeliverable_messages`, `stalled`, `partial`, and `retryable` distinguish
+terminal skips and stalled work from errors that Retry can repair.
+
+Unrepresented authors get one membership refresh, proven by a per-conversation
+confirmation newer than the request, before a content-free tombstone is written.
+Missing participant identities (`identity_stale`) never become tombstones.
+Narrowing group-history consent sweeps excluded queued authors. A fresh source
+observation that resolves under the current participant hash re-admits the row.

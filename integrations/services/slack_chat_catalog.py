@@ -10,6 +10,8 @@ import hashlib
 
 from django.db.models import Exists, OuterRef, Q, Subquery
 
+STALLED_DELIVERY_ATTEMPTS = 3  # Queued rows that failed this often no longer hold an import open.
+
 CATALOG_KEY = "mlai_chat_conversations_v1"
 PRIVATE_CHANNEL_CONSENT = "slack-chat-v4-private-channels"
 # Zero is all available history only after this explicit owner consent. Legacy
@@ -87,6 +89,9 @@ def catalog_conversations(conversations):
         Q(metadata__history_outside_window__isnull=True)
         | Q(metadata__history_outside_window=False),
     )
+    unfinished = unfinished.filter(
+        Q(metadata__dependency_superseded__isnull=True) | Q(metadata__dependency_superseded=False),
+    ).exclude(status__in=['pending', 'processing'], attempts__gte=STALLED_DELIVERY_ATTEMPTS)
     return conversations.select_related(None).prefetch_related(
         "grant__connection",
     ).annotate(

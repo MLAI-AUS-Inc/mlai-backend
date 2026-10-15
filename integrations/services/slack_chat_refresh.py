@@ -107,21 +107,23 @@ def _refresh_status(conversation):
             Q(metadata__history_outside_window__isnull=True)
             | Q(metadata__history_outside_window=False)
         )
-        .filter(
-            Q(metadata__history_recovery_superseded__isnull=True)
-            | Q(metadata__history_recovery_superseded=False)
-        )
-        .filter(
-            Q(metadata__dependency_superseded__isnull=True)
-            | Q(metadata__dependency_superseded=False)
-        )
     )
+    from integrations.services.slack_chat_catalog import STALLED_DELIVERY_ATTEMPTS
+    live = (Q(metadata__history_recovery_superseded__isnull=True) | Q(metadata__history_recovery_superseded=False)) & (
+        Q(metadata__dependency_superseded__isnull=True) | Q(metadata__dependency_superseded=False))
+    superseded = Q(metadata__history_recovery_superseded=True) | Q(metadata__dependency_superseded=True)
+    queued = Q(status__in=("pending", "processing"))
     counts = rows.aggregate(
-        imported_messages=Count("pk", filter=Q(status="completed", operation="create")),
-        queued_messages=Count("pk", filter=Q(status__in=("pending", "processing"))),
-        failed_messages=Count("pk", filter=Q(status__in=("failed", "dead"))),
-        delivery_revision=Max("updated_at", filter=Q(status="completed")),
+        imported_messages=Count("pk", filter=Q(status="completed", operation="create") & live),
+        queued_messages=Count("pk", filter=queued & live & Q(attempts__lt=STALLED_DELIVERY_ATTEMPTS)),
+        stalled_messages=Count("pk", filter=queued & live & Q(attempts__gte=STALLED_DELIVERY_ATTEMPTS)),
+        failed_messages=Count("pk", filter=Q(status="failed") & live),
+        skipped_messages=Count("pk", filter=Q(status="dead") | superseded),
+        undeliverable_messages=Count("pk", filter=Q(metadata__undeliverable=True)),
+        delivery_revision=Max("updated_at", filter=Q(status="completed") & live),
     )
+    for key in ("imported_messages", "queued_messages", "stalled_messages", "failed_messages", "skipped_messages", "undeliverable_messages"):
+        counts[key] = int(counts.get(key) or 0)
     failed = counts["failed_messages"] > 0
     pending = counts["queued_messages"] > 0
     scan_error = bool(
@@ -165,6 +167,9 @@ def _refresh_status(conversation):
         "history_scan_complete": conversation.history_backfilled_at is not None,
         "last_synced_at": conversation.history_backfilled_at,
         **counts,
+        "retryable": state == "error",
+        "stalled": counts["stalled_messages"] > 0 and counts["queued_messages"] == 0,
+        "partial": state == "complete" and (counts["skipped_messages"] > 0 or counts["stalled_messages"] > 0),
     }
 
 

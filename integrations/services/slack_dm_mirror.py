@@ -1198,6 +1198,7 @@ def status_payload(
             Q(metadata__history_outside_window__isnull=True)
             | Q(metadata__history_outside_window=False)
         )
+        .filter(Q(metadata__undeliverable__isnull=True) | Q(metadata__undeliverable=False))
         .count(),
         "queued_messages": backfill_deliveries.filter(
             status__in=(
