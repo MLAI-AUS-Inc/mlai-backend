@@ -273,7 +273,6 @@ class SettingsCompanyScopingTests(TestCase):
 
     def test_settings_unsafe_domain_edit_requires_confirmation(self):
         from integrations.models import GoogleConnection
-        from organizations.models import Organization
 
         GoogleConnection.objects.create(
             user=self.user,
@@ -282,7 +281,11 @@ class SettingsCompanyScopingTests(TestCase):
             refresh_token="token",
             scope="",
         )
-        Organization.objects.create(name="Taken", domain="taken-settings.example")
+        # A shared old tenant cannot be renamed in place. The new domain is
+        # available; existing unowned tenants are deliberately not claimable.
+        other=User.objects.create_user(email="shared-settings@example.test")
+        VibeRaisingCompany.objects.create(profile=VibeRaisingProfile.objects.create(user=other),
+            name="Shared tenant",domain=self.company_b.domain,organization=self.company_b.organization)
 
         with patch(f"{_VIEWS}._serialize_bootstrap", return_value={}):
             blocked = self.client.put(
@@ -310,6 +313,20 @@ class SettingsCompanyScopingTests(TestCase):
         self.assertEqual(confirmed.status_code, 200)
         self.company_b.refresh_from_db()
         self.assertEqual(self.company_b.organization.domain, "taken-settings.example")
+
+    def test_settings_confirmation_cannot_claim_an_unowned_existing_tenant(self):
+        from organizations.models import Organization
+        target=Organization.objects.create(name="Existing tenant",domain="unowned-settings.example")
+        original=self.company_b.organization_id
+        with patch(f"{_VIEWS}._serialize_bootstrap",return_value={}):
+            for confirmed in (False,True):
+                response=self.client.put("/api/v1/vibe-marketing/settings",{
+                    "companyId":str(self.company_b.id),"domain":target.domain,
+                    "confirmDomainChange":confirmed},format="json")
+                self.assertEqual(response.status_code,409)
+                self.assertIn("already linked",str(response.data["detail"]))
+                self.company_b.refresh_from_db()
+                self.assertEqual(self.company_b.organization_id,original)
 
     def test_settings_save_rejects_a_company_the_user_does_not_own(self):
         stranger = User.objects.create_user(
