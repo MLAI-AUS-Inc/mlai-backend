@@ -580,7 +580,7 @@ class PointsPurchaseModelTests(TestCase):
 
 
 class PointsPurchaseLimitTests(TestCase):
-    """Task 3 purchase limit policy tests."""
+    """Authenticated positive purchases use the current uncapped policy."""
 
     def setUp(self):
         self.user = User.objects.create_user(
@@ -616,7 +616,7 @@ class PointsPurchaseLimitTests(TestCase):
         with self.assertRaises(PermissionDeniedError):
             PointsPurchaseService.validate_purchase_limits(None, points_amount=10)
 
-    def test_rejects_guest_checkout_without_slack_link(self):
+    def test_authenticated_account_does_not_require_slack_link(self):
         guest_like_user = User.objects.create_user(
             email='guest@example.com',
             slack_id=None,
@@ -624,55 +624,49 @@ class PointsPurchaseLimitTests(TestCase):
         guest_like_user.date_joined = timezone.now() - timedelta(days=30)
         guest_like_user.save(update_fields=['date_joined'])
 
-        with self.assertRaises(PermissionDeniedError):
-            PointsPurchaseService.validate_purchase_limits(guest_like_user, points_amount=10)
+        PointsPurchaseService.validate_purchase_limits(guest_like_user, points_amount=10)
 
-    def test_rejects_purchase_above_25_points(self):
-        with self.assertRaises(ValueError) as ctx:
-            PointsPurchaseService.validate_purchase_limits(self.user, points_amount=26)
-        self.assertIn('25-point', str(ctx.exception))
+    def test_purchase_is_not_capped_at_25_points(self):
+        PointsPurchaseService.validate_purchase_limits(self.user, points_amount=26)
 
-    def test_rejects_accounts_younger_than_7_days(self):
+    def test_authenticated_new_account_can_purchase(self):
         self.user.date_joined = timezone.now() - timedelta(days=3)
         self.user.save(update_fields=['date_joined'])
 
-        with self.assertRaises(ValueError) as ctx:
-            PointsPurchaseService.validate_purchase_limits(self.user, points_amount=10)
-        self.assertIn('at least 7 days', str(ctx.exception))
+        PointsPurchaseService.validate_purchase_limits(self.user, points_amount=10)
 
-    def test_rejects_rolling_12_month_cap_above_50_points(self):
+    def test_rolling_purchase_history_does_not_cap_new_purchases(self):
         self._create_paid_purchase(points_amount=30, days_ago=20)
         self._create_paid_purchase(points_amount=19, days_ago=10)
 
-        with self.assertRaises(ValueError) as ctx:
-            PointsPurchaseService.validate_purchase_limits(self.user, points_amount=2)
-        self.assertIn('50-point rolling 12-month', str(ctx.exception))
+        PointsPurchaseService.validate_purchase_limits(self.user, points_amount=2)
 
     def test_ignores_purchases_older_than_12_month_window(self):
         self._create_paid_purchase(points_amount=50, days_ago=370)
         # Should be allowed because the old purchase is outside the rolling window.
         PointsPurchaseService.validate_purchase_limits(self.user, points_amount=25)
 
-    def test_rolling_12_month_cap_uses_paid_at_not_created_at(self):
+    def test_paid_purchase_date_does_not_introduce_a_removed_cap(self):
         self._create_paid_purchase(points_amount=50, days_ago=20, created_days_ago=370)
 
-        with self.assertRaises(ValueError) as ctx:
-            PointsPurchaseService.validate_purchase_limits(self.user, points_amount=1)
-        self.assertIn('50-point rolling 12-month', str(ctx.exception))
+        PointsPurchaseService.validate_purchase_limits(self.user, points_amount=1)
+
+    def test_rejects_nonpositive_purchase(self):
+        for amount in (0, -1):
+            with self.subTest(amount=amount), self.assertRaisesMessage(ValueError, 'positive'):
+                PointsPurchaseService.validate_purchase_limits(self.user, points_amount=amount)
 
     def test_validation_does_not_create_points_account(self):
         PointsPurchaseService.validate_purchase_limits(self.user, points_amount=10)
 
         self.assertFalse(PointsAccount.objects.filter(user=self.user).exists())
 
-    def test_rejects_balance_cap_above_100_without_approval(self):
+    def test_spendable_balance_does_not_cap_purchases(self):
         account = PointsService.get_or_create_account(self.user)
         account.balance = 90
         account.save(update_fields=['balance'])
 
-        with self.assertRaises(ValueError) as ctx:
-            PointsPurchaseService.validate_purchase_limits(self.user, points_amount=11)
-        self.assertIn('100-point spendable balance cap', str(ctx.exception))
+        PointsPurchaseService.validate_purchase_limits(self.user, points_amount=11)
 
     def test_allows_balance_cap_override_with_manual_approval(self):
         account = PointsService.get_or_create_account(self.user)

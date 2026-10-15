@@ -63,6 +63,23 @@ job) and retires the empty baseline without extending its review date. The 120
 newly selected database-free tests pass. Assignment is complete; the newly
 selected database-backed suites still require CI execution and repairs.
 
+The restored PostgreSQL command ran 1,697 tests at 495734dc and exposed 188
+failures and 59 errors. At ffcff89c it reported 162 failures and 87 errors;
+the initial tenant-fixture repair exposed duplicate legacy organisation creation.
+Subsequent batches reuse the owned organisation, bind callback/dispatch fixtures
+to real website records, keep monthly draft and source windows aligned, replace
+old dispatch/readiness expectations with current contracts, and restore current
+migration leaves after the historical microroo test. The latest fixes are in CI;
+the full suite is not yet green. No test modules were removed or skipped.
+
+Additional repairs keep HealthHack's administrator-only boundary, supply the
+reconciliation organisation, stub the current Slack provider method, require
+active ABR evidence in registration fixtures, and preserve imported financial
+metrics instead of manufacturing revenue through an editor request. Purchase
+tests follow the existing authenticated/positive-only policy; no billing policy
+or purchase implementation changed. These DB tests are syntax checked locally
+and execute only in the existing disposable CI lane.
+
 D2 remains incomplete until automatic stale-proposal rebuilding and article
 strategy escalation are implemented and tested. Refreshes must
 use a fresh owned branch/current base, preserve deterministic consent only and

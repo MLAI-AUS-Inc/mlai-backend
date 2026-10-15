@@ -7,6 +7,7 @@ from integrations.models import UserIntegration
 from content_factory.contract import CONTENT_FACTORY_REQUEST_SOURCE
 from content_factory.models import OrganizationContentConfig
 from organizations.models import Organization
+from tests.website_fixtures import bind_config_fixture
 from integrations.services.github import scan_github_project, scaffold_articles_directory, ScanError
 
 class GithubServiceTest(TestCase):
@@ -26,6 +27,7 @@ class GithubServiceTest(TestCase):
             github_token_encrypted="org_token_123",
             github_token_expires_at=timezone.now() + timedelta(hours=1),
         )
+        bind_config_fixture(self.config)
 
     @patch('integrations.services.github.get_latest_repo_sha', return_value="sha_123")
     @patch('integrations.services.github.http_requests.post')

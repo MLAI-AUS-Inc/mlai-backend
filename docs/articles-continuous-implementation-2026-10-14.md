@@ -16,10 +16,13 @@ Source plan: the 13 October one-shot runbook in the attached files and
 | B3, B4, B6, B7 | Implemented in backend #1016–#1018, CF #985 and Chat #468; draft stack, rollout off |
 | C1 through C5 | Implemented in backend #1019–#1023, CF #986, Chat #470–#472; final CI green, rollout off |
 | D1 | Backend #1024, Chat #473 and CF #988 final-head CI green; rollout off |
-| D2, D3 | #1028 bounded recovery CI green; #990 delivery CI green at d7f88b54, integration fixes in CI; stale refresh/article escalation pending. D3 locally implemented, 114 tests pass |
+| D2 | #1028 has five passing PostgreSQL provider-chain cases and 155 focused local tests; CF #990 final CI green. Restored legacy CI suites are being repaired; stale refresh/article escalation pending |
+| D3 | Draft backend #1029, 146 focused tests pass; rebase and final CI follow the D2 repair |
 | E1 through E5 and retained v2 channel/CMS/hosted work | Pending; fixture/provider owner inputs may be needed |
 | F1 through F3 | Pending |
-| G1 through G6 | Pending; owner operational steps remain separate |
+| G2 | CF #991 persists the Docker group ID in the deployment environment; 34 focused tests and final CI green. Host application waits for an owner-authorized release |
+| G3 | Backend #1031 redacts signed query tickets; 16 focused tests pass. Polling/auth/backoff work remains |
+| G1, G4 through G6 | Pending; owner operational steps remain separate |
 
 B2 backend worktree:
 `/Users/samdonegan/Documents/Code/mlai-backend/.codex-worktrees/articles-b2-design`,

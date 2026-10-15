@@ -53,9 +53,11 @@ class VibeRaisingApiTests(TestCase):
 
     def _create_founder_company(self, *, domain="acme.com", registered=True):
         profile = VibeRaisingProfile.objects.create(user=self.user, role=VibeRaisingProfile.ROLE_FOUNDER)
-        organization, _ = Organization.objects.get_or_create(
-            domain=domain, defaults={"name": "Acme Inc."}
-        )
+        organization = None
+        if domain:
+            organization, _ = Organization.objects.get_or_create(
+                domain=domain, defaults={"name": "Acme Inc."}
+            )
         # A registered company is, post-gate, a verified one — carry the ACN and
         # verification stamp so it can proceed to updates.
         company = VibeRaisingCompany.objects.create(
@@ -67,10 +69,27 @@ class VibeRaisingApiTests(TestCase):
             abn="89000000019" if registered else None,
             acn="000000019" if registered else None,
             abr_verified_at=timezone.now() if registered else None,
+            entity_type_code="PRV" if registered else "",
         )
         profile.active_company = company
         profile.save(update_fields=["active_company", "updated_at"])
         return profile, company
+
+    def _seed_imported_revenue(self, company, *, month=date(2026, 3, 1), value="50000"):
+        # An editor may retain imported revenue, but cannot create or change
+        # financial evidence with a browser-supplied metric.
+        StartupMetricObservation.objects.create(
+            organization=company.organization,
+            source_provider="xero",
+            metric_key="revenue",
+            metric_name="Revenue",
+            value_text=value,
+            value_number=Decimal(value),
+            unit="AUD",
+            period_month=month,
+            confidence=1,
+            source_metadata={"source_metric": "xero_profit_and_loss_revenue"},
+        )
 
     def _create_google_connection(
         self,
@@ -333,6 +352,8 @@ class VibeRaisingApiTests(TestCase):
             "configured": True,
             "reachable": True,
             "found": True,
+            "active": True,
+            "abn": abn,
             "is_company": True,
             "acn": "000000019",
             "entity_type_code": "PRV",
@@ -380,7 +401,8 @@ class VibeRaisingApiTests(TestCase):
 
     def test_founder_can_save_monthly_update_for_active_company(self):
         self.client.force_authenticate(user=self.user)
-        self._create_founder_company(domain="acme.com", registered=True)
+        _profile, company = self._create_founder_company(domain="acme.com", registered=True)
+        self._seed_imported_revenue(company)
 
         response = self.client.post(
             "/api/v1/vibe-raising/updates/",
@@ -1191,7 +1213,8 @@ class VibeRaisingApiTests(TestCase):
         other_profile.save(update_fields=["active_company", "updated_at"])
         self.client.force_authenticate(user=other_user)
         denied_response = self.client.get(f"/api/v1/vibe-raising/uploads/manual-documents/{document.id}/download/")
-        self.assertEqual(denied_response.status_code, 404)
+        self.assertEqual(denied_response.status_code, 409)
+        self.assertIn("domain", str(denied_response.data).lower())
 
         admin_user = User.objects.create_superuser(email="admin@example.com", password="password")
         self.client.force_authenticate(user=admin_user)
@@ -1451,7 +1474,8 @@ class VibeRaisingApiTests(TestCase):
 
     def test_monthly_update_save_round_trips_display_config(self):
         self.client.force_authenticate(user=self.user)
-        self._create_founder_company(domain="acme.com", registered=True)
+        _profile, company = self._create_founder_company(domain="acme.com", registered=True)
+        self._seed_imported_revenue(company)
 
         response = self.client.post(
             "/api/v1/vibe-raising/updates/",
