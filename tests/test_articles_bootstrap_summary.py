@@ -93,7 +93,7 @@ class BootstrapSummaryTests(SimpleTestCase):
             "diagnostics": {"logs": "private diagnostic " * 10_000},
             "component_manifest": {"components": [{"body": "component " * 10_000}]},
             "article_body": "article text " * 10_000}
-        runs = [SimpleNamespace(workflow="article", run_id=f"article-{index}", domain="example.test", github_repo="",
+        runs = [SimpleNamespace(workflow="article_generation", run_id=f"article-{index}", domain="example.test", github_repo="",
             status="completed", current_step="", approval_state="", resume_available=False, created_at=now, updated_at=now,
             step_order=[], steps=SimpleNamespace(order_by=lambda *_: [], all=lambda: []), acceptance_summary={}, result=raw,
             run_request={}, error="", verification_summary={}) for index in range(24)]

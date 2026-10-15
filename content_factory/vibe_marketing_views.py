@@ -11985,7 +11985,11 @@ def _verify_github_repository_access_b1(context, config, *, force=False, allow_p
     return result
 
 
-def _article_capabilities_for_context(context, config, *, latest_runs=None, force=False, allow_probe=True):
+def _article_capabilities_for_context(context, config, *, latest_runs=None, force=False, allow_probe=None):
+    # Projections (including the website GET and MCP capability read) observe.
+    # Admission/background callers already request force=True explicitly.
+    if allow_probe is None:
+        allow_probe = force
     runs = list(latest_runs) if latest_runs is not None else _latest_runs_for_org(context.organization, limit=12, config=config)
     account = _github_account_for_context(context, config, force=force, allow_probe=allow_probe)
     gate = _article_system_setup_gate(config, runs, resolve_article_system(config))

@@ -27,7 +27,7 @@ class BootstrapReadPathTests(SimpleTestCase):
             github_token_encrypted="", github_token_expires_at=None)
 
     def context(self):
-        return SimpleNamespace(organization=SimpleNamespace(pk=701), profile=SimpleNamespace(user=self.user))
+        return SimpleNamespace(organization=SimpleNamespace(pk=701, domain="example.test"), profile=SimpleNamespace(user=self.user))
 
     def test_account_cold_read_never_probes_or_acquires_a_lease_even_with_force(self):
         with patch("integrations.services.github_app.probe_installation_liveness") as provider, patch.object(
@@ -134,3 +134,20 @@ class BootstrapReadPathTests(SimpleTestCase):
         self.assertIs(organization, context.organization)
         self.assertEqual(runs, [])
         self.assertEqual(checks, {})
+
+    def test_capability_projections_observe_and_forced_admission_still_probes(self):
+        self.config.website_connection_id = self.website.pk
+        for force, explicit, expected in ((False, None, False), (True, None, True), (True, False, False)):
+            with self.subTest(force=force, explicit=explicit), patch.object(views, "_github_account_for_context",
+                return_value={"owned": True, "saved": True}
+            ) as account, patch.object(views, "_article_system_setup_gate", return_value={}), patch.object(
+                views, "resolve_article_system", return_value={}
+            ), patch.object(views, "integration_evidence", return_value={"verified": False}), patch.object(
+                views, "_verify_github_repository_access", return_value={"verified": False}
+            ) as repository, patch.object(views, "article_capabilities", return_value={}):
+                views._article_capabilities_for_context(self.context(), self.config,
+                    latest_runs=[], force=force, allow_probe=explicit)
+                self.assertIs(account.call_args.kwargs["allow_probe"], expected)
+                self.assertIs(repository.call_args.kwargs["allow_probe"], expected)
+                self.assertIs(account.call_args.kwargs["force"], force)
+                self.assertIs(repository.call_args.kwargs["force"], force)

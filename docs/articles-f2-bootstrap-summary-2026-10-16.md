@@ -25,10 +25,13 @@ test harness locally. No migration or production operation is involved.
 
 The local 24-run stress fixture gives each run a two-million-character review
 document plus large raw article/diagnostic/manifest values. The real serializer
-produces 110,695,470 bytes for the full run list and 49,374 bytes for the summary
-list. One measured run took 405.00 ms for full serialization and 2.83 ms for
+produces 60,535,614 bytes for the full run list and 49,638 bytes for the summary
+list. One measured run took 192.91 ms for full serialization and 2.05 ms for
 summary serialization. These are synthetic run-list measurements; they exclude
 database, authentication, bootstrap topic/capability projections and transport.
+These corrected measurements use the registered `article_generation` workflow;
+the original generic `article` fixture bypassed article-specific projection and
+overstated the full response size.
 The database/network-denying harness passes 25 bootstrap, merge-fact, portable
 control and private-preview tests. Renderer coverage counts all JSON encodes,
 includes negotiated indentation/Unicode bytes, and verifies repeated render
@@ -50,7 +53,10 @@ budget. A local serialization benchmark is not production latency evidence.
 
 Capability projection still reaches account-liveness and repository-HEAD probes
 on a cache miss. Bootstrap must select an explicit observation-only mode in both
-views. That mode reads finite existing probe results, checks current actor and
+views. Shared capability projections also default to observation-only, covering
+the website-status GET and MCP capability read. Existing forced admission and
+background callers select probes unless they explicitly opt out. Observation
+mode reads finite existing probe results, checks current actor and
 connection scope, and returns an unverified observation when none exists. It
 must never mint credentials, perform HTTP, or acquire a probe lease. Explicit
 admission and background verification retain their current probing behavior.
