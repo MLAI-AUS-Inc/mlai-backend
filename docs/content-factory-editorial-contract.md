@@ -612,6 +612,11 @@ minting credentials or acquiring probe leases. A missing observation remains
 unverified; admission and background verification own fresh provider checks.
 Current actor ownership and connection state, generation, repository,
 installation, branch and configuration revision fence cached observations.
+Workflow progress may reuse a presentation cache for at most 20 seconds,
+partitioned by current actor, connection, capabilities/checks and run/comment
+versions. Website facts, Google connection status, capabilities, journey and
+goal status refresh on every request. Disabling bootstrap caching also disables
+the progress cache.
 The `latestRunsByWorkflow` field is a small index of the newest run per workflow,
 carrying identifiers, status, approval and publish control state. Clients that
 need the run's result or review artifacts use the individual full run endpoint;

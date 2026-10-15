@@ -10,6 +10,7 @@ from django.db import connection
 from django.test.utils import CaptureQueriesContext
 
 from content_factory import vibe_marketing_views as views
+from content_factory.models import VibeMarketingComponentComment
 from content_factory.website_models import WebsiteConnection
 from tests.test_content_island_bootstrap import BOOTSTRAP_URL, ContentIslandBootstrapTestCase
 from workflow_runs.models import ContentFactoryRun
@@ -116,5 +117,41 @@ class BootstrapEndpointBudgetTests(ContentIslandBootstrapTestCase):
             response = self.client.get("/api/v1/my-startup/vibe-marketing/website-connection/")
             self.assertEqual(response.status_code, 200)
             self.assertIn("websiteJourney", response.data)
+            for boundary in forbidden:
+                boundary.assert_not_called()
+
+    def test_warm_progress_reuse_invalidates_after_comment_edit_and_run_update(self):
+        self.seed_runs(1)
+        with ExitStack() as stack:
+            forbidden = self.read_boundaries(stack)
+            progress = stack.enter_context(patch.object(views, "_workflow_progress", wraps=views._workflow_progress))
+            capabilities = stack.enter_context(patch.object(views, "_article_capabilities_for_context",
+                wraps=views._article_capabilities_for_context))
+            first = self.client.get(BOOTSTRAP_URL)
+            self.assertEqual(first.status_code, 200)
+            self.assertGreater(progress.call_count, 0)
+            progress.reset_mock()
+            capabilities.reset_mock()
+            second = self.client.get(BOOTSTRAP_URL)
+            self.assertEqual(second.status_code, 200)
+            progress.assert_not_called()
+            capabilities.assert_called_once()  # authority remains live on a presentation hit
+            run = ContentFactoryRun.objects.get(run_id="budget-article-0")
+            comment = VibeMarketingComponentComment.objects.create(run=run, component_id="title", body="Clarify the title")
+            third = self.client.get(BOOTSTRAP_URL)
+            self.assertEqual(third.status_code, 200)
+            self.assertGreater(progress.call_count, 0)
+            progress.reset_mock()
+            comment.body = "Use the current product name"
+            comment.save(update_fields=["body", "updated_at"])
+            fourth = self.client.get(BOOTSTRAP_URL)
+            self.assertEqual(fourth.status_code, 200)
+            self.assertGreater(progress.call_count, 0)
+            progress.reset_mock()
+            run.status = "failed"
+            run.save(update_fields=["status", "updated_at"])
+            fifth = self.client.get(BOOTSTRAP_URL)
+            self.assertEqual(fifth.status_code, 200)
+            self.assertGreater(progress.call_count, 0)
             for boundary in forbidden:
                 boundary.assert_not_called()

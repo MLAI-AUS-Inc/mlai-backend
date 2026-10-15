@@ -11417,14 +11417,14 @@ def _overlay_live_bootstrap_fields(payload, *, context, request, config=None, la
     checks = payload.get("checks") or {}
     payload["guidedSteps"], payload["currentGuidedStep"] = _guided_steps(checks)
     payload["recommendedNextAction"] = _recommended_next_action(checks)
-    payload["workflowProgress"] = _workflow_progress(context=context, latest_runs=runs,
-        checks=checks, topic_candidates=payload.get("topicCandidates") or [], config=website_config)
-    by_id = {run.run_id: run for run in runs}
+    from .bootstrap_progress_cache import project_workflow_progress
+    progress = project_workflow_progress(context=context, config=website_config, runs=runs, checks=checks,
+        candidates=payload.get("topicCandidates") or [], serialized_runs=payload.get("latestRuns") or [],
+        capabilities=capabilities)
+    payload["workflowProgress"] = progress["root"]
     for serialized in payload.get("latestRuns") or []:
-        row = by_id.get(serialized.get("runId"))
-        if row:
-            serialized["workflowProgress"] = _workflow_progress(context=context, run=row,
-                latest_runs=runs, checks=checks, topic_candidates=payload.get("topicCandidates") or [], config=website_config)
+        if serialized.get("runId") in progress["runs"]:
+            serialized["workflowProgress"] = progress["runs"][serialized["runId"]]
     return payload
 
 

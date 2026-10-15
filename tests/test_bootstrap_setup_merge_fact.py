@@ -48,6 +48,7 @@ class BootstrapSetupMergeFactTests(SimpleTestCase):
             "_article_capabilities_for_context": capabilities, "_guided_steps": ([], None),
             "_recommended_next_action": {}, "_latest_runs_for_org": [],
             "_workflow_progress": {},
+            "_bootstrap_cache_seconds": 0,
         }
         with ExitStack() as stack:
             for name, value in stubs.items():

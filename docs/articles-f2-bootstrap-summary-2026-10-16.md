@@ -72,3 +72,26 @@ warm endpoint responses with 24 large persisted runs in the existing disposable
 CI database, including total encoded bytes, SQL count and elapsed time. Run only
 database/network-denying unit tests locally. Broader overlay caching and SQL JSON
 projection follow measured endpoint evidence; they cannot weaken scope checks.
+
+## Cache workflow presentation within the live overlay
+
+The corrected 24-run endpoint fixture passes its byte/time assertions in the
+disposable PostgreSQL lane at `d1087325` (complete job logs remain pending).
+Next cache the root and per-run workflow progress, which repeatedly reads
+component feedback. Current website summary, Google status/connect URL,
+capabilities, journey and goal status still refresh on every request.
+
+The presentation cache is partitioned by organization, actor, config update,
+current connection identity/update, current capabilities/checks, topic count and
+displayed run IDs. Include aggregate count and latest update for all organization
+runs and component comments so source revisions and feedback outside the visible
+window invalidate it too. Cache only presentation dictionaries, with a maximum
+20-second TTL and deep-copy each use; never retain ORM objects or credentials.
+Setting the bootstrap TTL to zero disables this cache as well. Cache failures
+fall back to the normal projection. No cached presentation grants an action;
+admission rechecks live authority and source proofs.
+
+Validate warm reuse, immediate invalidation for changed feedback/run/connection
+facts, cache failures/disablement and current permission fields. The existing
+endpoint fixture continues to enforce full response bytes, no HTTP/credential
+minting/database writes, and the synthetic one-second p95 bound.

@@ -300,6 +300,7 @@ jobs:
           tests.test_vibe_marketing_bootstrap_performance \
           tests.test_articles_bootstrap_summary \
           tests.test_articles_bootstrap_read_path \
+          tests.test_articles_bootstrap_progress_cache \
           tests.test_bootstrap_setup_merge_fact
 
     - name: Check chat background retries and preview failure caches without database access
