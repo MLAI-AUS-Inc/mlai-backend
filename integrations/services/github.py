@@ -405,7 +405,7 @@ def scan_github_project(
     headers = {"Content-Type": "application/json"}
     if api_key:
         headers["X-API-KEY"] = api_key
-        logger.info(f"Using Content Factory API key: {api_key[:4]}***")
+        logger.info("Using Content Factory API-key authentication")
     else:
         logger.warning("No CONTENT_FACTORY_API_KEY found in settings! Scan request may fail.")
 

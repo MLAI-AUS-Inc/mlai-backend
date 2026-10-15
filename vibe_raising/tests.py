@@ -3280,7 +3280,7 @@ class VibeRaisingApiTests(TestCase):
             rendered_markdown="# March Update",
         )
 
-        with patch("vibe_raising.views.publish_xero_metric_observations") as mock_publish, \
+        with patch("startup_updates.services.publish_xero_metric_observations") as mock_publish, \
              patch("vibe_raising.views.notify_valley_run_created", return_value=ValleyHarnessResult(
                  ok=True, payload={"job_id": "refreshed-generation", "status": "queued"})) as notify:
             mock_publish.return_value = {"warnings": [], "published_metric_count": 0}
@@ -3297,7 +3297,7 @@ class VibeRaisingApiTests(TestCase):
         self.assertEqual(ContentFactoryRun.objects.filter(workflow="startup_monthly_update").count(), 2)
         mock_publish.assert_called_once()
         self.assertEqual(mock_publish.call_args.kwargs["organization"], organization)
-        self.assertIsNone(mock_publish.call_args.kwargs["run"])
+        self.assertEqual(mock_publish.call_args.kwargs["run"].run_id, response.data["runId"])
 
     def test_email_draft_start_merges_existing_startup_profile_context(self):
         self.client.force_authenticate(user=self.user)

@@ -67,6 +67,10 @@ def guarded_owner_operation(action, *, bind_selected=False, run_operation=False,
                         raise WebsiteAuthorityError("website_connection_changed", "This run belongs to a previous website connection.")
                 else:
                     requested_repo = str(request.data.get("github_repo") or request.data.get("githubRepo") or config.github_repo or "").strip()
+                    from .vibe_marketing_views import _github_repo_company_conflict_response
+                    conflict = _github_repo_company_conflict_response(context=context, requested_repo=requested_repo)
+                    if conflict:
+                        return conflict
                     expected = connection_contract(request.data)
                     current = config.website_connection
                     newly_bound = False

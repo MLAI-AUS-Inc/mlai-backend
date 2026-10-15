@@ -15711,7 +15711,7 @@ class VibeMarketingGitHubConnectView(APIView):
                 return_url=str(_request_value(request.data, "return_url", "returnUrl", default="") or "").strip() or None)
         except Exception:
             return Response({"status": "auth_unavailable", "error": "github_auth_url_failed",
-                "detail": "GitHub authorization could not be opened."}, status=503)
+                "connection_state": "auth_required", "detail": "GitHub authorization could not be opened."}, status=503)
         return Response({"status": "auth_required", "connection_state": "auth_required", "github_repo": repo,
             "auth_url": auth_url, "websiteConnection": website_summary(config, company_id=context.company.pk)})
 

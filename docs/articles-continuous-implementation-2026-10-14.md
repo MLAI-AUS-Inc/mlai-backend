@@ -546,3 +546,35 @@ run while retaining the saved draft; another month or connection cannot silently
 supersede active work. These are current revision-aware API contracts, not
 production compatibility changes. All DB cases are syntax checked only; remote
 disposable CI still must validate the final head.
+
+
+CI 022b3e36: all five first-article provider-chain cases and postgres-search pass.
+The expanded PostgreSQL selection ran 1,586 cases with two failures; the SQLite
+selection ran 3,518 cases with 23 failures and two errors, all in Autofill.
+Callback idempotency and report aggregation now pass in the real CI lanes.
+
+The remaining stale-queue case exposed a real ordering bug: refreshing connector
+context rewrote updated_at before redispatch checked its age. Both startup and
+email draft views now decide whether queued delivery is stale before refresh,
+while a failed authority refresh still prevents dispatch. The Xero generation
+regression now intercepts the actual service publisher and asserts the new run's
+identity. Removed a legacy API-key-prefix log. GitHub auth failures preserve their
+connection_state field, and guarded setup/scan actions reject a sibling company's
+repository before attempting GitHub binding.
+
+Autofill fixtures now provide explicit domain-change consent, a fresh baseline,
+an explicit logo company, saved company-owned content islands, real prior spend
+rows and original website scope for repository recovery. Metric tests distinguish
+verified provider difficulty and dated monthly history from legacy arrays. Legacy
+OAuth credentials do not establish GitHub App authority or promote themselves.
+Pending canonical setup observations remain in latestRuns; reset assertions use
+the durable operation receipt, generation fencing and replay identity. Ambiguous
+research delivery and an unavailable article worker retain the canonical queued
+outbox intent and original charge rather than claiming a synchronous failure.
+These assertions exercise current contracts without disabling admission guards.
+
+82 focused database-free disclosure, redispatch, editorial, metrics and research
+checks pass. All changed Python files parse. CI now fully selects 491 modules,
+with no omissions/partial modules; 685 production failure emissions retain their
+canonical contract. The updated DB-backed cases await the next existing remote
+CI run. No local database or migration was created or applied.

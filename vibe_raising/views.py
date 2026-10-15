@@ -2965,6 +2965,9 @@ class VibeRaisingStartupUpdateRunView(APIView):
                 return Response(payload, status=status.HTTP_503_SERVICE_UNAVAILABLE)
         else:
             run = existing_run
+            # Refreshing source context writes updated_at. Decide whether the
+            # queued delivery is stale before that unrelated bookkeeping write.
+            redispatch_existing = _should_dispatch_existing_run(run)
             set_startup_update_run_target_month(run, target_month)
             if input_sources:
                 windows = build_startup_update_target_windows(target_month)
@@ -2978,7 +2981,7 @@ class VibeRaisingStartupUpdateRunView(APIView):
                     manual_document_ids=manual_document_ids,
                     manual_summary=manual_summary,
                 )
-            if _should_dispatch_existing_run(run):
+            if redispatch_existing:
                 logger.info(
                     "Re-dispatching queued startup update run to Valley",
                     extra={"run_id": run.run_id, "organization_id": organization.id},
@@ -3105,6 +3108,7 @@ class VibeRaisingEmailDraftStartView(APIView):
         except (ValueError, TypeError):
             raise ValidationError({"updateId": "Choose a valid update."})
         requested_date = parse_generation_date(request.data, update_id=requested_id)
+        redispatch_existing = False
         with transaction.atomic():
             draft, _ = resolve_update(organization, month=target_month, update_id=requested_id,
                 creation_key=request.data.get("creationKey"), update_date=requested_date)
@@ -3139,6 +3143,7 @@ class VibeRaisingEmailDraftStartView(APIView):
                 from startup_updates.activity_scope import run_uses_month_scope
                 if not run_uses_month_scope(existing_run.run_request or {}):
                     raise RevisionConflict("This draft was started with an older source period. Cancel it and generate the monthly update again.")
+                redispatch_existing = _should_dispatch_existing_run(existing_run)
                 windows = build_startup_update_target_windows(target_month)
                 refresh_startup_update_run_source_context(
                     run=existing_run,
@@ -3160,7 +3165,7 @@ class VibeRaisingEmailDraftStartView(APIView):
                 automatic_source_scope=bool(getattr(self, "automatic_source_scope", False)),
                 audience_visibility=requested_audience,
                 cover_image=(display_config or {}).get("cover_image"))
-        if not existing_run or _should_dispatch_existing_run(run):
+        if not existing_run or redispatch_existing:
             dispatch_result = _dispatch_run_to_valley(run)
             if not dispatch_result:
                 return Response(_valley_dispatch_failure_payload(run, dispatch_result), status=503)

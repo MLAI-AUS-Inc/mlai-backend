@@ -20,6 +20,7 @@ from content_factory.google_baseline import (
 )
 from content_factory.models import (
     AISaturation,
+    ContentIsland,
     ClusterMembership,
     KeywordVelocity,
     KeywordStatus,
@@ -36,7 +37,7 @@ from founder_tools.serializers import FounderCompanySerializer
 from integrations import http_client
 from integrations.models import GoogleConnection, UserIntegration
 from organizations.models import Organization
-from roo.models import PointsAccount
+from roo.models import Ledger, PointsAccount
 from startup_updates.models import StartupProfile
 from workflow_runs.models import (
     ContentFactoryRun,
@@ -173,7 +174,7 @@ class VibeMarketingAutofillTransactionTests(TransactionTestCase):
                 format="json",
             )
 
-        self.assertEqual(response.status_code, 202)
+        self.assertEqual(response.status_code, 202, response.data)
         self.assertEqual(response.data["run_id"], "autofill-run-not-atomic")
         self.assertEqual(observed, {"in_atomic_block": False})
 
@@ -277,11 +278,11 @@ class VibeMarketingAutofillTests(TestCase):
             upload_file_to_storage.return_value = "https://cdn.example.com/company-avatar.jpg"
             response = self.client.post(
                 "/api/v1/vibe-marketing/company/avatar/",
-                {"avatar": _uploaded_png()},
+                {"companyId": str(self.company.pk), "avatar": _uploaded_png()},
                 format="multipart",
             )
 
-        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.status_code, 200, response.data)
         self.company.refresh_from_db()
         self.assertEqual(self.company.avatar_url, "https://cdn.example.com/company-avatar.jpg")
         self.assertEqual(response.data["company"]["avatarUrl"], "https://cdn.example.com/company-avatar.jpg")
@@ -316,7 +317,7 @@ class VibeMarketingAutofillTests(TestCase):
                 format="json",
             )
 
-        self.assertEqual(response.status_code, 202)
+        self.assertEqual(response.status_code, 202, response.data)
         self.assertEqual(response.data["run_id"], "autofill-run-1")
         self.assertNotIn("secret-key", str(response.data))
 
@@ -367,7 +368,7 @@ class VibeMarketingAutofillTests(TestCase):
                 format="json",
             )
 
-        self.assertEqual(response.status_code, 202)
+        self.assertEqual(response.status_code, 202, response.data)
         self.assertEqual(response.data["run_id"], active_run.run_id)
         self.assertEqual(response.data["runId"], active_run.run_id)
         self.assertEqual(response.data["status"], ContentFactoryRunStatus.RUNNING)
@@ -412,6 +413,7 @@ class VibeMarketingAutofillTests(TestCase):
                 "/api/v1/vibe-marketing/autofill/",
                 {
                     "companyName": "MLAI",
+                    "confirmDomainChange": True,
                     "domain": "https://mlai.au",
                     "companyLinkedInUrl": "https://www.linkedin.com/company/mlai-aus-inc/",
                     "location": "Melbourne, Australia",
@@ -431,7 +433,7 @@ class VibeMarketingAutofillTests(TestCase):
                 format="json",
             )
 
-        self.assertEqual(response.status_code, 202)
+        self.assertEqual(response.status_code, 202, response.data)
         self.assertEqual(response.data["run_id"], "autofill-run-persist")
 
         self.company.refresh_from_db()
@@ -689,7 +691,7 @@ class VibeMarketingAutofillTests(TestCase):
             format="json",
         )
 
-        self.assertEqual(response.status_code, 202)
+        self.assertEqual(response.status_code, 202, response.data)
         self.assertEqual(response.data["status"], ContentFactoryRunStatus.BLOCKED)
         self.assertEqual(
             response.data["error"],
@@ -1156,7 +1158,7 @@ class VibeMarketingAutofillTests(TestCase):
         with patch("content_factory.vibe_marketing_views.http_client.post", side_effect=fake_post):
             response = self.client.post("/api/v1/vibe-marketing/baseline/", {}, format="json")
 
-        self.assertEqual(response.status_code, 202)
+        self.assertEqual(response.status_code, 202, response.data)
         self.assertEqual(response.data["run_id"], "baseline-run-1")
         run = ContentFactoryRun.objects.get(run_id="baseline-run-1")
         self.assertEqual(run.workflow, "website_baseline")
@@ -1185,7 +1187,7 @@ class VibeMarketingAutofillTests(TestCase):
             "result": {
                 "baseline": {
                     "domain": "acme.com",
-                    "collectedAt": "2026-04-25T00:00:00+00:00",
+                    "collectedAt": timezone.now().isoformat(),
                     "overallScore": 78,
                     "summary": "Website baseline is workable.",
                     "metrics": {
@@ -1344,6 +1346,7 @@ class VibeMarketingAutofillTests(TestCase):
                             "title": "How AI Detectors Work",
                             "volume": 720,
                             "difficulty": 18,
+                            "difficulty_source": "dataforseo_labs",
                             "opportunityScore": 4516,
                         },
                         {
@@ -1352,6 +1355,7 @@ class VibeMarketingAutofillTests(TestCase):
                             "title": "What Is a Startup Company?",
                             "volume": 320,
                             "difficulty": 25,
+                            "difficulty_source": "dataforseo_labs",
                             "opportunityScore": 768,
                         },
                         {
@@ -1360,6 +1364,7 @@ class VibeMarketingAutofillTests(TestCase):
                             "title": "Competitive AI Startup Marketing",
                             "volume": 900,
                             "difficulty": 72,
+                            "difficulty_source": "dataforseo_labs",
                             "opportunityScore": 1200,
                         },
                         {
@@ -1368,6 +1373,7 @@ class VibeMarketingAutofillTests(TestCase):
                             "title": "Tiny AI Startup Idea",
                             "volume": 20,
                             "difficulty": 20,
+                            "difficulty_source": "dataforseo_labs",
                             "opportunityScore": 100,
                         },
                     ]
@@ -1567,6 +1573,8 @@ class VibeMarketingAutofillTests(TestCase):
         self.company.organization = organization
         self.company.save(update_fields=["organization", "updated_at"])
         OrganizationContentConfig.objects.get_or_create(organization=organization)
+        ContentIsland.objects.create(organization=organization, slug="ai-growth", name="AI Growth",
+            pillar_keyword="ai growth strategy", icon_key="rocket", color_key="blue", status="visible")
         captured = {}
 
         def fake_post(url, json=None, headers=None, timeout=None):
@@ -1589,7 +1597,7 @@ class VibeMarketingAutofillTests(TestCase):
                 format="json",
             )
 
-        self.assertEqual(response.status_code, 202)
+        self.assertEqual(response.status_code, 202, response.data)
         self.assertEqual(captured["url"], "https://content-factory.test/api/runs/discovery")
         self.assertEqual(captured["json"]["content_island_slug"], "ai-growth")
         self.assertEqual(captured["json"]["content_island_name"], "AI Growth")
@@ -1599,19 +1607,21 @@ class VibeMarketingAutofillTests(TestCase):
         self.assertEqual(captured["json"]["requested_topic_count"], 4)
         self.assertEqual(captured["json"]["client_request_id"], "vibe-topic-generation-ai-growth-1")
         self.assertEqual(captured["json"]["roo_points_action"], "content_island_topic_generation")
-        self.assertEqual(captured["json"]["roo_points_cost"], 1)
-        self.assertEqual(captured["json"]["roo_points_required"], 1)
+        self.assertEqual(captured["json"]["roo_points_cost"], 4)
+        self.assertEqual(captured["json"]["roo_points_required"], 4)
         self.assertEqual(captured["json"]["roo_points_billing_status"], "charged")
         self.assertTrue(captured["json"]["roo_points_ledger_id"])
         self.user.points_account.refresh_from_db()
-        self.assertEqual(self.user.points_account.balance, 19)
+        self.assertEqual(self.user.points_account.balance, 16)
 
     @override_settings(CONTENT_FACTORY_URL="https://content-factory.test", CONTENT_FACTORY_API_KEY="secret-key", IS_LOCAL_ENV=False)
-    def test_scoped_discovery_returns_service_unavailable_when_dispatch_fails(self):
+    def test_scoped_discovery_keeps_durable_delivery_after_transport_failure(self):
         organization, _created = Organization.objects.get_or_create(domain="acme.com", defaults={"name": "Acme"})
         self.company.organization = organization
         self.company.save(update_fields=["organization", "updated_at"])
         OrganizationContentConfig.objects.get_or_create(organization=organization)
+        ContentIsland.objects.create(organization=organization, slug="ai-growth", name="AI Growth",
+            pillar_keyword="ai growth strategy", icon_key="rocket", color_key="blue", status="visible")
 
         with patch.object(
             http_client, "post", side_effect=http_client.RequestException("connection refused")
@@ -1632,15 +1642,14 @@ class VibeMarketingAutofillTests(TestCase):
                 format="json",
             )
 
-        self.assertEqual(response.status_code, 503)
-        self.assertEqual(response.data["status"], ContentFactoryRunStatus.BLOCKED)
-        self.assertIn("Content Factory worker is unavailable", response.data["errors"][0])
-        self.assertTrue(response.data["retryable"])
-        self.assertIn("connection refused", response.data["diagnostics"]["technical_error"])
+        self.assertEqual(response.status_code, 202, response.data)
+        self.assertEqual(response.data["status"], ContentFactoryRunStatus.QUEUED)
+        from content_factory.dispatch_models import ContentFactoryDispatchOutbox
+        self.assertEqual(ContentFactoryDispatchOutbox.objects.get().state, "pending")
 
         run = ContentFactoryRun.objects.get(run_id=response.data["run_id"])
         self.assertEqual(run.workflow, "auto_discovery")
-        self.assertEqual(run.status, ContentFactoryRunStatus.BLOCKED)
+        self.assertEqual(run.status, ContentFactoryRunStatus.QUEUED)
         self.assertEqual(run.run_request["content_island_slug"], "ai-growth")
         # The dispatch outcome is ambiguous (the POST may have landed on the
         # content-factory side despite the transport error) and the key lookup
@@ -1648,7 +1657,7 @@ class VibeMarketingAutofillTests(TestCase):
         # refunding here while the real run starts is the refund-then-ghost bug
         # (Phase 4.1). The poll path refunds once the key confirms absent.
         self.user.points_account.refresh_from_db()
-        self.assertEqual(self.user.points_account.balance, 19)
+        self.assertEqual(self.user.points_account.balance, 16)
         self.assertEqual(
             run.run_request["pending_billing_refund"]["charged_user_id"], self.user.pk
         )
@@ -1786,6 +1795,8 @@ class VibeMarketingAutofillTests(TestCase):
         organization, _created = Organization.objects.get_or_create(domain="acme.com", defaults={"name": "Acme"})
         self.company.organization = organization
         self.company.save(update_fields=["organization", "updated_at"])
+        history = [{"year": 2026, "month": month, "search_volume": volume}
+            for month, volume in zip(range(5, 10), [400, 520, 610, 760, 920])]
         keyword = ResearchedKeyword.objects.create(
             organization=organization,
             keyword="best crm for ai startups",
@@ -1794,7 +1805,7 @@ class VibeMarketingAutofillTests(TestCase):
             opportunity_index=91,
             status=KeywordStatus.PENDING,
             related_keywords=["startup crm tools"],
-            monthly_searches=[400, 520, 610, 760, 920],
+            monthly_searches=history,
         )
         related_keyword = ResearchedKeyword.objects.create(
             organization=organization,
@@ -1847,9 +1858,9 @@ class VibeMarketingAutofillTests(TestCase):
         self.assertEqual(candidate["keyword"], "best crm for ai startups")
         self.assertEqual(candidate["velocity"]["dailyVolumes"], [400, 520, 610, 760, 920])
         self.assertEqual(candidate["velocity"]["trendStatus"], "rising")
-        self.assertEqual(candidate["monthlySearches"], [400, 520, 610, 760, 920])
+        self.assertEqual(candidate["monthlySearches"], history)
         self.assertEqual(candidate["trendStatus"], "rising")
-        self.assertEqual(candidate["trendPercent"], 28)
+        self.assertEqual(candidate["trendPercent"], 82.6)
         self.assertEqual(candidate["relatedKeywords"], ["startup crm tools", "startup crm comparison"])
         self.assertEqual(candidate["paaQuestions"][0]["question"], "What CRM should an AI startup use?")
         self.assertTrue(candidate["paaQuestions"][0]["hasAiOverview"])
@@ -2323,7 +2334,7 @@ class VibeMarketingAutofillTests(TestCase):
                 format="json",
             )
 
-        self.assertEqual(response.status_code, 202)
+        self.assertEqual(response.status_code, 202, response.data)
         self.assertNotIn("delivery_mode", captured)
         self.assertFalse(captured["delivery_mode_confirmed"])
         self.assertFalse(captured["delivery_mode_explicit"])
@@ -2369,7 +2380,7 @@ class VibeMarketingAutofillTests(TestCase):
                 format="json",
             )
 
-        self.assertEqual(response.status_code, 202)
+        self.assertEqual(response.status_code, 202, response.data)
         self.assertEqual(captured["delivery_mode"], "content_only")
         self.assertTrue(captured["delivery_mode_explicit"])
 
@@ -2470,7 +2481,7 @@ class VibeMarketingAutofillTests(TestCase):
         ]
         self.assertEqual(write_queries, [])
 
-    def test_bootstrap_article_setup_state_uses_pending_setup_outside_latest_runs(self):
+    def test_bootstrap_retains_pending_setup_among_latest_runs(self):
         organization, _created = Organization.objects.get_or_create(domain="acme.com", defaults={"name": "Acme"})
         config, _created = OrganizationContentConfig.objects.get_or_create(organization=organization)
         self.company.organization = organization
@@ -2518,7 +2529,7 @@ class VibeMarketingAutofillTests(TestCase):
         response = self.client.get("/api/v1/vibe-marketing/bootstrap/?view=summary")
 
         self.assertEqual(response.status_code, 200)
-        self.assertFalse(any(run["runId"] == "setup-run-canonical" for run in response.data["latestRuns"]))
+        self.assertTrue(any(run["runId"] == "setup-run-canonical" for run in response.data["latestRuns"]))
         state = response.data["articleSetupState"]
         self.assertEqual(state["setupRunId"], "setup-run-canonical")
         self.assertEqual(state["setupStatus"], "preview_failed")
@@ -2554,110 +2565,59 @@ class VibeMarketingAutofillTests(TestCase):
         self.assertFalse(response.data["checks"]["scaffold"]["setupBlocked"])
 
     @override_settings(CONTENT_FACTORY_URL="https://content-factory.test", CONTENT_FACTORY_API_KEY="secret-key", IS_LOCAL_ENV=False)
-    def test_article_setup_reset_proxies_and_clears_local_setup_state(self):
-        organization, _created = Organization.objects.get_or_create(domain="acme.com", defaults={"name": "Acme"})
-        config, _created = OrganizationContentConfig.objects.get_or_create(organization=organization)
-        self.company.organization = organization
-        self.company.save(update_fields=["organization", "updated_at"])
-        config.github_repo = "Acme/site"
+    def test_article_setup_reset_fences_old_generation_and_returns_durable_receipt(self):
+        config = self._connected_website_fixture(verified=False)
+        website = config.website_connection
+        generation = website.generation
+        config.articles_scaffolded = True
+        config.articles_scaffold_pr_url = "https://github.com/acme/site/pull/10"
+        config.articles_scaffold_preview_url = "https://preview.example/articles"
         config.publish_targets = [{"id": "registry", "kind": "registry_driven_seo"}]
         config.default_publish_target_id = "registry"
-        config.articles_scaffolded = True
-        config.articles_scaffold_pr_url = "https://github.com/Acme/site/pull/10"
-        config.articles_scaffold_preview_url = "https://preview.example/articles"
-        config.article_system = {
-            "state": "existing",
-            "directory_path": "app/articles",
-            "routePath": "/articles",
-            "pending_article_system_setup": {
-                "setupRunId": "setup-run-stale",
-                "setup_run_id": "setup-run-stale",
-                "sourceScanRunId": "scan-run-canonical",
-                "source_scan_run_id": "scan-run-canonical",
-                "status": "completed",
-                "routePath": "/articles",
-                "route_path": "/articles",
-            },
-            "scan": {
-                "githubRepo": "Acme/site",
-                "defaultBranch": "main",
-                "defaultBranchSha": "abc123",
-                "scanRunId": "scan-run-canonical",
-                "status": "completed",
-                "completedAt": (timezone.now() - timedelta(hours=2)).isoformat(),
-            },
-        }
-        config.save(
-            update_fields=[
-                "github_repo",
-                "publish_targets",
-                "default_publish_target_id",
-                "articles_scaffolded",
-                "articles_scaffold_pr_url",
-                "articles_scaffold_preview_url",
-                "article_system",
-                "updated_at",
-            ]
-        )
-        setup_run = ContentFactoryRun.objects.create(
-            run_id="setup-run-stale",
-            workflow="article_system_setup",
-            domain="acme.com",
-            github_repo="Acme/site",
-            status=ContentFactoryRunStatus.COMPLETED,
-            current_step="complete",
-            result={
-                "article_system_setup": {
-                    "setup_run_id": "setup-run-stale",
-                    "status": ContentFactoryRunStatus.COMPLETED,
-                    "route_path": "/articles",
-                    "preview_url": "https://preview.example/articles",
-                }
-            },
-        )
-        ContentFactoryRun.objects.filter(run_id=setup_run.run_id).update(updated_at=timezone.now() - timedelta(days=1))
-        self._connected_website_fixture(verified=False)
+        config.article_system = {"state": "existing", "pending_article_system_setup": {
+            "setupRunId": "setup-run-stale", "status": "completed"},
+            "scan": {"scanRunId": "scan-run-canonical", "defaultBranchSha": "a" * 40}}
+        config.save()
+        from content_factory.website_connections import contract_for
+        setup_run = ContentFactoryRun.objects.create(run_id="setup-run-stale",
+            organization=self.organization, workflow="article_system_setup", domain="acme.com",
+            github_repo="acme/site", status=ContentFactoryRunStatus.COMPLETED,
+            run_request=contract_for(website))
         with patch("content_factory.vibe_marketing_views.http_client.post") as post:
-            response = self.client.post(
-                "/api/v1/vibe-marketing/article-setup/reset",
-                {"githubRepo": "Acme/site"},
-                format="json",
-            )
-
-        self.assertEqual(response.status_code, 200)
+            response = self.client.post("/api/v1/vibe-marketing/article-setup/reset/",
+                {"githubRepo": "acme/site", "idempotency_key": "synthetic-reset"}, format="json")
+        self.assertEqual(response.status_code, 200, response.data)
         post.assert_not_called()
-        self.assertEqual(response.data["status"], "reset")
-        self.assertEqual(response.data["remote"], {})
+        operation = response.data["operation"]
+        self.assertEqual(operation["action"], "reset")
+        self.assertEqual(operation["state"], "pending")
+        self.assertTrue(operation["receipt"]["remote_cleanup_pending"])
+        self.assertFalse(operation["receipt"]["repository_modified"])
         config.refresh_from_db()
+        website.refresh_from_db()
+        setup_run.refresh_from_db()
+        self.assertEqual(website.generation, generation + 1)
+        self.assertEqual(website.verified_sha, "")
         self.assertEqual(config.publish_targets, [])
         self.assertIsNone(config.default_publish_target_id)
         self.assertFalse(config.articles_scaffolded)
         self.assertIsNone(config.articles_scaffold_pr_url)
         self.assertIsNone(config.articles_scaffold_preview_url)
-        self.assertEqual(config.article_system["state"], "missing")
-        self.assertNotIn("pending_article_system_setup", config.article_system)
-        self.assertEqual(config.article_system["scan"]["scanRunId"], "scan-run-canonical")
-        self.assertTrue(config.article_system["article_setup_reset_at"])
-        state = response.data["articleSetupState"]
-        self.assertEqual(state["scanRunId"], "scan-run-canonical")
-        self.assertEqual(state["scanStatus"], "completed")
+        self.assertEqual(config.article_system, {})
+        self.assertEqual(setup_run.status, ContentFactoryRunStatus.COMPLETED)
+        self.assertEqual(setup_run.run_request["connection_generation"], generation)
+        state = self.client.get("/api/v1/vibe-marketing/bootstrap/?view=summary").data["articleSetupState"]
         self.assertIsNone(state["setupRunId"])
-        self.assertIsNone(state["setupStatus"])
-        self.assertIsNone(state["routePath"])
-        self.assertFalse(state["setupBlocked"])
+        self.assertIsNone(state["scanRunId"])
         self.assertFalse(state["generationReady"])
         with patch("content_factory.vibe_marketing_views.http_client.post") as post:
-            second_response = self.client.post(
-                "/api/v1/vibe-marketing/article-setup/reset/",
-                {"githubRepo": "Acme/site"},
-                format="json",
-            )
-        self.assertEqual(second_response.status_code, 200)
+            repeated = self.client.post("/api/v1/vibe-marketing/article-setup/reset/",
+                {"githubRepo": "acme/site", "idempotency_key": "synthetic-reset"}, format="json")
+        self.assertEqual(repeated.status_code, 200, repeated.data)
         post.assert_not_called()
-        self.assertEqual(second_response.data["status"], "reset")
-        self.assertIsNone(second_response.data["articleSetupState"]["setupRunId"])
-        self.assertIsNone(second_response.data["articleSetupState"]["routePath"])
-        self.assertFalse(second_response.data["articleSetupState"]["generationReady"])
+        self.assertEqual(repeated.data["operation"]["id"], operation["id"])
+        website.refresh_from_db()
+        self.assertEqual(website.generation, generation + 1)
 
     def test_scan_status_exposes_blocking_reason_and_code(self):
         organization, _created = Organization.objects.get_or_create(domain="acme.com", defaults={"name": "Acme"})
@@ -2843,6 +2803,11 @@ class VibeMarketingAutofillTests(TestCase):
                 "roo_points_ledger_id": "ledger-article-original",
             },
         )
+        run.organization = self.organization
+        charge = Ledger.objects.create(user=self.user, kind="SPEND", source="CONTENT_FACTORY",
+            delta=-6, reference_id="paid-" + run.run_id)
+        run.run_request["roo_points_ledger_id"] = str(charge.pk)
+        run.save(update_fields=["organization", "run_request"])
         captured = {}
 
         def fake_post(url, json=None, headers=None, timeout=None):
@@ -2852,7 +2817,7 @@ class VibeMarketingAutofillTests(TestCase):
         with patch("content_factory.vibe_marketing_views.http_client.post", side_effect=fake_post):
             response = self.client.post(f"/api/v1/vibe-marketing/runs/{run.run_id}/restart/", {}, format="json")
 
-        self.assertEqual(response.status_code, 202)
+        self.assertEqual(response.status_code, 202, response.data)
         self.assertEqual(response.data["runId"], "article-restarted-1")
         self.assertNotEqual(response.data["runId"], run.run_id)
         self.assertEqual(captured["topic"], "Restartable Draft")
@@ -2860,7 +2825,7 @@ class VibeMarketingAutofillTests(TestCase):
         self.assertEqual(captured["restart_source_run_id"], run.run_id)
         self.assertEqual(captured["roo_points_action"], "article_generation")
         self.assertEqual(captured["roo_points_billing_status"], "reused")
-        self.assertEqual(captured["roo_points_ledger_id"], "ledger-article-original")
+        self.assertEqual(captured["roo_points_ledger_id"], str(charge.pk))
         self.assertNotIn("run_id", captured)
         run.refresh_from_db()
         self.assertEqual(run.result["restart_child_run_id"], "article-restarted-1")
@@ -2909,6 +2874,12 @@ class VibeMarketingAutofillTests(TestCase):
                 }
             },
         )
+        run.organization = self.organization
+        charge = Ledger.objects.create(user=self.user, kind="SPEND", source="CONTENT_FACTORY",
+            delta=-6, reference_id="paid-" + run.run_id)
+        run.run_request["roo_points_ledger_id"] = str(charge.pk)
+        run.save(update_fields=["organization", "run_request"])
+        self._connected_website_fixture(verified=True, run=run)
         captured = {}
 
         def fake_post(url, json=None, headers=None, timeout=None):
@@ -2918,7 +2889,7 @@ class VibeMarketingAutofillTests(TestCase):
         with patch("content_factory.vibe_marketing_views.http_client.post", side_effect=fake_post):
             response = self.client.post(f"/api/v1/vibe-marketing/runs/{run.run_id}/restart/", {}, format="json")
 
-        self.assertEqual(response.status_code, 202)
+        self.assertEqual(response.status_code, 202, response.data)
         self.assertEqual(response.data["runId"], "article-exact-preview-restart-1")
         self.assertNotIn("delivery_mode", captured)
         self.assertFalse(captured["delivery_mode_confirmed"])
@@ -2940,6 +2911,7 @@ class VibeMarketingAutofillTests(TestCase):
             run_request={"source_run_id": "article-source-1"},
         )
 
+        self._connected_website_fixture(run=run)
         response = self.client.post(f"/api/v1/vibe-marketing/runs/{run.run_id}/restart/", {}, format="json")
 
         self.assertEqual(response.status_code, 409)
@@ -2964,9 +2936,12 @@ class VibeMarketingAutofillTests(TestCase):
                 "topic": "Legacy Draft",
                 "target_keyword": "legacy draft",
                 "delivery_mode": "content_only",
+                "delivery_mode_confirmed": True,
             },
         )
 
+        run.organization = self.organization
+        run.save(update_fields=["organization"])
         with patch("content_factory.vibe_marketing_views.http_client.post") as post:
             response = self.client.post(f"/api/v1/vibe-marketing/runs/{run.run_id}/restart/", {}, format="json")
 
@@ -2977,7 +2952,7 @@ class VibeMarketingAutofillTests(TestCase):
         self.assertEqual(self.user.points_account.balance, 20)
 
     @override_settings(CONTENT_FACTORY_URL="", CONTENT_FACTORY_API_KEY="", IS_LOCAL_ENV=True)
-    def test_article_start_blocks_when_content_factory_is_unconfigured_without_marking_keyword(self):
+    def test_article_start_reserves_durable_delivery_when_worker_is_unconfigured(self):
         organization, _created = Organization.objects.get_or_create(domain="acme.com", defaults={"name": "Acme"})
         self.company.organization = organization
         self.company.save(update_fields=["organization", "updated_at"])
@@ -2994,12 +2969,16 @@ class VibeMarketingAutofillTests(TestCase):
                 format="json",
             )
 
-        self.assertEqual(response.status_code, 202)
-        self.assertEqual(response.data["status"], ContentFactoryRunStatus.BLOCKED)
+        self.assertEqual(response.status_code, 202, response.data)
+        self.assertEqual(response.data["status"], ContentFactoryRunStatus.QUEUED)
         post.assert_not_called()
         run = ContentFactoryRun.objects.get(run_id=response.data["run_id"])
-        self.assertEqual(run.status, ContentFactoryRunStatus.BLOCKED)
-        self.assertIn("content_factory_url_configured", run.result["diagnostics"])
+        self.assertEqual(run.status, ContentFactoryRunStatus.QUEUED)
+        from content_factory.dispatch_models import ContentFactoryDispatchOutbox
+        outbox = ContentFactoryDispatchOutbox.objects.get(client_request_id=run.run_id)
+        self.assertEqual(outbox.state, "pending")
+        self.assertEqual(outbox.attempts, 0)
+        self.assertTrue(run.run_request["dispatch_pending_resolution"])
         self.assertFalse(
             ResearchedKeyword.objects.filter(
                 organization=organization,
@@ -3029,7 +3008,7 @@ class VibeMarketingAutofillTests(TestCase):
                 format="json",
             )
 
-        self.assertEqual(response.status_code, 202)
+        self.assertEqual(response.status_code, 202, response.data)
         self.assertEqual(response.data["status"], ContentFactoryRunStatus.QUEUED)
         self.assertTrue(
             ResearchedKeyword.objects.filter(
@@ -3053,13 +3032,14 @@ class VibeMarketingAutofillTests(TestCase):
         )
 
         self._connected_website_fixture(run=run)
-        with patch("content_factory.vibe_marketing_views.http_client.get") as get:
+        with patch("content_factory.vibe_marketing_views.http_client.get", wraps=http_client.get) as get:
             response = self.client.get(f"/api/v1/vibe-marketing/runs/{run.run_id}/")
 
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.data["status"], ContentFactoryRunStatus.BLOCKED)
         self.assertIn("Content Factory worker is unavailable", response.data["errors"][0])
-        get.assert_not_called()
+        self.assertTrue(all(call.args[0].startswith("https://api.github.com/")
+            for call in get.call_args_list))
         run.refresh_from_db()
         self.assertEqual(run.status, ContentFactoryRunStatus.BLOCKED)
         self.assertEqual(run.current_step, "fetch_org_config")
@@ -3409,8 +3389,9 @@ class VibeMarketingAutofillTests(TestCase):
         self.assertIn("https://github.com/apps/mlai-tools/installations/new", response.data["auth_url"])
 
         config = OrganizationContentConfig.objects.get(organization__domain="acme.com")
-        self.assertEqual(config.github_repo, "acme/site")
-        self.assertEqual(config.connected_slack_user_id, f"mlai_user:{self.user.id}")
+        self.assertFalse(config.github_repo)
+        self.assertIsNone(config.website_connection_id)
+        self.assertFalse(config.connected_slack_user_id)
         self.assertNotIn("github_token", response.data)
 
     def test_github_mutation_requires_explicit_scope_for_multi_company_founder(self):
@@ -3505,9 +3486,11 @@ class VibeMarketingAutofillTests(TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.data["status"], "auth_required")
         config = OrganizationContentConfig.objects.get(organization__domain="acme.com")
-        self.assertEqual(config.github_repo, "acme/site")
+        self.assertFalse(config.github_repo)
+        self.assertEqual(response.data["github_repo"], "acme/site")
+        self.assertIsNone(config.website_connection_id)
 
-    def test_github_connect_reuses_valid_org_credentials(self):
+    def test_legacy_org_credentials_do_not_grant_website_access(self):
         organization, _created = Organization.objects.get_or_create(domain="acme.com", defaults={"name": "Acme"})
         self.company.organization = organization
         self.company.save(update_fields=["organization", "updated_at"])
@@ -3527,13 +3510,14 @@ class VibeMarketingAutofillTests(TestCase):
         )
 
         self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.data["status"], "already_connected")
-        self.assertEqual(response.data["connection_state"], "connected")
+        self.assertEqual(response.data["status"], "auth_required")
+        self.assertEqual(response.data["connection_state"], "auth_required")
         self.assertEqual(response.data["github_repo"], "acme/site")
         self.assertNotIn("org-token", str(response.data))
 
         bootstrap = self.client.get("/api/v1/vibe-marketing/bootstrap/")
-        self.assertTrue(bootstrap.data["checks"]["github"]["passed"])
+        self.assertFalse(bootstrap.data["checks"]["github"]["passed"])
+        self.assertIsNone(OrganizationContentConfig.objects.get(organization=organization).website_connection_id)
 
     def test_github_connect_force_reconnect_returns_auth_url_without_overwriting_repo(self):
         organization, _created = Organization.objects.get_or_create(domain="acme.com", defaults={"name": "Acme"})
@@ -3561,7 +3545,7 @@ class VibeMarketingAutofillTests(TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.data["status"], "auth_required")
         self.assertEqual(response.data["connection_state"], "auth_required")
-        self.assertEqual(response.data["github_repo"], "acme/site")
+        self.assertEqual(response.data["github_repo"], "other/site")
         self.assertEqual(response.data["auth_url"], "https://github.example/install")
         mock_ensure_valid_org_token.assert_not_called()
         mock_auth_url.assert_called_once()
@@ -3583,7 +3567,7 @@ class VibeMarketingAutofillTests(TestCase):
         self.assertEqual(response.data["error"], "github_auth_url_failed")
         self.assertIn("GitHub authorization could not be opened", response.data["detail"])
 
-    def test_github_connect_refreshes_expired_org_credentials_server_side(self):
+    def test_legacy_org_refresh_cannot_replace_github_app_authorization(self):
         organization, _created = Organization.objects.get_or_create(domain="acme.com", defaults={"name": "Acme"})
         self.company.organization = organization
         self.company.save(update_fields=["organization", "updated_at"])
@@ -3604,7 +3588,7 @@ class VibeMarketingAutofillTests(TestCase):
             config.save(update_fields=["github_token_encrypted", "github_token_expires_at", "updated_at"])
             return "new-org-token"
 
-        with patch("content_factory.vibe_marketing_views.ensure_valid_org_token", side_effect=fake_ensure_valid_org_token):
+        with patch("content_factory.vibe_marketing_views.ensure_valid_org_token", side_effect=fake_ensure_valid_org_token) as refresh:
             response = self.client.post(
                 "/api/v1/vibe-marketing/github/connect/",
                 {"githubRepo": "acme/site"},
@@ -3612,12 +3596,14 @@ class VibeMarketingAutofillTests(TestCase):
             )
 
         self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.data["status"], "already_connected")
+        self.assertEqual(response.data["status"], "auth_required")
         self.assertNotIn("new-org-token", str(response.data))
         config.refresh_from_db()
-        self.assertEqual(config.github_token_encrypted, "new-org-token")
+        self.assertEqual(config.github_token_encrypted, "old-org-token")
+        self.assertIsNone(config.website_connection_id)
+        refresh.assert_not_called()
 
-    def test_github_connect_promotes_matching_user_credentials_to_org(self):
+    def test_legacy_user_credentials_are_not_promoted_to_website_authority(self):
         actor_id = f"mlai_user:{self.user.id}"
         UserIntegration.objects.create(
             slack_user_id=actor_id,
@@ -3637,15 +3623,15 @@ class VibeMarketingAutofillTests(TestCase):
         )
 
         self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.data["status"], "already_connected")
-        self.assertEqual(response.data["credential_source"], "user_promoted")
+        self.assertEqual(response.data["status"], "auth_required")
         self.assertNotIn("user-token", str(response.data))
 
         config = OrganizationContentConfig.objects.get(organization__domain="acme.com")
-        self.assertEqual(config.github_token_encrypted, "user-token")
-        self.assertEqual(config.github_refresh_token_encrypted, "user-refresh")
-        self.assertEqual(config.github_repo, "acme/site")
-        self.assertEqual(config.github_installation_id, "inst-1")
+        self.assertFalse(config.github_token_encrypted)
+        self.assertFalse(config.github_refresh_token_encrypted)
+        self.assertFalse(config.github_repo)
+        self.assertFalse(config.github_installation_id)
+        self.assertIsNone(config.website_connection_id)
 
     def test_github_repos_lists_connected_installation_repositories(self):
         organization, _created = Organization.objects.get_or_create(domain="acme.com", defaults={"name": "Acme"})
@@ -3729,7 +3715,7 @@ class VibeMarketingAutofillTests(TestCase):
                 format="json",
             )
 
-        self.assertEqual(response.status_code, 202)
+        self.assertEqual(response.status_code, 202, response.data)
         self.assertEqual(response.data["runId"], "scan-hint-1")
         run = ContentFactoryRun.objects.get(run_id="scan-hint-1")
         self.assertEqual(run.run_request["article_surface_hint"]["route_path"], "/articles")
@@ -3790,7 +3776,7 @@ class VibeMarketingAutofillTests(TestCase):
                 format="json",
             )
 
-        self.assertEqual(response.status_code, 202)
+        self.assertEqual(response.status_code, 202, response.data)
         # The stored create-new selection is recovered and forwarded to content-factory.
         self.assertEqual(captured["mode"], "none")
         run = ContentFactoryRun.objects.get(run_id="scan-recover-1")
@@ -3867,7 +3853,7 @@ class VibeMarketingAutofillTests(TestCase):
                 format="json",
             )
 
-        self.assertEqual(response.status_code, 202)
+        self.assertEqual(response.status_code, 202, response.data)
         self.assertEqual(response.data["runId"], "scan-inventory-1")
         run = ContentFactoryRun.objects.get(run_id="scan-inventory-1")
         self.assertEqual(run.run_request["scan_purpose"], "inventory")
@@ -3906,7 +3892,8 @@ class VibeMarketingAutofillTests(TestCase):
         config = OrganizationContentConfig.objects.get(organization=organization)
         pending = config.article_system["pending_article_system_setup"]
         self.assertEqual(pending["routePath"], "/articles")
-        self.assertNotIn("setupRunId", pending)
+        self.assertEqual(pending["setupRunId"], run.run_id)
+        self.assertEqual(pending["setupStatus"], "blocked")
 
     @override_settings(CONTENT_FACTORY_URL="https://content-factory.test", CONTENT_FACTORY_API_KEY="secret-key", IS_LOCAL_ENV=False)
     def test_article_system_setup_records_confirmed_content_factory_run(self):
@@ -3944,7 +3931,7 @@ class VibeMarketingAutofillTests(TestCase):
                 format="json",
             )
 
-        self.assertEqual(response.status_code, 202)
+        self.assertEqual(response.status_code, 202, response.data)
         self.assertEqual(response.data["setupRunId"], "setup-confirmed-1")
         run = ContentFactoryRun.objects.get(run_id="setup-confirmed-1")
         self.assertEqual(run.workflow, "article_system_setup")
