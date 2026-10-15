@@ -2538,7 +2538,10 @@ class VibeMarketingAutofillTests(TestCase):
         self.assertTrue(any(run["runId"] == "setup-run-canonical" for run in response.data["latestRuns"]))
         state = response.data["articleSetupState"]
         self.assertEqual(state["setupRunId"], "setup-run-canonical")
-        self.assertEqual(state["setupStatus"], "preview_failed")
+        self.assertEqual(state["setupStatus"], "blocked")
+        self.assertTrue(state["setupBlocked"])
+        setup_run.refresh_from_db()
+        self.assertEqual(setup_run.current_step, "preview_failed")
         self.assertEqual(state["scanRunId"], "scan-run-canonical")
         self.assertEqual(state["routePath"], "/articles")
 
@@ -2917,7 +2920,7 @@ class VibeMarketingAutofillTests(TestCase):
             run_request={"source_run_id": "article-source-1"},
         )
 
-        self._connected_website_fixture(run=run)
+        self._connected_website_fixture(verified=True, run=run)
         response = self.client.post(f"/api/v1/vibe-marketing/runs/{run.run_id}/restart/", {}, format="json")
 
         self.assertEqual(response.status_code, 409)
@@ -2985,7 +2988,7 @@ class VibeMarketingAutofillTests(TestCase):
         self.assertEqual(outbox.state, "pending")
         self.assertEqual(outbox.attempts, 0)
         self.assertTrue(run.run_request["dispatch_pending_resolution"])
-        self.assertFalse(
+        self.assertTrue(
             ResearchedKeyword.objects.filter(
                 organization=organization,
                 keyword_normalized="founder workflow automation",

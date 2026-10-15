@@ -596,3 +596,19 @@ that path: a second flat-cost assignment overwrote the already computed requeste
 research count. Remove that assignment so roo_points_required matches the actual
 charge; eight focused research admission/outbox/refund cases pass, with a new
 assertion for the original requested count. No debit or quote price logic changed.
+
+
+Completed 6728b552 reports: SQLite ran 3,518 cases with seven failures and no
+errors (37 pre-existing skips). Four of those observations were already repaired
+in a89706dc. Remaining fixtures now assert a durably queued keyword is in progress,
+the canonical setup status is blocked while preview_failed remains its step, and
+the nonrestartable-workflow case starts with real current target/live readiness
+so it reaches its own workflow restriction. No readiness guard is replaced.
+
+The separate PostgreSQL message/authority lane found three reentry fixture errors:
+its synthetic profile had no companies manager after the new sibling-company
+preflight. Supply an actual founder user, profile, company and connection owner.
+The real loopback HTTP/transaction/authority paths remain intact. These database
+cases are syntax checked only pending the existing remote CI lanes. Thirty
+focused database-free contract, observation, redispatch and research checks pass.
+No local database or migration was run; all 491 modules remain assigned.
