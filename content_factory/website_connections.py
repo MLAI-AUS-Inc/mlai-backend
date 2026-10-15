@@ -1152,6 +1152,15 @@ def setup_pr_open(run):
         and (result.get("pr_url") or setup.get("pr_url") or result.get("pr_number") or setup.get("pr_number")))
 
 
+def setup_kit_check_failed(run):
+    """MLAI's own verification job failed on this setup pull request (not the site's CI)."""
+    from .website_setup_merge_policy import VERIFICATION_KIT_CHECKS
+    result = run.result if isinstance(run.result, dict) else {}
+    setup = result.get("article_system_setup") if isinstance(result.get("article_system_setup"), dict) else {}
+    return all(item.get("merge_status") == "checks_failed" and item.get("checks_source") == VERIFICATION_KIT_CHECKS
+        for item in (result, setup))
+
+
 def open_setup_pr_run(connection, *, source_sha):
     """The current generation's newest open setup pull request, if built on source_sha.
 

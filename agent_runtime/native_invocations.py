@@ -1,5 +1,6 @@
 """Durable owner mentions, bounded context and one native reply per invocation."""
 
+import json
 import re
 from datetime import datetime, timedelta, timezone as datetime_timezone
 from functools import partial
@@ -25,10 +26,14 @@ def validate_invocation(invocation, grant, *, now=None, allow_replied=False, all
     if (invocation.grant_id != grant.pk or invocation.installation_id != installation.pk
             or installation.app_id != "openai-dot" or invocation.resource not in grant.resources
             or str(installation.community_id) != native_sources.parse_resource(invocation.resource)[0]
-            or not HEX_ID.fullmatch(invocation.owner_public_key)
-            or invocation.status not in ({"pending", "replied"} if allow_replied else {"pending"})
-            or (not allow_expired and invocation.expires_at <= now)):
+            or not HEX_ID.fullmatch(invocation.owner_public_key)):
         raise AgentPermissionDenied("invocation_inactive")
+    allowed = {"pending"} | ({"replied"} if allow_replied else set()) | ({"expired"} if allow_expired else set())
+    if invocation.status not in allowed:
+        code = {"expired": "invocation_expired", "cancelled": "invocation_cancelled", "replied": "invocation_replied"}.get(invocation.status, "invocation_inactive")
+        raise AgentPermissionDenied(code)
+    if not allow_expired and invocation.expires_at <= now:
+        raise AgentPermissionDenied("invocation_expired")
     if not HEX_ID.fullmatch(invocation.source_event_id) or not HEX_ID.fullmatch(invocation.thread_id):
         raise AgentPermissionDenied("invocation_destination_invalid")
     return invocation
@@ -85,7 +90,7 @@ def get_invocation(principal, invocation_id=None):
             status="pending", expires_at__gt=timezone.now(),
         ).order_by("created_at", "pk").values_list("pk", flat=True)[:2])
         if len(candidates) != 1:
-            raise ValidationError("Provide invocation_id unless exactly one live pending owner mention exists.")
+            raise ValidationError("Provide invocation_id unless exactly one live pending owner mention exists.", code="invocation_ambiguous")
         invocation_id = candidates[0]
     _, invocation = _authorized_invocation(principal, invocation_id, "messages:read", allow_replied=True)
     return payload(invocation)
@@ -99,9 +104,10 @@ def read_invocation_thread(principal, invocation_id, *, cursor="", limit=100):
     return native_sources.read_invocation(invocation, cursor=cursor, limit=limit)
 
 
-def reply_event(invocation, text, *, created_at):
+def reply_event(invocation, text, *, created_at, now=None):
+    now = now or datetime.fromtimestamp(created_at, tz=datetime_timezone.utc)
     installation = invocation.installation
-    context = native_sources.invocation_context(invocation, operation="reply")
+    context = native_sources.invocation_context(invocation, operation="reply", now=now)
     _, channel = native_sources.parse_resource(invocation.resource)
     tags = [["h", channel], ["e", invocation.thread_id, "", "root"],
         ["e", invocation.source_event_id, "", "reply"],
@@ -124,16 +130,16 @@ def reply_to_invocation(principal, invocation_id, text, idempotency_key):
     existing = AgentInvocationReply.objects.filter(invocation=invocation).first()
     if existing:
         if existing.payload_hash != digest or existing.idempotency_key != key:
-            raise ValidationError("This invocation already has a different reply.")
+            raise ValidationError("This invocation already has a different reply.", code="reply_conflict")
         return reply_payload(existing)
     if invocation.status != "pending":
-        raise PermissionDenied("Invocation is no longer awaiting a reply.")
+        raise AgentPermissionDenied("invocation_replied")
     sent_today = AgentInvocationReply.objects.filter(invocation__installation=invocation.installation,
         created_at__gte=now.replace(hour=0, minute=0, second=0, microsecond=0)).exclude(status="cancelled").count()
     if sent_today >= invocation.grant.daily_task_limit:
-        raise PermissionDenied("Daily reply limit reached.")
+        raise AgentPermissionDenied("daily_limit_reached")
     row = AgentInvocationReply.objects.create(invocation=invocation, idempotency_key=key, payload_hash=digest,
-        event=reply_event(invocation, text, created_at=int(now.timestamp())))
+        event=reply_event(invocation, text, created_at=int(now.timestamp()), now=now))
     runtime.audit("native.reply.queued", grant=invocation.grant, invocation_id=str(invocation.pk), event_id=row.event["id"])
     # No network side effect before this transaction commits the exact event.
     return reply_payload(row)
@@ -159,6 +165,8 @@ def invocation_deliverable(grant, invocation_id, *, expected_resource=None, now=
         if expected_resource is not None and invocation.resource != expected_resource:
             return False
         validate_invocation(invocation, grant, now=now)
+        if grant.installation.owner_device is None:
+            return False
         bound = native_sources.current_device(grant.installation.owner, public_key=grant.installation.owner_device.public_key)
         native_sources.current_device(grant.installation.owner, public_key=invocation.owner_public_key)
         return bound.pk == grant.installation.owner_device_id
@@ -249,8 +257,8 @@ def poll_native_mentions(*, limit=50, now=None):
                     resource=resource, is_active=True, event_types=["agent.mentioned"], delivery__mode="webhook").first()
                 from django.utils.dateparse import parse_datetime
                 listening_since = parse_datetime(active.delivery.get("listening_since", "")) if active else None
-                expires_at = parse_datetime(active.delivery.get("expires_at", "")) if active else None
-                if not listening_since or not expires_at or expires_at <= now:
+                from .event_webhooks import lease_live
+                if not listening_since or not active or not lease_live(active.delivery, now):
                     active = None
                 if active:
                     from .unified_authority import assert_record_authority
@@ -291,6 +299,7 @@ def poll_native_mentions(*, limit=50, now=None):
 
 
 def dispatch_native_replies(*, limit=50, now=None):
+    supplied_now = now
     now = now or timezone.now()
     try:
         native_sources.require_native(reply=True)
@@ -300,6 +309,7 @@ def dispatch_native_replies(*, limit=50, now=None):
     ids = list(AgentInvocationReply.objects.filter(status__in=("pending", "unknown"))
                .order_by("created_at").values_list("invocation_id", flat=True)[:min(limit, 100)])
     for invocation_id in ids:
+        now = supplied_now or timezone.now()
         with transaction.atomic():
             grant_id = AgentInvocation.objects.values_list("grant_id", flat=True).get(pk=invocation_id)
             grant = runtime._grant(grant_id)
@@ -312,7 +322,7 @@ def dispatch_native_replies(*, limit=50, now=None):
             try:
                 from .unified_authority import assert_record_authority
                 assert_record_authority(grant, row.receipt)
-                validate_invocation(invocation, grant, now=now)
+                validate_invocation(invocation, grant, now=now, allow_expired=True)
                 bound = native_sources.current_device(grant.installation.owner, public_key=grant.installation.owner_device.public_key)
                 if bound.pk != grant.installation.owner_device_id:
                     raise AgentPermissionDenied("owner_device_changed")
@@ -320,12 +330,22 @@ def dispatch_native_replies(*, limit=50, now=None):
                 checker = lambda owner, action, resource: native_sources.live_access(owner, action, resource, owner_public_key=invocation.owner_public_key)
                 authorize(grant, "messages:reply", invocation.resource, expected_generation=invocation.generation,
                           access_checker=checker, now=now)
+                # Source ACL checks can take time; use the actual send boundary.
+                now = supplied_now or timezone.now()
+                if _reply_window_elapsed(row, now):
+                    row.save(update_fields=("status", "error_code", "updated_at"))
+                    continue
                 row.receipt = native_sources.send_reply(row)
                 row.status, row.error_code = "sent", ""
                 invocation.status = "replied"
                 invocation.save(update_fields=("status",))
                 sent += 1
-            except (AgentPermissionDenied, PermissionDenied):
+            except (AgentPermissionDenied, PermissionDenied) as exc:
+                if getattr(exc, "code", None) == "resource_unavailable":
+                    continue
+                if _reply_window_elapsed(row, supplied_now or timezone.now()):
+                    row.save(update_fields=("status", "error_code", "updated_at"))
+                    continue
                 if row.status == "unknown":
                     row.status, row.error_code = "stopped_unknown", "authority_changed_after_ambiguous_send"
                 else:
@@ -335,3 +355,66 @@ def dispatch_native_replies(*, limit=50, now=None):
                 row.status, row.error_code = "unknown", "relay_receipt_unavailable"
             row.save(update_fields=("status", "receipt", "error_code", "updated_at"))
     return sent
+
+
+def _signed_context_expiry(row):
+    """Read the already signed deadline; malformed context fails closed."""
+    try:
+        tags = row.event.get("tags", [])
+        context_tags = [tag for tag in tags if isinstance(tag, list) and tag and tag[0] == "native_invocation"]
+        if not context_tags:
+            return row.invocation.expires_at
+        if len(context_tags) != 1 or len(context_tags[0]) != 2:
+            raise ValueError()
+        expiry = json.loads(context_tags[0][1])["expires_at"]
+        if type(expiry) is not int:
+            raise ValueError()
+        return datetime.fromtimestamp(expiry, tz=datetime_timezone.utc)
+    except (ValueError, TypeError, KeyError, AttributeError, OverflowError, OSError):
+        return datetime.min.replace(tzinfo=datetime_timezone.utc)
+
+
+def _reply_window_elapsed(row, now):
+    if row.invocation.expires_at > now and _signed_context_expiry(row) > now + timedelta(seconds=5):
+        return False
+    if row.status == "unknown":
+        row.status, row.error_code = "stopped_unknown", "reply_window_elapsed_after_ambiguous_send"
+    else:
+        row.status = "failed"
+        row.error_code = "expired_before_reply" if row.invocation.expires_at <= now else "reply_window_elapsed"
+    runtime.audit("native.reply.failed", grant=row.invocation.grant,
+                  invocation_id=str(row.invocation.pk), reason=row.error_code)
+    return True
+
+
+def expire_native_invocations(*, limit=200, now=None):
+    """Retire elapsed invocations behind the same owner/install/grant fence."""
+    try:
+        native_sources.require_native()
+    except PermissionDenied:
+        return 0
+    now = now or timezone.now()
+    ids = list(AgentInvocation.objects.filter(status="pending", expires_at__lte=now)
+               .order_by("expires_at", "pk").values_list("pk", flat=True)[:max(1, min(limit, 200))])
+    expired = 0
+    for invocation_id in ids:
+        with transaction.atomic():
+            grant_id = AgentInvocation.objects.values_list("grant_id", flat=True).get(pk=invocation_id)
+            grant = runtime._grant(grant_id)
+            invocation = runtime.locked(AgentInvocation.objects.all()).get(pk=invocation_id)
+            invocation.grant, invocation.installation = grant, grant.installation
+            if invocation.status != "pending" or invocation.expires_at > now:
+                continue
+            row = runtime.locked(AgentInvocationReply.objects.all()).filter(invocation=invocation).first()
+            if row and row.status in {"pending", "unknown"}:
+                row.invocation = invocation
+                if _signed_context_expiry(row) > now:
+                    continue
+                row.error_code = "expired_after_ambiguous_send" if row.status == "unknown" else "expired_before_reply"
+                row.status = "stopped_unknown" if row.status == "unknown" else "failed"
+                row.save(update_fields=("status", "error_code", "updated_at"))
+            invocation.status = "expired"
+            invocation.save(update_fields=("status",))
+            runtime.audit("native.invocation.expired", grant=grant, invocation_id=str(invocation.pk))
+            expired += 1
+    return expired

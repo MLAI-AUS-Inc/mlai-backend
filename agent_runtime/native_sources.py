@@ -173,14 +173,16 @@ def live_access(owner, scope, resource, *, owner_public_key=None):
         return False
 
 
-def invocation_context(invocation, *, operation):
+def invocation_context(invocation, *, operation, now=None):
+    now = now or timezone.now()
     installation = invocation.installation
     community, channel = parse_resource(invocation.resource)
     return {"operation": operation, "community_id": community, "channel_id": channel,
         "owner_pubkey": invocation.owner_public_key, "bot_pubkey": installation.public_key,
         "installation_id": str(installation.pk), "grant_generation": invocation.generation,
         "invocation_id": str(invocation.pk), "trigger_event_id": invocation.source_event_id,
-        "root_event_id": invocation.thread_id, "expires_at": int(invocation.expires_at.timestamp())}
+        "root_event_id": invocation.thread_id,
+        "expires_at": min(int(invocation.expires_at.timestamp()), int(now.timestamp()) + 840)}
 
 
 def read_invocation(invocation, *, limit=100, cursor=""):
