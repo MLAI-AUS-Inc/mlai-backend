@@ -53,11 +53,13 @@ class VibeRaisingApiTests(TestCase):
 
     def _create_founder_company(self, *, domain="acme.com", registered=True):
         profile = VibeRaisingProfile.objects.create(user=self.user, role=VibeRaisingProfile.ROLE_FOUNDER)
+        organization,_=Organization.objects.get_or_create(domain=domain,defaults={"name":"Acme Inc."})
         # A registered company is, post-gate, a verified one — carry the ACN and
         # verification stamp so it can proceed to updates.
         company = VibeRaisingCompany.objects.create(
             profile=profile,
             name="Acme Inc.",
+            organization=organization,
             domain=domain,
             registered=registered,
             abn="89000000019" if registered else None,
