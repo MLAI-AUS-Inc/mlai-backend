@@ -6,6 +6,11 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class DependencyReviewWorkflowTests(unittest.TestCase):
+    def test_workflow_yaml_is_well_formed(self):
+        import yaml
+        for filename in ('deploy.yml', 'community-bridge-dependency-review.yml'):
+            yaml.safe_load((ROOT / '.github/workflows' / filename).read_text())
+
     def test_only_fixed_read_only_commands_are_available(self):
         text = (ROOT / '.github/workflows/community-bridge-dependency-review.yml').read_text()
         inputs = text.split('    inputs:\n', 1)[1].split('\npermissions:', 1)[0]
