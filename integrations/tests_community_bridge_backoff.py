@@ -36,6 +36,32 @@ class ParentDependencyBackoffTests(SimpleTestCase):
                     delivery_id=1, parent_message_id="parent",
                 )
 
+    def test_flag_off_does_not_classify_and_first_park_logs_once(self):
+        with patch('integrations.services.community_bridge.dependencies.classify_missing_dependency') as classify:
+            with self.assertLogs(store.logger, 'INFO') as logs:
+                self.park()
+            self.assertIn('community_bridge_waiting_for_parent', logs.output[0])
+            with self.assertNoLogs(store.logger, 'INFO'):
+                self.park()
+            classify.assert_not_called()
+
+    @override_settings(COMMUNITY_BRIDGE_DEPENDENCY_VERDICTS_ENABLED=True)
+    def test_flagged_verdicts_preserve_lease_and_attempt_bookkeeping(self):
+        from integrations.services.community_bridge.dependencies import DependencyVerdict
+        self.row.delivery_type = 'create'
+        for action, status in [('noop', 'completed'), ('dead_letter', 'dead'), ('park', 'waiting_parent'), ('wait', 'waiting_parent')]:
+            with self.subTest(action=action), patch('integrations.services.community_bridge.dependencies.classify_missing_dependency', return_value=DependencyVerdict(action, 'dependency_dead', 'slack_ts')), patch.object(store, '_wake_waiting_child_deliveries') as wake:
+                self.row.attempts = 3
+                self.row.dependency_attempts = 0
+                self.park()
+                self.assertEqual(self.row.status, status)
+                self.assertEqual(self.row.attempts, 2)
+                self.assertEqual(self.row.dependency_attempts, 1)
+                if action in {'noop', 'dead_letter'}:
+                    wake.assert_called_once_with(self.row)
+                if action == 'park':
+                    self.assertEqual(self.row.available_at, self.now + timedelta(days=7))
+
     def test_retry_schedule_survives_reclaims_without_spending_provider_attempts(self):
         first_seen = self.now
         for delay in (10, 30, 120, 300, 900, 900):
@@ -297,3 +323,37 @@ class AdapterErrorWorkerTests(IsolatedAsyncioTestCase):
             await worker.CommunityBridgeDiscordClient._process_claimed_public_delivery(instance, {"id": 1, "target_platform": "buzz"})
         self.assertIn("invalid_delivery", log.call_args.args)
         self.assertTrue(retry.call_args.kwargs["permanent"])
+
+
+class DependencyEvidenceTests(SimpleTestCase):
+    def test_ignored_evidence_uses_subtype_timestamp_without_echoing_content(self):
+        for subtype, fields, expected in (
+            ('channel_join', {'ts': '123.4', 'user': 'U1'}, ('123.4', 'subtype:channel_join')),
+            ('bot_message', {'ts': '123.5'}, ('123.5', 'userless_bot')),
+            ('message_changed', {'ts': 'event-ts', 'message': {'ts': '123.6', 'user': 'UBRIDGE'}}, ('123.6', 'bridge_echo')),
+            ('message_deleted', {'ts': 'event-ts', 'deleted_ts': '123.7', 'previous_message': {'user': 'UBRIDGE'}}, ('123.7', 'bridge_echo')),
+        ):
+            with self.subTest(subtype=subtype), override_settings(SLACK_BRIDGE_BOT_USER_ID='UBRIDGE'):
+                self.assertEqual(store._slack_ignored_message_evidence({'event': {'type': 'message', 'channel_type': 'channel', 'subtype': subtype, **fields}}), expected)
+
+    def test_noncovered_platform_always_waits_without_queries(self):
+        from integrations.services.community_bridge.dependencies import classify_missing_dependency
+        row = SimpleNamespace(source_platform='slack', target_platform='discord')
+        now = timezone.now()
+        verdict = classify_missing_dependency(row, '123.4', first_seen=now - timedelta(days=60), now=now)
+        self.assertEqual((verdict.action, verdict.code), ('wait', 'platform_not_covered'))
+
+    def test_command_verdict_does_not_spend_worker_attempts(self):
+        from integrations.services.community_bridge.dependencies import DependencyVerdict, apply_dependency_verdict
+        row = SimpleNamespace(pk=1, attempts=7, dependency_attempts=8, delivery_type='reaction_remove',
+                              source_platform='slack', target_platform='buzz', save=Mock())
+        now = timezone.now()
+        with patch.object(store, '_wake_waiting_child_deliveries') as wake:
+            apply_dependency_verdict(row, DependencyVerdict('noop', 'dependency_dead', 'reaction_object'),
+                dependency_id='reaction:abc', first_seen=now, now=now, claimed=False)
+        self.assertEqual((row.attempts, row.dependency_attempts), (7, 8))
+        self.assertEqual(row.dependency_first_seen_at, now)
+        self.assertIn('dependency_first_seen_at', row.save.call_args.kwargs['update_fields'])
+        self.assertEqual(row.status, 'completed')
+        self.assertEqual(row.last_error, 'dependency_noop:dependency_dead:reaction:abc')
+        wake.assert_called_once_with(row)

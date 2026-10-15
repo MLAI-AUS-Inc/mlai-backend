@@ -22,6 +22,7 @@ MLAI Chat is another client surface, not a one-time data migration.
 - Operators explicitly map a public Slack channel to one MLAI Chat channel.
 - New messages, replies, edits, deletes, the full emoji-mart Unicode 15 reaction catalog
   (including Slack aliases, flags, ZWJ sequences and skin tones), and safe Slack shortcode reactions are mirrored after
+  the matching adapter parity release and after
   the mapping is enabled. Shortcodes use canonical `:name:` content with an
   inner `[a-z0-9][a-z0-9_+-]{0,61}` name so the full value stays within MLAI
   Chat's 64-scalar reaction limit; longer Slack custom-emoji names fail closed.
@@ -166,10 +167,12 @@ this status check neither replays cancelled deliveries nor changes source reads.
   survive worker restarts in the existing outbox. With durable message sync
   enabled, long-running archive imports retain unresolved children. The legacy
   worker still applies its bounded age and dependency-attempt limit. Neither
-  mode flattens an unresolved child into a top-level message.
+  mode automatically flattens an unresolved child. The default-off dependency
+  verdict policy below can resolve terminal waits; separately approved operator
+  cleanup may flatten eligible unfrozen Slack-to-Buzz replies.
 - Exhausted deliveries enter a dead state for operator inspection and replay.
 - Immutable unsupported operations, such as a reaction outside the supported
-  Slack bridge set, enter the dead state immediately instead of retrying
+  Slack bridge set of the deployed adapter version, enter the dead state immediately instead of retrying
   forever under durable sync. Transient provider failures retain their existing
   retry policy. Both public and private adapters validate the exact signed
   reaction string against the bundled emoji-mart Unicode set, the legacy seven,
@@ -1714,3 +1717,15 @@ Content-free inventory rows add `device_access` (none/member/pending),
 `counterpart_has_mlai_account`. Avatars accept HTTPS only from
 `avatars.slack-edge.com` or `secure.gravatar.com`. These fields use cached
 metadata and verified identity links; listing them makes no provider request.
+
+### Missing public dependency verdicts
+
+`COMMUNITY_BRIDGE_DEPENDENCY_VERDICTS_ENABLED` defaults false. When enabled,
+missing dependencies wait while work is in flight or evidence is too recent.
+Positive scoped evidence can complete mutations as no-ops, dead-letter replies,
+or park replies outside the import window before later dead-lettering. Ignored
+bridge echoes never prove a parent absent. Discord remains on the wait policy.
+Reply flattening is available only through the explicitly confirmed operator
+command, limited to unfrozen Slack-to-Buzz replies. Public reaction parity
+requires the adapter's reaction-catalog release. Adapter failures preserve the
+legacy error prefix and may append a content-free ` [code]` reason suffix.

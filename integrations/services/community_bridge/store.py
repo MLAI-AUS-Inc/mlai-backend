@@ -51,6 +51,7 @@ def ingest_slack_event(payload: dict) -> dict:
     event = dict(payload.get("event") or {})
     normalized = _normalize_slack_event(payload)
     normalized_payload = normalized or {}
+    raw_ts, ignore_detail = _slack_ignored_message_evidence(payload) if normalized is None else ("", "")
     receipt_key = str(payload.get("event_id") or "").strip()
     source_channel_id = str(event.get("channel") or normalized_payload.get("source_channel_id") or "").strip()
     event_type = str(event.get("subtype") or event.get("type") or "").strip() or "message"
@@ -60,8 +61,40 @@ def ingest_slack_event(payload: dict) -> dict:
         source_channel_id=source_channel_id,
         event_type=event_type,
         normalized_event=normalized_payload or None,
-        raw_payload=payload,
+        raw_payload=payload, raw_source_message_id=raw_ts, ignore_detail=ignore_detail,
     )
+
+
+def _slack_ignored_message_evidence(payload) -> tuple[str, str]:
+    event = payload.get("event") or {}
+    if event.get("type") != "message":
+        return "", ""
+    subtype = str(event.get("subtype") or "")
+    if subtype == "message_changed":
+        message = event.get("message") or {}
+        ts = message.get("ts")
+    elif subtype == "message_deleted":
+        message = event.get("previous_message") or {}
+        ts = event.get("deleted_ts") or message.get("ts")
+    else:
+        message = event
+        ts = event.get("ts")
+    author = message.get("user")
+    if event.get("channel_type") not in BRIDGEABLE_SLACK_CHANNEL_TYPES:
+        detail = "channel_type"
+    elif event.get("is_ext_shared_channel") or event.get("is_shared"):
+        detail = "shared_channel"
+    elif event.get("hidden") and subtype not in {"message_changed", "message_deleted"}:
+        detail = "hidden"
+    elif author and author == getattr(settings, "SLACK_BRIDGE_BOT_USER_ID", ""):
+        detail = "bridge_echo"
+    elif subtype in {"", "bot_message", "thread_broadcast"} and not author:
+        detail = "userless_bot" if subtype == "bot_message" or event.get("bot_id") else "missing_user"
+    elif subtype in {"message_changed", "message_deleted"} and not author:
+        detail = "missing_user"
+    else:
+        detail = "subtype:" + re.sub(r"[^a-z0-9_]", "_", subtype.lower())[:40]
+    return str(ts or "")[:100], detail
 
 
 def ingest_discord_event(
@@ -91,6 +124,8 @@ def ingest_inbound_event(
     event_type: str,
     normalized_event: Optional[dict],
     raw_payload: dict,
+    raw_source_message_id: str = "",
+    ignore_detail: str = "",
 ) -> dict:
     normalized_receipt_key = str(receipt_key or "").strip()
     if not normalized_receipt_key:
@@ -124,7 +159,7 @@ def ingest_inbound_event(
                 receipt_key=normalized_receipt_key,
                 event_type=str(event_type or "").strip(),
                 source_channel_id=normalized_channel_id,
-                source_message_id=str((normalized_event or {}).get("source_message_id") or "").strip(),
+                source_message_id=str((normalized_event or {}).get("source_message_id") or raw_source_message_id or "").strip()[:100],
                 source_parent_message_id=str((normalized_event or {}).get("source_parent_message_id") or "").strip(),
                 status=CommunityBridgeReceiptStatus.ACCEPTED,
                 payload=raw_payload or {},
@@ -154,7 +189,7 @@ def ingest_inbound_event(
         return _mark_receipt_ignored(receipt, reason="unmapped_channel")
 
     if not normalized_event:
-        return _mark_receipt_ignored(receipt, reason="unsupported_or_ignored_event")
+        return _mark_receipt_ignored(receipt, reason="unsupported_or_ignored_event", detail=ignore_detail)
 
     if (
         normalized_event["delivery_type"] == CommunityBridgeDeliveryType.EDIT
@@ -515,6 +550,14 @@ def mark_delivery_waiting_for_parent(
         return
 
     first_seen = delivery.dependency_first_seen_at or now
+    previous = int(delivery.dependency_attempts or 0)
+    if getattr(settings, "COMMUNITY_BRIDGE_DEPENDENCY_VERDICTS_ENABLED", False):
+        from .dependencies import classify_missing_dependency, apply_dependency_verdict
+        verdict = classify_missing_dependency(delivery, parent_message_id, first_seen=first_seen, now=now)
+        if verdict.action != "wait":
+            apply_dependency_verdict(delivery, verdict, dependency_id=parent_message_id, first_seen=first_seen, now=now, claimed=True)
+            return
+
     dependency_attempts = min(int(delivery.dependency_attempts or 0) + 1, 32_767)
     max_age_seconds = max(
         1,
@@ -580,6 +623,8 @@ def mark_delivery_waiting_for_parent(
             "updated_at",
         ]
     )
+    if previous == 0 and not expired:
+        logger.info("community_bridge_waiting_for_parent delivery_id=%s parent_message_id=%s", delivery.pk, parent_message_id)
 
 
 def _wake_waiting_child_deliveries(parent: CommunityBridgeDelivery) -> int:
@@ -892,9 +937,9 @@ def _canonicalize_event(
     return event.normalized_payload()
 
 
-def _mark_receipt_ignored(receipt: CommunityBridgeReceipt, *, reason: str) -> dict:
+def _mark_receipt_ignored(receipt: CommunityBridgeReceipt, *, reason: str, detail: str = "") -> dict:
     receipt.status = CommunityBridgeReceiptStatus.IGNORED
-    receipt.error_text = str(reason or "").strip()
+    receipt.error_text = f"{reason}:{detail}" if detail else str(reason or "").strip()
     receipt.processed_at = timezone.now()
     receipt.save(update_fields=["status", "error_text", "processed_at", "updated_at"])
     return {"status": "ignored", "receipt_id": receipt.id, "reason": reason}

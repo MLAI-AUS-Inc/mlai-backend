@@ -314,3 +314,18 @@ breach.
 Production promotion requires named backend, security, operations, and
 community owners plus an incident contact and monitored dashboard. Missing
 evidence leaves mappings disabled and the release unpromoted.
+
+## Dependency and unrepresentable-delivery cleanup
+
+Owner approval is required; never run repairs during a deploy. Operators use
+`ssh mlai-droplet` and the container's `python manage.py` commands. Start with
+`resolve_unrepresentable_slack_dm_deliveries --stuck` and
+`resolve_community_bridge_dependencies --include-dead-reaction-adds`. Review
+content-free JSON verdicts, then repeat the exact selection with
+`--apply --expected-plan SHA256`. Changed plans need another review.
+Reaction requeue additionally requires `--requeue-dead-reaction-adds
+--confirm-adapter-reaction-fix`, after the adapter parity release is confirmed.
+Flattening requires separate owner approval and `--flatten-replies
+--confirm-flatten`. Only then consider enabling the GitHub variable
+`COMMUNITY_BRIDGE_DEPENDENCY_VERDICTS_ENABLED`; its default is false.
+The dependency-review dispatch workflow is read-only and provides no apply mode.

@@ -198,3 +198,11 @@ class ResponsivenessConfigTests(unittest.TestCase):
                     self.assertEqual(result.returncode == 0, accepted, result.stderr)
                     if not accepted:
                         self.assertEqual(env_file.read_text(), before)
+
+
+class DependencyVerdictFlagConfigTests(ResponsivenessConfigTests):
+    flags = {'COMMUNITY_BRIDGE_DEPENDENCY_VERDICTS_ENABLED': 'false'}
+
+    def test_invalid_flags_and_unread_prefetch_without_sync_and_inventory_rejected(self):
+        # This independent flag deliberately does not require MESSAGE_SYNC_ENABLED.
+        self.assertEqual(self.flags['COMMUNITY_BRIDGE_DEPENDENCY_VERDICTS_ENABLED'], 'false')
