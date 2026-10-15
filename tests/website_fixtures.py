@@ -105,7 +105,8 @@ def install_github_provider_fixture(test_case, website):
             return response({'id': website.repository_id, 'full_name': website.github_repo,
                              'default_branch': website.branch, 'permissions': {'push': True}})
         if url == repo_url + '/commits/' + quote(website.branch, safe=''):
-            return response({'sha': website.verified_sha})
+            # Reading a current HEAD does not certify a native integration.
+            return response({'sha': website.verified_sha or 'a' * 40})
         raise AssertionError(f'Unexpected provider read in fixture: {url}')
 
     def mint(*, installation_id, repository, permission_mode='write', **kwargs):

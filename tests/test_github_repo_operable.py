@@ -10,10 +10,10 @@ the fleet norm, since all 20 repo-connected orgs have expired/absent user tokens
 generation with the misleading "Connect and verify the article repository location…" message,
 even though the platform could mint a write token for the repo right then.
 
-These tests pin the corrected contract: ``_github_repo_operable`` treats a stamped App
-installation (with server app credentials configured) as a usable credential, and the four
-gates honor it. A missing credential remains an honest 409, while an operable repository
-with an unresolved article surface is delegated to Content Factory's repair loop.
+These tests retain App credential support while requiring current owner consent
+and native integration proof before dispatch. The setup goal repairs integration
+before the article endpoint can spend or publish; legacy scaffold labels alone
+cannot grant that authority.
 """
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -37,6 +37,10 @@ from founder_tools.models import VibeRaisingCompany, VibeRaisingProfile
 from organizations.models import Organization
 from roo.models import PointsAccount
 from workflow_runs.models import ContentFactoryRun, ContentFactoryRunStatus
+from tests.website_fixtures import (
+    WebsiteBoundAPIClient, bind_config_fixture, bind_verified_target_fixture,
+    install_github_provider_fixture,
+)
 
 
 User = get_user_model()
@@ -204,27 +208,26 @@ class ReadinessAndProfileCheckOperabilityTests(TestCase):
 
     @patch("content_factory.vibe_marketing_views.github_app_credentials_configured", return_value=True)
     def test_readiness_not_github_blocked_on_installation_only(self, _creds):
-        # Scaffolded, ready surface, only an installation credential: must be generation-ready
-        # (via the surface) and NOT misclassified github_required.
+        # App access plus current native proof is ready without user OAuth.
         config = self._config(
             github_installation_id="144909617",
             article_system=dict(SCAFFOLDED_ARTICLE_SYSTEM),
             publish_targets=SCAFFOLDED_PUBLISH_TARGETS,
             articles_scaffolded=True,
         )
+        owner = User.objects.create_user(email='readiness-owner@example.test')
+        bind_verified_target_fixture(config, user=owner)
         result = compute_article_readiness(self.org, config, [])
         self.assertTrue(result["generation_ready"])
         self.assertNotEqual(result["reason_code"], "github_required")
 
     @patch("content_factory.vibe_marketing_views.github_app_credentials_configured", return_value=True)
-    def test_readiness_repo_set_but_no_credential_says_reconnect(self, _creds):
-        # Repo present but no working credential and no scan/surface: the classifier must
-        # word the blocker as "Reconnect GitHub" (github_repo_set branch), not "connect a repo".
+    def test_readiness_repo_set_but_no_credential_requires_connection(self, _creds):
         config = self._config()
         result = compute_article_readiness(self.org, config, [])
         self.assertFalse(result["generation_ready"])
         self.assertEqual(result["reason_code"], "github_required")
-        self.assertIn("Reconnect GitHub", result["blocking_reason"])
+        self.assertIn("Connect GitHub", result["blocking_reason"])
 
 
 class RunCanPromotePackageTests(TestCase):
@@ -259,10 +262,15 @@ class RunCanPromotePackageTests(TestCase):
 
 
 class SetupBlockedGuardOperabilityTests(TestCase):
-    """`_setup_blocked_response_for_generation` gates on operability, not a user token."""
+    """Current consent and integration proof augment App credential support."""
 
     def setUp(self):
         self.org = Organization.objects.create(domain="guard.example", name="Guard")
+        self.user = User.objects.create_user(email='guard-owner@example.test')
+        self.profile = VibeRaisingProfile.objects.create(user=self.user, role=VibeRaisingProfile.ROLE_FOUNDER)
+        self.company = VibeRaisingCompany.objects.create(profile=self.profile,
+            organization=self.org, name='Guard', domain=self.org.domain)
+        self.context = SimpleNamespace(organization=self.org, profile=self.profile, company=self.company)
 
     def _config(self, **kwargs):
         kwargs.setdefault("organization", self.org)
@@ -270,27 +278,25 @@ class SetupBlockedGuardOperabilityTests(TestCase):
         return OrganizationContentConfig.objects.create(**kwargs)
 
     @patch("content_factory.vibe_marketing_views.github_app_credentials_configured", return_value=True)
-    def test_non_operable_repo_short_circuits_to_none(self, _creds):
+    def test_non_operable_repo_requires_github_before_dispatch(self, _creds):
         config = self._config()  # repo set, no credential at all
-        context = SimpleNamespace(organization=self.org)
-        self.assertIsNone(_setup_blocked_response_for_generation(context, config))
+        response = _setup_blocked_response_for_generation(self.context, config)
+        self.assertEqual(response.status_code, 409)
+        self.assertEqual(response.data['reasonCode'], 'github_required')
 
     @patch("content_factory.vibe_marketing_views.github_app_credentials_configured", return_value=True)
     def test_operable_but_unblocked_repo_returns_none(self, _creds):
-        # Operable + a healthy (merged) scaffold => not blocked => proceed (None). This
-        # exercises the new operable-aware path without a blocking setup.
+        # A verified native target and current provider proof permit dispatch.
         config = self._config(
             github_installation_id="144909617",
             article_system=dict(SCAFFOLDED_ARTICLE_SYSTEM),
             publish_targets=SCAFFOLDED_PUBLISH_TARGETS,
             articles_scaffolded=True,
         )
-        # The config is operable ONLY via the installation leg — the pre-swap guard
-        # (connection_state == "connected") would have short-circuited to None before
-        # even reaching _profile_checks, so this pins the operable-aware entry.
+        bind_verified_target_fixture(config, user=self.user)
+        install_github_provider_fixture(self, config.website_connection)
         self.assertTrue(_github_repo_operable(config))
-        context = SimpleNamespace(organization=self.org)
-        self.assertIsNone(_setup_blocked_response_for_generation(context, config))
+        self.assertIsNone(_setup_blocked_response_for_generation(self.context, config))
 
 
 class ArticleGenerationGateEndpointTests(TestCase):
@@ -299,7 +305,7 @@ class ArticleGenerationGateEndpointTests(TestCase):
     ARTICLE_URL = "/api/v1/vibe-marketing/article/"
 
     def setUp(self):
-        self.client = APIClient()
+        self.client = WebsiteBoundAPIClient()
         self.user = User.objects.create_user(
             email="founder@example.com",
             password="password",
@@ -337,6 +343,9 @@ class ArticleGenerationGateEndpointTests(TestCase):
         self.config.articles_scaffolded = True
         self.config.article_delivery_mode = "content_only"
         self.config.save()
+        bind_verified_target_fixture(self.config, user=self.user)
+        self.client.website_fixture = self.config.website_connection
+        install_github_provider_fixture(self, self.config.website_connection)
 
     @override_settings(
         CONTENT_FACTORY_URL="https://content-factory.test",
@@ -378,8 +387,7 @@ class ArticleGenerationGateEndpointTests(TestCase):
         )
 
         self.assertEqual(response.status_code, 409, response.data)
-        self.assertEqual(response.data.get("fallbackReason"), "github_auth_required")
-        self.assertEqual(response.data.get("nextRequiredStep"), "connect_github")
+        self.assertEqual(response.data.get("code"), "website_connection_required")
         self.assertFalse(post.called)
 
     @override_settings(
@@ -389,10 +397,8 @@ class ArticleGenerationGateEndpointTests(TestCase):
     )
     @patch("content_factory.vibe_marketing_views.github_app_credentials_configured", return_value=True)
     @patch("content_factory.vibe_marketing_views.http_client.post")
-    def test_operable_repo_without_surface_dispatches_self_healing_article(self, post, _creds):
-        # Credential is fine (installation), but the latest scan cannot prove a
-        # writable target. Content Factory must receive the article request so it
-        # can run its durable scan -> scaffold -> resume repair loop.
+    def test_operable_repo_without_surface_waits_for_verified_integration(self, post, _creds):
+        # The owned setup goal must establish native proof before paid generation.
         post.return_value = _QueuedResponse(
             {
                 "run_id": "cowork-repair-parent-1",
@@ -415,6 +421,11 @@ class ArticleGenerationGateEndpointTests(TestCase):
         }
         self.config.publish_targets = []
         self.config.save()
+        bind_config_fixture(self.config)
+        self.config.website_connection.authorized_by = self.user
+        self.config.website_connection.save(update_fields=['authorized_by'])
+        self.client.website_fixture = self.config.website_connection
+        install_github_provider_fixture(self, self.config.website_connection)
 
         # Discriminates from the credential-leg 409: the repo IS operable here, so the
         # block is specifically the article-surface leg (a revert of the operability swap
@@ -427,9 +438,11 @@ class ArticleGenerationGateEndpointTests(TestCase):
             format="json",
         )
 
-        self.assertEqual(response.status_code, 202, response.data)
-        self.assertEqual(response.data.get("runId"), "cowork-repair-parent-1")
-        self.assertTrue(post.called)
+        self.assertEqual(response.status_code, 409, response.data)
+        self.assertEqual(response.data.get('reasonCode'), 'integration_required')
+        post.assert_not_called()
+        self.user.points_account.refresh_from_db()
+        self.assertEqual(self.user.points_account.balance, 20)
         dispatched = post.call_args.kwargs["json"]
         self.assertEqual(dispatched["github_repo"], "HB-Vastu/coworkadelaide")
         self.assertFalse(dispatched["delivery_mode_explicit"])

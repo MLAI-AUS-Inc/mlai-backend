@@ -489,3 +489,14 @@ evidence. Luma context tests now assert the existing exact calendar-month
 window, excluding both prior- and following-month events. Database cases are
 syntax checked only. E1 backend remote CI verified pinned producer bytes using
 the existing secret; broader final-head checks remain in progress.
+
+
+Restored GitHub operability fixtures now distinguish a usable App credential
+from generation authority. Ready positive cases retain App-only credentials and
+add actual current owner/site/native/live records with provider transport fakes.
+The formerly permissive unverified-surface case now asserts 409 and no worker
+request or points change until integration is verified. A missing-connection
+case retains its denial; setup capability tests use actual founder context.
+Provider HEAD observations return a fixed source independently of whether the
+local connection has native proof. No credential or admission guard is mocked.
+These database cases remain syntax checked only pending the existing CI lanes.
