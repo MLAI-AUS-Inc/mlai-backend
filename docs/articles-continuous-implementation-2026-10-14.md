@@ -516,3 +516,19 @@ query alias in the health-evidence unit suite. Updated that row only; the public
 report fields are unchanged. Thirty focused report/callback/payment cases pass.
 Superseded CI runs are being cancelled to avoid duplicate runner work; latest
 heads retain the full assigned checks. Full final-head CI remains required.
+
+
+CI 71b2465e: five first-article chain cases pass; restored PostgreSQL selection
+is 1,586 cases with 11 failures/7 errors. Autofill's 97 cases moved to the
+existing SQLite job (no omissions); its result is still pending. Fixed the
+remaining legacy draft audience defect: resolve_update always returns a row,
+so the first save incorrectly inherited its default-private marker. New rows
+now use the original scoped run's saved audience after real binding/owner
+checks; existing draft choices remain unchanged. Thirteen database-free
+disclosure/curation/date cases pass, including no expansion from later company
+defaults and private fallback without a valid organization binding.
+Fixed two follow-up test defects: removed dispatch assertions after asserting
+no dispatch, and replaced an invalid ABN-status fixture argument with actual
+revision/approval/publication records for the monthly benefit. Scheduled-confirm
+refund now has an owned verified site and original scope, and asserts the
+downstream POST was reached. Database fixtures are syntax checked only.

@@ -60,12 +60,15 @@ class BoostPostAdmissionAPITests(APITestCase):
         )
         self.assertEqual(PointsAccount.objects.get(user=self.user).balance, 12)
 
-    def test_ready_verified_australian_startup_gets_half_price(self):
+    def test_approved_update_for_verified_australian_startup_gets_half_price(self):
         from founder_tools.models import VibeRaisingCompany, VibeRaisingProfile
         from organizations.models import Organization
         from startup_updates.models import (
             MonthlyUpdateDraft,
             MonthlyUpdateDraftStatus,
+            MonthlyEvidenceSnapshot,
+            MonthlyUpdateRevision,
+            MonthlyUpdateApproval,
             UserStartupBinding,
         )
 
@@ -73,7 +76,8 @@ class BoostPostAdmissionAPITests(APITestCase):
             name='Boost Pty Ltd',
             domain='boost.example',
         )
-        UserStartupBinding.objects.create(user=self.user, organization=organization)
+        UserStartupBinding.objects.create(user=self.user, organization=organization,
+            role='founder', coworking_discount_eligible=True)
         profile = VibeRaisingProfile.objects.create(
             user=self.user,
             role=VibeRaisingProfile.ROLE_FOUNDER,
@@ -86,14 +90,22 @@ class BoostPostAdmissionAPITests(APITestCase):
             abn='89000000019',
             acn='000000019',
             entity_type_code='PRV',
-            abn_status='Active',
             abr_verified_at=timezone.now(),
         )
-        MonthlyUpdateDraft.objects.create(
+        draft = MonthlyUpdateDraft.objects.create(
             organization=organization,
             month=timezone.localdate().replace(day=1),
             status=MonthlyUpdateDraftStatus.READY,
         )
+        snapshot = MonthlyEvidenceSnapshot.objects.create(organization=organization,
+            month=draft.month, content_hash='a' * 64, payload={})
+        revision = MonthlyUpdateRevision.objects.create(draft=draft, snapshot=snapshot,
+            number=1, content_hash='b' * 64, audience='private')
+        approval = MonthlyUpdateApproval.objects.create(revision=revision, actor=self.user,
+            content_hash=revision.content_hash, audience_visibility=['just_me'])
+        draft.current_revision = draft.published_revision = revision
+        draft.published_at = draft.first_published_at = draft.ready_at = approval.approved_at
+        draft.save(update_fields=['current_revision', 'published_revision', 'published_at', 'first_published_at', 'ready_at'])
 
         response = self.client.post(self.url, self.payload, format='json')
 

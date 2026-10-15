@@ -443,7 +443,5 @@ class ArticleGenerationGateEndpointTests(TestCase):
         post.assert_not_called()
         self.user.points_account.refresh_from_db()
         self.assertEqual(self.user.points_account.balance, 20)
-        dispatched = post.call_args.kwargs["json"]
-        self.assertEqual(dispatched["github_repo"], "HB-Vastu/coworkadelaide")
-        self.assertFalse(dispatched["delivery_mode_explicit"])
-        self.assertNotIn("delivery_mode", dispatched)
+        self.assertFalse(ContentFactoryRun.objects.filter(organization=self.org,
+            workflow__in={'article_generation', 'direct_generate'}).exists())
