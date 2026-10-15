@@ -509,3 +509,10 @@ The reset regression now proves historical articles alone cannot grant readiness
 then starts with an actual verified target and verifies reset removes readiness.
 Redetection checks the current integration_verified proof field. Syntax checked
 only; existing disposable CI is the database validation authority.
+
+
+The report aggregate fix exposed one synthetic row still using the old internal
+query alias in the health-evidence unit suite. Updated that row only; the public
+report fields are unchanged. Thirty focused report/callback/payment cases pass.
+Superseded CI runs are being cancelled to avoid duplicate runner work; latest
+heads retain the full assigned checks. Full final-head CI remains required.
