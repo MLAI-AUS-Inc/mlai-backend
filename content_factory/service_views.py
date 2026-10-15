@@ -8764,6 +8764,7 @@ def _merge_django_owned_run_request(existing_request, incoming_request):
     """
     from copy import deepcopy
     from .editorial_run_state import EditorialRunConflict
+    from .website_contract import CONNECTION_FIELDS
     existing = existing_request if isinstance(existing_request, dict) else {}
     incoming = incoming_request if isinstance(incoming_request, dict) else {}
     merged = {key: deepcopy(value) for key, value in incoming.items()
@@ -8771,6 +8772,11 @@ def _merge_django_owned_run_request(existing_request, incoming_request):
     merged = {key: value for key, value in merged.items()
               if not (key.startswith("roo_points_") or key in {"article_publish_approval_receipt", "article_publish_approval_revoked", "website_access_lost", "first_article_goal_operation_id", "first_article_goal_id"}) or key in existing}
     for key, value in existing.items():
+        if key in CONNECTION_FIELDS:
+            if key in incoming and incoming[key] != value:
+                raise EditorialRunConflict("Worker snapshots cannot change the original website connection identity")
+            merged[key] = deepcopy(value)
+            continue
         if key in {"setup_delivery_v1","article_delivery_v1"}:
             merged[key] = deepcopy(value)
             continue

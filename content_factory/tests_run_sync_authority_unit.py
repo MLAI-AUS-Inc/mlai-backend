@@ -68,6 +68,42 @@ class RunObservationTests(SimpleTestCase):
 
 
 class ObservationGuardTests(SimpleTestCase):
+    def test_identical_authorized_callback_does_not_rewrite_the_run(self):
+        from contextlib import nullcontext
+        from unittest.mock import patch
+        from rest_framework.response import Response
+        from . import website_connections as guards
+        from .website_contract import connection_contract
+        payload = {'domain': 'example.test', 'github_repo': 'fixture/site',
+            'website_connection_id': '11111111-1111-1111-1111-111111111111',
+            'connection_generation': 1, 'repository_id': 42}
+        run = SimpleNamespace(organization_id=1, run_request=connection_contract(payload), save=Mock())
+        website = SimpleNamespace(organization_id=1, pk=payload['website_connection_id'])
+        method = Mock(return_value=Response({'sync_status': 'unchanged'}))
+        handler = guards.guarded_service_write('config_write')(method)
+        with patch.object(guards, 'authority_guard', return_value=nullcontext(website)), \
+             patch('workflow_runs.models.ContentFactoryRun.objects.filter') as query, \
+             patch.object(guards, 'record_scan_evidence'), \
+             patch('content_factory.website_prepare.wake_prepare_after_commit'):
+            query.return_value.first.return_value = run
+            response = handler(None, SimpleNamespace(method='PUT', data=payload), run_id='run')
+            self.assertEqual(response.data['sync_status'], 'unchanged')
+            run.save.assert_not_called()
+            # A newly admitted operation receipt is still persisted once.
+            payload['operation_attempt'] = 2
+            handler(None, SimpleNamespace(method='PUT', data=payload), run_id='run')
+            run.save.assert_called_once_with(update_fields=['run_request', 'updated_at'])
+
+    def test_sparse_snapshots_preserve_and_cannot_replace_saved_connection_identity(self):
+        from .service_views import _merge_django_owned_run_request
+        from .editorial_run_state import EditorialRunConflict
+        original = {'website_connection_id': '11111111-1111-1111-1111-111111111111',
+            'connection_generation': 2, 'repository_id': 42, 'connection_target_id': 'articles'}
+        self.assertEqual(_merge_django_owned_run_request(original, {}), original)
+        for key in original:
+            with self.subTest(key=key), self.assertRaises(EditorialRunConflict):
+                _merge_django_owned_run_request(original, {key: None})
+
     def test_explicit_cancelled_operation_never_enters_observation_fallback(self):
         from contextlib import contextmanager
         from unittest.mock import patch

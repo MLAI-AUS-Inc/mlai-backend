@@ -452,3 +452,17 @@ successor re-hold/stale-lease settlement. Registered in the existing PostgreSQL
 lane; syntax checked only, no local DB/migration run. Draft PR will obtain CI
 feedback. Extend this fixture through canonical approve/merge/source/live checks
 before treating D1 as complete. C5 backend1023 and Chat472 are fully green.
+
+
+D2 CI repair, 15 October: b01f6f7e confirms all article-service and dispatch
+idempotency cases now pass; restored suite is 61 failures/12 errors across 1,683
+cases, plus two legacy callback idempotency failures in the SQLite lane. Fixed
+two real defects: sparse snapshots now retain the original connection tuple
+(and reject replacement), and identical guarded callbacks avoid a redundant
+run save. Fixed the report query aggregate alias that shadowed raw impressions,
+with actual ORM annotation resolution and weighted-position regressions.
+145 focused database-free cases pass. Synthetic live-target fixtures now publish
+the actual certified contract; merge labels remain historical, not readiness.
+Boost verified-company fixture now records active ABR status. Database-backed
+cases are syntax checked locally and remain assigned to the existing CI lanes.
+No local database, migration or production operation was run.

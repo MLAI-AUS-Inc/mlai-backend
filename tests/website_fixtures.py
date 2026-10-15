@@ -73,7 +73,7 @@ def bind_verified_target_fixture(config, *, user):
         source_sha=website.verified_sha, verified_at=timezone.now(), contract=contract,
         capabilities={'publishingReady': True})
     certify_live_target_fixture(target)
-    config.publish_targets = [contract]
+    config.publish_targets = [target.contract]
     config.default_publish_target_id = target.target_key
     config.connected_slack_user_id = user.slack_id or f'mlai_user:{user.pk}'
     config.save(update_fields=['publish_targets', 'default_publish_target_id', 'connected_slack_user_id'])

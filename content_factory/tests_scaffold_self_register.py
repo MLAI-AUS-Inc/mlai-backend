@@ -83,4 +83,5 @@ class ScaffoldSelfRegisterTests(TestCase):
         _mark_pending_article_system_setup_merged(self.config, run=_Run(), result={})
         self.config.refresh_from_db()
         self.assertEqual(self._direct_target(), [])
-        self.assertTrue(self.config.articles_scaffolded)
+        self.assertEqual(self.config.article_system['pending_article_system_setup']['status'], 'merged')
+        self.assertFalse(self.config.articles_scaffolded)

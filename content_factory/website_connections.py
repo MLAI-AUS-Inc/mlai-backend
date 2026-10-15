@@ -588,9 +588,11 @@ def guarded_service_write(action, *, only_repository=False, remote_actions=(), p
                         if run_id:
                             run = ContentFactoryRun.objects.filter(run_id=run_id).first()
                             if run:
-                                run.run_request = {**(run.run_request or {}), **connection_contract(payload),
+                                updated_request = {**(run.run_request or {}), **connection_contract(payload),
                                     **{key: payload[key] for key in ("operation_id", "operation_attempt", "deletion_epoch") if key in payload}}
-                                run.save(update_fields=["run_request", "updated_at"])
+                                if updated_request != run.run_request:
+                                    run.run_request = updated_request
+                                    run.save(update_fields=["run_request", "updated_at"])
                     if response is not None:
                         if response.status_code < 300 and existing_run and request.method != "GET" and (existing_run.run_request or {}).get("operation_id"):
                             from .website_operations import observe_workflow_status
