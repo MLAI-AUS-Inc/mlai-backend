@@ -477,3 +477,15 @@ owned Acme organization in the sibling-company test. The whole Autofill module
 is selected in the existing SQLite CI lane because it injects SQLite lock
 failures; no test was skipped or removed. All 490 modules remain fully assigned.
 These database-backed cases are syntax checked locally and await remote CI.
+
+
+Additional restored-suite fixtures: real stamp verification is now mocked only
+at the ledger I/O boundary in the database-free reuse decision test; an invented
+stamp still receives 409, and all five decision cases pass. The archive test
+uses an actual HealthHack administrator for its second leaderboard client.
+Compact AI evidence asserts bounded unavailable prompt summaries instead of
+expecting their removal; raw answer excerpts stay absent without measured
+evidence. Luma context tests now assert the existing exact calendar-month
+window, excluding both prior- and following-month events. Database cases are
+syntax checked only. E1 backend remote CI verified pinned producer bytes using
+the existing secret; broader final-head checks remain in progress.

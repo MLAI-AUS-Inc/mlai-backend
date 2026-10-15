@@ -621,7 +621,7 @@ class LumaRunContextTests(TestCase):
             checked_in_count=0,
         )
 
-    def test_context_uses_target_month_with_two_week_buffer(self):
+    def test_context_uses_only_the_selected_calendar_month(self):
         self._cached_event("outside-before", date(2026, 2, 14))
         self._cached_event("before", date(2026, 2, 15))
         self._cached_event("selected", date(2026, 3, 20), registrations=10)
@@ -652,14 +652,12 @@ class LumaRunContextTests(TestCase):
         )
 
         self.assertEqual(context["event_selection_mode"], "target_month")
-        self.assertEqual(context["context_days_each_side"], 14)
+        self.assertEqual(context["context_days_each_side"], 0)
         by_id = {event["event_id"]: event for event in context["events"]}
-        self.assertEqual(set(by_id), {"before", "selected", "after"})
-        self.assertEqual(by_id["before"]["context_role"], "before_month")
+        self.assertEqual(set(by_id), {"selected"})
         self.assertEqual(by_id["selected"]["context_role"], "selected_month")
         self.assertTrue(by_id["selected"]["counted_in_selected_month_metrics"])
         self.assertEqual(by_id["selected"]["registration_count"], 10)
-        self.assertEqual(by_id["after"]["context_role"], "after_month")
         self.assertEqual([metric["value"] for metric in context["metrics"]], ["1"])
 
         external_context = build_external_context_for_sources(
@@ -671,5 +669,6 @@ class LumaRunContextTests(TestCase):
         self.assertEqual(external_context["luma"]["target_month"], "2026-03-01")
         self.assertEqual(
             external_context["luma"]["context_days_each_side"],
-            14,
+            0,
         )
+        self.assertEqual({event['event_id'] for event in external_context['luma']['events']}, {'selected'})

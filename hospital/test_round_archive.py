@@ -134,6 +134,7 @@ class HospitalRoundArchiveTests(TestCase):
 
         leaderboard_user = User.objects.create_user(
             email='hi@mlai.au',
+            is_superuser=True,
             password='password',
         )
         leaderboard_client = APIClient()
