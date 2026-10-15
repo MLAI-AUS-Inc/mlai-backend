@@ -68,6 +68,10 @@ jobs:
     - name: Verify release freshness and live web route flip
       run: python -m unittest tests.test_deploy_release_freshness tests.test_backend_web_handoff -v
 
+    - name: Install hash-pinned workflow test dependencies
+      run: |
+        python -m pip install --only-binary=:all: --require-hashes -r .github/requirements-ci.lock
+
     - name: Test deployment failure handling and live contract
       run: python -m unittest tests.test_deploy_runtime_checks tests.test_message_sync_deploy_config tests.test_community_bridge_dependency_review_workflow tests.test_valley_mcp_deploy_config tests.test_native_agent_deploy_config tests.test_slack_owner_inventory_deploy_config tests.test_tech_volunteers_bridge_workflow -v
 
