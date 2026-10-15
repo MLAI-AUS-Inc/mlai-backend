@@ -180,13 +180,15 @@ class QueueDispatchIdempotencyTest(TestCase):
         self.assertEqual(stash["charged_user_id"], self.user.pk)
         self.assertNotIn("vibe-marketing-", run.run_id)
 
-    def test_definitive_rejection_refunds_immediately(self):
+    def test_keyed_rejection_receipt_refunds_immediately(self):
         key = "vibe-article:1:rejected"
         payload = {"client_request_id": key, "domain": "example.com", "target_keyword": "kw"}
 
         with patch(
             "content_factory.vibe_marketing_views.http_client.post",
-            return_value=_Response(status_code=422, payload={"detail": "A topic or custom_title is required."}),
+            return_value=_Response(status_code=422, payload={
+                "detail": {"code": "dispatch_rejected", "backend_code": "invalid_topic"}
+            }),
         ) as post, patch(
             "content_factory.vibe_marketing_views.http_client.get"
         ) as lookup, patch(
@@ -198,7 +200,21 @@ class QueueDispatchIdempotencyTest(TestCase):
         self.assertEqual(post.call_count, 1)  # 4xx is deterministic — no retry
         lookup.assert_not_called()
         self.assertFalse(_run_pending_remote_dispatch(run))
-        self.assertEqual(run.status, ContentFactoryRunStatus.BLOCKED)
+        self.assertEqual(run.status, ContentFactoryRunStatus.FAILED)
+
+    def test_generic_http_refusal_does_not_prove_no_work(self):
+        key = "vibe-article:1:unproven-refusal"
+        with patch(
+            "content_factory.vibe_marketing_views.http_client.post",
+            return_value=_Response(status_code=422, payload={"detail": "Invalid request"}),
+        ), patch(
+            "content_factory.vibe_marketing_views._refund_roo_points_for_article_start"
+        ) as refund:
+            run = self._queue(payload={"client_request_id": key, "domain": "example.com", "target_keyword": "kw"})
+
+        refund.assert_not_called()
+        self.assertTrue(_run_pending_remote_dispatch(run))
+        self.assertEqual(run.run_request["pending_billing_refund"]["charged_user_id"], self.user.pk)
 
     def test_unkeyed_scan_dispatch_stays_single_attempt(self):
         payload = {"domain": "example.com", "github_repo": "acme/site"}

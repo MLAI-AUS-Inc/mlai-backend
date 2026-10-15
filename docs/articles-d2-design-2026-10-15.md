@@ -80,6 +80,15 @@ tests follow the existing authenticated/positive-only policy; no billing policy
 or purchase implementation changed. These DB tests are syntax checked locally
 and execute only in the existing disposable CI lane.
 
+Subsequent CI evidence: 393eb315 reduced the restored suite to 120 failures
+and 47 errors; e1e72508 ran 1,700 tests with 104 failures and 44 errors. The
+notification endpoints, readiness suites and monthly source-window cases now
+pass, including the new current/wrong-repository/stale proof cases. The next
+batch preserves consent inside nested callback requests so identical deliveries
+remain unchanged, tests explicit keyed rejection separately from ambiguous HTTP
+refusal, and runs the complete callback/SQLite-lock suite in the existing SQLite
+lane. All 490 modules remain fully assigned. Later-head CI is still pending.
+
 D2 remains incomplete until automatic stale-proposal rebuilding and article
 strategy escalation are implemented and tested. Refreshes must
 use a fresh owned branch/current base, preserve deterministic consent only and

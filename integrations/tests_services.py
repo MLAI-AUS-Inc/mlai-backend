@@ -28,6 +28,16 @@ class GithubServiceTest(TestCase):
             github_token_expires_at=timezone.now() + timedelta(hours=1),
         )
         bind_config_fixture(self.config)
+        metadata = patch(
+            "content_factory.website_connections.read_repository_native_target",
+            side_effect=lambda connection: {
+                "id": connection.repository_id,
+                "full_name": connection.github_repo,
+                "default_branch": connection.branch,
+            },
+        )
+        metadata.start()
+        self.addCleanup(metadata.stop)
 
     @patch('integrations.services.github.get_latest_repo_sha', return_value="sha_123")
     @patch('integrations.services.github.http_requests.post')

@@ -101,6 +101,9 @@ class CallbackFixtureClient(WebsiteBoundAPIClient):
         binding = contract_for(self.website_fixture)
         if run and not (run.run_request or {}).get('website_connection_id'):
             run.organization = org
+            run.github_repo = run.github_repo or self.website_fixture.github_repo
             run.run_request = {**(run.run_request or {}), **binding}
-            run.save(update_fields=['organization', 'run_request'])
+            run.save(update_fields=['organization', 'github_repo', 'run_request'])
+        if isinstance(data.get('run_request'), dict):
+            data['run_request'] = {**data['run_request'], **binding}
         return {**binding, **data}

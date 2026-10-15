@@ -338,6 +338,7 @@ jobs:
     - name: Run targeted Django tests
       run: |
         python manage.py test \
+          tests.test_content_factory_run_sync \
           founder_tools.my_startup.test_database \
           roo.tests_rate_card \
           roo.tests_legacy_office_manager \
@@ -792,7 +793,6 @@ jobs:
           tests.test_confirm_endpoint \
           tests.test_content_factory_healing_records \
           tests.test_content_factory_learning_entries \
-          tests.test_content_factory_run_sync \
           tests.test_content_island_bootstrap \
           tests.test_content_island_contract \
           tests.test_content_island_ledger_reference \
