@@ -34,3 +34,15 @@ GET `/api/v1/auth/me/`, GET `/api/v1/points/me/balance/` and versioned GET/PATCH
 New apps/dependencies, migrations, authentication/provider policy, operational files and external sandbox credentials require a separate reviewed manual rollout. Ordinary domain functions/URL additions do not. A failed deployment retains the last healthy version; ask the operator for controller status rather than changing infrastructure from application code.
 
 Unavailable integrations return HTTP503 with `code: staging_integration_unavailable` and `capability`. Staging has no real email, payment charge, Slack/calendar reservation or outbound provider access. Synthetic purchases explicitly exercise local persisted outcomes. A reachable normal endpoint still follows its domain roles and may depend on an unavailable provider; availability is not an admin grant.
+
+## Flutter staging builds and deployment receipt
+
+From the Chat repository's `mobile` directory, a developer with Flutter installed can run:
+
+```sh
+flutter run --dart-define=MLAI_STAGING_ENABLED=true --dart-define=MLAI_API_URL=https://api-staging.mlai.au/api/v1 --dart-define=BUZZ_RELAY_URL=https://chat-staging.mlai.au
+```
+
+Use a fresh staging app/profile and an assigned synthetic login. The source supports ordinary same-origin `/api/` requests and the staging room screen. This rollout has source checks only; Flutter compilation/device validation remains pending. Installing a production app or changing a Git branch does not switch its environment.
+
+Authenticated GET `/api/v1/points/development/build/` returns the active staging backend release. It is a normal domain URL; anonymous callers cannot read it and authenticated non-staging callers receive404. Use it to confirm a completed backend timer deployment, rather than assuming a successful Git push is already live.
