@@ -64,17 +64,41 @@ def _uuid(value, message):
         raise ValidationError(message) from exc
 
 
+class NativeAgentError(APIException):
+    """An actionable application failure, without an OAuth reconnect challenge."""
+    status_code = 409
+
+    def __init__(self, code):
+        self.default_code = code
+        super().__init__("The personal agent request could not be completed.", code=code)
+
+
 def _api_errors(operation):
-    """Translate internal worker errors into safe errors at the public MCP seam."""
+    """Keep reconnect challenges specific to unified authority and scope loss."""
     @wraps(operation)
     def wrapped(*args, **kwargs):
         try:
             return operation(*args, **kwargs)
-        except (AgentPermissionDenied, ObjectDoesNotExist) as exc:
-            raise PermissionDenied("Personal agent authorisation is no longer available.",
-                code=getattr(exc, "code", "agent_unavailable")) from exc
+        except AgentPermissionDenied as exc:
+            if exc.code.startswith("unified_") or exc.code == "scope_denied":
+                raise PermissionDenied("Personal agent authorisation is no longer available.", code=exc.code) from exc
+            code = "owner_action_required" if exc.code in {"grant_inactive", "installation_inactive", "owner_device_changed"} else exc.code
+            raise NativeAgentError(code) from exc
+        except ObjectDoesNotExist as exc:
+            raise NativeAgentError("owner_action_required") from exc
         except runtime.AgentRuntimeError as exc:
-            raise ValidationError("The personal agent request could not be completed.", code=exc.code) from exc
+            raise NativeAgentError(exc.code) from exc
+        except ValidationError as exc:
+            codes = exc.get_codes()
+            code = codes[0] if isinstance(codes, list) and len(codes) == 1 else None
+            if code in {"invocation_ambiguous", "reply_conflict"}:
+                raise NativeAgentError(code) from exc
+            raise
+        except PermissionDenied as exc:
+            code = exc.get_codes()
+            if isinstance(code, str) and (code.startswith("unified_") or code == "scope_denied"):
+                raise
+            raise NativeAgentError("owner_action_required") from exc
     return wrapped
 
 
@@ -113,7 +137,7 @@ def bind_native_grant(user, session, unified_grant, installation_id):
     """Fresh consent supersedes native authority without upgrading any older token."""
     if (not enabled() or unified_grant.get("resource") != mlai_url()
             or not DOT_SCOPES <= set(unified_grant.get("scopes", []))):
-        raise PermissionDenied("Reconnect MLAI and explicitly approve the personal agent permissions.")
+        raise PermissionDenied("Reconnect MLAI and explicitly approve the personal agent permissions.", code="scope_denied")
     if not installation_id:
         raise ValidationError("Choose an already verified personal agent installation.")
     identifier = _uuid(installation_id, "Choose a valid personal agent installation.")
@@ -132,7 +156,7 @@ def bind_native_grant(user, session, unified_grant, installation_id):
         raise PermissionDenied("The enrolled channel is no longer available.")
     if (unified_grant.get("user_id") != user.pk or unified_grant.get("auth_version") != user.auth_version
             or unified_grant.get("session_id") != str(session.pk) or not unified_grant.get("client_id")):
-        raise PermissionDenied("The agent consent belongs to another account session.")
+        raise PermissionDenied("The agent consent belongs to another account session.", code="unified_session_changed")
     now = timezone.now()
     generation = original.generation + 1
     expiry = min(original.expires_at, datetime.fromtimestamp(unified_grant["expiresAt"], tz=datetime_timezone.utc))
@@ -172,7 +196,7 @@ def _private(principal, *, activate=False):
     current = oauth.valid_grant(principal.grant["id"])
     cached = current.grant
     if not enabled() or cached.get("resource") != mlai_url() or not DOT_SCOPES <= set(cached.get("scopes", [])):
-        raise PermissionDenied("Explicit personal agent consent is required.")
+        raise PermissionDenied("Explicit personal agent consent is required.", code="unified_consent_required")
     grant_id = _uuid(cached.get("native_agent_grant_id"), "Choose a signed personal agent installation.")
     credential_id = _uuid(cached.get("native_agent_credential_id"), "The personal agent connection is unavailable.")
     owner = runtime.locked(get_user_model().objects.all()).get(pk=current.user.pk)
@@ -180,12 +204,12 @@ def _private(principal, *, activate=False):
     installation = runtime.locked(AgentInstallation.objects.filter(pk=installation_id, owner=owner)).first()
     grant = runtime.locked(AgentGrant.objects.filter(pk=grant_id, installation=installation)).first()
     if grant is None:
-        raise PermissionDenied("This agent belongs to another account.")
+        raise PermissionDenied("This agent belongs to another account.", code="unified_owner_changed")
     grant.installation = installation
     installation.owner = owner
     credential = runtime.locked(AgentCredential.objects.filter(pk=credential_id, grant=grant)).select_related("task").first()
     if credential is None or not AgentOAuthBinding.objects.filter(credential=credential, client_id=PREFIX + cached["id"]).exists():
-        raise PermissionDenied("The private agent binding is unavailable.")
+        raise PermissionDenied("The private agent binding is unavailable.", code="unified_binding_unavailable")
     validate_grant_base(grant)
     if activate and credential.revoked_at is None and credential.expires_at <= timezone.now():
         assert_unified_authority(grant, credential_id=credential.pk, allow_pending=True)
@@ -233,7 +257,7 @@ def supports_events(principal):
 @transaction.atomic
 def call_tool(principal, name, arguments):
     if name not in NAMES or not set(TOOL_SCOPES[name]) <= set(principal.grant.get("scopes", [])):
-        raise PermissionDenied("Reconnect MLAI with the required personal agent permission.")
+        raise PermissionDenied("Reconnect MLAI with the required personal agent permission.", code="scope_denied")
     native = principal_for(principal)
     result = broker.execute(native, NAMES[name], arguments)
     if name == "get_agent_account":
@@ -250,7 +274,7 @@ def call_tool(principal, name, arguments):
 @transaction.atomic
 def handle_events(principal, method, params):
     if "agent:mentions:listen" not in principal.grant.get("scopes", []):
-        raise PermissionDenied("Reconnect MLAI to explicitly enable mention notifications.")
+        raise PermissionDenied("Reconnect MLAI to explicitly enable mention notifications.", code="scope_denied")
     native = principal_for(principal)
     result = event_webhooks.handle_method(native, method, params)
     if method == "events/subscribe":
