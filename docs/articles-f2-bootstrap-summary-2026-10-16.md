@@ -95,3 +95,12 @@ Validate warm reuse, immediate invalidation for changed feedback/run/connection
 facts, cache failures/disablement and current permission fields. The existing
 endpoint fixture continues to enforce full response bytes, no HTTP/credential
 minting/database writes, and the synthetic one-second p95 bound.
+
+At `1a98c240`, the complete fixture is 245,471 bytes. Warm requests use 56 SQL
+queries and 285–319 ms; the cold request uses 267 queries and 1,009.60 ms,
+missing the one-second assertion. Keep the threshold and reduce cold work:
+prefetch component feedback for only the selected bootstrap runs, and reuse the
+same comment read to infer the latest submitted batch. Prefetch only on a base
+payload miss, so warm presentation hits need no comment bodies. Mutation/read
+callers outside bootstrap keep their existing fresh model reads. The website
+GET fixture must send explicit company scope, as the real client does.

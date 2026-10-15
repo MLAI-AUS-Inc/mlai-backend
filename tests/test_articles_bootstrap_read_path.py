@@ -151,3 +151,29 @@ class BootstrapReadPathTests(SimpleTestCase):
                 self.assertIs(repository.call_args.kwargs["allow_probe"], expected)
                 self.assertIs(account.call_args.kwargs["force"], force)
                 self.assertIs(repository.call_args.kwargs["force"], force)
+
+    def test_prefetched_feedback_preserves_comments_and_infers_submitted_batch_without_queries(self):
+        run = SimpleNamespace(run_id="feedback-1", workflow="article_generation", run_request={}, result={})
+        draft = views.VibeMarketingComponentComment(run_id=1, component_id="title", body="Clarify the title")
+        submitted = views.VibeMarketingComponentComment(run_id=1, component_id="intro", body="Add evidence", batch_id="batch-1")
+        run._bootstrap_component_comments = [draft, submitted]
+        with patch.object(views.VibeMarketingComponentComment.objects, "filter",
+            side_effect=AssertionError("Prefetched feedback must not query again")):
+            result = views._component_feedback_from_run(run)
+        self.assertEqual([item["body"] for item in result["comments"]], ["Clarify the title", "Add evidence"])
+        self.assertEqual(result["latestBatch"], {"id": "batch-1", "sourceRunId": "feedback-1",
+            "revisionRunId": None, "status": "submitted"})
+        run._bootstrap_component_comments = []
+        with patch.object(views.VibeMarketingComponentComment.objects, "filter",
+            side_effect=AssertionError("An empty prefetch is still complete")):
+            self.assertEqual(views._component_feedback_from_run(run), {"comments": [], "latestBatch": None})
+
+    def test_ordinary_feedback_uses_one_current_comment_read_for_own_batch(self):
+        run = SimpleNamespace(run_id="feedback-2", workflow="article_generation", run_request={}, result={})
+        submitted = views.VibeMarketingComponentComment(run_id=2, component_id="title", body="Use current name", batch_id="batch-2")
+        with patch.object(views.VibeMarketingComponentComment.objects, "filter") as query:
+            query.return_value.order_by.return_value = [submitted]
+            result = views._component_feedback_from_run(run)
+        query.assert_called_once_with(run=run)
+        self.assertEqual(result["comments"][0]["body"], "Use current name")
+        self.assertEqual(result["latestBatch"]["id"], "batch-2")

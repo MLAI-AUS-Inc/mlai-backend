@@ -1575,7 +1575,7 @@ def _run_belongs_to_context(run, context) -> bool:
     return normalize_company_domain(run.domain) == normalize_company_domain(context.organization.domain)
 
 
-def _latest_runs_for_org(organization, limit=24, *, config=None):
+def _latest_runs_for_org(organization, limit=24, *, config=None, prefetch_feedback=False):
     rows = ContentFactoryRun.objects.filter(domain=organization.domain, workflow__in=VIBE_MARKETING_WORKFLOWS).exclude(status=ContentFactoryRunStatus.CANCELLED)
     if config is None:
         config = _get_config(organization)
@@ -1597,7 +1597,11 @@ def _latest_runs_for_org(organization, limit=24, *, config=None):
             retained.append(selected)
     retained_ids = {run.run_id for run in retained}
     ordinary = [run for run in candidates if run.run_id not in retained_ids and not article_setup_reset_ignores_run(config, run)]
-    return sorted(retained + ordinary[:max(limit - len(retained), 0)], key=lambda run: run.updated_at, reverse=True)
+    selected_runs = sorted(retained + ordinary[:max(limit - len(retained), 0)], key=lambda run: run.updated_at, reverse=True)
+    if prefetch_feedback:
+        from django.db.models import Prefetch, prefetch_related_objects
+        prefetch_related_objects(selected_runs, Prefetch("component_comments", to_attr="_bootstrap_component_comments"))
+    return selected_runs
 
 
 
@@ -4855,9 +4859,9 @@ def _component_feedback_from_run(run):
     batch_source_run = run
     if run.workflow == "article_revision" and source_run_id:
         batch_source_run = ContentFactoryRun.objects.filter(run_id=source_run_id).first() or run
-    comments = list(
-        VibeMarketingComponentComment.objects.filter(run=run).order_by("created_at", "id")
-    )
+    prefetched_comments = getattr(run, "_bootstrap_component_comments", None)
+    comments = (list(prefetched_comments) if isinstance(prefetched_comments, list) else list(
+        VibeMarketingComponentComment.objects.filter(run=run).order_by("created_at", "id")))
     latest_batch = result.get("component_feedback_latest_batch")
     if not isinstance(latest_batch, dict):
         source_result = batch_source_run.result if isinstance(batch_source_run.result, dict) else {}
@@ -4872,7 +4876,7 @@ def _component_feedback_from_run(run):
                 "status": "running",
             }
     if not isinstance(latest_batch, dict):
-        submitted_comments = list(
+        submitted_comments = comments if batch_source_run is run else list(
             VibeMarketingComponentComment.objects.filter(run=batch_source_run)
             .exclude(batch_id="")
             .order_by("created_at", "id")
@@ -11389,7 +11393,8 @@ def _overlay_live_bootstrap_fields(payload, *, context, request, config=None, la
             "vibe_bootstrap_google_overlay_failed org_id=%s",
             getattr(getattr(context, "organization", None), "id", None),
         )
-    runs = latest_runs if latest_runs is not None else _latest_runs_for_org(context.organization, limit=24, config=website_config)
+    runs = latest_runs if latest_runs is not None else _latest_runs_for_org(context.organization, limit=24,
+        config=website_config, prefetch_feedback=True)
     if capabilities is None:
         capabilities = _article_capabilities_for_context(context, website_config, latest_runs=runs, allow_probe=False)
     payload["articleCapabilities"] = capabilities
@@ -11444,7 +11449,7 @@ def _serialize_bootstrap(context, request=None, *, view="summary"):
             )
             payload = None
 
-    runs = _latest_runs_for_org(context.organization, config=config)
+    runs = _latest_runs_for_org(context.organization, config=config, prefetch_feedback=payload is None)
     capabilities = None
     if payload is None:
         payload = _compute_bootstrap_payload(context, request=request, view=view, config=config, latest_runs=runs)
@@ -11482,7 +11487,7 @@ def _compute_bootstrap_payload(context, request=None, *, view="summary", config=
     if config is None:
         config = _get_config(context.organization)
     if latest_runs is None:
-        latest_runs = _latest_runs_for_org(context.organization, config=config)
+        latest_runs = _latest_runs_for_org(context.organization, config=config, prefetch_feedback=True)
     # Bootstrap is a read projection. Explicit full reads must not perform
     # GitHub reconciliation either; dedicated mutations/background work own it.
     discovery_topic_runs = _recent_discovery_topic_runs_for_org(context.organization)

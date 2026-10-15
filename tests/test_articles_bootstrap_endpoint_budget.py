@@ -114,7 +114,7 @@ class BootstrapEndpointBudgetTests(ContentIslandBootstrapTestCase):
     def test_website_journey_get_also_observes_without_provider_calls(self):
         with ExitStack() as stack:
             forbidden = self.read_boundaries(stack)
-            response = self.client.get("/api/v1/my-startup/vibe-marketing/website-connection/")
+            response = self.client.get("/api/v1/my-startup/vibe-marketing/website-connection/", {"company_id": str(self.company.pk)})
             self.assertEqual(response.status_code, 200)
             self.assertIn("websiteJourney", response.data)
             for boundary in forbidden:
