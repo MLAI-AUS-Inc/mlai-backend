@@ -115,6 +115,7 @@ from vibe_raising.audience_visibility import (
 from integrations.services.valley_harness import cancel_valley_run, notify_valley_run_created
 from integrations.utils import normalize_domain
 from .metric_history import build_metric_history
+from .transaction_retry import run_in_retryable_transaction
 from .serializers import (
     VibeRaisingActiveCompanySerializer,
     VibeRaisingCompanySerializer,
@@ -3105,19 +3106,26 @@ class VibeRaisingEmailDraftStartView(APIView):
         except (ValueError, TypeError):
             raise ValidationError({"updateId": "Choose a valid update."})
         requested_date = parse_generation_date(request.data, update_id=requested_id)
-        with transaction.atomic():
-            draft, _ = resolve_update(organization, month=target_month, update_id=requested_id,
+        requested_month = target_month
+
+        def resolve_and_queue_run():
+            # A deadlock rolls this whole attempt back and it runs again, so it
+            # derives every value from the request. Only database writes and
+            # read-only source lookups happen here; Valley dispatch waits for
+            # the commit below and therefore happens once.
+            draft, _ = resolve_update(organization, month=requested_month, update_id=requested_id,
                 creation_key=request.data.get("creationKey"), update_date=requested_date)
             if str(request.data.get("expectedRevision") or "") != str(draft.current_revision_id or ""):
                 raise RevisionConflict()
-            if requested_date is None:
+            update_date = requested_date
+            if update_date is None:
                 from zoneinfo import ZoneInfo
                 reporting_zone = ZoneInfo(_startup_profile.reporting_timezone or "UTC")
-                requested_date = default_generation_date(
+                update_date = default_generation_date(
                     draft, today=timezone.now().astimezone(reporting_zone).date(),
                 )
-            target_month = draft.month
-            period = narrative_window(organization, draft, requested_date,
+            run_month = draft.month
+            period = narrative_window(organization, draft, update_date,
                 requested_start=request.data.get("narrativeStart"), requested_end=request.data.get("narrativeEnd"))
             try:
                 requested_audience = normalize_audience_visibility(request.data.get("audienceVisibility"))
@@ -3139,7 +3147,7 @@ class VibeRaisingEmailDraftStartView(APIView):
                 from startup_updates.activity_scope import run_uses_month_scope
                 if not run_uses_month_scope(existing_run.run_request or {}):
                     raise RevisionConflict("This draft was started with an older source period. Cancel it and generate the monthly update again.")
-                windows = build_startup_update_target_windows(target_month)
+                windows = build_startup_update_target_windows(run_month)
                 refresh_startup_update_run_source_context(
                     run=existing_run,
                     organization=organization,
@@ -3151,15 +3159,20 @@ class VibeRaisingEmailDraftStartView(APIView):
                     manual_summary=manual_summary,
                 )
             if not existing_run:
-                draft.update_date = requested_date
+                draft.update_date = update_date
                 draft.save(update_fields=["update_date"])
             run = existing_run or create_startup_update_run(organization=organization, binding=binding,
-                input_sources=input_sources, source_warnings=source_warnings, target_month=target_month,
+                input_sources=input_sources, source_warnings=source_warnings, target_month=run_month,
                 manual_document_ids=manual_document_ids, manual_summary=manual_summary,
                 force_regenerate=force, update_draft=draft, narrative_period=period,
                 automatic_source_scope=bool(getattr(self, "automatic_source_scope", False)),
                 audience_visibility=requested_audience,
                 cover_image=(display_config or {}).get("cover_image"))
+            return draft, run, existing_run, run_month
+
+        draft, run, existing_run, target_month = run_in_retryable_transaction(
+            resolve_and_queue_run, label="startup_update_draft_start",
+        )
         if not existing_run or _should_dispatch_existing_run(run):
             dispatch_result = _dispatch_run_to_valley(run)
             if not dispatch_result:
