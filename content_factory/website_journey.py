@@ -8,6 +8,14 @@ from .activation import VERIFICATION_MAX_AGE
 from django.utils import timezone
 from datetime import timedelta
 
+# The button names the action; the step's reason sentence travels beside it.
+NEXT_ACTION_LABELS = {"verify-access": "Check GitHub access", "scan": "Scan repository",
+    "permissions": "Review GitHub permissions", "setup": "Set up articles",
+    "ci-attestation": "Recheck verification", "verify": "Verify website"}
+# Cleanup, re-verification and dispatch follow-ups run in the background and can
+# stay queued for days. None of them is the owner's current website operation.
+BACKGROUND_OPERATION_ACTIONS = ("cancel-operation", "source-reverify", "worker_followup")
+
 
 def fact(complete=False, *, code="", reason="", status=None, verified_at=None, operation=None):
     """Expose a finite state; a saved credential is never an active check."""
@@ -131,7 +139,8 @@ def project_journey(*, company_id, domain, website=None, capabilities=None, disc
     next_step = next((step for step in steps if step["status"] != "complete"), None)
     action_id = {"github": "verify-access", "repository": "verify-access", "scan": "scan", "permissions": "permissions", "integration": "setup",
         "preview": "ci-attestation" if verification_stale else "verify", "activation": "verify"}.get(next_step["id"] if next_step else "")
-    next_action = {"id": action_id, "label": next_step["reason"] or next_step["label"], "step": next_step["id"]} if next_step and action_id in allowed else None
+    next_action = {"id": action_id, "label": NEXT_ACTION_LABELS[action_id], "step": next_step["id"],
+        "reason": next_step["reason"]} if next_step and action_id in allowed else None
     if next_action and setup_pr and next_step["id"] in {"scan", "integration"}:
         # MLAI Chat opens the saved setup run for "Review setup changes", where Publish
         # lives. Until preparation returns to this PR, the setup page's Prepare does.
@@ -209,6 +218,23 @@ def build_proof_fresh(connection, target, capabilities, *, now=None):
         for stamp in (target_stamp, connection.last_verified_at))
 
 
+def current_operation(connection):
+    """The owner's current website operation in this generation, if any.
+
+    A live preparation or disconnect always wins. A stopped preparation stays
+    the operation until newer owner work starts; its queued cleanup follow-up
+    never stands in for it.
+    """
+    current = connection.operations.filter(generation=connection.generation)
+    latest = current.filter(action__in=["prepare", "disconnect"]).order_by("-created_at").first()
+    if latest is None or latest.state == "cancelled":
+        newer = current.exclude(action__in=BACKGROUND_OPERATION_ACTIONS)
+        if latest is not None:
+            newer = newer.filter(created_at__gt=latest.updated_at)
+        latest = newer.order_by("-created_at").first() or latest
+    return latest
+
+
 def journey_for_context(context, config, *, capabilities=None):
     """Load current-generation facts only; authenticated account probes stay live."""
     from .website_connections import summary_for
@@ -249,8 +275,7 @@ def journey_for_context(context, config, *, capabilities=None):
         if cleanup:
             proof.update(cleanupAwaitingDeployment=True, cleanupOperationId=str(cleanup.pk))
         proof["reviewedMergeReady"] = connection.repository_mutations.filter(generation=connection.generation, status="applied").exclude(head_sha="").exists() and bool(connection.capabilities.get("previewSupported"))
-        composite = connection.operations.filter(generation=connection.generation, action__in=["prepare", "disconnect"]).exclude(state="cancelled").order_by("-created_at").first()
-        latest = composite or connection.operations.filter(generation=connection.generation).order_by("-created_at").first()
+        latest = current_operation(connection)
         operation = operation_summary(latest) if latest else None
         epoch = deletion_epoch(connection)
         from workflow_runs.models import ContentFactoryRun
