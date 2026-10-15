@@ -1,3 +1,5 @@
+from zoneinfo import ZoneInfo
+
 from django.test import override_settings
 from django.urls import reverse
 from django.utils import timezone
@@ -94,7 +96,7 @@ class BoostPostAdmissionAPITests(APITestCase):
         )
         draft = MonthlyUpdateDraft.objects.create(
             organization=organization,
-            month=timezone.localdate().replace(day=1),
+            month=timezone.localdate(timezone=ZoneInfo("Australia/Melbourne")).replace(day=1),
             status=MonthlyUpdateDraftStatus.READY,
         )
         snapshot = MonthlyEvidenceSnapshot.objects.create(organization=organization,
