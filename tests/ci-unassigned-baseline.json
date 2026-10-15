@@ -1,6 +1,6 @@
 {
   "recorded_on": "2026-09-14",
-  "review_by": "2026-10-14",
+  "review_by": "2026-10-28",
   "owner": "backend-maintainers",
   "reason": "Existing test modules outside the audited CI selection; execution/failure status unverified. This is tracked selection debt, not evidence of passing tests. Newly omitted modules must be assigned to CI.",
   "partially_selected_modules": [
