@@ -740,7 +740,7 @@
                     },
                     "generation": {
                       "type": "integer",
-                      "minimum": 1
+                      "minimum": 0
                     },
                     "state_version": {
                       "type": "integer",

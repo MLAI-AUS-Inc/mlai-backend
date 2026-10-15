@@ -18727,6 +18727,9 @@ def control_article_run(*, user, context, run, action, data, run_id=None, goal_o
             run.approval_state = ContentFactoryApprovalState.DENIED
             run.status = ContentFactoryRunStatus.DENIED
         elif action == "resume":
+            if goal_operation_id is not None and remote_data.get("status")=="noop" and remote_data.get("resume_available") is False:
+                error=WebsiteAuthorityError("ARTICLE_SETUP_STRATEGY_UNAVAILABLE","The saved article cannot recover by repeating this step.")
+                return Response(error.as_dict(),status=error.status)
             if run.workflow in ARTICLE_WORKFLOWS and not remote_data.get("already_queued") and goal_operation_id is None:
                 previous_actions = (run.result or {}).get("user_action_count")
                 run.result = {**(run.result or {}), "user_action_count":

@@ -41,10 +41,18 @@ only bounded article outcomes/usage. Worker snapshots cannot enroll a stream or
 replace its marker; incoming sparse outcomes preserve richer canonical article
 evidence. Setup and article apply flags remain independent and default off.
 
-Local evidence for the delivery extension: 111 backend tests pass, alongside
-183 Content Factory delivery/queue/attempt/usage/failure tests in #990. The
-schema is pinned to immutable Content Factory revision d7f88b54. CI also now
-tests server enrollment in the real PostgreSQL paid-run recovery chain.
+Local evidence for the delivery extension: 155 backend tests pass, alongside
+184 Content Factory delivery/queue/attempt/usage/failure tests in #990. The
+schema is pinned to immutable Content Factory revision e56b8c50. CI also now
+tests server enrollment and actual durable receiver application in the real
+PostgreSQL paid-run recovery chain, with a no-op refusal variant.
+
+That chain exposed the zero-based worker generation and nullable usage schema
+gaps; both are fixed without changing the resume-ordering guard. A refused
+canonical resume cannot mark the goal's repair submitted. It raises a bounded
+strategy outcome instead. Content Factory's reserved-attempt repair path checks
+the original goal budget and authenticated operation before overriding only the
+legacy non-retryable label; source shortfall/admission/budget guards stay active.
 
 D2 remains incomplete until automatic stale-proposal rebuilding and article
 strategy escalation are implemented and tested. Refreshes must

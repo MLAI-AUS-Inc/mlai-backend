@@ -56,6 +56,7 @@ class BudgetTests(SimpleTestCase):
 
     def test_cumulative_usage_replay_and_old_or_contradictory_reports(self):
         goal = budget.account_usage(self.goal, self.report(), run_id="child")
+
         self.assertEqual(budget.account_usage(goal, self.report(), run_id="child"), goal)
         self.assertEqual(budget.account_usage(goal, self.report(state_version=1), run_id="child"), goal)
         with self.assertRaises(ValueError):
@@ -65,6 +66,15 @@ class BudgetTests(SimpleTestCase):
         updated = budget.account_usage(goal, self.report(state_version=3, active_seconds=8), run_id="child")
         self.assertEqual(updated["budget_used"]["active_seconds"], 8)
         self.assertEqual(updated["budget_used"]["model_cost"], 0.2)
+
+    def test_initial_worker_generation_zero_is_metered_and_negative_or_boolean_is_rejected(self):
+        initial=self.report(generation=0)
+        metered=budget.account_usage(self.goal,initial,run_id="child")
+        self.assertEqual(metered["budget_used"]["model_cost"],initial["model_usd"])
+        self.assertEqual(budget.account_usage(metered,initial,run_id="child"),metered)
+        for generation in (-1,True):
+            with self.subTest(generation=generation),self.assertRaises(ValueError):
+                budget.account_usage(self.goal,self.report(generation=generation),run_id="child")
 
     def test_same_fingerprint_twice_escalates_once_and_waiting_does_not_count(self):
         goal, effective, fresh = budget.record_policy_occurrence(self.goal, occurrence="one", fingerprint="f" * 64, classification="repairable")

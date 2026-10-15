@@ -25,7 +25,7 @@ def valid_usage(report, run_id):
     """A report is cumulative for an exact original run, never a transport delta."""
     return (isinstance(report, dict) and type(report.get("version")) is int and report["version"] == 1
         and report.get("run_id") == run_id and isinstance(run_id, str) and 0 < len(run_id) <= 100
-        and type(report.get("generation")) is int and report["generation"] >= 1
+        and type(report.get("generation")) is int and report["generation"] >= 0
         and type(report.get("state_version")) is int and report["state_version"] >= 0
         and all(key in report and (report[key] is None or numeric(report[key])) for key in COUNTERS)
         and all(report[key] is None or type(report[key]) is int for key in ("model_calls", "tokens", "builds", "previews")))

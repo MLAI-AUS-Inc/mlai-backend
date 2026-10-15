@@ -16,7 +16,7 @@ Source plan: the 13 October one-shot runbook in the attached files and
 | B3, B4, B6, B7 | Implemented in backend #1016–#1018, CF #985 and Chat #468; draft stack, rollout off |
 | C1 through C5 | Implemented in backend #1019–#1023, CF #986, Chat #470–#472; final CI green, rollout off |
 | D1 | Backend #1024, Chat #473 and CF #988 final-head CI green; rollout off |
-| D2, D3 | Backend #1028 bounded recovery CI green; CF #990 and backend article outcome delivery in CI; stale refresh, article escalation and D3 pending |
+| D2, D3 | #1028 bounded recovery CI green; #990 delivery CI green at d7f88b54, integration fixes in CI; stale refresh/article escalation pending. D3 locally implemented, 114 tests pass |
 | E1 through E5 and retained v2 channel/CMS/hosted work | Pending; fixture/provider owner inputs may be needed |
 | F1 through F3 | Pending |
 | G1 through G6 | Pending; owner operational steps remain separate |

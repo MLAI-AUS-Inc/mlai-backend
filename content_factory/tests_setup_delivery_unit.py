@@ -698,7 +698,7 @@ class ArticleDeliveryChainTests(SimpleTestCase):
 class SetupDeliveryContractTests(SimpleTestCase):
     def test_usage_schema_accepts_explicit_unknown_numbers_and_rejects_strings(self):
         from .website_goal_budget import COUNTERS
-        report={"version":1,"run_id":"setup-1","generation":1,"state_version":1,
+        report={"version":1,"run_id":"setup-1","generation":0,"state_version":1,
             **{key:0 for key in COUNTERS}}
         for value in (0,None):
             with self.subTest(value=value):

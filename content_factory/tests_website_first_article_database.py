@@ -115,7 +115,12 @@ class FirstArticleProviderChainTests(OneClickBillingFixture,TransactionTestCase)
     def test_failed_article_recovers_original_paid_run_then_finishes_the_live_chain(self):
         self.ready_article_chain(repair=True)
 
-    def ready_article_chain(self,*,repair=False):
+    @override_settings(ARTICLES_ARTICLE_RECOVERY_ENABLED=True,ARTICLES_WEBSITE_GOAL_BUDGETS_ENABLED=True,
+        CONTENT_FACTORY_ARTICLE_DELIVERY_V1_APPLY_ENABLED=True)
+    def test_unresumable_worker_does_not_claim_an_article_repair_was_submitted(self):
+        self.ready_article_chain(repair=True,resume_noop=True)
+
+    def ready_article_chain(self,*,repair=False,resume_noop=False):
         """Ready is the precondition; everything through live uses owning records."""
         from django.core.cache import cache
         from .article_publish_approval import article_publish_approval_receipt_matches
@@ -123,7 +128,7 @@ class FirstArticleProviderChainTests(OneClickBillingFixture,TransactionTestCase)
         from .website_goal_evidence import collect_proofs
         from .website_verification import BOOLEAN_PROOFS,record_ci_attestation,validated_ci_identity,verify_live_deployment
 
-        def usage(identifier,generation=1,state_version=2):
+        def usage(identifier,generation=0,state_version=2):
             from .website_goal_budget import COUNTERS
             return {"version":1,"run_id":identifier,"generation":generation,"state_version":state_version,
                 **{key:0 for key in COUNTERS}}
@@ -163,7 +168,8 @@ class FirstArticleProviderChainTests(OneClickBillingFixture,TransactionTestCase)
             if url.endswith("/first-article/resume"):
                 self.assertEqual(kwargs["json"]["operation_attempt"],2)
                 self.assertEqual(Ledger.objects.filter(kind="SPEND",source="CONTENT_FACTORY").count(),1)
-                return provider_response({"run_id":"first-article","status":"queued"},status=202)
+                return provider_response({"run_id":"first-article","status":"noop","resume_available":False} if resume_noop
+                    else {"run_id":"first-article","status":"queued"},status=200 if resume_noop else 202)
             if url.endswith("/first-article/publish-pr"):
                 source=ContentFactoryRun.objects.get(run_id="first-article")
                 WebsiteRepositoryMutation.objects.create(connection=self.website,generation=self.website.generation,
@@ -227,10 +233,10 @@ class FirstArticleProviderChainTests(OneClickBillingFixture,TransactionTestCase)
                 worker=envelope(kind="run_snapshot",status="failed",event_id="first-article-failure")
                 worker.update(run_id=run.run_id,workflow="direct_generate",scope={
                     key:run.run_request[key] for key in SCOPE_FIELDS if run.run_request.get(key) not in (None,"")},
-                    execution={"generation":1,"state_version":2})
+                    execution={"generation":0,"state_version":2})
                 projection=worker["body"]["state_projection"]
                 causal=attach_failure_projection({},classify_failure("DIRECTORY_STYLE_REVIEW_FAILED","article_style"),str(uuid4()))
-                projection.update(generation=1,state_version=2,current_step="article_style",
+                projection.update(generation=0,state_version=2,current_step="article_style",
                     failure=causal["failure"],failure_occurrence_id=causal["failure_occurrence_id"],
                     result={"usage":usage(run.run_id),**causal})
                 signed(worker)
@@ -242,6 +248,15 @@ class FirstArticleProviderChainTests(OneClickBillingFixture,TransactionTestCase)
                 held=deepcopy(op.receipt["first_article_billing"])
                 self.advance_article(op,record_failure=True)
                 self.assertEqual(op.receipt["article_recovery"]["state"],"pending")
+                if resume_noop:
+                    self.advance_article(op,record_failure=True)
+                    self.assertNotEqual(op.receipt["article_recovery"]["state"],"submitted")
+                    self.assertNotEqual(op.state,"completed")
+                    self.assertFalse(goals.complete(op.receipt["goal"]))
+                    self.assertEqual(op.receipt["first_article_billing"],held)
+                    self.assertEqual(Ledger.objects.filter(kind="SPEND",source="CONTENT_FACTORY").count(),1)
+                    self.assertNotIn("first_article_approval",op.receipt)
+                    return
                 self.advance_article(op)  # actual canonical resume and reserved attempt
                 run.refresh_from_db()
                 self.assertEqual(run.run_request["operation_attempt"],2)
@@ -251,7 +266,7 @@ class FirstArticleProviderChainTests(OneClickBillingFixture,TransactionTestCase)
             # This is the simulated Content Factory checkpoint. Approval and
             # merge receipts below must be written by their canonical handlers.
             run.status="completed"
-            run.result={"generation":2 if repair else 1,"state_version":5,"usage":usage(run.run_id,2 if repair else 1,5),
+            run.result={"generation":1 if repair else 0,"state_version":5,"usage":usage(run.run_id,1 if repair else 0,5),
                 "livePreview":{"previewUrl":"https://preview.test/article","exactRender":True,
                 "proof":{"commitSha":"b"*40},"resume_generation":0},
                 "article_preview_quality":{"status":"passed","preview_url":"https://preview.test/article",
