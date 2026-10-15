@@ -62,6 +62,7 @@ class BootstrapSetupMergeFactTests(SimpleTestCase):
                 for alias in ("articleSetupState", "article_setup_state"):
                     self.assertIs(result[alias]["setupMerged"], True)
                     self.assertEqual(result[alias]["setupRunId"], "merged-setup")
+                    self.assertEqual(result[alias]["websiteConnection"], result["websiteConnection"])
                     for flag in ("generationReady", "generation_ready", "scaffoldConnected", "published"):
                         self.assertIs(result[alias][flag], False)
                 self.assertIs(result["articleCapabilities"]["canGenerateArticle"], False)
