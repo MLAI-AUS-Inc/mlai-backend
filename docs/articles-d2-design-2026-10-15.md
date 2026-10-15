@@ -54,6 +54,15 @@ strategy outcome instead. Content Factory's reserved-attempt repair path checks
 the original goal budget and authenticated operation before overriding only the
 legacy non-retryable label; source shortfall/admission/budget guards stay active.
 
+At cab8dc31, all five PostgreSQL provider-chain cases passed, including actual
+durable failure reception, paid-run recovery through live and refused-resume
+handling. The ordinary CI check then reached the existing selection-debt review
+deadline. The follow-up assigns 123 omitted and ten partial modules to explicit
+lanes (13 database-free; remaining modules in the existing disposable PostgreSQL
+job) and retires the empty baseline without extending its review date. The 120
+newly selected database-free tests pass. Assignment is complete; the newly
+selected database-backed suites still require CI execution and repairs.
+
 D2 remains incomplete until automatic stale-proposal rebuilding and article
 strategy escalation are implemented and tested. Refreshes must
 use a fresh owned branch/current base, preserve deterministic consent only and

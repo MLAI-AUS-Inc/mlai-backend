@@ -66,9 +66,9 @@ def main():
     labels = selected_labels((ROOT / ".github/workflows/deploy.yml").read_text())
     complete, partial, absent = classify(modules, labels)
     baseline = json.loads(BASELINE.read_text())
-    if date.today() > date.fromisoformat(baseline["review_by"]):
-        raise SystemExit("Existing CI selection debt is due for review; assign suites before extending the baseline.")
     allowed = set(baseline["unassigned_modules"])
+    if allowed and date.today() > date.fromisoformat(baseline["review_by"]):
+        raise SystemExit("Existing CI selection debt is due for review; assign suites before extending the baseline.")
     new = absent - allowed
     print(
         f"CI test-module assignment: {len(complete)} fully selected, "
