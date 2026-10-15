@@ -9,7 +9,21 @@ from uuid import UUID
 
 FLAGS = {"MLAI_MCP_NATIVE_AGENTS_ENABLED", "AGENT_RUNTIME_ENABLED", "AGENT_RUNTIME_NATIVE_ENABLED",
          "AGENT_RUNTIME_NATIVE_REPLIES_ENABLED", "AGENT_RUNTIME_MCP_EVENTS_ENABLED"}
-VALUES = FLAGS | {"AGENT_RUNTIME_NATIVE_COMMUNITIES", "AGENT_RUNTIME_DOT_SETUP_URL", "AGENT_RUNTIME_NATIVE_PERSONAL_LIMIT"}
+# These remain independently switchable even while the pilot is enabled.
+OPTIONAL_FLAGS = {"AGENT_RUNTIME_NATIVE_ALWAYS_ADMIT", "AGENT_RUNTIME_NATIVE_BACKLOG_REPLAY",
+                  "AGENT_RUNTIME_NATIVE_DURABLE_WATCH", "AGENT_RUNTIME_NATIVE_LAPSE_ALERTS",
+                  "AGENT_RUNTIME_NATIVE_RENEWAL_ENABLED", "MLAI_MCP_AGENT_GRANT_EXTENSION_ENABLED"}
+BOUNDED_INTEGERS = {
+    "AGENT_RUNTIME_NATIVE_QUEUE_TTL_MINUTES": (15, 10080),
+    "AGENT_RUNTIME_NATIVE_ADMISSION_DAILY_CAP": (1, 1000),
+    "AGENT_RUNTIME_NATIVE_DENIAL_GRACE_SECONDS": (60, 86400),
+    "AGENT_RUNTIME_NATIVE_UNIFIED_GRACE_SECONDS": (600, 604800),
+    "MLAI_MCP_REFRESH_REPLAY_GRACE_SECONDS": (0, 300),
+}
+ENUMS = {"AGENT_RUNTIME_MCP_EVENTS_LEASE_POLICY": {"24h", "grant"}}
+TIMEZONE_KEY = "AGENT_RUNTIME_NATIVE_LIMIT_TIMEZONE"
+REQUIRED_VALUES = {"AGENT_RUNTIME_NATIVE_COMMUNITIES", "AGENT_RUNTIME_DOT_SETUP_URL", "AGENT_RUNTIME_NATIVE_PERSONAL_LIMIT"}
+VALUES = FLAGS | REQUIRED_VALUES | OPTIONAL_FLAGS | set(BOUNDED_INTEGERS) | set(ENUMS) | {TIMEZONE_KEY}
 SECRETS = {"AGENT_RUNTIME_NATIVE_SERVICE_PRIVATE_KEY", "AGENT_RUNTIME_NATIVE_REGISTRY_KEY", "COMMUNITY_CHAT_ROLE_SERVICE_TOKEN"}
 ORDER = 0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEBAAEDCE6AF48A03BBFD25E8CD0364141
 
@@ -33,9 +47,19 @@ def validate_single(key, value):
     """Reject malformed stdin payloads before they can replace a host setting."""
     if not isinstance(value, str) or not value or "\n" in value or "\r" in value:
         raise ValueError(f"{key} must be a non-empty single-line value")
-    if key in FLAGS:
+    if key in FLAGS | OPTIONAL_FLAGS:
         if value not in {"true", "false"}:
             raise ValueError(f"{key} must be true or false")
+    elif key in BOUNDED_INTEGERS:
+        low, high = BOUNDED_INTEGERS[key]
+        if not re.fullmatch(r"0|[1-9][0-9]{0,6}", value) or not low <= int(value) <= high:
+            raise ValueError(f"{key} must be an integer from {low} to {high}")
+    elif key in ENUMS:
+        if value not in ENUMS[key]:
+            raise ValueError(f"{key} has an unsupported policy")
+    elif key == TIMEZONE_KEY:
+        if not re.fullmatch(r"[A-Za-z][A-Za-z0-9_+-]*(?:/[A-Za-z0-9_+-]+)*", value):
+            raise ValueError(f"{key} must be an IANA timezone name")
     elif key == "AGENT_RUNTIME_NATIVE_PERSONAL_LIMIT":
         if value != "1":
             raise ValueError("The native pilot requires one personal installation per community")
@@ -67,7 +91,7 @@ def validate_single(key, value):
 
 def validate(environment):
     """Keep dormant settings optional and require complete explicit activation."""
-    for key in FLAGS:
+    for key in FLAGS | OPTIONAL_FLAGS:
         validate_single(key, environment.get(key, "false"))
     for key in (VALUES | SECRETS) - FLAGS:
         if environment.get(key):
@@ -78,7 +102,7 @@ def validate(environment):
         raise ValueError("The native pilot requires its complete runtime and unified MCP gates")
     if environment.get("COMMUNITY_CHAT_STARTUP_UPDATES_ENABLED") == "false":
         raise ValueError("The native pilot requires the existing startup connection gate")
-    for key in (VALUES | SECRETS) - FLAGS:
+    for key in REQUIRED_VALUES | SECRETS:
         if not environment.get(key):
             raise ValueError(f"The enabled native pilot requires {key}")
     if not json.loads(environment["AGENT_RUNTIME_NATIVE_COMMUNITIES"]):

@@ -98,3 +98,94 @@ class NativeAgentDeployConfigTests(unittest.TestCase):
         workflow = (ROOT / ".github/workflows/deploy.yml").read_text()
         for key in active():
             self.assertIn(key, workflow)
+
+
+class MaekSafetyConfigTests(unittest.TestCase):
+    # This is the reviewed rollout contract, independent of runtime imports.
+    defaults = {
+        "AGENT_RUNTIME_NATIVE_ALWAYS_ADMIT": "false",
+        "AGENT_RUNTIME_NATIVE_QUEUE_TTL_MINUTES": "1440",
+        "AGENT_RUNTIME_NATIVE_ADMISSION_DAILY_CAP": "200",
+        "AGENT_RUNTIME_NATIVE_LIMIT_TIMEZONE": "Australia/Melbourne",
+        "AGENT_RUNTIME_NATIVE_BACKLOG_REPLAY": "false",
+        "AGENT_RUNTIME_MCP_EVENTS_LEASE_POLICY": "24h",
+        "AGENT_RUNTIME_NATIVE_DURABLE_WATCH": "false",
+        "AGENT_RUNTIME_NATIVE_DENIAL_GRACE_SECONDS": "600",
+        "AGENT_RUNTIME_NATIVE_UNIFIED_GRACE_SECONDS": "86400",
+        "AGENT_RUNTIME_NATIVE_LAPSE_ALERTS": "false",
+        "AGENT_RUNTIME_NATIVE_RENEWAL_ENABLED": "false",
+        "MLAI_MCP_AGENT_GRANT_EXTENSION_ENABLED": "false",
+        "MLAI_MCP_REFRESH_REPLAY_GRACE_SECONDS": "0",
+    }
+
+    def test_optional_flags_can_stay_off_while_pilot_is_on(self):
+        from scripts.validate_native_agent_deploy_config import OPTIONAL_FLAGS
+        self.assertTrue(FLAGS.isdisjoint(OPTIONAL_FLAGS))
+        validate({**active(), **self.defaults})
+        validate({**active(), "AGENT_RUNTIME_NATIVE_ALWAYS_ADMIT": "false"})
+        for key in OPTIONAL_FLAGS:
+            for value in ("true", "false"):
+                with self.subTest(key=key, value=value):
+                    validate_single(key, value)
+            for value in ("yes", "TRUE", "1", "false\nINJECT=true"):
+                with self.subTest(key=key, value=value), self.assertRaises(ValueError):
+                    validate_single(key, value)
+
+    def test_integer_enum_and_timezone_contracts(self):
+        from scripts.validate_native_agent_deploy_config import BOUNDED_INTEGERS
+        for key, (low, high) in BOUNDED_INTEGERS.items():
+            for value in (str(low), str(high), self.defaults[key]):
+                validate_single(key, value)
+            for value in (str(low - 1), str(high + 1), "1.5", "yes", "1\nINJECT=true"):
+                with self.subTest(key=key, value=value), self.assertRaises(ValueError):
+                    validate_single(key, value)
+        for value in ("24h", "grant"):
+            validate_single("AGENT_RUNTIME_MCP_EVENTS_LEASE_POLICY", value)
+        for value in ("forever", "24H", "null"):
+            with self.assertRaises(ValueError):
+                validate_single("AGENT_RUNTIME_MCP_EVENTS_LEASE_POLICY", value)
+        for value in ("Australia/Melbourne", "UTC", "Etc/GMT+1"):
+            validate_single("AGENT_RUNTIME_NATIVE_LIMIT_TIMEZONE", value)
+        for value in ("../UTC", "/UTC", "Australia//Melbourne", "Australia/Melbourne\nX=true", "Australia Melbourne"):
+            with self.assertRaises(ValueError):
+                validate_single("AGENT_RUNTIME_NATIVE_LIMIT_TIMEZONE", value)
+
+    def test_all_defaults_reach_every_deployment_surface(self):
+        deploy = (ROOT / "deploy.sh").read_text()
+        loop = deploy.split("for native_flag in ", 1)[1].split("; do", 1)[0]
+        upsert = (ROOT / "scripts/upsert_env_value_from_stdin.sh").read_text()
+        for key, default in self.defaults.items():
+            with self.subTest(key=key):
+                self.assertIn(key + ": ${{ vars." + key + " || '" + default + "' }}", (ROOT / ".github/workflows/deploy.yml").read_text())
+                self.assertIn(key + '="${' + key + ':-' + default + '}"', deploy)
+                self.assertIn("export " + key, deploy)
+                self.assertIn(key, loop)
+                self.assertGreaterEqual(upsert.count(key), 2)
+                self.assertIn(key, (ROOT / "mlai/settings.py").read_text())
+                self.assertIn(key + "=" + default, (ROOT / ".env.example").read_text())
+                self.assertIn(key, (ROOT / "docs/mlai-mcp-native-dot.md").read_text())
+        worker = (ROOT / "docker-compose.yml").read_text().split("  native-agent-worker:\n", 1)[1].split("\n  db:", 1)[0]
+        self.assertIn("--health-file /tmp/native-agent-heartbeat", worker)
+        self.assertIn("healthcheck:", worker)
+        self.assertIn("<= 300", worker)
+
+    def test_optional_stdin_values_are_atomic_and_route_to_native_validator(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "scripts").mkdir()
+            for name in ("upsert_env_value_from_stdin.sh", "validate_native_agent_deploy_config.py"):
+                shutil.copy2(ROOT / "scripts" / name, root / "scripts" / name)
+            for key, default in self.defaults.items():
+                with self.subTest(key=key):
+                    env_file = root / ".env"
+                    env_file.write_text("KEEP_ME=yes\n")
+                    command = ["bash", str(root / "scripts/upsert_env_value_from_stdin.sh"), key]
+                    result = subprocess.run(command, input=default, text=True, capture_output=True,
+                                            env={"PATH": os.defpath}, timeout=5)
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    self.assertIn(key + "=" + default + "\n", env_file.read_text())
+                    before = env_file.read_bytes()
+                    result = subprocess.run(command, input="invalid value\nINJECT=true", text=True,
+                                            capture_output=True, env={"PATH": os.defpath}, timeout=5)
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertEqual(before, env_file.read_bytes())
