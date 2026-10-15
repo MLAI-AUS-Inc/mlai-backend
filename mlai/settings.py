@@ -509,6 +509,7 @@ REST_FRAMEWORK = {
         'community_chat_slack_snapshot_account': os.getenv('COMMUNITY_CHAT_SLACK_SNAPSHOT_ACCOUNT_RATE', '600/minute'),
         'community_chat_slack_open': os.getenv('COMMUNITY_CHAT_SLACK_OPEN_RATE', '60/minute'),
         'community_chat_slack_read_receipt': os.getenv('COMMUNITY_CHAT_SLACK_READ_RECEIPT_RATE', '60/minute'),
+        'community_chat_slack_directory': os.getenv('COMMUNITY_CHAT_SLACK_DIRECTORY_RATE', '120/minute'),
         'community_chat_home': os.getenv('COMMUNITY_CHAT_HOME_RATE', '60/minute'),
         'my_startup_bootstrap': os.getenv('MY_STARTUP_BOOTSTRAP_RATE', '120/minute'),
         'my_startup_read': os.getenv('MY_STARTUP_READ_RATE', '120/minute'),
@@ -1227,6 +1228,7 @@ MESSAGE_SYNC_ENABLED = os.getenv('MESSAGE_SYNC_ENABLED', 'false').lower() == 'tr
 MESSAGE_SYNC_TARGETED_READ_POLLING = _env_is_true('MESSAGE_SYNC_TARGETED_READ_POLLING', False)
 # Open priority is reversible; unread prefetch requires a measured rollout.
 MESSAGE_SYNC_OPEN_PRIORITY_ENABLED = _env_is_true('MESSAGE_SYNC_OPEN_PRIORITY_ENABLED', True)
+MESSAGE_SYNC_DEVICE_FANOUT_BATCH = int(os.getenv('MESSAGE_SYNC_DEVICE_FANOUT_BATCH', '0'))
 MESSAGE_SYNC_UNREAD_PREFETCH_ENABLED = _env_is_true('MESSAGE_SYNC_UNREAD_PREFETCH_ENABLED', False)
 MESSAGE_SYNC_UNREAD_PREFETCH_PER_HOUR = int(os.getenv('MESSAGE_SYNC_UNREAD_PREFETCH_PER_HOUR', '6'))
 MESSAGE_SYNC_INBOX_READ_EXPORT = _env_is_true('MESSAGE_SYNC_INBOX_READ_EXPORT', False)
@@ -1266,6 +1268,8 @@ BUZZ_BRIDGE_CALLBACK_MAX_AGE_SECONDS = int(
 COMMUNITY_BRIDGE_WORKER_POLL_SECONDS = float(
     os.getenv('COMMUNITY_BRIDGE_WORKER_POLL_SECONDS', '1')
 )
+COMMUNITY_BRIDGE_DEPENDENCY_VERDICTS_ENABLED = _env_is_true('COMMUNITY_BRIDGE_DEPENDENCY_VERDICTS_ENABLED', False)
+COMMUNITY_BRIDGE_DEPENDENCY_VERDICT_MIN_AGE_SECONDS = int(os.getenv('COMMUNITY_BRIDGE_DEPENDENCY_VERDICT_MIN_AGE_SECONDS', '3600'))
 COMMUNITY_BRIDGE_PARENT_DEPENDENCY_MAX_AGE_SECONDS = int(
     os.getenv('COMMUNITY_BRIDGE_PARENT_DEPENDENCY_MAX_AGE_SECONDS', '3600')
 )

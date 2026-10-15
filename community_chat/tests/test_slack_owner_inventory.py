@@ -554,3 +554,19 @@ class SlackOwnerInventoryTests(SlackDmIoAuthorityFixture, TransactionTestCase):
                 _validate_open_source(self.grant, self.authority, self.grant.owner_conversation_inventory.get(slack_conversation_id="DEMPTY"))
         self.assertEqual(empty.exception.code, "inventory_no_in_window_activity")
         self.assertEqual(calls, ["conversations_info", "conversations_history"])
+
+    def test_inventory_presentation_adds_one_bounded_identity_query_without_provider_io(self):
+        from django.db import connection
+        from django.test.utils import CaptureQueriesContext
+        self.consent()
+        record_private_page(self.authority, [self.row(f'DPRESENT{i}') for i in range(20)],
+                            started_at=timezone.now(), kinds={'im'})
+        with patch('integrations.services.slack_owner_inventory_api._call_slack_with_grant_authority', side_effect=AssertionError('provider I/O')):
+            # B3 baseline: 28 queries; presentation adds one scoped identity query.
+            with self.assertNumQueries(29), CaptureQueriesContext(connection) as queries:
+                page = conversation_page(self.user, public_key=self.owner_key)
+        self.assertEqual(len(page['items']), 20)
+        for item in page['items']:
+            self.assertTrue({'device_access', 'avatar_url', 'participants', 'counterpart_has_mlai_account'}.issubset(item))
+        identity_queries = [q for q in queries if 'community_bridge_identity_link' in q['sql']]
+        self.assertEqual(len(identity_queries), 1)

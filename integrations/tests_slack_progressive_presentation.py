@@ -212,7 +212,8 @@ class SlackProgressivePresentationTests(SimpleTestCase):
         self.assertEqual(result["source_coverage"]["classification"], "source_limited")
         self.assertEqual(result["delivery_revision"], self.now)
         revision_filter = rows.aggregate.call_args.kwargs["delivery_revision"].filter
-        self.assertEqual(revision_filter.children, [("status", "completed")])
+        self.assertIn(("status", "completed"), revision_filter.children)
+        self.assertIn("metadata__dependency_superseded", str(revision_filter))
 
     def recovery(self, rows, receipts, *, device_authorized=True, before_id=None):
         self.grant.conversations.filter.return_value.first.return_value = self.conversation

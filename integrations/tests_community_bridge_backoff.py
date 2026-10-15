@@ -9,7 +9,7 @@ from unittest.mock import AsyncMock, Mock, patch
 from django.test import SimpleTestCase, override_settings
 from django.utils import timezone
 
-from integrations.services.community_bridge import store, worker
+from integrations.services.community_bridge import buzz, store, worker
 from integrations.services.message_sync.delivery import delivery_context
 from integrations.services.message_sync.scheduler import LeaseLost
 
@@ -35,6 +35,32 @@ class ParentDependencyBackoffTests(SimpleTestCase):
                 store.mark_delivery_waiting_for_parent.__wrapped__(
                     delivery_id=1, parent_message_id="parent",
                 )
+
+    def test_flag_off_does_not_classify_and_first_park_logs_once(self):
+        with patch('integrations.services.community_bridge.dependencies.classify_missing_dependency') as classify:
+            with self.assertLogs(store.logger, 'INFO') as logs:
+                self.park()
+            self.assertIn('community_bridge_waiting_for_parent', logs.output[0])
+            with self.assertNoLogs(store.logger, 'INFO'):
+                self.park()
+            classify.assert_not_called()
+
+    @override_settings(COMMUNITY_BRIDGE_DEPENDENCY_VERDICTS_ENABLED=True)
+    def test_flagged_verdicts_preserve_lease_and_attempt_bookkeeping(self):
+        from integrations.services.community_bridge.dependencies import DependencyVerdict
+        self.row.delivery_type = 'create'
+        for action, status in [('noop', 'completed'), ('dead_letter', 'dead'), ('park', 'waiting_parent'), ('wait', 'waiting_parent')]:
+            with self.subTest(action=action), patch('integrations.services.community_bridge.dependencies.classify_missing_dependency', return_value=DependencyVerdict(action, 'dependency_dead', 'slack_ts')), patch.object(store, '_wake_waiting_child_deliveries') as wake:
+                self.row.attempts = 3
+                self.row.dependency_attempts = 0
+                self.park()
+                self.assertEqual(self.row.status, status)
+                self.assertEqual(self.row.attempts, 2)
+                self.assertEqual(self.row.dependency_attempts, 1)
+                if action in {'noop', 'dead_letter'}:
+                    wake.assert_called_once_with(self.row)
+                if action == 'park':
+                    self.assertEqual(self.row.available_at, self.now + timedelta(days=7))
 
     def test_retry_schedule_survives_reclaims_without_spending_provider_attempts(self):
         first_seen = self.now
@@ -216,3 +242,118 @@ class UnsupportedDeliveryTests(IsolatedAsyncioTestCase):
                     instance, {"id": 1, "target_platform": "slack"},
                 )
             self.assertEqual(retry.call_args.kwargs["permanent"], permanent)
+
+
+@override_settings(BUZZ_BRIDGE_ADAPTER_URL="http://adapter.internal:8080/", BUZZ_BRIDGE_ADAPTER_TOKEN="token")
+class AdapterErrorDetailTests(SimpleTestCase):
+    def deliver(self):
+        return buzz.BuzzBridgeClient.deliver(delivery_id="fixture", created_at=1, operation="reaction_add", channel_id="11111111-1111-4111-8111-111111111111", text="🧨")
+
+    def response(self, status, body):
+        return Mock(status_code=status, ok=status < 400, json=Mock(return_value=body))
+
+    def test_deliver_preserves_prefix_and_records_permanent_reason(self):
+        detail = "invalid_delivery/reaction_add_is_not_in_the_approved_bridge_set"
+        with patch.object(buzz.requests, "post", return_value=self.response(400, {"error": "invalid_delivery", "reason": "reaction_add_is_not_in_the_approved_bridge_set"})):
+            with self.assertRaises(buzz.BuzzBridgePermanentError) as caught:
+                self.deliver()
+        self.assertEqual(str(caught.exception), f"MLAI Chat adapter rejected delivery with HTTP 400 [{detail}]")
+        self.assertTrue(caught.exception.permanent)
+        self.assertEqual(caught.exception.adapter_error, detail)
+
+    def test_untrusted_or_invalid_body_keeps_exact_legacy_message(self):
+        for body in [{"error": "channel is not mapped"}, {"error": "x <b>"}, [], None, {"error": "a" * 65}]:
+            with self.subTest(body=body), patch.object(buzz.requests, "post", return_value=self.response(400, body)):
+                with self.assertRaises(buzz.BuzzBridgePermanentError) as caught:
+                    self.deliver()
+                self.assertEqual(str(caught.exception), "MLAI Chat adapter rejected delivery with HTTP 400")
+                self.assertEqual(caught.exception.adapter_error, "")
+        response = self.response(400, {})
+        response.json.side_effect = ValueError("invalid JSON")
+        with patch.object(buzz.requests, "post", return_value=response):
+            with self.assertRaises(buzz.BuzzBridgePermanentError) as caught:
+                self.deliver()
+        self.assertEqual(str(caught.exception), "MLAI Chat adapter rejected delivery with HTTP 400")
+        self.assertEqual(caught.exception.adapter_error, "")
+
+    def test_request_errors_keep_status_classification_and_batch_fallback(self):
+        for status, code, error_type, message in [
+            (422, "relay_rejected", buzz.BuzzBridgePermanentError, "MLAI Chat adapter rejected request with HTTP 422 [relay_rejected]"),
+            (502, "upstream_unavailable", buzz.BuzzBridgeError, "MLAI Chat adapter returned HTTP 502 [upstream_unavailable]"),
+            (404, "not_found", buzz.BuzzBridgePermanentError, "MLAI Chat adapter rejected request with HTTP 404 [not_found]"),
+        ]:
+            with self.subTest(status=status), patch.object(buzz.requests, "post", return_value=self.response(status, {"error": code})):
+                with self.assertRaises(error_type) as caught:
+                    buzz.BuzzBridgeClient._post_adapter("v1/fixture", {})
+                self.assertEqual(str(caught.exception), message)
+                self.assertEqual(caught.exception.adapter_error, code)
+                self.assertEqual(caught.exception.permanent, status != 502)
+
+    def test_delete_error_preserves_suffix_and_prefix(self):
+        with patch.object(buzz.requests, "delete", return_value=self.response(409, {"error": "conflict"})):
+            with self.assertRaises(buzz.BuzzBridgePermanentError) as caught:
+                buzz.BuzzBridgeClient._delete_adapter("v1/fixture")
+        self.assertEqual(str(caught.exception), "MLAI Chat adapter rejected unregister request with HTTP 409 [conflict]")
+        self.assertEqual(caught.exception.adapter_error, "conflict")
+
+    def test_lookup_error_preserves_suffix_and_prefix(self):
+        with patch.object(buzz.requests, "post", return_value=self.response(400, {"error": "invalid_delivery"})):
+            with self.assertRaises(buzz.BuzzBridgePermanentError) as caught:
+                buzz.BuzzBridgeClient.lookup_messages(channel_id="11111111-1111-4111-8111-111111111111", source_workspace_id="T1", source_channel_id="C1", source_message_ids=["1.000001"])
+        self.assertEqual(str(caught.exception), "MLAI Chat adapter rejected lookup with HTTP 400 [invalid_delivery]")
+        self.assertEqual(caught.exception.adapter_error, "invalid_delivery")
+
+    def test_retryable_delivery_delete_and_lookup_errors_retain_codes(self):
+        cases = [("post", self.deliver, "MLAI Chat adapter returned HTTP 503"),
+                 ("delete", lambda: buzz.BuzzBridgeClient._delete_adapter("v1/fixture"), "MLAI Chat adapter unregister returned HTTP 503"),
+                 ("post", lambda: buzz.BuzzBridgeClient.lookup_messages(channel_id="11111111-1111-4111-8111-111111111111", source_workspace_id="T1", source_channel_id="C1", source_message_ids=["1.000001"]), "MLAI Chat adapter lookup returned HTTP 503")]
+        for method, call, prefix in cases:
+            with self.subTest(prefix=prefix), patch.object(buzz.requests, method, return_value=self.response(503, {"error": "inbox_disabled"})):
+                with self.assertRaises(buzz.BuzzBridgeError) as caught:
+                    call()
+                self.assertFalse(caught.exception.permanent)
+                self.assertEqual(caught.exception.adapter_error, "inbox_disabled")
+                self.assertEqual(str(caught.exception), prefix + " [inbox_disabled]")
+
+
+class AdapterErrorWorkerTests(IsolatedAsyncioTestCase):
+    async def test_worker_logs_content_free_error_and_keeps_permanent_policy(self):
+        instance = SimpleNamespace(_process_delivery=AsyncMock(side_effect=buzz.BuzzBridgePermanentError("x", adapter_error="invalid_delivery")))
+        with patch.object(worker, "message_sync_enabled", return_value=False), patch.object(worker, "mark_delivery_retry") as retry, patch.object(worker.logger, "exception") as log:
+            await worker.CommunityBridgeDiscordClient._process_claimed_public_delivery(instance, {"id": 1, "target_platform": "buzz"})
+        self.assertIn("invalid_delivery", log.call_args.args)
+        self.assertTrue(retry.call_args.kwargs["permanent"])
+
+
+class DependencyEvidenceTests(SimpleTestCase):
+    def test_ignored_evidence_uses_subtype_timestamp_without_echoing_content(self):
+        for subtype, fields, expected in (
+            ('channel_join', {'ts': '123.4', 'user': 'U1'}, ('123.4', 'subtype:channel_join')),
+            ('bot_message', {'ts': '123.5'}, ('123.5', 'userless_bot')),
+            ('message_changed', {'ts': 'event-ts', 'message': {'ts': '123.6', 'user': 'UBRIDGE'}}, ('123.6', 'bridge_echo')),
+            ('message_deleted', {'ts': 'event-ts', 'deleted_ts': '123.7', 'previous_message': {'user': 'UBRIDGE'}}, ('123.7', 'bridge_echo')),
+        ):
+            with self.subTest(subtype=subtype), override_settings(SLACK_BRIDGE_BOT_USER_ID='UBRIDGE'):
+                self.assertEqual(store._slack_ignored_message_evidence({'event': {'type': 'message', 'channel_type': 'channel', 'subtype': subtype, **fields}}), expected)
+
+    def test_noncovered_platform_always_waits_without_queries(self):
+        from integrations.services.community_bridge.dependencies import classify_missing_dependency
+        row = SimpleNamespace(source_platform='slack', target_platform='discord')
+        now = timezone.now()
+        verdict = classify_missing_dependency(row, '123.4', first_seen=now - timedelta(days=60), now=now)
+        self.assertEqual((verdict.action, verdict.code), ('wait', 'platform_not_covered'))
+
+    def test_command_verdict_does_not_spend_worker_attempts(self):
+        from integrations.services.community_bridge.dependencies import DependencyVerdict, apply_dependency_verdict
+        row = SimpleNamespace(pk=1, attempts=7, dependency_attempts=8, delivery_type='reaction_remove',
+                              source_platform='slack', target_platform='buzz', save=Mock())
+        now = timezone.now()
+        with patch.object(store, '_wake_waiting_child_deliveries') as wake:
+            apply_dependency_verdict(row, DependencyVerdict('noop', 'dependency_dead', 'reaction_object'),
+                dependency_id='reaction:abc', first_seen=now, now=now, claimed=False)
+        self.assertEqual((row.attempts, row.dependency_attempts), (7, 8))
+        self.assertEqual(row.dependency_first_seen_at, now)
+        self.assertIn('dependency_first_seen_at', row.save.call_args.kwargs['update_fields'])
+        self.assertEqual(row.status, 'completed')
+        self.assertEqual(row.last_error, 'dependency_noop:dependency_dead:reaction:abc')
+        wake.assert_called_once_with(row)

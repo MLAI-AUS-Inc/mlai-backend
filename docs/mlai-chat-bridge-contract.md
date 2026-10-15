@@ -22,6 +22,7 @@ MLAI Chat is another client surface, not a one-time data migration.
 - Operators explicitly map a public Slack channel to one MLAI Chat channel.
 - New messages, replies, edits, deletes, the full emoji-mart Unicode 15 reaction catalog
   (including Slack aliases, flags, ZWJ sequences and skin tones), and safe Slack shortcode reactions are mirrored after
+  the matching adapter parity release and after
   the mapping is enabled. Shortcodes use canonical `:name:` content with an
   inner `[a-z0-9][a-z0-9_+-]{0,61}` name so the full value stays within MLAI
   Chat's 64-scalar reaction limit; longer Slack custom-emoji names fail closed.
@@ -166,12 +167,16 @@ this status check neither replays cancelled deliveries nor changes source reads.
   survive worker restarts in the existing outbox. With durable message sync
   enabled, long-running archive imports retain unresolved children. The legacy
   worker still applies its bounded age and dependency-attempt limit. Neither
-  mode flattens an unresolved child into a top-level message.
+  mode automatically flattens an unresolved child. The default-off dependency
+  verdict policy below can resolve terminal waits; separately approved operator
+  cleanup may flatten eligible unfrozen Slack-to-Buzz replies.
 - Exhausted deliveries enter a dead state for operator inspection and replay.
 - Immutable unsupported operations, such as a reaction outside the supported
-  Slack bridge set, enter the dead state immediately instead of retrying
+  Slack bridge set of the deployed adapter version, enter the dead state immediately instead of retrying
   forever under durable sync. Transient provider failures retain their existing
-  retry policy.
+  retry policy. Both public and private adapters validate the exact signed
+  reaction string against the bundled emoji-mart Unicode set, the legacy seven,
+  and canonical Slack shortcodes; padded content fails closed.
 - Public Buzz edits/deletes whose create has not yet been mapped use the
   dependency queue. Completing the create wakes both replies and mutations.
 
@@ -1676,3 +1681,73 @@ It follows explicit opens and device recovery, validates eligible cached unread
 sources against Slack, and uses all verified owner devices at normal import
 priority. Its flags/cursor contain no message bodies; privacy and metadata
 consent fences remain unchanged. Enable it only after open-priority measurements.
+
+### Private refresh completion and skipped work
+
+Private refresh responses retain `status` in `syncing`, `complete`, or `error`.
+`failed_messages` counts retryable failed rows only; `queued_messages` excludes
+queued rows with three or more attempts. Those keep retrying in the background
+and appear in `stalled_messages`. Additive fields `skipped_messages`,
+`undeliverable_messages`, `stalled`, `partial`, and `retryable` distinguish
+terminal skips and stalled work from errors that Retry can repair.
+
+Unrepresented authors get one membership refresh, proven by a per-conversation
+confirmation newer than the request, before a content-free tombstone is written.
+Missing participant identities (`identity_stale`) never become tombstones.
+Narrowing group-history consent sweeps excluded queued authors. A fresh source
+observation that resolves under the current participant hash re-admits the row.
+
+### Slack open progress and directory budgets
+
+GET `/slack/users/` has its own per-account `community_chat_slack_directory`
+bucket (default 120/minute). A 429 returns
+`{"error":"slack_directory_rate_limited","retry_after_seconds":N}` with
+`Retry-After: N`. POST invitations retain the home bucket.
+
+Open 202 responses add `stage`, `attempts`, `request_id`, `requested_at`,
+`deadline_at`, approximate `queue_position`, and `device_access`. Stages are
+queued, adding_device, validating, provisioning, and importing_history. A
+never-started pending intent can report `409 {"error":"open_timed_out"}` once
+in the 120 seconds following its deadline; Retry creates a new request.
+Foreground polling prioritizes due queued sources without interrupting a source
+whose validation or provisioning checkpoint is already in progress.
+
+Content-free inventory rows add `device_access` (none/member/pending),
+`avatar_url`, MPIM `participants` (at most eight, excluding the owner), and IM
+`counterpart_has_mlai_account`. Avatars accept HTTPS only from
+`avatars.slack-edge.com` or `secure.gravatar.com`. These fields use cached
+metadata and verified identity links; listing them makes no provider request.
+
+### Missing public dependency verdicts
+
+`COMMUNITY_BRIDGE_DEPENDENCY_VERDICTS_ENABLED` defaults false. When enabled,
+missing dependencies wait while work is in flight or evidence is too recent.
+Positive scoped evidence can complete mutations as no-ops, dead-letter replies,
+or park replies outside the import window before later dead-lettering. Ignored
+bridge echoes never prove a parent absent. Discord remains on the wait policy.
+Reply flattening is available only through the explicitly confirmed operator
+command, limited to unfrozen Slack-to-Buzz replies. Public reaction parity
+requires the adapter's reaction-catalog release. Adapter failures preserve the
+legacy error prefix and may append a content-free ` [code]` reason suffix.
+
+### Device audience fan-out
+
+`MESSAGE_SYNC_DEVICE_FANOUT_BATCH=0` preserves existing recovery. After relay
+permission scoping, stable rooms, security sign-off, and bridge-room adoption
+are verified, an operator may enable a batch up to 50 (recommended 10), capped
+at 20 repaired rooms per minute per owner. IM membership is immutable, so these
+device-only repairs preserve the room and history without Slack I/O. MPIMs and
+private channels continue through source validation.
+
+Status adds `device_audience: {pending, total}` when stable rooms and an active
+verified key are available. Pending is non-zero only for the current enrollment
+target and excludes cooling or unconsented sources. Other devices see zero
+pending. Only currently verified, non-revoked owner devices enter audiences;
+registration cleanup and consent checks remain mandatory under lock.
+
+Device retirement also sends preserved IM rooms through device-only fan-out.
+A provisioning room must retain its room id and completed history marker to
+qualify. It is repaired even when the surviving target key was already listed,
+and can recover without an enrollment hint. Both modes share the configured
+batch and per-minute cap. First-time provisioning and source-mutable private
+channels continue through normal discovery and source validation.

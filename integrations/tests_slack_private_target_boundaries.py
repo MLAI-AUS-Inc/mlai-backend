@@ -3,7 +3,7 @@ from datetime import timedelta
 from unittest.mock import patch
 
 from django.db import transaction
-from django.test import TransactionTestCase
+from django.test import TransactionTestCase, override_settings
 from django.utils import timezone
 
 from community_chat.tests.test_slack_dm_io_authority import SlackDmIoAuthorityFixture
@@ -355,3 +355,128 @@ class PrivateReplyRecoveryTests(SlackDmIoAuthorityFixture, TransactionTestCase):
         self.assertEqual(self.child.status, 'dead')
         self.assertEqual(self.child.encrypted_text, '')
         self.assertTrue(self.child.metadata['permanent_failure'])
+
+
+@override_settings(SLACK_DM_MIRROR_SHADOW_SECRET="synthetic-author-resolution")
+class UnrepresentableAuthorResolutionTests(SlackDmIoAuthorityFixture, TransactionTestCase):
+    def row(self, author='UOTHER', **metadata):
+        return SlackDmMirrorDelivery.objects.create(
+            conversation=self.conversation, source_platform='slack', source_message_id=f'{timezone.now().timestamp()}',
+            source_author_id=author, operation='create', status='pending', available_at=timezone.now(), encrypted_text='private body',
+            metadata={'participant_hash': self.conversation.participant_hash, 'backfill': True, **metadata})
+
+    def test_resolution_respects_consent_before_system_author(self):
+        from integrations.services.slack_dm_author_resolution import resolve_author
+        from integrations.services.slack_chat_catalog import PRIVATE_CHANNEL_CONSENT, ALL_HISTORY_CONSENT
+        for author, reason in [('UOTHER', 'identity_stale'), ('USLACKBOT', 'system_author'),
+                               ('B123', 'system_author'), ('UNOTREGISTERED', 'non_participant_author')]:
+            self.assertEqual(resolve_author(self.row(author)).reason, reason)
+        self.conversation.slack_conversation_id = 'GIOAUTH'
+        self.grant.consent_version = PRIVATE_CHANNEL_CONSENT
+        for author in ('UFORMER', 'B123'):
+            self.assertEqual(resolve_author(self.row(author)).reason, 'consent_excludes_author')
+        self.grant.consent_version = ALL_HISTORY_CONSENT
+        self.assertEqual(resolve_author(self.row('UFORMER')).reason, 'identity_stale')
+
+    def test_tombstone_erases_body_but_rejects_changed_participants(self):
+        from integrations.services.slack_dm_author_resolution import mark_undeliverable_locked
+        row = self.row('USLACKBOT')
+        mark_undeliverable_locked(row, reason='system_author', source='test')
+        row.refresh_from_db()
+        self.assertEqual((row.status, row.encrypted_text), ('completed', ''))
+        self.assertTrue(row.metadata['undeliverable'])
+        row = self.row('USLACKBOT', participant_hash='stale')
+        with self.assertRaises(dm.SlackDmMirrorAuthorizationError):
+            mark_undeliverable_locked(row, reason='system_author', source='test')
+
+    def test_command_requires_exact_plan_and_default_is_read_only(self):
+        import json
+        from io import StringIO
+        from django.core.management import call_command, CommandError
+        row = self.row('USLACKBOT')
+        original = row.updated_at
+        output = StringIO()
+        call_command('resolve_unrepresentable_slack_dm_deliveries', delivery_id=[row.pk], stdout=output)
+        row.refresh_from_db()
+        self.assertEqual(row.updated_at, original)
+        self.assertNotIn('USLACKBOT', output.getvalue())
+        self.assertNotIn('private body', output.getvalue())
+        plan = json.loads(output.getvalue().splitlines()[-1])['plan']
+        for expected in (None, '0'*64):
+            with self.assertRaises(CommandError):
+                call_command('resolve_unrepresentable_slack_dm_deliveries', delivery_id=[row.pk], apply=True, expected_plan=expected, stdout=StringIO())
+        call_command('resolve_unrepresentable_slack_dm_deliveries', delivery_id=[row.pk], apply=True, expected_plan=plan, stdout=StringIO())
+        row.refresh_from_db()
+        self.assertEqual(row.status, 'completed')
+
+    def test_refresh_requires_conversation_evidence_and_never_retires_participants(self):
+        from integrations.services.slack_dm_author_resolution import author_refresh_observed
+        from integrations.services.slack_chat_catalog import CATALOG_KEY
+        requested = timezone.now() - timedelta(hours=1)
+        row = self.row('UNOTREGISTERED', author_refresh_requested_at=requested.isoformat())
+        self.assertFalse(author_refresh_observed(row))
+        self.connection.provider_metadata = {**self.connection.provider_metadata, CATALOG_KEY: {self.conversation.slack_conversation_id: {'membership_confirmed_at': timezone.now().isoformat()}}}
+        self.assertTrue(author_refresh_observed(row))
+        row.status = 'processing'
+        with patch.object(dm.BuzzBridgeClient, 'deliver_private') as deliver:
+            dm._deliver_to_mlai(row)
+        deliver.assert_not_called()
+        participant = self.row(author_refresh_requested_at=requested.isoformat())
+        participant.status = 'processing'
+        with self.assertRaises(dm.SlackDmMirrorAuthorRefreshRequired) as raised:
+            dm._deliver_to_mlai(participant)
+        self.assertEqual(raised.exception.reason, 'identity_stale')
+
+    def test_refresh_backoff_keeps_first_request_and_rejects_changed_authority(self):
+        row = self.row('UNOTREGISTERED')
+        row.status = 'processing'
+        row.save()
+        before = self.grant.last_discovery_at
+        now = timezone.now()
+        dm._record_private_delivery_failure(row, dm.SlackDmMirrorAuthorRefreshRequired('non_participant_author'))
+        row.refresh_from_db()
+        self.assertEqual((row.status, row.attempts), ('pending', 1))
+        self.assertAlmostEqual((row.available_at - now).total_seconds(), 600, delta=5)
+        requested = row.metadata['author_refresh_requested_at']
+        row.status = 'processing'
+        row.save()
+        dm._record_private_delivery_failure(row, dm.SlackDmMirrorAuthorRefreshRequired('non_participant_author'))
+        row.refresh_from_db()
+        self.assertEqual(row.metadata['author_refresh_requested_at'], requested)
+        self.grant.refresh_from_db()
+        self.assertEqual(self.grant.last_discovery_at, before)
+        row.status = 'processing'
+        row.save()
+        self.conversation.participant_hash = 'changed'
+        self.conversation.save()
+        dm._record_private_delivery_failure(row, dm.SlackDmMirrorAuthorRefreshRequired('non_participant_author'))
+        row.refresh_from_db()
+        self.assertEqual((row.status, row.encrypted_text), ('dead', ''))
+
+    def test_consent_sweep_and_fresh_observation_readmission(self):
+        from integrations.services.slack_chat_catalog import ALL_HISTORY_CONSENT
+        self.grant.consent_version = ALL_HISTORY_CONSENT
+        self.grant.history_days = 0
+        self.grant.save()
+        self.conversation.slack_conversation_id = 'GIOAUTH'
+        self.conversation.participant_identity_map = {'UOTHER': 'b'*64}
+        self.conversation.save()
+        former, bot, participant = self.row('UFORMER'), self.row('B123'), self.row('UOTHER')
+        dm.backfill_grant(self.grant, history_days=30)
+        for row in (former, bot):
+            row.refresh_from_db()
+            self.assertEqual((row.status, row.encrypted_text), ('completed', ''))
+            self.assertEqual(row.metadata['undeliverable_reason'], 'consent_excludes_author')
+        participant.refresh_from_db()
+        self.assertEqual(participant.status, 'pending')
+        self.grant.refresh_from_db()
+        self.grant.consent_version = ALL_HISTORY_CONSENT
+        self.grant.save()
+        self.conversation.grant = self.grant
+        self.conversation.participant_buzz_pubkeys.append(dm._shadow_pubkey(self.conversation, 'private-channel-import'))
+        self.conversation.save()
+        dm._upsert_history_delivery(self.conversation, source_message_id=former.source_message_id, author_id='UFORMER', text='fresh',
+            metadata={'participant_hash': self.conversation.participant_hash, 'backfill': True}, operation='create', held_until=timezone.now())
+        former.refresh_from_db()
+        self.assertEqual((former.status, former.attempts, former.encrypted_text), ('pending', 0, 'fresh'))
+        self.assertNotIn('undeliverable', former.metadata)

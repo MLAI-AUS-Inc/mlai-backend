@@ -103,9 +103,22 @@ class Command(BaseCommand):
             latency['available'] = True
         except Exception:
             latency = {'available': False}
+        public_dependency = {}
+        for platform in ('buzz', 'slack', 'discord'):
+            deliveries = CommunityBridgeDelivery.objects.filter(target_platform=platform)
+            waiting = deliveries.filter(status='waiting_parent')
+            public_dependency[platform] = {
+                'waiting_count': waiting.count(),
+                'parked_count': waiting.filter(last_error__startswith='parent_mapping_parked:').count(),
+                'dead_unresolvable_by_code': dict(Counter(err.split(':', 2)[1] if ':' in err else 'unknown' for err in
+                    deliveries.filter(status='dead', last_error__startswith='parent_unresolvable:').values_list('last_error', flat=True)[:1000])),
+                'noop_completed_7d': deliveries.filter(status='completed', completed_at__gte=now - timedelta(days=7), last_error__startswith='dependency_noop:').count(),
+                'oldest_waiting_age_seconds': age(waiting.aggregate(value=Min('dependency_first_seen_at'))['value']),
+            }
         result = {
             'enabled': enabled, 'checked_at': now.isoformat(), 'stale_lanes': stale,
             'provider_throughput': throughput,
+            'public_dependency': public_dependency,
             'discovery': discovery, 'open_requests': opens, 'open_latency': latency,
             'inbox_pending': inbox.count(),
             'oldest_inbox_age_seconds': age(inbox.aggregate(value=Min('received_at'))['value']),
@@ -116,6 +129,9 @@ class Command(BaseCommand):
             'provider_cooldowns': list(BridgeApiBudget.objects.filter(cooldown_until__gt=now).exclude(method__startswith='priority:').values('method').annotate(count=Count('id'), until=Max('cooldown_until')).order_by('method')),
             'public_delivery': delivery(CommunityBridgeDelivery.objects.filter(target_platform='buzz')),
             'private_delivery': delivery(SlackDmMirrorDelivery.objects.all()),
+            'private_undeliverable_by_reason': dict(Counter(str(r or 'unknown') for r in
+                SlackDmMirrorDelivery.objects.filter(metadata__undeliverable=True, updated_at__gte=now - timedelta(days=7))
+                .values_list('metadata__undeliverable_reason', flat=True)[:5000])),
             'workers': list(BridgeWorkerHeartbeat.objects.values(
                 'worker_id', 'lane', 'heartbeat_at', 'progressed_at', 'completed_count', 'failed_count', 'last_error_code',
             )),

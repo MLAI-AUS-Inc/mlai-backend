@@ -157,7 +157,7 @@ if __name__ == "__main__":
 
 
 class ResponsivenessConfigTests(unittest.TestCase):
-    flags = {"MESSAGE_SYNC_OPEN_PRIORITY_ENABLED": "true", "MESSAGE_SYNC_UNREAD_PREFETCH_ENABLED": "false", "MESSAGE_SYNC_UNREAD_PREFETCH_PER_HOUR": "6"}
+    flags = {"MESSAGE_SYNC_OPEN_PRIORITY_ENABLED": "true", "MESSAGE_SYNC_UNREAD_PREFETCH_ENABLED": "false", "MESSAGE_SYNC_UNREAD_PREFETCH_PER_HOUR": "6", "MESSAGE_SYNC_DEVICE_FANOUT_BATCH": "0"}
 
     def test_flags_are_wired_through_every_configuration_surface(self):
         root = Path(__file__).resolve().parents[1]
@@ -190,11 +190,35 @@ class ResponsivenessConfigTests(unittest.TestCase):
             for key in self.flags:
                 env_file.write_text("KEEP_ME=yes\n")
                 numeric = key.endswith("PER_HOUR")
-                values = ("6", "256", "0", "257", "6\nINJECT=true") if numeric else ("true", "false", "yes", "TRUE", "true\nINJECT=true")
+                fanout = key.endswith("FANOUT_BATCH")
+                values = ("0", "10", "50", "51", "-1", "1.5", "10\nINJECT=true") if fanout else ("6", "256", "0", "257", "6\nINJECT=true") if numeric else ("true", "false", "yes", "TRUE", "true\nINJECT=true")
                 for value in values:
                     before = env_file.read_text()
                     result = subprocess.run(["bash", "scripts/upsert_env_value_from_stdin.sh", key], cwd=sandbox, input=value, text=True, capture_output=True, timeout=5)
-                    accepted = value in ({"6", "256"} if numeric else {"true", "false"})
+                    accepted = value in ({"0", "10", "50"} if fanout else {"6", "256"} if numeric else {"true", "false"})
                     self.assertEqual(result.returncode == 0, accepted, result.stderr)
                     if not accepted:
                         self.assertEqual(env_file.read_text(), before)
+
+
+class DependencyVerdictFlagConfigTests(ResponsivenessConfigTests):
+    flags = {'COMMUNITY_BRIDGE_DEPENDENCY_VERDICTS_ENABLED': 'false'}
+
+    def test_invalid_flags_and_unread_prefetch_without_sync_and_inventory_rejected(self):
+        # This independent flag deliberately does not require MESSAGE_SYNC_ENABLED.
+        self.assertEqual(self.flags['COMMUNITY_BRIDGE_DEPENDENCY_VERDICTS_ENABLED'], 'false')
+
+
+class DeviceFanoutConfigTests(unittest.TestCase):
+    def test_batch_bounds_and_durable_sync_requirement(self):
+        for value in ('-1', '51', '1.5', '10\nX=1'):
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                validate({'MESSAGE_SYNC_DEVICE_FANOUT_BATCH': value})
+        validate({'MESSAGE_SYNC_DEVICE_FANOUT_BATCH': '0'})
+        valid = {'MESSAGE_SYNC_ENABLED': 'true', 'COMMUNITY_BRIDGE_PRODUCTION_ENABLED': 'true',
+                 'MESSAGE_SYNC_SLACK_APP_ID': 'ATEST', 'MESSAGE_SYNC_SLACK_BOT_WORKSPACE_ID': 'TTEST',
+                 'SLACK_BRIDGE_WORKSPACE_ID': 'TTEST', 'MESSAGE_SYNC_SLACK_APP_TOKEN': 'xapp-synthetic'}
+        for value in ('0', '10', '50'):
+            validate({**valid, 'MESSAGE_SYNC_DEVICE_FANOUT_BATCH': value})
+        with self.assertRaisesRegex(ValueError, 'requires MESSAGE_SYNC_ENABLED=true'):
+            validate({'MESSAGE_SYNC_DEVICE_FANOUT_BATCH': '10'})

@@ -157,6 +157,25 @@ class SlackChannelRefreshTests(SimpleTestCase):
                     refresh._refresh_status(conversation)["status"], expected
                 )
 
+    @patch.object(BridgeSyncState, "objects")
+    def test_additive_defaults_and_coverage_error_contract(self, states):
+        conv = self.conversation()
+        rows = MagicMock()
+        rows.filter.return_value = rows
+        rows.exclude.return_value = rows
+        rows.aggregate.return_value = {"imported_messages": 2, "queued_messages": 0, "failed_messages": 0}
+        conv.deliveries = rows
+        states.filter.return_value.first.return_value = None
+        result = refresh._refresh_status(conv)
+        for key in ("skipped_messages", "stalled_messages", "undeliverable_messages"):
+            self.assertEqual(result[key], 0)
+        for key in ("stalled", "partial", "retryable"):
+            self.assertFalse(result[key])
+        states.filter.return_value.first.return_value = SimpleNamespace(last_error_code="slack_error", verified_ranges={})
+        self.assertTrue(refresh._refresh_status(conv)["retryable"])
+        states.filter.return_value.first.return_value = SimpleNamespace(last_error_code="", verified_ranges={"head": {"classification": "incomplete"}})
+        self.assertEqual(refresh._refresh_status(conv)["status"], "syncing")
+
 
 class SlackCurrentRoomRefreshTests(SlackDmIoAuthorityFixture, TestCase):
     def setUp(self):
@@ -180,14 +199,59 @@ class SlackCurrentRoomRefreshTests(SlackDmIoAuthorityFixture, TestCase):
         self.assertEqual(result["failed_messages"], 0)
         self.assertEqual(SlackDmMirrorDelivery.objects.filter(pk__in=[old.pk, retired.pk], status="dead").count(), 2)
 
-    def test_current_room_failure_is_not_hidden(self):
+    def test_current_room_dead_row_is_skipped_not_error(self):
         self.row("current-failure")
         result = refresh._refresh_status(self.conversation)
-        self.assertEqual(result["status"], "error")
-        self.assertEqual(result["failed_messages"], 1)
+        self.assertEqual(result["status"], "complete")
+        self.assertEqual(result["skipped_messages"], 1)
+        self.assertEqual(result["failed_messages"], 0)
+        self.assertTrue(result["partial"])
+        self.assertFalse(result["retryable"])
 
     def test_current_room_pending_work_keeps_syncing(self):
         self.row("pending-reaction", status="pending", error="Waiting for parent")
         result = refresh._refresh_status(self.conversation)
         self.assertEqual(result["status"], "syncing")
         self.assertEqual(result["queued_messages"], 1)
+
+    def test_failed_work_is_retryable_and_stalled_work_is_partial(self):
+        row = self.row("work", status="failed")
+        result = refresh._refresh_status(self.conversation)
+        self.assertEqual(result["status"], "error")
+        self.assertTrue(result["retryable"])
+        row.status = "pending"
+        row.attempts = 3
+        row.save()
+        result = refresh._refresh_status(self.conversation)
+        self.assertEqual(result["status"], "complete")
+        self.assertEqual(result["queued_messages"], 0)
+        self.assertEqual(result["stalled_messages"], 1)
+        self.assertTrue(result["stalled"])
+        self.assertTrue(result["partial"])
+        self.row("fresh", status="pending")
+        self.assertEqual(refresh._refresh_status(self.conversation)["status"], "syncing")
+
+    def test_tombstones_are_skipped_and_catalog_stalled_rows_stop_holding_import(self):
+        from integrations.services.slack_chat_catalog import catalog_conversations
+        from integrations.models import SlackDmMirrorConversation
+        row = self.row("backfill", status="pending")
+        row.metadata.update(backfill=True)
+        row.attempts = 2
+        row.save()
+        def pending():
+            return catalog_conversations(SlackDmMirrorConversation.objects.filter(pk=self.conversation.pk)).get()._import_pending
+        self.assertTrue(pending())
+        row.attempts = 3
+        row.save()
+        self.assertFalse(pending())
+        row.status = "dead"
+        row.save()
+        self.assertTrue(pending())
+        row.status = "completed"
+        row.metadata.update(dependency_superseded=True, undeliverable=True, undeliverable_reason="system_author")
+        row.save()
+        self.assertFalse(pending())
+        result = refresh._refresh_status(self.conversation)
+        self.assertEqual(result["skipped_messages"], 1)
+        self.assertEqual(result["undeliverable_messages"], 1)
+        self.assertEqual(result["imported_messages"], 0)

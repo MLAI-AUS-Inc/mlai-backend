@@ -81,7 +81,15 @@ class NativeInstallationStateView(NativeOwnerView):
 
 
 class NativeRegistryView(APIView):
-    """Keeps bot tombstones available even when the operator stops native work."""
+    """Keeps bot tombstones available even when the operator stops native work.
+
+    Relay cache contract: registered=true is permanent for a key. Installations
+    are never deleted or re-keyed; revocation retains their tombstones. Keys are
+    generated server-side in native_installations.enroll, never from client input.
+    MLAI Chat's crates/buzz-relay/src/native_agent.rs caches agent verdicts for
+    24 hours and ordinary verdicts for up to ten minutes. Change that cache
+    policy before changing either invariant.
+    """
     authentication_classes = ()
     permission_classes = ()
     # Internal service classification is on ordinary relay admission/fanout.

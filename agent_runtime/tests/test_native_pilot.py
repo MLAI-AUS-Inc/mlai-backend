@@ -415,3 +415,69 @@ class NativeCatalogSafetyTests(SimpleTestCase):
                 "consent_version": native_installations.CONSENT_VERSION}
         with self.assertRaises(ValidationError):
             serializers.validated(serializers.EnrollmentSerializer, data)
+
+
+class NativeRegistryContractTests(SimpleTestCase):
+    def test_enrollment_input_cannot_supply_a_bot_key(self):
+        fields = set(serializers.EnrollmentSerializer().fields)
+        self.assertIn('owner_public_key', fields)
+        self.assertFalse({'public_key', 'bot_public_key', 'bot_pubkey', 'bot_key'} & fields)
+
+    def test_installation_keys_are_generated_server_side(self):
+        import ast
+        from pathlib import Path
+        from agent_runtime import oauth
+        tree = ast.parse(Path(native_installations.__file__).read_text())
+        enroll = next(node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == 'enroll')
+        keys = {target.id for node in ast.walk(enroll) if isinstance(node, ast.Assign)
+                and isinstance(node.value, ast.Call) and isinstance(node.value.func, ast.Name)
+                and node.value.func.id == 'PrivateKey' for target in node.targets if isinstance(target, ast.Name)}
+        creates = [node for node in ast.walk(enroll) if isinstance(node, ast.Call)
+                   and ast.unparse(node.func) == 'AgentInstallation.objects.create']
+        self.assertEqual(len(creates), 1)
+        public_key = next(keyword.value for keyword in creates[0].keywords if keyword.arg == 'public_key')
+        self.assertIn(ast.unparse(public_key), {f'native_crypto.public_key({key})' for key in keys})
+        for node in ast.walk(ast.parse(Path(oauth.__file__).read_text())):
+            if isinstance(node, ast.Call) and ast.unparse(node.func) == 'AgentInstallation.objects.create':
+                self.assertNotIn('public_key', {keyword.arg for keyword in node.keywords})
+
+    def test_only_known_modules_create_installations(self):
+        import os
+        from pathlib import Path
+        import re
+        root = Path(__file__).resolve().parents[2]
+        skip = {'.git', 'node_modules', 'venv', '.venv', 'env', '__pycache__', 'site-packages', 'migrations', 'tests'}
+        pattern = re.compile(r'AgentInstallation\.objects\.(create|get_or_create|update_or_create|bulk_create)\b|(?<!class )\bAgentInstallation\(')
+        matches = set()
+        for directory, folders, files in os.walk(root):
+            folders[:] = [folder for folder in folders if folder not in skip]
+            for filename in files:
+                if filename.endswith('.py') and not filename.startswith('test'):
+                    path = Path(directory) / filename
+                    if pattern.search(path.read_text()):
+                        matches.add(str(path.relative_to(root)))
+        self.assertEqual(matches, {'agent_runtime/native_installations.py', 'agent_runtime/oauth.py'})
+
+    def test_registry_rows_are_never_deleted_or_rekeyed(self):
+        import ast
+        from pathlib import Path
+        from django.db import models
+        from agent_runtime.models import AgentInstallation
+        self.assertTrue(AgentInstallation._meta.get_field('public_key').unique)
+        self.assertIs(AgentInstallation._meta.get_field('owner').remote_field.on_delete, models.PROTECT)
+        root = Path(__file__).resolve().parents[2]
+        paths = list((root / 'agent_runtime').glob('*.py')) + [root / 'startup_updates/mcp/native_agents.py', root / 'community_chat/device_management.py']
+        for path in paths:
+            if path.name.startswith('test'):
+                continue
+            for node in ast.walk(ast.parse(path.read_text())):
+                with self.subTest(path=str(path.relative_to(root)), line=getattr(node, 'lineno', 0)):
+                    if isinstance(node, (ast.Assign, ast.AnnAssign, ast.AugAssign)):
+                        targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+                        for target in targets:
+                            self.assertFalse(isinstance(target, ast.Attribute) and target.attr in {'public_key', 'community_id'})
+                    if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute):
+                        if node.func.attr == 'update':
+                            self.assertFalse({'public_key', 'community_id'} & {keyword.arg for keyword in node.keywords})
+                        if node.func.attr == 'delete':
+                            self.assertNotIn('installation', ast.unparse(node.func.value).lower())

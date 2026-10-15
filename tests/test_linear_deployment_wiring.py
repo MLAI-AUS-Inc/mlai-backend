@@ -257,6 +257,8 @@ class LinearDeploymentWiringTests(unittest.TestCase):
             "MESSAGE_SYNC_OPEN_PRIORITY_ENABLED": "true",
             "MESSAGE_SYNC_UNREAD_PREFETCH_ENABLED": "false",
             "MESSAGE_SYNC_UNREAD_PREFETCH_PER_HOUR": "6",
+            "MESSAGE_SYNC_DEVICE_FANOUT_BATCH": "0",
+            "COMMUNITY_BRIDGE_DEPENDENCY_VERDICTS_ENABLED": "false",
             "SLACK_OWNER_INVENTORY_ENABLED": "false",
             "MESSAGE_SYNC_SLACK_APP_ID": "ATEST",
             "MESSAGE_SYNC_SLACK_USER_APP_ID": "APRIVATE",

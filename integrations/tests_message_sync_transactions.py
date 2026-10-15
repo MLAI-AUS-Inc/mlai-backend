@@ -160,3 +160,41 @@ class MessageSyncHealthTests(TestCase):
                 call_command('message_sync_status', check=True, stdout=StringIO())
         with override_settings(MESSAGE_SYNC_ENABLED=False):
             call_command('message_sync_status', check=True, stdout=StringIO())
+
+
+class UndeliverableAndDependencyReportTests(TestCase):
+    def test_full_report_is_content_free_and_counts_all_target_platforms(self):
+        from datetime import timedelta
+        from io import StringIO
+        import json
+        from django.core.management import call_command
+        from django.utils import timezone
+        from integrations.models import SlackDmMirrorDelivery
+        from django.contrib.auth import get_user_model
+        from integrations.models import ExternalServiceConnection, SlackDmMirrorGrant, SlackDmMirrorConversation
+        user = get_user_model().objects.create_user(email='report@example.com')
+        connection = ExternalServiceConnection.objects.create(user=user, provider='slack', access_token='synthetic', external_account_id='TREPORT')
+        grant = SlackDmMirrorGrant.objects.create(user=user, connection=connection, slack_workspace_id='TREPORT', slack_user_id='UOWNER', consented_at=timezone.now())
+        conv = SlackDmMirrorConversation.objects.create(grant=grant, slack_workspace_id='TREPORT', slack_conversation_id='DREPORT')
+        now = timezone.now()
+        for index, reason in enumerate(('system_author', 'consent_excludes_author', 'expired')):
+            row = SlackDmMirrorDelivery.objects.create(conversation=conv, source_platform='slack', source_message_id=str(index),
+                operation='create', status='completed', available_at=now, metadata={'undeliverable': True, 'undeliverable_reason': reason})
+            if reason == 'expired':
+                SlackDmMirrorDelivery.objects.filter(pk=row.pk).update(updated_at=now - timedelta(days=8))
+        channel = CommunityBridgeChannel.objects.create(slack_workspace_id='TREPORT', slack_channel_id='CREPORT', destination_platform='buzz', destination_channel_id='room')
+        for platform, status, error in [('buzz', 'waiting_parent', 'parent_mapping_parked:dependency_dead:123.4'),
+                ('buzz', 'dead', 'parent_unresolvable:dependency_dead:123.4'), ('buzz', 'completed', 'dependency_noop:dependency_dead:123.4'),
+                ('slack', 'waiting_parent', 'parent_mapping_pending:123.4')]:
+            CommunityBridgeDelivery.objects.create(channel=channel, source_platform='buzz' if platform == 'slack' else 'slack',
+                target_platform=platform, delivery_type='create', status=status, available_at=now,
+                completed_at=now if status == 'completed' else None, dependency_first_seen_at=now - timedelta(hours=1), last_error=error)
+        out = StringIO()
+        call_command('message_sync_status', stdout=out)
+        report = json.loads(out.getvalue())
+        self.assertEqual(report['private_undeliverable_by_reason'], {'system_author': 1, 'consent_excludes_author': 1})
+        self.assertEqual(report['public_dependency']['buzz']['waiting_count'], 1)
+        self.assertEqual(report['public_dependency']['buzz']['parked_count'], 1)
+        self.assertEqual(report['public_dependency']['buzz']['dead_unresolvable_by_code'], {'dependency_dead': 1})
+        self.assertEqual(report['public_dependency']['buzz']['noop_completed_7d'], 1)
+        self.assertEqual(report['public_dependency']['slack']['waiting_count'], 1)

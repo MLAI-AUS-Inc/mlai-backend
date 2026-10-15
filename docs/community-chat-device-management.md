@@ -56,3 +56,11 @@ recent authentication, explicit confirmation, stale targets, current-device
 and agent protection, and credential/relay revocation. Existing account,
 password, device-binding and agent PostgreSQL regressions must remain green.
 Disposable tests require approval of their exact existing migration inventory.
+
+Removing a device fences its Slack registrations and re-provisions affected
+private rooms. With stable rooms and `MESSAGE_SYNC_DEVICE_FANOUT_BATCH` above
+zero, preserved previously working IM rooms recover in bounded batches without
+Slack calls, including when no enrollment hint is present. Revoked keys are
+excluded from the repaired audience. Registration cleanup remains a prerequisite;
+private channels and MPIMs always revalidate source membership. At batch zero,
+the existing one-room discovery recovery remains in effect.

@@ -68,8 +68,12 @@ jobs:
     - name: Verify release freshness and live web route flip
       run: python -m unittest tests.test_deploy_release_freshness tests.test_backend_web_handoff -v
 
+    - name: Install hash-pinned workflow test dependencies
+      run: |
+        python -m pip install --only-binary=:all: --require-hashes -r .github/requirements-ci.lock
+
     - name: Test deployment failure handling and live contract
-      run: python -m unittest tests.test_deploy_runtime_checks tests.test_message_sync_deploy_config tests.test_valley_mcp_deploy_config tests.test_native_agent_deploy_config tests.test_slack_owner_inventory_deploy_config tests.test_tech_volunteers_bridge_workflow -v
+      run: python -m unittest tests.test_deploy_runtime_checks tests.test_message_sync_deploy_config tests.test_community_bridge_dependency_review_workflow tests.test_valley_mcp_deploy_config tests.test_native_agent_deploy_config tests.test_slack_owner_inventory_deploy_config tests.test_tech_volunteers_bridge_workflow -v
 
     - name: Check jobs delivery contracts without database access
       run: python -m unittest tests.test_jobs_delivery_unit -v
@@ -606,6 +610,7 @@ jobs:
           integrations.tests_message_sync_capacity \
           integrations.tests_message_sync_configuration \
           integrations.tests_message_sync_transactions \
+          integrations.tests_community_bridge_dependency_cleanup \
           integrations.tests_message_sync_scheduler \
           integrations.tests_message_sync_discovery \
           integrations.tests_message_sync_discovery_worker \
@@ -781,6 +786,7 @@ jobs:
         VALLEY_MCP_ENABLED: ${{ vars.VALLEY_MCP_ENABLED || 'false' }}
         VALLEY_MCP_PUBLIC_BASE_URL: ${{ vars.VALLEY_MCP_PUBLIC_BASE_URL || 'https://api.mlai.au' }}
         VALLEY_MCP_DOMAIN_VERIFICATION_TOKEN: ${{ vars.VALLEY_MCP_DOMAIN_VERIFICATION_TOKEN || '' }}
+        COMMUNITY_BRIDGE_DEPENDENCY_VERDICTS_ENABLED: ${{ vars.COMMUNITY_BRIDGE_DEPENDENCY_VERDICTS_ENABLED || 'false' }}
         MESSAGE_SYNC_ENABLED: ${{ vars.MESSAGE_SYNC_ENABLED || 'false' }}
         MESSAGE_SYNC_QUIET_HEAD_BACKOFF_ENABLED: ${{ vars.MESSAGE_SYNC_QUIET_HEAD_BACKOFF_ENABLED || 'false' }}
         COMMUNITY_CHAT_MEMBER_ACCOUNTS_ENABLED: ${{ vars.COMMUNITY_CHAT_MEMBER_ACCOUNTS_ENABLED || 'false' }}
@@ -789,6 +795,7 @@ jobs:
         MESSAGE_SYNC_TARGETED_READ_POLLING: ${{ vars.MESSAGE_SYNC_TARGETED_READ_POLLING || 'false' }}
         MESSAGE_SYNC_OPEN_PRIORITY_ENABLED: ${{ vars.MESSAGE_SYNC_OPEN_PRIORITY_ENABLED || 'true' }}
         MESSAGE_SYNC_UNREAD_PREFETCH_ENABLED: ${{ vars.MESSAGE_SYNC_UNREAD_PREFETCH_ENABLED || 'false' }}
+        MESSAGE_SYNC_DEVICE_FANOUT_BATCH: ${{ vars.MESSAGE_SYNC_DEVICE_FANOUT_BATCH || '0' }}
         MESSAGE_SYNC_UNREAD_PREFETCH_PER_HOUR: ${{ vars.MESSAGE_SYNC_UNREAD_PREFETCH_PER_HOUR || '6' }}
         MESSAGE_SYNC_INBOX_READ_EXPORT: ${{ vars.MESSAGE_SYNC_INBOX_READ_EXPORT || 'false' }}
         MESSAGE_SYNC_INBOX_CURSOR_PUSH: ${{ vars.MESSAGE_SYNC_INBOX_CURSOR_PUSH || 'false' }}

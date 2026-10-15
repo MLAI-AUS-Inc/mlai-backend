@@ -6,7 +6,7 @@ from django.test import SimpleTestCase, override_settings
 
 from community_chat.throttles import enforce_bootstrap_limits
 from community_chat.throttles import CommunityChatScopedThrottle
-from community_chat.slack_views import SlackDmMirrorView, SlackOwnerConversationOpenView
+from community_chat.slack_views import SlackDmMirrorView, SlackOwnerConversationOpenView, SlackUserDirectoryView
 
 
 @override_settings(CACHES={"default": {"BACKEND": "django.core.cache.backends.locmem.LocMemCache"}})
@@ -19,6 +19,7 @@ class SlackPollingThrottleTests(SimpleTestCase):
             "community_chat_slack_read_receipt": "2/minute",
             "community_chat_slack_open": "2/minute",
             "community_chat_home": "1/minute",
+            "community_chat_slack_directory": "2/minute",
         })
         rates.start()
         self.addCleanup(rates.stop)
@@ -71,6 +72,21 @@ class SlackPollingThrottleTests(SimpleTestCase):
         self.assertFalse(self.allowed(method="PATCH", action="resume"))
         self.assertTrue(self.allowed())
         self.assertTrue(self.allowed(method="PATCH", action="mark_read"))
+
+    def test_directory_get_has_separate_account_budget_and_precise_retry_after(self):
+        from rest_framework.exceptions import Throttled
+        request = SimpleNamespace(method="GET", user=SimpleNamespace(pk=1, is_authenticated=True))
+        view = SlackUserDirectoryView()
+        view.request = request
+        self.assertEqual([all(t.allow_request(request, view) for t in view.get_throttles()) for _ in range(3)], [True, True, False])
+        self.assertTrue(self.allowed(method="PATCH", action="refresh_channel"))
+        result = view.handle_exception(Throttled(wait=7))
+        self.assertEqual(result.data, {"error": "slack_directory_rate_limited", "retry_after_seconds": 7})
+        self.assertEqual(result["Retry-After"], "7")
+        view = SlackUserDirectoryView()
+        view.request = SimpleNamespace(method="POST")
+        view.get_throttles()
+        self.assertEqual(view.community_chat_throttle_scope, "community_chat_home")
 
 
 class CommunityChatBootstrapThrottleTests(SimpleTestCase):

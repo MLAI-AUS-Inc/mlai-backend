@@ -122,3 +122,11 @@ records that confirmation revision; after a later source read, returning to the
 same native unread timestamp is a genuine source regression. Scope resets and
 new device revisions cannot reuse an older echo marker. Raw Slack scheduling
 timestamps remain separate from the signed display frontier.
+
+Cursor submissions use per-item results. Forbidden rooms cool down for 30
+minutes, invalid rooms for 15 minutes; cooldowns expire automatically. Aged
+source timestamps request fresh metadata; `inbox disabled` uses transient
+backoff. Unknown accounts trigger at most one re-probe per room per five
+minutes. Transient retries back off from 30 seconds to a 300-second cap. Inspect
+`inbox cursor rejected`, `inbox cursor push unavailable`, and
+`inbox cursor push failed` logs for content-free outcome diagnostics.

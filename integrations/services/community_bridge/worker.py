@@ -363,11 +363,6 @@ class CommunityBridgeDiscordClient(discord.Client):
             except BudgetDeferred as exc:
                 await asyncio.to_thread(defer_delivery, delivery_id=delivery["id"], retry_after=exc.retry_after)
             except ParentMappingPending as exc:
-                logger.info(
-                    "community_bridge_waiting_for_parent delivery_id=%s parent_message_id=%s",
-                    delivery["id"],
-                    exc.parent_message_id,
-                )
                 await asyncio.to_thread(
                     mark_delivery_waiting_for_parent,
                     delivery_id=delivery["id"],
@@ -375,9 +370,10 @@ class CommunityBridgeDiscordClient(discord.Client):
                 )
             except Exception as exc:
                 logger.exception(
-                    "community_bridge_delivery_failed delivery_id=%s target_platform=%s",
+                    "community_bridge_delivery_failed delivery_id=%s target_platform=%s adapter_error=%s",
                     delivery["id"],
                     delivery["target_platform"],
+                    getattr(exc, "adapter_error", "") or "-",
                 )
                 await asyncio.to_thread(
                     mark_delivery_retry,
