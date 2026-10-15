@@ -904,7 +904,6 @@ def _charge_roo_points_for_content_island_topic_generation(request, *, context, 
         "user_last_name": getattr(request.user, "last_name", ""),
         "user_avatar_url": getattr(request.user, "avatar_url", ""),
     }
-    cost_points = get_content_factory_content_island_topic_cost_points(domain)
     # MCP research has a durable original-input receipt before a worker call.
     # Existing HTTP clients retain their contract; only explicitly marked MCP
     # requests enlist the existing outbox in the same Roo spend transaction.

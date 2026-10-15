@@ -568,9 +568,9 @@ rows and original website scope for repository recovery. Metric tests distinguis
 verified provider difficulty and dated monthly history from legacy arrays. Legacy
 OAuth credentials do not establish GitHub App authority or promote themselves.
 Pending canonical setup observations remain in latestRuns; reset assertions use
-the durable operation receipt, generation fencing and replay identity. Ambiguous
-research delivery and an unavailable article worker retain the canonical queued
-outbox intent and original charge rather than claiming a synchronous failure.
+the durable operation receipt, generation fencing and replay identity. MCP research and an unavailable article worker retain the canonical queued
+outbox intent and original charge. Legacy HTTP research retains its existing
+503/pending-reconciliation contract for an ambiguous transport failure.
 These assertions exercise current contracts without disabling admission guards.
 
 82 focused database-free disclosure, redispatch, editorial, metrics and research
@@ -578,3 +578,21 @@ checks pass. All changed Python files parse. CI now fully selects 491 modules,
 with no omissions/partial modules; 685 production failure emissions retain their
 canonical contract. The updated DB-backed cases await the next existing remote
 CI run. No local database or migration was created or applied.
+
+
+CI 6728b552: all five provider-chain cases pass. The 1,586 restored PostgreSQL
+cases have one remaining failure: a feature-flag payload equality test crossed a
+signed URL's timestamp second. Freeze only TimestampSigner.timestamp while keeping
+the full payload equality assertion. The previous stale-queue and Xero publisher
+failures now pass. SQLite's final report remains pending.
+
+Further static fixture review preserves credential-presence checks separately
+from website authority, and preserves historical baseline AI scores in storage
+while presenting them as unverified. Only measured technical evidence contributes
+to that legacy fixture's displayed score. Research uses the account/company-scoped
+request identity shared with its real ledger. Its HTTP failure contract differs
+from MCP's durable outbox and remains unchanged. A real receipt bug was found in
+that path: a second flat-cost assignment overwrote the already computed requested
+research count. Remove that assignment so roo_points_required matches the actual
+charge; eight focused research admission/outbox/refund cases pass, with a new
+assertion for the original requested count. No debit or quote price logic changed.

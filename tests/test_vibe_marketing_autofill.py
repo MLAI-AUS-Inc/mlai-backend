@@ -1226,10 +1226,12 @@ class VibeMarketingAutofillTests(TestCase):
 
         bootstrap = self.client.get("/api/v1/vibe-marketing/bootstrap/")
         self.assertTrue(bootstrap.data["checks"]["baseline"]["passed"])
-        self.assertEqual(bootstrap.data["websiteBaseline"]["overallScore"], 78)
+        self.assertEqual(bootstrap.data["websiteBaseline"]["overallScore"], 82)
         providers = bootstrap.data["websiteBaseline"]["metrics"]["aiVisibility"]["providers"]
         self.assertEqual(providers[0]["key"], "chatgpt")
-        self.assertEqual(providers[1]["score"], 70)
+        self.assertIsNone(providers[1]["score"])
+        self.assertEqual(providers[1]["status"], "unavailable")
+        self.assertEqual(snapshot.metrics["aiVisibility"]["providers"][1]["score"], 70)
 
     def test_bootstrap_returns_topic_candidates_from_selection_options(self):
         organization, _created = Organization.objects.get_or_create(domain="acme.com", defaults={"name": "Acme"})
@@ -1605,7 +1607,10 @@ class VibeMarketingAutofillTests(TestCase):
         self.assertEqual(captured["json"]["content_island_icon_key"], "rocket")
         self.assertEqual(captured["json"]["content_island_color_key"], "blue")
         self.assertEqual(captured["json"]["requested_topic_count"], 4)
-        self.assertEqual(captured["json"]["client_request_id"], "vibe-topic-generation-ai-growth-1")
+        request_id = captured["json"]["client_request_id"]
+        self.assertTrue(request_id.startswith("vibe-research:"))
+        self.assertNotEqual(request_id, "vibe-topic-generation-ai-growth-1")
+        self.assertEqual(Ledger.objects.get(pk=captured["json"]["roo_points_ledger_id"]).reference_id, request_id)
         self.assertEqual(captured["json"]["roo_points_action"], "content_island_topic_generation")
         self.assertEqual(captured["json"]["roo_points_cost"], 4)
         self.assertEqual(captured["json"]["roo_points_required"], 4)
@@ -1615,7 +1620,7 @@ class VibeMarketingAutofillTests(TestCase):
         self.assertEqual(self.user.points_account.balance, 16)
 
     @override_settings(CONTENT_FACTORY_URL="https://content-factory.test", CONTENT_FACTORY_API_KEY="secret-key", IS_LOCAL_ENV=False)
-    def test_scoped_discovery_keeps_durable_delivery_after_transport_failure(self):
+    def test_scoped_discovery_returns_service_unavailable_when_dispatch_fails(self):
         organization, _created = Organization.objects.get_or_create(domain="acme.com", defaults={"name": "Acme"})
         self.company.organization = organization
         self.company.save(update_fields=["organization", "updated_at"])
@@ -1642,14 +1647,15 @@ class VibeMarketingAutofillTests(TestCase):
                 format="json",
             )
 
-        self.assertEqual(response.status_code, 202, response.data)
-        self.assertEqual(response.data["status"], ContentFactoryRunStatus.QUEUED)
-        from content_factory.dispatch_models import ContentFactoryDispatchOutbox
-        self.assertEqual(ContentFactoryDispatchOutbox.objects.get().state, "pending")
+        self.assertEqual(response.status_code, 503, response.data)
+        self.assertEqual(response.data["status"], ContentFactoryRunStatus.BLOCKED)
+        self.assertIn("Content Factory worker is unavailable", response.data["errors"][0])
+        self.assertTrue(response.data["retryable"])
+        self.assertIn("connection refused", response.data["diagnostics"]["technical_error"])
 
         run = ContentFactoryRun.objects.get(run_id=response.data["run_id"])
         self.assertEqual(run.workflow, "auto_discovery")
-        self.assertEqual(run.status, ContentFactoryRunStatus.QUEUED)
+        self.assertEqual(run.status, ContentFactoryRunStatus.BLOCKED)
         self.assertEqual(run.run_request["content_island_slug"], "ai-growth")
         # The dispatch outcome is ambiguous (the POST may have landed on the
         # content-factory side despite the transport error) and the key lookup
@@ -3516,7 +3522,9 @@ class VibeMarketingAutofillTests(TestCase):
         self.assertNotIn("org-token", str(response.data))
 
         bootstrap = self.client.get("/api/v1/vibe-marketing/bootstrap/")
-        self.assertFalse(bootstrap.data["checks"]["github"]["passed"])
+        # A credential-presence check is distinct from website authority.
+        self.assertTrue(bootstrap.data["checks"]["github"]["passed"])
+        self.assertFalse(bootstrap.data["articleSetupState"]["generationReady"])
         self.assertIsNone(OrganizationContentConfig.objects.get(organization=organization).website_connection_id)
 
     def test_github_connect_force_reconnect_returns_auth_url_without_overwriting_repo(self):
