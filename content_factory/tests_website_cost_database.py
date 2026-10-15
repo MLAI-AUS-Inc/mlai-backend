@@ -131,7 +131,8 @@ class CostUsageAuthorizationTests(ContentIslandBootstrapTestCase):
             self.assertEqual(response.data["usage"]["recordedRuns"], 1)
             self.assertEqual(response.data["usage"]["metrics"]["tokens"]["total"], 17)
             denied = self.client.get(url, {"company_id": str(other_company.pk)})
-            self.assertEqual(denied.status_code, 404, denied.data)
+            self.assertEqual(denied.status_code, 400 if prefix == "/api/v1" else 404, denied.data)
+            self.assertNotIn("usage", denied.data)
             hidden = self.client.get(prefix + f"/vibe-marketing/website-connection/operations/{row.pk}/",
                 {"company_id": str(self.company.pk)})
             self.assertEqual(hidden.status_code, 404, hidden.data)
