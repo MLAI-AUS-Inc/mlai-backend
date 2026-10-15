@@ -97,6 +97,8 @@ class CostUsageTests(SimpleTestCase):
         truncated = costs.aggregate([self.merge(None, self.report)], now=self.now, truncated=True)
         self.assertIsNone(truncated["metrics"]["tokens"]["total"])
         self.assertEqual(truncated["metrics"]["tokens"]["knownSubtotal"], 17)
+        corrupt_state = {**self.merge(None, self.report), "incomplete_reason": []}
+        self.assertIsNone(costs.aggregate([corrupt_state], now=self.now)["metrics"]["tokens"]["total"])
 
     def test_missing_or_invalid_worker_reports_remain_in_coverage_and_replays_are_inert(self):
         known = self.merge(None, self.report)
@@ -130,3 +132,12 @@ class CostUsageTests(SimpleTestCase):
                 costs.attribution(operation, SimpleNamespace(**{**vars(run), "run_request": {**saved, **changes}}))
         with self.assertRaises(ValueError):
             costs.attribution(operation, SimpleNamespace(**{**vars(run), "organization_id": 8}))
+        for key in ("connection_generation", "configuration_revision", "deletion_epoch"):
+            corrupted = deepcopy(operation)
+            corrupted_run = deepcopy(run)
+            corrupted.receipt["goal"]["scope"][key] = False if key == "deletion_epoch" else True
+            if key == "connection_generation":
+                corrupted.generation = corrupted_run.run_request["connection_generation"] = 1
+            corrupted_run.run_request["goal_budget"]["scope_digest"] = goals.digest(corrupted.receipt["goal"]["scope"])
+            with self.subTest(scope_key=key), self.assertRaises(ValueError):
+                costs.attribution(corrupted, corrupted_run)

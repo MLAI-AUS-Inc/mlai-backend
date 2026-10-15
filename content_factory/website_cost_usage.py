@@ -95,6 +95,10 @@ def attribution(operation, run):
     saved = goals.mapping(run.run_request)
     contract = goals.mapping(saved.get("goal_budget"))
     if (not goals.valid_goal(goal, scope) or goal["goal_id"] != str(operation.pk)
+            or any(type(scope.get(key)) is not int or scope[key] < minimum for key, minimum in
+                (("connection_generation", 1), ("configuration_revision", 1), ("deletion_epoch", 0)))
+            or any(not isinstance(scope.get(key), str) for key in
+                ("company_id", "organization_id", "connection_id", "repository_id", "branch", "app_root"))
             or type(contract.get("version")) is not int or contract["version"] != 1
             or contract.get("goal_id") != goal["goal_id"] or contract.get("scope_digest") != goals.digest(scope)
             or str(run.organization_id) != scope["organization_id"]
@@ -117,10 +121,14 @@ def aggregate(records, *, now, truncated=False):
         record = deepcopy(goals.mapping(raw))
         usage = goals.mapping(record.get("usage"))
         try:
+            if record.get("incomplete_reason") is not None and not isinstance(record["incomplete_reason"], str):
+                raise ValueError("Invalid stored accounting state")
             if not budget.valid_usage(usage, usage.get("run_id")):
                 raise ValueError("Invalid stored usage")
             if record.get("accounting") is not None:
                 record["accounting"] = accounting(record["accounting"], usage)
+            elif record.get("incomplete_reason") is None:
+                record["incomplete_reason"] = "unavailable"
         except ValueError:
             record["incomplete_reason"] = "invalid_snapshot"
         normalized.append(record)
