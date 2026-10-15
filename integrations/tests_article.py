@@ -896,18 +896,30 @@ class ArticleGenerationServiceTest(TestCase):
 
     @patch("integrations.services.article_generation.http_requests.post")
     def test_trigger_generation_reuses_existing_billed_job_for_same_client_request_id(self, mock_post):
+        paid_org = Organization.objects.create(domain="example.com", name="Research before website setup")
+        VibeRaisingCompany.objects.create(profile=self.profile, organization=paid_org,
+                                         name=paid_org.name, domain=paid_org.domain)
         mock_post.return_value.status_code = 202
         mock_post.return_value.json.return_value = {
             "job_id": "existing-job-123", "status": "awaiting_confirmation"
         }
-        first = trigger_article_generation(self.slack_user_id, self._article_request(topic=None))
+        request = self._article_request(topic=None, domain=paid_org.domain)
+        first = trigger_article_generation(self.slack_user_id, dict(request))
         self.assertEqual(first["job_id"], "existing-job-123")
+        first_job = ContentFactoryJob.objects.get(job_id=first["job_id"])
+        self.assertEqual(first_job.billing_status, "charged")
+        self.assertEqual(first_job.billing_amount, 4)
+        ledger_id = first_job.billing_ledger_id
         mock_post.reset_mock()
 
-        result = trigger_article_generation(self.slack_user_id, self._article_request(topic=None))
+        result = trigger_article_generation(self.slack_user_id, dict(request))
 
         self.assertEqual(result["job_id"], "existing-job-123")
         mock_post.assert_not_called()
+        first_job.refresh_from_db()
+        self.assertEqual(first_job.billing_ledger_id, ledger_id)
+        self.user.points_account.refresh_from_db()
+        self.assertEqual(self.user.points_account.balance, 16)
 
     @patch("integrations.services.article_generation.http_requests.post")
     def test_unowned_requester_cannot_use_another_founders_verified_website(self, mock_post):
