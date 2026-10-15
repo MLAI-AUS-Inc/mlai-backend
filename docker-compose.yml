@@ -402,7 +402,7 @@ services:
           echo "Waiting for migrations to complete...";
           sleep 5;
         done;
-        exec python manage.py run_agent_scheduler --native --webhooks --interval 5 --limit 50
+        exec python manage.py run_agent_scheduler --native --webhooks --interval 5 --limit 50 --health-file /tmp/native-agent-heartbeat
       '
     environment:
       APP_ENV: ${APP_ENV:-production}
@@ -413,6 +413,12 @@ services:
     networks:
       default:
       mlai-shared:
+    healthcheck:
+      test: ["CMD", "python", "-c", "import os,time; p='/tmp/native-agent-heartbeat'; raise SystemExit(0 if os.path.isfile(p) and time.time() - os.path.getmtime(p) <= 300 else 1)"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 90s
     restart: unless-stopped
     stop_grace_period: 30s
 

@@ -207,6 +207,36 @@ class PrepareReturnsToOpenPullRequestTests(SimpleTestCase):
         self.assertEqual(self.op.receipt["reason_code"], "website_source_changed")
 
 
+    def checks_failed_run(self, *, checks_source):
+        """PR #40 after the merge fence blocked it: Vyavos PR #4 (15 Oct)."""
+        run = open_setup_run()
+        for item in (run.result, run.result["article_system_setup"]):
+            item.update(status="checks_failed", merge_status="checks_failed")
+            if checks_source:
+                item["checks_source"] = checks_source
+        return run
+
+    def test_the_owners_retry_after_mlais_own_check_failed_builds_a_new_setup(self):
+        self.op.payload["repair_setup"] = True
+        merge = self.advance(run=self.checks_failed_run(checks_source="verification_kit"))
+        merge.assert_not_called()
+        self.setup.assert_called_once()
+        self.assertEqual(self.op.receipt["child_run_id"], "new-setup")
+
+    def test_the_sites_own_failed_checks_still_return_to_the_pull_request(self):
+        # The owner may fix their own CI on the PR branch; Publish re-checks the new head.
+        self.op.payload["repair_setup"] = True
+        merge = self.advance(run=self.checks_failed_run(checks_source=None))
+        merge.assert_called_once()
+        self.setup.assert_not_called()
+
+    def test_only_the_owners_retry_rebuilds(self):
+        self.op.payload.pop("repair_setup", None)
+        merge = self.advance(run=self.checks_failed_run(checks_source="verification_kit"))
+        merge.assert_called_once()
+        self.setup.assert_not_called()
+
+
 class RealMergeRefusalTests(SimpleTestCase):
     """Through the real run guard, a changed head waits for the owner's Publish."""
 

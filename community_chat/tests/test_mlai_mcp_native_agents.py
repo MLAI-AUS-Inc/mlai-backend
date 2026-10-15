@@ -514,9 +514,10 @@ class NativePrivateAdapterTests(SimpleTestCase):
         installation = self.native.installation
         installation.owner_attestation = []
         self.installations.filter.return_value.select_related.return_value.first.return_value = installation
-        with self.assertRaises(PermissionDenied):
+        with self.assertRaises(self.adapter.NativeAgentError) as error:
             self.adapter.bind_native_grant(
                 self.value.user, Obj(pk="session"), self.value.grant, str(installation.pk))
+        self.assertEqual(error.exception.default_code, "owner_action_required")
         self.grants.create.assert_not_called()
         self.credentials.create.assert_not_called()
 
