@@ -82,8 +82,28 @@ lifecycle projection and generic operation receipt reads.
 Precise quality ingestion matches CF's optional version-1 accounting object:
 tokens/provider time expose known subtotals and call coverage; USD remains a
 configured bound. Legacy token reservations never become exact accounting.
-Actual build/preview invocations, a lazy client, durable backfill after an
-observation outage, and operational alerts remain subsequent F3 work.
+Actual build/preview invocation meters and operational alerts remain subsequent
+F3 work. The lazy client and durable observation recovery are described below.
+
+The follow-up recovery path records `cost_pending_run_ids` with the accepted
+goal transition. `_persist_prepare` reserves one `usage-refresh` operation in
+the same transaction as its successful compare-and-set. A lost prepare claim
+cannot reserve a retry. Original-run observations remain globally deduplicated;
+recovery calls only stored-run/ledger reads and writes, never the worker or a
+repository provider. A two-minute lease, the existing capped retry backoff and
+B4's transient-attempt cap also bound crashes/reclaims. Replacing a pending
+batch fences the old worker's completion. Exhaustion is internal attention and
+does not stop the site goal or notify its owner.
+
+The operation reconciler processes these records under the same default-off
+accounting policy. Disconnect retains this read-only historical recovery;
+purge/organization erasure removes its rows and cannot recreate them. While a
+retry is pending, running or exhausted, the separate company read includes its
+bounded source references as unknown observations (without exposing run IDs).
+An older ledger value cannot become a complete current total during recovery.
+Both ledger and recovery reads are bounded, and no accounting scan enters
+bootstrap. Chat's optional lazy view is MLAI-AUS-Inc/mlai-chat#505. Actual
+invocation meters and operational alert delivery remain subsequent work.
 
 Exclude internal accounting/alert operations from lifecycle/latest-operation
 projections. Respect existing disconnect, purge and organization erasure rules.

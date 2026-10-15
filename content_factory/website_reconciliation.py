@@ -364,10 +364,16 @@ def process_website_connection_operations(*, limit=20, now=None, connection_id=N
     from django.conf import settings
     from .website_notification_outbox import ACTION as notice_action
     from .website_first_article_refunds import ACTION as refund_action
+    from .website_cost_recovery import ACTION as usage_action, advance as advance_usage
+    from .website_cost_ledger import enabled as accounting_enabled
     notices_enabled=getattr(settings,"ARTICLES_GOAL_NOTIFICATIONS_ENABLED",False)
+    excluded = ["workflow"] if notices_enabled else ["workflow", notice_action]
+    if not accounting_enabled():
+        excluded.append(usage_action)
     due = WebsiteConnectionOperation.objects.filter(Q(next_attempt_at__isnull=True) | Q(next_attempt_at__lte=now),
         Q(state="pending") | Q(action="prepare", state="running") | Q(action=notice_action,state="running") | Q(action=refund_action,state="running") |
-        Q(action="prepare", state="needs_user", receipt__user_action__id__in=["deploy_site","merge_pr","review_draft"])).exclude(action__in=["workflow"] if notices_enabled else ["workflow",notice_action])
+        Q(action=usage_action, state="running") |
+        Q(action="prepare", state="needs_user", receipt__user_action__id__in=["deploy_site","merge_pr","review_draft"])).exclude(action__in=excluded)
     if connection_id:
         due = due.filter(connection_id=connection_id)
     ids = list(due.order_by("next_attempt_at").values_list("id", flat=True)[:limit])
@@ -377,6 +383,14 @@ def process_website_connection_operations(*, limit=20, now=None, connection_id=N
     monitor_cleanup_pull_requests(limit=limit, connection_id=connection_id)
     from .website_wakeups import enabled as event_wakes_enabled
     for identifier in ids:
+        if accounting_enabled() and WebsiteConnectionOperation.objects.filter(pk=identifier, action=usage_action).exists():
+            outcome = advance_usage(identifier, now=now)
+            if outcome is not None:
+                result["processed"] += 1
+                result["pending" if outcome == "pending" else "completed"] += 1
+                if len(result["operations"]) < 20:
+                    result["operations"].append({"id": str(identifier), "action": usage_action, "outcome": outcome})
+            continue
         if WebsiteConnectionOperation.objects.filter(pk=identifier,action=refund_action).exists():
             from .website_first_article_refunds import advance_refund
             outcome=advance_refund(identifier,now=now)

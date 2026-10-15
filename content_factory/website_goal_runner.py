@@ -322,7 +322,12 @@ def account_child_usage(op, goal):
                 or saved.get("deletion_epoch") != deletion_epoch(op.connection)):
             continue
         from .website_cost_ledger import observe
-        observe(child)
+        observation = observe(child)
+        pending = result.get("cost_pending_run_ids") or []
+        if observation is False and identifier not in pending:
+            result = {**result, "cost_pending_run_ids": (list(pending) + [identifier])[-64:]}
+        elif observation is True and identifier in pending:
+            result = {**result, "cost_pending_run_ids": [value for value in pending if value != identifier]}
         if child.status not in {"failed", "completed", "blocked", "cancelled", "denied"}:
             op._goal_has_active_child = True
         report = goals.mapping(child.result).get("usage")

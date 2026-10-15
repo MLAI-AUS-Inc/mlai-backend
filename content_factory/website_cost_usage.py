@@ -114,7 +114,7 @@ def attribution(operation, run):
     return {"version": 1, "run_id": run.run_id, "goal_id": goal["goal_id"], "scope": deepcopy(scope)}
 
 
-def aggregate(records, *, now, truncated=False):
+def aggregate(records, *, now, truncated=False, incomplete=False):
     """Describe retained observations and coverage; an empty ledger is unmeasured."""
     normalized = []
     for raw in records:
@@ -155,9 +155,9 @@ def aggregate(records, *, now, truncated=False):
             subtotals.append(subtotal if _nullable(subtotal, integer=key in INTEGER) else None)
         known = [value for value in subtotals if value is not None]
         metrics[key] = {"basis": "invocations" if key in {"builds", "previews"} else basis,
-            "total": sum(values) if values and not truncated and all(value is not None for value in values) else None,
+            "total": sum(values) if values and not truncated and not incomplete and all(value is not None for value in values) else None,
             "knownSubtotal": sum(known) if known else None, "measuredRuns": sum(value is not None for value in values),
             "recordedRuns": len(records)}
     return {"version": 1, "history": "retained_recorded_usage", "coverage": "observed_goal_meter_runs", "observedAt": now.isoformat(),
         "recordedRuns": len(records), "incompleteRuns": sum(record.get("incomplete_reason") is not None for record in records),
-        "truncated": truncated, "metrics": metrics}
+        "truncated": truncated, "coverageIncomplete": truncated or incomplete, "metrics": metrics}
