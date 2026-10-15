@@ -80,5 +80,8 @@ def recover_existing_conversation(*, grant_id, device_id, source_id, apply=False
             if not expected_plan or expected_plan != fingerprint:
                 raise InventoryError('recovery_plan_changed', 409)
             result = enqueue_open_locked(grant, connection, authority, device, row)
+            if result["state"] == "failed":
+                report.update(enqueued=False, state="failed", error=result["error"])
+                return report
             report.update(enqueued=True, state=result['state'], retry_after_seconds=result['retry_after_seconds'])
         return report

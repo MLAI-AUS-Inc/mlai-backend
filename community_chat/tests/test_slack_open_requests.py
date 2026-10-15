@@ -13,8 +13,10 @@ from integrations.services import slack_dm_mirror as dm
 from integrations.services.message_sync.scheduler import BudgetDeferred
 
 
+@override_settings(CACHES={"default": {"BACKEND": "django.core.cache.backends.locmem.LocMemCache"}})
 class SlackOpenRequestsTests(SimpleTestCase):
     def setUp(self):
+        opens.cache.clear()
         self.now = 1900000000.0
         self.connection = SimpleNamespace(sync_cursor={}, save=MagicMock())
         self.grant = SimpleNamespace(
@@ -129,6 +131,54 @@ class SlackOpenRequestsTests(SimpleTestCase):
         self.enqueue()
         self.assertEqual(len(self.connection.sync_cursor[opens.KEY]), 1)
 
+    def test_progress_and_one_time_timeout_survive_another_enqueue(self):
+        from datetime import datetime, timezone
+        first = self.enqueue()
+        self.assertEqual(first["stage"], "queued")
+        self.assertEqual(first["device_access"], "none")
+        self.assertEqual(first["queue_position"], 0)
+        self.assertEqual(first["deadline_at"], datetime.fromtimestamp(self.now + 900, tz=timezone.utc).isoformat())
+        key, request = next(iter(self.connection.sync_cursor[opens.KEY].items()))
+        request["until"] = self.now - 10
+        self.row.slack_conversation_id = "DOTHER"
+        second = self.enqueue()
+        self.assertEqual(second["queue_position"], 0)
+        self.row.slack_conversation_id = "DCINDY"
+        with patch.object(api, "catalog_conversations") as catalog:
+            catalog.return_value.first.return_value = None
+            self.assertEqual(self.request(), (409, {"error": "open_timed_out"}))
+        self.assertIn("timeout_reported_at", self.connection.sync_cursor[opens.KEY][key])
+        retry = self.enqueue()
+        self.assertNotEqual(retry["request_id"], first["request_id"])
+
+    def test_importing_and_old_expired_requests_reenqueue_without_timeout(self):
+        self.enqueue()
+        key, request = next(iter(self.connection.sync_cursor[opens.KEY].items()))
+        for state, expired in (("importing", 10), ("pending", 121)):
+            self.connection.sync_cursor[opens.KEY][key] = {**request, "state": state, "until": self.now - expired}
+            self.assertEqual(self.enqueue()["state"], "importing")
+
+    def test_device_gap_reports_adding_device_and_cache_failure_is_nonfatal(self):
+        mirror = SimpleNamespace(status="live", slack_conversation_id="DCINDY", participant_buzz_pubkeys=["other"], mlai_channel_id=uuid4())
+        with patch.object(api, "catalog_conversations") as catalog, patch.object(opens.cache, "set", side_effect=RuntimeError), self.assertLogs(opens.logger, "WARNING"):
+            catalog.return_value.first.return_value = mirror
+            status, result = self.request()
+        self.assertEqual((status, result["stage"], result["device_access"]), (202, "adding_device", "pending"))
+        self.assertTrue(next(iter(self.connection.sync_cursor[opens.KEY].values()))["device_only"])
+
+    def test_due_source_can_pass_cooling_queued_source_but_not_in_flight(self):
+        self.enqueue()
+        old_key, old = next(iter(self.connection.sync_cursor[opens.KEY].items()))
+        old["due"] = self.now + 30
+        self.connection.sync_cursor[opens.KEY]["second"] = {**old, "id": "new", "source_id": "DERICA", "stage": "queued", "due": self.now, "requested_at": self.now + 1}
+        with patch.object(opens, "_update") as update, patch.object(opens, "_validated_source", return_value=({}, 0)), patch.object(dm, "_discover_conversation", return_value=None):
+            opens.process_next_open(self.grant, self.authority)
+        self.assertEqual(update.call_args.args[1], "second")
+        for stage in ("validating", "provisioning"):
+            old["stage"] = stage
+            with self.assertRaises(BudgetDeferred):
+                opens.process_next_open(self.grant, self.authority)
+
     def run_worker(self, *, source_error=None, import_error=None, changed_epoch=False):
         self.enqueue()
         if changed_epoch:
@@ -150,7 +200,7 @@ class SlackOpenRequestsTests(SimpleTestCase):
         self.assertFalse(discover.call_args.kwargs["force_backfill"])
         self.assertFalse(discover.call_args.kwargs["reset_history"])
         prioritize.assert_called_once()
-        self.assertEqual(update.call_args.kwargs, {"state": "importing"})
+        self.assertEqual(update.call_args.kwargs, {"state": "importing", "stage": "importing_history"})
 
     def test_worker_defers_budget_without_provisioning(self):
         _, discover, prioritize, update = self.run_worker(
@@ -167,7 +217,7 @@ class SlackOpenRequestsTests(SimpleTestCase):
 
     def test_backoff_begins_after_slow_source_work(self):
         self.enqueue()
-        with patch.object(opens.time, "time", side_effect=[self.now, self.now, self.now + 8]), patch.object(
+        with patch.object(opens.cache, "get_many", return_value={}), patch.object(opens.time, "time", side_effect=[self.now, self.now, self.now + 8]), patch.object(
             api, "_validate_open_source", side_effect=BudgetDeferred(60),
         ), patch.object(opens, "_update") as update:
             opens.process_next_open(self.grant, self.authority)
@@ -179,7 +229,7 @@ class SlackOpenRequestsTests(SimpleTestCase):
         source, discover, _, update = self.run_worker()
         source.assert_not_called()
         discover.assert_called_once()
-        self.assertEqual(update.call_args.kwargs, {"state": "importing"})
+        self.assertEqual(update.call_args.kwargs, {"state": "importing", "stage": "importing_history"})
 
     def test_source_checkpoint_does_not_persist_provider_message_payloads(self):
         details = {
@@ -231,9 +281,10 @@ class SlackOpenRequestsTests(SimpleTestCase):
         self.enqueue()
         request = next(iter(self.connection.sync_cursor[opens.KEY].values()))
         request["due"] = self.now + 18
+        request["stage"] = "validating"
         # A second tap must not overwrite the first source's resumable metadata.
         self.connection.sync_cursor[opens.KEY]["second"] = {
-            **request, "id": "second", "source_id": "DERICA",
+            **request, "id": "second", "source_id": "DERICA", "stage": "queued",
             "requested_at": self.now + 1, "due": self.now,
         }
         with patch.object(api, "_validate_open_source") as source, self.assertRaises(BudgetDeferred) as deferred:
@@ -266,7 +317,7 @@ class SlackOpenRequestsTests(SimpleTestCase):
             source, discover, _, update = self.run_worker()
         source.assert_not_called()
         discover.assert_not_called()
-        self.assertEqual(update.call_args.kwargs, {"state": "importing"})
+        self.assertEqual(update.call_args.kwargs, {"state": "importing", "stage": "importing_history"})
 
     def test_old_receipt_pages_advance_without_revalidating_source(self):
         with patch("integrations.services.message_sync.presentation.recover_presentation", return_value=(False, 41)):

@@ -1693,3 +1693,24 @@ confirmation newer than the request, before a content-free tombstone is written.
 Missing participant identities (`identity_stale`) never become tombstones.
 Narrowing group-history consent sweeps excluded queued authors. A fresh source
 observation that resolves under the current participant hash re-admits the row.
+
+### Slack open progress and directory budgets
+
+GET `/slack/users/` has its own per-account `community_chat_slack_directory`
+bucket (default 120/minute). A 429 returns
+`{"error":"slack_directory_rate_limited","retry_after_seconds":N}` with
+`Retry-After: N`. POST invitations retain the home bucket.
+
+Open 202 responses add `stage`, `attempts`, `request_id`, `requested_at`,
+`deadline_at`, approximate `queue_position`, and `device_access`. Stages are
+queued, adding_device, validating, provisioning, and importing_history. A
+never-started pending intent can report `409 {"error":"open_timed_out"}` once
+in the 120 seconds following its deadline; Retry creates a new request.
+Foreground polling prioritizes due queued sources without interrupting a source
+whose validation or provisioning checkpoint is already in progress.
+
+Content-free inventory rows add `device_access` (none/member/pending),
+`avatar_url`, MPIM `participants` (at most eight, excluding the owner), and IM
+`counterpart_has_mlai_account`. Avatars accept HTTPS only from
+`avatars.slack-edge.com` or `secure.gravatar.com`. These fields use cached
+metadata and verified identity links; listing them makes no provider request.

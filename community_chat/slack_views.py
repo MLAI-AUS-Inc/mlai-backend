@@ -562,6 +562,18 @@ class SlackDmMirrorView(SlackDmMirrorApiView):
 class SlackUserDirectoryView(SlackDmMirrorApiView):
     """Search internal human users visible to the owner's Slack token."""
 
+    def get_throttles(self):
+        if self.request.method == "GET":
+            self.community_chat_throttle_scope = "community_chat_slack_directory"
+        return super().get_throttles()
+
+    def handle_exception(self, exc):
+        if isinstance(exc, Throttled) and self.request.method == "GET":
+            n = max(1, int(exc.wait or 1))
+            return Response({"error": "slack_directory_rate_limited", "retry_after_seconds": n},
+                            status=429, headers={"Retry-After": str(n), "Cache-Control": "private, no-store"})
+        return super().handle_exception(exc)
+
     def get(self, request):
         try:
             limit = int(request.query_params.get("limit", 20))

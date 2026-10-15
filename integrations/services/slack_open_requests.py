@@ -8,6 +8,7 @@ import uuid
 
 from django.conf import settings
 from django.db import transaction
+from django.core.cache import cache
 from integrations.services.message_sync import telemetry
 from django.utils import timezone
 
@@ -16,6 +17,8 @@ from integrations.services.message_sync.scheduler import BudgetDeferred, LeaseLo
 KEY = "slack_conversation_open_requests_v1"
 MAX_REQUESTS = 16
 REQUEST_TTL = 900
+TIMEOUT_REPORT_GRACE = 120
+MAX_RETAINED_GRACE = 16
 SOURCE_VALIDATION_TTL = 60
 logger = logging.getLogger(__name__)
 
@@ -23,6 +26,34 @@ logger = logging.getLogger(__name__)
 def _live_requests(cursor, now):
     return {key: value for key, value in (cursor.get(KEY) or {}).items()
             if isinstance(value, dict) and value.get("until", 0) > now}
+
+
+def _retained_requests(cursor, now):
+    live = _live_requests(cursor, now)
+    grace = [(key, value) for key, value in (cursor.get(KEY) or {}).items()
+             if isinstance(value, dict) and value.get("state") == "pending"
+             and value.get("until", 0) <= now < value.get("until", 0) + TIMEOUT_REPORT_GRACE
+             and not value.get("timeout_reported_at")]
+    live.update(sorted(grace, key=lambda item: item[1]["until"], reverse=True)[:MAX_RETAINED_GRACE])
+    return live
+
+
+def _mark_polled(grant, request, now):
+    try:
+        cache.set(f"slack-open-polled:{request['id']}", now, 30)
+    except Exception:
+        logger.warning("slack_open_poll_mark_failed grant_id=%s", grant.pk)
+
+
+def _progress(request, live, now):
+    return {
+        "stage": request.get("stage") or ("importing_history" if request.get("state") == "importing" else "queued"),
+        "attempts": int(request.get("attempts") or 0), "request_id": request["id"],
+        "requested_at": datetime.fromtimestamp(request["requested_at"], tz=dt_timezone.utc).isoformat(),
+        "deadline_at": datetime.fromtimestamp(request["until"], tz=dt_timezone.utc).isoformat(),
+        "queue_position": sum(v.get("state") == "pending" and v.get("requested_at", now) < request["requested_at"] for v in live.values()),
+        "device_access": "pending" if request.get("device_only") else "none",
+    }
 
 
 def has_pending_opens(cursor):
@@ -58,17 +89,28 @@ def _schedule_requests_locked(grant, connection, cursor, requests, now):
     grant.save(update_fields=["last_discovery_at", "updated_at"])
 
 
-def enqueue_open_locked(grant, connection, authority, device, row):
+def enqueue_open_locked(grant, connection, authority, device, row, *, device_only=False):
     """Coalesce opens under the existing authority lock without provider I/O."""
     from integrations.services.slack_owner_inventory import device_epoch, state_for
     from integrations.services.slack_owner_inventory_api import InventoryError
 
     now = time.time()
     cursor = dict(connection.sync_cursor or {})
-    requests = _live_requests(cursor, now)
+    requests = _retained_requests(cursor, now)
+    live = _live_requests(cursor, now)
     key = f"{device.pk}:{row.slack_conversation_id}"
     epoch = device_epoch(grant, authority, device, state=state_for(connection, authority))
-    previous = requests.get(key)
+    stale = (cursor.get(KEY) or {}).get(key)
+    if (isinstance(stale, dict) and stale.get("epoch") == epoch and stale.get("state") == "pending"
+            and stale.get("until", 0) <= now < stale.get("until", 0) + TIMEOUT_REPORT_GRACE
+            and not stale.get("timeout_reported_at")):
+        requests[key] = {**stale, "timeout_reported_at": now}
+        cursor[KEY] = requests
+        connection.sync_cursor = cursor
+        connection.save(update_fields=["sync_cursor", "updated_at"])
+        logger.info("slack_open_timed_out grant_id=%s request_id=%s", grant.pk, stale["id"])
+        return {"state": "failed", "error": "open_timed_out"}
+    previous = live.get(key)
     if previous and previous.get("epoch") == epoch:
         if previous.get("error"):
             raise InventoryError(previous["error"], previous["status_code"])
@@ -83,18 +125,22 @@ def enqueue_open_locked(grant, connection, authority, device, row):
                 from integrations.services.slack_chat_catalog import source_limited_without_pending
                 if source_limited_without_pending(grant, row.slack_conversation_id):
                     raise InventoryError("inventory_source_limited", 409)
+        _mark_polled(grant, previous, now)
         # Polling must not bypass Retry-After or restart successful provisioning.
         return {"state": "importing", "mlai_channel_id": None,
-                "retry_after_seconds": max(2, math.ceil(previous.get("due", now) - now))}
-    if key not in requests and len(requests) >= MAX_REQUESTS:
+                "retry_after_seconds": max(2, math.ceil(previous.get("due", now) - now)),
+                **_progress(previous, live, now)}
+    if key not in live and len(live) >= MAX_REQUESTS:
         raise InventoryError("inventory_rate_limited", 429, retry_after_seconds=10)
     requests[key] = {
         "id": uuid.uuid4().hex, "epoch": epoch, "source_id": row.slack_conversation_id,
         "public_key": device.public_key, "requested_at": now,
         "until": now + REQUEST_TTL, "due": now, "state": "pending",
+        "stage": "adding_device" if device_only else "queued", "device_only": bool(device_only),
     }
     _schedule_requests_locked(grant, connection, cursor, requests, now)
-    return {"state": "importing", "mlai_channel_id": None, "retry_after_seconds": 2}
+    _mark_polled(grant, requests[key], now)
+    return {"state": "importing", "mlai_channel_id": None, "retry_after_seconds": 2, **_progress(requests[key], live, now)}
 
 
 def _update(authority, key, request, **changes):
@@ -103,9 +149,10 @@ def _update(authority, key, request, **changes):
     with transaction.atomic():
         _, connection = dm._lock_slack_grant_api_authority(authority, required_scopes={"im:read"})
         cursor = dict(connection.sync_cursor or {})
-        requests = _live_requests(cursor, time.time())
+        now = time.time()
+        requests = _retained_requests(cursor, now)
         current = requests.get(key)
-        if current is None or current.get("id") != request["id"]:
+        if current is None or current.get("until", 0) <= now or current.get("id") != request["id"]:
             return
         requests[key] = {**current, **changes}
         cursor[KEY] = requests
@@ -200,7 +247,14 @@ def process_next_open(grant, authority):
     # The directory metadata checkpoint is one resumable source per owner.
     # Keep this short foreground attempt until it completes or expires, so
     # background pages cannot discard successful membership/profile stages.
-    key, request = min(pending, key=lambda item: item[1]["requested_at"])
+    try:
+        polled = cache.get_many([f"slack-open-polled:{v['id']}" for _, v in pending])
+    except Exception:
+        polled = {}
+    due = [i for i in pending if i[1].get("due", 0) <= now]
+    in_flight = [i for i in pending if i[1].get("stage") in {"validating", "provisioning"}]
+    recent = [i for i in due if now - float(polled.get(f"slack-open-polled:{i[1]['id']}") or 0) <= 15]
+    key, request = min(in_flight or recent or due or pending, key=lambda i: i[1]["requested_at"])
     if request.get("due", 0) > now:
         deferred = BudgetDeferred(request["due"] - now)
         if getattr(settings, "MESSAGE_SYNC_OPEN_PRIORITY_ENABLED", True):
@@ -225,7 +279,7 @@ def process_next_open(grant, authority):
                 before_id=request.get("receipt_before_id"),
             )
             if recovered:
-                _update(authority, key, request, state="importing")
+                _update(authority, key, request, state="importing", stage="importing_history")
                 return True  # The next metadata-only open resolves the ready room.
             if before_id is not None:
                 _update(authority, key, request, receipt_before_id=before_id, due=time.time() + 2)
@@ -236,7 +290,9 @@ def process_next_open(grant, authority):
             raise InventoryError("inventory_source_limited", 409)
         started_at = datetime.fromtimestamp(request["requested_at"], tz=dt_timezone.utc)
         with conversation_progress(authority, row.slack_conversation_id, row.kind, started_at) as progress:
+            _update(authority, key, request, stage="validating")
             details, activity = _validated_source(current_grant, authority, row, progress)
+            _update(authority, key, request, stage="provisioning")
             conversation = dm._discover_conversation(
                 current_grant, authority, details, profile_cache={},
                 force_backfill=False, reset_history=False,
@@ -247,7 +303,7 @@ def process_next_open(grant, authority):
             raise InventoryError("inventory_conversation_unavailable", 409)
         _prioritize_history(conversation, authority, request)
         dm._drain_staged_events_for_conversation(authority, conversation.pk)
-        _update(authority, key, request, state="importing")
+        _update(authority, key, request, state="importing", stage="importing_history")
         log_open_latency("open_provisioned", request, authority.grant_id)
     except LeaseLost:
         raise
