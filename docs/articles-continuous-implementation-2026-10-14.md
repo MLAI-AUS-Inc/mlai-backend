@@ -612,3 +612,28 @@ The real loopback HTTP/transaction/authority paths remain intact. These database
 cases are syntax checked only pending the existing remote CI lanes. Thirty
 focused database-free contract, observation, redispatch and research checks pass.
 No local database or migration was run; all 491 modules remain assigned.
+
+E1 checkpoint, 15 October: source-scoped fingerprint producer is CF draft PR992
+(83fcec6ec783dbea93d75ae8001f8861bda8b6dd), with 124 focused tests and the
+1,110-emitter audit passing. Backend validation/projection has 89 database-free
+tests passing, 491 fully assigned test modules and 685 audited failure emitters.
+The separate E1 lock pins the actual producer example for remote CI parity using
+the existing read-only secret. Both flags remain false; no migration, deployment
+or customer operation. E2–E5, F/G and D2 stale-proposal/article-strategy recovery
+remain outstanding. Restored D2 CI at b851ad1d still has 62 failures/12 errors in
+1,683 restored PostgreSQL cases plus two callback-idempotency failures in the
+SQLite checks lane. Five first-article provider-chain cases pass. Final E1 CI and
+the later paid-research reuse fixture at b01f6f7e still need remote evidence.
+
+E1 rebase checkpoint, 15 October: retain the complete D2 CI repairs and the E1
+source validator/producer parity check together. D2 dad06649 now passes the main
+checks lane, including all 3,518 targeted Django tests (37 pre-existing skips).
+Its restored PostgreSQL and migration evidence was green at the preceding head;
+final dad06649 authority/migration lanes remain live. This supersedes the earlier
+failure counts above. The rebased E1 head requires fresh CI. No local database,
+migration, rollout or production operation is authorized by this checkpoint.
+
+Rebased E1 validation: 31 focused fingerprint, strategy-budget and deployment
+unit cases pass without a database. All 492 modules are fully selected in CI;
+there are no baseline/partial omissions. The local producer bytes match their
+immutable lock. Remote producer parity and full E1 CI require the new run.

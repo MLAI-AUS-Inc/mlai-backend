@@ -1,0 +1,146 @@
+{
+  "app_root": "",
+  "branch": "main",
+  "capture_status": "complete",
+  "captured_at": "2026-10-15T00:00:00+00:00",
+  "digest": "53342f112bd88a79248a4a2aab1b0045ace5db1d436feb38a0264b77f6f03dce",
+  "fields": {
+    "adapter": {
+      "confidence": "high",
+      "evidence": [
+        "detect_article_framework_adapter"
+      ],
+      "value": "astro"
+    },
+    "app_roots": {
+      "confidence": "high",
+      "evidence": [
+        "repository_tree"
+      ],
+      "value": {
+        "candidates": [],
+        "selected": "",
+        "workspace": false
+      }
+    },
+    "blog": {
+      "confidence": "unknown",
+      "evidence": [],
+      "value": null
+    },
+    "build": {
+      "confidence": "high",
+      "evidence": [
+        "netlify.toml",
+        "package.json"
+      ],
+      "value": {
+        "cwd": "",
+        "invocation": [
+          "pnpm",
+          "run",
+          "build"
+        ],
+        "output": "dist",
+        "script": "build"
+      }
+    },
+    "framework": {
+      "confidence": "high",
+      "evidence": [
+        "repository_inventory.tech_stack"
+      ],
+      "value": "astro"
+    },
+    "hosting": {
+      "confidence": "medium",
+      "evidence": [
+        "netlify.toml"
+      ],
+      "value": {
+        "candidates": [
+          "netlify"
+        ],
+        "conflict": false,
+        "provider": "netlify"
+      }
+    },
+    "lockfiles": {
+      "confidence": "high",
+      "evidence": [
+        "pnpm-lock.yaml"
+      ],
+      "value": [
+        {
+          "manager": "pnpm",
+          "path": "pnpm-lock.yaml",
+          "sha256": "f7529a1fe88f19b89a3eef864d3363d12d446cd63171b48fb71d1b03b8489d20"
+        }
+      ]
+    },
+    "package_manager": {
+      "confidence": "high",
+      "evidence": [
+        "package.json",
+        "pnpm-lock.yaml"
+      ],
+      "value": {
+        "conflict": false,
+        "name": "pnpm",
+        "version": "9.1.0"
+      }
+    },
+    "private_build_inputs": {
+      "confidence": "medium",
+      "evidence": [
+        "package.json"
+      ],
+      "value": {
+        "environment_names": [],
+        "registry_configured": false,
+        "scoped_packages": []
+      }
+    },
+    "robots": {
+      "confidence": "unknown",
+      "evidence": [],
+      "value": null
+    },
+    "router": {
+      "confidence": "unknown",
+      "evidence": [],
+      "value": null
+    },
+    "routing": {
+      "confidence": "unknown",
+      "evidence": [
+        "netlify.toml"
+      ],
+      "value": null
+    },
+    "runtime": {
+      "confidence": "high",
+      "evidence": [
+        ".nvmrc"
+      ],
+      "value": {
+        "node": "22.1.0"
+      }
+    },
+    "sitemap": {
+      "confidence": "unknown",
+      "evidence": [],
+      "value": null
+    },
+    "styling": {
+      "confidence": "unknown",
+      "evidence": [],
+      "value": []
+    }
+  },
+  "github_repo": "example/site",
+  "issues": [],
+  "public_status": "not_observed",
+  "schema_version": 1,
+  "source_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+}

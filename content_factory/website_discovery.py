@@ -42,7 +42,7 @@ def discovery_snapshot(value):
     raw_paths = normalized.get("support_paths") if isinstance(normalized.get("support_paths"), list) else []
     support_paths = [{key: item[key][:1000] for key in ("id", "label", "status", "reason", "action") if isinstance(item.get(key), str)}
         for item in raw_paths[:8] if isinstance(item, dict) and item.get("id") in {"native", "custom_contract", "bring_ci", "provider", "portable"}]
-    return {"version": 1, "complete": inventory.get("discovery_complete") is True or payload.get("scan_complete") is True or normalized.get("discovery_complete") is True,
+    result = {"version": 1, "complete": inventory.get("discovery_complete") is True or payload.get("scan_complete") is True or normalized.get("discovery_complete") is True,
         "sourceSha": inventory.get("source_sha") or inventory.get("repo_head_sha") or payload.get("repo_head_sha") or payload.get("commit_sha") or normalized.get("source_sha") or None,
         "githubRepo": inventory.get("github_repo") or payload.get("github_repo") or "",
         "repositoryId": inventory.get("repository_id") or payload.get("repository_id"),
@@ -52,6 +52,13 @@ def discovery_snapshot(value):
             or payload.get("detected_framework") or payload.get("framework") or normalized.get("framework"),
         "resolution": resolution, "candidates": candidates, "publishReady": False,
         "supportLevel": str(normalized.get("support_level") or "unsupported")[:100], "supportPaths": support_paths}
+    from .website_site_fingerprint import project, framework_hint
+    fingerprint = project(inventory.get('site_fingerprint'), github_repo=result['githubRepo'],
+        source_sha=result['sourceSha'], branch=result['branch'], app_root=result['appRoot'])
+    if fingerprint:
+        result['siteFingerprint'] = fingerprint
+        result['framework'] = framework_hint(fingerprint) or result['framework']
+    return result
 
 
 def normalize_scan_callback(value):

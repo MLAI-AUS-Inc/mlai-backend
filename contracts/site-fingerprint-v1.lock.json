@@ -1,0 +1,7 @@
+{
+  "schema_version": 1,
+  "sha256": "0bda1c4eb8ce2f8e5128a7426eeaec2827a61d5d76b57f1c254396de6b691eda",
+  "source_path": "backend/contracts/site-fingerprint-v1.example.json",
+  "source_repository": "drsamdonegan/content-factory",
+  "source_revision": "83fcec6ec783dbea93d75ae8001f8861bda8b6dd"
+}

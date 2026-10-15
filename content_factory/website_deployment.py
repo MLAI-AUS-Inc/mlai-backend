@@ -138,13 +138,25 @@ def read_files(connection, source):
 def ensure_fingerprint(connection, binding):
     """Reuse only a same-generation/source/root observation and fence new reads."""
     if not enabled():return None
+    from .website_site_fingerprint import enabled as site_enabled, for_connection, hosting_hint
     source = binding["source_sha"]
     with authority_guard(binding, action="read") as current:
         saved = goals.mapping(current.capabilities).get("deploymentFingerprint")
-        if valid(saved, current, source):return saved
+        site = for_connection(current, source)
+        site_digest = site['digest'] if site else None
+        if valid(saved, current, source) and (not site_enabled() or saved.get('siteFingerprintDigest') == site_digest):return saved
     files, default_branch = read_files(connection, source)
     value = {**fingerprint(files, app_root=connection.app_root, branch=connection.branch, default_branch=default_branch),
         "sourceSha": source, "connectionGeneration": connection.generation, "appRoot": connection.app_root}
+    hint = hosting_hint(site) if site else None
+    if site:
+        value['siteFingerprintDigest'] = site_digest
+    if hint:
+        value['signals'] = sorted(set(value.get('signals', [])) | {'site-fingerprint:' + site['digest'][:12]})[:12]
+        if value['provider'] == 'unknown':
+            value.update(provider=hint, confidence=0.6, automation='unknown')
+        elif value['provider'] not in {hint, 'github_actions'}:
+            value.update(provider='unknown', confidence=0, automation='unknown')
     with authority_guard(binding, action="read") as current:
         current.capabilities = {**goals.mapping(current.capabilities), "deploymentFingerprint": value}
         current.save(update_fields=["capabilities", "updated_at"])
