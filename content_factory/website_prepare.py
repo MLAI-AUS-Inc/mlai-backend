@@ -836,10 +836,12 @@ def _return_to_open_setup_pr(op, config, journey):
     waits to be published. A pull request built on an older branch head is
     stale and is not resumed.
     """
-    from .website_connections import open_setup_pr_run
+    from .website_connections import open_setup_pr_run, setup_kit_check_failed
     source_sha = (journey.get("repository") or {}).get("observedSourceSha") or ""
     run = open_setup_pr_run(op.connection, source_sha=source_sha)
-    if run is None:
+    if run is None or (op.payload.get("repair_setup") and setup_kit_check_failed(run)):
+        # The owner cannot fix MLAI's own verification job on this pull request;
+        # their Try again builds a new setup and kit instead of re-reading it.
         return None
     op.receipt = {**op.receipt, "child_run_id": run.run_id, "setup_run_id": run.run_id, "current_step": "merge",
         "status": "working", "message": "Returning to your articles setup pull request.", "user_action": None,

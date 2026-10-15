@@ -277,7 +277,7 @@ class InvocationAuthorityTests(SimpleTestCase):
         self.assertEqual(context["trigger_event_id"], invocation.source_event_id)
         self.assertEqual(context["root_event_id"], invocation.thread_id)
         self.assertEqual(context["invocation_id"], str(invocation.pk))
-        self.assertEqual(context["expires_at"], int(invocation.expires_at.timestamp()))
+        self.assertEqual(context["expires_at"], int(NOW.timestamp()) + 840)
         self.assertTrue(PublicKeyXOnly(bytes.fromhex(event["pubkey"])).verify(bytes.fromhex(event["sig"]), bytes.fromhex(event["id"])))
 
     def test_reply_serializer_rejects_caller_selected_destination_identity_and_blank(self):
