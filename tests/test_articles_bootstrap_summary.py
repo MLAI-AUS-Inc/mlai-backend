@@ -35,6 +35,8 @@ class BootstrapSummaryTests(SimpleTestCase):
     def test_internal_bootstrap_callers_also_default_to_summary(self):
         context = SimpleNamespace(organization=SimpleNamespace(id=1))
         with patch.object(views, "_get_config", return_value=SimpleNamespace()), patch.object(
+            views, "_latest_runs_for_org", return_value=[]
+        ), patch.object(
             views, "_bootstrap_cache_seconds", return_value=0
         ), patch.object(views, "_compute_bootstrap_payload", return_value={}) as compute, patch.object(
             views, "_overlay_live_bootstrap_fields", side_effect=lambda payload, **kwargs: payload

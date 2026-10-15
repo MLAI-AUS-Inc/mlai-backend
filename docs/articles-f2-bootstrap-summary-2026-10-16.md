@@ -14,7 +14,8 @@ reconciliation retain their ownership and authority boundaries.
 
 Record response bytes and elapsed time from DRF's first negotiated render.
 Cache that rendered content on the response so measuring it does not introduce
-a second encoding. Count actual delivered bytes, including renderer options.
+a second encoding. Count negotiated, uncompressed response bytes, including
+renderer options; compression and transport overhead are outside this metric.
 
 Validate with the real run serializer and a synthetic 24-run company carrying
 large review artifacts. Record response sizes and rendering durations, check
@@ -44,3 +45,24 @@ The remaining F2 work includes overlay caching that preserves immediate
 per-user authority/revocation checks, end-to-end Chat lazy-detail validation,
 and measurement of the complete endpoint against the 300 KB / one-second p95
 budget. A local serialization benchmark is not production latency evidence.
+
+## Complete read path
+
+Capability projection still reaches account-liveness and repository-HEAD probes
+on a cache miss. Bootstrap must select an explicit observation-only mode in both
+views. That mode reads finite existing probe results, checks current actor and
+connection scope, and returns an unverified observation when none exists. It
+must never mint credentials, perform HTTP, or acquire a probe lease. Explicit
+admission and background verification retain their current probing behavior.
+Repository observations must include the live connection state, repository,
+installation, branch, generation and configuration revision in their identity,
+so a cached positive observation cannot survive a changed or revoked binding.
+
+Load the current config and recent runs once for each bootstrap request and
+reuse them for capability and workflow projection. This is request-local reuse;
+it does not cache actor authority across requests. A cached payload still gets
+current connection, capability, journey and goal status. Check actual cold and
+warm endpoint responses with 24 large persisted runs in the existing disposable
+CI database, including total encoded bytes, SQL count and elapsed time. Run only
+database/network-denying unit tests locally. Broader overlay caching and SQL JSON
+projection follow measured endpoint evidence; they cannot weaken scope checks.

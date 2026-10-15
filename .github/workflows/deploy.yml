@@ -299,6 +299,7 @@ jobs:
           tests.test_daily_research_policy_unit \
           tests.test_vibe_marketing_bootstrap_performance \
           tests.test_articles_bootstrap_summary \
+          tests.test_articles_bootstrap_read_path \
           tests.test_bootstrap_setup_merge_fact
 
     - name: Check chat background retries and preview failure caches without database access
@@ -704,8 +705,8 @@ jobs:
     # Exercise the article chain before the expensive graph-rewind regressions,
     # so a controller/billing failure has a short, separately named CI result.
     # This uses the same disposable PostgreSQL schema and never deploys.
-    - name: Run first-article provider-chain PostgreSQL tests
-      run: python manage.py test content_factory.tests_website_first_article_database --verbosity 2
+    - name: Run first-article and bootstrap-budget PostgreSQL tests
+      run: python manage.py test content_factory.tests_website_first_article_database tests.test_articles_bootstrap_endpoint_budget --verbosity 2
 
     - name: Run formerly unassigned and partially selected Django suites
       run: |
