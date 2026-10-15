@@ -1,11 +1,20 @@
 import threading
 import time
 import uuid
+from contextlib import contextmanager
 from unittest import skipUnless
 from unittest.mock import MagicMock, patch
 
 from django.contrib.auth import get_user_model
-from django.db import close_old_connections, connection
+from django.db import close_old_connections, connection, transaction
+from django.db.models.constants import LOOKUP_SEP
+from django.db.models.sql.compiler import (
+    SQLAggregateCompiler,
+    SQLCompiler,
+    SQLDeleteCompiler,
+    SQLInsertCompiler,
+    SQLUpdateCompiler,
+)
 from django.test import TransactionTestCase
 from django.utils import timezone
 
@@ -190,6 +199,88 @@ class SlackDmIoAuthorityTests(SlackDmIoAuthorityFixture, TransactionTestCase):
             SlackDmMirrorConversationStatus.PAUSED,
         )
         self.assertEqual(self.conversation.last_error, "before-discovery")
+
+
+@contextmanager
+def recorded_row_locks():
+    """Record the tables each SELECT ... FOR UPDATE locks, on any backend.
+
+    SQLite never emits FOR UPDATE, so record Django's lock request instead.
+    Without OF, PostgreSQL also locks every joined table's rows.
+    """
+    tables: list[str] = []
+    original = SQLCompiler.execute_sql
+    writes = (SQLAggregateCompiler, SQLDeleteCompiler, SQLInsertCompiler, SQLUpdateCompiler)
+
+    def execute_sql(compiler, *args, **kwargs):
+        result = original(compiler, *args, **kwargs)
+        query = compiler.query
+        if not isinstance(compiler, writes) and query.select_for_update:
+            model = query.model
+            if query.select_for_update_of:
+                for name in query.select_for_update_of:
+                    target = model
+                    for part in name.split(LOOKUP_SEP):
+                        if part != "self":
+                            target = target._meta.get_field(part).related_model
+                    tables.append(target._meta.db_table)
+            else:
+                tables.append(model._meta.db_table)
+                tables.extend(
+                    join.table_name
+                    for alias, join in query.alias_map.items()
+                    if query.alias_refcount.get(alias) and join.table_name != model._meta.db_table
+                )
+        return result
+
+    with patch.object(SQLCompiler, "execute_sql", execute_sql):
+        yield tables
+
+
+def live_dm_receipt(event_id="EvOwnerLockOrder"):
+    """Queue a Slack DM message for the fixture's live owner mirror."""
+    from integrations.services.message_sync.inbox import enqueue_slack_callback
+
+    ts = f"{int(timezone.now().timestamp()) - 30}.000100"
+    enqueue_slack_callback({
+        "api_app_id": "AIOAUTH",
+        "team_id": "TIOAUTH",
+        "event_id": event_id,
+        "event": {
+            "type": "message",
+            "channel": "DIOAUTH",
+            "channel_type": "im",
+            "user": "UOTHER",
+            "text": "lock order fixture",
+            "ts": ts,
+        },
+        "authorizations": [{"team_id": "TIOAUTH", "user_id": "UOWNER"}],
+    })
+    return ts
+
+
+class SlackDmInboxLockOrderTests(SlackDmIoAuthorityFixture, TransactionTestCase):
+    def test_dm_receipt_locks_owner_before_owner_grant(self):
+        from integrations.services.message_sync.inbox import process_inbox_once
+
+        user_table = get_user_model()._meta.db_table
+        grant_table = SlackDmMirrorGrant._meta.db_table
+        ts = live_dm_receipt()
+
+        with recorded_row_locks() as tables:
+            self.assertEqual(process_inbox_once(), 1)
+
+        # Consent, discovery and inventory lock user -> all grants. A receipt
+        # that held the grant while waiting for its owner deadlocked them.
+        self.assertIn(user_table, tables)
+        self.assertIn(grant_table, tables)
+        self.assertLess(tables.index(user_table), tables.index(grant_table))
+        self.assertTrue(
+            SlackDmMirrorDelivery.objects.filter(
+                conversation=self.conversation,
+                source_message_id=ts,
+            ).exists()
+        )
 
 
 @skipUnless(
@@ -456,5 +547,81 @@ class SlackDmIoAuthorityTransactionTests(
             SlackDmMirrorConversation.objects.filter(
                 grant=self.grant,
                 slack_conversation_id__in=("DNEW", "GNEW"),
+            ).exists()
+        )
+
+    def test_dm_receipt_and_owner_consent_lock_do_not_deadlock(self):
+        from integrations.services.message_sync.inbox import process_inbox_once
+
+        ts = live_dm_receipt()
+        authority = slack_dm_mirror._capture_slack_grant_api_authority(
+            self.grant, refresh_token=False,
+        )
+        ingested = threading.Event()
+        allow_receipt_commit = threading.Event()
+        owner_started = threading.Event()
+        owner_backend_pid: list[int] = []
+        receipts: list[int] = []
+        errors: list[BaseException] = []
+        original_ingest = slack_dm_mirror.ingest_slack_dm_event
+
+        def ingest_then_wait(payload):
+            result = original_ingest(payload)
+            ingested.set()
+            if not allow_receipt_commit.wait(timeout=5):
+                raise RuntimeError("test timed out waiting to commit the receipt")
+            return result
+
+        def receive():
+            close_old_connections()
+            try:
+                receipts.append(process_inbox_once())
+            except BaseException as exc:
+                errors.append(exc)
+            finally:
+                connection.close()
+
+        def lock_owner():
+            # Discovery, inventory and disconnect all start user -> all grants.
+            close_old_connections()
+            try:
+                connection.ensure_connection()
+                owner_backend_pid.append(connection.connection.info.backend_pid)
+                owner_started.set()
+                with transaction.atomic():
+                    slack_dm_mirror._lock_slack_grant_api_authority(
+                        authority,
+                        required_scopes=slack_dm_mirror.DIRECT_DM_SCOPES,
+                    )
+            except BaseException as exc:
+                errors.append(exc)
+            finally:
+                connection.close()
+
+        with patch.object(
+            slack_dm_mirror, "ingest_slack_dm_event", side_effect=ingest_then_wait,
+        ):
+            receipt_thread = threading.Thread(target=receive)
+            receipt_thread.start()
+            self.assertTrue(ingested.wait(timeout=5))
+            owner_thread = threading.Thread(target=lock_owner)
+            owner_thread.start()
+            self.assertTrue(owner_started.wait(timeout=5))
+            self._wait_until_backend_is_lock_waiting(owner_backend_pid[0])
+            # Before the fix the receipt held only the grant here, then asked
+            # for the owner row that this transaction already holds.
+            allow_receipt_commit.set()
+            receipt_thread.join(timeout=10)
+            owner_thread.join(timeout=10)
+            close_old_connections()
+
+        self.assertFalse(receipt_thread.is_alive())
+        self.assertFalse(owner_thread.is_alive())
+        self.assertEqual(errors, [])
+        self.assertEqual(receipts, [1])
+        self.assertTrue(
+            SlackDmMirrorDelivery.objects.filter(
+                conversation=self.conversation,
+                source_message_id=ts,
             ).exists()
         )
