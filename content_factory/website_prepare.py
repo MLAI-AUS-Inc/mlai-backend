@@ -779,11 +779,18 @@ def wake_prepare_after_commit(connection_id):
     transaction.on_commit(lambda: advance_prepares_for_connection(connection_id), robust=True)
 
 
-def wake_prepare_for_source(connection_id, *, organization_id):
-    """Source changes reopen the current operation without granting new consent."""
+def wake_prepare_for_source(connection_id, *, organization_id, owned_merge_run_id=""):
+    """Source changes reopen the current operation without granting new consent.
+
+    Stopping preparation keeps its setup pull request publishable, so an owned
+    merge of a current-generation setup (MLAI's Publish, or the owner merging
+    that verified pull request on GitHub) also reopens a cancelled preparation
+    to verify that setup. Any other push leaves stopped work stopped.
+    """
     from .website_models import WebsiteConnection
     from .models import OrganizationContentConfig
     from founder_tools.models import VibeRaisingCompany
+    from workflow_runs.models import ContentFactoryRun
     connection = WebsiteConnection.objects.select_related("organization", "authorized_by").filter(
         pk=connection_id, organization_id=organization_id, state="connected").first()
     if connection is None or connection.authorized_by is None:
@@ -800,12 +807,23 @@ def wake_prepare_for_source(connection_id, *, organization_id):
         if latest and owns_goal(latest):
             return wake_goal_for_source(config, company_id=company.pk, user=connection.authorized_by, now=timezone.now())
     op = start_prepare(config, company_id=company.pk, user=connection.authorized_by)
+    reopenable = ["completed", "needs_user", "needs_attention", "pending", "stopped"]
+    owned_setup = bool(owned_merge_run_id) and ContentFactoryRun.objects.filter(run_id=owned_merge_run_id,
+        organization_id=organization_id, workflow="article_system_setup", run_request__website_connection_id=str(connection.pk),
+        run_request__connection_generation=connection.generation).exists()
+    if owned_setup:
+        reopenable.append("cancelled")
+    # Cancellation bookkeeping stays with the cancel follow-up that owns the cleanup.
     receipt = {key: value for key, value in op.receipt.items()
-        if key not in {"scan_run_id", "setup_run_id", "completed_steps", "deployment_wait_started_at", "transient_started_at", "child_resume_pending"}}
+        if key not in {"scan_run_id", "setup_run_id", "completed_steps", "deployment_wait_started_at", "transient_started_at", "child_resume_pending",
+            "remote_effects", "remote_outcome_unknown", "remote_cleanup_pending", "cancellation_undoes_remote_writes"}}
+    if owned_setup:
+        receipt["merged_setup_run_id"] = owned_merge_run_id
     reopened = WebsiteConnectionOperation.objects.filter(pk=op.pk, generation=connection.generation,
-        state__in=["completed", "needs_user", "needs_attention", "pending", "stopped"]).update(state="pending", next_attempt_at=timezone.now(),
+        state__in=reopenable).update(state="pending", next_attempt_at=timezone.now(),
             receipt={**receipt, "status": "working", "current_step": "scan", "deployment_attempts": 0,
-                "step_failures": {}, "user_action": None, "last_completed": None, "child_run_id": None},
+                "step_failures": {}, "user_action": None, "last_completed": None, "child_run_id": None,
+                "message": "Rechecking the changed website source."},
             payload={**{key: value for key, value in op.payload.items() if key not in {"run_id", "repair_setup"}},
                 "source_reverify": True, "attempt": op.payload.get("attempt", 1) + 1, "retry_epoch": uuid4().hex}, updated_at=timezone.now())
     if not reopened:

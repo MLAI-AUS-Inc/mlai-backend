@@ -315,7 +315,7 @@ class JourneyNextStepTests(SimpleTestCase):
         setup = {"runId": "setup-1", "prNumber": 40, "prUrl": PR_URL, "status": "pr_created", "savedSetup": True}
         journey = self.journey(setup_pull_request=setup)
         self.assertEqual(journey["nextAction"], {"id": "setup", "label": "Review setup changes", "step": "integration",
-            "setupRunId": "setup-1"})
+            "setupRunId": "setup-1", "reason": "Your articles setup pull request is ready. Review the changes, then publish."})
         self.assertEqual((journey["reasonCode"], journey["prerequisites"]["integration"]["reasonCode"]),
             ("setup_pr_unmerged", "setup_pr_unmerged"))
         self.assertIn("ready", journey["reason"])
@@ -329,7 +329,9 @@ class JourneyNextStepTests(SimpleTestCase):
 
     def test_without_one_the_journey_is_unchanged(self):
         journey = self.journey()
-        self.assertEqual(journey["nextAction"]["label"], self.source_changed["reason"])
+        # The button is a short verb; the reason sentence is carried beside it.
+        self.assertEqual(journey["nextAction"], {"id": "setup", "label": "Set up articles", "step": "integration",
+            "reason": self.source_changed["reason"]})
         self.assertEqual(journey["reasonCode"], "repository_source_changed")
         self.assertIsNone(journey["setupPullRequest"])
 

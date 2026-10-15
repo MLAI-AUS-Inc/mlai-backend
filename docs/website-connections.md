@@ -304,7 +304,15 @@ before the merge response is saved may use an authenticated read of that same
 merged PR; its merge SHA, repository IDs, branches and head must match. Reads
 occur outside authority locks and the original connection is fenced again before
 persistence. The reconciler checks for a late merge receipt before dispatching
-an inventory scan. Other pushes report
+an inventory scan. The owner may instead merge an approved setup's own pull
+request on GitHub. That push is owned only when GitHub reports the pull request
+merged into the selected branch as the pushed commit, from the selected
+repository at the exact head the setup previewed, and the pushed commit has that
+head's tree. Under the same connection lock the setup then records it as its own
+merge (`merge_sha`, `merged_at`, `merge_response.source=github_owner_merge`),
+unless the run changed or already records a merge commit. Setup settlement and
+CI lineage accept that merge as they accept MLAI's Publish; without a
+`publish_merge_intent` it is never a goal `backend_merge`. Other pushes report
 `repository_source_changed` and additionally queue a fresh inventory scan. The
 reconciler authenticates current-source provider CI and observes listing/detail/
 unknown-slug deployment routes before enabling the new source. A failed or
