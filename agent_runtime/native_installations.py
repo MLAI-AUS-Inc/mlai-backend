@@ -260,8 +260,8 @@ def installation_payload(installation, *, now=None):
     from django.utils.dateparse import parse_datetime
     subscriptions = AgentSubscription.objects.filter(grant=grant, generation=grant.generation,
         is_active=True, event_types=["agent.mentioned"], delivery__mode="webhook") if grant else []
-    live_bindings = [row for row in subscriptions if
-        (parse_datetime(row.delivery.get("expires_at", "")) or now) > now]
+    from .event_webhooks import lease_live
+    live_bindings = [row for row in subscriptions if lease_live(row.delivery, now)]
     from .policy import AgentPermissionDenied
     from .unified_authority import assert_record_authority, assert_unified_authority
     valid_bindings = []
