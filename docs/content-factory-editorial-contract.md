@@ -605,11 +605,14 @@ Full and compact article run responses include a bounded `hostedQualityIssues` l
 
 ## Vibe Marketing response size
 
-The bootstrap response keeps complete recent runs in `latestRuns`. Its
+The bootstrap defaults to `view=summary` and keeps compact recent runs in
+`latestRuns`; explicit `view=full` retains the complete legacy projection. Its
 `latestRunsByWorkflow` field is a small index of the newest run per workflow,
 carrying identifiers, status, approval and publish control state. Clients that
-need the run's result or review artifacts use `latestRuns` or the individual
-run endpoint; the index does not repeat those large values.
+need the run's result or review artifacts use the individual full run endpoint;
+the index does not repeat those large values. Both bootstrap views read stored
+status without refreshing GitHub or reconciling publication. Response timing
+and byte headers are measured from the first negotiated render.
 
 An individual full article run exposes `reviewDraftHtml`, `componentManifest`,
 `contentPackage`, `sectionIssues`, artifacts and diagnostics in their dedicated

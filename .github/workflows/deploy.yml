@@ -298,6 +298,7 @@ jobs:
           integrations.tests_slack_shared_conversation_policy \
           tests.test_daily_research_policy_unit \
           tests.test_vibe_marketing_bootstrap_performance \
+          tests.test_articles_bootstrap_summary \
           tests.test_bootstrap_setup_merge_fact
 
     - name: Check chat background retries and preview failure caches without database access

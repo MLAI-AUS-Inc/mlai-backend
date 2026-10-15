@@ -11426,7 +11426,7 @@ def _overlay_live_bootstrap_fields(payload, *, context, request):
     return payload
 
 
-def _serialize_bootstrap(context, request=None, *, view="full"):
+def _serialize_bootstrap(context, request=None, *, view="summary"):
     config = _get_config(context.organization)
     ttl = _bootstrap_cache_seconds()
     cache_key = _bootstrap_cache_key(context, config, view) if ttl > 0 else None
@@ -11471,31 +11471,13 @@ def _bootstrap_workflow_run_ref(serialized_run):
     return {key: serialized_run.get(key) for key in _BOOTSTRAP_WORKFLOW_RUN_FIELDS}
 
 
-def _compute_bootstrap_payload(context, request=None, *, view="full", config=None):
+def _compute_bootstrap_payload(context, request=None, *, view="summary", config=None):
     compact = view == "summary"
     if config is None:
         config = _get_config(context.organization)
     latest_runs = _latest_runs_for_org(context.organization)
-    if not compact:
-        # A dashboard navigation must never wait for GitHub's PR API. The
-        # setup run page performs this refresh, and the next summary bootstrap
-        # observes its stored state through the cache fingerprint/TTL.
-        _refreshed_setup_run, setup_pr_refreshed = _refresh_pending_article_system_setup_pr_status(
-            context=context, config=config, latest_runs=latest_runs
-        )
-        if setup_pr_refreshed:
-            latest_runs = _latest_runs_for_org(context.organization)
-    if not compact:
-        # Sync written-article lifecycle (PR merged? live on the site?) so the
-        # dashboard badge reflects reality; internally throttled + bounded.
-        try:
-            refresh_publish_statuses(context.organization, config)
-        except Exception:
-            logger.warning(
-                "article_publish_status_refresh_failed org=%s",
-                getattr(context.organization, "pk", None),
-                exc_info=True,
-            )
+    # Bootstrap is a read projection. Explicit full reads must not perform
+    # GitHub reconciliation either; dedicated mutations/background work own it.
     discovery_topic_runs = _recent_discovery_topic_runs_for_org(context.organization)
     topic_limit = 8 if compact else None
     declined_topic_feedback_all = list_topic_feedback(context.organization, feedback_type="declined", limit=100)
@@ -11784,31 +11766,34 @@ def _serialize_bootstrap_without_domain(company):
     return payload
 
 
+class _TimedVibeResponse(Response):
+    """Measure the first negotiated rendering without serializing a second time."""
+
+    @property
+    def rendered_content(self):
+        if not hasattr(self, "_vibe_encoded_content"):
+            content = super().rendered_content
+            self._vibe_encoded_content = content
+            elapsed_ms = (time.perf_counter() - self._vibe_started_at) * 1000
+            payload_bytes = len(content)
+            logger.info(
+                "vibe_marketing_response metric=%s view=%s status=%s bytes=%s duration_ms=%.1f",
+                self._vibe_metric_name, self._vibe_view or "", self.status_code, payload_bytes, elapsed_ms,
+            )
+            self["Server-Timing"] = f"{self._vibe_metric_name};dur={elapsed_ms:.1f}"
+            self["X-MLAI-Serialize-MS"] = f"{elapsed_ms:.1f}"
+            self["X-MLAI-Payload-Bytes"] = str(payload_bytes)
+        return self._vibe_encoded_content
+
+
 def _timed_vibe_response(payload, *, started_at, metric_name, view=None, response_status=status.HTTP_200_OK):
-    elapsed_ms = (time.perf_counter() - started_at) * 1000
-    payload_bytes = 0
-    try:
-        from rest_framework.renderers import JSONRenderer
-        payload_bytes = len(JSONRenderer().render(payload))
-    except (TypeError, ValueError):
-        payload_bytes = 0
-    logger.info(
-        "vibe_marketing_response metric=%s view=%s status=%s bytes=%s duration_ms=%.1f",
-        metric_name,
-        view or "",
-        response_status,
-        payload_bytes,
-        elapsed_ms,
-    )
-    headers = {
-        "Server-Timing": f"{metric_name};dur={elapsed_ms:.1f}",
-        "X-MLAI-Serialize-MS": f"{elapsed_ms:.1f}",
-    }
+    response = _TimedVibeResponse(payload, status=response_status)
+    response._vibe_started_at = started_at
+    response._vibe_metric_name = metric_name
+    response._vibe_view = view
     if view:
-        headers["X-MLAI-View"] = str(view)
-    if payload_bytes:
-        headers["X-MLAI-Payload-Bytes"] = str(payload_bytes)
-    return Response(payload, status=response_status, headers=headers)
+        response["X-MLAI-View"] = str(view)
+    return response
 
 
 def _github_account_for_context(context, config, *, force=False):
@@ -14705,7 +14690,7 @@ class VibeMarketingAbnLookupView(APIView):
 class VibeMarketingBootstrapView(APIView):
     def get(self, request):
         started_at = time.perf_counter()
-        view = "summary" if str(request.query_params.get("view") or "").strip().lower() == "summary" else "full"
+        view = "full" if str(request.query_params.get("view") or "").strip().lower() == "full" else "summary"
         _profile, company, error_response = _resolve_profile_company_or_response(request)
         if error_response is not None:
             return error_response
