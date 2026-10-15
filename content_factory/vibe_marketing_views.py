@@ -11367,19 +11367,19 @@ def _bootstrap_cache_key(context, config, view):
 
 
 def _overlay_live_bootstrap_fields(payload, *, context, request, config=None, latest_runs=None, capabilities=None):
-    """Recompute the only per-user / per-request fields so they are never cached.
+    """Refresh current website facts and actor authority even on cache hits.
 
-    googleBaselineConnection depends on the authenticated user's Google credentials
-    and its connectUrl is derived from the request, so both must reflect the live
-    request even on a cache hit. Every other field in the payload is org-derived.
+    Optional inputs are reused only within the calling request. Google credentials
+    and connect URLs also belong to that authenticated request.
     """
     if not isinstance(payload, dict):
         return payload
     website_config = config if config is not None else _get_config(context.organization)
     website = website_summary(website_config, company_id=context.company.pk)
     payload["websiteConnection"] = website
-    if isinstance(payload.get("articleSetupState"), dict):
-        payload["articleSetupState"] = {**payload["articleSetupState"], "websiteConnection": website}
+    for key in ("articleSetupState", "article_setup_state"):
+        if isinstance(payload.get(key), dict):
+            payload[key] = {**payload[key], "websiteConnection": website}
     try:
         google_status = google_baseline_connection_status(context.profile.user, context.organization)
         google_status["connectUrl"] = _google_baseline_connect_url(request, context)

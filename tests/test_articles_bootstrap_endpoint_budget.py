@@ -32,7 +32,7 @@ class BootstrapEndpointBudgetTests(ContentIslandBootstrapTestCase):
         html = "<article>" + "large-review-sentinel " * 90_000 + "</article>"
         ContentFactoryRun.objects.bulk_create([ContentFactoryRun(run_id=f"budget-article-{index}",
             organization=self.organization, domain=self.organization.domain, github_repo=self.website.github_repo,
-            workflow="article", status="completed", run_request={"keyword": f"fixture topic {index}",
+            workflow="article_generation", status="completed", run_request={"keyword": f"fixture topic {index}",
                 "delivery_mode": "content_only", "website_connection_id": str(self.website.pk),
                 "connection_generation": self.website.generation},
             result={"review_draft_html": html, "title": f"Fixture article {index}",
