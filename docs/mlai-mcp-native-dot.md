@@ -80,6 +80,49 @@ to the provider manually.
 
 ## Disabled-by-default rollout
 
+The following controls are plumbed for later rollout. Admission, replay, durable
+watch, alerts and renewal remain disabled. The lease policy remains `24h`.
+Changing these defaults is a separate owner deployment action.
+
+| Setting | Default | Allowed |
+| --- | --- | --- |
+| `AGENT_RUNTIME_NATIVE_ALWAYS_ADMIT` | `false` | true / false |
+| `AGENT_RUNTIME_NATIVE_QUEUE_TTL_MINUTES` | `1440` | 15–10080 |
+| `AGENT_RUNTIME_NATIVE_ADMISSION_DAILY_CAP` | `200` | 1–1000 |
+| `AGENT_RUNTIME_NATIVE_LIMIT_TIMEZONE` | `Australia/Melbourne` | IANA timezone |
+| `AGENT_RUNTIME_NATIVE_BACKLOG_REPLAY` | `false` | true / false |
+| `AGENT_RUNTIME_MCP_EVENTS_LEASE_POLICY` | `24h` | 24h / grant |
+| `AGENT_RUNTIME_NATIVE_DURABLE_WATCH` | `false` | true / false |
+| `AGENT_RUNTIME_NATIVE_DENIAL_GRACE_SECONDS` | `600` | 60–86400 |
+| `AGENT_RUNTIME_NATIVE_UNIFIED_GRACE_SECONDS` | `86400` | 600–604800 |
+| `AGENT_RUNTIME_NATIVE_LAPSE_ALERTS` | `false` | true / false |
+| `AGENT_RUNTIME_NATIVE_RENEWAL_ENABLED` | `false` | true / false |
+| `MLAI_MCP_AGENT_GRANT_EXTENSION_ENABLED` | `false` | true / false |
+| `MLAI_MCP_REFRESH_REPLAY_GRACE_SECONDS` | `0` | 0–300 |
+
+
+Safety fixes apply independently of the later rollout switches. Scheduler stages
+and webhook subscriptions are isolated, and the native worker writes a heartbeat
+after each stage. Its Compose healthcheck allows a maximum age of 300 seconds.
+Diagnostics contain stage/error type and subscription ID where applicable;
+exception messages and stack locals are omitted to keep work content private.
+
+Invocation lifetime remains 15 minutes. Every thread/reply relay context is
+capped at the earlier of invocation expiry or the call's clock plus 840 seconds.
+A queued reply keeps its exact signed event and is never re-signed. The dispatcher
+checks its signed deadline again after source authorization; elapsed windows fail
+without sending, or retain `stopped_unknown` after an ambiguous earlier send.
+Expired invocation rows remain readable through the status tool under current
+grant, caller and resource authority, without allowing another content read/send.
+
+The unified MCP adapter keeps OAuth reconnect challenges for scope or unified
+connection failures. Application failures return a structured error with status
+409 and a specific code, including `owner_action_required`, `invocation_expired`,
+`invocation_cancelled`, `invocation_replied`, `invocation_ambiguous`,
+`reply_conflict` and `daily_limit_reached`. An expired mention or quota limit does
+not ask ChatGPT to obtain more OAuth permission. Mention webhook schemas and
+installation payload status values are unchanged.
+
 The existing MLAI availability requirements remain in force. A deployment must
 configure the existing public MCP origin and shared Redis and explicitly enable
 the compatible startup/MLAI connection gates. Personal agents additionally
