@@ -264,6 +264,16 @@ class SetupMergePolicyUnitTests(SimpleTestCase):
         self.assertEqual(self.merge_calls, [])
         self.assertEqual(self.run.result["merge_status"], "checks_failed")
         self.assertIn("MLAI articles verification failed", self.run.result["merge_blocked_reason"])
+        self.assertIn("Try again", self.run.result["merge_blocked_reason"])
+        from .website_connections import setup_kit_check_failed
+        self.assertEqual((self.run.result["checks_source"], self.run.result["article_system_setup"]["checks_source"]),
+            ("verification_kit", "verification_kit"))
+        self.assertTrue(setup_kit_check_failed(self.run))
+        # A later block for another reason no longer names the kit.
+        views._mark_setup_merge_blocked(run=self.run, config=self.config, reason="Merge it in GitHub.")
+        self.assertNotIn("checks_source", self.run.result)
+        self.assertNotIn("checks_source", self.run.result["article_system_setup"])
+        self.assertFalse(setup_kit_check_failed(self.run))
 
     def test_kit_setup_merges_once_its_verify_check_passed(self):
         result = self.kit_merge(self.verify_run("completed", "success"),
