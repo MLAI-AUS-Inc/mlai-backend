@@ -4,6 +4,7 @@ import urllib.parse
 from django.contrib.auth import get_user_model
 from django.test import Client, TestCase, override_settings
 from django.urls import reverse
+from django.utils import timezone
 from rest_framework.test import APIClient
 from rest_framework_simplejwt.tokens import RefreshToken
 
@@ -379,6 +380,12 @@ class GoogleOAuthViewTests(TestCase):
         founder_profile.save(update_fields=["active_company", "updated_at"])
 
         organization = Organization.objects.create(name="Acme", domain="acme.com")
+        company.organization = organization
+        company.abn = '89000000019'
+        company.acn = '000000019'
+        company.entity_type_code = 'PRV'
+        company.abr_verified_at = timezone.now()
+        company.save(update_fields=['organization', 'abn', 'acn', 'entity_type_code', 'abr_verified_at'])
         UserStartupBinding.objects.create(
             user=self.user,
             organization=organization,

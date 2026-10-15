@@ -2115,9 +2115,9 @@ class VibeRaisingApiTests(TestCase):
 
         self.assertEqual(first.status_code, 201)
         self.assertEqual(first.data["state"], "queued")
-        self.assertFalse(first.data["reusedExistingRun"])
+        self.assertIsInstance(first.data['updateId'], int)
         self.assertEqual(second.status_code, 200)
-        self.assertTrue(second.data["reusedExistingRun"])
+        self.assertEqual(second.data['updateId'], first.data['updateId'])
         self.assertEqual(ContentFactoryRun.objects.filter(workflow="startup_monthly_update").count(), 1)
         self.assertEqual(first.data["runId"], second.data["runId"])
         mock_notify.assert_called_once()
@@ -2278,11 +2278,10 @@ class VibeRaisingApiTests(TestCase):
                 format="json",
             )
 
-        self.assertEqual(response.status_code, 200)
-        self.assertTrue(response.data["targetMonthConflict"])
-        self.assertEqual(response.data["requestedTargetMonth"], "2026-03-01")
-        self.assertEqual(response.data["activeTargetMonth"], "2026-04-01")
-        self.assertEqual(response.data["runId"], active_run.run_id)
+        self.assertEqual(response.status_code, 409)
+        active_run.refresh_from_db()
+        self.assertEqual(active_run.run_request['target_month'], '2026-04-01')
+        self.assertEqual(active_run.status, ContentFactoryRunStatus.QUEUED)
         self.assertEqual(ContentFactoryRun.objects.filter(workflow="startup_monthly_update").count(), 1)
         mock_notify.assert_not_called()
 
@@ -2324,7 +2323,7 @@ class VibeRaisingApiTests(TestCase):
             )
 
         self.assertEqual(retry.status_code, 200)
-        self.assertTrue(retry.data["reusedExistingRun"])
+        self.assertIsInstance(retry.data['updateId'], int)
         self.assertEqual(retry.data["runId"], run.run_id)
         run.refresh_from_db()
         self.assertEqual(run.result["_valley_meta"]["dispatch_status"], "queued")
@@ -2366,7 +2365,7 @@ class VibeRaisingApiTests(TestCase):
 
         self.assertEqual(response.status_code, 201)
         self.assertEqual(response.data["state"], "queued")
-        self.assertFalse(response.data["reusedExistingRun"])
+        self.assertIsInstance(response.data['updateId'], int)
         self.assertEqual(ContentFactoryRun.objects.filter(workflow="startup_monthly_update").count(), 2)
         regenerated_run = ContentFactoryRun.objects.get(run_id=response.data["runId"])
         self.assertEqual(regenerated_run.run_request["input_sources"], ["gmail", "xero"])
@@ -2385,7 +2384,7 @@ class VibeRaisingApiTests(TestCase):
             )
 
         self.assertEqual(response.status_code, 200)
-        self.assertTrue(response.data["reusedExistingRun"])
+        self.assertEqual(response.data['updateId'], run.run_request['update_id'])
         self.assertEqual(response.data["runId"], run.run_id)
         mock_notify.assert_not_called()
 
@@ -2489,45 +2488,25 @@ class VibeRaisingApiTests(TestCase):
     def test_email_draft_start_redispatches_stale_queued_run(self):
         self.client.force_authenticate(user=self.user)
         self._create_founder_company()
-        google_connection = GoogleConnection.objects.create(
-            user=self.user,
-            google_email="founder@gmail.com",
-            refresh_token="refresh-token",
-            scope="https://www.googleapis.com/auth/gmail.readonly",
-        )
-        organization, _ = Organization.objects.get_or_create(
-            domain="acme.com", defaults={"name": "Acme Inc."}
-        )
-        binding = UserStartupBinding.objects.create(
-            user=self.user,
-            organization=organization,
-            google_connection=google_connection,
-            role="founder",
-            is_default_for_gmail=True,
-        )
-        run = create_startup_update_run(
-            organization=organization,
-            binding=binding,
-        )
-        ContentFactoryRun.objects.filter(pk=run.pk).update(
-            updated_at=timezone.now() - timedelta(minutes=5),
-        )
-
-        with patch("vibe_raising.views.notify_valley_run_created") as mock_notify:
-            with self.captureOnCommitCallbacks(execute=True):
-                response = self.client.post(
-                    "/api/v1/vibe-raising/email-draft/start/",
-                    {},
-                    format="json",
-                )
-
-        self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.data["state"], "queued")
-        self.assertEqual(response.data["runId"], run.run_id)
-        self.assertEqual(ContentFactoryRun.objects.filter(workflow="startup_monthly_update").count(), 1)
+        self._create_google_connection()
+        with patch("vibe_raising.views.notify_valley_run_created", return_value=ValleyHarnessResult(
+                ok=True, payload={"job_id": "queued-job", "status": "queued"})) as mock_notify:
+            first = self.client.post("/api/v1/vibe-raising/email-draft/start/",
+                {"targetMonth": "2026-03-01"}, format="json")
+            self.assertEqual(first.status_code, 201, first.data)
+            run = ContentFactoryRun.objects.get(run_id=first.data['runId'])
+            self.assertEqual(run.run_request['update_id'], first.data['updateId'])
+            ContentFactoryRun.objects.filter(pk=run.pk).update(updated_at=timezone.now() - timedelta(minutes=5))
+            mock_notify.reset_mock()
+            response = self.client.post("/api/v1/vibe-raising/email-draft/start/",
+                {"targetMonth": "2026-03-01", "updateId": first.data['updateId']}, format="json")
+        self.assertEqual(response.status_code, 200, response.data)
+        self.assertEqual(response.data['state'], 'queued')
+        self.assertEqual(response.data['runId'], run.run_id)
+        self.assertEqual(ContentFactoryRun.objects.filter(workflow='startup_monthly_update').count(), 1)
         mock_notify.assert_called_once_with(run.run_id)
 
-    def test_email_draft_start_supersedes_other_connection_open_run(self):
+    def test_email_draft_start_preserves_other_connection_open_run(self):
         self.client.force_authenticate(user=self.user)
         self._create_founder_company()
         google_connection = self._create_google_connection()
@@ -2574,14 +2553,12 @@ class VibeRaisingApiTests(TestCase):
                     format="json",
                 )
 
-        self.assertEqual(response.status_code, 201)
-        new_run = ContentFactoryRun.objects.get(run_id=response.data["runId"])
+        self.assertEqual(response.status_code, 409)
         other_run.refresh_from_db()
-        self.assertNotEqual(new_run.run_id, other_run.run_id)
-        self.assertEqual(new_run.run_request["google_connection_id"], google_connection.id)
-        self.assertEqual(other_run.status, ContentFactoryRunStatus.FAILED)
-        self.assertEqual(other_run.error, SUPERSEDED_GMAIL_CONNECTION_ERROR)
-        mock_notify.assert_called_once_with(new_run.run_id)
+        self.assertEqual(other_run.run_request['google_connection_id'], other_connection.id)
+        self.assertEqual(other_run.status, ContentFactoryRunStatus.QUEUED)
+        self.assertEqual(ContentFactoryRun.objects.filter(organization=organization).count(), 1)
+        mock_notify.assert_not_called()
 
     def test_email_draft_status_reports_queued_then_running_for_open_run(self):
         self.client.force_authenticate(user=self.user)
@@ -3225,66 +3202,41 @@ class VibeRaisingApiTests(TestCase):
         self.assertIn("Stale alpha", str(merged.structured_memo))
         self.assertIn("Fresh delta", str(merged.structured_memo))
 
-    def test_email_draft_start_reuses_completed_draft_without_creating_run(self):
+    def test_email_draft_start_regenerates_completed_draft_without_publishing_or_discarding_it(self):
         self.client.force_authenticate(user=self.user)
         self._create_founder_company()
-        google_connection = GoogleConnection.objects.create(
-            user=self.user,
-            google_email="founder@gmail.com",
-            refresh_token="refresh-token",
-            scope="https://www.googleapis.com/auth/gmail.readonly",
-        )
-        organization, _ = Organization.objects.get_or_create(
-            domain="acme.com", defaults={"name": "Acme Inc."}
-        )
-        UserStartupBinding.objects.create(
-            user=self.user,
-            organization=organization,
-            google_connection=google_connection,
-            role="founder",
-            is_default_for_gmail=True,
-        )
-        MonthlyUpdateDraft.objects.create(
-            organization=organization,
-            month=date(2026, 3, 1),
-            status="ready",
-            structured_memo={
-                "highlights": ["Closed two new pilots"],
-                "lowlights": ["Hiring is still slow"],
-                "asks": ["Customer intros"],
-                "kpi_snapshot": [{"metric_key": "revenue", "label": "Revenue", "value": "$45,000"}],
-            },
-            rendered_markdown="# March Update",
-        )
+        connection = self._create_google_connection()
+        organization = Organization.objects.get(domain='acme.com')
+        UserStartupBinding.objects.create(user=self.user, organization=organization,
+            google_connection=connection, role='founder', is_default_for_gmail=True)
+        memo = {'highlights': ['Closed two new pilots'], 'lowlights': ['Hiring is still slow'],
+            'asks': ['Customer intros'], '_month_sequence': 1}
+        draft = MonthlyUpdateDraft.objects.create(organization=organization, month=date(2026, 3, 1),
+            status='ready', structured_memo=memo, rendered_markdown='# March Update')
+        with patch('vibe_raising.views.notify_valley_run_created', return_value=ValleyHarnessResult(
+                ok=True, payload={'job_id': 'new-generation', 'status': 'queued'})) as notify:
+            response = self.client.post('/api/v1/vibe-raising/email-draft/start/',
+                {'targetMonth': '2026-03-01', 'updateId': draft.pk}, format='json')
+            self.assertEqual(response.status_code, 201, response.data)
+            self.assertEqual(response.data['state'], 'queued')
+            self.assertEqual(response.data['updateId'], draft.pk)
+            first_run = ContentFactoryRun.objects.get(run_id=response.data['runId'])
+            self.assertEqual(first_run.run_request['update_id'], draft.pk)
+            draft.refresh_from_db()
+            self.assertEqual(draft.structured_memo, memo)
+            self.assertIsNone(draft.published_at)
+            first_run.status = ContentFactoryRunStatus.COMPLETED
+            first_run.save(update_fields=['status'])
+            notify.reset_mock()
+            forced = self.client.post('/api/v1/vibe-raising/email-draft/start/',
+                {'targetMonth': '2026-03-01', 'updateId': draft.pk, 'forceRegenerate': True}, format='json')
+        self.assertEqual(forced.status_code, 201, forced.data)
+        self.assertEqual(forced.data['updateId'], draft.pk)
+        self.assertNotEqual(forced.data['runId'], first_run.run_id)
+        self.assertEqual(ContentFactoryRun.objects.filter(workflow='startup_monthly_update').count(), 2)
+        notify.assert_called_once_with(forced.data['runId'])
 
-        response = self.client.post(
-            "/api/v1/vibe-raising/email-draft/start/",
-            {"targetMonth": "2026-03-01"},
-            format="json",
-        )
-
-        self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.data["state"], "completed")
-        self.assertEqual(response.data["targetMonth"], "2026-03-01")
-        self.assertFalse(ContentFactoryRun.objects.filter(workflow="startup_monthly_update").exists())
-        self.assertEqual(response.data["currentMonth"]["metrics"]["revenue"], "$45,000")
-
-        with patch("vibe_raising.views.notify_valley_run_created") as mock_notify:
-            with self.captureOnCommitCallbacks(execute=True):
-                forced_response = self.client.post(
-                    "/api/v1/vibe-raising/email-draft/start/",
-                    {"targetMonth": "2026-03-01", "forceRegenerate": True},
-                    format="json",
-                )
-
-        self.assertEqual(forced_response.status_code, 201)
-        self.assertEqual(forced_response.data["state"], "queued")
-        self.assertEqual(forced_response.data["targetMonth"], "2026-03-01")
-        forced_run = ContentFactoryRun.objects.get(run_id=forced_response.data["runId"])
-        self.assertEqual(forced_run.run_request["target_month"], "2026-03-01")
-        mock_notify.assert_called_once_with(forced_run.run_id)
-
-    def test_email_draft_start_refreshes_xero_metrics_when_reusing_completed_draft(self):
+    def test_email_draft_start_refreshes_xero_metrics_when_regenerating_completed_draft(self):
         self.client.force_authenticate(user=self.user)
         self._create_founder_company()
         google_connection = self._create_google_connection()
@@ -3328,7 +3280,9 @@ class VibeRaisingApiTests(TestCase):
             rendered_markdown="# March Update",
         )
 
-        with patch("vibe_raising.views.publish_xero_metric_observations") as mock_publish:
+        with patch("vibe_raising.views.publish_xero_metric_observations") as mock_publish, \
+             patch("vibe_raising.views.notify_valley_run_created", return_value=ValleyHarnessResult(
+                 ok=True, payload={"job_id": "refreshed-generation", "status": "queued"})) as notify:
             mock_publish.return_value = {"warnings": [], "published_metric_count": 0}
             response = self.client.post(
                 "/api/v1/vibe-raising/email-draft/start/",
@@ -3336,10 +3290,11 @@ class VibeRaisingApiTests(TestCase):
                 format="json",
             )
 
-        self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.data["state"], "completed")
-        self.assertFalse(response.data["reusedExistingRun"])
-        self.assertEqual(ContentFactoryRun.objects.filter(workflow="startup_monthly_update").count(), 1)
+        self.assertEqual(response.status_code, 201, response.data)
+        self.assertEqual(response.data["state"], "queued")
+        self.assertNotEqual(response.data["runId"], run.run_id)
+        notify.assert_called_once_with(response.data["runId"])
+        self.assertEqual(ContentFactoryRun.objects.filter(workflow="startup_monthly_update").count(), 2)
         mock_publish.assert_called_once()
         self.assertEqual(mock_publish.call_args.kwargs["organization"], organization)
         self.assertIsNone(mock_publish.call_args.kwargs["run"])

@@ -532,3 +532,17 @@ no dispatch, and replaced an invalid ABN-status fixture argument with actual
 revision/approval/publication records for the monthly benefit. Scheduled-confirm
 refund now has an owned verified site and original scope, and asserts the
 downstream POST was reached. Database fixtures are syntax checked only.
+
+
+Restored integration fixtures now fake the actual Xero catalogue read seams
+and return provider-shaped account records, retaining real filtering/scope and
+line-membership checks. A newer incomplete capture must retain its own identity
+and cannot validate a line from an older complete capture. GitHub auth-error
+classification and Gmail callback/start fixtures now have actual prior company/
+website ownership. Email-generation tests use updateId/run identity instead of
+the removed reusedExistingRun marker. Stale redispatch starts through the real
+API so its update/source scope is current. Explicit regeneration creates a new
+run while retaining the saved draft; another month or connection cannot silently
+supersede active work. These are current revision-aware API contracts, not
+production compatibility changes. All DB cases are syntax checked only; remote
+disposable CI still must validate the final head.
