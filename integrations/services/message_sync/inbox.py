@@ -86,12 +86,17 @@ def process_inbox_once():
             from integrations.services.community_bridge.store import ingest_slack_event
             from integrations.services.slack_dm_mirror import ingest_slack_dm_event
             from .read_activity import record_public_event
+            from .read_priority import invalidate_event
             # Public ingestion locks the channel. Take state -> channel first,
             # matching the history worker, in this same receipt transaction.
             record_public_event(payload)
-            ingest_slack_dm_event(payload) or ingest_slack_event(payload)
-            from .read_priority import invalidate_event
+            # Read hints take each recipient owner's user -> all grants ->
+            # connection locks. Private ingestion then locks grant ->
+            # conversation. Hinting after ingestion held a grant while waiting
+            # for its owner, inverting the order used by consent, discovery
+            # and inventory transactions and deadlocking against them.
             invalidate_event(payload)
+            ingest_slack_dm_event(payload) or ingest_slack_event(payload)
             if row.lease_expires_at <= timezone.now():
                 raise LeaseLost("inbox_lease_expired")
             row.status = "completed"

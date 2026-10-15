@@ -9,6 +9,7 @@ from unittest.mock import MagicMock, patch
 from django.core import signing
 from django.contrib.auth import get_user_model
 from django.core.cache import cache
+from django.db import OperationalError
 from django.http import Http404
 from django.test import SimpleTestCase, override_settings
 from django.utils import timezone
@@ -413,6 +414,60 @@ class CoverImageTests(SimpleTestCase):
         self.assertEqual(response.status_code, 201)
         self.assertEqual(create.call_args.kwargs['cover_image'], cover)
         dispatch.assert_called_once()
+
+    def test_generate_endpoint_retries_a_deadlocked_commit_and_dispatches_once(self):
+        from vibe_raising import transaction_retry, views as founder_views
+
+        class AbortedCommit:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                if exc_type is None:
+                    cause = Exception('deadlock detected')
+                    cause.sqlstate = '40P01'
+                    raise OperationalError('deadlock detected') from cause
+                return False
+
+        org, company, binding = Obj(id=7), Obj(organization=Obj()), Obj(id=8, google_connection_id=None)
+        request = Obj(user=Obj(id=1), data={'updateDate': '2026-09-30'}, query_params={})
+        patches = {
+            '_get_founder_company_context_or_response': ({'company': company, 'domain': 'acme.example'}, None),
+            '_ensure_binding_for_company': (org, None, binding),
+            '_resolve_manual_documents_for_request': [], '_get_requested_manual_document_ids': [],
+            '_get_requested_manual_summary': 'Founder notes', '_get_requested_input_sources': ['manual_documents'],
+            '_requested_target_month_from_request': date(2026, 9, 1), 'google_connection_for_org': None,
+            'coerce_startup_update_sources_for_gmail_scope': (['manual_documents'], None, {}),
+            '_sync_selected_connector_sources_for_draft': {}, 'get_open_startup_update_run': None,
+            '_build_email_draft_payload': {},
+        }
+        transactions = [AbortedCommit(), nullcontext()]
+        with ExitStack() as stack:
+            for name, result in patches.items():
+                stack.enter_context(patch.object(founder_views, name, return_value=result))
+            stack.enter_context(patch.object(founder_views.transaction, 'atomic', side_effect=lambda: transactions.pop(0)))
+            sleep = stack.enter_context(patch.object(transaction_retry.time, 'sleep'))
+            drafts = [
+                Obj(pk=1, current_revision_id=None, month=date(2026, 9, 1), update_date=None, save=MagicMock())
+                for _ in range(2)
+            ]
+            resolve = stack.enter_context(patch('startup_updates.update_identity.resolve_update', side_effect=[(draft, True) for draft in drafts]))
+            stack.enter_context(patch('startup_updates.update_identity.identity_payload', return_value={}))
+            stack.enter_context(patch('startup_updates.update_identity.narrative_window', return_value={'start': '2026-09-01T00:00:00Z', 'end': '2026-10-01T00:00:00Z'}))
+            runs = [Obj(run_id='rolled-back', run_request={}), Obj(run_id='committed', run_request={})]
+            create = stack.enter_context(patch.object(founder_views, 'create_startup_update_run', side_effect=runs))
+            dispatch = stack.enter_context(patch.object(founder_views, '_dispatch_run_to_valley', return_value=True))
+            response = founder_views.VibeRaisingEmailDraftStartView().post(request)
+        self.assertEqual(response.status_code, 201)
+        self.assertEqual(transactions, [])
+        self.assertEqual(resolve.call_count, 2)
+        self.assertEqual(create.call_count, 2)
+        # Each attempt starts from the request, not from the rolled-back draft.
+        self.assertEqual([call.kwargs['update_date'] for call in resolve.call_args_list], [date(2026, 9, 30)] * 2)
+        self.assertEqual(drafts[1].update_date, date(2026, 9, 30))
+        sleep.assert_called_once()
+        # Valley sees only the run whose transaction committed.
+        dispatch.assert_called_once_with(runs[1])
 
     def test_new_generation_run_persists_cover_without_provider_or_database_access(self):
         from startup_updates import services

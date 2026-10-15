@@ -272,7 +272,7 @@ class PublicReadActivityTests(SimpleTestCase):
         ):
             receipt.return_value.filter.return_value.first.return_value = row
             self.assertEqual(inbox.process_inbox_once(), 1)
-        self.assertEqual(order, ["activity", "private", "public", "hint"])
+        self.assertEqual(order, ["activity", "hint", "private", "public"])
         self.assertEqual(row.encrypted_payload, "")
 
     def test_verified_mapped_bot_event_records_only_timestamp_under_history_lock_order(self):

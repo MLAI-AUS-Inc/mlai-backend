@@ -491,6 +491,7 @@ jobs:
           roo.tests_startup_update_benefits_unit \
           startup_updates.tests_reward_eligibility \
           vibe_raising.tests_company_registration \
+          vibe_raising.tests_transaction_retry \
           community_chat.tests.test_startup_updates \
           community_chat.tests.test_startup_updates_database \
           startup_updates.tests_evidence_contract \
