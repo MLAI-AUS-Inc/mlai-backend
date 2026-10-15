@@ -299,15 +299,17 @@ class BuzzBridgeClient:
 
     @classmethod
     def push_inbox_cursors(cls, cursors):
-        """Deliver coalesced source observations without changing retry identities."""
+        """Return individual results; inbox_observations._normalize_result owns compatibility.
+
+        Items can be rejected independently without invalidating accepted peers.
+        """
         if not 1 <= len(cursors) <= 200:
             raise BuzzBridgePermanentError('Inbox observations require 1-200 cursors')
         result = cls._post_adapter('v1/inbox-cursors', {'cursors': cursors})
         responses = result.get('cursors')
-        if not isinstance(responses, list) or len(responses) != len(cursors) or any(
-            row.get('accepted') is not True for row in responses if isinstance(row, dict)
-        ) or any(not isinstance(row, dict) for row in responses):
-            raise BuzzBridgeError('Inbox observations were not accepted')
+        if (not isinstance(responses, list) or len(responses) != len(cursors)
+                or any(not isinstance(row, dict) for row in responses)):
+            raise BuzzBridgeError('Inbox observations returned an invalid result')
         return responses
 
     @classmethod
