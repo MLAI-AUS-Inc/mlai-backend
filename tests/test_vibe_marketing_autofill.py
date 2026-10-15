@@ -133,8 +133,10 @@ class VibeMarketingAutofillTransactionTests(TransactionTestCase):
             role="participant",
         )
         self.profile = VibeRaisingProfile.objects.create(user=self.user, role=VibeRaisingProfile.ROLE_FOUNDER)
+        self.organization = Organization.objects.create(name="Acme", domain="acme.com")
         self.company = VibeRaisingCompany.objects.create(
             profile=self.profile,
+            organization=self.organization,
             name="Acme",
             domain="acme.com",
             registered=True,
@@ -186,8 +188,10 @@ class VibeMarketingAutofillTests(TestCase):
             role="participant",
         )
         self.profile = VibeRaisingProfile.objects.create(user=self.user, role=VibeRaisingProfile.ROLE_FOUNDER)
+        self.organization = Organization.objects.create(name="Acme", domain="acme.com")
         self.company = VibeRaisingCompany.objects.create(
             profile=self.profile,
+            organization=self.organization,
             name="Acme",
             domain="acme.com",
             registered=True,

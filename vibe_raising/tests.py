@@ -53,7 +53,9 @@ class VibeRaisingApiTests(TestCase):
 
     def _create_founder_company(self, *, domain="acme.com", registered=True):
         profile = VibeRaisingProfile.objects.create(user=self.user, role=VibeRaisingProfile.ROLE_FOUNDER)
-        organization,_=Organization.objects.get_or_create(domain=domain,defaults={"name":"Acme Inc."})
+        organization, _ = Organization.objects.get_or_create(
+            domain=domain, defaults={"name": "Acme Inc."}
+        )
         # A registered company is, post-gate, a verified one — carry the ACN and
         # verification stamp so it can proceed to updates.
         company = VibeRaisingCompany.objects.create(
@@ -592,7 +594,9 @@ class VibeRaisingApiTests(TestCase):
     def test_publish_requires_founder_owner(self):
         self.client.force_authenticate(user=self.user)
         _profile, company = self._create_founder_company(domain="acme.com", registered=True)
-        organization = Organization.objects.create(name="Acme Inc.", domain="acme.com")
+        organization, _ = Organization.objects.get_or_create(
+            domain="acme.com", defaults={"name": "Acme Inc."}
+        )
         company.organization = organization
         company.save(update_fields=["organization", "updated_at"])
         draft = MonthlyUpdateDraft.objects.create(
@@ -634,7 +638,9 @@ class VibeRaisingApiTests(TestCase):
     def test_publish_is_idempotent_and_preserves_existing_visibility(self, mock_award):
         self.client.force_authenticate(user=self.user)
         _profile, company = self._create_founder_company(domain="acme.com", registered=True)
-        organization = Organization.objects.create(name="Acme Inc.", domain="acme.com")
+        organization, _ = Organization.objects.get_or_create(
+            domain="acme.com", defaults={"name": "Acme Inc."}
+        )
         company.organization = organization
         company.save(update_fields=["organization", "updated_at"])
         draft = MonthlyUpdateDraft.objects.create(
@@ -666,7 +672,9 @@ class VibeRaisingApiTests(TestCase):
     def test_editing_published_update_preserves_publish_state_and_visibility_when_omitted(self):
         self.client.force_authenticate(user=self.user)
         _profile, company = self._create_founder_company(domain="acme.com", registered=True)
-        organization = Organization.objects.create(name="Acme Inc.", domain="acme.com")
+        organization, _ = Organization.objects.get_or_create(
+            domain="acme.com", defaults={"name": "Acme Inc."}
+        )
         company.organization = organization
         company.save(update_fields=["organization", "updated_at"])
         published_at = timezone.now()
@@ -707,7 +715,9 @@ class VibeRaisingApiTests(TestCase):
     def test_drafts_endpoint_returns_only_unpublished_owner_rows(self):
         self.client.force_authenticate(user=self.user)
         _profile, company = self._create_founder_company(domain="acme.com", registered=True)
-        organization = Organization.objects.create(name="Acme Inc.", domain="acme.com")
+        organization, _ = Organization.objects.get_or_create(
+            domain="acme.com", defaults={"name": "Acme Inc."}
+        )
         company.organization = organization
         company.save(update_fields=["organization", "updated_at"])
         MonthlyUpdateDraft.objects.create(
@@ -754,7 +764,9 @@ class VibeRaisingApiTests(TestCase):
         )
 
     def test_audience_visibility_filters_published_community_and_investor_surfaces(self):
-        organization = Organization.objects.create(name="Acme Inc.", domain="acme.com")
+        organization, _ = Organization.objects.get_or_create(
+            domain="acme.com", defaults={"name": "Acme Inc."}
+        )
         now = timezone.now()
         community = MonthlyUpdateDraft.objects.create(
             organization=organization,
@@ -810,7 +822,9 @@ class VibeRaisingApiTests(TestCase):
     def test_monthly_updates_get_filters_audience_query_for_founder_preview(self):
         self.client.force_authenticate(user=self.user)
         self._create_founder_company(domain="acme.com", registered=True)
-        organization = Organization.objects.create(name="Acme Inc.", domain="acme.com")
+        organization, _ = Organization.objects.get_or_create(
+            domain="acme.com", defaults={"name": "Acme Inc."}
+        )
         now = timezone.now()
         MonthlyUpdateDraft.objects.create(
             organization=organization,
@@ -870,7 +884,9 @@ class VibeRaisingApiTests(TestCase):
         from startup_updates.api_views import _serialize_draft
         from startup_updates.serializers import DraftResultsSerializer
 
-        organization = Organization.objects.create(name="Acme Inc.", domain="acme.com")
+        organization, _ = Organization.objects.get_or_create(
+            domain="acme.com", defaults={"name": "Acme Inc."}
+        )
         published_at = timezone.now()
         draft = MonthlyUpdateDraft.objects.create(
             organization=organization,
@@ -1385,7 +1401,9 @@ class VibeRaisingApiTests(TestCase):
     def test_founder_can_list_monthly_updates_for_active_company(self):
         self.client.force_authenticate(user=self.user)
         self._create_founder_company(domain="acme.com", registered=True)
-        organization = Organization.objects.create(name="Acme Inc.", domain="acme.com")
+        organization, _ = Organization.objects.get_or_create(
+            domain="acme.com", defaults={"name": "Acme Inc."}
+        )
         MonthlyUpdateDraft.objects.create(
             organization=organization,
             month=date(2026, 2, 1),
@@ -1514,7 +1532,9 @@ class VibeRaisingApiTests(TestCase):
     def test_monthly_update_post_preserves_display_config_when_omitted(self):
         self.client.force_authenticate(user=self.user)
         self._create_founder_company(domain="acme.com", registered=True)
-        organization = Organization.objects.create(name="Acme Inc.", domain="acme.com")
+        organization, _ = Organization.objects.get_or_create(
+            domain="acme.com", defaults={"name": "Acme Inc."}
+        )
         MonthlyUpdateDraft.objects.create(
             organization=organization,
             month=date(2026, 3, 1),
@@ -1565,7 +1585,9 @@ class VibeRaisingApiTests(TestCase):
     def test_monthly_updates_get_returns_metric_history(self):
         self.client.force_authenticate(user=self.user)
         self._create_founder_company(domain="acme.com", registered=True)
-        organization = Organization.objects.create(name="Acme Inc.", domain="acme.com")
+        organization, _ = Organization.objects.get_or_create(
+            domain="acme.com", defaults={"name": "Acme Inc."}
+        )
         MonthlyUpdateDraft.objects.create(
             organization=organization,
             month=date(2026, 1, 1),
@@ -1612,7 +1634,9 @@ class VibeRaisingApiTests(TestCase):
     def test_metric_history_uses_xero_value_number(self):
         self.client.force_authenticate(user=self.user)
         self._create_founder_company(domain="acme.com", registered=True)
-        organization = Organization.objects.create(name="Acme Inc.", domain="acme.com")
+        organization, _ = Organization.objects.get_or_create(
+            domain="acme.com", defaults={"name": "Acme Inc."}
+        )
         MonthlyUpdateDraft.objects.create(
             organization=organization,
             month=date(2026, 4, 1),
@@ -1647,7 +1671,9 @@ class VibeRaisingApiTests(TestCase):
     def test_display_config_defaults_for_legacy_updates(self):
         self.client.force_authenticate(user=self.user)
         self._create_founder_company(domain="acme.com", registered=True)
-        organization = Organization.objects.create(name="Acme Inc.", domain="acme.com")
+        organization, _ = Organization.objects.get_or_create(
+            domain="acme.com", defaults={"name": "Acme Inc."}
+        )
         MonthlyUpdateDraft.objects.create(
             organization=organization,
             month=date(2026, 2, 1),
@@ -1945,7 +1971,9 @@ class VibeRaisingApiTests(TestCase):
             refresh_token="refresh-token",
             scope="https://www.googleapis.com/auth/gmail.readonly",
         )
-        organization = Organization.objects.create(name="Acme Inc.", domain="acme.com")
+        organization, _ = Organization.objects.get_or_create(
+            domain="acme.com", defaults={"name": "Acme Inc."}
+        )
         UserStartupBinding.objects.create(
             user=self.user,
             organization=organization,
@@ -2161,7 +2189,9 @@ class VibeRaisingApiTests(TestCase):
         self.client.force_authenticate(user=self.user)
         self._create_founder_company()
         google_connection = self._create_google_connection()
-        organization = Organization.objects.create(name="Acme Inc.", domain="acme.com")
+        organization, _ = Organization.objects.get_or_create(
+            domain="acme.com", defaults={"name": "Acme Inc."}
+        )
         UserStartupBinding.objects.create(
             user=self.user,
             organization=organization,
@@ -2198,7 +2228,9 @@ class VibeRaisingApiTests(TestCase):
         self.client.force_authenticate(user=self.user)
         self._create_founder_company()
         google_connection = self._create_google_connection()
-        organization = Organization.objects.create(name="Acme Inc.", domain="acme.com")
+        organization, _ = Organization.objects.get_or_create(
+            domain="acme.com", defaults={"name": "Acme Inc."}
+        )
         binding = UserStartupBinding.objects.create(
             user=self.user,
             organization=organization,
@@ -2436,7 +2468,9 @@ class VibeRaisingApiTests(TestCase):
             refresh_token="refresh-token",
             scope="https://www.googleapis.com/auth/gmail.readonly",
         )
-        organization = Organization.objects.create(name="Acme Inc.", domain="acme.com")
+        organization, _ = Organization.objects.get_or_create(
+            domain="acme.com", defaults={"name": "Acme Inc."}
+        )
         binding = UserStartupBinding.objects.create(
             user=self.user,
             organization=organization,
@@ -2470,7 +2504,9 @@ class VibeRaisingApiTests(TestCase):
         self.client.force_authenticate(user=self.user)
         self._create_founder_company()
         google_connection = self._create_google_connection()
-        organization = Organization.objects.create(name="Acme Inc.", domain="acme.com")
+        organization, _ = Organization.objects.get_or_create(
+            domain="acme.com", defaults={"name": "Acme Inc."}
+        )
         UserStartupBinding.objects.create(
             user=self.user,
             organization=organization,
@@ -2529,7 +2565,9 @@ class VibeRaisingApiTests(TestCase):
             refresh_token="refresh-token",
             scope="https://www.googleapis.com/auth/gmail.readonly",
         )
-        organization = Organization.objects.create(name="Acme Inc.", domain="acme.com")
+        organization, _ = Organization.objects.get_or_create(
+            domain="acme.com", defaults={"name": "Acme Inc."}
+        )
         binding = UserStartupBinding.objects.create(
             user=self.user,
             organization=organization,
@@ -2569,7 +2607,9 @@ class VibeRaisingApiTests(TestCase):
         self.client.force_authenticate(user=self.user)
         self._create_founder_company()
         google_connection = self._create_google_connection()
-        organization = Organization.objects.create(name="Acme Inc.", domain="acme.com")
+        organization, _ = Organization.objects.get_or_create(
+            domain="acme.com", defaults={"name": "Acme Inc."}
+        )
         UserStartupBinding.objects.create(
             user=self.user,
             organization=organization,
@@ -2618,7 +2658,9 @@ class VibeRaisingApiTests(TestCase):
             refresh_token="refresh-token",
             scope="https://www.googleapis.com/auth/gmail.readonly",
         )
-        organization = Organization.objects.create(name="Acme Inc.", domain="acme.com")
+        organization, _ = Organization.objects.get_or_create(
+            domain="acme.com", defaults={"name": "Acme Inc."}
+        )
         UserStartupBinding.objects.create(
             user=self.user,
             organization=organization,
@@ -2698,7 +2740,9 @@ class VibeRaisingApiTests(TestCase):
         self.client.force_authenticate(user=self.user)
         self._create_founder_company()
         google_connection = self._create_google_connection()
-        organization = Organization.objects.create(name="Acme Inc.", domain="acme.com")
+        organization, _ = Organization.objects.get_or_create(
+            domain="acme.com", defaults={"name": "Acme Inc."}
+        )
         binding = UserStartupBinding.objects.create(
             user=self.user,
             organization=organization,
@@ -2739,7 +2783,9 @@ class VibeRaisingApiTests(TestCase):
         self.client.force_authenticate(user=self.user)
         self._create_founder_company()
         google_connection = self._create_google_connection()
-        organization = Organization.objects.create(name="Acme Inc.", domain="acme.com")
+        organization, _ = Organization.objects.get_or_create(
+            domain="acme.com", defaults={"name": "Acme Inc."}
+        )
         binding = UserStartupBinding.objects.create(
             user=self.user,
             organization=organization,
@@ -2813,7 +2859,9 @@ class VibeRaisingApiTests(TestCase):
         self.client.force_authenticate(user=self.user)
         self._create_founder_company()
         google_connection = self._create_google_connection()
-        organization = Organization.objects.create(name="Acme Inc.", domain="acme.com")
+        organization, _ = Organization.objects.get_or_create(
+            domain="acme.com", defaults={"name": "Acme Inc."}
+        )
         binding = UserStartupBinding.objects.create(
             user=self.user,
             organization=organization,
@@ -2911,7 +2959,9 @@ class VibeRaisingApiTests(TestCase):
         self.client.force_authenticate(user=self.user)
         self._create_founder_company()
         google_connection = self._create_google_connection()
-        organization = Organization.objects.create(name="Acme Inc.", domain="acme.com")
+        organization, _ = Organization.objects.get_or_create(
+            domain="acme.com", defaults={"name": "Acme Inc."}
+        )
         binding = UserStartupBinding.objects.create(
             user=self.user,
             organization=organization,
@@ -2996,7 +3046,9 @@ class VibeRaisingApiTests(TestCase):
         self.client.force_authenticate(user=self.user)
         self._create_founder_company()
         google_connection = self._create_google_connection()
-        organization = Organization.objects.create(name="Acme Inc.", domain="acme.com")
+        organization, _ = Organization.objects.get_or_create(
+            domain="acme.com", defaults={"name": "Acme Inc."}
+        )
         binding = UserStartupBinding.objects.create(
             user=self.user,
             organization=organization,
@@ -3040,7 +3092,9 @@ class VibeRaisingApiTests(TestCase):
     def test_generated_monthly_update_defaults_to_company_visibility_and_preserves_existing(self):
         self.client.force_authenticate(user=self.user)
         _profile, company = self._create_founder_company(domain="acme.com", registered=True)
-        organization = Organization.objects.create(name="Acme Inc.", domain="acme.com")
+        organization, _ = Organization.objects.get_or_create(
+            domain="acme.com", defaults={"name": "Acme Inc."}
+        )
         company.organization = organization
         company.default_audience_visibility = ["community", "investors"]
         company.save(update_fields=["organization", "default_audience_visibility", "updated_at"])
@@ -3080,7 +3134,9 @@ class VibeRaisingApiTests(TestCase):
     def test_generated_monthly_update_accepts_explicit_audience_visibility(self):
         self.client.force_authenticate(user=self.user)
         _profile, company = self._create_founder_company(domain="acme.com", registered=True)
-        organization = Organization.objects.create(name="Acme Inc.", domain="acme.com")
+        organization, _ = Organization.objects.get_or_create(
+            domain="acme.com", defaults={"name": "Acme Inc."}
+        )
         company.organization = organization
         company.default_audience_visibility = ["community"]
         company.save(update_fields=["organization", "default_audience_visibility", "updated_at"])
@@ -3150,7 +3206,9 @@ class VibeRaisingApiTests(TestCase):
             refresh_token="refresh-token",
             scope="https://www.googleapis.com/auth/gmail.readonly",
         )
-        organization = Organization.objects.create(name="Acme Inc.", domain="acme.com")
+        organization, _ = Organization.objects.get_or_create(
+            domain="acme.com", defaults={"name": "Acme Inc."}
+        )
         UserStartupBinding.objects.create(
             user=self.user,
             organization=organization,
@@ -3202,7 +3260,9 @@ class VibeRaisingApiTests(TestCase):
         self.client.force_authenticate(user=self.user)
         self._create_founder_company()
         google_connection = self._create_google_connection()
-        organization = Organization.objects.create(name="Acme Inc.", domain="acme.com")
+        organization, _ = Organization.objects.get_or_create(
+            domain="acme.com", defaults={"name": "Acme Inc."}
+        )
         binding = UserStartupBinding.objects.create(
             user=self.user,
             organization=organization,
