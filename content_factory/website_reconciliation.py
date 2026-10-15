@@ -173,12 +173,12 @@ def handle_website_github_event(event_type, payload):
                         website.blockers = [item for item in website.blockers if item.get("code") != "repository_source_changed"] + [{"code": "repository_source_changed", "message": "The repository changed. Scan and verify the current source before publishing.", "source_sha": source_sha}]
                     website.save(update_fields=["configuration_version", "capabilities", "blockers", "updated_at"])
                     result["invalidated"] += 1
-                    prepare_wakes.append((website.pk, config.organization_id))
+                    prepare_wakes.append((website.pk, config.organization_id, owned_merge["run_id"] if owned_merge else ""))
         # Run no provider calls while the webhook transaction owns authority
         # locks. Both MLAI merges and customer pushes resume the same journey.
-        for identifier, organization_id in prepare_wakes:
+        for identifier, organization_id, owned_merge_run_id in prepare_wakes:
             from .website_prepare import wake_prepare_for_source
-            wake_prepare_for_source(identifier, organization_id=organization_id)
+            wake_prepare_for_source(identifier, organization_id=organization_id, owned_merge_run_id=owned_merge_run_id)
     else:
         result["ignored"] = True
     return result
@@ -911,6 +911,11 @@ def _process_source_reverification(identifier, now):
         receipt.update(status="verification_pending", code=exc.code, retryable=exc.retryable)
         if exc.code in {"website_disconnected", "website_connection_changed", "website_operation_cancelled"}:
             state = "cancelled"
+        elif exc.authority_code == "website_source_changed":
+            # GitHub's branch has moved past this source, and that newer push
+            # queued its own verification. Retrying this one can never succeed.
+            state = "cancelled"
+            receipt.update(status="superseded", retryable=False)
         elif exc.authority_code == "operation_key_conflict":
             # A settled rescan already moved to a fresh identity, so this key
             # belongs to finished or different work: retrying cannot repair it.

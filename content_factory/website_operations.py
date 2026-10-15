@@ -363,6 +363,10 @@ def cancel_operation(config, *, data, idempotency_key):
         op.next_attempt_at = None
         op.receipt = {**op.receipt, "status": "cancelled_by_user" if op.action == "prepare" else "cancelled", "repository_modified": bool(effects) or None, "remote_effects": effects,
             "remote_outcome_unknown": not bool(effects), "cancellation_undoes_remote_writes": False, "remote_cleanup_pending": True}
+        if op.action == "prepare":
+            # The stopped receipt (and its cleanup follow-up's copy) must not keep
+            # reporting the step that was in progress.
+            op.receipt["message"] = "Website preparation stopped."
         op.save(update_fields=["state", "receipt", "next_attempt_at", "updated_at"])
         run_ids = list(ContentFactoryRun.objects.filter(organization=connection.organization, run_request__operation_id=str(op.pk)).values_list("run_id", flat=True))
         child_operations = []
