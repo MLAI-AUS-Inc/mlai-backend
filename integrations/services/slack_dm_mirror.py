@@ -204,6 +204,14 @@ class SlackDmMirrorError(RuntimeError):
     code = "slack_dm_mirror_error"
 
 
+# Add mpim only after security sign-off covering Slack group-DM conversion.
+DEVICE_ONLY_AUDIENCE_KINDS = frozenset({"im"})
+
+
+class SlackDmDeviceOnlyIneligible(SlackDmMirrorError):
+    """The current locked room no longer qualifies for a device-only repair."""
+
+
 class SlackDmMirrorAuthorizationError(SlackDmMirrorError):
     """Raised when a queued private operation no longer has owner authority."""
 
@@ -1152,6 +1160,7 @@ def status_payload(
     # A timestamp from an older import cannot certify messages in this room.
     # Confirmed quiet/outside-window rooms still finish progress without being
     # published, because there is no selected history to deliver for them.
+    from integrations.services.message_sync.device_recovery import device_audience_summary
     from integrations.services.slack_chat_catalog import conversation_activity_at, history_oldest_ts
 
     quiet_entries = {}
@@ -1282,6 +1291,7 @@ def status_payload(
             and grant.status == SlackDmMirrorGrantStatus.ACTIVE
             and grant.last_discovery_at is None
         ),
+        "device_audience": device_audience_summary(grant, catalog_key),
         "channel_catalog": channel_catalog,
         "private_channels_enabled": bool(grant and private_channels_enabled(grant)),
         "group_dms_enabled": bool(
@@ -2693,6 +2703,11 @@ def discover_conversations(
 
     if process_next_open(grant, authority):
         return 1
+    if getattr(settings, "MESSAGE_SYNC_ENABLED", False):
+        from integrations.services.message_sync.device_recovery import fan_out_device_audience, fanout_batch
+        batch = fanout_batch()
+        if batch and fan_out_device_audience(grant, authority, limit=batch):
+            return 1
     include_group_dms = GROUP_DM_SCOPES.issubset(set(grant.connection.scopes or []))
     conversation_types = "im,mpim" if include_group_dms else "im"
     if private_channels_enabled(grant):
@@ -4760,6 +4775,7 @@ def _provision_owner_conversation(
     force_backfill: bool = False,
     reset_history: bool = False,
     required_owner_public_key: str | None = None,
+    device_only_statuses: frozenset[str] | None = None,
 ) -> None:
     """Provision a mirror readable only by the consenting owner.
 
@@ -4798,6 +4814,7 @@ def _provision_owner_conversation(
             force_backfill=force_backfill,
             reset_history=reset_history,
             required_owner_public_key=required_owner_public_key,
+            device_only_statuses=device_only_statuses,
         )
     if deferred_error is not None:
         raise deferred_error
@@ -4921,6 +4938,7 @@ def _prepare_owner_conversation_locked(
     force_backfill: bool,
     reset_history: bool,
     required_owner_public_key: str | None,
+    device_only_statuses: frozenset[str] | None = None,
 ) -> tuple[dict[str, Any] | None, Exception | None]:
     """Prepare a provision request while grant and conversation rows are locked."""
 
@@ -4938,6 +4956,10 @@ def _prepare_owner_conversation_locked(
                 "Slack DM mirroring consent is no longer active."
             ),
         )
+    if device_only_statuses is not None and (
+            conversation.status not in device_only_statuses or not conversation.mlai_channel_id
+            or conversation_kind(conversation) not in DEVICE_ONLY_AUDIENCE_KINDS):
+        raise SlackDmDeviceOnlyIneligible("The private room no longer qualifies for a device-only update.")
     if grant.slack_user_id not in participant_ids or (
         not is_private_channel and not 2 <= len(participant_ids) <= 9
     ):

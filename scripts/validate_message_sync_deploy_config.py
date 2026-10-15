@@ -25,6 +25,11 @@ def validate(env):
         raise ValueError("MESSAGE_SYNC_UNREAD_PREFETCH_PER_HOUR must be an integer from 1 to 256")
     if env.get("MESSAGE_SYNC_UNREAD_PREFETCH_ENABLED", "false").lower() == "true" and (enabled != "true" or inventory_enabled != "true"):
         raise ValueError("MESSAGE_SYNC_UNREAD_PREFETCH_ENABLED requires MESSAGE_SYNC_ENABLED=true and SLACK_OWNER_INVENTORY_ENABLED=true")
+    fanout = env.get("MESSAGE_SYNC_DEVICE_FANOUT_BATCH", "0")
+    if not re.fullmatch(r"0|[1-9][0-9]?", fanout) or int(fanout) > 50:
+        raise ValueError("MESSAGE_SYNC_DEVICE_FANOUT_BATCH must be an integer from 0 to 50")
+    if int(fanout) > 0 and enabled != "true":
+        raise ValueError("MESSAGE_SYNC_DEVICE_FANOUT_BATCH requires MESSAGE_SYNC_ENABLED=true")
     user_app = env.get("MESSAGE_SYNC_SLACK_USER_APP_ID", "")
     if user_app:
         if not re.fullmatch(r"A[A-Z0-9]+", user_app) or not re.fullmatch(r"[0-9a-f]{32}", env.get("MESSAGE_SYNC_SLACK_USER_SIGNING_SECRET", "")):

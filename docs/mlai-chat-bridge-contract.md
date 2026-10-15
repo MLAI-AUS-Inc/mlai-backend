@@ -1729,3 +1729,18 @@ Reply flattening is available only through the explicitly confirmed operator
 command, limited to unfrozen Slack-to-Buzz replies. Public reaction parity
 requires the adapter's reaction-catalog release. Adapter failures preserve the
 legacy error prefix and may append a content-free ` [code]` reason suffix.
+
+### Device audience fan-out
+
+`MESSAGE_SYNC_DEVICE_FANOUT_BATCH=0` preserves existing recovery. After relay
+permission scoping, stable rooms, security sign-off, and bridge-room adoption
+are verified, an operator may enable a batch up to 50 (recommended 10), capped
+at 20 repaired rooms per minute per owner. IM membership is immutable, so these
+device-only repairs preserve the room and history without Slack I/O. MPIMs and
+private channels continue through source validation.
+
+Status adds `device_audience: {pending, total}` when stable rooms and an active
+verified key are available. Pending is non-zero only for the current enrollment
+target and excludes cooling or unconsented sources. Other devices see zero
+pending. Only currently verified, non-revoked owner devices enter audiences;
+registration cleanup and consent checks remain mandatory under lock.

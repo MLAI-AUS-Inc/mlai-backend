@@ -179,6 +179,26 @@ class SlackOpenRequestsTests(SimpleTestCase):
             with self.assertRaises(BudgetDeferred):
                 opens.process_next_open(self.grant, self.authority)
 
+    @override_settings(MESSAGE_SYNC_ENABLED=True, MESSAGE_SYNC_STABLE_PRIVATE_ROOMS=True, MESSAGE_SYNC_DEVICE_FANOUT_BATCH=10)
+    def test_device_only_im_skips_source_validation_and_falls_back_if_ineligible(self):
+        self.enqueue()
+        request = next(iter(self.connection.sync_cursor[opens.KEY].values()))
+        request["device_only"] = True
+        mirror = SimpleNamespace(pk=12)
+        self.grant.conversations.filter.return_value.first.return_value = mirror
+        with patch('integrations.services.message_sync.device_recovery.device_only_row_eligible', return_value=True), patch.object(dm, '_provision_owner_conversation') as provision, patch.object(api, '_validate_open_source') as validate, patch.object(opens, '_update'):
+            self.assertTrue(opens.process_next_open(self.grant, self.authority))
+        validate.assert_not_called()
+        provision.assert_called_once_with(mirror, required_owner_public_key=self.device.public_key, device_only_statuses=frozenset({'live'}))
+        with patch('integrations.services.message_sync.device_recovery.device_only_row_eligible', return_value=True), patch.object(dm, '_provision_owner_conversation', side_effect=dm.SlackDmDeviceOnlyIneligible('changed')), patch.object(api, '_validate_open_source', return_value=({}, 0)) as validate, patch.object(dm, '_discover_conversation', return_value=None), patch.object(opens, '_update'):
+            opens.process_next_open(self.grant, self.authority)
+        validate.assert_called_once()
+        self.row.kind = 'private_channel'
+        with patch.object(dm, '_provision_owner_conversation') as provision, patch.object(api, '_validate_open_source', return_value=({}, 0)) as validate, patch.object(dm, '_discover_conversation', return_value=None), patch.object(opens, '_update'):
+            opens.process_next_open(self.grant, self.authority)
+        provision.assert_not_called()
+        validate.assert_called_once()
+
     def run_worker(self, *, source_error=None, import_error=None, changed_epoch=False):
         self.enqueue()
         if changed_epoch:

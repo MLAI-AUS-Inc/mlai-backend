@@ -271,6 +271,28 @@ def process_next_open(grant, authority):
         ).first()
         if row is None or row.kind == "public_channel":
             raise InventoryError("inventory_conversation_unavailable", 404)
+        from integrations.services.message_sync.device_recovery import (
+            fanout_batch, device_only_row_eligible, _fanout_failure, _propagating_recovery_error,
+        )
+        if request.get("device_only") and fanout_batch() and row.kind in dm.DEVICE_ONLY_AUDIENCE_KINDS:
+            mirror = current_grant.conversations.filter(slack_conversation_id=row.slack_conversation_id,
+                status="live", mlai_channel_id__isnull=False).first()
+            if mirror is not None and device_only_row_eligible(current_grant, row):
+                mirror.grant = current_grant
+                try:
+                    _update(authority, key, request, stage="adding_device")
+                    dm._provision_owner_conversation(mirror, required_owner_public_key=device.public_key,
+                                                     device_only_statuses=frozenset({"live"}))
+                except dm.SlackDmDeviceOnlyIneligible:
+                    pass
+                except Exception as exc:
+                    if not _propagating_recovery_error(exc):
+                        _fanout_failure(current_grant, authority, mirror, device.public_key, exc)
+                    raise
+                else:
+                    _update(authority, key, request, state="importing", stage="importing_history")
+                    log_open_latency("open_provisioned", request, authority.grant_id)
+                    return True
         from integrations.services.message_sync.presentation import recover_presentation
 
         if not request.get("receipt_recovery_complete"):
