@@ -38,6 +38,20 @@ class HostedBuildTests(SimpleTestCase):
         self.assertEqual(self.verified(),self.base)
         self.assertEqual(self.run.result["directory_quality_gates"]["local_build"],False)
 
+    def test_saved_temporary_preview_branch_matches_producer_without_changing_source_branch(self):
+        preview=self.run.result["live_preview"];proof=preview["proof"]
+        branch="cf-review/"+self.run.run_id
+        proof.update(branch=branch,sourceRepo=self.website.github_repo)
+        preview["branchName"]=branch
+        receipt=proof["hostedBuildReceipt"];receipt["branch"]=branch
+        receipt["digest"]=goals.digest({key:value for key,value in receipt.items() if key!="digest"})
+        self.assertEqual(self.verified(),self.base)
+        self.assertEqual(self.run.run_request["branch"],"main")
+        for field,value in (("branch","other"),("branch",None),("sourceRepo","foreign/site")):
+            original=deepcopy(proof);proof[field]=value
+            self.assertEqual(self.verified(),"",field)
+            proof.clear();proof.update(original)
+
     def test_missing_wrong_digest_run_nonce_head_branch_fallback_or_incomplete_gates_never_pass(self):
         valid=deepcopy(self.run.result)
         for field,value in (("digest","b"*64),("runId","foreign"),("dispatchNonce","b"*12),("commitSha",self.base),("version",True),("completedAt","invalid")):

@@ -975,6 +975,12 @@ def approve_prepared_setup(run, context, config, *, user, goal=None):
     head = str((run.result or {}).get("branch_commit_sha") or "")
     base = _verified_setup_run_base(run, head, website, automatic_approval=True)
     if not base:
+        if hosted and goal is not None and _setup_preview_proven_for_review(run, head):
+            from .website_hosted_build import partial_environment
+            if partial_environment(run, preview, head, website):
+                error = WebsiteAuthorityError("prepare_no_progress", "The hosted build identity is incomplete. Trying the next articles strategy.", retryable=False)
+                error.findings = [{"constraint": "incomplete_environment_identity"}]
+                raise error
         if _setup_preview_proven_for_review(run, head) and not (hosted and goal is not None):
             return review
         raise WebsiteAuthorityError("setup_preview_verification_required", "Waiting for exact setup preview proof.", retryable=True)

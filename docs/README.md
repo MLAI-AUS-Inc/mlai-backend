@@ -28,6 +28,7 @@ subsystem-specific contracts and runbooks.
 - [Articles B2 goal runner design](articles-b2-design-2026-10-14.md) — proposed milestone proofs, per-site execution and one backend status for Chat
 - [B2 implementation and validation](articles-b2-implementation-2026-10-14.md)
 - [Continuous one-shot implementation progress](articles-continuous-implementation-2026-10-14.md)
+- [E2 hosted attempt and recovery design](articles-e2-build-recovery-2026-10-16.md) — temporary preview branches and gated recovery for scoped partial environment receipts
 - [E1 site fingerprint](articles-e1-site-fingerprint-2026-10-15.md) — bounded immutable facts, source validation, strategy/deploy hints and pinned producer parity
 
 - [Articles Phase 2 design approvals](articles-phase2-design-notes-2026-10-12.md) — all eight designs approved; implementation waits for Phase 1 deployment
