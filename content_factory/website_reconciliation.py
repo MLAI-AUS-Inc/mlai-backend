@@ -1062,10 +1062,14 @@ def _process_source_reverification(identifier, now):
     state, receipt = "pending", dict(op.receipt)
     try:
         with authority_guard(binding, action="read") as website:
-            target = website.targets.filter(generation=website.generation, target_key=op.payload.get("target_id")).first()
-            if target is None and not op.payload.get("target_id") and receipt.get("scan_run_id"):
+            pinned = op.payload.get("target_id")
+            target = website.targets.filter(generation=website.generation, target_key=pinned).first()
+            if target is None and receipt.get("scan_run_id"):
+                # The push pinned the default it saw. That id can name a target this
+                # generation never recorded, or one no scan re-derives, so waiting
+                # for it never succeeds. After the rescan, verify the target selected now.
                 config = OrganizationContentConfig.objects.get(website_connection=website)
-                if config.default_publish_target_id:
+                if config.default_publish_target_id and config.default_publish_target_id != pinned:
                     target = website.targets.filter(generation=website.generation,
                         target_key=config.default_publish_target_id).first()
         # First-time scaffold merges have no publishing target yet. Their owned
@@ -1131,7 +1135,8 @@ def _process_source_reverification(identifier, now):
         config = OrganizationContentConfig.objects.get(website_connection=website)
         deployment = verify_live_deployment(config, data=ci.receipt)
         state, receipt = "completed", {**receipt, "status": "verified", "source_sha": op.payload["source_sha"],
-            "ci_operation_id": str(ci.pk), "deployment_operation_id": str(deployment.pk), "repository_modified": False}
+            "target_id": target.target_key, "ci_operation_id": str(ci.pk), "deployment_operation_id": str(deployment.pk),
+            "repository_modified": False}
     except WebsiteAuthorityError as exc:
         receipt.update(status="verification_pending", code=exc.code, retryable=exc.retryable)
         if exc.code in {"website_disconnected", "website_connection_changed", "website_operation_cancelled"}:
