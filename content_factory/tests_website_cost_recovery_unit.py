@@ -50,6 +50,7 @@ class AccountingRecoveryTests(SimpleTestCase):
         operation.receipt["goal"]["cost_pending_run_ids"] = ["meter-run"]
         now = timezone.now()
         with patch.object(prepare.transaction, "atomic", return_value=nullcontext()), \
+                patch.object(recovery, "lock_connection", return_value=True), \
                 patch.object(prepare, "_persist_prepare_state", return_value=None) as persist, \
                 patch.object(recovery, "reserve") as reserve:
             self.assertIsNone(prepare._persist_prepare(operation, now=now))
@@ -57,3 +58,14 @@ class AccountingRecoveryTests(SimpleTestCase):
             persist.return_value = operation
             self.assertIs(prepare._persist_prepare(operation, now=now), operation)
             reserve.assert_called_once_with(operation, now=now)
+
+    @override_settings(ARTICLES_COST_ACCOUNTING_ENABLED=True, ARTICLES_GOAL_NOTIFICATIONS_ENABLED=False)
+    def test_erased_or_replaced_connection_cannot_commit_pending_accounting_work(self):
+        operation = GoalRunnerRegressions().operation()
+        operation.receipt["goal"]["cost_pending_run_ids"] = ["meter-run"]
+        with patch.object(prepare.transaction, "atomic", return_value=nullcontext()), \
+                patch.object(recovery, "lock_connection", return_value=False), \
+                patch.object(prepare, "_persist_prepare_state") as persist, patch.object(recovery, "reserve") as reserve:
+            self.assertIsNone(prepare._persist_prepare(operation, now=timezone.now()))
+        persist.assert_not_called()
+        reserve.assert_not_called()

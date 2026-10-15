@@ -239,12 +239,14 @@ def _persist_prepare(op, *, now):
     from .website_goal_runner import owns_goal
     from .website_first_article_billing import REFUND_TERMINAL
     from .website_first_article_refunds import reserve_refund
-    from .website_cost_recovery import pending_for, reserve as reserve_usage_refresh
+    from .website_cost_recovery import pending_for, lock_connection, reserve as reserve_usage_refresh
     notify = enabled(op.connection) and owns_goal(op)
     refund = op.state in REFUND_TERMINAL and bool(op.receipt.get("first_article_billing"))
     accounting = bool(pending_for(op))
     if notify or refund or accounting:
         with transaction.atomic():
+            if accounting and not lock_connection(op):
+                return None
             notice=track_transition(op,now=now) if notify else None
             saved=_persist_prepare_state(op,now=now)
             if saved is not None:

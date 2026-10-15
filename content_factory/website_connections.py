@@ -871,6 +871,7 @@ def transition_connection(config, *, action, expected, idempotency_key="", verif
         if action in {"reset", "reconnect", "purge"}:
             invalidate_repository_config(config)
         if action == "purge":
+            connection.operations.filter(action__in=["goal-usage", "usage-refresh", "goal-alert"]).delete()
             connection.scan_snapshots.all().delete()
             connection.template_revisions.all().delete()
             connection.targets.all().delete()
@@ -942,6 +943,12 @@ def offboard_website_connections(organization, *, user=None, purge=False):
                     payload={"previous_generation": previous_generation, "cancel_run_ids": [], "disable_auto_merge_prs": []})
             if not purge:
                 continue
+            from .website_operations import deletion_epoch
+            watermark = max(deletion_epoch(website) + 1, website.configuration_version)
+            website.blockers = [item for item in website.blockers if isinstance(item, dict) and item.get("code") != "website_data_deleted"] + [
+                {"code": "website_data_deleted", "deletion_epoch": watermark, "message": "Previous website data was removed."}]
+            website.save(update_fields=["blockers", "updated_at"])
+            website.operations.filter(action__in=["goal-usage", "usage-refresh", "goal-alert"]).delete()
             website.scan_snapshots.all().delete()
             website.template_revisions.all().delete()
             website.targets.all().delete()

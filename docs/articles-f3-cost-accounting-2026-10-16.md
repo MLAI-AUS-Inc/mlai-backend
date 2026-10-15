@@ -105,6 +105,14 @@ Both ledger and recovery reads are bounded, and no accounting scan enters
 bootstrap. Chat's optional lazy view is MLAI-AUS-Inc/mlai-chat#505. Actual
 invocation meters and operational alert delivery remain subsequent work.
 
+Ledger writes lock the connection and compare its retained deletion watermark
+to the original scope. A logical website purge removes internal accounting
+rows, and organization offboarding advances that watermark before erasing
+them, including when financial proof retains an old goal row. In-flight
+recovery cannot recreate erased observations. Retry reservations keep
+connection-before-parent lock order; recovery claims lock only their own row
+and release that claim transaction before reading original reports.
+
 Exclude internal accounting/alert operations from lifecycle/latest-operation
 projections. Respect existing disconnect, purge and organization erasure rules.
 The projection describes retained recorded usage and its coverage, with an

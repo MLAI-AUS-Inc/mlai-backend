@@ -10,7 +10,7 @@ from . import website_cost_ledger as ledger, website_cost_recovery as recovery
 from . import website_goal_runner as runner, website_prepare as prepare
 from .tests_website_connections import WebsiteDatabaseFixture
 from .tests_website_cost_database import seed
-from .website_connections import transition_connection
+from .website_connections import transition_connection, offboard_website_connections
 from .website_models import WebsiteConnectionOperation
 
 
@@ -151,3 +151,30 @@ class AccountingRecoveryPersistenceTests(WebsiteDatabaseFixture, TransactionTest
         self.website.delete()
         self.assertIsNone(recovery.advance(identifier, now=self.now))
         self.assertFalse(WebsiteConnectionOperation.objects.filter(action=recovery.ACTION).exists())
+
+    def test_logical_purge_fences_an_inflight_accounting_worker(self):
+        row = self.enqueue()
+        original_record = ledger.record
+        def purge_before_record(run, **kwargs):
+            transition_connection(self.config, action="purge", expected=self.binding)
+            return original_record(run, **kwargs)
+        with patch.object(ledger, "record", side_effect=purge_before_record):
+            self.assertIsNone(recovery.advance(row.pk, now=self.now))
+        self.assertFalse(WebsiteConnectionOperation.objects.filter(action__in=[ledger.ACTION, recovery.ACTION]).exists())
+        self.assertIsNone(ledger.record(self.run))
+
+    def test_organization_offboarding_erases_accounting_without_recreation(self):
+        self.enqueue()
+        ledger.record(self.run)
+        offboard_website_connections(self.org, purge=True)
+        self.assertFalse(WebsiteConnectionOperation.objects.filter(action__in=[ledger.ACTION, recovery.ACTION]).exists())
+        self.assertIsNone(ledger.record(self.run))
+
+    def test_erasure_watermark_also_fences_a_retained_financial_goal(self):
+        self.enqueue()
+        # Retained financial proof can keep the original goal row present.
+        # Accounting still has to honor erasure rather than resurrect its data.
+        with patch("content_factory.website_first_article_refunds.retain_financial_refunds_for_erasure", return_value=True):
+            offboard_website_connections(self.org, purge=True)
+        self.assertTrue(WebsiteConnectionOperation.objects.filter(pk=self.parent.pk).exists())
+        self.assertIsNone(ledger.record(self.run))

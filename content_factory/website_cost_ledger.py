@@ -18,7 +18,7 @@ def enabled():
 
 def record(run, *, now=None):
     """Read original attribution, then serialize snapshots on the unique run row."""
-    from .website_models import WebsiteConnectionOperation
+    from .website_models import WebsiteConnection, WebsiteConnectionOperation
     saved = goals.mapping(run.run_request)
     try:
         identifier = UUID(str(goals.mapping(saved.get("goal_budget")).get("goal_id")))
@@ -30,6 +30,12 @@ def record(run, *, now=None):
         if parent is None:
             return None
         metadata = costs.attribution(parent, run)
+        # Serialize with logical purge as well as physical deletion. Generation
+        # changes retain history; an advanced erasure watermark does not.
+        current = WebsiteConnection.objects.select_for_update().filter(pk=parent.connection_id, organization_id=run.organization_id).first()
+        from .website_operations import deletion_epoch
+        if current is None or deletion_epoch(current) != metadata["scope"]["deletion_epoch"]:
+            return None
         # The table's idempotency key is globally unique, including across goals
         # which reuse the same original worker run.
         key = "articles:usage:" + goals.digest({"run": run.run_id})

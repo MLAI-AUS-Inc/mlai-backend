@@ -30,6 +30,13 @@ def pending_for(op):
         return []
 
 
+def lock_connection(op):
+    """Keep connection-before-parent lock order for an accepted retry reservation."""
+    from .website_models import WebsiteConnection
+    return WebsiteConnection.objects.select_for_update().filter(pk=op.connection_id,
+        generation=op.generation, state="connected").first() is not None
+
+
 def reserve(op, *, now):
     """Reserve with the successful prepare CAS in its existing transaction."""
     from .website_models import WebsiteConnectionOperation
@@ -66,7 +73,7 @@ def advance(identifier, *, now=None):
     from workflow_runs.models import ContentFactoryRun
     now = now or timezone.now()
     with transaction.atomic():
-        row = WebsiteConnectionOperation.objects.select_for_update().select_related("connection").filter(pk=identifier, action=ACTION).first()
+        row = WebsiteConnectionOperation.objects.select_for_update(of=("self",)).select_related("connection").filter(pk=identifier, action=ACTION).first()
         if row is None or row.state not in {"pending", "running"} or row.next_attempt_at and row.next_attempt_at > now:
             return None
         payload = goals.mapping(row.payload)
