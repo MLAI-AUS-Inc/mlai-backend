@@ -197,10 +197,14 @@ def installation_payload(installation, *, now=None):
     grant = installation.grants.filter(revoked_at__isnull=True, expires_at__gt=now).order_by("-created_at").first()
     reply = AgentInvocationReply.objects.filter(invocation__installation=installation, status="sent").order_by("-updated_at").first()
     enrollment = installation.enrollments.order_by("-created_at").first() if installation.state == "awaiting_owner_proof" else None
+    ready = bool(available() and grant and installation.state == "active")
+    status = installation.state
+    if status == "active":
+        status = "reconnect_required" if not grant else "unavailable" if not ready else "ready" if reply else "needs_setup"
     return {"installation_id": str(installation.pk), "app_id": APP_ID, "name": installation.name,
-        "community_id": str(installation.community_id), "status": installation.state,
+        "community_id": str(installation.community_id), "status": status,
         "public_key": installation.public_key, "resources": grant.resources if grant else [],
-        "subscription_active": bool(available() and grant and installation.state == "active"),
+        "subscription_active": ready,
         "test_completed": bool(reply), "last_reply_at": reply.updated_at.isoformat() if reply else None,
         "expires_at": grant.expires_at.isoformat() if grant else None, "setup_url": None, "setup_prompt": "",
         "instructions": "Community mode answers members in the approved public thread. It has no personal Dot memory or connectors.",

@@ -184,3 +184,19 @@ class CommunityIsolationTests(SimpleTestCase):
         for url in ('http://model.example/v1', 'https://user:password@model.example/v1', 'https://[invalid', 'https://model.example:invalid/v1'):
             with override_settings(AGENT_RUNTIME_MODEL_BASE_URL=url):
                 self.assertFalse(community.available())
+
+    def test_owner_status_requires_enabled_runtime_current_grant_and_actual_reply(self):
+        self.installation.grants = MagicMock()
+        current = self.installation.grants.filter.return_value.order_by.return_value
+        current.first.return_value = self.grant
+        replies = MagicMock()
+        reply = replies.filter.return_value.order_by.return_value
+        reply.first.return_value = None
+        with patch.object(community, 'AgentInvocationReply', objects=replies), patch.object(community, 'available', return_value=True):
+            self.assertEqual(community.installation_payload(self.installation, now=NOW)['status'], 'needs_setup')
+            reply.first.return_value = SimpleNamespace(updated_at=NOW)
+            payload = community.installation_payload(self.installation, now=NOW)
+            self.assertEqual(payload['status'], 'ready')
+            self.assertTrue(payload['test_completed'])
+            current.first.return_value = None
+            self.assertEqual(community.installation_payload(self.installation, now=NOW)['status'], 'reconnect_required')
