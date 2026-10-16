@@ -1,0 +1,47 @@
+name: Activate Admin Brain
+
+on:
+  workflow_dispatch:
+    inputs:
+      expected_release:
+        description: Full SHA of the currently running backend release
+        required: true
+        type: string
+      confirm_activation:
+        description: Activate the reviewed production Admin Brain binding
+        required: true
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+# Same production mutation lock as deploy.yml on main.
+concurrency:
+  group: mlai-backend-deploy-refs/heads/main
+  cancel-in-progress: false
+
+jobs:
+  activate:
+    if: ${{ github.ref == 'refs/heads/main' && inputs.confirm_activation && vars.ORG_MEMORY_PRODUCTION_DEPLOY_ENABLED == 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v6
+      - name: Validate requested release
+        env:
+          EXPECTED_RELEASE: ${{ inputs.expected_release }}
+        run: |
+          [[ "$EXPECTED_RELEASE" =~ ^[a-f0-9]{40}$ ]] || exit 64
+      - name: Install existing deployment SSH key
+        uses: webfactory/ssh-agent@v0.10.0
+        with:
+          ssh-private-key: ${{ secrets.DO_SSH_KEY }}
+      - name: Add deployment host
+        run: ssh-keyscan -H 209.38.85.60 >> ~/.ssh/known_hosts
+      - name: Activate reviewed binding on the running release
+        env:
+          EXPECTED_RELEASE: ${{ inputs.expected_release }}
+        run: |
+          [[ "$EXPECTED_RELEASE" =~ ^[a-f0-9]{40}$ ]] || exit 64
+          ssh root@209.38.85.60 "timeout --kill-after=30s 600 bash -s -- $EXPECTED_RELEASE" < scripts/activate_admin_brain.sh

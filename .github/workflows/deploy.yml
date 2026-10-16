@@ -382,6 +382,7 @@ jobs:
           org_memory.tests \
           tests.test_org_memory_governance \
           tests.test_org_memory_production_deploy \
+          tests.test_admin_brain_activation_unit \
           tests.test_drive_transcript_inventory \
           tests.test_validate_prod_urls \
           tests.test_deploy_command_wiring \
