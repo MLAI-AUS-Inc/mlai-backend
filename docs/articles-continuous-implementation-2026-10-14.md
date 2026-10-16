@@ -16,9 +16,11 @@ Source plan: the 13 October one-shot runbook in the attached files and
 | B3, B4, B6, B7 | Implemented in backend #1016–#1018, CF #985 and Chat #468; draft stack, rollout off |
 | C1 through C5 | Implemented in backend #1019–#1023, CF #986, Chat #470–#472; final CI green, rollout off |
 | D1 | Backend #1024, Chat #473 and CF #988 final-head CI green; rollout off |
-| D2 | #1028 has five passing PostgreSQL provider-chain cases and 155 focused local tests; CF #990 final CI green. Restored legacy CI suites are being repaired; stale refresh/article escalation pending |
-| D3 | Draft backend #1029, 146 focused tests pass; rebase and final CI follow the D2 repair |
-| E1 through E5 and retained v2 channel/CMS/hosted work | Pending; fixture/provider owner inputs may be needed |
+| D2 | Backend #1028 dad06649 and CF #990 full CI green. Bounded paid-run recovery implemented; stale-proposal refresh and article strategy escalation remain pending |
+| D3 | Backend #1029 rebased on repaired D2; 145 focused tests pass, fresh full CI pending |
+| E1 | CF #992 full CI green. Backend #1041 rebased on D2; 31 focused tests pass, 492 modules selected, fresh CI pending |
+| E2 | CF #994 input preflight, environment receipts and fingerprint handoff in draft. 396 focused tests and five caller regressions pass; prior 2f68fcd1 full CI and 14 real-container cases green. New bdf64cab CI pending; runtime-fact revalidation, cache, resume and registry work remain |
+| E3–E5 and retained v2 channel/CMS/hosted work | Pending; fixture/provider owner inputs may be needed |
 | F1 through F3 | Pending |
 | G2 | CF #991 persists the Docker group ID in the deployment environment; 34 focused tests and final CI green. Host application waits for an owner-authorized release |
 | G3 | Backend #1031 redacts signed query tickets; 16 focused tests pass. Polling/auth/backoff work remains |
@@ -637,3 +639,16 @@ Rebased E1 validation: 31 focused fingerprint, strategy-budget and deployment
 unit cases pass without a database. All 492 modules are fully selected in CI;
 there are no baseline/partial omissions. The local producer bytes match their
 immutable lock. Remote producer parity and full E1 CI require the new run.
+
+CI restoration checkpoint, 15 October: backend D2 dad066493dc9c24af60cc6b71476969278914e3d
+passes all required jobs in run 38680824393. Main checks include 3,518 Django cases
+with 37 pre-existing skips; PostgreSQL suites run 77, 310, 69 and 76 cases;
+the final lane passes five provider-chain cases, 1,586 restored database cases
+and 116 migration cases. Deployment was skipped. No local DB/migration was run.
+E1 and D3 have been rebased on that repaired baseline; their fresh CI remains
+required. G3's ticket-redaction slice is rebased here; 16 focused cases pass and all 491
+modules remain selected. Its fresh CI remains required. Broader G3 work and
+the remaining plan stay open. CF E2 bdf64cab carries E1/source scope into the
+verifier, after all 14 container cases passed at 2f68fcd1. E2 remains off and
+incomplete. This evidence does not establish nightly acceptance or any production
+release.

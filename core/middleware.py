@@ -17,6 +17,7 @@ SENSITIVE_QUERY_PARAMETERS = {
     "id_token",
     "refresh_token",
     "state",
+    "ticket",
     "token",
 }
 
