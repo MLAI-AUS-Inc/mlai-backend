@@ -48,7 +48,7 @@ class SiteRecipeAuthorityTests(SimpleTestCase):
         self.assertEqual(result["target"]["site_contract_digest"], "e" * 64)
         self.assertNotIn("capabilities", result)
         self.assertNotIn("verification", result["target"])
-        self.connection.targets.filter.assert_called_once_with(generation=2, target_key="articles", source_sha="a" * 40)
+        self.connection.targets.filter.assert_called_once_with(generation=2, target_key="articles")
         self.assertEqual(before, (self.operation.payload, self.target))
         result["probe"]["title"] = "Changed returned data"
         self.assertEqual(self.operation.payload["site_recipe_probe"]["title"], "Fixture article")
@@ -149,7 +149,7 @@ class SiteRecipeAuthorityTests(SimpleTestCase):
             selected = recipe.dispatch_selection(self.connection, target, "a" * 40)
             self.assertEqual(selected, {"site_recipe_version": 2, "site_contract_digest": "e" * 64,
                 "probe": {"slug": "fixture", "title": "Fixture article"}})
-            for field, value in (("generation", 1), ("connection_id", "other"), ("source_sha", "b" * 40)):
+            for field, value in (("generation", 1), ("connection_id", "other")):
                 original = getattr(target, field)
                 setattr(target, field, value)
                 with self.subTest(field=field), self.assertRaises(WebsiteAuthorityError):
@@ -157,6 +157,21 @@ class SiteRecipeAuthorityTests(SimpleTestCase):
                 setattr(target, field, original)
             self.target.pop("site_contract_version")
             self.assertIsNone(recipe.dispatch_selection(self.connection, target, "a" * 40))
+
+    def test_historical_target_definition_is_not_relabelled_as_new_source_proof(self):
+        target = self.enrolled_target()
+        target.source_sha = "b" * 40
+        target.verified_at = "historical"
+        target.capabilities = {"publishingReady": False}
+        self.connection.targets.filter.return_value.first.return_value = target
+        before = deepcopy(target.contract), target.source_sha, deepcopy(target.capabilities)
+        with patch("content_factory.website_hosted_verification.enabled", return_value=True):
+            self.assertEqual(recipe.dispatch_selection(self.connection, target, "a" * 40)["site_recipe_version"], 2)
+        result = self.call()
+        self.assertEqual(result["binding"]["expected_source_sha"], "a" * 40)
+        self.assertNotIn("source_sha", result["target"])
+        self.assertNotIn("verification", result["target"])
+        self.assertEqual(before, (target.contract, target.source_sha, target.capabilities))
         with override_settings(ARTICLES_SITE_CONTRACT_V2_ENABLED=False):
             self.assertIsNone(recipe.dispatch_selection(self.connection, target, "a" * 40))
 

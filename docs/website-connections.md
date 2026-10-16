@@ -25,7 +25,8 @@ The default-off E5 extension accepts `action=custom_contract` with explicit
 `site_recipe_version=2`, `site_contract_digest`, `target_id`, `branch` and
 `app_root`. With `ARTICLES_SITE_CONTRACT_V2_ENABLED` plus hosted-verification
 enablement and goal enrollment, it returns `site_recipe_verification` only for
-the exact saved current hosted-verification reservation and target/source. Its
+the exact saved current hosted-verification reservation and accepted target
+definition. The worker must produce fresh evidence at the reserved source. Its
 closed read/build projection contains `version`, `scope`, `binding`, `target`
 and the backend-selected `probe`; query commands, probe data and target
 definitions are ignored. It cannot enroll a recipe or grant publication

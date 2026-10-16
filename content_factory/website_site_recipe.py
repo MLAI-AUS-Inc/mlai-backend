@@ -44,7 +44,7 @@ def dispatch_selection(connection, target, source):
         probe = stored.get("site_verification_probe")
         if (type(stored["site_contract_version"]) is not int or stored["site_contract_version"] != 2
                 or str(target.connection_id) != str(connection.pk) or type(target.generation) is not int
-                or target.generation != connection.generation or target.source_sha != source
+                or target.generation != connection.generation
                 or not isinstance(source, str) or not _SHA.fullmatch(source)
                 or stored.get("target_id") != target.target_key
                 or not isinstance(stored.get("site_contract_digest"), str) or not _DIGEST.fullmatch(stored["site_contract_digest"])
@@ -97,8 +97,10 @@ def authorization_inputs(connection, query):
             or not isinstance(original.get("site_contract_digest"), str) or not _DIGEST.fullmatch(original["site_contract_digest"])
             or not isinstance(original.get("contract_digest"), str) or not _DIGEST.fullmatch(original["contract_digest"])):
         deny()
-    target = connection.targets.filter(generation=connection.generation, target_key=original.get("target_id"),
-        source_sha=original["expected_source_sha"]).first()
+    # This is an accepted recipe definition, not a build fact about the new
+    # commit. CF must read the matching recipe at the reserved source and emit
+    # fresh evidence; the existing promotion/source-review gates still apply.
+    target = connection.targets.filter(generation=connection.generation, target_key=original.get("target_id")).first()
     if target is None or not isinstance(target.contract, dict):
         deny()
     stored = target.contract

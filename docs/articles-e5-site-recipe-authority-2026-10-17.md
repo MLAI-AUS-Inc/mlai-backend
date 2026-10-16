@@ -12,7 +12,7 @@ recipe digest cannot enroll a target or select arbitrary build inputs.
 Extend the existing service-authenticated `connections/authorize` read for
 `action=custom_contract` only when a v2 verifier explicitly requests it. Under the
 existing authority lock, read the saved hosted-verification reservation and the
-current generation's target at its reserved source. Require the original run,
+current generation's accepted target definition. Require the original run,
 operation, attempt, deletion epoch, repository, branch, app root, target digest
 and site-recipe digest. Return a bounded projection of that accepted target, the
 current binding and a probe previously selected by the backend reservation.
@@ -32,15 +32,23 @@ Tests use database-free model boundaries and the actual authorization view; no
 local database or migration is run.
 
 The existing hosted dispatcher now selects v2 only from an already enrolled,
-current-generation target at the reserved source. The selected probe participates
+current-generation target definition. The selected probe participates
 in the reservation identity and is saved privately on the operation. It is
 removed from the CF API body, which carries only the explicit protocol version
 and recipe digest alongside the existing request fields. Replays cannot replace
 the private probe. Legacy targets and disabled flags retain the v1 selection.
+The reserved source belongs to the current operation. A target definition may
+have been recorded at an earlier source; this read/build receipt returns no
+historical source SHA, verification or publishing capability. CF must read the
+matching recipe and run fresh verification at the reserved commit. Existing
+source-review and publication promotion gates remain in place, and the old
+target source/proof is never relabeled. Requiring the old target source to equal
+the commit awaiting verification would prevent post-merge verification itself.
+
 The existing setup lineage requirement remains; reconnect without a new setup
 still needs its own scheduling and enrollment integration.
 
-Validation: 96 database-free authority/hosted/permissions/status/goal/recovery/
+Validation: 97 database-free authority/hosted/permissions/status/goal/recovery/
 fingerprint checks pass. The actual authorization view adds a receipt only for an
 explicit v2 request, and a denial returns no partial receipt. Ordinary v1 reads
 are unchanged. An actual dispatch-to-authorization test checks the saved private
