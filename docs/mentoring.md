@@ -1,8 +1,9 @@
 # Vibe Mentoring (pilot)
 
 Status: pilot, built on the private branch `mentoring/pilot`. Not in `main`.
-Needs the migration in `docs/migration-proposals/mentoring-0001.md` approved
-and applied before it can run anywhere with a database.
+The migration `mentoring/migrations/0001_initial.py` is generated and approved by
+the operator for this private copy, but not yet applied anywhere. See
+`docs/migration-proposals/mentoring-0001.md`.
 
 ## What it is
 
@@ -19,10 +20,10 @@ HTTP layer is `community_chat/mentoring_views.py`.
 - Mentors set their own weekly availability (windows per weekday in their own
   timezone), their own session length (15 to 120 minutes, multiples of 5), their
   price, bio, topics and location.
-- Location is "MLAI space" or "Video" (or "either", then the founder picks per
-  request). For video the mentor supplies their own https link. There is no
-  Google Calendar or Meet integration. The link is shown to the founder only
-  once the session is accepted.
+- Each mentor sets one location, "MLAI space" or "Video"; the founder does not
+  choose. For video the mentor shares their own https link in `video_link` (for
+  example a Google Meet link). There is no Google Calendar or Meet integration.
+  The link is shown to the founder only once the session is accepted.
 - Mentors can set away dates: a list of inclusive local date ranges (`away_dates` on
   the profile, up to 20) with no bookings. Existing accepted sessions are not
   cancelled automatically; the mentor cancels them.
@@ -32,6 +33,7 @@ HTTP layer is `community_chat/mentoring_views.py`.
   snapshotted on each session.
 - Each request carries a brief: stage, biggest struggle, outcome wanted, and an
   optional link.
+- A request charges nothing. Points are taken when the mentor accepts.
 - A request expires after 48 hours unanswered, or at the session start time if
   that is sooner. Expiry and auto-completion are applied lazily whenever
   sessions or availability are read. There is no worker.
@@ -50,18 +52,18 @@ Everything returns 404 `mentor_booking_disabled` while the flag is off.
 | GET `mentors/` | List active mentors (no email or Slack id) |
 | GET `mentors/<id>/availability/?from=&to=` | Free slots (UTC ISO times), up to 31 days, default next 14 |
 | GET, PUT `mentor/profile/` | The mentor's own profile and weekly `availability` list |
-| POST `mentor/sessions/` | Founder request: `mentor_id` (whole number), `starts_at`, `location_type`, `brief`, `client_request_id`, and `expected_price` (required, the whole-number price the founder was shown) |
+| POST `mentor/sessions/` | Founder request: `mentor_id` (whole number), `starts_at`, `brief`, `client_request_id`, and `expected_price` (required, the whole-number price the founder was shown) |
 | GET `mentor/sessions/?role=founder\|mentor&status=` | My sessions |
-| POST `mentor/sessions/<uuid>/accept/` | Mentor accepts |
-| POST `mentor/sessions/<uuid>/decline/` | Mentor declines (refund) |
-| POST `mentor/sessions/<uuid>/cancel/` | Founder or mentor, before the start (refund) |
+| POST `mentor/sessions/<uuid>/accept/` | Mentor accepts; the founder is charged now (409 `founder_insufficient_points` and the request stays open if they cannot pay) |
+| POST `mentor/sessions/<uuid>/decline/` | Mentor declines (no points move) |
+| POST `mentor/sessions/<uuid>/cancel/` | Founder or mentor, any time before completion, even after the start (refund if charged) |
 | POST `mentor/sessions/<uuid>/complete/` | Mentor marks done, only once the session has ended (payout) |
 
 A missing or non-integer `expected_price` returns 400 `expected_price_required`; a
 mismatch with the mentor's current price returns 400 `price_changed`. A boolean or
 non-integer `mentor_id` returns 400 `invalid_mentor_id`. When the flag is off the
 flag is checked before authentication and throttling, so every caller gets 404.
-If an action hits a request that has just expired, the expiry and refund are committed
+If an action hits a request that has just expired, the expiry is committed
 first and the call then returns 409 `request_expired`.
 
 Creating a request is idempotent per founder through `client_request_id`. A
@@ -85,17 +87,28 @@ The home endpoint exposes `feature_flags.mentor_booking`.
 All movements use `PointsService`, ledger source `MANUAL`, reference type
 `MENTOR_SESSION`, so no `roo` migration is needed.
 
-1. Request: spend the price from the founder, key `mentor_hold:{session id}`,
-   in the same transaction that creates the session. Not enough points gives
-   409 `insufficient_points` and nothing is created.
-2. Decline, cancel or expiry: refund to the founder, key
-   `mentor_release:{session id}`, restoring the purchased and earned split.
-3. Completion (mentor marks done, or automatically 24 hours after the session
-   end): award the price to the mentor, key `mentor_payout:{session id}`.
+1. Request: nothing is charged. The service only checks the founder's available
+   balance and returns 409 `insufficient_points` early if it is below the price.
+2. Accept: the price snapshot is spent from the founder, key
+   `mentor_charge:{session id}`. If the founder's balance is now too low the accept
+   fails with 409 `founder_insufficient_points` and the session stays `requested`.
+3. Decline and expiry: no points move, because nothing was charged.
+4. Cancel (founder or mentor), any time before the session is completed, including
+   after the start: if the founder was charged, refund with key
+   `mentor_release:{session id}`, restoring the purchased and earned split. Cancelling
+   a request that was never accepted moves no points.
+5. Completion (mentor marks done after the session ends, or automatically 24 hours
+   after the end): the price is awarded to the mentor as plain Roo points through
+   `award()`, key `mentor_payout:{session id}`.
 
 Known side effect: `PointsService.award` raises the mentor's lifetime earned
-total, which also gates the Conference Room and committee eligibility. This
-is accepted for the pilot and is an open decision for the operator.
+total, which also gates the Conference Room and committee eligibility. The operator
+decided this is fine: the payout is plain Roo points, with no special earned handling.
+
+Deleting a user deletes their mentor profile and sessions (cascade) so account deletion
+is never blocked; ledger rows are separate and stay. If a charged, not yet completed
+session is removed that way, the other party is not refunded automatically, so handle
+those sessions (cancel them first) as part of account deletion.
 
 ## Notifications
 
@@ -110,11 +123,14 @@ failed DM cannot change a booking. Mentors can also poll
 
 ## Rollout order
 
-1. Operator approves the migration; generate `mentoring/migrations/0001_initial.py`
-   from the models and review it against the proposal.
+1. The migration `mentoring/migrations/0001_initial.py` is generated and approved
+   (private copy). Review it against the proposal.
 2. Run the database-backed tests (not yet written) on a disposable database.
-3. Operator sets `APPROVED_MIGRATION_PLAN_SHA256` on the host, then merge and
-   deploy the backend (the flag is off, so nothing changes for users).
+3. Apply the migration before or with the code (the app's tables must exist before
+   any user deletion or admin page touches them). Operator sets
+   `APPROVED_MIGRATION_PLAN_SHA256` on the host (see the proposal for the exact value
+   and how to recompute it), then merge and deploy (the flag is off, so nothing
+   changes for users).
 4. In Django admin create a `MentorProfile` per mentor and tick active; mentors
    fill in availability and video link through the API or the chat client.
 5. Set `MENTOR_BOOKING_ENABLED=true` in the host env and restart.
