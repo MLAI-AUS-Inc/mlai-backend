@@ -3146,10 +3146,14 @@ class VibeRaisingEmailDraftStartView(APIView):
                     cancelled_by_user_id=request.user.id)
                 existing_run = None
                 draft.refresh_from_db()
+            redispatch_existing = False
             if existing_run:
                 from startup_updates.activity_scope import run_uses_month_scope
                 if not run_uses_month_scope(existing_run.run_request or {}):
                     raise RevisionConflict("This draft was started with an older source period. Cancel it and generate the monthly update again.")
+                # Refreshing source context advances updated_at; retain the
+                # stale-queue decision from before that write on this attempt.
+                redispatch_existing = _should_dispatch_existing_run(existing_run)
                 windows = build_startup_update_target_windows(run_month)
                 refresh_startup_update_run_source_context(
                     run=existing_run,
@@ -3171,12 +3175,12 @@ class VibeRaisingEmailDraftStartView(APIView):
                 automatic_source_scope=bool(getattr(self, "automatic_source_scope", False)),
                 audience_visibility=requested_audience,
                 cover_image=(display_config or {}).get("cover_image"))
-            return draft, run, existing_run, run_month
+            return draft, run, existing_run, run_month, redispatch_existing
 
-        draft, run, existing_run, target_month = run_in_retryable_transaction(
+        draft, run, existing_run, target_month, redispatch_existing = run_in_retryable_transaction(
             resolve_and_queue_run, label="startup_update_draft_start",
         )
-        if not existing_run or _should_dispatch_existing_run(run):
+        if not existing_run or redispatch_existing:
             dispatch_result = _dispatch_run_to_valley(run)
             if not dispatch_result:
                 return Response(_valley_dispatch_failure_payload(run, dispatch_result), status=503)
