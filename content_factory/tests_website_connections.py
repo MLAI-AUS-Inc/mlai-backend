@@ -1193,6 +1193,35 @@ class WebsiteSourceFenceTests(WebsiteDatabaseFixture, TestCase):
 
 
 class WebsiteReviewRegressionTests(WebsiteDatabaseFixture, TestCase):
+    @override_settings(ARTICLES_CHANNEL_DISCOVERY_ENABLED=True, ARTICLES_SITE_FINGERPRINT_ENABLED=True)
+    def test_channel_owner_choice_survives_current_scan_and_fingerprint_refresh(self):
+        """Real persistence and consent locking run only on disposable remote CI."""
+        from django.contrib.auth import get_user_model
+        from founder_tools.models import VibeRaisingCompany, VibeRaisingProfile
+        from . import website_publishing_channels as channels
+        from .website_channel_observation import classify_prefix
+        from .tests_site_fingerprint_unit import example, stamp
+        user = get_user_model().objects.create_user(email='channel-fixture@example.test', password='synthetic-password')
+        profile = VibeRaisingProfile.objects.create(user=user, role='founder')
+        company = VibeRaisingCompany.objects.create(profile=profile, organization=self.org, name='Synthetic', domain=self.org.domain)
+        context = SimpleNamespace(profile=profile, company=company, organization=self.org)
+        with patch.object(channels, 'observe_homepage', return_value=classify_prefix(b'<html/>')) as observe:
+            inspected = channels.update_choice(context, self.config, expected_scope=channels.scope_for(context, self.config), expected_revision=0)
+            selected = channels.update_choice(context, self.config, expected_scope=inspected['scope'], expected_revision=1, selected='portable')
+            facts = example()
+            facts.update(github_repo=self.website.github_repo, branch=self.website.branch, app_root=self.website.app_root)
+            facts = stamp(facts)
+            self.config.last_scanned_sha = facts['source_sha']
+            self.config.save(update_fields=['last_scanned_sha'])
+            record_scan_evidence(self.website, {'source_sha': facts['source_sha'], 'repository_inventory': {
+                'source_sha': facts['source_sha'], 'discovery_complete': True, 'site_fingerprint': facts}})
+            self.config.refresh_from_db()
+            saved = channels.projection(context, self.config)
+            self.assertEqual(saved['recommendation']['recommended_channel'], 'git')
+            self.assertEqual(saved['selection'], selected['selection'])
+            self.assertEqual(saved['observed_at'], selected['observed_at'])
+            self.assertEqual(observe.call_count, 1)
+
     @patch('content_factory.website_connections.verify_repository_access')
     def test_v2_disconnect_reconnect_twice_retains_recipe_and_requires_fresh_proof(self, verify):
         """Actual lifecycle transactions run on CI's disposable database only."""

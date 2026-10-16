@@ -846,6 +846,10 @@ class ContentFactoryOrgConfigView(APIView):
         with transaction.atomic():
             Organization.objects.select_for_update().get(pk=org.pk)
             current_config = OrganizationContentConfig.objects.filter(organization=org).first()
+            if 'article_system' in defaults:
+                from .website_publishing_channels import preserve_choice
+                defaults['article_system'] = preserve_choice(
+                    getattr(current_config, 'article_system', None), defaults['article_system'])
             current_strategy = current_config.pillar_strategy if current_config else {}
             if 'pillar_strategy' in defaults:
                 defaults['pillar_strategy'] = merge_strategy(current_strategy, defaults['pillar_strategy'])

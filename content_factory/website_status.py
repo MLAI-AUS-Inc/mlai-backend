@@ -140,6 +140,10 @@ def status_for_context(context, config, *, journey, now=None):
 
 def add_status(payload, context, config, *, journey):
     """Add the shared server contract only when the status rollout is enabled."""
+    from .website_publishing_channels import projection
+    channel = projection(context, config)
+    if channel is not None:
+        payload["publishingChannel"] = channel
     result = status_for_context(context, config, journey=journey)
     if result is not None:
         from .website_setup_consent import setup_plan

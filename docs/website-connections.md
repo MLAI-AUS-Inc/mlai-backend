@@ -17,6 +17,30 @@ Company facts, editorial policy, generated articles and history remain company-o
 
 ## Contract
 
+The default-off `ARTICLES_CHANNEL_DISCOVERY_ENABLED` surface adds an
+informational `publishingChannel` record to owner status responses, including
+companies without a GitHub connection. `POST website-connection/inspect-channel`
+accepts `channel_scope` and integer `channel_revision` copied from that record.
+It reads only the saved public homepage, outside database locks, and saves a
+minimized recommendation after checking the company, founder, domain, selected
+repository/generation, current source/configuration and channel revision again.
+`POST website-connection/select-channel` accepts the same scope/revision plus
+`channel: git|cms|hosted|portable`, limited to offered options. It records an
+owner preference without executing a channel or granting access/readiness.
+Both actions retain the existing authenticated, explicitly selected company
+boundary; neither accepts a URL, credential or worker-selected owner choice.
+
+A successful explicit repository bind observes the homepage after releasing its
+transaction when no current recommendation exists. The ensuing exact-scope E1
+scan can update the recommendation locally without HTTP. Ordinary scans and
+worker config PUT cannot replace the owner preference. A source-only
+configuration revision does not erase that preference; a different site,
+repository/root/branch, generation or connection state requires fresh inspection.
+Status reads only project saved records. Public markers are hints and can be
+spoofed. Squarespace currently offers hosted/portable. Channel execution,
+credentials, hosted domains and publication acceptance belong to later steps.
+See the [channel discovery design and evidence](articles-e5-channel-discovery-2026-10-17.md).
+
 Every repository request, saved run, child run, token request, callback and repository-derived config update carries `website_connection_id` and `connection_generation`. `repository_id` verifies GitHub's immutable identity. `connection_target_id` identifies a verified target for publishing; when omitted the selected default must be verified. Worker retry `generation` is a separate counter.
 
 `GET /api/content-factory/connections/authorize` accepts that tuple, `domain`, `github_repo`, and `action=read|scan|config_write|preview|setup|publish|merge|cleanup`. It uses existing internal API-key authentication. Missing, stale, revoked, cross-company and mismatched repository authority returns a stable 409 error. No legacy OAuth fallback overrides denial. A successful check is not a lease: workers recheck immediately before each external mutation. The backend serializes its writes with lifecycle changes using organization/connection row locks.

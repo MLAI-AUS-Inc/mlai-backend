@@ -125,7 +125,20 @@ class WebsiteConnectionView(APIView):
                 repo=request.data.get("githubRepo") or request.data.get("github_repo") or config.github_repo,
                 app_root=request.data.get("appRoot", ""), branch=request.data.get("branch", ""),
                 site_url=request.data.get("siteUrl", ""), expected=request.data)
-            return Response({"websiteConnection": summary_for(config, company_id=context.company.pk), **contract_for(connection)})
+            from .website_publishing_channels import enabled, projection, scope_for, update_choice
+            channel = projection(context, config)
+            if enabled() and channel is not None and channel["recommendation"] is None:
+                try:
+                    # bind_website has released its transaction before public HTTP.
+                    update_choice(context, config, expected_scope=scope_for(context, config), expected_revision=channel["revision"])
+                except WebsiteAuthorityError:
+                    # Superseding consent must win without undoing a successful bind.
+                    config.refresh_from_db()
+                channel = projection(context, config)
+            payload = {"websiteConnection": summary_for(config, company_id=context.company.pk), **contract_for(connection)}
+            if channel is not None:
+                payload["publishingChannel"] = channel
+            return Response(payload)
         except WebsiteAuthorityError as exc:
             return Response(exc.as_dict(), status=exc.status)
 
@@ -134,12 +147,20 @@ class WebsiteConnectionActionView(APIView):
     """Independent pause/disconnect/reconnect/reset/cleanup consent actions."""
 
     def post(self, request, action):
-        if action not in {"prepare", "pause", "disconnect", "reconnect", "reset", "cleanup", "purge", "cancel-operation", "reconcile", "verify-access", "verify", "custom-contract", "ci-attestation", "github-revoke", "verify-cleanup"}:
+        if action not in {"prepare", "pause", "disconnect", "reconnect", "reset", "cleanup", "purge", "cancel-operation", "reconcile", "verify-access", "verify", "custom-contract", "ci-attestation", "github-revoke", "verify-cleanup", "inspect-channel", "select-channel"}:
             return Response({"code": "invalid_connection_action", "detail": "Unknown website action."}, status=400)
         context, config, error = _context(request)
         if error:
             return error
         try:
+            if action in {"inspect-channel", "select-channel"}:
+                from .website_publishing_channels import update_choice
+                selected = request.data.get("channel") if action == "select-channel" else None
+                if action == "select-channel" and selected is None:
+                    raise WebsiteAuthorityError("website_prepare_blocked", "Choose an offered channel.", status=422)
+                record = update_choice(context, config, expected_scope=request.data.get("channel_scope"),
+                    expected_revision=request.data.get("channel_revision"), selected=selected)
+                return Response({"publishingChannel": record})
             revision = request.data.get("configuration_revision")
             if action != "disconnect" and revision is not None and config.website_connection and str(revision) != str(config.website_connection.configuration_version):
                 raise WebsiteAuthorityError("website_configuration_changed", "Refresh the current website settings before changing them.")
