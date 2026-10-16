@@ -117,6 +117,26 @@ class MentoringViewTests(unittest.TestCase):
         self.assertEqual((args[0], str(args[1]), str(args[2])), (3, '2026-11-03', '2026-11-10'))
         self.assertEqual(self.call(views.MentorAvailabilityView, data={'from': 'tomorrow'}, mentor_id=3).status_code, 400)
 
+    @override_settings(MENTOR_BOOKING_ENABLED=True)
+    def test_meeting_retry_calls_the_service_and_is_a_write(self):
+        response = self.call(views.MentorSessionMeetingRetryView, 'post', session_id=SID)
+        self.assertEqual(response.status_code, 200)
+        self.service.retry_meeting.assert_called_once_with(SID, self.user)
+        view = views.MentorSessionMeetingRetryView()
+        view.request = SimpleNamespace(method='POST')
+        self.assertEqual(view.community_chat_throttle_scope, 'community_chat_mentoring_write')
+
+    @override_settings(MENTOR_BOOKING_ENABLED=True)
+    def test_meeting_retry_errors_are_json(self):
+        self.service.retry_meeting.side_effect = MentoringError('not_session_mentor', 'Only the mentor can do this.', 403)
+        response = self.call(views.MentorSessionMeetingRetryView, 'post', session_id=SID)
+        self.assertEqual((response.status_code, response.data['code']), (403, 'not_session_mentor'))
+
+    def test_meeting_retry_url_exists(self):
+        from django.urls import reverse
+        url = reverse('community_chat_mentor_session_meeting_retry', kwargs={'session_id': SID})
+        self.assertTrue(url.endswith(f'mentor/sessions/{SID}/meeting/retry/'))
+
     def test_write_views_use_the_write_throttle_scope(self):
         view = views.MentorSessionsView()
         view.request = SimpleNamespace(method='POST')

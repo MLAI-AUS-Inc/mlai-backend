@@ -141,3 +141,7 @@ class MentorSessionCancelView(MentorSessionActionView):
 
 class MentorSessionCompleteView(MentorSessionActionView):
     action = 'complete'
+
+
+class MentorSessionMeetingRetryView(MentorSessionActionView):
+    action = 'retry_meeting'

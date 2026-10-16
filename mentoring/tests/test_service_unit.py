@@ -5,7 +5,7 @@ import unittest
 from unittest.mock import MagicMock, patch
 import uuid
 
-from mentoring import service
+from mentoring import google, service
 from mentoring.models import MentorSession
 from mentoring.service import MentoringError, MentoringService
 
@@ -24,6 +24,8 @@ def make_session(status='requested', **kw):
         release_ledger_entry=None, payout_ledger_entry=None,
         starts_at=START, ends_at=START + timedelta(minutes=30), expires_at=NOW + timedelta(hours=48),
         responded_at=None, completed_at=None, cancelled_at=None, cancelled_by=None,
+        location_type='video', meet_link='', calendar_event_id='', meeting_status='pending',
+        meeting_error='', meeting_path='',
     )
     base.update(kw)
     s = SimpleNamespace(**base)
@@ -324,7 +326,7 @@ class RequestTests(Base):
         self.profile = SimpleNamespace(
             pk=7, user=SimpleNamespace(pk=2, slack_id='UMENTOR'), user_id=2, is_active=True,
             price_roo=40, session_minutes=30, timezone='Australia/Melbourne',
-            location_type='video', video_link='https://meet.example/mia', space_notes='',
+            location_type='video', busy_calendar_email='', space_notes='',
         )
         self.slot = START
         account = SimpleNamespace(purchased_topup_balance_microroo=15_000_000)
@@ -363,7 +365,7 @@ class RequestTests(Base):
         self.assertFalse(hasattr(session, 'charge_ledger_entry'))
         self.assertEqual(session.expires_at, NOW + timedelta(hours=48))
         self.assertEqual(session.location_type, 'video')
-        self.assertEqual(session.location_detail, 'https://meet.example/mia')
+        self.assertEqual(session.location_detail, '')
         self.assertEqual(session.ends_at - session.starts_at, timedelta(minutes=30))
         service.MentoringService.notify_mentor.assert_called_once()
         keys = self.lock_keys.call_args.args
@@ -474,7 +476,7 @@ class RequestTests(Base):
 
 
 class ProfileValidationTests(unittest.TestCase):
-    cur = {'location_type': 'video', 'video_link': 'https://meet.example/x'}
+    cur = {'location_type': 'video'}
 
     def bad(self, payload, current=None):
         with self.assertRaises(MentoringError):
@@ -489,12 +491,19 @@ class ProfileValidationTests(unittest.TestCase):
         self.assertEqual(service.validate_profile_update({'session_minutes': 45, 'price_roo': 60}, self.cur),
                          {'session_minutes': 45, 'price_roo': 60})
 
-    def test_video_needs_own_https_link(self):
-        self.bad({'video_link': 'http://insecure.example'})
+    def test_location_type_and_no_mentor_supplied_video_link(self):
         self.bad({'location_type': 'either'})
-        self.bad({'location_type': 'video'}, {'location_type': 'mlai_space', 'video_link': ''})
-        self.assertEqual(service.validate_profile_update({'location_type': 'mlai_space'},
-                         {'location_type': 'video', 'video_link': ''}), {'location_type': 'mlai_space'})
+        # Video needs nothing from the mentor now; a stray video_link is ignored.
+        self.assertEqual(service.validate_profile_update({'location_type': 'video', 'video_link': 'https://x.example'},
+                         {'location_type': 'mlai_space'}), {'location_type': 'video'})
+
+    def test_busy_calendar_email(self):
+        self.bad({'busy_calendar_email': 'not-an-email'})
+        self.bad({'busy_calendar_email': 5})
+        self.assertEqual(service.validate_profile_update({'busy_calendar_email': ' Mia@Gmail.com '}, self.cur),
+                         {'busy_calendar_email': 'mia@gmail.com'})
+        self.assertEqual(service.validate_profile_update({'busy_calendar_email': ''}, self.cur),
+                         {'busy_calendar_email': ''})
 
     def test_timezone_and_topics(self):
         self.bad({'timezone': 'Mars/Base'})
@@ -534,23 +543,255 @@ class ProfileValidationTests(unittest.TestCase):
 
 
 class SerializationTests(unittest.TestCase):
-    def test_video_link_hidden_from_founder_until_accepted(self):
-        s = make_session('requested', location_detail='https://meet.example/mia', location_type='video',
+    def test_meet_link_hidden_from_founder_until_accepted(self):
+        s = make_session('requested', location_detail='', location_type='video',
+                         meet_link='https://meet.google.com/abc-defg-hij', meeting_status='created',
                          brief_stage='a', brief_struggle='b', brief_outcome='c', brief_link='',
                          requested_at=NOW, mentor_id=7)
         founder = SimpleNamespace(pk=1)
-        self.assertEqual(service.serialize_session(s, founder)['location_detail'], '')
+        for viewer in (founder, SimpleNamespace(pk=2)):
+            data = service.serialize_session(s, viewer)
+            self.assertEqual((data['meet_link'], data['meeting_status']), ('', None))
         s.status = 'accepted'
-        self.assertEqual(service.serialize_session(s, founder)['location_detail'], 'https://meet.example/mia')
-        s.status = 'requested'
-        self.assertEqual(service.serialize_session(s, SimpleNamespace(pk=2))['location_detail'], 'https://meet.example/mia')
+        for viewer in (founder, SimpleNamespace(pk=2)):
+            data = service.serialize_session(s, viewer)
+            self.assertEqual(data['meet_link'], 'https://meet.google.com/abc-defg-hij')
+            self.assertEqual(data['meeting_status'], 'created')
+        for status in ('cancelled', 'declined', 'expired'):
+            s.status = status
+            self.assertEqual(service.serialize_session(s, founder)['meet_link'], '')
+        s.status, s.location_type = 'accepted', 'mlai_space'
+        self.assertEqual(service.serialize_session(s, founder)['meet_link'], '')
 
     def test_no_contact_details_leak(self):
         s = make_session('accepted', location_detail='', location_type='video', brief_stage='a',
+                         meet_link='',
                          brief_struggle='b', brief_outcome='c', brief_link='', requested_at=NOW)
         text = str(service.serialize_session(s, SimpleNamespace(pk=1)))
         self.assertNotIn('UMENTOR', text)
         self.assertNotIn('UFOUNDER', text)
+
+
+class GoogleBase(Base):
+    """Meeting creation, retry, cancel and free/busy with the Google client mocked."""
+
+    def setUp(self):
+        super().setUp()
+        self.g = MagicMock()
+        self.g.GoogleError = google.GoogleError
+        self.g.is_enabled.return_value = True
+        self.g.create_meeting.return_value = {
+            'meet_link': 'https://meet.google.com/abc-defg-hij', 'calendar_event_id': 'ev1',
+            'path': 'meet_api', 'error': '',
+        }
+        p = patch.object(service, 'google', self.g)
+        p.start()
+        self.addCleanup(p.stop)
+        self.objs_patch = patch.object(service.MentorSession, 'objects')
+        self.objs = self.objs_patch.start()
+        self.addCleanup(self.objs_patch.stop)
+        self.objs.filter.return_value.exclude.return_value.exists.return_value = False
+
+    def updated(self):
+        return self.objs.filter.return_value.update.call_args.kwargs
+
+    def give(self, session):
+        self.objs.select_related.return_value.get.return_value = session
+        self.objs.filter.return_value.update.return_value = 1
+
+
+class MeetingTests(GoogleBase):
+    def test_meeting_is_created_after_accept_commits(self):
+        s = make_session()
+        self.give(s)
+        self.load(s)
+        MentoringService.accept(SID, self.actor_mentor)
+        self.assertEqual(s.status, 'accepted')
+        self.assertEqual(s.meeting_status, 'pending')
+        self.g.create_meeting.assert_called_once_with(s)
+        self.assertEqual(self.updated(), {
+            'meeting_status': 'created', 'meeting_error': '', 'meet_link': 'https://meet.google.com/abc-defg-hij',
+            'calendar_event_id': 'ev1', 'meeting_path': 'meet_api',
+        })
+
+    def test_meeting_waits_for_commit(self):
+        s = make_session()
+        self.give(s)
+        self.load(s)
+        self.txn.on_commit.side_effect = None  # hold the callback: nothing runs before commit
+        MentoringService.accept(SID, self.actor_mentor)
+        self.g.create_meeting.assert_not_called()
+        self.txn.on_commit.call_args.args[0]()
+        self.g.create_meeting.assert_called_once()
+
+    def test_fallback_path_is_recorded(self):
+        self.g.create_meeting.return_value = {
+            'meet_link': 'https://meet.google.com/zzz', 'calendar_event_id': 'ev2',
+            'path': 'calendar', 'error': '',
+        }
+        s = make_session('accepted')
+        self.give(s)
+        self.assertEqual(MentoringService.create_meeting(SID), 'created')
+        self.assertEqual(self.updated()['meeting_path'], 'calendar')
+
+    def test_failure_keeps_the_acceptance(self):
+        self.g.create_meeting.side_effect = google.GoogleError('permission')
+        s = make_session()
+        self.give(s)
+        self.load(s)
+        MentoringService.accept(SID, self.actor_mentor)
+        self.assertEqual(s.status, 'accepted')
+        self.points.spend.assert_called_once()
+        self.assertEqual(self.updated(), {'meeting_status': 'failed', 'meeting_error': 'permission'})
+
+    def test_unexpected_exception_is_contained(self):
+        self.g.create_meeting.side_effect = RuntimeError('boom')
+        s = make_session()
+        self.give(s)
+        self.load(s)
+        MentoringService.accept(SID, self.actor_mentor)
+        self.assertEqual(s.status, 'accepted')
+        self.assertEqual(self.updated()['meeting_status'], 'failed')
+
+    def test_unavailable_when_google_is_off_or_on_staging(self):
+        self.g.is_enabled.return_value = False
+        s = make_session()
+        self.give(s)
+        self.load(s)
+        MentoringService.accept(SID, self.actor_mentor)
+        self.assertEqual((s.status, s.meeting_status), ('accepted', 'unavailable'))
+        self.g.create_meeting.assert_not_called()
+
+    def test_in_person_sessions_get_no_meeting(self):
+        s = make_session(location_type='mlai_space')
+        self.give(s)
+        self.load(s)
+        MentoringService.accept(SID, self.actor_mentor)
+        self.g.create_meeting.assert_not_called()
+        self.assertEqual(s.meeting_status, 'pending')
+
+    def test_cancelled_while_creating_removes_the_new_event(self):
+        s = make_session('accepted')
+        self.give(s)
+        self.objs.filter.return_value.update.return_value = 0
+        MentoringService.create_meeting(SID)
+        self.g.delete_event.assert_called_once_with('ev1')
+
+    def test_retry_after_failure_creates_the_link(self):
+        s = make_session('accepted', meeting_status='failed', meeting_error='network')
+        self.give(s)
+        self.load(s)
+        self.assertEqual(MentoringService.retry_meeting(SID, self.actor_mentor), s)
+        self.g.create_meeting.assert_called_once()
+        self.assertEqual(self.updated()['meeting_status'], 'created')
+        claim = self.objs.filter.return_value.update.call_args_list[0].kwargs
+        self.assertEqual(claim, {'meeting_status': 'pending', 'meeting_error': ''})
+
+    def test_retry_rules(self):
+        self.give(make_session('accepted', meeting_status='failed'))
+        s = make_session('accepted', meeting_status='failed')
+        self.load(s)
+        with self.assertRaises(MentoringError) as ctx:
+            MentoringService.retry_meeting(SID, self.actor_founder)
+        self.assertEqual(ctx.exception.code, 'not_session_mentor')
+        for bad in (make_session('requested'), make_session('accepted', location_type='mlai_space')):
+            with patch.object(MentoringService, '_load_session', return_value=bad):
+                with self.assertRaises(MentoringError) as ctx:
+                    MentoringService.retry_meeting(SID, self.actor_mentor)
+                self.assertEqual(ctx.exception.code, 'invalid_state')
+        pending = make_session('accepted', meeting_status='pending')
+        with patch.object(MentoringService, '_load_session', return_value=pending):
+            with self.assertRaises(MentoringError) as ctx:
+                MentoringService.retry_meeting(SID, self.actor_mentor)
+            self.assertEqual(ctx.exception.code, 'meeting_pending')
+        done = make_session('accepted', meeting_status='created', meet_link='https://meet.google.com/x')
+        with patch.object(MentoringService, '_load_session', return_value=done):
+            self.assertEqual(MentoringService.retry_meeting(SID, self.actor_mentor), done)
+        self.g.create_meeting.assert_not_called()
+
+    def test_retry_stays_unavailable_on_staging(self):
+        self.g.is_enabled.return_value = False
+        s = make_session('accepted', meeting_status='unavailable')
+        self.give(s)
+        self.load(s)
+        MentoringService.retry_meeting(SID, self.actor_mentor)
+        self.g.create_meeting.assert_not_called()
+        self.assertEqual(self.updated()['meeting_status'], 'unavailable')
+
+    def test_cancel_removes_the_calendar_event_best_effort(self):
+        s = make_session('accepted', calendar_event_id='ev1', meet_link='https://meet.google.com/x')
+        self.load(s)
+        MentoringService.cancel(SID, self.actor_founder)
+        self.assertEqual(s.status, 'cancelled')
+        self.g.delete_event.assert_called_once_with('ev1')
+        # a Google failure changes nothing
+        self.g.delete_event.side_effect = google.GoogleError('network')
+        s2 = make_session('accepted', calendar_event_id='ev2')
+        self.load(s2)
+        MentoringService.cancel(SID, self.actor_mentor)
+        self.assertEqual(s2.status, 'cancelled')
+
+    def test_cancel_without_a_meeting_calls_nothing(self):
+        s = make_session('accepted')
+        self.load(s)
+        MentoringService.cancel(SID, self.actor_founder)
+        self.g.delete_event.assert_not_called()
+
+
+class BusyTests(GoogleBase):
+    DAY = datetime(2026, 11, 9).date()  # a Monday
+
+    def setUp(self):
+        super().setUp()
+        self.mentor = SimpleNamespace(
+            pk=7, timezone='UTC', session_minutes=30, away_dates=[], busy_calendar_email='mia@gmail.com',
+            availability_rules=MagicMock(all=lambda: [
+                SimpleNamespace(weekday=0, start_time=datetime(2026, 1, 1, 9).time(), end_time=datetime(2026, 1, 1, 11).time()),
+            ]),
+        )
+        self.objs.filter.return_value.values_list.return_value = []
+        self.g.busy_times.return_value = []
+        self.now = datetime(2026, 11, 2, tzinfo=tz.utc)
+
+    def slots(self, **kw):
+        return MentoringService._free_slots(self.mentor, self.DAY, self.DAY, now=self.now,
+                                            settle_first=False, **kw)
+
+    def hours(self, slots):
+        return [s.strftime('%H:%M') for s in slots]
+
+    def test_google_busy_time_is_subtracted(self):
+        self.g.busy_times.return_value = [(datetime(2026, 11, 9, 9, 30, tzinfo=tz.utc),
+                                           datetime(2026, 11, 9, 10, 30, tzinfo=tz.utc))]
+        slots, check = self.slots(with_google=True)
+        self.assertEqual((self.hours(slots), check), (['09:00', '10:30'], 'ok'))
+        self.assertEqual(self.g.busy_times.call_args.args[0], 'mia@gmail.com')
+
+    def test_freebusy_failure_still_shows_slots_and_flags_it(self):
+        self.g.busy_times.side_effect = google.GoogleError('calendar_not_shared')
+        slots, check = self.slots(with_google=True)
+        self.assertEqual((self.hours(slots), check), (['09:00', '09:30', '10:00', '10:30'], 'failed'))
+
+    def test_off_without_email_google_or_flag(self):
+        self.mentor.busy_calendar_email = ''
+        self.assertEqual(self.slots(with_google=True)[1], 'off')
+        self.mentor.busy_calendar_email = 'mia@gmail.com'
+        self.g.is_enabled.return_value = False
+        self.assertEqual(self.slots(with_google=True)[1], 'off')
+        self.g.is_enabled.return_value = True
+        self.assertEqual(self.slots(with_google=False)[1], 'off')
+        self.g.busy_times.assert_not_called()
+
+    def test_booking_recheck_makes_no_google_call(self):
+        MentoringService.free_slots(self.mentor, self.DAY, self.DAY, now=self.now, settle_first=False)
+        self.g.busy_times.assert_not_called()
+
+    def test_availability_reports_busy_check(self):
+        with patch.object(MentoringService, '_get_active_mentor', return_value=self.mentor), \
+                patch.object(MentoringService, 'sweep'):
+            self.mentor.price_roo = 40
+            data = MentoringService.availability(7, self.DAY, self.DAY)
+        self.assertEqual(data['busy_check'], 'ok')
 
 
 if __name__ == '__main__':

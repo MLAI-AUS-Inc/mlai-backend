@@ -45,9 +45,12 @@ class MentorProfile(models.Model):
     location_type = models.CharField(
         max_length=16, choices=LOCATION_CHOICES, default=LOCATION_VIDEO
     )
-    video_link = models.URLField(
-        max_length=500, blank=True, default='',
-        help_text="The mentor's own video link, for example a Google Meet link.",
+    busy_calendar_email = models.EmailField(
+        max_length=254, blank=True, default='',
+        help_text=(
+            'Email of the Google Calendar the mentor shared free/busy of with the MLAI '
+            'mentoring account. Optional; busy times are hidden from the slot list.'
+        ),
     )
     space_notes = models.CharField(max_length=300, blank=True, default='')
     created_at = models.DateTimeField(auto_now_add=True)
@@ -98,6 +101,17 @@ class MentorSession(models.Model):
         (STATUS_COMPLETED, 'Completed'),
     )
     ACTIVE_STATUSES = (STATUS_REQUESTED, STATUS_ACCEPTED)
+
+    MEETING_PENDING = 'pending'
+    MEETING_CREATED = 'created'
+    MEETING_FAILED = 'failed'
+    MEETING_UNAVAILABLE = 'unavailable'
+    MEETING_CHOICES = (
+        (MEETING_PENDING, 'Pending'),
+        (MEETING_CREATED, 'Created'),
+        (MEETING_FAILED, 'Failed'),
+        (MEETING_UNAVAILABLE, 'Unavailable'),
+    )
 
     NOTIFY_PENDING = 'pending'
     NOTIFY_SENT = 'sent'
@@ -156,6 +170,19 @@ class MentorSession(models.Model):
         on_delete=models.SET_NULL, related_name='+',
     )
     completed_at = models.DateTimeField(null=True, blank=True)
+
+    # Google Meet link, created by the MLAI organiser account when the mentor
+    # accepts a video session. A failure here never changes status.
+    meet_link = models.URLField(max_length=500, blank=True, default='')
+    calendar_event_id = models.CharField(max_length=255, blank=True, default='')
+    meeting_status = models.CharField(
+        max_length=12, choices=MEETING_CHOICES, default=MEETING_PENDING
+    )
+    meeting_error = models.CharField(max_length=40, blank=True, default='')
+    meeting_path = models.CharField(
+        max_length=16, blank=True, default='',
+        help_text='Which Google path made the link: meet_api or calendar.',
+    )
 
     # Delivery outcome is deliberately separate from status: a failed Slack DM
     # must never change the booking.

@@ -43,6 +43,7 @@ from .mentoring_views import (
     MentorSessionCancelView,
     MentorSessionCompleteView,
     MentorSessionDeclineView,
+    MentorSessionMeetingRetryView,
     MentorSessionsView,
     MyMentorProfileView,
 )
@@ -84,6 +85,7 @@ urlpatterns = [
     path("mentor/sessions/<uuid:session_id>/accept/", MentorSessionAcceptView.as_view(), name="community_chat_mentor_session_accept"),
     path("mentor/sessions/<uuid:session_id>/decline/", MentorSessionDeclineView.as_view(), name="community_chat_mentor_session_decline"),
     path("mentor/sessions/<uuid:session_id>/cancel/", MentorSessionCancelView.as_view(), name="community_chat_mentor_session_cancel"),
+    path("mentor/sessions/<uuid:session_id>/meeting/retry/", MentorSessionMeetingRetryView.as_view(), name="community_chat_mentor_session_meeting_retry"),
     path("mentor/sessions/<uuid:session_id>/complete/", MentorSessionCompleteView.as_view(), name="community_chat_mentor_session_complete"),
     path("slack/message/", SlackMessageActionView.as_view(), name="community_chat_slack_message"),
     path("slack/", SlackDmMirrorView.as_view(), name="community_chat_slack"),

@@ -22,8 +22,8 @@ class MentorProfileAdmin(admin.ModelAdmin):
 
 @admin.register(MentorSession)
 class MentorSessionAdmin(admin.ModelAdmin):
-    list_display = ('id', 'mentor', 'founder', 'status', 'starts_at', 'price_roo', 'notification_status')
-    list_filter = ('status', 'notification_status')
+    list_display = ('id', 'mentor', 'founder', 'status', 'starts_at', 'price_roo', 'notification_status', 'meeting_status')
+    list_filter = ('status', 'notification_status', 'meeting_status')
     readonly_fields = [f.name for f in MentorSession._meta.fields]
 
     def has_add_permission(self, request):

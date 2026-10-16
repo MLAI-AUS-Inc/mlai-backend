@@ -40,12 +40,13 @@ copy (done; it is in the branch). Still needed from the staging operator side:
 
 Mark two or three existing marked synthetic accounts as mentors (never real people):
 in Django admin, "Vibe Mentoring" > Mentor profiles > add, pick the user, tick Active,
-set location (MLAI space or Video) and, for video, a Google Meet `video_link`, save. Suggested: one with video, one with MLAI space, and keep at least two other
+set location (MLAI space or Video), save. Suggested: one with video, one with MLAI space, and keep at least two other
 synthetic accounts as founders. Give founders points the usual staging way
 (at least 40 Roo per session they will be charged for; the charge happens on accept). Each mentor then signs in as
 themselves and PUTs `/api/v1/community-chat/mentor/profile/` with weekly
-`availability` (for example weekday 1, start "09:00", end "12:00"), a `video_link`
-(an https placeholder link standing in for a Google Meet link), and optional `away_dates`.
+`availability` (for example weekday 1, start "09:00", end "12:00") and optional `away_dates`.
+Video sessions have no mentor link any more. On staging the Google calls are unavailable, so an
+accepted video session shows `meeting_status: unavailable` and no `meet_link`. That is expected.
 
 ## 4. Verify
 

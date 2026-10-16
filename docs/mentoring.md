@@ -1,9 +1,11 @@
 # Vibe Mentoring (pilot)
 
 Status: pilot, built on the private branch `mentoring/pilot`. Not in `main`.
-The migration `mentoring/migrations/0001_initial.py` is generated and approved by
-the operator for this private copy, but not yet applied anywhere. See
-`docs/migration-proposals/mentoring-0001.md`.
+The migration `mentoring/migrations/0001_initial.py` was approved by the operator for
+this private copy, but it is now TO BE REGENERATED after approval: the Google work removed
+`video_link` and added fields (see `docs/migration-proposals/mentoring-0001.md`). Until the
+operator approves the changed field list the migration file and the models disagree, and
+nothing has been applied anywhere.
 
 ## What it is
 
@@ -21,9 +23,10 @@ HTTP layer is `community_chat/mentoring_views.py`.
   timezone), their own session length (15 to 120 minutes, multiples of 5), their
   price, bio, topics and location.
 - Each mentor sets one location, "MLAI space" or "Video"; the founder does not
-  choose. For video the mentor shares their own https link in `video_link` (for
-  example a Google Meet link). There is no Google Calendar or Meet integration.
-  The link is shown to the founder only once the session is accepted.
+  choose. For video there is no mentor-supplied link: when the mentor accepts, MLAI
+  creates a fresh Google Meet link for that session (see "Google Meet and free/busy"
+  below). `meet_link` is shown only to the founder and the mentor, and only once the
+  session is accepted (or completed).
 - Mentors can set away dates: a list of inclusive local date ranges (`away_dates` on
   the profile, up to 20) with no bookings. Existing accepted sessions are not
   cancelled automatically; the mentor cancels them.
@@ -50,11 +53,12 @@ Everything returns 404 `mentor_booking_disabled` while the flag is off.
 | Method and path | Purpose |
 | --- | --- |
 | GET `mentors/` | List active mentors (no email or Slack id) |
-| GET `mentors/<id>/availability/?from=&to=` | Free slots (UTC ISO times), up to 31 days, default next 14 |
-| GET, PUT `mentor/profile/` | The mentor's own profile and weekly `availability` list |
+| GET `mentors/<id>/availability/?from=&to=` | Free slots (UTC ISO times), up to 31 days, default next 14, plus `busy_check` (`ok`, `failed` or `off`) |
+| GET, PUT `mentor/profile/` | The mentor's own profile, weekly `availability` list and optional `busy_calendar_email` |
 | POST `mentor/sessions/` | Founder request: `mentor_id` (whole number), `starts_at`, `brief`, `client_request_id`, and `expected_price` (required, the whole-number price the founder was shown) |
 | GET `mentor/sessions/?role=founder\|mentor&status=` | My sessions |
 | POST `mentor/sessions/<uuid>/accept/` | Mentor accepts; the founder is charged now (409 `founder_insufficient_points` and the request stays open if they cannot pay) |
+| POST `mentor/sessions/<uuid>/meeting/retry/` | Mentor asks for the Meet link again when `meeting_status` is `failed` or `unavailable` (409 `meeting_pending` while one is being made) |
 | POST `mentor/sessions/<uuid>/decline/` | Mentor declines (no points move) |
 | POST `mentor/sessions/<uuid>/cancel/` | Founder or mentor, any time before completion, even after the start (refund if charged) |
 | POST `mentor/sessions/<uuid>/complete/` | Mentor marks done, only once the session has ended (payout) |
@@ -121,6 +125,74 @@ not queued, only when the mentor has a Slack id. The outcome is stored in
 failed DM cannot change a booking. Mentors can also poll
 `mentor/sessions/?role=mentor&status=requested`.
 
+## Google Meet and free/busy
+
+Code: `mentoring/google.py`. One MLAI-owned free Google account (consumer Gmail, not
+Workspace) is the organiser. Mentor and mentee Google accounts are never used to sign
+in. Plain HTTPS through `requests`; no new dependency. Everything is off unless
+`MENTORING_GOOGLE_ENABLED` is true and the three credentials are set, and it is always
+unavailable on isolated staging (capability `google`, never called).
+
+- Accept: after the charge commits (`transaction.on_commit`, best effort like the Slack
+  DM) a fresh Meet link is made for every video session. Primary path: Meet REST API
+  `POST https://meet.googleapis.com/v2/spaces` with `accessType: OPEN`, then a Calendar
+  event on the MLAI account's primary calendar inviting the mentor and the founder
+  (`sendUpdates=all`), the link in location and description. If the Meet call fails with a
+  permission or feature error, fallback: a Calendar event with `conferenceData.createRequest`
+  (`hangoutsMeet`, requestId = session id), reading `hangoutLink` and polling once if pending.
+  The path used is stored in `meeting_path` (`meet_api` or `calendar`).
+- Session fields: `meet_link`, `calendar_event_id`, `meeting_status` (`pending`, `created`,
+  `failed`, `unavailable`), `meeting_error` (short code such as `permission`, `network`,
+  `google_off`). A failure never undoes the acceptance. The mentor can retry with
+  `POST mentor/sessions/<id>/meeting/retry/`. With Google off or on staging the status is
+  `unavailable`.
+- Cancel after a meeting exists: the Calendar event is deleted (best effort; guests are told).
+- Slots: when the mentor has `busy_calendar_email` and Google is enabled, the slot list
+  drops times the mentor is busy, from the Calendar `freeBusy` call made by the MLAI
+  account. Answers are cached per mentor and window for 5 minutes. If the call fails the
+  slots are still shown and `busy_check` is `failed` (`off` when not used). The booking
+  re-check inside the transaction does not call Google, so a mentor who is busy can still
+  decline a request.
+- Responses: `meet_link` and `meeting_status` appear only for video sessions that are
+  accepted or completed, and sessions are only ever returned to their two participants.
+  `busy_calendar_email` is returned only on the mentor's own profile.
+
+## Google setup (for the operator)
+
+1. Create a free Google account just for MLAI mentoring (a normal Gmail address, not
+   Workspace). Use a shared mailbox the team controls, and turn on two-step sign-in.
+2. In Google Cloud Console (signed in as that account) create a project. Enable two APIs:
+   "Google Calendar API" and "Google Meet REST API". Set up the OAuth consent screen
+   (External; add the MLAI account as a test user, and publish the app to Production so the
+   refresh token does not expire after seven days).
+3. Create an OAuth client (type "Desktop app" or "Web application"). This gives a client
+   id and a client secret.
+4. Do a one-time sign-in as the MLAI account to grant these scopes:
+   `https://www.googleapis.com/auth/calendar.events` (create and delete events),
+   `https://www.googleapis.com/auth/calendar.freebusy` (busy times) and
+   `https://www.googleapis.com/auth/meetings.space.created` (create Meet spaces).
+   Use Google's OAuth consent flow (for example the OAuth 2.0 Playground with your own
+   client id and secret, or a local one-off sign-in). Ask for offline access so Google returns a
+   refresh token, and copy only the refresh token. This repo deliberately has no script that
+   stores secrets.
+5. Put the three values in the backend environment, never in git or docs:
+   `MENTORING_GOOGLE_CLIENT_ID`, `MENTORING_GOOGLE_CLIENT_SECRET`,
+   `MENTORING_GOOGLE_REFRESH_TOKEN`, then set `MENTORING_GOOGLE_ENABLED=true`. They go in the
+   laptop vault later; until then keep them only in the host env file.
+6. Mentor step, "Share free/busy with <MLAI account>": in Google Calendar on the web, open
+   Settings, pick the calendar, "Share with specific people or groups", add the MLAI
+   account's address with the permission "See only free/busy (hide details)". Then the mentor
+   saves that calendar's email address as `busy_calendar_email` on their mentor profile. The
+   mentor never signs in to MLAI's Google.
+
+Open questions that need a live test before the pilot relies on them:
+
+- Can a free consumer account call Meet `spaces.create` with `accessType: OPEN`? If not, the
+  Calendar `conferenceData` fallback is used automatically; check `meeting_path` on a test
+  session to see which path was taken.
+- Can guests join the call when the organiser (the MLAI account) is not present? This decides
+  whether sessions can start with only the mentor and founder.
+
 ## Rollout order
 
 1. The migration `mentoring/migrations/0001_initial.py` is generated and approved
@@ -132,18 +204,20 @@ failed DM cannot change a booking. Mentors can also poll
    and how to recompute it), then merge and deploy (the flag is off, so nothing
    changes for users).
 4. In Django admin create a `MentorProfile` per mentor and tick active; mentors
-   fill in availability and video link through the API or the chat client.
+   fill in availability through the API or the chat client (and, if they want busy times hidden, share free/busy with the MLAI account and set `busy_calendar_email`).
 5. Set `MENTOR_BOOKING_ENABLED=true` in the host env and restart.
 6. Release the chat clients that read `feature_flags.mentor_booking`.
 
 ## Settings
 
 `MENTOR_BOOKING_ENABLED` (false), `MENTOR_REQUEST_TTL_HOURS` (48),
-`MENTOR_AUTO_COMPLETE_HOURS` (24), `COMMUNITY_CHAT_MENTORING_RATE` (60/minute),
+`MENTOR_AUTO_COMPLETE_HOURS` (24), `MENTORING_GOOGLE_ENABLED` (false),
+`MENTORING_GOOGLE_CLIENT_ID`, `MENTORING_GOOGLE_CLIENT_SECRET`, `MENTORING_GOOGLE_REFRESH_TOKEN`
+(all empty, env only), `COMMUNITY_CHAT_MENTORING_RATE` (60/minute),
 `COMMUNITY_CHAT_MENTORING_WRITE_RATE` (20/minute).
 
 ## Tests
 
 No-database suites, registered in `.github/workflows/deploy.yml`:
-`python scripts/test_without_database.py mentoring.tests.test_scheduling_unit mentoring.tests.test_service_unit mentoring.tests.test_dst_unit community_chat.tests.test_mentoring_views_unit`.
+`python scripts/test_without_database.py mentoring.tests.test_scheduling_unit mentoring.tests.test_google_unit mentoring.tests.test_service_unit mentoring.tests.test_dst_unit community_chat.tests.test_mentoring_views_unit`.
 Locking, constraints and real ledger rows need database tests after migration approval.

@@ -32,7 +32,7 @@ from roo.models import PointsAccount
 from roo.permissions import InsufficientBalanceError
 from roo.services import PointsService
 
-from . import scheduling
+from . import google, scheduling
 from .models import (
     DEFAULT_PRICE_ROO,
     LOCATION_MLAI_SPACE,
@@ -52,6 +52,7 @@ MAX_PRICE_ROO = 1000
 MAX_AVAILABILITY_WINDOWS = 28
 MAX_AWAY_RANGES = 20
 _TIME_RE = re.compile(r'^([01]\d|2[0-3]):([0-5]\d)$')
+_EMAIL_RE = re.compile(r'^[^@\s]+@[^@\s]+\.[^@\s]+$')
 
 
 class MentoringError(Exception):
@@ -246,13 +247,14 @@ def validate_profile_update(payload, current):
         if payload['location_type'] not in (LOCATION_MLAI_SPACE, LOCATION_VIDEO):
             raise MentoringError('invalid_field', 'location_type must be mlai_space or video.', 400)
         clean['location_type'] = payload['location_type']
-    if 'video_link' in payload:
-        clean['video_link'] = _clean_url(payload['video_link'], 'video_link')
+    if 'busy_calendar_email' in payload:
+        email = _clean_text(payload['busy_calendar_email'], 'busy_calendar_email', 254).lower()
+        if email and not _EMAIL_RE.match(email):
+            raise MentoringError('invalid_field', 'busy_calendar_email must be an email address.', 400)
+        clean['busy_calendar_email'] = email
     if 'space_notes' in payload:
         clean['space_notes'] = _clean_text(payload['space_notes'], 'space_notes', 300)
-    final = {**current, **clean}
-    if final.get('location_type') == LOCATION_VIDEO and not final.get('video_link'):
-        raise MentoringError('video_link_required', 'Add your own video link (for example a Google Meet link) for video sessions.', 400)
+    # video_link no longer exists: video sessions always get an automatic Meet link.
     return clean
 
 
@@ -276,7 +278,7 @@ def serialize_mentor(profile, *, include_private=False):
     if include_private:
         data.update({
             'is_active': profile.is_active,
-            'video_link': profile.video_link,
+            'busy_calendar_email': profile.busy_calendar_email,
             'space_notes': profile.space_notes,
         })
     return data
@@ -284,9 +286,11 @@ def serialize_mentor(profile, *, include_private=False):
 
 def serialize_session(session, viewer):
     is_mentor = session.mentor.user_id == viewer.pk
-    show_location = is_mentor or session.status in (
+    after_acceptance = session.status in (
         MentorSession.STATUS_ACCEPTED, MentorSession.STATUS_COMPLETED,
     )
+    show_location = is_mentor or after_acceptance
+    is_video = session.location_type == LOCATION_VIDEO
     return {
         'id': str(session.pk),
         'role': 'mentor' if is_mentor else 'founder',
@@ -297,6 +301,10 @@ def serialize_session(session, viewer):
         'price_roo': session.price_roo,
         'location_type': session.location_type,
         'location_detail': session.location_detail if show_location else '',
+        # Only the two participants ever load a session, and the link is shown
+        # only once the session is accepted (or completed).
+        'meet_link': (session.meet_link or '') if (is_video and after_acceptance) else '',
+        'meeting_status': session.meeting_status if (is_video and after_acceptance) else None,
         'mentor': {
             'id': session.mentor_id,
             'name': _display_name(session.mentor.user),
@@ -411,6 +419,25 @@ class MentoringService:
 
     @classmethod
     def free_slots(cls, mentor, first_day, last_day, now=None, settle_first=True):
+        """Free slots from weekly rules and bookings only (no Google call)."""
+        return cls._free_slots(mentor, first_day, last_day, now, settle_first, with_google=False)[0]
+
+    @classmethod
+    def _google_busy(cls, mentor, first_day, last_day):
+        """Return (busy intervals, busy_check) where busy_check is ok, failed or off."""
+        email = getattr(mentor, 'busy_calendar_email', '') or ''
+        if not email or not google.is_enabled():
+            return [], 'off'
+        window_start = datetime.combine(first_day - timedelta(days=1), time.min, tzinfo=dt_timezone.utc)
+        window_end = datetime.combine(last_day + timedelta(days=2), time.min, tzinfo=dt_timezone.utc)
+        try:
+            return google.busy_times(email, window_start, window_end), 'ok'
+        except Exception as exc:
+            logger.warning('free/busy failed for mentor %s: %s', mentor.pk, getattr(exc, 'code', exc.__class__.__name__))
+            return [], 'failed'
+
+    @classmethod
+    def _free_slots(cls, mentor, first_day, last_day, now=None, settle_first=True, with_google=False):
         now = now or timezone.now()
         problem = scheduling.validate_range(first_day, last_day)
         if problem:
@@ -425,11 +452,17 @@ class MentoringService:
             mentor=mentor, status__in=MentorSession.ACTIVE_STATUSES,
             ends_at__gt=now,
         ).values_list('starts_at', 'ends_at')
-        return scheduling.generate_slots(
+        busy = list(busy)
+        busy_check = 'off'
+        if with_google:
+            google_busy, busy_check = cls._google_busy(mentor, first_day, last_day)
+            busy += google_busy
+        slots = scheduling.generate_slots(
             rules=rules, tz_name=mentor.timezone, session_minutes=mentor.session_minutes,
-            first_day=first_day, last_day=last_day, busy=list(busy), now=now,
+            first_day=first_day, last_day=last_day, busy=busy, now=now,
             away=_away_ranges(mentor),
         )
+        return slots, busy_check
 
     @classmethod
     def availability(cls, mentor_id, first_day=None, last_day=None):
@@ -438,12 +471,13 @@ class MentoringService:
         tz = ZoneInfo(mentor.timezone)
         first_day = first_day or now.astimezone(tz).date()
         last_day = last_day or first_day + timedelta(days=13)
-        slots = cls.free_slots(mentor, first_day, last_day, now=now)
+        slots, busy_check = cls._free_slots(mentor, first_day, last_day, now=now, with_google=True)
         return {
             'mentor_id': mentor.pk,
             'timezone': mentor.timezone,
             'session_minutes': mentor.session_minutes,
             'price_roo': mentor.price_roo,
+            'busy_check': busy_check,
             'slots': [s.isoformat() for s in slots],
         }
 
@@ -532,9 +566,7 @@ class MentoringService:
                 raise MentoringError('not_a_mentor', 'Your account is not set up as a mentor.', 404)
             if not profile.is_active:
                 raise MentoringError('mentor_inactive', 'An admin must activate your mentor profile first.', 403)
-            current = {
-                'location_type': profile.location_type, 'video_link': profile.video_link,
-            }
+            current = {'location_type': profile.location_type}
             clean = validate_profile_update(payload, current)
             windows = validate_availability(payload['availability']) if 'availability' in payload else None
             for field, value in clean.items():
@@ -553,7 +585,8 @@ class MentoringService:
     @staticmethod
     def _location(mentor):
         """The mentor sets one location; the founder does not choose."""
-        detail = mentor.video_link if mentor.location_type == LOCATION_VIDEO else mentor.space_notes
+        # Video sessions get an automatic Meet link on accept, so no detail here.
+        detail = '' if mentor.location_type == LOCATION_VIDEO else mentor.space_notes
         return mentor.location_type, detail
 
     @classmethod
@@ -682,15 +715,93 @@ class MentoringService:
             logger.exception('could not record notification outcome for %s', session_id)
         return outcome
 
+    # ---- meeting (best effort, never touches status)
+
+    @classmethod
+    def _create_meeting_safely(cls, session_id):
+        try:
+            cls.create_meeting(session_id)
+        except Exception:
+            logger.exception('mentor meeting creation raised for %s', session_id)
+
+    @classmethod
+    def create_meeting(cls, session_id):
+        """Create the Meet link for an accepted video session. Returns the meeting status."""
+        outcome, error, fields = MentorSession.MEETING_FAILED, 'unexpected', {}
+        event_id = ''
+        try:
+            session = MentorSession.objects.select_related('mentor__user', 'founder').get(pk=session_id)
+            if (
+                session.status != MentorSession.STATUS_ACCEPTED
+                or session.location_type != LOCATION_VIDEO
+                or session.meet_link
+            ):
+                return session.meeting_status
+            if not google.is_enabled():
+                outcome, error = MentorSession.MEETING_UNAVAILABLE, 'google_off'
+            else:
+                try:
+                    result = google.create_meeting(session)
+                    event_id = result['calendar_event_id']
+                    outcome, error = MentorSession.MEETING_CREATED, result['error']
+                    fields = {
+                        'meet_link': result['meet_link'], 'calendar_event_id': event_id,
+                        'meeting_path': result['path'],
+                    }
+                except google.GoogleError as exc:
+                    error = exc.code
+        except Exception:
+            logger.exception('mentor meeting creation failed for %s', session_id)
+        try:
+            saved = MentorSession.objects.filter(
+                pk=session_id, status=MentorSession.STATUS_ACCEPTED,
+            ).update(meeting_status=outcome, meeting_error=error, **fields)
+            if not saved and event_id:
+                # Cancelled while the link was being made: remove the invite.
+                cls._delete_event_safely(session_id, event_id)
+        except Exception:
+            logger.exception('could not record meeting outcome for %s', session_id)
+        return outcome
+
+    @classmethod
+    def _delete_event_safely(cls, session_id, event_id):
+        try:
+            if google.is_enabled():
+                google.delete_event(event_id)
+        except Exception:
+            logger.exception('could not remove calendar event for %s', session_id)
+
+    @classmethod
+    def retry_meeting(cls, session_id, actor):
+        """Mentor asks for the Meet link again after a failure."""
+        session = cls._load_session(session_id, actor)
+        if session.mentor.user_id != actor.pk:
+            raise MentoringError('not_session_mentor', 'Only the mentor can do this.', 403)
+        if session.status != MentorSession.STATUS_ACCEPTED or session.location_type != LOCATION_VIDEO:
+            raise MentoringError('invalid_state', 'Only an accepted video session has a meeting.', 409)
+        if session.meeting_status == MentorSession.MEETING_CREATED and session.meet_link:
+            return session  # a retried call is a success
+        if session.meeting_status == MentorSession.MEETING_PENDING:
+            raise MentoringError('meeting_pending', 'The meeting link is still being created.', 409)
+        claimed = MentorSession.objects.filter(
+            pk=session.pk, status=MentorSession.STATUS_ACCEPTED,
+            meeting_status__in=(MentorSession.MEETING_FAILED, MentorSession.MEETING_UNAVAILABLE),
+        ).update(meeting_status=MentorSession.MEETING_PENDING, meeting_error='')
+        if claimed:
+            cls.create_meeting(session.pk)
+        return MentorSession.objects.select_related('mentor__user', 'founder').get(pk=session.pk)
+
     # ---- transitions
 
     @classmethod
     def _load_for_update(cls, session_id, actor):
+        return cls._load_session(session_id, actor, lock=True)
+
+    @classmethod
+    def _load_session(cls, session_id, actor, lock=False):
         try:
-            session = (
-                MentorSession.objects.select_for_update()
-                .select_related('mentor__user', 'founder').get(pk=session_id)
-            )
+            query = MentorSession.objects.select_for_update() if lock else MentorSession.objects
+            session = query.select_related('mentor__user', 'founder').get(pk=session_id)
         except (MentorSession.DoesNotExist, ValueError, TypeError):
             raise MentoringError('session_not_found', 'Session not found.', 404)
         if actor.pk not in (session.founder_id, session.mentor.user_id):
@@ -754,6 +865,15 @@ class MentoringService:
         _charge_founder(session)
         session.status = MentorSession.STATUS_ACCEPTED
         session.responded_at = now
+        if session.location_type == LOCATION_VIDEO:
+            if google.is_enabled():
+                session.meeting_status = MentorSession.MEETING_PENDING
+                # After the charge commits, best effort, like the Slack DM.
+                pk = session.pk
+                transaction.on_commit(lambda: cls._create_meeting_safely(pk))
+            else:
+                session.meeting_status = MentorSession.MEETING_UNAVAILABLE
+                session.meeting_error = 'google_off'
         session.save()
 
     @classmethod
@@ -770,6 +890,9 @@ class MentoringService:
         # Allowed any time before completion, even after the start. Refund only
         # if the founder was charged (the mentor had accepted).
         _refund_charge(session, actor_slack_id=actor.slack_id)
+        if session.calendar_event_id:
+            event_id = session.calendar_event_id
+            transaction.on_commit(lambda: cls._delete_event_safely(session.pk, event_id))
         session.status = MentorSession.STATUS_CANCELLED
         session.cancelled_at = now
         session.cancelled_by = actor
