@@ -35,16 +35,43 @@ paths reject an old CMS connection. CMS disconnect remains available with the
 rollouts disabled and tells the owner to revoke the application/integration key
 in the provider too. The backend cannot revoke an arbitrary provider-owned key.
 
-**Still incomplete:** capture, media, durable post publication/reconciliation,
+Public-post capture now uses the common `capture_existing` operation and owner
+`capture-existing` action with the current connection tuple plus a fresh UUID
+`client_request_id`. One `cms-capture` reservation advances a bounded page per
+short lease. Every provider read reloads the current selected founder/company,
+credential reference and generation; results are checked again before saving.
+Expired leases can be replaced; a late reply cannot overwrite a newer worker or
+cancellation. The generic reconciler resumes these jobs only with CMS execution
+enabled and never treats a frozen CMS job as Git cleanup.
+
+WordPress posts are ordered by ID with authenticated edit context, published
+status and fixed page size. Ghost posts use fixed public/published filtering,
+HTML format and bounded pagination. Original HTML stays private in the capture
+manifest with content digests and native author/category/tag/media IDs; it is
+never executed. Password-protected/member-only bodies and author emails are
+excluded. Public receipts contain counts, coverage and an inventory digest only.
+Changing pagination can restart the same capture twice. Transient page reads
+retry with bounded backoff; exhausted or invalid capture records shared B1
+failure evidence for the goal's later fallback handling. Page, record and byte
+limits remain explicitly partial, and purge erases captured private manifests.
+No CMS source is represented as a Git commit or on-main publication fact.
+
+**Still incomplete:** media, durable post publication/reconciliation,
 unpublish, live proof, CMS goal milestones, artifact-only CF envelope, owner UI,
 and the remote WordPress/Ghost acceptance runs. Connection summaries deliberately
 advertise no generation or publication readiness. Keep rollout flags off.
 
-Local evidence: the full 899-test website group includes 40 CMS credential,
-transport, identity and owner cases; 15 observability tests also pass. Two actual ORM
+Local evidence: the full 925-test website group includes 66 CMS credential,
+transport, identity, owner and capture cases; 15 observability and 24 Chat facade
+tests also pass. Two actual ORM
 credential/connect/replay/disconnect regressions are assigned to disposable CI
 and have not been run locally. The final run and exact PR CI head are recorded
 in the PR validation notes.
+
+Capture validation adds pure pagination/manifest and actual-guard lease/race
+cases; its actual ORM capture/purge path is assigned to the remote disposable
+connection regression. Full WordPress/Ghost container and goal acceptance remain
+required; a complete inventory is an observation, not a live publication proof.
 
 ## Independent provider authority
 

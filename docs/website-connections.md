@@ -57,6 +57,16 @@ revoke the key in the CMS too. These are connection primitives; CMS generation,
 publication, live proof and the full goal remain unavailable pending adapter
 acceptance. See [CMS implementation and remaining work](articles-e5-cms-publishing-2026-10-17.md).
 
+`POST website-connection/capture-existing` uses the common channel interface.
+For a current CMS binding it accepts the reviewed connection tuple and UUID
+`client_request_id`, reserves one idempotent `cms-capture` operation and advances
+a bounded public-post page. Its response is only an operation receipt; private
+native HTML is stored under the capture's current scope and never returned in
+status. Background reconciliation resumes missing pages with short leases and
+bounded retries, rechecking ownership, generation, cancellation and the private
+credential reference around every provider read. Pagination/byte limits are
+explicitly partial. This read-only inventory grants no publication readiness.
+
 Every repository request, saved run, child run, token request, callback and repository-derived config update carries `website_connection_id` and `connection_generation`. `repository_id` verifies GitHub's immutable identity. `connection_target_id` identifies a verified target for publishing; when omitted the selected default must be verified. Worker retry `generation` is a separate counter.
 
 `GET /api/content-factory/connections/authorize` accepts that tuple, `domain`, `github_repo`, and `action=read|scan|config_write|preview|setup|publish|merge|cleanup`. It uses existing internal API-key authentication. Missing, stale, revoked, cross-company and mismatched repository authority returns a stable 409 error. No legacy OAuth fallback overrides denial. A successful check is not a lease: workers recheck immediately before each external mutation. The backend serializes its writes with lifecycle changes using organization/connection row locks.

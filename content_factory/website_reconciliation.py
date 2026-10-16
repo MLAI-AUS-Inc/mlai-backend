@@ -753,6 +753,11 @@ def process_website_connection_operations(*, limit=20, now=None, connection_id=N
     from .website_operational_alert_delivery import ACTION as alert_action, advance as advance_alert, channel as alert_channel
     notices_enabled=getattr(settings,"ARTICLES_GOAL_NOTIFICATIONS_ENABLED",False)
     excluded = ["workflow"] if notices_enabled else ["workflow", notice_action]
+    from .cms_connection_authority import enabled as cms_channel_enabled
+    cms_enabled = cms_channel_enabled()
+    if not cms_enabled:
+        # Frozen provider jobs must never fall through to Git token cleanup.
+        excluded.extend(["cms-capture", "cms-publish", "cms-unpublish"])
     if not accounting_enabled():
         excluded.append(usage_action)
     if not getattr(settings, "ARTICLES_OPERATIONAL_ALERTS_ENABLED", False):
@@ -762,6 +767,7 @@ def process_website_connection_operations(*, limit=20, now=None, connection_id=N
         Q(state="pending") | Q(action="prepare", state="running") | Q(action=notice_action,state="running") | Q(action=refund_action,state="running") |
         Q(action=usage_action, state="running") |
         Q(action=alert_action, state="running") |
+        Q(action="cms-capture", state="running") |
         unconfigured_alerts |
         Q(action="prepare", state="needs_user", receipt__user_action__id__in=["deploy_site","merge_pr","review_draft"])).exclude(action__in=excluded)
     if connection_id:
@@ -773,6 +779,15 @@ def process_website_connection_operations(*, limit=20, now=None, connection_id=N
     monitor_cleanup_pull_requests(limit=limit, connection_id=connection_id)
     from .website_wakeups import enabled as event_wakes_enabled
     for identifier in ids:
+        if cms_enabled and WebsiteConnectionOperation.objects.filter(pk=identifier, action="cms-capture").exists():
+            from .cms_capture import advance_capture
+            operation = advance_capture(identifier, now=now)
+            if operation is not None:
+                result["processed"] += 1
+                result["pending" if operation.state in {"pending", "running"} else "completed"] += 1
+                if len(result["operations"]) < 20:
+                    result["operations"].append({"id": str(identifier), "action": "cms-capture", "outcome": operation.state})
+            continue
         if getattr(settings, "ARTICLES_OPERATIONAL_ALERTS_ENABLED", False) and WebsiteConnectionOperation.objects.filter(pk=identifier, action=alert_action).exists():
             outcome = advance_alert(identifier, now=now)
             if outcome is not None:

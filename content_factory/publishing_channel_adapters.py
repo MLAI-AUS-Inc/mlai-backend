@@ -75,7 +75,13 @@ class CmsChannel(UnavailableChannel):
     """Authenticated CMS effects are supplied by v2 3.3 and 3.6."""
 
     name = "cms"
-    effect_capabilities = frozenset({"disconnect"})
+    effect_capabilities = frozenset({"capture_existing", "disconnect"})
+
+    def capture_existing(self, request):
+        """Reserve and advance bounded public-post capture with private authority."""
+        from .cms_capture import start_capture, advance_capture
+        operation = start_capture(request.context, request.config, user=request.user, data=request.data)
+        return advance_capture(operation.pk, now=request.now) or operation
 
     def disconnect(self, request):
         """Erase stored CMS authority and retain published provider content."""

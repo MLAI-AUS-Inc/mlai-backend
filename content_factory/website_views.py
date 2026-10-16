@@ -147,12 +147,22 @@ class WebsiteConnectionActionView(APIView):
     """Independent pause/disconnect/reconnect/reset/cleanup consent actions."""
 
     def post(self, request, action):
-        if action not in {"prepare", "pause", "disconnect", "reconnect", "reset", "cleanup", "purge", "cancel-operation", "reconcile", "verify-access", "verify", "custom-contract", "ci-attestation", "github-revoke", "verify-cleanup", "inspect-channel", "select-channel", "cms-connect"}:
+        if action not in {"prepare", "pause", "disconnect", "reconnect", "reset", "cleanup", "purge", "cancel-operation", "reconcile", "verify-access", "verify", "custom-contract", "ci-attestation", "github-revoke", "verify-cleanup", "inspect-channel", "select-channel", "cms-connect", "capture-existing"}:
             return Response({"code": "invalid_connection_action", "detail": "Unknown website action."}, status=400)
         context, config, error = _context(request)
         if error:
             return error
         try:
+            if action == "capture-existing":
+                current = config.website_connection
+                if current is None or "_cms_binding" not in (current.capabilities or {}):
+                    raise WebsiteAuthorityError("publishing_adapter_required", "Use repository scan for a Git website or choose the current CMS connection.")
+                from .publishing_channels import execute
+                from .publishing_channel_contract import ChannelRequest
+                from .website_operations import operation_summary
+                operation = execute("capture_existing", ChannelRequest(context=context, config=config,
+                    user=request.user, data=dict(request.data)))
+                return Response({"operation": operation_summary(operation)}, headers={"Cache-Control": "private, no-store"})
             if action == "cms-connect":
                 from .cms_owner_connection import connect
                 from .website_publishing_channels import projection
