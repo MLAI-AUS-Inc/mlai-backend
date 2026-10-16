@@ -5,6 +5,7 @@ from .website_contract import evidence_digest
 from .website_discovery import discovery_snapshot
 from .website_operations import deletion_epoch, operation_summary
 from .activation import VERIFICATION_MAX_AGE
+from .article_publication_policy import can_publish_article
 from django.utils import timezone
 from datetime import timedelta
 
@@ -43,7 +44,8 @@ def project_journey(*, company_id, domain, website=None, capabilities=None, disc
     deployed = bool(deployment.get("status") == "passed" and deployment.get("source_sha") == website.get("verifiedSha")
         and deployment.get("connection_generation") == website.get("connectionGeneration") and deployment.get("target_id") == target.get("key")
         and deployment.get("public_url") and deployment.get("checked_at"))
-    live_ready = verified and deployed
+    live_ready = can_publish_article(integration_verified=verified,
+        write_verified=capabilities.get("repositoryWriteVerified") is True and write_allowed,deployment_verified=deployed)
     reason_code = capabilities.get("reasonCode") or "integration_required"
     reason = capabilities.get("reason") or "Prepare and verify your articles integration."
     if not authoring_supported:
@@ -163,7 +165,7 @@ def project_journey(*, company_id, domain, website=None, capabilities=None, disc
         "policy": {"allowed": write_allowed, "reasonCode": "" if write_allowed else reason_code, "reason": "" if write_allowed else reason},
         "reasonCode": "" if verified else reason_code, "reason": "" if verified else reason,
         "prerequisites": prerequisites, "steps": steps,
-        "capabilities": {"canRead": access, "canScan": bool(access and connected), "canPrepare": "setup" in allowed,
+        "capabilities": {"canRead": access, "canScan": bool(access and connected), "canPrepare": "setup" in allowed,"repositoryWriteVerified":capabilities.get("repositoryWriteVerified") is True,
             "canPreview": bool(mapping(website.get("capabilities")).get("previewSupported") and write_allowed),
             "canGeneratePortableDraft": bool(capabilities.get("canGeneratePortableDraft", company_id)), "canGenerateArticle": verified, "canOpenPublicationPr": verified,
             "canPublishArticle": live_ready, "canMerge": bool(write_allowed and proof.get("reviewedMergeReady")), "canDisconnect": bool(website), "canPurge": bool(website), "canCleanup": "cleanup" in allowed},

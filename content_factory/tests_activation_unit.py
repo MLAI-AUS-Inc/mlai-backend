@@ -68,7 +68,10 @@ class ActivationEvidenceTests(SimpleTestCase):
         access = {"verified": True, "branch": "main", "sha": "abc123"}
         ready = article_capabilities(cfg, domain="example.com", account=account, evidence=evidence, repository_access=access)
         self.assertTrue(ready["canGenerateArticle"])
-        self.assertTrue(ready["canPublishArticle"])
+        self.assertFalse(ready["canPublishArticle"])
+        self.assertEqual(ready["publishingReasonCode"],"live_deployment_verification_required")
+        self.assertTrue(article_capabilities(cfg,domain="example.com",account=account,
+            evidence={**evidence,"publishingVerified":True},repository_access=access)["canPublishArticle"])
         for bad_access in ({}, {**access, "sha": "new-head"}, {**access, "branch": "next"}):
             self.assertFalse(article_capabilities(cfg, account=account, evidence=evidence, repository_access=bad_access)["canGenerateArticle"])
 

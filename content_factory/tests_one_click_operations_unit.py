@@ -66,7 +66,9 @@ class PrepareJourneyTests(SimpleTestCase):
         op = self.operation()
         with patch.object(prepare, "_claim_prepare", return_value=op), \
                 patch.object(prepare, "_prepare_context", return_value=(Mock(), Mock(), Mock())), \
-                patch.object(prepare, "journey_for_context", return_value={"capabilities": {"canPublishArticle": True}}), \
+                patch.object(prepare, "journey_for_context", return_value={"policy":{"allowed":True},
+                    "prerequisites":{"deployment":{"status":"complete"}},
+                    "capabilities": {"canGenerateArticle":True,"repositoryWriteVerified":True,"canPublishArticle": True}}), \
                 patch.object(prepare, "_persist_prepare", side_effect=lambda operation, **kwargs: operation):
             prepare.advance_prepare(op.pk, handlers={})
         self.assertEqual(op.state, "completed")

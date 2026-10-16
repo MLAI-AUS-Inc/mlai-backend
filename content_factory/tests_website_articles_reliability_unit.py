@@ -142,7 +142,7 @@ class WebsiteJourneyContractTests(SimpleTestCase):
 
     def test_target_readiness_needs_exact_live_deployment_proof(self):
         website = {"status": "connected", "verifiedSha": "a" * 40, "connectionGeneration": 2, "writePolicy": {"allowed": True}}
-        caps = {"canGenerateArticle": True, "repositoryAccessVerified": True}
+        caps = {"canGenerateArticle": True, "repositoryAccessVerified": True,"repositoryWriteVerified":True}
         partial = project_journey(company_id="42", domain="example.test", website=website, capabilities=caps)
         self.assertTrue(partial["capabilities"]["canOpenPublicationPr"])
         self.assertFalse(partial["capabilities"]["canPublishArticle"])

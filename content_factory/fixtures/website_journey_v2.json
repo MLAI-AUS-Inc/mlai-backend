@@ -190,6 +190,7 @@
     "canRead": true,
     "canScan": true,
     "canPrepare": false,
+    "repositoryWriteVerified": false,
     "canPreview": false,
     "canGeneratePortableDraft": true,
     "canGenerateArticle": false,
