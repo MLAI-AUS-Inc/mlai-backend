@@ -5,17 +5,73 @@ import re
 from datetime import datetime, timedelta, timezone as datetime_timezone
 from functools import partial
 from uuid import UUID
+from zoneinfo import ZoneInfo
 
-from django.db import transaction
+from django.conf import settings
+from django.db import IntegrityError, transaction
 from django.utils import timezone
 from rest_framework.exceptions import PermissionDenied, ValidationError
 
 from . import native_crypto, native_sources, runtime
-from .models import AgentCredential, AgentGrant, AgentInstallation, AgentInvocation, AgentInvocationReply, AgentSubscription
+from .models import AgentAuditEvent, AgentCredential, AgentGrant, AgentInstallation, AgentInvocation, AgentInvocationReply, AgentOAuthBinding, AgentSubscription
 from .policy import AgentPermissionDenied, authorize, canonical_hash, idempotency_key as validate_idempotency_key, validate_grant_base
 from .authentication import validate_credential
 
 HEX_ID = re.compile(r"^[0-9a-f]{64}$")
+
+
+class NativeTriggerRejected(ValueError):
+    """A permanent, content-free rejection of one source event, not the page."""
+
+    def __init__(self, reason):
+        self.reason = reason
+        super().__init__(reason)
+
+
+def always_admit():
+    return getattr(settings, "AGENT_RUNTIME_NATIVE_ALWAYS_ADMIT", False)
+
+
+def native_day_start(now):
+    """Use one accounting day for native admission, replies and owner status."""
+    zone = ZoneInfo(settings.AGENT_RUNTIME_NATIVE_LIMIT_TIMEZONE) if always_admit() else datetime_timezone.utc
+    return now.astimezone(zone).replace(hour=0, minute=0, second=0, microsecond=0)
+
+
+def native_daily_cap(grant):
+    return settings.AGENT_RUNTIME_NATIVE_ADMISSION_DAILY_CAP if always_admit() else grant.daily_task_limit
+
+
+def _deliberately_revoked(grant, *, now=None):
+    """Distinguish explicit account revocation from unavailable/expired consent."""
+    from startup_updates.mcp import oauth
+    from .unified_authority import PREFIX
+    now = now or timezone.now()
+    bindings = AgentOAuthBinding.objects.filter(credential__grant_id=grant.pk, client_id__startswith=PREFIX)
+    for binding in bindings:
+        try:
+            cached = oauth.cache.get(oauth.key("grant", binding.client_id[len(PREFIX):]))
+            if not isinstance(cached, dict) or cached.get("expiresAt", 0) <= now.timestamp():
+                continue
+            epoch = oauth.cache.get(oauth.key("epoch",
+                f"{grant.installation.owner.pk}:{oauth.grant_subject(cached.get('company_id'))}")) or ""
+            if (cached.get("revoked") or cached.get("auth_version") != grant.installation.owner.auth_version
+                    or cached.get("revocation_epoch", "") != epoch):
+                return True
+        except Exception:
+            # Missing cache authority never enables delivery. Admission alone
+            # may continue, with a reconnect requirement, until consent returns.
+            continue
+    return False
+
+
+def _note_blocked(installation, grant, code, *, now):
+    cursor = dict(installation.native_cursor)
+    if cursor.get("needs") != code:
+        runtime.audit("native.admission.blocked", grant=grant, reason=code)
+    cursor["needs"] = code
+    installation.native_cursor = cursor
+    installation.save(update_fields=("native_cursor", "updated_at"))
 
 
 def validate_invocation(invocation, grant, *, now=None, allow_replied=False, allow_expired=False):
@@ -70,30 +126,80 @@ def _authorized_invocation(principal, invocation_id, scope, *, allow_replied=Fal
     return principal, invocation
 
 
-def payload(invocation):
+def payload(invocation, *, now=None):
+    now = now or timezone.now()
     return {"invocation_id": str(invocation.pk), "installation_id": str(invocation.installation_id),
         "resource": invocation.resource, "source_event_id": invocation.source_event_id,
         "thread_id": invocation.thread_id, "status": invocation.status, "expires_at": invocation.expires_at.isoformat(),
-        "context_policy": "triggering_public_thread_only", "caller_public_key": invocation.owner_public_key}
+        "context_policy": "triggering_public_thread_only", "caller_public_key": invocation.owner_public_key,
+        "created_at": invocation.created_at.isoformat(),
+        "age_seconds": max(0, int((now - invocation.created_at).total_seconds())), "caller_is_owner": True}
+
+
+def _pending_invocations(principal):
+    """Return only currently authorized work; never reveal inaccessible rows."""
+    principal = _current_principal(principal)
+    if "messages:read" not in principal.credential.scopes:
+        raise AgentPermissionDenied("scope_denied")
+    grant = principal.grant
+    now = timezone.now()
+    validate_grant_base(grant, expected_generation=principal.credential.generation, now=now)
+    bound = native_sources.current_device(principal.owner, public_key=grant.installation.owner_device.public_key)
+    if bound.pk != grant.installation.owner_device_id:
+        raise AgentPermissionDenied("owner_device_changed")
+    rows = runtime.locked(AgentInvocation.objects.all()).filter(
+        grant=grant, installation=grant.installation, generation=principal.credential.generation,
+        resource__in=grant.resources, status="pending", expires_at__gt=now, reply__isnull=True,
+    ).order_by("created_at", "pk")
+    allowed, access = [], {}
+    for invocation in rows:
+        invocation.installation, invocation.grant = grant.installation, grant
+        try:
+            validate_invocation(invocation, grant, now=now)
+            native_sources.current_device(principal.owner, public_key=invocation.owner_public_key)
+            key = (invocation.owner_public_key, invocation.resource)
+            if key not in access:
+                checker = lambda owner, action, resource: native_sources.live_access(
+                    owner, action, resource, owner_public_key=invocation.owner_public_key)
+                try:
+                    authorize(grant, "messages:read", invocation.resource,
+                        expected_generation=principal.credential.generation, access_checker=checker, now=now)
+                except (AgentPermissionDenied, PermissionDenied, ValidationError):
+                    access[key] = False
+                else:
+                    access[key] = True
+            if access[key]:
+                allowed.append(invocation)
+        except (AgentPermissionDenied, PermissionDenied, ValidationError):
+            continue
+    return principal, allowed
+
+
+@transaction.atomic
+def list_pending_invocations(principal, *, limit=20):
+    """List oldest authorized owner mentions without disclosing other work."""
+    if type(limit) is not int or not 1 <= limit <= 20:
+        raise ValidationError("Invalid pending invocation limit.")
+    _, rows = _pending_invocations(principal)
+    return {"invocations": [payload(row) for row in rows[:limit]],
+            "pending_count": len(rows), "truncated": len(rows) > limit}
 
 
 @transaction.atomic
 def get_invocation(principal, invocation_id=None):
-    """Resolve an explicit request or the sole live pending request for this grant."""
+    """Resolve an explicit request or the oldest authorized pending owner mention."""
     if invocation_id is None:
-        principal = _current_principal(principal)
-        if "messages:read" not in principal.credential.scopes:
-            raise AgentPermissionDenied("scope_denied")
-        candidates = list(runtime.locked(AgentInvocation.objects.all()).filter(
-            grant=principal.grant, installation=principal.grant.installation,
-            generation=principal.credential.generation, resource__in=principal.grant.resources,
-            status="pending", expires_at__gt=timezone.now(),
-        ).order_by("created_at", "pk").values_list("pk", flat=True)[:2])
-        if len(candidates) != 1:
-            raise ValidationError("Provide invocation_id unless exactly one live pending owner mention exists.", code="invocation_ambiguous")
-        invocation_id = candidates[0]
-    _, invocation = _authorized_invocation(principal, invocation_id, "messages:read", allow_replied=True)
-    return payload(invocation)
+        _, candidates = _pending_invocations(principal)
+        if not candidates:
+            raise ValidationError("No pending owner mention is available.", code="no_pending_invocation")
+        invocation = candidates[0]
+        result = {**payload(invocation), "pending_count": len(candidates), "more_pending": len(candidates) > 1}
+    else:
+        _, invocation = _authorized_invocation(principal, invocation_id, "messages:read", allow_replied=True)
+        result = payload(invocation)
+    runtime.audit("native.invocation.fetched", grant=invocation.grant,
+                  invocation_id=str(invocation.pk), tool="get_invocation")
+    return result
 
 
 @transaction.atomic
@@ -101,7 +207,10 @@ def read_invocation_thread(principal, invocation_id, *, cursor="", limit=100):
     if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 100:
         raise ValidationError("Invalid context limit.")
     _, invocation = _authorized_invocation(principal, invocation_id, "messages:read")
-    return native_sources.read_invocation(invocation, cursor=cursor, limit=limit)
+    result = native_sources.read_invocation(invocation, cursor=cursor, limit=limit)
+    runtime.audit("native.invocation.fetched", grant=invocation.grant,
+                  invocation_id=str(invocation.pk), tool="read_invocation_thread")
+    return result
 
 
 def reply_event(invocation, text, *, created_at, now=None):
@@ -135,8 +244,8 @@ def reply_to_invocation(principal, invocation_id, text, idempotency_key):
     if invocation.status != "pending":
         raise AgentPermissionDenied("invocation_replied")
     sent_today = AgentInvocationReply.objects.filter(invocation__installation=invocation.installation,
-        created_at__gte=now.replace(hour=0, minute=0, second=0, microsecond=0)).exclude(status="cancelled").count()
-    if sent_today >= invocation.grant.daily_task_limit:
+        created_at__gte=native_day_start(now)).exclude(status="cancelled").count()
+    if sent_today >= native_daily_cap(invocation.grant):
         raise AgentPermissionDenied("daily_limit_reached")
     row = AgentInvocationReply.objects.create(invocation=invocation, idempotency_key=key, payload_hash=digest,
         event=reply_event(invocation, text, created_at=int(now.timestamp()), now=now))
@@ -177,27 +286,54 @@ def invocation_deliverable(grant, invocation_id, *, expected_resource=None, now=
 def admit_metadata(grant, metadata, *, now=None):
     """Called inside the grant and native cursor transaction; ingress is trusted relay metadata."""
     now = now or timezone.now()
+    always = always_admit()
     installation = grant.installation
     if not isinstance(metadata, dict):
+        if always:
+            raise NativeTriggerRejected("trigger_invalid")
         raise ValidationError("Invalid native trigger.")
     community, channel = native_sources.parse_resource(grant.resources[0])
     if (not HEX_ID.fullmatch(str(metadata.get("author_pubkey", "")))
             or str(metadata.get("community_id")) != community or str(metadata.get("channel_id")) != channel
             or not HEX_ID.fullmatch(str(metadata.get("event_id", "")))
             or not HEX_ID.fullmatch(str(metadata.get("root_event_id", "")))
-            or type(metadata.get("created_at")) is not int):
+            or (not always and type(metadata.get("created_at")) is not int)):
+        if always:
+            raise NativeTriggerRejected("trigger_mismatch")
         raise PermissionDenied("Native trigger does not match the installation.")
-    caller = native_sources.current_device(installation.owner, public_key=metadata["author_pubkey"])
-    occurred = datetime.fromtimestamp(metadata["created_at"], tz=datetime_timezone.utc)
-    expires = min(grant.expires_at, occurred + timedelta(minutes=15), now + timedelta(minutes=15))
-    if expires <= now or occurred > now + timedelta(minutes=1):
-        return None
+    try:
+        caller = native_sources.current_device(installation.owner, public_key=metadata["author_pubkey"])
+    except PermissionDenied as exc:
+        if always:
+            raise NativeTriggerRejected("caller_not_current_device") from exc
+        raise
+    if always:
+        if type(metadata.get("created_at")) is not int:
+            raise NativeTriggerRejected("invalid_timestamp")
+        try:
+            raw = datetime.fromtimestamp(metadata["created_at"], tz=datetime_timezone.utc)
+        except (ValueError, OverflowError, OSError) as exc:
+            raise NativeTriggerRejected("invalid_timestamp") from exc
+        if raw > now + timedelta(seconds=960):
+            raise NativeTriggerRejected("future_timestamp")
+        occurred = min(raw, now)
+        if raw < grant.created_at - timedelta(seconds=300):
+            raise NativeTriggerRejected("before_current_grant")
+        expires = min(grant.expires_at,
+            occurred + timedelta(minutes=settings.AGENT_RUNTIME_NATIVE_QUEUE_TTL_MINUTES))
+    else:
+        occurred = datetime.fromtimestamp(metadata["created_at"], tz=datetime_timezone.utc)
+        expires = min(grant.expires_at, occurred + timedelta(minutes=15), now + timedelta(minutes=15))
+        if expires <= now or occurred > now + timedelta(minutes=1):
+            return None
     existing = AgentInvocation.objects.filter(installation=installation, source_event_id=metadata["event_id"]).first()
     if existing:
         return existing
+    if always and expires <= now:
+        raise NativeTriggerRejected("older_than_ttl")
     admitted = AgentInvocation.objects.filter(installation=installation,
-        created_at__gte=now.replace(hour=0, minute=0, second=0, microsecond=0)).count()
-    if admitted >= grant.daily_task_limit:
+        created_at__gte=native_day_start(now)).count()
+    if admitted >= native_daily_cap(grant):
         # The caller holds the owner/install/grant lock: concurrent admissions
         # cannot spend another slot, and no webhook/inference is triggered.
         return None
@@ -207,11 +343,61 @@ def admit_metadata(grant, metadata, *, now=None):
             "owner_public_key": caller.public_key, "expires_at": expires})
     if created:
         from .events import ingest_event
-        ingest_event(source="native", source_event_id=str(invocation.pk), resource=invocation.resource,
-            event_type="agent.mentioned", occurred_at=occurred, payload={"installation_id": str(installation.pk),
-                "invocation_id": str(invocation.pk), "source_event_id": invocation.source_event_id}, actor_kind="human")
-        runtime.audit("native.invocation.created", grant=grant, invocation_id=str(invocation.pk))
+        try:
+            ingest_event(source="native", source_event_id=str(invocation.pk), resource=invocation.resource,
+                event_type="agent.mentioned", occurred_at=occurred, payload={"installation_id": str(installation.pk),
+                    "invocation_id": str(invocation.pk), "source_event_id": invocation.source_event_id}, actor_kind="human")
+        except runtime.AgentRuntimeError as exc:
+            if always and exc.code == "event_idempotency_conflict":
+                raise NativeTriggerRejected("event_conflict") from exc
+            raise
+        if not always:
+            runtime.audit("native.invocation.created", grant=grant, invocation_id=str(invocation.pk))
     return invocation
+
+
+def _admit_one(grant, event, *, now, listening, needs):
+    """Isolate a poison event with a savepoint; page/global failures propagate."""
+    source = event.get("event_id", "") if isinstance(event, dict) else ""
+    # Audit only a validated identifier, never arbitrary source content.
+    source = source if isinstance(source, str) and HEX_ID.fullmatch(source) else ""
+    try:
+        with transaction.atomic():
+            existing = bool(source and AgentInvocation.objects.filter(
+                installation=grant.installation, source_event_id=source).exists())
+            try:
+                invocation = admit_metadata(grant, event, now=now)
+            except IntegrityError as exc:
+                # Only known event/source uniqueness failures are per-event.
+                # Other database failures must roll back the entire page.
+                constraint = getattr(getattr(exc.__cause__, "diag", None), "constraint_name", None)
+                if constraint in {"agent_invocation_source_unique", "agent_event_source_unique"}:
+                    raise NativeTriggerRejected("event_conflict") from exc
+                raise
+            if invocation is None:
+                if not AgentAuditEvent.objects.filter(grant__installation=grant.installation,
+                        event_type="native.admission.held", created_at__gte=native_day_start(now)).exists():
+                    runtime.audit("native.admission.held", grant=grant, reason="daily_limit_reached")
+                return "held"
+            if existing:
+                return "existing"
+            runtime.audit("native.invocation.admitted", grant=grant, invocation_id=str(invocation.pk),
+                          source_event_id=source, listening=listening, needs=needs)
+            return "created"
+    except NativeTriggerRejected as exc:
+        runtime.audit("native.invocation.dropped", grant=grant, source_event_id=source,
+                      reason=exc.reason, listening=listening)
+        return "dropped"
+
+
+def _poll_problem(installation_id, code, *, now):
+    current = AgentInstallation.objects.filter(pk=installation_id).values_list("native_cursor", flat=True).first() or {}
+    if always_admit():
+        current = {key: value for key, value in current.items() if key != "error_code"}
+        current["last_error"] = {"code": code, "at": now.isoformat()}
+    else:
+        current = {**current, "error_code": code}
+    AgentInstallation.objects.filter(pk=installation_id).update(native_cursor=current)
 
 
 def poll_native_mentions(*, limit=50, now=None):
@@ -221,9 +407,12 @@ def poll_native_mentions(*, limit=50, now=None):
     except PermissionDenied:
         return 0
     count = 0
+    always = always_admit()
     ids = list(AgentInstallation.objects.filter(app_id="openai-dot", is_active=True, state="active")
                .order_by("updated_at", "pk").values_list("pk", flat=True)[:min(limit, 100)])
     for installation_id in ids:
+        grant = None
+        admitted_count = 0
         try:
             with transaction.atomic():
                 grant_id = AgentGrant.objects.filter(installation_id=installation_id, revoked_at__isnull=True,
@@ -231,8 +420,14 @@ def poll_native_mentions(*, limit=50, now=None):
                 if grant_id is None:
                     continue
                 grant = runtime._grant(grant_id)
+                needs = None
                 from .unified_authority import assert_unified_authority
-                assert_unified_authority(grant, allow_pending=True)
+                try:
+                    assert_unified_authority(grant, allow_pending=True)
+                except AgentPermissionDenied as exc:
+                    if not always or exc.code == "unified_agent_disabled" or _deliberately_revoked(grant, now=now):
+                        raise
+                    needs = "reconnect_required"
                 validate_grant_base(grant, now=now)
                 installation = grant.installation
                 resource = grant.resources[0]
@@ -242,6 +437,8 @@ def poll_native_mentions(*, limit=50, now=None):
                 authorize(grant, "events:read", resource, access_checker=access_checker_for(grant), now=now)
                 device = native_sources.current_device(installation.owner, public_key=installation.owner_device.public_key)
                 if device.pk != installation.owner_device_id:
+                    if always:
+                        _note_blocked(installation, grant, "anchor_device_changed", now=now)
                     continue
                 context = {"bot_pubkey": installation.public_key, "installation_id": str(installation.pk),
                            "grant_generation": grant.generation, "limit": 100}
@@ -262,21 +459,57 @@ def poll_native_mentions(*, limit=50, now=None):
                     active = None
                 if active:
                     from .unified_authority import assert_record_authority
-                    assert_record_authority(grant, active.delivery)
-                for event in events:
+                    try:
+                        assert_record_authority(grant, active.delivery)
+                    except AgentPermissionDenied:
+                        if not always:
+                            raise
+                        active = None
+                held = False
+                # Invalid timestamps remain one-event rejections, rather than
+                # causing a mixed-type sort to abort the whole source page.
+                ordered = sorted(events, key=lambda e: (
+                    e.get("created_at") if isinstance(e, dict) and type(e.get("created_at")) is int else 0,
+                    e.get("event_id", "") if isinstance(e, dict) else "")) if always else events
+                for event in ordered:
+                    if always:
+                        outcome = _admit_one(grant, event, now=now, listening=active is not None, needs=needs)
+                        admitted_count += outcome == "created"
+                        if outcome == "held":
+                            held = True
+                            break
+                        continue
                     # Starting/resuming listening does not activate earlier mentions.
                     if not isinstance(event, dict):
                         raise ValidationError("Native event page is invalid.")
                     if active and type(event.get("created_at")) is int and event["created_at"] >= int(listening_since.timestamp()):
                         if admit_metadata(grant, event, now=now):
                             count += 1
-                if cursor.get("gap_detected"):
-                    new_cursor.update(gap_detected=True, error_code="native_cursor_reset_required")
-                installation.native_cursor = new_cursor
-                installation.save(update_fields=("native_cursor", "updated_at"))
+                if not held:
+                    if always:
+                        if cursor.get("gap"):
+                            new_cursor["gap"] = {**cursor["gap"], "rebaselined_at": now.isoformat()}
+                            if not cursor["gap"].get("rebaselined_at"):
+                                runtime.audit("native.cursor.rebaselined", grant=grant,
+                                              epoch=new_cursor["epoch"], sequence=new_cursor["sequence"])
+                        if needs:
+                            new_cursor["needs"] = needs
+                    elif cursor.get("gap_detected"):
+                        new_cursor.update(gap_detected=True, error_code="native_cursor_reset_required")
+                    installation.native_cursor = new_cursor
+                    installation.save(update_fields=("native_cursor", "updated_at"))
+            count += admitted_count
         except native_sources.NativeCursorReset:
-            AgentInstallation.objects.filter(pk=installation_id).update(
-                native_cursor={"gap_detected": True, "error_code": "native_cursor_reset_required"})
+            if always:
+                previous = (grant.installation.native_cursor if grant else {})
+                previous = {key: previous.get(key) for key in ("epoch", "sequence")}
+                runtime.audit("native.cursor.reset", grant=grant, previous=previous, reason="native_cursor_reset_required")
+                AgentInstallation.objects.filter(pk=installation_id).update(native_cursor={
+                    "gap": {"previous": previous, "reason": "native_cursor_reset_required", "at": now.isoformat()},
+                    "last_error": {"code": "native_cursor_reset_required", "at": now.isoformat()}})
+            else:
+                AgentInstallation.objects.filter(pk=installation_id).update(
+                    native_cursor={"gap_detected": True, "error_code": "native_cursor_reset_required"})
             # Next poll captures a fresh head; acknowledge missed updates by pause/resume.
             continue
         except AgentPermissionDenied as exc:
@@ -284,13 +517,11 @@ def poll_native_mentions(*, limit=50, now=None):
                 # Enrolled bots need fresh OAuth consent and an authenticated
                 # connection before listening. Lost consent is not a relay outage.
                 continue
-            current = AgentInstallation.objects.filter(pk=installation_id).values_list("native_cursor", flat=True).first() or {}
-            AgentInstallation.objects.filter(pk=installation_id).update(native_cursor={**current, "error_code": "native_source_unavailable"})
+            _poll_problem(installation_id, "native_source_unavailable", now=now)
             continue
         except (PermissionDenied, ValidationError, native_sources.SourceUnavailable, ValueError):
             # A failure does not advance the durable source cursor.
-            current = AgentInstallation.objects.filter(pk=installation_id).values_list("native_cursor", flat=True).first() or {}
-            AgentInstallation.objects.filter(pk=installation_id).update(native_cursor={**current, "error_code": "native_source_unavailable"})
+            _poll_problem(installation_id, "native_source_unavailable", now=now)
             continue
         finally:
             # Round-robin admission includes failed or expired installations.

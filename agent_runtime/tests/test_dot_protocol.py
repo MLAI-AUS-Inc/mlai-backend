@@ -115,7 +115,7 @@ class DotDiscoveryTests(SimpleTestCase):
                 "io.modelcontextprotocol/protocolVersion": "2026-07-28"}}})
         result = MCPView().post(request).data["result"]
         tools = {tool["name"]: tool for tool in result["tools"]}
-        self.assertEqual(set(tools), {"get_profile", "list_channels", "get_invocation",
+        self.assertEqual(set(tools), {"get_profile", "list_channels", "get_invocation", "list_pending_invocations",
                                      "read_invocation_thread", "reply_to_invocation", "get_invocation_status"})
         self.assertFalse(tools["reply_to_invocation"]["annotations"]["readOnlyHint"])
         self.assertTrue(tools["read_invocation_thread"]["annotations"]["readOnlyHint"])

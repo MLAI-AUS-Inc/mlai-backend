@@ -25,7 +25,7 @@ from rest_framework.exceptions import AuthenticationFailed, PermissionDenied, Va
 
 from agent_runtime import broker, event_webhooks, native_crypto, native_installations, native_invocations, native_sources, oauth, runtime
 from agent_runtime.authentication import token_hash, validate_credential
-from agent_runtime.models import AgentCredential, AgentEnrollment, AgentEvent, AgentGrant, AgentInstallation, AgentInvocation, AgentInvocationReply, AgentSubscription
+from agent_runtime.models import AgentAuditEvent, AgentCredential, AgentEnrollment, AgentEvent, AgentGrant, AgentInstallation, AgentInvocation, AgentInvocationReply, AgentSubscription
 from agent_runtime.policy import AgentPermissionDenied
 from agent_runtime.webhook_transport import CallbackEndpointError, WebhookResponse
 from community_chat.models import CommunityChatDevice
@@ -383,7 +383,7 @@ class NativeDatabaseTests(unittest.TestCase):
             native_invocations.read_invocation_thread(principal, invocation.pk)
         self.assertFalse(AgentInvocationReply.objects.filter(invocation=invocation).exists())
 
-    def test_implicit_lookup_resolves_only_one_live_current_grant_mention(self):
+    def test_implicit_lookup_resolves_oldest_live_current_grant_mention_without_reply(self):
         _installation, grant, principal = self.active()
         with self.assertRaises(ValidationError):
             broker.execute(principal, "get_invocation", {})
@@ -404,16 +404,20 @@ class NativeDatabaseTests(unittest.TestCase):
             thread_id="f" * 64, owner_public_key=self.device.public_key, expires_at=grant.expires_at)
         invocation = self.invocation(grant)
         self.assertEqual(broker.execute(principal, "get_invocation", {})["invocation_id"], str(invocation.pk))
-        self.invocation(grant)
-        with self.assertRaises(ValidationError):
-            broker.execute(principal, "get_invocation", {})
+        second = self.invocation(grant)
+        selected = broker.execute(principal, "get_invocation", {})
+        self.assertEqual(selected["invocation_id"], str(invocation.pk))
+        self.assertEqual(selected["pending_count"], 2)
+        self.assertTrue(selected["more_pending"])
+        native_invocations.reply_to_invocation(principal, invocation.pk, "Synthetic queued answer", "queued-lookup")
+        self.assertEqual(broker.execute(principal, "get_invocation", {})["invocation_id"], str(second.pk))
         self.assertEqual(broker.execute(principal, "get_invocation", {"invocation_id": str(invocation.pk)})["invocation_id"], str(invocation.pk))
 
     def test_implicit_lookup_keeps_live_membership_device_and_scope_checks(self):
         _installation, grant, principal = self.active()
         self.invocation(grant)
         self.membership = False
-        with self.assertRaises(AgentPermissionDenied):
+        with self.assertRaises(ValidationError):
             broker.execute(principal, "get_invocation", {})
         self.membership = True
         CommunityChatDevice.objects.filter(pk=self.device.pk).update(status="revoked", revoked_at=timezone.now())
@@ -599,6 +603,62 @@ class NativeDatabaseTests(unittest.TestCase):
         self.assertEqual(AgentInvocation.objects.filter(installation=installation).count(), 1)
         self.assertEqual(AgentEvent.objects.filter(source="native", payload__installation_id=str(installation.pk)).count(), 1)
         self.assertFalse(AgentInvocationReply.objects.filter(invocation__installation=installation).exists())
+
+    @override_settings(AGENT_RUNTIME_NATIVE_ALWAYS_ADMIT=True)
+    def test_always_admit_commits_invocation_event_audit_and_cursor_together(self):
+        installation, grant, _ = self.active()
+        self.source_events = [self.metadata(), self.metadata()]
+        from agent_runtime.events import ingest_event
+        calls = 0
+
+        def fail_second(**kwargs):
+            nonlocal calls
+            calls += 1
+            if calls == 2:
+                raise native_sources.SourceUnavailable()
+            return ingest_event(**kwargs)
+
+        with patch("agent_runtime.events.ingest_event", side_effect=fail_second):
+            native_invocations.poll_native_mentions()
+        installation.refresh_from_db()
+        self.assertEqual(installation.native_cursor["sequence"], 0)
+        self.assertFalse(AgentInvocation.objects.filter(grant=grant).exists())
+        self.assertFalse(AgentEvent.objects.filter(payload__installation_id=str(installation.pk)).exists())
+        self.assertFalse(AgentAuditEvent.objects.filter(grant=grant, event_type="native.invocation.admitted").exists())
+        self.assertEqual(native_invocations.poll_native_mentions(), 2)
+        installation.refresh_from_db()
+        self.assertEqual(installation.native_cursor["sequence"], 2)
+        self.assertEqual(AgentInvocation.objects.filter(grant=grant).count(), 2)
+        self.assertEqual(AgentEvent.objects.filter(payload__installation_id=str(installation.pk)).count(), 2)
+        self.assertEqual(AgentAuditEvent.objects.filter(grant=grant, event_type="native.invocation.admitted").count(), 2)
+
+    @override_settings(AGENT_RUNTIME_NATIVE_ALWAYS_ADMIT=True)
+    def test_integrity_error_in_one_event_does_not_abort_page(self):
+        installation, grant, _ = self.active()
+        self.source_events = [self.metadata(event_id="1" * 64), self.metadata(event_id="2" * 64)]
+        from agent_runtime.events import ingest_event
+        calls = 0
+
+        def conflict_once(**kwargs):
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                row = AgentInvocation.objects.get(pk=kwargs["source_event_id"])
+                # Exercise a real PostgreSQL uniqueness error inside the nested
+                # savepoint, rather than merely raising a Python exception.
+                AgentInvocation.objects.create(installation=row.installation, grant=grant,
+                    generation=row.generation, resource=row.resource, source_event_id=row.source_event_id,
+                    thread_id=row.thread_id, owner_public_key=row.owner_public_key, expires_at=row.expires_at)
+            return ingest_event(**kwargs)
+
+        with patch("agent_runtime.events.ingest_event", side_effect=conflict_once):
+            self.assertEqual(native_invocations.poll_native_mentions(), 1)
+        installation.refresh_from_db()
+        self.assertEqual(installation.native_cursor["sequence"], 2)
+        self.assertEqual(AgentInvocation.objects.filter(grant=grant).count(), 1)
+        self.assertEqual(AgentEvent.objects.filter(payload__installation_id=str(installation.pk)).count(), 1)
+        self.assertTrue(AgentAuditEvent.objects.filter(grant=grant, event_type="native.invocation.dropped",
+            metadata__reason="event_conflict").exists())
 
     def test_concurrent_daily_admissions_spend_only_one_real_locked_slot(self):
         installation, grant, _principal = self.active()
