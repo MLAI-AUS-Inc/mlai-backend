@@ -5,14 +5,14 @@ from unittest.mock import patch
 from django.test import SimpleTestCase, override_settings
 from django.utils import timezone
 from . import website_cost_recovery as recovery, website_goal_runner as runner, website_prepare as prepare
-from .tests_website_goal_unit import GoalRunnerRegressions
+from . import tests_website_goal_unit as goal_fixtures
 from .tests_website_usage_settlement_unit import report
 
 
 class AccountingRecoveryTests(SimpleTestCase):
     @override_settings(ARTICLES_COST_ACCOUNTING_ENABLED=False)
     def test_feature_off_does_not_reserve_or_process_recovery(self):
-        operation = GoalRunnerRegressions().operation()
+        operation = goal_fixtures.GoalRunnerRegressions().operation()
         with patch("content_factory.website_models.WebsiteConnectionOperation.objects.filter") as rows:
             self.assertEqual(recovery.pending_for(operation), [])
             self.assertIsNone(recovery.reserve(operation, now=timezone.now()))
@@ -29,7 +29,7 @@ class AccountingRecoveryTests(SimpleTestCase):
     def test_failure_keeps_a_durable_reference_and_success_clears_it_without_changing_usage(self):
         operation = SimpleNamespace(connection_id="connection", generation=2,
             connection=SimpleNamespace(organization_id=4, repository_id=42), receipt={"setup_run_id": "meter-run"})
-        goal = GoalRunnerRegressions().operation().receipt["goal"]
+        goal = goal_fixtures.GoalRunnerRegressions().operation().receipt["goal"]
         child = SimpleNamespace(status="completed", result={"usage": report()},
             run_request={"website_connection_id": "connection", "connection_generation": 2,
                 "repository_id": 42, "deletion_epoch": 3})
@@ -46,7 +46,7 @@ class AccountingRecoveryTests(SimpleTestCase):
 
     @override_settings(ARTICLES_COST_ACCOUNTING_ENABLED=True, ARTICLES_GOAL_NOTIFICATIONS_ENABLED=False)
     def test_only_a_successful_goal_compare_and_set_can_reserve_recovery(self):
-        operation = GoalRunnerRegressions().operation()
+        operation = goal_fixtures.GoalRunnerRegressions().operation()
         operation.receipt["goal"]["cost_pending_run_ids"] = ["meter-run"]
         now = timezone.now()
         with patch.object(prepare.transaction, "atomic", return_value=nullcontext()), \
@@ -61,7 +61,7 @@ class AccountingRecoveryTests(SimpleTestCase):
 
     @override_settings(ARTICLES_COST_ACCOUNTING_ENABLED=True, ARTICLES_GOAL_NOTIFICATIONS_ENABLED=False)
     def test_erased_or_replaced_connection_cannot_commit_pending_accounting_work(self):
-        operation = GoalRunnerRegressions().operation()
+        operation = goal_fixtures.GoalRunnerRegressions().operation()
         operation.receipt["goal"]["cost_pending_run_ids"] = ["meter-run"]
         with patch.object(prepare.transaction, "atomic", return_value=nullcontext()), \
                 patch.object(recovery, "lock_connection", return_value=False), \

@@ -240,12 +240,15 @@ def _persist_prepare(op, *, now):
     from .website_first_article_billing import REFUND_TERMINAL
     from .website_first_article_refunds import reserve_refund
     from .website_cost_recovery import pending_for, lock_connection, reserve as reserve_usage_refresh
+    from .website_operational_alerts import budget_alert
+    from .website_operational_alert_delivery import reserve as reserve_operational_alert
     notify = enabled(op.connection) and owns_goal(op)
     refund = op.state in REFUND_TERMINAL and bool(op.receipt.get("first_article_billing"))
     accounting = bool(pending_for(op))
-    if notify or refund or accounting:
+    incident = budget_alert(op, now=now)
+    if notify or refund or accounting or incident:
         with transaction.atomic():
-            if accounting and not lock_connection(op):
+            if (accounting or incident) and not lock_connection(op):
                 return None
             notice=track_transition(op,now=now) if notify else None
             saved=_persist_prepare_state(op,now=now)
@@ -253,6 +256,7 @@ def _persist_prepare(op, *, now):
                 if refund:reserve_refund(op,now=now)
                 if notify:reserve_notice(op,notice,now=now)
                 if accounting:reserve_usage_refresh(op,now=now)
+                if incident:reserve_operational_alert(op,incident,now=now)
             return saved
     return _persist_prepare_state(op,now=now)
 

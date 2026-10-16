@@ -156,6 +156,25 @@ configuration remains visible to operators and does not block the site goal.
 Keep a separate default-off, server-controlled rollout/enrollment policy. No
 live messages, new credentials or production operations are part of validation.
 
+The first delivery increment covers accepted B4 budget stops.
+`ARTICLES_OPERATIONAL_ALERTS_ENABLED=false` also requires the existing trusted
+goal/B1 cohort. A pure projector validates the saved stop, binds its reason to
+the original occurrence and emits fixed codes, safe IDs and numeric execution
+bounds. `_persist_prepare` reserves one `goal-alert` row with the successful
+goal compare-and-set, retaining the first incident snapshot. Owner-action
+notifications remain independent.
+
+Delivery reuses `CONTENT_FACTORY_OPS_SLACK_CHANNEL_ID` and `SlackService`.
+It claims a bounded lease, releases DB locks before transport, reuses a stable
+client message UUID after uncertainty, and records only a matching provider
+acknowledgement. The existing ops policy supplies three attempts with a
+five-minute interval. Missing configuration is a visible internal state with
+no outbound attempt; a later valid configuration can resume it. A changed
+destination is not silently substituted after an attempted send. Erasure and
+lost claims fence receipt updates, and no send path can create repository or
+generation work. Local/CI validation uses mocked Slack clients only. Stage
+policy stalls and accepted reconciler repairs remain the next alert increments.
+
 ## Validation and completion
 
 Run pure, database/network-denying tests locally for snapshot ordering,
