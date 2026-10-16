@@ -198,6 +198,17 @@ class TransitionTests(Base):
         self.assertEqual(send.call_args.args[0], 'UMENTOR')
         self.assertEqual(self._notify(MagicMock(return_value=(False, None)))[0], 'failed')
 
+    def test_staging_503_from_slack_only_sets_notification_status(self):
+        from rest_framework.exceptions import APIException
+
+        class StagingUnavailable(APIException):
+            status_code = 503
+            default_code = 'staging_integration_unavailable'
+
+        outcome, _ = self._notify(MagicMock(side_effect=StagingUnavailable(
+            {'code': 'staging_integration_unavailable', 'capability': 'slack'})))
+        self.assertEqual(outcome, 'failed')
+
     def test_mentor_without_slack_is_skipped(self):
         s = make_session('requested')
         s.mentor.user.slack_id = None
@@ -341,6 +352,12 @@ class RequestTests(Base):
         session, _ = self.call(location_type='mlai_space')
         self.assertEqual((session.location_type, session.location_detail), ('mlai_space', 'Level 2, desk 4'))
 
+    def test_request_still_succeeds_if_notification_raises(self):
+        service.MentoringService.notify_mentor.side_effect = RuntimeError('slack 503')
+        session, created = self.call()
+        self.assertTrue(created)
+        self.points.spend.assert_called_once()
+
     def test_location_not_offered_is_refused(self):
         with self.assertRaises(MentoringError) as ctx:
             self.call(location_type='mlai_space')
@@ -375,6 +392,24 @@ class ProfileValidationTests(unittest.TestCase):
 
     def test_is_active_cannot_be_set_by_a_mentor(self):
         self.assertEqual(service.validate_profile_update({'is_active': True, 'user': 5}, self.cur), {})
+
+    def test_away_dates_validation(self):
+        got = service.validate_away_dates([
+            {'from': '2026-12-20', 'to': '2027-01-05'}, {'from': '2026-11-10', 'to': '2026-11-10'}])
+        self.assertEqual(got[0], {'from': '2026-11-10', 'to': '2026-11-10'})
+        for bad in ('x', [{'from': '2026-12-20'}], [{'from': '2026-12-20', 'to': '2026-12-01'}],
+                    [{'from': 'soon', 'to': 'later'}], [{'from': '2026-01-01', 'to': '2028-01-01'}],
+                    [{'from': '2026-01-01', 'to': '2026-01-02'}] * 21):
+            with self.subTest(bad=bad), self.assertRaises(MentoringError):
+                service.validate_away_dates(bad)
+
+    def test_away_dates_flow_through_profile_update_and_slot_rules(self):
+        clean = service.validate_profile_update(
+            {'away_dates': [{'from': '2026-11-02', 'to': '2026-11-03'}]}, self.cur)
+        self.assertEqual(clean['away_dates'], [{'from': '2026-11-02', 'to': '2026-11-03'}])
+        from datetime import date
+        profile = SimpleNamespace(away_dates=clean['away_dates'] + [{'from': 'junk'}])
+        self.assertEqual(service._away_ranges(profile), [(date(2026, 11, 2), date(2026, 11, 3))])
 
     def test_availability_validation(self):
         ok = service.validate_availability([{'weekday': 1, 'start': '09:00', 'end': '11:00'}])

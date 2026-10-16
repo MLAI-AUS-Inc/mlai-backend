@@ -17,7 +17,7 @@ import hashlib
 import logging
 import re
 import uuid
-from datetime import datetime, time, timedelta, timezone as dt_timezone
+from datetime import date, datetime, time, timedelta, timezone as dt_timezone
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from django.conf import settings
@@ -49,6 +49,7 @@ LEDGER_SOURCE = 'MANUAL'
 LEDGER_REFERENCE_TYPE = 'MENTOR_SESSION'
 MAX_PRICE_ROO = 1000
 MAX_AVAILABILITY_WINDOWS = 28
+MAX_AWAY_RANGES = 20
 _TIME_RE = re.compile(r'^([01]\d|2[0-3]):([0-5]\d)$')
 
 
@@ -166,6 +167,34 @@ def validate_availability(windows):
     return parsed
 
 
+def validate_away_dates(value):
+    """Return a clean, sorted list of {"from", "to"} ISO date strings (inclusive)."""
+    if not isinstance(value, list) or len(value) > MAX_AWAY_RANGES:
+        raise MentoringError('invalid_away_dates', f'away_dates must be a list of at most {MAX_AWAY_RANGES} ranges.', 400)
+    clean = []
+    for item in value:
+        try:
+            first = date.fromisoformat(item['from'])
+            last = date.fromisoformat(item['to'])
+        except (KeyError, TypeError, ValueError):
+            raise MentoringError('invalid_away_dates', 'Each range needs from and to as YYYY-MM-DD.', 400)
+        if last < first or (last - first).days > 366:
+            raise MentoringError('invalid_away_dates', 'A range must end on or after it starts and last at most a year.', 400)
+        clean.append((first, last))
+    clean.sort()
+    return [{'from': a.isoformat(), 'to': b.isoformat()} for a, b in clean]
+
+
+def _away_ranges(profile):
+    out = []
+    for item in profile.away_dates or []:
+        try:
+            out.append((date.fromisoformat(item['from']), date.fromisoformat(item['to'])))
+        except (KeyError, TypeError, ValueError):
+            continue
+    return out
+
+
 def validate_profile_update(payload, current):
     """Return a dict of validated fields. current is a dict of existing values."""
     if not isinstance(payload, dict):
@@ -187,6 +216,8 @@ def validate_profile_update(payload, current):
         except (ZoneInfoNotFoundError, ValueError, OSError):
             raise MentoringError('invalid_field', 'Unknown timezone.', 400)
         clean['timezone'] = name
+    if 'away_dates' in payload:
+        clean['away_dates'] = validate_away_dates(payload['away_dates'])
     if 'session_minutes' in payload:
         minutes = payload['session_minutes']
         if (
@@ -229,6 +260,7 @@ def serialize_mentor(profile, *, include_private=False):
         'bio': profile.bio or (getattr(user, 'about', '') or ''),
         'topics': list(profile.topics or []),
         'timezone': profile.timezone,
+        'away_dates': list(profile.away_dates or []),
         'session_minutes': profile.session_minutes,
         'price_roo': profile.price_roo,
         'location_type': profile.location_type,
@@ -367,6 +399,7 @@ class MentoringService:
         return scheduling.generate_slots(
             rules=rules, tz_name=mentor.timezone, session_minutes=mentor.session_minutes,
             first_day=first_day, last_day=last_day, busy=list(busy), now=now,
+            away=_away_ranges(mentor),
         )
 
     @classmethod
@@ -572,7 +605,11 @@ class MentoringService:
             if existing is None:
                 raise
             return cls._replay(existing, mentor, starts_at), False
-        cls.notify_mentor(session.pk)
+        try:
+            cls.notify_mentor(session.pk)
+        except Exception:
+            # Notification trouble must never fail or alter a committed booking.
+            logger.exception('mentor notification raised for %s', session.pk)
         return session, True
 
     @staticmethod
