@@ -1643,13 +1643,12 @@ PY
             # back off before the runtime services start.
             echo "⚠️ Admin Brain pilot staging skipped: the pilot has no retrievable evidence yet."
             echo "⚠️ Keeping the Admin Brain query API disabled; retrieval remains fail-closed."
-            echo "⚠️ The next deploy after ingestion restores evidence will stage and activate the binding."
+            echo "⚠️ Use Activate Admin Brain after its readiness checks recover."
             upsert_env_value ORG_MEMORY_QUERY_API_ENABLED "false"
         else
-            echo "❌ Admin Brain production staging failed; aborting the deploy."
-            rm -f "\$stage_stdout"
-            # Fail via a command (not exit) so the ERR trap restores web.
-            false
+            echo "⚠️ Admin Brain production staging failed; continuing the app deploy with retrieval disabled."
+            echo "⚠️ Resolve the readiness blockers, then use Activate Admin Brain."
+            upsert_env_value ORG_MEMORY_QUERY_API_ENABLED "false"
         fi
         rm -f "\$stage_stdout"
         unset stage_operator activation_operator approval_hash approval_hash_short
