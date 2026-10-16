@@ -240,15 +240,15 @@ def _persist_prepare(op, *, now):
     from .website_first_article_billing import REFUND_TERMINAL
     from .website_first_article_refunds import reserve_refund
     from .website_cost_recovery import pending_for, lock_connection, reserve as reserve_usage_refresh
-    from .website_operational_alerts import budget_alert
+    from .website_operational_alerts import budget_alert, stall_alert
     from .website_operational_alert_delivery import reserve as reserve_operational_alert
     notify = enabled(op.connection) and owns_goal(op)
     refund = op.state in REFUND_TERMINAL and bool(op.receipt.get("first_article_billing"))
     accounting = bool(pending_for(op))
-    incident = budget_alert(op, now=now)
-    if notify or refund or accounting or incident:
+    incidents = [item for item in (budget_alert(op, now=now), stall_alert(op, now=now)) if item is not None]
+    if notify or refund or accounting or incidents:
         with transaction.atomic():
-            if (accounting or incident) and not lock_connection(op):
+            if (accounting or incidents) and not lock_connection(op):
                 return None
             notice=track_transition(op,now=now) if notify else None
             saved=_persist_prepare_state(op,now=now)
@@ -256,7 +256,7 @@ def _persist_prepare(op, *, now):
                 if refund:reserve_refund(op,now=now)
                 if notify:reserve_notice(op,notice,now=now)
                 if accounting:reserve_usage_refresh(op,now=now)
-                if incident:reserve_operational_alert(op,incident,now=now)
+                for incident in incidents:reserve_operational_alert(op,incident,now=now)
             return saved
     return _persist_prepare_state(op,now=now)
 
@@ -367,6 +367,9 @@ def prepare_failure(op, step, error, *, now=None):
         op.receipt["waiting_observations"] = count
         started = op.receipt.setdefault("waiting_started_at", now.isoformat())
         deadline = datetime.fromisoformat(started) + timedelta(hours=24)
+        if now >= deadline:
+            from .website_operational_alerts import record_policy_stall
+            record_policy_stall(op, step=step, reason="waiting_policy_deadline", started_at=started, deadline=deadline, now=now)
         op.state = "pending" if now < deadline else "needs_attention"
         op.receipt["status"] = "waiting_for_step" if op.state == "pending" else "needs_attention"
         op.next_attempt_at = min(deadline, now + timedelta(minutes=DEPLOYMENT_RETRY_MINUTES[min(count - 1, len(DEPLOYMENT_RETRY_MINUTES) - 1)])) if op.state == "pending" else None
@@ -381,8 +384,12 @@ def prepare_failure(op, step, error, *, now=None):
         from .website_goal import mapping
         source = mapping(op.receipt.get("goal")).get("current_source_sha") or getattr(op.connection,"verified_sha",None)
         deployment_hint = mapping(getattr(op.connection,"capabilities",None)).get("deploymentFingerprint")
-        if deploy_detection_enabled() and valid_deployment_hint(deployment_hint,op.connection,source) and deployment_hint["automation"] == "manual":
+        manual_deploy = deploy_detection_enabled() and valid_deployment_hint(deployment_hint,op.connection,source) and deployment_hint["automation"] == "manual"
+        if manual_deploy:
             deadline = now
+        elif now >= deadline:
+            from .website_operational_alerts import record_policy_stall
+            record_policy_stall(op, step=step, reason="deployment_policy_deadline", started_at=started, deadline=deadline, now=now)
         op.receipt["failure_class"] = "waiting"
         op.state = "pending" if now < deadline else "needs_user"
         op.receipt["status"] = "waiting_for_deployment" if op.state == "pending" else "needs_you"
@@ -401,6 +408,9 @@ def prepare_failure(op, step, error, *, now=None):
         from datetime import datetime
         started = op.receipt.setdefault("transient_started_at", now.isoformat())
         deadline = datetime.fromisoformat(started) + timedelta(hours=24)
+        if now >= deadline:
+            from .website_operational_alerts import record_policy_stall
+            record_policy_stall(op, step=step, reason="transient_policy_deadline", started_at=started, deadline=deadline, now=now)
         op.state = "pending" if now < deadline else "needs_attention"
         op.next_attempt_at = min(deadline, now + timedelta(minutes=RETRY_MINUTES[min(failures[step] - 1, len(RETRY_MINUTES) - 1)])) if op.state == "pending" else None
         op.receipt["status"] = "working" if op.state == "pending" else "needs_attention"

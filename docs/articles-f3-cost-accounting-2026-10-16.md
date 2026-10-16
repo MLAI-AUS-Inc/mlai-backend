@@ -181,8 +181,18 @@ Normal callbacks, duplicate or fenced snapshots, shadow checks and
 observation-only projections do not create incidents. Original B4 goal/company
 attribution is used only when the immutable admission scope validates; legacy
 repairs explicitly retain an unavailable goal and unattributed company.
-Delivery uses the same outbox and acknowledgement policy. Stage-policy stalls
-remain the next alert increment.
+Delivery uses the same outbox and acknowledgement policy.
+
+Stage incidents are recorded at the existing preparation policy's actual
+expiry branches: strict non-deployment waiting, deployment observation and
+transient retry deadlines. Their original start/deadline and safe stage/reason
+bind a deterministic occurrence. Poll counts and intermediate retries cannot
+create incidents, and repeated expiry observations retain the first snapshot.
+An explicitly manual hosting fingerprint is an immediate owner-deploy wait,
+not a stall; owner merge/review action branches do not enter stall policy.
+The incident is reserved only with the accepted goal compare-and-set, including
+when the same transition also records a separate B4 budget stop. No new timeout,
+owner notice, setup dispatch or migration is introduced.
 
 ## Validation and completion
 
