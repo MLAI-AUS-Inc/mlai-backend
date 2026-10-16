@@ -42,11 +42,14 @@ def _public_progress(state, key):
     scanning = not complete and recent_history.request_pending(updated, key)
     if scanning:
         _wake(job)
-    queued = CommunityBridgeDelivery.objects.filter(
+    deliveries = CommunityBridgeDelivery.objects.filter(
         channel=state.public_channel, target_platform="buzz",
         source_platform="slack", source_channel_id=state.source_channel_id,
-    ).filter(Q(status__in=["pending", "processing"]) | Q(status="failed", attempts__lt=F("max_attempts"))).exists()
-    return _payload(complete, scanning or queued, job.last_error_code, job=job)
+    )
+    queued = deliveries.filter(Q(status__in=["pending", "processing"]) | Q(status="failed", attempts__lt=F("max_attempts"))).exists()
+    failed = deliveries.filter(status="failed", attempts__gte=F("max_attempts")).exists()
+    error = job.last_error_code or ("delivery_failed" if failed else "")
+    return _payload(complete, scanning or queued, error, job=job)
 
 
 def _private_progress(conversation, key):

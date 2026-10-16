@@ -12,6 +12,23 @@ from integrations.services.message_sync.scheduler import validate_checkpoint
 
 @override_settings(MESSAGE_SYNC_ENABLED=True, MESSAGE_SYNC_RECENT_HISTORY_ENABLED=True)
 class RecentHistoryPolicyTests(SimpleTestCase):
+    def test_permanently_failed_public_delivery_cannot_certify_source_exhaustion(self):
+        from integrations.services.message_sync.head_repair import head_scope
+        state = SimpleNamespace(authority_generation=1, public_channel=SimpleNamespace(
+            slack_workspace_id='T1', slack_channel_id='C1', destination_workspace_id='community',
+            destination_channel_id='room'), source_channel_id='C1', jobs=Mock())
+        job = SimpleNamespace(pk=1, checkpoint={'authority_generation': head_scope(state),
+            'timeline_complete': True, 'recent_messages': 50}, last_error_code='')
+        state.jobs.select_for_update.return_value.get.return_value = job
+        deliveries = Mock()
+        deliveries.filter.return_value.exists.side_effect = [False, True]
+        with patch.object(api, 'schedule_job', return_value=job), patch.object(
+            api.CommunityBridgeDelivery.objects, 'filter', return_value=deliveries
+        ):
+            result = api._public_progress(state, 'a' * 64)
+        self.assertEqual(result['error'], 'slack_history_unavailable')
+        self.assertFalse(result['pending'])
+
     def test_provider_deferral_preserves_pending_and_retry_after(self):
         from datetime import timedelta
         now = api.timezone.now()
