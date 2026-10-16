@@ -60,6 +60,8 @@ def execute(name, request):
         connection = request.config.website_connection
         if connection and connection.github_repo:
             selected = "git"
+        elif connection and "_cms_binding" in (connection.capabilities or {}):
+            selected = "cms"
     if request.operation is not None:
         from .website_goal import mapping
         pin = mapping(mapping(request.operation.receipt).get("goal")).get("strategy_pin")

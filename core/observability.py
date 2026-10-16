@@ -86,6 +86,19 @@ def _before_send(event: dict, _hint: dict) -> Optional[dict]:
     an exception here would be raised inside Sentry's own send path.
     """
     try:
+        traces = [event.get("stacktrace")]
+        for collection in (event.get("exception"), event.get("threads")):
+            if isinstance(collection, dict) and isinstance(collection.get("values"), list):
+                traces.extend(item.get("stacktrace") for item in collection["values"] if isinstance(item, dict))
+        frames = [frame for trace in traces if isinstance(trace, dict) and isinstance(trace.get("frames"), list)
+            for frame in trace["frames"] if isinstance(frame, dict)]
+        if any(str(frame.get("module") or "").startswith("content_factory.cms_") or
+                "content_factory/cms_" in str(frame.get("filename") or "").replace("\\", "/") for frame in frames):
+            # CMS connection/transport frames can hold plaintext application
+            # credentials. Keep the traceback, but drop ALL locals in its call
+            # chain, including caller request dictionaries and HTTP headers.
+            for frame in frames:
+                frame.pop("vars", None)
         request = event.get("request")
         if isinstance(request, dict):
             if isinstance(request.get("query_string"), str):

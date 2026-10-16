@@ -75,6 +75,24 @@ class CmsChannel(UnavailableChannel):
     """Authenticated CMS effects are supplied by v2 3.3 and 3.6."""
 
     name = "cms"
+    effect_capabilities = frozenset({"disconnect"})
+
+    def disconnect(self, request):
+        """Erase stored CMS authority and retain published provider content."""
+        from .cms_owner_connection import _owner
+        from .website_disconnect import start_disconnect
+        _owner(request.context, request.config, request.user)
+        connection = request.config.website_connection
+        if not connection or "_cms_binding" not in (connection.capabilities or {}):
+            raise WebsiteAuthorityError("website_connection_required", "Choose the current CMS connection.")
+        if request.data.get("remove_setup", False) is not False:
+            raise WebsiteAuthorityError("published_content_review_required", "Disconnect keeps CMS articles. Unpublish each owned article separately.")
+        operation = start_disconnect(request.config, user=request.user, data={**request.data, "remove_setup": False})
+        operation.receipt = {**operation.receipt, "channel": "cms", "credential_erased": True,
+            "credential_revocation_instruction": "Revoke this application password or integration key in your CMS as well.",
+            "published_content_retained": True}
+        operation.save(update_fields=["receipt", "updated_at"])
+        return operation
 
 
 class HostedChannel(UnavailableChannel):

@@ -13,7 +13,7 @@ WRITE_ACTIONS = {"setup", "publish", "merge", "cleanup"}
 CAPABILITY_KEYS = ("inventoryReady", "templatesValid", "generationReady", "publishingReady", "previewSupported")
 SHA_PATTERN = re.compile(r"^[a-fA-F0-9]{40}(?:[a-fA-F0-9]{24})?$")
 TEMPLATE_WRAPPERS = re.compile(r"(?mi)^#{1,6}\s+(?:EXISTING ARTIFACT|BASE TEMPLATE|CODEBASE CONTEXT|ARTIFACT TO ADAPT|REPOSITORY CONTEXT|GENERATION INSTRUCTIONS|UPDATE INSTRUCTIONS)\s*$")
-SECRET_KEYS = {"github_token", "github_access_token", "github_refresh_token", "access_token", "refresh_token", "authorization", "api_key", "private_key", "password"}
+SECRET_KEYS = {"github_token", "github_access_token", "github_refresh_token", "access_token", "refresh_token", "authorization", "api_key", "private_key", "password", "secret", "sealed_credential", "application_password", "integration_key", "cms_credential"}
 
 
 class WebsiteAuthorityError(ValueError):
@@ -92,6 +92,8 @@ def connection_contract(payload):
 
 def validate_authority(connection, payload, *, action="read", domain="", github_repo=""):
     """Check one persisted connection without granting authority from the payload."""
+    if action != "portable" and "_cms_binding" in (connection.capabilities or {}):
+        raise WebsiteAuthorityError("publishing_adapter_required", "This CMS connection cannot authorize GitHub operations.")
     if action not in REPO_ACTIONS:
         raise WebsiteAuthorityError("invalid_connection_action", "Unknown website operation.", status=400)
     contract = connection_contract(payload)

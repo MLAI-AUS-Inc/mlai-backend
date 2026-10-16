@@ -18,7 +18,7 @@ class SetupMergeVerificationUnitTests(SimpleTestCase):
         identifier = "11111111-1111-4111-8111-111111111111"
         self.website = SimpleNamespace(id=identifier, pk=identifier, generation=2,
             repository_id=123, github_repo="example/site", state="connected", verified_sha="",
-            organization=SimpleNamespace(domain="example.test"), targets=Mock())
+            organization=SimpleNamespace(domain="example.test"), capabilities={}, targets=Mock())
         self.website.targets.filter.return_value = []
         self.run = SimpleNamespace(run_id="setup-1", workflow="article_system_setup", status="completed",
             approval_state="approved", domain="example.test", github_repo="example/site",

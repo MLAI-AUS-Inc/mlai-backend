@@ -147,12 +147,19 @@ class WebsiteConnectionActionView(APIView):
     """Independent pause/disconnect/reconnect/reset/cleanup consent actions."""
 
     def post(self, request, action):
-        if action not in {"prepare", "pause", "disconnect", "reconnect", "reset", "cleanup", "purge", "cancel-operation", "reconcile", "verify-access", "verify", "custom-contract", "ci-attestation", "github-revoke", "verify-cleanup", "inspect-channel", "select-channel"}:
+        if action not in {"prepare", "pause", "disconnect", "reconnect", "reset", "cleanup", "purge", "cancel-operation", "reconcile", "verify-access", "verify", "custom-contract", "ci-attestation", "github-revoke", "verify-cleanup", "inspect-channel", "select-channel", "cms-connect"}:
             return Response({"code": "invalid_connection_action", "detail": "Unknown website action."}, status=400)
         context, config, error = _context(request)
         if error:
             return error
         try:
+            if action == "cms-connect":
+                from .cms_owner_connection import connect
+                from .website_publishing_channels import projection
+                connect(context, config, user=request.user, data=dict(request.data))
+                config.refresh_from_db()
+                return Response({"websiteConnection": summary_for(config, company_id=context.company.pk),
+                    "publishingChannel": projection(context, config)}, headers={"Cache-Control": "private, no-store"})
             if action in {"inspect-channel", "select-channel"}:
                 from .website_publishing_channels import update_choice
                 selected = request.data.get("channel") if action == "select-channel" else None
@@ -161,6 +168,9 @@ class WebsiteConnectionActionView(APIView):
                 record = update_choice(context, config, expected_scope=request.data.get("channel_scope"),
                     expected_revision=request.data.get("channel_revision"), selected=selected)
                 return Response({"publishingChannel": record})
+            current = config.website_connection
+            if current and "_cms_binding" in (current.capabilities or {}) and action not in {"disconnect", "purge", "pause"}:
+                raise WebsiteAuthorityError("publishing_adapter_required", "Use the CMS connection actions for this website.")
             revision = request.data.get("configuration_revision")
             if action != "disconnect" and revision is not None and config.website_connection and str(revision) != str(config.website_connection.configuration_version):
                 raise WebsiteAuthorityError("website_configuration_changed", "Refresh the current website settings before changing them.")
@@ -175,7 +185,12 @@ class WebsiteConnectionActionView(APIView):
                 operation.refresh_from_db()
             elif action == "disconnect":
                 from .publishing_channels import enabled as channels_enabled, execute as execute_channel
-                if channels_enabled():
+                if current and "_cms_binding" in (current.capabilities or {}):
+                    from .publishing_channel_adapters import CmsChannel
+                    from .publishing_channel_contract import ChannelRequest
+                    operation = CmsChannel().disconnect(ChannelRequest(context=context, config=config,
+                        user=request.user, data=dict(request.data)))
+                elif channels_enabled():
                     from .publishing_channel_contract import ChannelRequest
                     operation = execute_channel("disconnect", ChannelRequest(context=context, config=config,
                         user=request.user, data=dict(request.data)))
@@ -243,6 +258,10 @@ class WebsiteConnectionActionView(APIView):
                 operation = transition_connection(config, action=action, expected=request.data,
                     idempotency_key=key)
             config.refresh_from_db()
+            if config.website_connection and "_cms_binding" in (config.website_connection.capabilities or {}):
+                from .website_operations import operation_summary
+                return Response({"websiteConnection": summary_for(config, company_id=context.company.pk),
+                    "operation": operation_summary(operation) if operation else None}, headers={"Cache-Control": "private, no-store"})
             from .website_journey import journey_for_context
             from .website_operations import operation_summary
             from .website_status import add_status
@@ -263,7 +282,7 @@ class WebsiteConnectionOperationView(APIView):
         from .website_models import WebsiteConnectionOperation
         from .website_operations import operation_summary
         operation = WebsiteConnectionOperation.objects.filter(pk=operation_id, connection__organization=context.organization).first()
-        if operation is None or operation.action in {"goal-usage", "goal-alert", "usage-refresh"}:
+        if operation is None or operation.action in {"goal-usage", "goal-alert", "usage-refresh", "channel-credential"}:
             return Response({"detail": "Operation not found."}, status=404)
         return Response({"operation": operation_summary(operation)})
 

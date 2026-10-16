@@ -14,6 +14,25 @@ from core.observability import _before_send, _env_float, init_sentry
 
 
 class BeforeSendScrubbingTests(SimpleTestCase):
+    def test_cms_trace_drops_all_stack_locals_including_callers_and_threads(self):
+        from copy import deepcopy
+        for identifying in ({"module": "content_factory.cms_owner_connection"},
+                            {"filename": "/app/content_factory/cms_api_transport.py"}):
+            event = {"exception": {"values": [{"stacktrace": {"frames": [
+                {**identifying, "function": "connect", "vars": {"secret": "synthetic-cms-secret"}},
+                {"module": "content_factory.website_views", "vars": {"data": {"secret": "synthetic-cms-secret"}}}
+            ]}}]}, "threads": {"values": [{"stacktrace": {"frames": [
+                {"module": "http.client", "vars": {"headers": {"Authorization": "private-auth"}}}
+            ]}}]}, "request": {"data": {"secret": "synthetic-cms-secret"}}}
+            result = _before_send(deepcopy(event), {})
+            self.assertNotIn("synthetic-cms-secret", str(result))
+            self.assertNotIn("private-auth", str(result))
+            self.assertEqual(result["exception"]["values"][0]["stacktrace"]["frames"][0]["function"], "connect")
+        ordinary = {"exception": {"values": [{"stacktrace": {"frames": [
+            {"module": "jobs.service", "vars": {"count": 3}}
+        ]}}]}}
+        self.assertEqual(_before_send(deepcopy(ordinary), {}), ordinary)
+
     def test_redacts_sensitive_query_string_params(self):
         event = {
             "request": {

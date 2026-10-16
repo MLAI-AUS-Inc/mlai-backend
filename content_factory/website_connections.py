@@ -226,6 +226,9 @@ def summary_for(config, *, company_id=None):
     connection = getattr(config, "website_connection", None) if config else None
     if connection is None:
         return None
+    if "_cms_binding" in (connection.capabilities or {}):
+        from .cms_connection_authority import public_summary
+        return public_summary(connection, company_id=company_id)
     capabilities = {key: bool((connection.capabilities or {}).get(key)) for key in CAPABILITY_KEYS}
     if connection.state != "connected":
         capabilities["publishingReady"] = False
@@ -256,7 +259,7 @@ def summary_for(config, *, company_id=None):
     if target_blocked:
         capabilities.update(publishingReady=False, previewSupported=False)
         actions = [action for action in actions if action not in {"setup", "publish", "preview"}]
-    latest = connection.operations.exclude(action__in=["goal-usage", "goal-alert", "usage-refresh"]).order_by("-created_at").first()
+    latest = connection.operations.exclude(action__in=["goal-usage", "goal-alert", "usage-refresh", "channel-credential"]).order_by("-created_at").first()
     summary = {
         "latestOperation": {"id": str(latest.pk), "action": latest.action, "state": latest.state, "receipt": latest.receipt} if latest else None,
         "connectionId": str(connection.pk), "connectionGeneration": connection.generation,
@@ -412,6 +415,8 @@ def authority_guard(data, *, action="read", domain="", github_repo="", require_s
     candidate = WebsiteConnection.objects.select_related("organization").filter(pk=contract["website_connection_id"]).first()
     if candidate is None:
         raise WebsiteAuthorityError("website_connection_not_found", "Website connection was not found.")
+    if action != "portable" and "_cms_binding" in (candidate.capabilities or {}):
+        raise WebsiteAuthorityError("publishing_adapter_required", "This CMS connection cannot authorize GitHub operations.")
     from .website_failure_scope import failure_scope
     with failure_scope(candidate.organization_id):
         revision = payload.get("configuration_revision")
@@ -843,6 +848,7 @@ def transition_connection(config, *, action, expected, idempotency_key="", verif
                     "setup_run_ids": list(connection.repository_mutations.exclude(run_id="").values_list("run_id", flat=True)), "attempt": 1},
                 receipt={"status": "proposal_requested", "requires_review": True, "repository_modified": False})
         old_generation = connection.generation
+        cms_marker = {"_cms_binding": connection.capabilities["_cms_binding"]} if "_cms_binding" in (connection.capabilities or {}) else None
         from .website_first_article_billing import cancel_held_goals
         cancel_held_goals(connection)
         connection.operations.filter(generation=old_generation).exclude(
@@ -855,6 +861,11 @@ def transition_connection(config, *, action, expected, idempotency_key="", verif
         connection.state = {"pause": "paused", "disconnect": "disconnected", "revoke": "revoked", "reconnect": "connected", "reset": connection.state, "purge": "disconnected"}[action]
         connection.disconnected_at = timezone.now() if action in {"disconnect", "revoke", "purge"} else None
         connection.capabilities = {**(connection.capabilities or {}), "publishingReady": False, "previewSupported": False} if action == "pause" else {}
+        if cms_marker is not None:
+            # Keep a provider tombstone even after revocation. An old CMS tuple
+            # must never fall through to Git cleanup or token authorization.
+            connection.capabilities = cms_marker
+            connection.operations.filter(action="channel-credential").update(payload={}, state="deleted", updated_at=timezone.now())
         connection.verified_sha = ""
         connection.last_verified_at = None
         from .website_operations import deletion_epoch
@@ -890,14 +901,19 @@ def transition_connection(config, *, action, expected, idempotency_key="", verif
             from .models import ResearchAutomation
             ResearchAutomation.objects.filter(organization=connection.organization, status="active").update(status="paused", updated_at=timezone.now())
         from workflow_runs.models import ContentFactoryRun
-        scoped_runs = ContentFactoryRun.objects.filter(organization=connection.organization, workflow__in=REPOSITORY_WORKFLOWS).filter(
-            Q(run_request__website_connection_id=str(connection.pk)) | Q(github_repo__iexact=connection.github_repo, run_request__website_connection_id__isnull=True))
+        run_scope = Q(run_request__website_connection_id=str(connection.pk))
+        if cms_marker is None:
+            run_scope |= Q(github_repo__iexact=connection.github_repo, run_request__website_connection_id__isnull=True)
+        scoped_runs = ContentFactoryRun.objects.filter(organization=connection.organization, workflow__in=REPOSITORY_WORKFLOWS).filter(run_scope)
         runs = list(scoped_runs.exclude(status__in=["completed", "failed", "cancelled", "denied"]).values_list("run_id", flat=True))
         # A terminal run can still own a hosted preview. Stop its runtime without
         # changing completed article history or claiming that a PR was undone.
         stop_preview_runs = list(scoped_runs.values_list("run_id", flat=True))
         pending_auto_merge_prs = []
-        for saved in ContentFactoryRun.objects.filter(organization=connection.organization, github_repo__iexact=connection.github_repo).values_list("result", flat=True):
+        merge_runs = ContentFactoryRun.objects.filter(organization=connection.organization, github_repo__iexact=connection.github_repo)
+        if cms_marker is not None:
+            merge_runs = merge_runs.none()
+        for saved in merge_runs.values_list("result", flat=True):
             if not isinstance(saved, dict):
                 continue
             if saved.get("publish_auto_merge_state") or saved.get("auto_merge") or saved.get("auto_merge_enabled"):
@@ -933,6 +949,9 @@ def offboard_website_connections(organization, *, user=None, purge=False):
         if not purge:
             websites = websites.filter(authorized_by=user)
         for website in list(websites):
+            cms_marker = {"_cms_binding": website.capabilities["_cms_binding"]} if "_cms_binding" in (website.capabilities or {}) else None
+            if cms_marker is not None:
+                website.operations.filter(action="channel-credential").update(payload={}, state="deleted", updated_at=timezone.now())
             from .website_first_article_billing import cancel_held_goals
             cancel_held_goals(website)
             if config and config.website_connection_id == website.pk:
@@ -942,7 +961,7 @@ def offboard_website_connections(organization, *, user=None, purge=False):
                 previous_generation = website.generation
                 website.generation += 1
                 website.state = "revoked"
-                website.capabilities = {}
+                website.capabilities = cms_marker or {}
                 website.verified_sha = ""
                 website.save(update_fields=["generation", "state", "capabilities", "verified_sha", "updated_at"])
                 WebsiteConnectionOperation.objects.create(connection=website, generation=website.generation,
