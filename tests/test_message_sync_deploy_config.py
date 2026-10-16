@@ -97,6 +97,12 @@ class MessageSyncDeployConfigTests(unittest.TestCase):
                         self.assertNotEqual(result.returncode, 0)
                         self.assertEqual(env_file.read_text(), before)
 
+    def test_recent_history_requires_durable_sync_and_valid_boolean(self):
+        validate({"MESSAGE_SYNC_RECENT_HISTORY_ENABLED": "false"})
+        for value in ("yes", "true"):
+            with self.subTest(value=value), self.assertRaisesRegex(ValueError, "RECENT_HISTORY"):
+                validate({"MESSAGE_SYNC_RECENT_HISTORY_ENABLED": value})
+
     def test_disabled_needs_no_new_credentials(self):
         validate({})
 
@@ -134,6 +140,7 @@ class MessageSyncDeployConfigTests(unittest.TestCase):
         }
         validate(valid)
         validate({**valid, "MESSAGE_SYNC_QUIET_HEAD_BACKOFF_ENABLED": "true"})
+        validate({**valid, "MESSAGE_SYNC_RECENT_HISTORY_ENABLED": "true"})
         validate({**valid, "SLACK_OWNER_INVENTORY_ENABLED": "true"})
         private = {**valid, "MESSAGE_SYNC_SLACK_USER_APP_ID": "APRIVATE",
                    "MESSAGE_SYNC_SLACK_USER_SIGNING_SECRET": "a" * 32,
@@ -157,7 +164,7 @@ if __name__ == "__main__":
 
 
 class ResponsivenessConfigTests(unittest.TestCase):
-    flags = {"MESSAGE_SYNC_OPEN_PRIORITY_ENABLED": "true", "MESSAGE_SYNC_UNREAD_PREFETCH_ENABLED": "false", "MESSAGE_SYNC_UNREAD_PREFETCH_PER_HOUR": "6", "MESSAGE_SYNC_DEVICE_FANOUT_BATCH": "0"}
+    flags = {"MESSAGE_SYNC_RECENT_HISTORY_ENABLED": "false", "MESSAGE_SYNC_OPEN_PRIORITY_ENABLED": "true", "MESSAGE_SYNC_UNREAD_PREFETCH_ENABLED": "false", "MESSAGE_SYNC_UNREAD_PREFETCH_PER_HOUR": "6", "MESSAGE_SYNC_DEVICE_FANOUT_BATCH": "0"}
 
     def test_flags_are_wired_through_every_configuration_surface(self):
         root = Path(__file__).resolve().parents[1]

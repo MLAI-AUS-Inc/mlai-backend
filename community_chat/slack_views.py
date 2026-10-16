@@ -302,6 +302,9 @@ class SlackDmMirrorView(SlackDmMirrorApiView):
         if self.request.method == "GET":
             self.community_chat_throttle_scope = "community_chat_slack_snapshot_device"
             return [SlackSnapshotDeviceThrottle(), SlackSnapshotAccountThrottle()]
+        if self.request.method == "PATCH" and self.request.data.get("action") == "page_history":
+            self.community_chat_throttle_scope = "community_chat_slack_snapshot_device"
+            return [SlackSnapshotDeviceThrottle(), SlackSnapshotAccountThrottle()]
         if self.request.method == "PATCH" and self.request.data.get("action") in {"mark_read", "mark_unread"}:
             # Background polling must not consume the user's acknowledgement budget.
             self.community_chat_throttle_scope = "community_chat_slack_read_receipt"
@@ -486,6 +489,24 @@ class SlackDmMirrorView(SlackDmMirrorApiView):
                 return _slack_endpoint_error_response(exc)
             except SlackDmMirrorError as exc:
                 raise ValidationError({"slack": str(exc)}) from exc
+        if request.data.get("action") == "page_history":
+            from integrations.services.slack_history_pages import request_history_page
+            from integrations.services.slack_owner_inventory_api import InventoryError
+            try:
+                response = Response(request_history_page(
+                    request.user,
+                    public_key=getattr(request, "community_chat_public_key", None),
+                    channel_id=request.data.get("channel_id"),
+                    request_key=request.data.get("request_key"),
+                ))
+                response["Cache-Control"] = "private, no-store"
+                return response
+            except InventoryError as exc:
+                return Response({"error": exc.code}, status=exc.status_code)
+            except (SlackDmMirrorCredentialError, SlackDmMirrorUpstreamError,
+                    SlackClientError, DatabaseError, BudgetDeferred,
+                    SlackDmMirrorRateLimited) as exc:
+                return _slack_endpoint_error_response(exc)
         if request.data.get("action") == "refresh_channel":
             from integrations.services.slack_chat_refresh import (
                 request_conversation_refresh,
