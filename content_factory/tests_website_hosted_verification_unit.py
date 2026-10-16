@@ -25,7 +25,7 @@ class HostedPromotionTests(SimpleTestCase):
     def promote(self,value,proof=None):
         from .website_models import WebsiteConnection
         with value.boundaries(),patch.object(WebsiteConnection.objects,"get",return_value=value.website),patch.object(hosted,"remote_request",return_value={"status":"completed","run_id":"native-run","verification":proof or value.sealed}),patch("content_factory.website_operations.validate_operation",return_value=value.origin):
-            return verification.record_ci_attestation({**value.sealed,"run_id":"native-run","source_run_id":"setup-parent"},origin="authenticated_hosted")
+            return verification.record_ci_attestation({**value.sealed,"run_id":"native-run","source_run_id":value.origin.payload["binding"].get("source_run_id")},origin="authenticated_hosted")
 
     def test_real_promotion_and_saved_receipt_work_without_customer_ci_grants(self):
         value=self.fixture();op=self.promote(value)
@@ -43,6 +43,28 @@ class HostedPromotionTests(SimpleTestCase):
             if "evidence_digest" not in changes:bad["evidence_digest"]=evidence_digest({k:v for k,v in bad.items() if k!="evidence_digest"})
             with self.subTest(changes=changes),self.assertRaises(WebsiteAuthorityError):self.promote(value,bad)
             value.target.save.assert_not_called()
+
+    def test_parentless_v2_reads_only_its_saved_completed_proof(self):
+        value = self.fixture()
+        value.origin.payload["binding"].update(source_run_id=None, site_recipe_version=2, site_contract_digest="f" * 64)
+        with patch("content_factory.website_operations.validate_operation", return_value=value.origin), \
+                patch.object(hosted, "remote_request", return_value={"status": "completed", "run_id": "native-run", "verification": value.sealed}) as fetch:
+            self.assertEqual(hosted.read_completed_proof(value.website, {**value.sealed, "run_id": "native-run", "source_run_id": None}), value.sealed)
+            fetch.assert_called_once_with("get", "/api/runs/native-run/hosted-native-verification")
+            fetch.reset_mock()
+            value.origin.payload["binding"].pop("site_recipe_version")
+            with self.assertRaises(WebsiteAuthorityError):
+                hosted.read_completed_proof(value.website, {**value.sealed, "run_id": "native-run", "source_run_id": None})
+            fetch.assert_not_called()
+
+    def test_parentless_v2_cannot_skip_changed_source_review(self):
+        value = self.fixture()
+        value.origin.payload["binding"].update(source_run_id=None, site_recipe_version=2, site_contract_digest="f" * 64)
+        value.website.verified_sha = ""
+        with self.assertRaises(WebsiteAuthorityError) as error:
+            self.promote(value)
+        self.assertEqual(error.exception.code, "website_source_review_required")
+        value.target.save.assert_not_called()
 
     def test_foreign_parent_or_cancelled_original_operation_never_fetches_service_proof(self):
         value=self.fixture()

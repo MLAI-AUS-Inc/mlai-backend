@@ -29,18 +29,18 @@ def remote_request(method,path,*,data=None):
 
 
 def request_for(op,context,config,target,source):
-    """Use original setup lineage and server target identity, never owner-supplied commands."""
+    """Use enrolled v2 or original v1 setup lineage with server-owned target inputs."""
     from .website_operations import reserve_workflow_operation
     from workflow_runs.models import ContentFactoryRun
     connection=config.website_connection
+    from .website_site_recipe import dispatch_selection
+    selection = dispatch_selection(connection, target, source)
     source_run=goals.mapping(op.receipt).get("setup_run_id")
-    if not source_run:raise WebsiteAuthorityError("verified_target_required","The original setup verifier inputs are not yet available.",retryable=True)
+    if not source_run and not selection:raise WebsiteAuthorityError("verified_target_required","The original setup verifier inputs are not yet available.",retryable=True)
     payload={**contract_for(connection),"domain":context.organization.domain,"github_repo":connection.github_repo,
         "branch":connection.branch,"expected_source_sha":source,"source_run_id":source_run,
         "target_id":target.target_key,"contract_digest":target.contract.get("contract_digest"),
         "client_request_id":f"goal:{op.pk}:hosted:{source}:{op.payload.get('attempt',1)}:{op.payload.get('retry_epoch','initial')}"}
-    from .website_site_recipe import dispatch_selection
-    selection = dispatch_selection(connection, target, source)
     if selection:
         payload.update(site_recipe_version=2, site_contract_digest=selection["site_contract_digest"],
             site_recipe_probe=selection["probe"])
@@ -92,7 +92,7 @@ def advance(op,context,config,target,source):
     if state!="completed":return {"status":"pending"}
     proof=goals.mapping(outcome.get("verification"))
     from .website_verification import record_ci_attestation
-    receipt=record_ci_attestation({**proof,"run_id":payload["run_id"],"source_run_id":payload["source_run_id"]},origin="authenticated_hosted")
+    receipt=record_ci_attestation({**proof,"run_id":payload["run_id"],"source_run_id":payload.get("source_run_id")},origin="authenticated_hosted")
     return {"status":"completed","operation_id":str(receipt.pk)}
 
 
@@ -102,6 +102,7 @@ def read_completed_proof(connection,data):
     origin=validate_operation(connection,data)
     binding=goals.mapping(origin.payload.get("binding")) if origin else {}
     if (not origin or origin.payload.get("workflow")!="hosted_native_verification" or origin.state!="completed"
+        or not binding.get("source_run_id") and (type(binding.get("site_recipe_version")) is not int or binding["site_recipe_version"] != 2)
         or any(binding.get(key)!=data.get(key) for key in ("target_id","contract_digest","run_id","source_run_id"))
         or binding.get("expected_source_sha")!=data.get("source_sha")):
         raise WebsiteAuthorityError("ci_attestation_scope_mismatch","Hosted evidence differs from its original verification operation.")

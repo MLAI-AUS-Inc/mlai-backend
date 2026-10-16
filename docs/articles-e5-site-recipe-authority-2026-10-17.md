@@ -74,3 +74,14 @@ identity while the target remains unverified and publishing stays unavailable.
 The canonical failure audit covers 704 production emissions. Compile and diff
 checks pass. This remains gated: no production target is enrolled and no reconnect
 path is switched to v2 by this change.
+
+## V2 without a setup parent
+
+Choose the accepted current v2 definition before requiring a setup lineage ID.
+Only explicit v2 requests may omit that ID: the fresh reservation owns the probe,
+and CF reads the committed recipe at the reserved source. V1 continues to require
+the original same-generation setup. Do not invent a parent ID or relabel an old
+run. Completed hosted proof still has to match the saved request, exact source,
+current operation/generation and all provider/source-review checks. This removes
+one transport dependency; reconnect enrollment and owner-source review remain
+separate work before reconnect can be claimed complete.

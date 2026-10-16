@@ -192,7 +192,7 @@ class SiteRecipeAuthorityTests(SimpleTestCase):
         with override_settings(ARTICLES_SITE_CONTRACT_V2_ENABLED=False):
             self.assertIsNone(recipe.dispatch_selection(self.connection, target, "a" * 40))
 
-    def test_actual_dispatch_saves_server_probe_separately_from_api_body_and_authorizes_it(self):
+    def dispatch_site_request(self, source_run="setup-parent"):
         from . import website_hosted_verification as hosted
         from workflow_runs.models import ContentFactoryRun
         target = self.enrolled_target()
@@ -207,7 +207,9 @@ class SiteRecipeAuthorityTests(SimpleTestCase):
             payload.update(operation_id=str(child.pk), operation_attempt=1, deletion_epoch=0)
             return child
 
-        op = SimpleNamespace(pk="prepare-goal", payload={}, receipt={"setup_run_id": "setup-parent", "goal": {}})
+        op = SimpleNamespace(pk="prepare-goal", payload={}, receipt={"goal": {}})
+        if source_run:
+            op.receipt["setup_run_id"] = source_run
         with patch.object(hosted, "enabled", return_value=True), \
                 patch("content_factory.website_operations.reserve_workflow_operation", side_effect=reserve), \
                 patch.object(hosted, "authority_guard", return_value=nullcontext(self.connection)), \
@@ -226,3 +228,20 @@ class SiteRecipeAuthorityTests(SimpleTestCase):
         receipt = self.call()
         self.assertEqual(receipt["probe"], {"slug": "fixture", "title": "Fixture article"})
         self.assertEqual(receipt["binding"]["site_contract_digest"], payload["site_contract_digest"])
+        return payload
+
+    def test_actual_dispatch_saves_server_probe_separately_from_api_body_and_authorizes_it(self):
+        self.assertEqual(self.dispatch_site_request()["source_run_id"], "setup-parent")
+
+    def test_enrolled_v2_dispatch_has_no_dependency_on_a_setup_parent(self):
+        self.assertIsNone(self.dispatch_site_request(source_run=None)["source_run_id"])
+
+    def test_legacy_without_setup_parent_cannot_reserve_or_dispatch(self):
+        from . import website_hosted_verification as hosted
+        target = self.enrolled_target()
+        self.target.pop("site_contract_version")
+        with patch.object(hosted, "enabled", return_value=True), \
+                patch("content_factory.website_operations.reserve_workflow_operation") as reserve, self.assertRaises(WebsiteAuthorityError):
+            hosted.request_for(SimpleNamespace(receipt={}), SimpleNamespace(organization=self.connection.organization),
+                SimpleNamespace(website_connection=self.connection), target, "a" * 40)
+        reserve.assert_not_called()
