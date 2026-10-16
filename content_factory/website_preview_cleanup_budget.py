@@ -50,7 +50,7 @@ def begin(op, *, now):
     saved = op.receipt.get(KEY)
     if not valid(op, saved, now=now) or saved["status"] == "completed":
         op.state, op.next_attempt_at = "needs_attention", None
-        op.receipt.update(status="preview_cleanup_budget_invalid", reason_code="preview_cleanup_budget_invalid")
+        op.receipt.update(status="preview_cleanup_budget_invalid", cleanup_stop_reason="preview_cleanup_budget_invalid")
         op.receipt.pop("user_action", None)
         raise PreviewCleanupBudgetReached()
     if saved["status"] == "abandoned" or goals.stamp(saved["deadline"]) <= now:
@@ -58,7 +58,7 @@ def begin(op, *, now):
             saved = {**saved, "status": "abandoned", "abandoned_at": now.isoformat()}
             op.receipt[KEY] = saved
         op.state, op.next_attempt_at = "needs_attention", None
-        op.receipt.update(status="preview_cleanup_abandoned", reason_code="preview_cleanup_abandoned",
+        op.receipt.update(status="preview_cleanup_abandoned", cleanup_stop_reason="preview_cleanup_abandoned",
                          preview_cleanup_pending=True, remote_cleanup_pending=True)
         op.receipt.pop("user_action", None)
         # The original payload retains every run/resource ID for an owner sweep;

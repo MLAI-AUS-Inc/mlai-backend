@@ -49,6 +49,8 @@ class PreviewCleanupBudgetTests(SimpleTestCase):
         self.assertEqual(self.op.state, "needs_attention")
         self.assertIsNone(self.op.next_attempt_at)
         self.assertEqual(self.op.receipt["status"], "preview_cleanup_abandoned")
+        self.assertEqual(self.op.receipt["cleanup_stop_reason"], "preview_cleanup_abandoned")
+        self.assertNotIn("reason_code", self.op.receipt)
         self.assertTrue(self.op.receipt["remote_cleanup_pending"])
         self.assertEqual(self.op.payload, payload)
         self.assertNotIn("cleanup_success", self.op.receipt)
@@ -72,6 +74,7 @@ class PreviewCleanupBudgetTests(SimpleTestCase):
                     policy.begin(self.op, now=self.now)
                 self.assertEqual(self.op.receipt[policy.KEY], change)
                 self.assertEqual(self.op.receipt["status"], "preview_cleanup_budget_invalid")
+                self.assertEqual(self.op.receipt["cleanup_stop_reason"], "preview_cleanup_budget_invalid")
                 self.assertIsNone(alerts.cleanup_alert(self.op, now=self.now))
 
     def test_success_closes_the_same_window_and_operations_without_previews_are_unchanged(self):
