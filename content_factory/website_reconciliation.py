@@ -13,6 +13,7 @@ from .models import OrganizationContentConfig
 from .website_connections import contract_for, transition_connection
 from .website_contract import cleanup_plan, safe_repository_path, evidence_digest
 from .website_models import WebsiteConnection, WebsiteConnectionOperation, WebsiteScanSnapshot
+from . import website_preview_cleanup_budget as preview_budget
 
 
 def _merge_connection_identity(website):
@@ -471,8 +472,9 @@ def process_website_connection_operations(*, limit=20, now=None, connection_id=N
                 continue
             result["processed"] += 1
             op.attempts += 1
+            preview_budget.start(op, now=now)
             op.next_attempt_at = now + timedelta(minutes=5)
-            op.save(update_fields=["attempts", "next_attempt_at", "updated_at"])
+            op.save(update_fields=["attempts", "receipt", "next_attempt_at", "updated_at"])
             claimed_at = op.updated_at
         from .website_connections import require_unlocked_remote_call
         require_unlocked_remote_call()
@@ -480,6 +482,7 @@ def process_website_connection_operations(*, limit=20, now=None, connection_id=N
             "refunded_run_ids": op.receipt.get("refunded_run_ids", []), "closed_mutation_ids": op.receipt.get("closed_mutation_ids", []),
             "tokens": op.receipt.get("tokens", {})})
         try:
+            preview_budget.begin(op, now=now)
             if op.action == "cleanup":
                 from .website_restoration import worker_restoration
                 op.receipt = worker_restoration(op) or _cleanup_proposal(op)
@@ -574,19 +577,20 @@ def process_website_connection_operations(*, limit=20, now=None, connection_id=N
                 if not op.receipt["remote_cleanup_pending"]:
                     op.state = "completed"
                     op.receipt["status"] = "completed"
+        except preview_budget.PreviewCleanupBudgetReached:
+            pass
         except Exception:
             # No transport messages can accidentally include credentials or source bodies.
             op.receipt = {**op.receipt, "last_error": "remote_reconciliation_unavailable"}
-        op.next_attempt_at = now + timedelta(seconds=min(3600, 15 * 2 ** min(op.attempts, 8)))
+        preview_budget.completed(op, now=now)
+        op.next_attempt_at = None if op.state == "needs_attention" else now + timedelta(seconds=min(3600, 15 * 2 ** min(op.attempts, 8)))
         if op.action == "disconnect" and "remove_setup" in op.payload:
             from .website_disconnect import disconnect_retry_policy
             after_cleanup = evidence_digest({"payload": op.payload, "completed_steps": op.receipt.get("completed_steps", []),
                 "refunded_run_ids": op.receipt.get("refunded_run_ids", []), "closed_mutation_ids": op.receipt.get("closed_mutation_ids", []),
                 "tokens": op.receipt.get("tokens", {})})
             disconnect_retry_policy(op, now=now, progressed=before_cleanup != after_cleanup)
-        applied = WebsiteConnectionOperation.objects.filter(pk=op.pk, state="pending", attempts=op.attempts,
-            updated_at=claimed_at).update(receipt=op.receipt, payload=op.payload, state=op.state,
-                next_attempt_at=op.next_attempt_at, updated_at=timezone.now())
+        applied = preview_budget.persist(op, claimed_at=claimed_at, now=now)
         # Offboarding may redact the payload while transport runs. Never replace
         # that newer retention/erasure receipt with our pre-request snapshot.
         result["pending" if not applied or op.state == "pending" else "completed"] += 1

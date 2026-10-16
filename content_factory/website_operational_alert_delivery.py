@@ -70,6 +70,25 @@ def reserve_repair(connection, run, envelope, *, now):
     return row
 
 
+def reserve_cleanup(op, *, now):
+    """Reserve one incident atomically with an accepted lifecycle deadline stop."""
+    if not alerts.enabled(op.connection):
+        return None
+    from .website_models import WebsiteConnectionOperation
+    scope = goals.scope_for(op.connection, goals.mapping(op.payload).get("company_id") or "unattributed")
+    alert = alerts.cleanup_alert(op, now=now)
+    if alert is None:
+        return None
+    row, _ = WebsiteConnectionOperation.objects.get_or_create(idempotency_key="articles:ops-alert:" + alert["id"], defaults={
+        "connection_id": op.connection_id, "generation": scope["connection_generation"], "action": ACTION, "state": "pending",
+        "payload": {"version": 1, "scope": scope, "goal_operation_id": None, "alert": alert},
+        "receipt": {"status": "pending", "client_msg_id": str(uuid5(NAMESPACE_URL, "mlai-articles-ops:" + alert["id"]))},
+        "next_attempt_at": now})
+    if row.action != ACTION or row.connection_id != op.connection_id or goals.mapping(goals.mapping(row.payload).get("alert")).get("id") != alert["id"]:
+        raise ValueError("Operational cleanup incident attribution changed")
+    return row
+
+
 def advance(identifier, *, now=None):
     """Claim, send outside locks, and save only a matching provider acknowledgement."""
     if not getattr(settings, "ARTICLES_OPERATIONAL_ALERTS_ENABLED", False):

@@ -7,6 +7,7 @@ from .website_doctor import number, safe_identifier
 REASONS = {"wall_time", "active_compute", "model_cost", "transient_attempts", "repairable_attempts",
     "usage_unknown", "invalid_usage_report", "invalid_budget_contract"}
 REPAIR_REASON = "setup_delivery_projection_repaired"
+CLEANUP_REASON = "preview_cleanup_abandoned"
 STALL_REASONS = {"waiting_policy_deadline", "deployment_policy_deadline", "transient_policy_deadline"}
 STAGES = frozenset(goals.ACTION_FOR.values()) | {"permissions", "prepare", "publish"}
 COUNTERS = (*budget.COUNTERS, "transient_attempts", "repairable_attempts")
@@ -114,6 +115,23 @@ def stall_alert(op, *, now):
     return alert if valid(alert, scope) else None
 
 
+def cleanup_alert(op, *, now):
+    """A lifecycle cleanup deadline is an incident, not a fabricated site goal."""
+    from .website_preview_cleanup_budget import abandonment
+    saved = abandonment(op, now=now)
+    if not enabled(op.connection) or saved is None:
+        return None
+    scope = goals.scope_for(op.connection, goals.mapping(op.payload).get("company_id") or "unattributed")
+    facts = {"cleanup_operation_id": str(op.pk), "scope_digest": goals.digest(scope),
+             "started_at": saved["started_at"], "deadline": saved["deadline"]}
+    occurrence = goals.digest(facts)
+    alert = {"version": 1, "kind": "cleanup", "severity": "warning", "reason": CLEANUP_REASON,
+             "goal_id": None, "connection_id": str(op.connection_id), **facts,
+             "occurrence": occurrence, "at": saved["abandoned_at"], "usage": {key: None for key in COUNTERS}}
+    alert["id"] = goals.digest({"kind": "cleanup", "scope": scope, "goal_id": None, "occurrence": occurrence})
+    return alert if valid(alert, scope) else None
+
+
 def valid(alert, scope):
     """Stored incidents contain only allowlisted codes, safe references and numbers."""
     if (not isinstance(scope, dict) or set(scope) != set(goals.SCOPE_FIELDS)
@@ -125,13 +143,16 @@ def valid(alert, scope):
     fields = {"version", "id", "kind", "severity", "reason", "goal_id", "connection_id", "scope_digest", "occurrence", "at", "usage"}
     if isinstance(alert, dict) and alert.get("kind") == "stall":
         fields |= {"stage", "started_at", "deadline"}
+    if isinstance(alert, dict) and alert.get("kind") == "cleanup":
+        fields |= {"cleanup_operation_id", "started_at", "deadline"}
     if (not isinstance(alert, dict) or set(alert) != fields
             or type(alert.get("version")) is not int or alert["version"] != 1
-            or not isinstance(alert.get("kind"), str) or alert["kind"] not in {"budget", "repair", "stall"}
+            or not isinstance(alert.get("kind"), str) or alert["kind"] not in {"budget", "repair", "stall", "cleanup"}
             or alert.get("severity") != ("error" if alert["kind"] == "budget" else "warning")
             or not isinstance(alert.get("reason"), str) or alert["reason"] not in (
-                REASONS if alert["kind"] == "budget" else STALL_REASONS if alert["kind"] == "stall" else {REPAIR_REASON})
-            or (safe_identifier(alert.get("goal_id")) is None and not (alert["kind"] == "repair" and alert.get("goal_id") is None))
+                REASONS if alert["kind"] == "budget" else STALL_REASONS if alert["kind"] == "stall"
+                else {CLEANUP_REASON} if alert["kind"] == "cleanup" else {REPAIR_REASON})
+            or (safe_identifier(alert.get("goal_id")) is None and not (alert["kind"] in {"repair", "cleanup"} and alert.get("goal_id") is None))
             or alert.get("connection_id") != scope.get("connection_id")
             or safe_identifier(alert.get("connection_id")) is None or alert.get("scope_digest") != goals.digest(scope)
             or not isinstance(alert.get("occurrence"), str) or not goals.DIGEST.fullmatch(alert["occurrence"])
@@ -145,6 +166,14 @@ def valid(alert, scope):
                 or alert["occurrence"] != goals.digest({key: alert[key] for key in
                     ("goal_id", "scope_digest", "stage", "reason", "started_at", "deadline")})):
             return False
+    if alert["kind"] == "cleanup":
+        from .website_preview_cleanup_budget import WALL_TIME
+        started, deadline, at = (goals.stamp(alert.get(key)) for key in ("started_at", "deadline", "at"))
+        if (alert["goal_id"] is not None or safe_identifier(alert.get("cleanup_operation_id")) is None
+                or not started or not deadline or not at or deadline - started != WALL_TIME or deadline > at
+                or alert["occurrence"] != goals.digest({key: alert[key] for key in
+                    ("cleanup_operation_id", "scope_digest", "started_at", "deadline")})):
+            return False
     for key, value in alert["usage"].items():
         if value is not None and (not budget.numeric(value) or key in {"model_calls", "tokens", "builds", "previews", "transient_attempts", "repairable_attempts"} and type(value) is not int):
             return False
@@ -157,13 +186,14 @@ def text(alert):
     usage = goals.mapping(alert.get("usage"))
     measured = {key: number(usage.get(key), integer=key in {"model_calls", "tokens", "builds", "previews", "transient_attempts", "repairable_attempts"}) for key in COUNTERS}
     used = ", ".join(f"{key}={value}" for key, value in measured.items() if value is not None)
-    reason = alert.get("reason") if isinstance(alert.get("reason"), str) and alert["reason"] in REASONS | STALL_REASONS | {REPAIR_REASON} else "unknown"
+    reason = alert.get("reason") if isinstance(alert.get("reason"), str) and alert["reason"] in REASONS | STALL_REASONS | {REPAIR_REASON, CLEANUP_REASON} else "unknown"
     goal_id = safe_identifier(alert.get("goal_id")) or "unavailable"
     incident = alert.get("id")
     incident = incident if isinstance(incident, str) and goals.DIGEST.fullmatch(incident) else "unavailable"
-    kind = alert.get("kind") if isinstance(alert.get("kind"), str) and alert["kind"] in {"budget", "repair", "stall"} else "unknown"
+    kind = alert.get("kind") if isinstance(alert.get("kind"), str) and alert["kind"] in {"budget", "repair", "stall", "cleanup"} else "unknown"
     connection_id = safe_identifier(alert.get("connection_id")) or "unavailable"
     stage = alert.get("stage") if isinstance(alert.get("stage"), str) and alert["stage"] in STAGES else "unavailable"
-    return (f"Articles operational alert: {kind}. Goal {goal_id}. Website {connection_id}. Reason: {reason}. "
+    cleanup = f" Cleanup operation {safe_identifier(alert.get('cleanup_operation_id')) or 'unavailable'}." if kind == "cleanup" else ""
+    return (f"Articles operational alert: {kind}. Goal {goal_id}. Website {connection_id}. Reason: {reason}.{cleanup} "
         f"Stage: {stage}. "
         f"Execution budget counters (conservative bounds): {used or 'unavailable'}. Incident: {incident}.")
