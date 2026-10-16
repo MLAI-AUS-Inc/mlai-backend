@@ -285,6 +285,7 @@ class StopPreparingKeepsOpenPullRequestTests(SimpleTestCase):
             if kwargs.get("workflow") == "article_system_setup":
                 return [open_setup_run()]
             rows = MagicMock()
+            rows.filter.return_value = rows
             rows.values_list.return_value = ["queued-scan"]
             rows.first.return_value = None
             rows.update.side_effect = lambda **values: updates.append((kwargs, values))

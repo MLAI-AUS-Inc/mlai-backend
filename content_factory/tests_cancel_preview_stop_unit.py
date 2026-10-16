@@ -28,7 +28,7 @@ class CancelPreviewStopDeadlineTests(SimpleTestCase):
         self.now = timezone.now()
 
     def _operation(self, *, age, cancel_run_ids=(), **payload):
-        return SimpleNamespace(pk=uuid.uuid4(), action="cancel-operation", state="pending", attempts=48,
+        return SimpleNamespace(pk=uuid.uuid4(), generation=3, action="cancel-operation", state="pending", attempts=48,
             next_attempt_at=None, created_at=self.now - age, updated_at=self.now, connection_id=uuid.uuid4(),
             connection=SimpleNamespace(pk=uuid.uuid4()), save=Mock(),
             payload={"cancel_run_ids": list(cancel_run_ids), "stop_preview_run_ids": [RUN], "purge_run_ids": [RUN],
