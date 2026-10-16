@@ -575,6 +575,84 @@ def _process_worker_followup(identifier, now):
     return state
 
 
+SUPERSEDED_SETUP_CLEANUP_DEADLINE = timedelta(hours=24)
+
+
+def _superseded_setup_refs(body):
+    """Keep only bounded ref identities and outcomes from the worker's receipt."""
+    rows = body.get("refs") if isinstance(body, dict) and isinstance(body.get("refs"), list) else []
+    return [{key: str(row[key])[:255] for key in ("status", "reason", "github_repo", "branch_name") if isinstance(row.get(key), str)}
+        for row in rows[:20] if isinstance(row, dict)]
+
+
+def _process_superseded_setup_cleanup(identifier, now):
+    """Ask Content Factory to remove a replaced setup's own review branch.
+
+    CF fences the run, then deletes only a ledger-owned head that never had a
+    pull request. It retains everything else with a reason. An unknown outcome
+    retries until the deadline, then settles as timed out instead of retrying
+    forever.
+    """
+    from integrations import http_client
+    from .vibe_marketing_views import _content_factory_remote_config, _content_factory_headers
+    from .website_operations import deletion_epoch
+    with transaction.atomic():
+        operation = WebsiteConnectionOperation.objects.select_for_update().select_related("connection").filter(
+            pk=identifier, state="pending").first()
+        if operation is None or (operation.next_attempt_at and operation.next_attempt_at > now):
+            return None
+        operation.attempts += 1
+        attempt = operation.attempts
+        operation.next_attempt_at = now + timedelta(minutes=5)
+        operation.save(update_fields=["attempts", "next_attempt_at", "updated_at"])
+        payload, connection = dict(operation.payload), operation.connection
+        generation, created_at = operation.generation, operation.created_at
+    binding = payload.get("binding") if isinstance(payload.get("binding"), dict) else {}
+    run_id = str(payload.get("run_id") or "")
+    state, receipt = "pending", {"status": "cleanup_pending", "run_id": run_id, "repository_modified": None}
+    try:
+        if (not binding or binding.get("run_id") != run_id or connection.state != "connected" or connection.generation != generation
+                or str(binding.get("deletion_epoch")) != str(deletion_epoch(connection))):
+            # The worker would retain the ref for a changed connection anyway.
+            state, receipt = "cancelled", {"status": "authority_changed", "run_id": run_id, "repository_modified": False}
+        else:
+            remote = _content_factory_remote_config()
+            if not remote["enabled"]:
+                receipt["last_error"] = "content_factory_unavailable"
+            else:
+                response = http_client.post(f"{remote['base_url']}/api/connections/{connection.pk}/superseded-setup-cleanup",
+                    headers=_content_factory_headers(), json=binding, timeout=(3, 30))
+                try:
+                    body = response.json()
+                except (ValueError, AttributeError):
+                    body = {}
+                refs = _superseded_setup_refs(body)
+                if (response.status_code == 404 and isinstance(body, dict) and body.get("status") == "run_missing"
+                        and body.get("run_id") == run_id):
+                    # Any other 404 is a worker without this route yet; it retries until the deadline.
+                    state, receipt = "completed", {"status": "run_missing", "run_id": run_id, "repository_modified": False}
+                elif response.status_code == 409:
+                    # Identity mismatch, a live run, or a fenced operation: never retried.
+                    state, receipt = "cancelled", {"status": "refused", "run_id": run_id, "repository_modified": False}
+                elif (response.status_code == 200 and isinstance(body, dict) and body.get("run_id") == run_id
+                        and body.get("status") == "completed" and body.get("cleanup_pending") is False):
+                    state, receipt = "completed", {"status": "completed", "run_id": run_id, "refs": refs,
+                        "reason": str(body.get("reason") or "")[:64],
+                        "repository_modified": any(row.get("status") == "deleted" for row in refs)}
+                else:
+                    receipt.update(refs=refs, last_error="superseded_setup_cleanup_pending")
+    except Exception:
+        logging.getLogger(__name__).warning("superseded_setup_cleanup_failed operation=%s", identifier, exc_info=True)
+        receipt["last_error"] = "superseded_setup_cleanup_unavailable"
+    if state == "pending" and now - created_at >= SUPERSEDED_SETUP_CLEANUP_DEADLINE:
+        state, receipt = "completed", {**receipt, "status": "timed_out", "branch_cleanup_unconfirmed": True}
+    # Compare-and-set the claim: a duplicate reconciler cannot replace a newer receipt.
+    WebsiteConnectionOperation.objects.filter(pk=identifier, attempts=attempt, state="pending").update(
+        state=state, receipt=receipt, updated_at=timezone.now(),
+        next_attempt_at=now + timedelta(seconds=min(3600, 15 * 2 ** min(attempt, 8))) if state == "pending" else None)
+    return state
+
+
 SETUP_PR_MERGE_TIMEOUT = timedelta(minutes=60)
 
 
@@ -690,6 +768,14 @@ def process_website_connection_operations(*, limit=20, now=None, connection_id=N
                 result["processed"] += 1
                 if len(result["operations"]) < 20:
                     result["operations"].append({"id": str(identifier), "action": "setup-pr-merge", "outcome": outcome})
+                result["pending" if outcome == "pending" else "completed"] += 1
+            continue
+        if WebsiteConnectionOperation.objects.filter(pk=identifier, action="superseded-setup-cleanup").exists():
+            outcome = _process_superseded_setup_cleanup(identifier, now)
+            if outcome is not None:
+                result["processed"] += 1
+                if len(result["operations"]) < 20:
+                    result["operations"].append({"id": str(identifier), "action": "superseded-setup-cleanup", "outcome": outcome})
                 result["pending" if outcome == "pending" else "completed"] += 1
             continue
         if WebsiteConnectionOperation.objects.filter(pk=identifier, action="worker_followup").exists():
