@@ -172,8 +172,17 @@ five-minute interval. Missing configuration is a visible internal state with
 no outbound attempt; a later valid configuration can resume it. A changed
 destination is not silently substituted after an attempted send. Erasure and
 lost claims fence receipt updates, and no send path can create repository or
-generation work. Local/CI validation uses mocked Slack clients only. Stage
-policy stalls and accepted reconciler repairs remain the next alert increments.
+generation work. Local/CI validation uses mocked Slack clients only.
+
+The B5 receiver reserves a repair incident in the same transaction as an
+accepted authoritative pull projection and its delivery receipt. The identity
+binds the original run, execution generation/state version and state digest.
+Normal callbacks, duplicate or fenced snapshots, shadow checks and
+observation-only projections do not create incidents. Original B4 goal/company
+attribution is used only when the immutable admission scope validates; legacy
+repairs explicitly retain an unavailable goal and unattributed company.
+Delivery uses the same outbox and acknowledgement policy. Stage-policy stalls
+remain the next alert increment.
 
 ## Validation and completion
 

@@ -474,6 +474,9 @@ def receive_setup_delivery(payload, *, expected_kind=None, path_run_id=None, pul
             else:
                 disposition = "duplicate" if decision == "no_change" else decision
             _record_receipt(run, envelope, nonce, disposition, now)
+            if pull_pin is not None and disposition == "applied":
+                from .website_operational_alert_delivery import reserve_repair
+                reserve_repair(website, run, envelope, now=now)
             return Response(acknowledgement(envelope, disposition), status=200)
     except DeliveryReceiptConflict:
         return Response(acknowledgement(envelope, "quarantined", code="delivery_identity_conflict",

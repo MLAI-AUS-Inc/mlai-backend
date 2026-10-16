@@ -3,7 +3,7 @@ from copy import deepcopy
 from datetime import timedelta
 import logging
 import re
-from uuid import NAMESPACE_URL, uuid5
+from uuid import NAMESPACE_URL, UUID, uuid5
 from django.conf import settings
 from django.db import transaction
 from django.utils import timezone
@@ -34,6 +34,39 @@ def reserve(op, alert, *, now):
         "next_attempt_at": now})
     if row.action != ACTION or row.connection_id != op.connection_id or goals.mapping(goals.mapping(row.payload).get("alert")).get("id") != alert["id"]:
         raise ValueError("Operational incident attribution changed")
+    return row
+
+
+def reserve_repair(connection, run, envelope, *, now):
+    """Reserve with B5's accepted projection; missing lineage stays unattributed."""
+    if not alerts.enabled(connection):
+        return None
+    from .website_models import WebsiteConnectionOperation
+    from . import website_cost_usage as costs
+    scope, goal_id = goals.scope_for(connection, "unattributed"), None
+    try:
+        identifier = UUID(str(goals.mapping(goals.mapping(run.run_request).get("goal_budget")).get("goal_id")))
+    except (ValueError, TypeError, AttributeError):
+        identifier = None
+    if identifier:
+        parent = WebsiteConnectionOperation.objects.select_related("connection").filter(pk=identifier, action="prepare",
+            connection_id=connection.pk, connection__organization_id=run.organization_id).first()
+        if parent:
+            try:
+                metadata = costs.attribution(parent, run)
+                scope, goal_id = metadata["scope"], metadata["goal_id"]
+            except ValueError:
+                pass
+    alert = alerts.repair_alert(connection, run, envelope, scope=scope, goal_id=goal_id, now=now)
+    if alert is None:
+        return None
+    row, _ = WebsiteConnectionOperation.objects.get_or_create(idempotency_key="articles:ops-alert:" + alert["id"], defaults={
+        "connection_id": connection.pk, "generation": scope["connection_generation"], "action": ACTION, "state": "pending",
+        "payload": {"version": 1, "scope": scope, "goal_operation_id": goal_id, "alert": alert},
+        "receipt": {"status": "pending", "client_msg_id": str(uuid5(NAMESPACE_URL, "mlai-articles-ops:" + alert["id"]))},
+        "next_attempt_at": now})
+    if row.action != ACTION or row.connection_id != connection.pk or goals.mapping(goals.mapping(row.payload).get("alert")).get("id") != alert["id"]:
+        raise ValueError("Operational repair incident attribution changed")
     return row
 
 
