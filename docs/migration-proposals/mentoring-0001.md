@@ -28,6 +28,7 @@ source `MANUAL` with reference_type `MENTOR_SESSION`.
 | bio | Text, default '' | |
 | topics | JSON, default list | |
 | timezone | Char(64), default Australia/Melbourne | |
+| away_dates | JSON, default list | list of {from, to} ISO local dates, inclusive; no bookings on those days |
 | session_minutes | PositiveSmallInteger, default 30 | validated 15 to 120 in service |
 | price_roo | PositiveInteger, default 40 | |
 | location_type | Char(16), default video | mlai_space, video, either |

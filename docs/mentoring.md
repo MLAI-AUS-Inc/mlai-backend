@@ -23,6 +23,11 @@ HTTP layer is `community_chat/mentoring_views.py`.
   request). For video the mentor supplies their own https link. There is no
   Google Calendar or Meet integration. The link is shown to the founder only
   once the session is accepted.
+- Mentors can set away dates: a list of inclusive local date ranges (`away_dates` on
+  the profile, up to 20) with no bookings. Existing accepted sessions are not
+  cancelled automatically; the mentor cancels them.
+- Availability windows are wall-clock times in the mentor's timezone; slots advance
+  in real time, so daylight saving gaps are skipped and a repeated hour is offered twice.
 - Price defaults to 40 Roo Points and is stored per mentor. The price is
   snapshotted on each session.
 - Each request carries a brief: stage, biggest struggle, outcome wanted, and an
@@ -105,5 +110,5 @@ failed DM cannot change a booking. Mentors can also poll
 ## Tests
 
 No-database suites, registered in `.github/workflows/deploy.yml`:
-`python scripts/test_without_database.py mentoring.tests.test_scheduling_unit mentoring.tests.test_service_unit community_chat.tests.test_mentoring_views_unit`.
+`python scripts/test_without_database.py mentoring.tests.test_scheduling_unit mentoring.tests.test_service_unit mentoring.tests.test_dst_unit community_chat.tests.test_mentoring_views_unit`.
 Locking, constraints and real ledger rows need database tests after migration approval.

@@ -8,7 +8,7 @@ MIN_LEAD_MINUTES = 60
 MAX_ADVANCE_DAYS = 30
 
 
-def generate_slots(*, rules, tz_name, session_minutes, first_day, last_day, busy, now):
+def generate_slots(*, rules, tz_name, session_minutes, first_day, last_day, busy, now, away=()):
     """Return the free slot start datetimes (UTC, aware) for a mentor.
 
     rules: iterable of (weekday, start_time, end_time) in the mentor's timezone.
@@ -23,12 +23,16 @@ def generate_slots(*, rules, tz_name, session_minutes, first_day, last_day, busy
     earliest = now + timedelta(minutes=MIN_LEAD_MINUTES)
     latest = now + timedelta(days=MAX_ADVANCE_DAYS)
     busy = [(s, e) for s, e in busy]
+    away = [(a, b) for a, b in away]
     by_weekday = {}
     for weekday, start, end in rules:
         by_weekday.setdefault(weekday, []).append((start, end))
     slots = []
     day = first_day
     while day <= last_day:
+        if any(a <= day <= b for a, b in away):
+            day += timedelta(days=1)
+            continue
         for start, end in sorted(by_weekday.get(day.weekday(), [])):
             cursor = datetime.combine(day, start, tzinfo=tz).astimezone(dt_timezone.utc)
             window_end = datetime.combine(day, end, tzinfo=tz).astimezone(dt_timezone.utc)

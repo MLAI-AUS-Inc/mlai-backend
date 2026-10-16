@@ -38,6 +38,10 @@ class MentorProfile(models.Model):
     bio = models.TextField(blank=True, default='', max_length=2000)
     topics = models.JSONField(default=list, blank=True)
     timezone = models.CharField(max_length=64, default='Australia/Melbourne')
+    away_dates = models.JSONField(
+        default=list, blank=True,
+        help_text='List of {"from": "YYYY-MM-DD", "to": "YYYY-MM-DD"} local date ranges with no bookings.',
+    )
     session_minutes = models.PositiveSmallIntegerField(default=30)
     price_roo = models.PositiveIntegerField(default=DEFAULT_PRICE_ROO)
     location_type = models.CharField(
