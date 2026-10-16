@@ -64,8 +64,7 @@ class MentoringViewTests(unittest.TestCase):
     def test_create_uses_session_identity_only_and_returns_201_or_200(self):
         session = SimpleNamespace()
         self.service.request_session.return_value = (session, True)
-        body = {'mentor_id': 3, 'starts_at': '2026-11-05T10:00:00+11:00', 'location_type': 'video',
-                'brief': {'stage': 'a', 'struggle': 'b', 'outcome': 'c'},
+        body = {'mentor_id': 3, 'starts_at': '2026-11-05T10:00:00+11:00', 'brief': {'stage': 'a', 'struggle': 'b', 'outcome': 'c'},
                 'client_request_id': SID, 'expected_price': 40, 'founder_id': 99, 'user_id': 98}
         response = self.call(views.MentorSessionsView, 'post', data=body)
         self.assertEqual(response.status_code, 201)

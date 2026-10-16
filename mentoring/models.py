@@ -16,12 +16,10 @@ MAX_SESSION_MINUTES = 120
 
 LOCATION_MLAI_SPACE = 'mlai_space'
 LOCATION_VIDEO = 'video'
-LOCATION_EITHER = 'either'
 LOCATION_CHOICES = (
     (LOCATION_MLAI_SPACE, 'MLAI space'),
     (LOCATION_VIDEO, 'Video'),
 )
-MENTOR_LOCATION_CHOICES = LOCATION_CHOICES + ((LOCATION_EITHER, 'Either (founder picks)'),)
 
 
 class MentorProfile(models.Model):
@@ -45,9 +43,12 @@ class MentorProfile(models.Model):
     session_minutes = models.PositiveSmallIntegerField(default=30)
     price_roo = models.PositiveIntegerField(default=DEFAULT_PRICE_ROO)
     location_type = models.CharField(
-        max_length=16, choices=MENTOR_LOCATION_CHOICES, default=LOCATION_VIDEO
+        max_length=16, choices=LOCATION_CHOICES, default=LOCATION_VIDEO
     )
-    video_link = models.URLField(max_length=500, blank=True, default='')
+    video_link = models.URLField(
+        max_length=500, blank=True, default='',
+        help_text="The mentor's own video link, for example a Google Meet link.",
+    )
     space_notes = models.CharField(max_length=300, blank=True, default='')
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
@@ -111,10 +112,10 @@ class MentorSession(models.Model):
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     mentor = models.ForeignKey(
-        MentorProfile, on_delete=models.PROTECT, related_name='sessions'
+        MentorProfile, on_delete=models.CASCADE, related_name='sessions'
     )
     founder = models.ForeignKey(
-        settings.AUTH_USER_MODEL, on_delete=models.PROTECT, related_name='mentor_sessions'
+        settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name='mentor_sessions'
     )
     status = models.CharField(
         max_length=12, choices=STATUS_CHOICES, default=STATUS_REQUESTED
@@ -124,6 +125,7 @@ class MentorSession(models.Model):
 
     # Snapshots taken at request time so later profile edits change nothing.
     price_roo = models.PositiveIntegerField()
+    # Set when the founder is charged (on accept); needed for an exact refund split.
     purchased_points_cost_microroo = models.BigIntegerField(default=0)
     location_type = models.CharField(max_length=16, choices=LOCATION_CHOICES)
     location_detail = models.CharField(max_length=500, blank=True, default='')
@@ -135,14 +137,14 @@ class MentorSession(models.Model):
 
     client_request_id = models.UUIDField()
 
-    hold_ledger_entry = models.ForeignKey(
-        'roo.Ledger', null=True, blank=True, on_delete=models.PROTECT, related_name='+'
+    charge_ledger_entry = models.ForeignKey(
+        'roo.Ledger', null=True, blank=True, on_delete=models.SET_NULL, related_name='+'
     )
     release_ledger_entry = models.ForeignKey(
-        'roo.Ledger', null=True, blank=True, on_delete=models.PROTECT, related_name='+'
+        'roo.Ledger', null=True, blank=True, on_delete=models.SET_NULL, related_name='+'
     )
     payout_ledger_entry = models.ForeignKey(
-        'roo.Ledger', null=True, blank=True, on_delete=models.PROTECT, related_name='+'
+        'roo.Ledger', null=True, blank=True, on_delete=models.SET_NULL, related_name='+'
     )
 
     requested_at = models.DateTimeField()

@@ -7,9 +7,11 @@ serialises writers for one mentor.
 
 Points flow (all via PointsService, source MANUAL, reference_type MENTOR_SESSION
 so no roo migration is needed):
-  request  -> spend   key mentor_hold:{id}     founder pays the mentor's price
-  decline / cancel / expiry -> refund key mentor_release:{id}
-  complete -> award   key mentor_payout:{id}   mentor receives the price
+  request  -> nothing is charged (only an early balance check)
+  accept   -> spend  key mentor_charge:{id}   founder pays the price snapshot
+  cancel after accept (any time before completion) -> refund key mentor_release:{id}
+  decline / expiry / cancel before accept -> no points move
+  complete -> award  key mentor_payout:{id}   mentor receives the price
 Expiry and auto-completion are applied lazily whenever sessions are read.
 """
 
@@ -33,7 +35,6 @@ from roo.services import PointsService
 from . import scheduling
 from .models import (
     DEFAULT_PRICE_ROO,
-    LOCATION_EITHER,
     LOCATION_MLAI_SPACE,
     LOCATION_VIDEO,
     MAX_SESSION_MINUTES,
@@ -242,16 +243,16 @@ def validate_profile_update(payload, current):
             raise MentoringError('invalid_field', f'price_roo must be a whole number from 1 to {MAX_PRICE_ROO}.', 400)
         clean['price_roo'] = price
     if 'location_type' in payload:
-        if payload['location_type'] not in (LOCATION_MLAI_SPACE, LOCATION_VIDEO, LOCATION_EITHER):
-            raise MentoringError('invalid_field', 'location_type must be mlai_space, video or either.', 400)
+        if payload['location_type'] not in (LOCATION_MLAI_SPACE, LOCATION_VIDEO):
+            raise MentoringError('invalid_field', 'location_type must be mlai_space or video.', 400)
         clean['location_type'] = payload['location_type']
     if 'video_link' in payload:
         clean['video_link'] = _clean_url(payload['video_link'], 'video_link')
     if 'space_notes' in payload:
         clean['space_notes'] = _clean_text(payload['space_notes'], 'space_notes', 300)
     final = {**current, **clean}
-    if final.get('location_type') in (LOCATION_VIDEO, LOCATION_EITHER) and not final.get('video_link'):
-        raise MentoringError('video_link_required', 'Add your own video link for video sessions.', 400)
+    if final.get('location_type') == LOCATION_VIDEO and not final.get('video_link'):
+        raise MentoringError('video_link_required', 'Add your own video link (for example a Google Meet link) for video sessions.', 400)
     return clean
 
 
@@ -318,13 +319,9 @@ def serialize_session(session, viewer):
 
 # ------------------------------------------------------------------- points
 
-def _hold_description(session):
-    return f'Mentor session {session.pk} with mentor {session.mentor_id}'
-
-
-def _release_hold(session, *, actor_slack_id):
-    """Refund the founder exactly once. Safe to call again (idempotency key)."""
-    if session.hold_ledger_entry_id is None:
+def _refund_charge(session, *, actor_slack_id):
+    """Refund the founder if (and only if) they were charged. Idempotent by key."""
+    if session.charge_ledger_entry_id is None:
         return
     ledger, _ = PointsService.refund(
         user=session.founder,
@@ -339,6 +336,31 @@ def _release_hold(session, *, actor_slack_id):
         reverse_lifetime_spent=True,
     )
     session.release_ledger_entry = ledger
+
+
+def _charge_founder(session):
+    """Spend the price snapshot from the founder when the mentor accepts."""
+    account = PointsAccount.objects.select_for_update().filter(user=session.founder).first()
+    if account is not None:
+        PointsService._ensure_microroo_account(account)
+    price_microroo = PointsService.roo_to_microroo(session.price_roo)
+    purchased = min(account.purchased_topup_balance_microroo if account else 0, price_microroo)
+    try:
+        ledger, _ = PointsService.spend(
+            user=session.founder, delta=session.price_roo, source=LEDGER_SOURCE,
+            description=f'Mentor session {session.pk} with mentor {session.mentor_id}',
+            created_by_slack_id=session.founder.slack_id or '',
+            idempotency_key=f'mentor_charge:{session.pk}',
+            reference_type=LEDGER_REFERENCE_TYPE, reference_id=str(session.pk),
+            purchased_delta_microroo=purchased,
+        )
+    except InsufficientBalanceError:
+        raise MentoringError(
+            'founder_insufficient_points',
+            'The founder no longer has enough Roo Points. The request stays open.', 409,
+        )
+    session.charge_ledger_entry = ledger
+    session.purchased_points_cost_microroo = purchased
 
 
 def _pay_mentor(session):
@@ -476,7 +498,6 @@ class MentoringService:
             auto_complete_hours=_auto_complete_hours(),
         )
         if action == 'expire':
-            _release_hold(session, actor_slack_id='')
             session.status = MentorSession.STATUS_EXPIRED
             session.responded_at = now
             session.save()
@@ -530,20 +551,13 @@ class MentoringService:
     # ---- request
 
     @staticmethod
-    def _resolve_location(mentor, requested):
-        if mentor.location_type == LOCATION_EITHER:
-            if requested not in (LOCATION_MLAI_SPACE, LOCATION_VIDEO):
-                raise MentoringError('location_required', 'Choose mlai_space or video.', 400)
-            chosen = requested
-        else:
-            if requested not in (None, '', mentor.location_type):
-                raise MentoringError('location_unavailable', 'This mentor does not offer that location.', 409)
-            chosen = mentor.location_type
-        detail = mentor.video_link if chosen == LOCATION_VIDEO else mentor.space_notes
-        return chosen, detail
+    def _location(mentor):
+        """The mentor sets one location; the founder does not choose."""
+        detail = mentor.video_link if mentor.location_type == LOCATION_VIDEO else mentor.space_notes
+        return mentor.location_type, detail
 
     @classmethod
-    def request_session(cls, *, founder, mentor_id, starts_at, location_type, brief,
+    def request_session(cls, *, founder, mentor_id, starts_at, brief,
                         client_request_id, expected_price=None):
         mentor_id = parse_mentor_id(mentor_id)
         starts_at = parse_aware_datetime(starts_at)
@@ -585,7 +599,7 @@ class MentoringService:
                     raise MentoringError('mentor_not_found', 'Mentor not found.', 404)
                 if expected_price != mentor.price_roo:
                     raise MentoringError('price_changed', 'The price has changed. Please review it.', 400)
-                chosen, detail = cls._resolve_location(mentor, location_type)
+                chosen, detail = cls._location(mentor)
                 ends_at = starts_at + timedelta(minutes=mentor.session_minutes)
                 day = starts_at.astimezone(ZoneInfo(mentor.timezone)).date()
                 slots = cls.free_slots(mentor, day - timedelta(days=1), day + timedelta(days=1),
@@ -598,30 +612,19 @@ class MentoringService:
                 ).exists():
                     raise MentoringError('founder_busy', 'You already have a mentor session at that time.', 409)
 
-                account = PointsAccount.objects.select_for_update().filter(user=founder).first()
-                if account is not None:
-                    PointsService._ensure_microroo_account(account)
-                price_microroo = PointsService.roo_to_microroo(mentor.price_roo)
-                purchased = min(account.purchased_topup_balance_microroo if account else 0, price_microroo)
+                # Nothing is charged now; this only fails early for a founder who
+                # clearly cannot pay. The charge happens when the mentor accepts.
+                if PointsService.get_available_microroo(founder) < PointsService.roo_to_microroo(mentor.price_roo):
+                    raise InsufficientBalanceError('not enough points')
                 session = MentorSession(
                     mentor=mentor, founder=founder, starts_at=starts_at, ends_at=ends_at,
-                    price_roo=mentor.price_roo, purchased_points_cost_microroo=purchased,
+                    price_roo=mentor.price_roo,
                     location_type=chosen, location_detail=detail,
                     client_request_id=request_id, requested_at=now,
                     expires_at=scheduling.request_expiry(now=now, starts_at=starts_at, ttl_hours=_ttl_hours()),
                     **brief_fields,
                 )
                 session.save()
-                ledger, _ = PointsService.spend(
-                    user=founder, delta=session.price_roo, source=LEDGER_SOURCE,
-                    description=_hold_description(session),
-                    created_by_slack_id=founder.slack_id or '',
-                    idempotency_key=f'mentor_hold:{session.pk}',
-                    reference_type=LEDGER_REFERENCE_TYPE, reference_id=str(session.pk),
-                    purchased_delta_microroo=purchased,
-                )
-                session.hold_ledger_entry = ledger
-                session.save(update_fields=['hold_ledger_entry', 'updated_at'])
         except InsufficientBalanceError:
             raise MentoringError('insufficient_points', "You don't have enough Roo Points for this session.", 409)
         except IntegrityError:
@@ -712,7 +715,7 @@ class MentoringService:
                 handler = getattr(cls, f'_do_{target}')
                 handler(session, actor, timezone.now())
         if expired:
-            raise MentoringError('request_expired', 'This request has expired. The points were refunded.', 409)
+            raise MentoringError('request_expired', 'This request has expired.', 409)
         return session
 
     @classmethod
@@ -748,6 +751,7 @@ class MentoringService:
             starts_at__lt=session.ends_at, ends_at__gt=session.starts_at,
         ).exclude(pk=session.pk).exists():
             raise MentoringError('slot_unavailable', 'You already accepted a session at that time.', 409)
+        _charge_founder(session)
         session.status = MentorSession.STATUS_ACCEPTED
         session.responded_at = now
         session.save()
@@ -755,7 +759,7 @@ class MentoringService:
     @classmethod
     def _do_declined(cls, session, actor, now):
         cls._need(session, MentorSession.STATUS_REQUESTED)
-        _release_hold(session, actor_slack_id=actor.slack_id)
+        # Nothing was charged for a request, so there is nothing to refund.
         session.status = MentorSession.STATUS_DECLINED
         session.responded_at = now
         session.save()
@@ -763,9 +767,9 @@ class MentoringService:
     @classmethod
     def _do_cancelled(cls, session, actor, now):
         cls._need(session, MentorSession.STATUS_REQUESTED, MentorSession.STATUS_ACCEPTED)
-        if now >= session.starts_at:
-            raise MentoringError('session_started', 'A session cannot be cancelled after it starts.', 409)
-        _release_hold(session, actor_slack_id=actor.slack_id)
+        # Allowed any time before completion, even after the start. Refund only
+        # if the founder was charged (the mentor had accepted).
+        _refund_charge(session, actor_slack_id=actor.slack_id)
         session.status = MentorSession.STATUS_CANCELLED
         session.cancelled_at = now
         session.cancelled_by = actor

@@ -112,7 +112,6 @@ class MentorSessionsView(MentoringBaseView):
             founder=request.user,
             mentor_id=data.get('mentor_id'),
             starts_at=data.get('starts_at'),
-            location_type=data.get('location_type'),
             brief=data.get('brief'),
             client_request_id=data.get('client_request_id'),
             expected_price=data.get('expected_price'),

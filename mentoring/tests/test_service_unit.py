@@ -20,7 +20,8 @@ def make_session(status='requested', **kw):
     base = dict(
         pk=SID, status=status, mentor_id=7, mentor=SimpleNamespace(pk=7, user=mentor_user, user_id=2, timezone='Australia/Melbourne'),
         founder=founder, founder_id=1, price_roo=40, purchased_points_cost_microroo=10_000_000,
-        hold_ledger_entry_id=99, release_ledger_entry=None, payout_ledger_entry=None,
+        charge_ledger_entry_id=99 if status == 'accepted' else None, charge_ledger_entry=None,
+        release_ledger_entry=None, payout_ledger_entry=None,
         starts_at=START, ends_at=START + timedelta(minutes=30), expires_at=NOW + timedelta(hours=48),
         responded_at=None, completed_at=None, cancelled_at=None, cancelled_by=None,
     )
@@ -47,7 +48,11 @@ class Base(unittest.TestCase):
         self.points = MagicMock()
         self.points.refund.return_value = ('refund-ledger', True)
         self.points.award.return_value = ('payout-ledger', True)
-        self.points.spend.return_value = ('hold-ledger', True)
+        self.points.spend.return_value = ('charge-ledger', True)
+        self.points.get_available_microroo.return_value = 100_000_000
+        self.account = SimpleNamespace(purchased_topup_balance_microroo=15_000_000)
+        self.account_cls = MagicMock()
+        self.account_cls.objects.select_for_update.return_value.filter.return_value.first.return_value = self.account
         self.points.roo_to_microroo.side_effect = lambda n: n * 1_000_000
         self.clock = NOW
         self.txn = MagicMock()
@@ -58,6 +63,7 @@ class Base(unittest.TestCase):
             patch.object(service, 'PointsService', self.points),
             patch.object(service, 'transaction', self.txn),
             patch.object(service, '_lock_keys', self.lock_keys),
+            patch.object(service, 'PointsAccount', self.account_cls),
             patch.object(service.timezone, 'now', side_effect=lambda: self.clock),
         ):
             p.start()
@@ -73,19 +79,13 @@ class Base(unittest.TestCase):
 
 
 class TransitionTests(Base):
-    def test_decline_refunds_with_release_key_and_exact_split(self):
+    def test_decline_moves_no_points_because_nothing_was_charged(self):
         s = make_session()
         self.load(s)
         MentoringService.decline(SID, self.actor_mentor)
-        kw = self.points.refund.call_args.kwargs
-        self.assertEqual(kw['idempotency_key'], f'mentor_release:{SID}')
-        self.assertEqual(kw['delta'], 40)
-        self.assertEqual(kw['purchased_delta_microroo'], 10_000_000)
-        self.assertEqual(kw['source'], 'MANUAL')
-        self.assertEqual(kw['reference_type'], 'MENTOR_SESSION')
-        self.assertTrue(kw['reverse_lifetime_spent'])
-        self.assertEqual(kw['user'], s.founder)
         self.assertEqual(s.status, 'declined')
+        self.points.refund.assert_not_called()
+        self.points.spend.assert_not_called()
 
     def test_only_mentor_can_accept_decline_complete(self):
         for fn in (MentoringService.accept, MentoringService.decline, MentoringService.complete):
@@ -95,15 +95,37 @@ class TransitionTests(Base):
             self.assertEqual(ctx.exception.code, 'not_session_mentor')
         self.points.refund.assert_not_called()
 
-    def test_accept_does_not_move_points(self):
-        s = make_session()
+    def accept(self, s):
         self.load(s)
         with patch.object(service.MentorSession, 'objects') as objs:
             objs.filter.return_value.exclude.return_value.exists.return_value = False
-            MentoringService.accept(SID, self.actor_mentor)
+            return MentoringService.accept(SID, self.actor_mentor)
+
+    def test_accept_charges_the_founder_with_the_charge_key(self):
+        s = make_session()
+        self.accept(s)
         self.assertEqual(s.status, 'accepted')
+        kw = self.points.spend.call_args.kwargs
+        self.assertEqual(kw['idempotency_key'], f'mentor_charge:{SID}')
+        self.assertEqual(kw['delta'], 40)
+        self.assertEqual(kw['user'], s.founder)
+        self.assertEqual(kw['source'], 'MANUAL')
+        self.assertEqual(kw['reference_type'], 'MENTOR_SESSION')
+        self.assertEqual(kw['purchased_delta_microroo'], 15_000_000)
+        self.assertEqual(s.purchased_points_cost_microroo, 15_000_000)
+        self.assertEqual(s.charge_ledger_entry, 'charge-ledger')
         self.points.refund.assert_not_called()
         self.points.award.assert_not_called()
+
+    def test_accept_fails_cleanly_when_founder_is_now_too_poor(self):
+        s = make_session()
+        self.points.spend.side_effect = service.InsufficientBalanceError('no')
+        with self.assertRaises(MentoringError) as ctx:
+            self.accept(s)
+        self.assertEqual((ctx.exception.code, ctx.exception.status_code), ('founder_insufficient_points', 409))
+        self.assertEqual(s.status, 'requested')
+        self.assertIsNotNone(self.txn.atomic.return_value.exit_exc)  # rolled back, nothing saved
+        s.save.assert_not_called()
 
     def test_accept_blocked_by_overlapping_accepted_session(self):
         self.load(make_session())
@@ -113,7 +135,7 @@ class TransitionTests(Base):
                 MentoringService.accept(SID, self.actor_mentor)
         self.assertEqual(ctx.exception.code, 'slot_unavailable')
 
-    def test_accept_after_48h_refunds_and_reports_expired(self):
+    def test_accept_after_48h_charges_nothing_and_reports_expired(self):
         s = make_session()
         self.load(s)
         self.clock = NOW + timedelta(hours=48, seconds=1)
@@ -121,39 +143,63 @@ class TransitionTests(Base):
             MentoringService.accept(SID, self.actor_mentor)
         self.assertEqual(ctx.exception.code, 'request_expired')
         self.assertEqual(s.status, 'expired')
-        self.assertEqual(self.points.refund.call_args.kwargs['idempotency_key'], f'mentor_release:{SID}')
+        self.points.refund.assert_not_called()
+        self.points.spend.assert_not_called()
 
-    def test_expiry_refund_commits_before_the_error_is_raised(self):
+    def test_expiry_commits_before_the_error_is_raised(self):
         s = make_session()
         self.load(s)
         probe = self.txn.atomic.return_value
         self.clock = NOW + timedelta(hours=49)
         with self.assertRaises(MentoringError) as ctx:
             MentoringService.decline(SID, self.actor_mentor)
-        # the block exited normally (None), so the refund and status commit
+        # the block exited normally (None), so the expiry commits
         self.assertIsNone(probe.exit_exc)
         self.assertEqual(ctx.exception.code, 'request_expired')
-        self.assertIn('refunded', ctx.exception.message)
+        self.assertEqual(ctx.exception.message, 'This request has expired.')
         self.assertEqual(s.status, 'expired')
-        self.points.refund.assert_called_once()
+        self.points.refund.assert_not_called()
         s.save.assert_called()
 
-    def test_cancel_by_founder_or_mentor_before_start_refunds(self):
+    def test_cancel_after_accept_refunds_with_release_key_and_exact_split(self):
         for actor in (self.actor_founder, self.actor_mentor):
             self.points.refund.reset_mock()
-            s = make_session('accepted')
+            s = make_session('accepted', purchased_points_cost_microroo=10_000_000)
             self.load(s)
             MentoringService.cancel(SID, actor)
             self.assertEqual(s.status, 'cancelled')
             self.assertEqual(s.cancelled_by, actor)
-            self.points.refund.assert_called_once()
+            kw = self.points.refund.call_args.kwargs
+            self.assertEqual(kw['idempotency_key'], f'mentor_release:{SID}')
+            self.assertEqual((kw['delta'], kw['purchased_delta_microroo']), (40, 10_000_000))
+            self.assertEqual((kw['source'], kw['reference_type']), ('MANUAL', 'MENTOR_SESSION'))
+            self.assertTrue(kw['reverse_lifetime_spent'])
+            self.assertEqual(kw['user'], s.founder)
 
-    def test_cancel_after_start_is_refused_without_refund(self):
-        self.load(make_session('accepted'))
-        self.clock = START + timedelta(minutes=1)
+    def test_cancel_before_accept_refunds_nothing(self):
+        s = make_session('requested')
+        self.load(s)
+        MentoringService.cancel(SID, self.actor_founder)
+        self.assertEqual(s.status, 'cancelled')
+        self.points.refund.assert_not_called()
+
+    def test_cancel_is_allowed_after_the_start_until_completion(self):
+        for when in (START + timedelta(minutes=1), START + timedelta(hours=5)):
+            self.points.refund.reset_mock()
+            s = make_session('accepted')
+            self.load(s)
+            self.clock = when
+            MentoringService.cancel(SID, self.actor_mentor)
+            self.assertEqual(s.status, 'cancelled')
+            self.points.refund.assert_called_once()
+            self.points.award.assert_not_called()
+
+    def test_cancel_after_completion_is_refused(self):
+        s = make_session('completed')
+        self.load(s)
         with self.assertRaises(MentoringError) as ctx:
             MentoringService.cancel(SID, self.actor_founder)
-        self.assertEqual(ctx.exception.code, 'session_started')
+        self.assertEqual(ctx.exception.code, 'invalid_state')
         self.points.refund.assert_not_called()
 
     def test_complete_pays_mentor_with_payout_key(self):
@@ -302,39 +348,41 @@ class RequestTests(Base):
 
     def call(self, **kw):
         args = dict(
-            founder=self.founder, mentor_id=7, starts_at=START.isoformat(), location_type=None,
+            founder=self.founder, mentor_id=7, starts_at=START.isoformat(),
             brief=self.brief, client_request_id=str(uuid.uuid4()), expected_price=40,
         )
         args.update(kw)
         return MentoringService.request_session(**args)
 
-    def test_request_spends_default_40_with_hold_key_and_snapshots(self):
+    def test_request_charges_nothing_and_snapshots_the_price(self):
         session, created = self.call()
         self.assertTrue(created)
-        kw = self.points.spend.call_args.kwargs
-        self.assertEqual(kw['delta'], 40)
-        self.assertEqual(kw['idempotency_key'], f'mentor_hold:{SID}')
-        self.assertEqual(kw['source'], 'MANUAL')
-        self.assertEqual(kw['reference_type'], 'MENTOR_SESSION')
-        self.assertEqual(kw['user'], self.founder)
+        self.points.spend.assert_not_called()
+        self.points.refund.assert_not_called()
         self.assertEqual(session.price_roo, 40)
-        self.assertEqual(session.purchased_points_cost_microroo, 15_000_000)
+        self.assertFalse(hasattr(session, 'charge_ledger_entry'))
         self.assertEqual(session.expires_at, NOW + timedelta(hours=48))
+        self.assertEqual(session.location_type, 'video')
         self.assertEqual(session.location_detail, 'https://meet.example/mia')
         self.assertEqual(session.ends_at - session.starts_at, timedelta(minutes=30))
         service.MentoringService.notify_mentor.assert_called_once()
-        self.assertEqual(kw['purchased_delta_microroo'], 15_000_000)
-        self.assertEqual(kw['purchased_delta_microroo'], session.purchased_points_cost_microroo)
         keys = self.lock_keys.call_args.args
         self.assertIn('mentoring:founder:1', keys)
         self.assertIn('mentoring:mentor:7', keys)
 
-    def test_insufficient_points_maps_to_409_and_no_session_is_returned(self):
-        self.points.spend.side_effect = service.InsufficientBalanceError('no')
+    def test_poor_founder_is_told_early_and_nothing_is_created(self):
+        self.points.get_available_microroo.return_value = 39_999_999
         with self.assertRaises(MentoringError) as ctx:
             self.call()
         self.assertEqual((ctx.exception.code, ctx.exception.status_code), ('insufficient_points', 409))
+        self.assertEqual(FakeSession.created, [])
+        self.points.spend.assert_not_called()
         service.MentoringService.notify_mentor.assert_not_called()
+
+    def test_exactly_enough_points_passes_the_early_check(self):
+        self.points.get_available_microroo.return_value = 40_000_000
+        _, created = self.call()
+        self.assertTrue(created)
 
     def test_slot_not_free_is_rejected_before_any_charge(self):
         self.slot = START + timedelta(hours=1)
@@ -410,25 +458,19 @@ class RequestTests(Base):
             self.call()
         self.assertEqual(ctx.exception.code, 'idempotency_conflict')
 
-    def test_mentor_offering_either_location_needs_a_choice(self):
-        self.profile.location_type = 'either'
-        with self.assertRaises(MentoringError) as ctx:
-            self.call()
-        self.assertEqual(ctx.exception.code, 'location_required')
+    def test_mlai_space_mentor_uses_space_notes_and_founder_cannot_choose(self):
+        self.profile.location_type = 'mlai_space'
         self.profile.space_notes = 'Level 2, desk 4'
-        session, _ = self.call(location_type='mlai_space')
+        session, _ = self.call()
         self.assertEqual((session.location_type, session.location_detail), ('mlai_space', 'Level 2, desk 4'))
+        import inspect
+        self.assertNotIn('location_type', inspect.signature(MentoringService.request_session).parameters)
 
     def test_request_still_succeeds_if_notification_raises(self):
         service.MentoringService.notify_mentor.side_effect = RuntimeError('slack 503')
         session, created = self.call()
         self.assertTrue(created)
-        self.points.spend.assert_called_once()
-
-    def test_location_not_offered_is_refused(self):
-        with self.assertRaises(MentoringError) as ctx:
-            self.call(location_type='mlai_space')
-        self.assertEqual(ctx.exception.code, 'location_unavailable')
+        self.points.spend.assert_not_called()
 
 
 class ProfileValidationTests(unittest.TestCase):
@@ -449,7 +491,8 @@ class ProfileValidationTests(unittest.TestCase):
 
     def test_video_needs_own_https_link(self):
         self.bad({'video_link': 'http://insecure.example'})
-        self.bad({'location_type': 'either'}, {'location_type': 'video', 'video_link': ''})
+        self.bad({'location_type': 'either'})
+        self.bad({'location_type': 'video'}, {'location_type': 'mlai_space', 'video_link': ''})
         self.assertEqual(service.validate_profile_update({'location_type': 'mlai_space'},
                          {'location_type': 'video', 'video_link': ''}), {'location_type': 'mlai_space'})
 
