@@ -650,6 +650,11 @@ def _process_setup_pr_merge(identifier, now):
     return state
 
 
+# A stop follow-up whose runs are cancelled waits this long for Content Factory
+# to confirm its preview teardown: the TTL of CF's preview worker reaper.
+CANCEL_PREVIEW_STOP_DEADLINE = timedelta(days=7)
+
+
 def process_website_connection_operations(*, limit=20, now=None, connection_id=None):
     """Retry cancellation/token revocation, and build bounded cleanup proposals."""
     from integrations import http_client
@@ -783,6 +788,17 @@ def process_website_connection_operations(*, limit=20, now=None, connection_id=N
                     "purge_run_ids": op.payload.get("purge_run_ids", preview_ids)}
                 op.receipt = {**op.receipt, "tokens": tokens, "preview_cleanup_pending": bool(preview_pending),
                     "remote_cleanup_pending": bool(pending or preview_pending or pending_merges or tokens["pending"])}
+                if (op.action == "cancel-operation" and remote["enabled"] and preview_pending
+                        and not (pending or pending_merges or tokens["pending"])
+                        and not op.payload.get("purge_after_reconciliation")
+                        and now - op.created_at >= CANCEL_PREVIEW_STOP_DEADLINE):
+                    # The stopped runs are cancelled and their tokens revoked. Only
+                    # Content Factory's own preview teardown is unconfirmed, and it
+                    # can stay so indefinitely (a missing provider credential), so
+                    # stop retrying it hourly. The receipt keeps the run ids.
+                    op.state = "completed"
+                    op.receipt.update(status="timed_out", unconfirmed_preview_run_ids=preview_pending,
+                        message="Stopped. Content Factory did not confirm its preview was removed.")
                 if op.action == "purge":
                     from .website_operations import deletion_epoch
                     manifest = {"phase": "apply", "approved": True, "connection_generation": op.payload["previous_generation"],
