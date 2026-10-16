@@ -36,6 +36,16 @@ from .coding_views import (
 from .home_views import CommunityHomeView
 from .insight_views import TokenInsightsView
 from .coworking_views import CoworkingTodayView
+from .mentoring_views import (
+    MentorAvailabilityView,
+    MentorListView,
+    MentorSessionAcceptView,
+    MentorSessionCancelView,
+    MentorSessionCompleteView,
+    MentorSessionDeclineView,
+    MentorSessionsView,
+    MyMentorProfileView,
+)
 from .slack_action_views import SlackMessageActionView
 from .slack_views import SlackDmMirrorView, SlackDmStartView, SlackOwnerConversationOpenView, SlackOwnerConversationView, SlackUserDirectoryView
 from .usage_views import (
@@ -67,6 +77,14 @@ urlpatterns = [
     path("volunteer/", include("community_chat.volunteer.urls")),
     path("home/", CommunityHomeView.as_view(), name="community_chat_home"),
     path("coworking/today/", CoworkingTodayView.as_view(), name="community_chat_coworking_today"),
+    path("mentors/", MentorListView.as_view(), name="community_chat_mentors"),
+    path("mentors/<int:mentor_id>/availability/", MentorAvailabilityView.as_view(), name="community_chat_mentor_availability"),
+    path("mentor/profile/", MyMentorProfileView.as_view(), name="community_chat_mentor_profile"),
+    path("mentor/sessions/", MentorSessionsView.as_view(), name="community_chat_mentor_sessions"),
+    path("mentor/sessions/<uuid:session_id>/accept/", MentorSessionAcceptView.as_view(), name="community_chat_mentor_session_accept"),
+    path("mentor/sessions/<uuid:session_id>/decline/", MentorSessionDeclineView.as_view(), name="community_chat_mentor_session_decline"),
+    path("mentor/sessions/<uuid:session_id>/cancel/", MentorSessionCancelView.as_view(), name="community_chat_mentor_session_cancel"),
+    path("mentor/sessions/<uuid:session_id>/complete/", MentorSessionCompleteView.as_view(), name="community_chat_mentor_session_complete"),
     path("slack/message/", SlackMessageActionView.as_view(), name="community_chat_slack_message"),
     path("slack/", SlackDmMirrorView.as_view(), name="community_chat_slack"),
     path("slack/conversations/", SlackOwnerConversationView.as_view(), name="community_chat_slack_conversations"),
