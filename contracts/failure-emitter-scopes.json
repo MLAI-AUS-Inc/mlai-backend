@@ -1143,6 +1143,66 @@
       "site_sha256": "7c654b9fed393d591b927015a1e965e0c2c8ee1e3efe3038d767569bcef53a7a",
       "source": "registered WebsiteAuthorityError code copied to a cancelled legacy setup-pr-merge operation receipt; does not reclassify or replace the run failure",
       "test": "content_factory.tests_setup_pr_changes_unit.SetupPrMergeFollowupTests.test_revoked_authority_keeps_its_registered_code_without_changing_the_run"
+    },
+    {
+      "adapter": "audited_v0_observation",
+      "allowed_codes_ref": "contracts/failure-codes.json#/codes",
+      "expression": "safe_code(receipt.get('reason_code'))",
+      "field": "reason_code",
+      "function": "inspection_report",
+      "owner": "backend.website_doctor",
+      "path": "content_factory/management/commands/inspect_website_prepare.py",
+      "site_sha256": "d1477205315d5746f12a60d7fcc0e1c5bc30472f965364397d092446ca56a3c8",
+      "source": "Saved diagnostic observation through safe_code; never authorizes failure policy, dispatch or readiness. Arbitrary bodies and credentials omitted.",
+      "test": "content_factory.tests_website_doctor_unit.DoctorTests.test_inspector_omits_secrets_even_in_old_legacy_fields"
+    },
+    {
+      "adapter": "audited_v0_observation",
+      "allowed_codes_ref": "contracts/failure-codes.json#/codes",
+      "expression": "safe_code(failure.get('code') or receipt.get('reason_code'))",
+      "field": "code",
+      "function": "project_doctor",
+      "owner": "backend.website_doctor",
+      "path": "content_factory/website_doctor.py",
+      "site_sha256": "c521f2afb9479b78362540aa092e66f98696decffaa1cf34172e69b6105d15fc",
+      "source": "Saved diagnostic observation through safe_code; never authorizes failure policy, dispatch or readiness. Arbitrary bodies and credentials omitted.",
+      "test": "content_factory.tests_website_doctor_unit.DoctorTests.test_inspector_omits_secrets_even_in_old_legacy_fields"
+    },
+    {
+      "adapter": "authority_registry_boundary",
+      "allowed_codes_ref": "contracts/failure-codes.json#/codes",
+      "expression": "body.get('code') or 'website_prepare_step_failed'",
+      "field": "error_code",
+      "function": "_check_response",
+      "owner": "backend.website_first_article",
+      "path": "content_factory/website_first_article.py",
+      "site_sha256": "d81ee46d85e03b94a8e4018b50054cc0632332de74bdea3b2b24abd3750c9e84",
+      "source": "Owned generation/control response or original tenant-scoped run result; WebsiteAuthorityError classifies within the enrolled goal scope and prepare_failure revalidates canonical failure policy.",
+      "test": "content_factory.tests_website_first_article_unit.FirstArticleControllerTests.test_unknown_control_failure_is_resolved_by_the_enrolled_registry_boundary"
+    },
+    {
+      "adapter": "authority_registry_boundary",
+      "allowed_codes_ref": "contracts/failure-codes.json#/codes",
+      "expression": "goals.mapping(run.result).get('error_code') or 'website_prepare_step_failed'",
+      "field": "error_code",
+      "function": "advance",
+      "owner": "backend.website_first_article",
+      "path": "content_factory/website_first_article.py",
+      "site_sha256": "fa8a898bb5b2f2414ea2eac529751b4014f0eeb051598467bb58edf2bac24aca",
+      "source": "Owned generation/control response or original tenant-scoped run result; WebsiteAuthorityError classifies within the enrolled goal scope and prepare_failure revalidates canonical failure policy.",
+      "test": "content_factory.tests_website_first_article_unit.FirstArticleControllerTests.test_unknown_control_failure_is_resolved_by_the_enrolled_registry_boundary"
+    },
+    {
+      "adapter": "authority_registry_boundary",
+      "allowed_codes_ref": "contracts/failure-codes.json#/codes",
+      "expression": "goals.mapping(child.result).get('error_code') or 'website_prepare_step_failed'",
+      "field": "error_code",
+      "function": "advance",
+      "owner": "backend.website_first_article",
+      "path": "content_factory/website_first_article.py",
+      "site_sha256": "607f3e7eda26cddf7eb14734dc55f720275c3d5d9fb0fef0f25c41671642f5f5",
+      "source": "The publication child is selected from this goal's owned source run; WebsiteAuthorityError and prepare_failure validate its B1 failure before recovery policy.",
+      "test": "content_factory.tests_website_article_recovery_unit.ArticleRecoveryControllerTests.test_unknown_publication_failure_stops_at_the_enrolled_registry_boundary"
     }
   ],
   "entry_points": [

@@ -5,6 +5,7 @@ from .website_contract import evidence_digest
 from .website_discovery import discovery_snapshot
 from .website_operations import deletion_epoch, operation_summary
 from .activation import VERIFICATION_MAX_AGE
+from .article_publication_policy import can_publish_article
 from django.utils import timezone
 from datetime import timedelta
 
@@ -14,7 +15,7 @@ NEXT_ACTION_LABELS = {"verify-access": "Check GitHub access", "scan": "Scan repo
     "ci-attestation": "Recheck verification", "verify": "Verify website"}
 # Cleanup, re-verification and dispatch follow-ups run in the background and can
 # stay queued for days. None of them is the owner's current website operation.
-BACKGROUND_OPERATION_ACTIONS = ("cancel-operation", "source-reverify", "worker_followup")
+BACKGROUND_OPERATION_ACTIONS = ("cancel-operation", "source-reverify", "worker_followup", "superseded-setup-cleanup")
 
 
 def fact(complete=False, *, code="", reason="", status=None, verified_at=None, operation=None):
@@ -43,7 +44,8 @@ def project_journey(*, company_id, domain, website=None, capabilities=None, disc
     deployed = bool(deployment.get("status") == "passed" and deployment.get("source_sha") == website.get("verifiedSha")
         and deployment.get("connection_generation") == website.get("connectionGeneration") and deployment.get("target_id") == target.get("key")
         and deployment.get("public_url") and deployment.get("checked_at"))
-    live_ready = verified and deployed
+    live_ready = can_publish_article(integration_verified=verified,
+        write_verified=capabilities.get("repositoryWriteVerified") is True and write_allowed,deployment_verified=deployed)
     reason_code = capabilities.get("reasonCode") or "integration_required"
     reason = capabilities.get("reason") or "Prepare and verify your articles integration."
     if not authoring_supported:
@@ -65,9 +67,10 @@ def project_journey(*, company_id, domain, website=None, capabilities=None, disc
     verification_stale = proof.get("verificationStale") is True
     # Current verification paths use in-repository CI. Once its proof is
     # current, publishing needs neither workflow-file writes nor CI reads.
-    workflow_needed = not proof.get("integrationVerified", verified)
+    hosted_selected = proof.get("hostedVerificationSelected") is True
+    workflow_needed = not hosted_selected and not proof.get("integrationVerified", verified)
     ci_attestation_needed = proof.get("ciAttestationRequired") is True and not deployed
-    ci_read_needed = not proof.get("buildVerified", verified) or verification_stale or ci_attestation_needed
+    ci_read_needed = not hosted_selected and (not proof.get("buildVerified", verified) or verification_stale or ci_attestation_needed)
     workflow_missing = workflow_needed and grants.get("workflows") is not True
     ci_missing = ci_read_needed and not (grants.get("checks") is True and grants.get("statuses") is True)
     permissions_ready = not (workflow_missing or ci_missing)
@@ -162,7 +165,7 @@ def project_journey(*, company_id, domain, website=None, capabilities=None, disc
         "policy": {"allowed": write_allowed, "reasonCode": "" if write_allowed else reason_code, "reason": "" if write_allowed else reason},
         "reasonCode": "" if verified else reason_code, "reason": "" if verified else reason,
         "prerequisites": prerequisites, "steps": steps,
-        "capabilities": {"canRead": access, "canScan": bool(access and connected), "canPrepare": "setup" in allowed,
+        "capabilities": {"canRead": access, "canScan": bool(access and connected), "canPrepare": "setup" in allowed,"repositoryWriteVerified":capabilities.get("repositoryWriteVerified") is True,
             "canPreview": bool(mapping(website.get("capabilities")).get("previewSupported") and write_allowed),
             "canGeneratePortableDraft": bool(capabilities.get("canGeneratePortableDraft", company_id)), "canGenerateArticle": verified, "canOpenPublicationPr": verified,
             "canPublishArticle": live_ready, "canMerge": bool(write_allowed and proof.get("reviewedMergeReady")), "canDisconnect": bool(website), "canPurge": bool(website), "canCleanup": "cleanup" in allowed},
@@ -276,6 +279,12 @@ def journey_for_context(context, config, *, capabilities=None):
             proof.update(cleanupAwaitingDeployment=True, cleanupOperationId=str(cleanup.pk))
         proof["reviewedMergeReady"] = connection.repository_mutations.filter(generation=connection.generation, status="applied").exclude(head_sha="").exists() and bool(connection.capabilities.get("previewSupported"))
         latest = current_operation(connection)
+        from .website_hosted_verification import enabled as hosted_enabled
+        from .website_setup_consent import valid as valid_consent
+        from .website_goal import scope_matches, scope_for
+        saved_goal = mapping(mapping(getattr(latest, "receipt", None)).get("goal"))
+        if hosted_enabled(connection) and valid_consent(saved_goal) and scope_matches(saved_goal.get("scope"), scope_for(connection, context.company.pk)):
+            proof["hostedVerificationSelected"] = saved_goal["consent"]["answers"]["ci_mode"] == "hosted"
         operation = operation_summary(latest) if latest else None
         epoch = deletion_epoch(connection)
         from workflow_runs.models import ContentFactoryRun

@@ -2966,6 +2966,9 @@ class VibeRaisingStartupUpdateRunView(APIView):
                 return Response(payload, status=status.HTTP_503_SERVICE_UNAVAILABLE)
         else:
             run = existing_run
+            # Refreshing source context writes updated_at. Decide whether the
+            # queued delivery is stale before that unrelated bookkeeping write.
+            redispatch_existing = _should_dispatch_existing_run(run)
             set_startup_update_run_target_month(run, target_month)
             if input_sources:
                 windows = build_startup_update_target_windows(target_month)
@@ -2979,7 +2982,7 @@ class VibeRaisingStartupUpdateRunView(APIView):
                     manual_document_ids=manual_document_ids,
                     manual_summary=manual_summary,
                 )
-            if _should_dispatch_existing_run(run):
+            if redispatch_existing:
                 logger.info(
                     "Re-dispatching queued startup update run to Valley",
                     extra={"run_id": run.run_id, "organization_id": organization.id},

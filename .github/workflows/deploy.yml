@@ -3,7 +3,7 @@ name: Deploy to Digital Ocean
 on:
   pull_request:
     # Stacked Articles implementation PRs need the same validation lanes.
-    branches: [ main, "codex/articles-*" ]
+    branches: [ main, "codex/articles-*", "fix/admin-brain-deploy-decoupling", "feat/goal-wakeups", "feat/deploy-detection", "feat/first-article-goal" ]
   push:
     branches: [ main ]
   workflow_dispatch:
@@ -89,7 +89,9 @@ jobs:
         # Dedicated read-only Contents access to the private canonical CF repo.
         # Missing access fails closed; never replace the immutable lock with main.
         CONTENT_FACTORY_CONTRACT_READ_TOKEN: ${{ secrets.CONTENT_FACTORY_CONTRACT_READ_TOKEN }}
-      run: python scripts/check_failure_contract.py --remote
+      run: |
+        python scripts/check_failure_contract.py --remote
+        python scripts/check_site_fingerprint_contract.py --remote
 
     - name: Check test-module assignment
       run: python scripts/check_test_assignment.py
@@ -98,14 +100,14 @@ jobs:
       run: python scripts/test_without_database.py content_factory.tests_run_sync_authority_unit content_factory.tests_current_connection_unit tests.test_refactor_unit tests.test_refactor_django_unit tests.test_refactor_migration_inventory roo.test_event_ticket_price
 
     - name: Check Roo Points GST and Xero capture contracts without database access
-      run: python scripts/test_without_database.py roo.tests_purchase_tax_unit tests.test_xero_capture_backoff_unit
+      run: python scripts/test_without_database.py roo.tests_purchase_tax_unit roo.tests_startup_update_benefits_unit tests.test_xero_capture_backoff_unit
 
     - name: Check coworking report channel permissions without database access
       run: python scripts/test_without_database.py roo.tests_coworking_report_access
 
     - name: Check personal agent gateway without database access
       # SQL suites skip here; they require the separately reviewed disposable runner.
-      run: python scripts/test_without_database.py agent_runtime.tests.test_core agent_runtime.tests.test_interface agent_runtime.tests.test_event_webhooks agent_runtime.tests.test_dot_protocol agent_runtime.tests.test_native_pilot agent_runtime.tests.test_native_safety agent_runtime.tests.test_native_queue agent_runtime.tests.test_native_watch agent_runtime.tests.test_model_budget agent_runtime.tests.test_model_proxy agent_runtime.tests.test_model_transport agent_runtime.tests.test_native_database agent_runtime.tests.test_unified_bridge_database
+      run: python scripts/test_without_database.py agent_runtime.tests.test_community agent_runtime.tests.test_core agent_runtime.tests.test_interface agent_runtime.tests.test_event_webhooks agent_runtime.tests.test_dot_protocol agent_runtime.tests.test_native_pilot agent_runtime.tests.test_native_safety agent_runtime.tests.test_native_queue agent_runtime.tests.test_native_watch agent_runtime.tests.test_model_budget agent_runtime.tests.test_model_proxy agent_runtime.tests.test_model_transport agent_runtime.tests.test_native_database agent_runtime.tests.test_unified_bridge_database
 
     - name: Check inbox account bindings without database access
       run: python scripts/test_without_database.py community_chat.tests.test_inbox_accounts community_chat.tests.test_inbox_erasure integrations.tests_inbox_activity integrations.tests_inbox_targeted_selection integrations.tests_inbox_own_hints integrations.tests_inbox_coverage integrations.tests_read_coverage integrations.tests_inbox_exports integrations.tests_inbox_observations integrations.tests_inbox_mentions integrations.tests_inbox_relay_counts community_chat.tests.test_adapter
@@ -126,6 +128,7 @@ jobs:
           integrations.tests_message_sync_head_repair \
           integrations.tests_message_sync_priority_budget \
           integrations.tests_message_sync_priority_routing \
+          integrations.tests_slack_recent_history \
           integrations.tests_message_sync_telemetry \
           integrations.tests_message_sync_capacity
 
@@ -162,6 +165,7 @@ jobs:
           startup_updates.tests_curation_context_unit \
           startup_updates.tests_curation_context_api_unit \
           startup_updates.tests_draft_disclosure_unit \
+          startup_updates.tests_dispatch_timing_unit \
           startup_updates.tests_update_identity.GenerationDateCompatibilityTests
 
     - name: Run no-database editorial contract checks
@@ -183,8 +187,14 @@ jobs:
     - name: Check Articles failure taxonomy without database access
       run: python scripts/test_without_database.py content_factory.tests_failure_contract_unit
 
+    - name: Check article recovery controller policy without database access
+      run: python scripts/test_without_database.py content_factory.tests_website_article_recovery_unit
+
+    - name: Check shared article publication policy without database access
+      run: python scripts/test_without_database.py content_factory.tests_article_publication_policy_unit
+
     - name: Check website journey and lifecycle contracts without database access
-      run: python scripts/test_without_database.py content_factory.tests_website_goal_unit content_factory.tests_website_goal_chain_unit content_factory.tests_website_status_unit content_factory.tests_one_click_operations_unit content_factory.tests_articles_phase_a_unit content_factory.tests_dispatch_outcomes_unit content_factory.tests_prepare_observability_unit content_factory.tests_prepare_journey_unit content_factory.tests_prepare_permissions_unit content_factory.tests_cancel_receipts_unit content_factory.tests_setup_revision_status_unit content_factory.tests_reconciliation_unit content_factory.tests_website_articles_reliability_unit content_factory.tests_portable_run_controls_unit content_factory.tests_portable_workflow_progress_unit content_factory.tests_incident_guards_unit content_factory.tests_publish_child_review_identity_unit content_factory.tests_website_operation_recovery_unit content_factory.tests_setup_pr_failure_unit content_factory.tests_setup_merge_verification_unit content_factory.tests_source_reverify_target_unit content_factory.tests_setup_pr_changes_unit content_factory.tests_setup_merge_policy_unit content_factory.tests_setup_pr_return_unit content_factory.tests_stopped_prepare_source_unit content_factory.tests_owner_setup_merge_unit content_factory.tests_setup_post_merge_unit content_factory.tests_setup_delivery_unit content_factory.test_reliability_contract content_factory.tests_private_preview_document_unit content_factory.tests_editorial_dispatch_unit
+      run: python scripts/test_without_database.py content_factory.tests_website_goal_unit content_factory.tests_website_goal_chain_unit content_factory.tests_website_status_unit content_factory.tests_one_click_operations_unit content_factory.tests_articles_phase_a_unit content_factory.tests_dispatch_outcomes_unit content_factory.tests_prepare_observability_unit content_factory.tests_prepare_journey_unit content_factory.tests_prepare_permissions_unit content_factory.tests_cancel_receipts_unit content_factory.tests_setup_revision_status_unit content_factory.tests_reconciliation_unit content_factory.tests_website_articles_reliability_unit content_factory.tests_portable_run_controls_unit content_factory.tests_portable_workflow_progress_unit content_factory.tests_incident_guards_unit content_factory.tests_publish_child_review_identity_unit content_factory.tests_website_operation_recovery_unit content_factory.tests_setup_pr_failure_unit content_factory.tests_setup_merge_verification_unit content_factory.tests_source_reverify_target_unit content_factory.tests_setup_pr_changes_unit content_factory.tests_setup_merge_policy_unit content_factory.tests_setup_pr_return_unit content_factory.tests_stopped_prepare_source_unit content_factory.tests_superseded_setup_cleanup_unit content_factory.tests_owner_setup_merge_unit content_factory.tests_setup_post_merge_unit content_factory.tests_setup_delivery_unit content_factory.test_reliability_contract content_factory.tests_private_preview_document_unit content_factory.tests_editorial_dispatch_unit content_factory.tests_cancel_preview_stop_unit content_factory.tests_prepare_transient_authorization_unit content_factory.tests_site_fingerprint_unit content_factory.tests_website_first_article_unit content_factory.tests_website_first_article_topics_unit content_factory.tests_website_first_article_billing_unit content_factory.tests_website_notification_delivery_unit content_factory.tests_website_goal_notifications_unit content_factory.tests_website_deployment_unit content_factory.tests_website_hosted_verification_unit content_factory.tests_website_hosted_build_unit content_factory.tests_website_environment_recovery_unit content_factory.tests_website_setup_consent_unit content_factory.tests_website_doctor_unit content_factory.tests_website_wakeups_unit content_factory.tests_website_strategy_budget_unit content_factory.tests_website_usage_settlement_unit content_factory.tests_website_cost_usage_unit content_factory.tests_website_cost_ledger_unit content_factory.tests_website_cost_recovery_unit content_factory.tests_website_operational_alerts_unit content_factory.tests_website_repair_alerts_unit content_factory.tests_website_stage_stalls_unit content_factory.tests_website_preview_cleanup_budget_unit
 
     - name: Check migrations are committed
       run: python manage.py makemigrations --check --dry-run
@@ -194,6 +204,9 @@ jobs:
 
     - name: Check paid island research contracts without database access
       run: python -m unittest content_factory.tests_island_research_unit content_factory.tests_custom_islands_unit content_factory.tests_editorial_catalog_unit -q
+
+    - name: Run formerly unassigned database-free suites
+      run: python scripts/test_without_database.py content_factory.tests_preserve_publish_targets content_factory.tests_scaffold_accept core.tests.test_observability generic_hackathons.tests_smart_home integrations.tests_valley_harness tests.test_article_system_registry tests.test_customerio_template_docs tests.test_github_app_credentials_command tests.test_jobs_public_pages tests.test_jobs_sources tests.test_jobs_startup_boards tests.test_scan_force_refresh vibe_raising.tests_acn_validators
 
     - name: Scan tracked source for credentials
       run: python scripts/check_secrets.py
@@ -293,6 +306,9 @@ jobs:
           integrations.tests_slack_shared_conversation_policy \
           tests.test_daily_research_policy_unit \
           tests.test_vibe_marketing_bootstrap_performance \
+          tests.test_articles_bootstrap_summary \
+          tests.test_articles_bootstrap_read_path \
+          tests.test_articles_bootstrap_progress_cache \
           tests.test_bootstrap_setup_merge_fact
 
     - name: Check chat background retries and preview failure caches without database access
@@ -336,6 +352,8 @@ jobs:
     - name: Run targeted Django tests
       run: |
         python manage.py test \
+          tests.test_content_factory_run_sync \
+          tests.test_vibe_marketing_autofill \
           founder_tools.my_startup.test_database \
           roo.tests_rate_card \
           roo.tests_legacy_office_manager \
@@ -372,6 +390,7 @@ jobs:
           org_memory.tests \
           tests.test_org_memory_governance \
           tests.test_org_memory_production_deploy \
+          tests.test_admin_brain_activation_unit \
           tests.test_drive_transcript_inventory \
           tests.test_validate_prod_urls \
           tests.test_deploy_command_wiring \
@@ -695,6 +714,135 @@ jobs:
         python -m pip install --upgrade pip
         pip install --require-hashes -r requirements.lock
 
+    # Exercise the article chain before the expensive graph-rewind regressions,
+    # so a controller/billing failure has a short, separately named CI result.
+    # This uses the same disposable PostgreSQL schema and never deploys.
+    - name: Run first-article and bootstrap-budget PostgreSQL tests
+      run: python manage.py test content_factory.tests_website_first_article_database content_factory.tests_website_cost_database content_factory.tests_website_cost_recovery_database content_factory.tests_website_operational_alerts_database content_factory.tests_website_repair_alerts_database content_factory.tests_website_stage_stalls_database content_factory.tests_website_preview_cleanup_budget_database tests.test_articles_bootstrap_endpoint_budget --verbosity 2
+
+    - name: Run formerly unassigned and partially selected Django suites
+      run: |
+        python manage.py test \
+          community_chat.tests.test_account_privacy \
+          community_chat.tests.test_account_profiles \
+          community_chat.tests.test_browser_auth_recovery_unit \
+          community_chat.tests.test_device_metadata \
+          community_chat.tests.test_email_code_auth \
+          community_chat.tests.test_email_code_delivery \
+          community_chat.tests.test_home_facades \
+          community_chat.tests.test_onboarding \
+          community_chat.tests.test_onboarding_names_unit \
+          content_factory.tests_article_repo_review_capable \
+          content_factory.tests_auto_publish_flag \
+          content_factory.tests_autofill_company_scoping \
+          content_factory.tests_baseline_article_citations \
+          content_factory.tests_baseline_history_and_connect \
+          content_factory.tests_component_reuse_roundtrip \
+          content_factory.tests_github_webhook \
+          content_factory.tests_org_config_tenancy \
+          content_factory.tests_purge_mirrored_test_runs \
+          content_factory.tests_run_authorization \
+          content_factory.tests_scaffold_self_register \
+          content_factory.tests_serialize_run_setup_refs \
+          content_factory.tests_service_config \
+          content_factory.tests_vibe_marketing_topic_selection \
+          content_factory.tests_website_baseline_serialization \
+          core.tests.test_admin_user_creation \
+          core.tests.test_password_readiness \
+          core.tests.test_permissions \
+          core.tests.test_stale_content_type_purge \
+          data_access.tests \
+          generic_hackathons.tests \
+          generic_hackathons.tests_join_requests \
+          generic_hackathons.tests_team_leadership \
+          generic_hackathons.tests_team_provisioning \
+          generic_hackathons.tests_watt_unity_sessions \
+          hackathons.watt_the_hack.tests \
+          hospital.test_announcements \
+          hospital.test_round_archive \
+          hospital.test_scoring \
+          hospital.tests \
+          hospital.tests_onboarding \
+          integrations.test_luma_cover \
+          integrations.tests \
+          integrations.tests_article \
+          integrations.tests_community_bridge_thread_reconciliation \
+          integrations.tests_community_bridge_thread_repair \
+          integrations.tests_connection_org_scoping \
+          integrations.tests_connector_company_scoping \
+          integrations.tests_github_callback \
+          integrations.tests_github_installations \
+          integrations.tests_github_reconnect \
+          integrations.tests_gmail_oauth \
+          integrations.tests_gmail_org_scoping \
+          integrations.tests_gmail_service \
+          integrations.tests_luma \
+          integrations.tests_luma_connector \
+          integrations.tests_reconciliation \
+          integrations.tests_reconciliation_knowledge \
+          integrations.tests_reconciliation_reporting \
+          integrations.tests_services \
+          integrations.tests_startup_updates \
+          integrations.tests_xero_all_account_capture \
+          integrations.tests_xero_bill_intake \
+          integrations.tests_xero_stripe_statement_binding \
+          mlai_studio.tests \
+          roo.tests \
+          roo.tests_admin \
+          roo.tests_api \
+          roo.tests_boost_post_admission \
+          roo.tests_coding_migration \
+          roo.tests_committee_candidates \
+          roo.tests_committee_sync \
+          roo.tests_permissions \
+          roo.tests_quests \
+          startup_updates.tests_data_deletion_authz \
+          startup_updates.tests_monthly_dispatch \
+          tests.test_article_performance_reports \
+          tests.test_article_readiness_rollup \
+          tests.test_article_report_api \
+          tests.test_article_report_notifications \
+          tests.test_article_report_scheduler \
+          tests.test_article_review_preview_events \
+          tests.test_article_setup_dangling_run_ref \
+          tests.test_article_setup_reset_cleanup \
+          tests.test_article_setup_reset_durable \
+          tests.test_article_system_readiness \
+          tests.test_confirm_endpoint \
+          tests.test_content_factory_healing_records \
+          tests.test_content_factory_learning_entries \
+          tests.test_content_island_bootstrap \
+          tests.test_content_island_contract \
+          tests.test_content_island_ledger_reference \
+          tests.test_content_islands \
+          tests.test_coworking_cost \
+          tests.test_dispatch_idempotency_seam \
+          tests.test_empty_id_setup_fallback \
+          tests.test_financial_sync_domain_fallback \
+          tests.test_github_repo_operable \
+          tests.test_live_preview_serializer \
+          tests.test_new_endpoints \
+          tests.test_notification_channels \
+          tests.test_report_digest \
+          tests.test_roo_points_revision_authorization \
+          tests.test_run_billing_link_persistence \
+          tests.test_run_status_missing \
+          tests.test_scan_callback_audit_only \
+          tests.test_scheduled_discovery \
+          tests.test_setup_publish_card_state \
+          tests.test_slack_preview \
+          tests.test_startup_data_status \
+          tests.test_topic_difficulty_metrics \
+          tests.test_validate_startup_update_schema \
+          vibe_raising.tests \
+          vibe_raising.tests_admin \
+          vibe_raising.tests_backfill_acn \
+          vibe_raising.tests_company_scoping \
+          vibe_raising.tests_registration_gate \
+          vibe_raising.tests_tenancy \
+          workflow_runs.tests \
+          --noinput --verbosity=2
+
     - name: Run migration tests
       run: |
         python manage.py test \
@@ -768,6 +916,7 @@ jobs:
         AGENT_RUNTIME_NATIVE_COMMUNITIES: ${{ vars.AGENT_RUNTIME_NATIVE_COMMUNITIES || '' }}
         AGENT_RUNTIME_DOT_SETUP_URL: ${{ vars.AGENT_RUNTIME_DOT_SETUP_URL || '' }}
         AGENT_RUNTIME_NATIVE_PERSONAL_LIMIT: ${{ vars.AGENT_RUNTIME_NATIVE_PERSONAL_LIMIT || '1' }}
+        AGENT_RUNTIME_COMMUNITY_ENABLED: ${{ vars.AGENT_RUNTIME_COMMUNITY_ENABLED || 'false' }}
         AGENT_RUNTIME_NATIVE_ALWAYS_ADMIT: ${{ vars.AGENT_RUNTIME_NATIVE_ALWAYS_ADMIT || 'false' }}
         AGENT_RUNTIME_NATIVE_QUEUE_TTL_MINUTES: ${{ vars.AGENT_RUNTIME_NATIVE_QUEUE_TTL_MINUTES || '1440' }}
         AGENT_RUNTIME_NATIVE_ADMISSION_DAILY_CAP: ${{ vars.AGENT_RUNTIME_NATIVE_ADMISSION_DAILY_CAP || '200' }}
@@ -788,6 +937,7 @@ jobs:
         VALLEY_MCP_DOMAIN_VERIFICATION_TOKEN: ${{ vars.VALLEY_MCP_DOMAIN_VERIFICATION_TOKEN || '' }}
         COMMUNITY_BRIDGE_DEPENDENCY_VERDICTS_ENABLED: ${{ vars.COMMUNITY_BRIDGE_DEPENDENCY_VERDICTS_ENABLED || 'false' }}
         MESSAGE_SYNC_ENABLED: ${{ vars.MESSAGE_SYNC_ENABLED || 'false' }}
+        MESSAGE_SYNC_RECENT_HISTORY_ENABLED: ${{ vars.MESSAGE_SYNC_RECENT_HISTORY_ENABLED || 'false' }}
         MESSAGE_SYNC_QUIET_HEAD_BACKOFF_ENABLED: ${{ vars.MESSAGE_SYNC_QUIET_HEAD_BACKOFF_ENABLED || 'false' }}
         COMMUNITY_CHAT_MEMBER_ACCOUNTS_ENABLED: ${{ vars.COMMUNITY_CHAT_MEMBER_ACCOUNTS_ENABLED || 'false' }}
         COMMUNITY_CHAT_INBOX_ERASURE_ENABLED: ${{ vars.COMMUNITY_CHAT_INBOX_ERASURE_ENABLED || 'false' }}

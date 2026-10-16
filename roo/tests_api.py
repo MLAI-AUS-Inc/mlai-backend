@@ -1220,7 +1220,7 @@ class SystemAwardViewTests(APITestCase):
 
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         user = User.objects.get(slack_id='UNOPROFILE')
-        self.assertEqual(user.email, 'UNOPROFILE@slack.placeholder.com')
+        self.assertEqual(user.email, 'unoprofile@slack.placeholder.com')
         self.assertEqual(user.first_name, 'Unknown Slack User')
 
     @patch('core.permissions.HasRooApiKey.has_permission', return_value=True)

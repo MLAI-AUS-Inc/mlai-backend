@@ -67,6 +67,10 @@ def guarded_owner_operation(action, *, bind_selected=False, run_operation=False,
                         raise WebsiteAuthorityError("website_connection_changed", "This run belongs to a previous website connection.")
                 else:
                     requested_repo = str(request.data.get("github_repo") or request.data.get("githubRepo") or config.github_repo or "").strip()
+                    from .vibe_marketing_views import _github_repo_company_conflict_response
+                    conflict = _github_repo_company_conflict_response(context=context, requested_repo=requested_repo)
+                    if conflict:
+                        return conflict
                     expected = connection_contract(request.data)
                     current = config.website_connection
                     newly_bound = False
@@ -145,7 +149,7 @@ class WebsiteConnectionActionView(APIView):
             if action == "prepare":
                 from .website_prepare import start_prepare, advance_prepare
                 operation = start_prepare(config, expected=dict(request.data), company_id=context.company.pk,
-                    user=request.user, retry=True, target=request.data.get("goal_target", "ready"))
+                    user=request.user, retry=True, target=request.data.get("goal_target", "ready"), consent=request.data.get("setup_consent"))
                 advance_prepare(operation.pk)
                 operation.refresh_from_db()
             elif action == "disconnect":
@@ -226,9 +230,31 @@ class WebsiteConnectionOperationView(APIView):
         from .website_models import WebsiteConnectionOperation
         from .website_operations import operation_summary
         operation = WebsiteConnectionOperation.objects.filter(pk=operation_id, connection__organization=context.organization).first()
-        if operation is None:
+        if operation is None or operation.action in {"goal-usage", "goal-alert", "usage-refresh"}:
             return Response({"detail": "Operation not found."}, status=404)
         return Response({"operation": operation_summary(operation)})
+
+
+class WebsiteCostUsageView(APIView):
+    """Read recorded accounting for an explicitly selected authorized company."""
+
+    def get(self, request):
+        context, _, error = _context(request)
+        if error:
+            return error
+        from . import website_cost_ledger as ledger
+        if not ledger.enabled():
+            return Response({"detail": "Accounting not available."}, status=404)
+        goal_id = request.query_params.get("goal_id")
+        if goal_id is not None:
+            try:
+                parsed = str(uuid.UUID(goal_id))
+                if parsed != goal_id:
+                    raise ValueError("Noncanonical goal ID")
+            except (ValueError, AttributeError, TypeError):
+                return Response({"detail": "Invalid goal ID."}, status=400)
+        return Response({"usage": ledger.read(company_id=context.company.pk, organization_id=context.organization.pk, goal_id=goal_id)},
+            headers={"Cache-Control": "private, no-store"})
 
 
 class WebsiteConnectionAuthorizeView(APIView):

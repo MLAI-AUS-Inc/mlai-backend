@@ -142,7 +142,7 @@ class WebsiteJourneyContractTests(SimpleTestCase):
 
     def test_target_readiness_needs_exact_live_deployment_proof(self):
         website = {"status": "connected", "verifiedSha": "a" * 40, "connectionGeneration": 2, "writePolicy": {"allowed": True}}
-        caps = {"canGenerateArticle": True, "repositoryAccessVerified": True}
+        caps = {"canGenerateArticle": True, "repositoryAccessVerified": True,"repositoryWriteVerified":True}
         partial = project_journey(company_id="42", domain="example.test", website=website, capabilities=caps)
         self.assertTrue(partial["capabilities"]["canOpenPublicationPr"])
         self.assertFalse(partial["capabilities"]["canPublishArticle"])
@@ -176,7 +176,7 @@ class WebsiteJourneyContractTests(SimpleTestCase):
         for suffix in ("", "/", "/disconnect", "/disconnect/", "/purge", "/cancel-operation", "/operations/b761b209-8673-4843-9a48-90b3177bde26"):
             self.assertTrue(resolve(prefix + suffix).func.view_class.__name__.__contains__("WebsiteConnection"))
 
-    def test_account_probe_runs_when_integration_is_blocked(self):
+    def test_forced_account_probe_runs_when_integration_is_blocked(self):
         from .vibe_marketing_views import _article_capabilities_for_context
         config = SimpleNamespace(github_repo="example/site", website_connection=object())
         with patch("content_factory.vibe_marketing_views._github_account_for_context", return_value={"saved": True, "owned": True}), \
@@ -184,8 +184,10 @@ class WebsiteJourneyContractTests(SimpleTestCase):
              patch("content_factory.vibe_marketing_views.resolve_article_system", return_value={}), \
              patch("content_factory.vibe_marketing_views.integration_evidence", return_value={"verified": False, "reasonCode": "website_writes_paused"}), \
              patch("content_factory.vibe_marketing_views._verify_github_repository_access", return_value={"verified": True}) as probe:
-            result = _article_capabilities_for_context(SimpleNamespace(organization=SimpleNamespace(domain="example.test")), config, latest_runs=[])
+            result = _article_capabilities_for_context(SimpleNamespace(organization=SimpleNamespace(domain="example.test")), config, latest_runs=[], force=True)
         probe.assert_called_once()
+        self.assertIs(probe.call_args.kwargs["force"], True)
+        self.assertIs(probe.call_args.kwargs["allow_probe"], True)
         self.assertEqual(result["accountStatus"], "connected")
         self.assertEqual(result["reasonCode"], "website_writes_paused")
 

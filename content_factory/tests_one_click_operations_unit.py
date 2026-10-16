@@ -66,7 +66,9 @@ class PrepareJourneyTests(SimpleTestCase):
         op = self.operation()
         with patch.object(prepare, "_claim_prepare", return_value=op), \
                 patch.object(prepare, "_prepare_context", return_value=(Mock(), Mock(), Mock())), \
-                patch.object(prepare, "journey_for_context", return_value={"capabilities": {"canPublishArticle": True}}), \
+                patch.object(prepare, "journey_for_context", return_value={"policy":{"allowed":True},
+                    "prerequisites":{"deployment":{"status":"complete"}},
+                    "capabilities": {"canGenerateArticle":True,"repositoryWriteVerified":True,"canPublishArticle": True}}), \
                 patch.object(prepare, "_persist_prepare", side_effect=lambda operation, **kwargs: operation):
             prepare.advance_prepare(op.pk, handlers={})
         self.assertEqual(op.state, "completed")
@@ -171,7 +173,13 @@ class BillingClarityTests(SimpleTestCase):
         import time
         payload = {"startup": "Melbourne café", "points": 0}
         response = _timed_vibe_response(payload, started_at=time.perf_counter(), metric_name="vibe_bootstrap")
-        self.assertEqual(int(response["X-MLAI-Payload-Bytes"]), len(JSONRenderer().render(payload)))
+        self.assertNotIn("X-MLAI-Payload-Bytes", response)
+        response.accepted_renderer = JSONRenderer()
+        response.accepted_media_type = "application/json"
+        response.renderer_context = {}
+        response.render()
+        self.assertEqual(int(response["X-MLAI-Payload-Bytes"]), len(response.content))
+        self.assertEqual(response.content, JSONRenderer().render(payload))
 
     def test_setup_is_free_and_account_balance_is_named(self):
         from .billing import build_roo_points_payload, get_content_factory_setup_cost_points

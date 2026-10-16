@@ -22,6 +22,7 @@ MESSAGE_SYNC_QUIET_HEAD_BACKOFF_ENABLED="${MESSAGE_SYNC_QUIET_HEAD_BACKOFF_ENABL
 COMMUNITY_CHAT_MEMBER_ACCOUNTS_ENABLED="${COMMUNITY_CHAT_MEMBER_ACCOUNTS_ENABLED:-false}"
 COMMUNITY_CHAT_INBOX_ERASURE_ENABLED="${COMMUNITY_CHAT_INBOX_ERASURE_ENABLED:-false}"
 MESSAGE_SYNC_TARGETED_READ_POLLING="${MESSAGE_SYNC_TARGETED_READ_POLLING:-false}"
+MESSAGE_SYNC_RECENT_HISTORY_ENABLED="${MESSAGE_SYNC_RECENT_HISTORY_ENABLED:-false}"
 MESSAGE_SYNC_OPEN_PRIORITY_ENABLED="${MESSAGE_SYNC_OPEN_PRIORITY_ENABLED:-true}"
 MESSAGE_SYNC_UNREAD_PREFETCH_ENABLED="${MESSAGE_SYNC_UNREAD_PREFETCH_ENABLED:-false}"
 MESSAGE_SYNC_DEVICE_FANOUT_BATCH="${MESSAGE_SYNC_DEVICE_FANOUT_BATCH:-0}"
@@ -69,6 +70,7 @@ AGENT_RUNTIME_NATIVE_PERSONAL_LIMIT="${AGENT_RUNTIME_NATIVE_PERSONAL_LIMIT:-1}"
 AGENT_RUNTIME_NATIVE_SERVICE_PRIVATE_KEY="${AGENT_RUNTIME_NATIVE_SERVICE_PRIVATE_KEY:-}"
 AGENT_RUNTIME_NATIVE_REGISTRY_KEY="${AGENT_RUNTIME_NATIVE_REGISTRY_KEY:-}"
 COMMUNITY_CHAT_ROLE_SERVICE_TOKEN="${COMMUNITY_CHAT_ROLE_SERVICE_TOKEN:-}"
+AGENT_RUNTIME_COMMUNITY_ENABLED="${AGENT_RUNTIME_COMMUNITY_ENABLED:-false}"
 AGENT_RUNTIME_NATIVE_ALWAYS_ADMIT="${AGENT_RUNTIME_NATIVE_ALWAYS_ADMIT:-false}"
 AGENT_RUNTIME_NATIVE_QUEUE_TTL_MINUTES="${AGENT_RUNTIME_NATIVE_QUEUE_TTL_MINUTES:-1440}"
 AGENT_RUNTIME_NATIVE_ADMISSION_DAILY_CAP="${AGENT_RUNTIME_NATIVE_ADMISSION_DAILY_CAP:-200}"
@@ -87,6 +89,7 @@ export AGENT_RUNTIME_NATIVE_REPLIES_ENABLED AGENT_RUNTIME_MCP_EVENTS_ENABLED
 export AGENT_RUNTIME_NATIVE_COMMUNITIES AGENT_RUNTIME_DOT_SETUP_URL AGENT_RUNTIME_NATIVE_PERSONAL_LIMIT
 export AGENT_RUNTIME_NATIVE_SERVICE_PRIVATE_KEY AGENT_RUNTIME_NATIVE_REGISTRY_KEY
 export COMMUNITY_CHAT_ROLE_SERVICE_TOKEN
+export AGENT_RUNTIME_COMMUNITY_ENABLED
 export AGENT_RUNTIME_NATIVE_ALWAYS_ADMIT
 export AGENT_RUNTIME_NATIVE_QUEUE_TTL_MINUTES
 export AGENT_RUNTIME_NATIVE_ADMISSION_DAILY_CAP
@@ -124,7 +127,7 @@ case "$MESSAGE_SYNC_QUIET_HEAD_BACKOFF_ENABLED" in
     *) echo "MESSAGE_SYNC_QUIET_HEAD_BACKOFF_ENABLED must be true or false." >&2; exit 1 ;;
 esac
 export MESSAGE_SYNC_QUIET_HEAD_BACKOFF_ENABLED
-for responsiveness_flag in MESSAGE_SYNC_OPEN_PRIORITY_ENABLED MESSAGE_SYNC_UNREAD_PREFETCH_ENABLED; do
+for responsiveness_flag in MESSAGE_SYNC_OPEN_PRIORITY_ENABLED MESSAGE_SYNC_UNREAD_PREFETCH_ENABLED MESSAGE_SYNC_RECENT_HISTORY_ENABLED; do
     case "${!responsiveness_flag}" in
         true|TRUE|True) printf -v "$responsiveness_flag" '%s' true ;;
         false|FALSE|False) printf -v "$responsiveness_flag" '%s' false ;;
@@ -465,7 +468,7 @@ if [ -n "$VALLEY_MCP_DOMAIN_VERIFICATION_TOKEN" ]; then
 fi
 for native_flag in MLAI_MCP_NATIVE_AGENTS_ENABLED AGENT_RUNTIME_ENABLED AGENT_RUNTIME_NATIVE_ENABLED \
     AGENT_RUNTIME_NATIVE_REPLIES_ENABLED AGENT_RUNTIME_MCP_EVENTS_ENABLED AGENT_RUNTIME_NATIVE_PERSONAL_LIMIT \
-    AGENT_RUNTIME_NATIVE_ALWAYS_ADMIT \
+    AGENT_RUNTIME_COMMUNITY_ENABLED AGENT_RUNTIME_NATIVE_ALWAYS_ADMIT \
     AGENT_RUNTIME_NATIVE_QUEUE_TTL_MINUTES \
     AGENT_RUNTIME_NATIVE_ADMISSION_DAILY_CAP \
     AGENT_RUNTIME_NATIVE_LIMIT_TIMEZONE \
@@ -497,6 +500,7 @@ fi
 # The app-level token travels only through SSH stdin. Never reuse an OAuth
 # bot/user token: recipient expansion is a separate Slack authorization surface.
 install_remote_env_value MESSAGE_SYNC_ENABLED "$MESSAGE_SYNC_ENABLED"
+install_remote_env_value MESSAGE_SYNC_RECENT_HISTORY_ENABLED "$MESSAGE_SYNC_RECENT_HISTORY_ENABLED"
 install_remote_env_value COMMUNITY_BRIDGE_DEPENDENCY_VERDICTS_ENABLED "$COMMUNITY_BRIDGE_DEPENDENCY_VERDICTS_ENABLED"
 install_remote_env_value MESSAGE_SYNC_QUIET_HEAD_BACKOFF_ENABLED "$MESSAGE_SYNC_QUIET_HEAD_BACKOFF_ENABLED"
 install_remote_env_value MESSAGE_SYNC_OPEN_PRIORITY_ENABLED "$MESSAGE_SYNC_OPEN_PRIORITY_ENABLED"
@@ -949,6 +953,12 @@ ssh "$DEPLOY_SSH_TARGET" <<EOF
     unset retired_committee_container_ids
 
     source scripts/runtime-services.sh
+    if [ "\$(read_env_value AGENT_RUNTIME_COMMUNITY_ENABLED)" = "true" ]; then
+        runtime_services+=("\${community_agent_runtime_services[@]}")
+    else
+        docker compose stop community-agent-worker || true
+        docker compose rm -f community-agent-worker || true
+    fi
     if [ "\$(read_env_value MLAI_MCP_NATIVE_AGENTS_ENABLED)" = "true" ]; then
         runtime_services+=("\${native_agent_runtime_services[@]}")
         native_agent_worker_enabled=1
@@ -1024,7 +1034,7 @@ ssh "$DEPLOY_SSH_TARGET" <<EOF
     # command-substituted on the deploying runner.)
     echo "🧪 Running deployment preflight..."
     compose_run_web python manage.py deploy_preflight
-    compose_run_web python scripts/validate_native_agent_deploy_config.py
+    compose_run_web python scripts/validate_native_agent_deploy_config.py --provider
 
     previous_runtime_container_ids=()
     previous_scheduler_container_id=""
@@ -1698,13 +1708,12 @@ PY
             # back off before the runtime services start.
             echo "⚠️ Admin Brain pilot staging skipped: the pilot has no retrievable evidence yet."
             echo "⚠️ Keeping the Admin Brain query API disabled; retrieval remains fail-closed."
-            echo "⚠️ The next deploy after ingestion restores evidence will stage and activate the binding."
+            echo "⚠️ Use Activate Admin Brain after its readiness checks recover."
             upsert_env_value ORG_MEMORY_QUERY_API_ENABLED "false"
         else
-            echo "❌ Admin Brain production staging failed; aborting the deploy."
-            rm -f "\$stage_stdout"
-            # Fail via a command (not exit) so the ERR trap restores web.
-            false
+            echo "⚠️ Admin Brain production staging failed; continuing the app deploy with retrieval disabled."
+            echo "⚠️ Resolve the readiness blockers, then use Activate Admin Brain."
+            upsert_env_value ORG_MEMORY_QUERY_API_ENABLED "false"
         fi
         rm -f "\$stage_stdout"
         unset stage_operator activation_operator approval_hash approval_hash_short

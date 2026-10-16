@@ -286,3 +286,10 @@ fetch and a correlated native reply. The existing unqueued posts from before
 rollout are not retroactively admitted by this release.
 
 Lease contract: [official OpenAI MCP Events documentation](https://developers.openai.com/plugins/build/mcp-events).
+
+## Separate community assistant
+
+The optional `AGENT_RUNTIME_COMMUNITY_ENABLED=false` gate adds a different
+`mlai-community` installation with its own signing key and public-thread consent.
+It never routes guests into the personal Dot. See [Personal Maek and Maek ·
+community](mlai-community-agent.md) for isolation, limits, rollout and validation.

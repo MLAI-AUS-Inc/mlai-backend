@@ -206,6 +206,7 @@ def article_capabilities(config, *, domain="", account=None, evidence=None, repo
     account = account or github_account_state(config)
     evidence = evidence or integration_evidence(config)
     access = repository_access or {}
+    from .article_publication_policy import can_publish_article
     repo_selected = bool(str(getattr(config, "github_repo", "") or "").strip())
     writable = access.get("writable", access.get("verified"))
     ready = bool(account.get("owned") and evidence.get("verified") and access.get("verified")
@@ -223,16 +224,19 @@ def article_capabilities(config, *, domain="", account=None, evidence=None, repo
         "repository_source_changed": "The repository source changed. Scan and verify the current source.",
         "publishing_adapter_required": "The custom build is verified. Connect an article publishing adapter or write a portable draft.",
     }
-    publishing_code = "github_write_required" if ready and not writable else "live_deployment_verification_required" if ready and not evidence.get("publishingVerified", True) else code
+    write_verified=access.get("verified") is True and writable is True
+    publication_ready=can_publish_article(integration_verified=ready,write_verified=write_verified,
+        deployment_verified=evidence.get("publishingVerified"))
+    publishing_code = "github_write_required" if ready and not write_verified else "live_deployment_verification_required" if ready and evidence.get("publishingVerified") is not True else code
     publishing_reason = "Verify the current website deployment before publishing." if publishing_code == "live_deployment_verification_required" else reasons.get(publishing_code, "")
     route = evidence.get("routePath") or "/articles"
     label = route.strip("/").split("/")[0].replace("-", " ").title() or "Articles"
     unit = get_content_factory_content_island_topic_cost_points(domain)
-    return {"version": 1, "canResearch": bool(domain), "canGenerateArticle": ready, "canGeneratePortableDraft": bool(domain), "canPublishArticle": bool(ready and writable and evidence.get("publishingVerified", True)), "publishingReasonCode": publishing_code, "publishingReason": publishing_reason,
+    return {"version": 1, "canResearch": bool(domain), "canGenerateArticle": ready, "canGeneratePortableDraft": bool(domain), "canPublishArticle": publication_ready, "publishingReasonCode": publishing_code, "publishingReason": publishing_reason,
             "stage": "ready" if ready else "unavailable" if code == "github_unavailable" else "github" if not account.get("saved") or code == "github_access_required" else "repository" if not repo_selected else "verifying" if code in {"verification_required", "verification_stale", "github_verification_required", "github_unavailable"} else "integration",
             "reasonCode": code, "reason": "" if ready else reasons.get(code, "Complete articles setup to start writing."),
             "githubConnected": bool(account.get("saved")), "accountStatus": "connected" if account.get("verified") or access.get("verified") else account.get("status", "not_connected"),
-            "accountAccessVerified": bool(account.get("verified") or access.get("verified")), "repositoryWriteVerified": bool(access.get("verified") and writable),
+            "accountAccessVerified": bool(account.get("verified") or access.get("verified")), "repositoryWriteVerified": write_verified,
             "repositorySelected": repo_selected, "repositoryAccessVerified": bool(access.get("verified")),
             "repositorySourceSha": access.get("sha") if access.get("verified") else None,
             "repositoryBranch": access.get("branch") if access.get("verified") else None,

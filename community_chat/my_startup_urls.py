@@ -20,6 +20,7 @@ ROUTES = (
     ("vibe-marketing/company-billing", views.CompanyBillingView),
     ("vibe-marketing/article", views.ArticleView),
     ("vibe-marketing/website-connection", views.WebsiteConnectionView),
+    ("vibe-marketing/website-connection/usage", views.WebsiteCostUsageView),
     ("vibe-marketing/website-connection/operations/<uuid:operation_id>", views.WebsiteConnectionOperationView),
     ("vibe-marketing/website-connection/<str:action>", views.WebsiteConnectionActionView),
     ("vibe-marketing/notifications/channels", views.NotificationChannelsView),

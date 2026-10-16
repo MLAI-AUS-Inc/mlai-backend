@@ -10,6 +10,7 @@ CODE_CLASSES = {
     "github_unavailable": "transient",
     "HOSTED_PREVIEW_UNAVAILABLE": "transient",
     "website_prepare_unavailable": "transient",
+    "CONNECTION_SERVICE_TRANSIENT": "transient",
     "live_route_unavailable": "waiting",
     "manual_merge_required": "needs_user",
     "code_review_ready": "needs_user",

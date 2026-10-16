@@ -100,7 +100,7 @@ class GithubReconnectScanClassificationTests(TestCase):
     @patch('integrations.services.github.time.sleep', return_value=None)
     @patch('integrations.services.github.http_requests.get')
     @patch('integrations.services.github.http_requests.post')
-    @patch('integrations.services.github.get_latest_repo_sha', return_value='sha-123')
+    @patch('integrations.services.github.get_latest_repo_sha', return_value='a' * 40)
     @patch('integrations.services.article_generation.get_github_credentials_for_domain')
     def test_scan_github_project_classifies_remote_bad_credentials_as_auth_error(
         self,
@@ -110,6 +110,17 @@ class GithubReconnectScanClassificationTests(TestCase):
         mock_get,
         mock_sleep,
     ):
+        from django.contrib.auth import get_user_model
+        from founder_tools.models import VibeRaisingCompany, VibeRaisingProfile
+        from tests.website_fixtures import bind_config_fixture
+        owner = get_user_model().objects.create_user(email='scan-owner@example.test', slack_id='U123')
+        profile = VibeRaisingProfile.objects.create(user=owner, role=VibeRaisingProfile.ROLE_FOUNDER)
+        organization = Organization.objects.create(domain='mlai.au', name='MLAI')
+        VibeRaisingCompany.objects.create(profile=profile, organization=organization, domain=organization.domain, name='MLAI')
+        config = OrganizationContentConfig.objects.create(organization=organization, github_repo='owner/repo')
+        bind_config_fixture(config)
+        config.website_connection.authorized_by = owner
+        config.website_connection.save(update_fields=['authorized_by'])
         mock_get_credentials.return_value = {
             "token": "gh-token",
             "repo": "owner/repo",
@@ -128,6 +139,7 @@ class GithubReconnectScanClassificationTests(TestCase):
 
         with self.assertRaises(GitHubAuthScanError):
             scan_github_project("U123", domain="mlai.au")
+        mock_post.assert_called_once()
 
 
 class ContentFactoryGitHubReconnectEndpointTests(TestCase):

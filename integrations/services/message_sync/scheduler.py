@@ -24,6 +24,7 @@ CHECKPOINT_KEYS = frozenset({
     "cursor", "latest", "oldest", "thread_ts", "next_latest", "scan_id",
     "upper_bound", "lower_bound", "authority_generation", "has_more", "phase",
     "observed_messages", "source_limited", "head_latest_activity",
+    "recent_messages", "requested_messages", "demand_targets", "frontier", "timeline_complete",
 })
 
 
@@ -231,6 +232,15 @@ def finish_job(lease, *, checkpoint, delay_seconds=0, complete=False):
     with transaction.atomic():
         state, job = locked_job(lease)
         now = timezone.now()
+        from . import recent_history
+        if recent_history.enabled() and "recent_messages" in checkpoint:
+            checkpoint = recent_history.merge_demand(checkpoint, job.checkpoint or {})
+            # A scroll can extend demand while an idle/last-page turn is in
+            # flight. Keep that new target runnable without losing its cursor.
+            if not checkpoint.get("timeline_complete") and recent_history.page_limit(checkpoint, 50) > 0:
+                delay_seconds = 0
+                checkpoint["phase"] = "recent_import"
+            validate_checkpoint(checkpoint)
         job.checkpoint = checkpoint
         job.due_at = now + timedelta(seconds=max(0, delay_seconds))
         job.lease_token = None

@@ -1242,6 +1242,8 @@ def status_payload(
     return {
         "connected": connection is not None,
         "inventory_enabled": inventory_enabled,
+        "recent_history_enabled": bool(getattr(settings, "MESSAGE_SYNC_ENABLED", False) and
+                                       getattr(settings, "MESSAGE_SYNC_RECENT_HISTORY_ENABLED", False)),
         "inventory_consent_required": inventory_consent_required,
         "inventory_epoch": inventory_epoch,
         "needs_reauthorization": bool(
@@ -2850,6 +2852,9 @@ def discover_conversations(
                     grant=grant,
                     slack_conversation_id=channel_id,
                 ).exists()
+                from integrations.services.message_sync.recent_history import enabled as recent_first
+                if recent_first() and not existing and (raw.get("is_open") is False or raw.get("is_member") is False):
+                    continue
                 activity = _slack_conversation_activity_seconds(raw)
                 recent = True
                 check_recency = bool(
@@ -5809,6 +5814,7 @@ def _prepare_history_scan_page(
     grant_id: int,
     authority: _SlackGrantApiAuthority,
     required_scopes: set[str] | frozenset[str],
+    *, main_first: bool = False,
 ) -> tuple[
     _SlackHistoryScanAuthority,
     str,
@@ -5873,6 +5879,7 @@ def _prepare_history_scan_page(
                     "history_scan_state": "main",
                     "import_contract_version": IMPORT_CONTRACT_VERSION,
                     "complete": False,
+                    "upper_bound": f"{int(time.time())}.999999",
                     "scan_epoch": uuid.uuid4().hex,
                     "participant_hash": _history_participant_boundary(conversation),
                     "mlai_channel_id": str(conversation.mlai_channel_id or ""),
@@ -5890,7 +5897,7 @@ def _prepare_history_scan_page(
             state,
             scan_authority,
         )
-        thread_state = _next_incomplete_thread_state(
+        thread_state = None if main_first else _next_incomplete_thread_state(
             conversation,
             scan_epoch=scan_authority.epoch,
         )
@@ -5906,6 +5913,7 @@ def _prepare_history_scan_page(
 def _enqueue_history_page(
     conversation: SlackDmMirrorConversation,
     grant: SlackDmMirrorGrant,
+    *, timeline_only: bool = False,
 ) -> int:
     authority = _capture_slack_grant_api_authority(grant)
     required_scopes = _history_required_scopes(
@@ -5922,6 +5930,7 @@ def _enqueue_history_page(
         grant.pk,
         authority,
         required_scopes,
+        **({"main_first": True} if timeline_only else {}),
     )
     if thread_state is not None:
         return _enqueue_reply_page(
@@ -5933,6 +5942,8 @@ def _enqueue_history_page(
             thread_state,
         )
     if main_complete:
+        if timeline_only:
+            return 0
         with transaction.atomic():
             locked_conversation, _ = _locked_history_write_context(
                 conversation.pk,
@@ -5946,10 +5957,19 @@ def _enqueue_history_page(
 
     from integrations.services.message_sync.history_policy import history_page_limit
 
+    from integrations.services.message_sync.recent_history import private_page_limit, private_progress
+    limit = private_page_limit(conversation, history_page_limit()) if timeline_only else history_page_limit()
+    if limit == 0:
+        return 0
     request_kwargs: dict[str, Any] = {
         "channel": slack_conversation_id,
-        "limit": history_page_limit(),
+        "limit": limit,
     }
+    marker = private_progress(conversation) if timeline_only else None
+    upper = (marker.metadata or {}).get("upper_bound") if marker else None
+    if upper:
+        request_kwargs["latest"] = upper
+        request_kwargs["inclusive"] = False
     if scan_authority.oldest:
         request_kwargs["oldest"] = scan_authority.oldest
         request_kwargs["inclusive"] = True
@@ -5962,6 +5982,8 @@ def _enqueue_history_page(
         required_scopes=required_scopes,
         **request_kwargs,
     )
+    if timeline_only and len(response.get("messages") or []) > limit:
+        raise SlackDmMirrorUpstreamError("Slack returned an oversized history page.")
     return _persist_history_page(
         conversation.pk,
         grant.pk,
@@ -6185,6 +6207,8 @@ def _persist_history_page_locked(
     elif has_more:
         raise SlackDmMirrorError("Slack history pagination made no progress.")
     state_metadata = dict(state.metadata or {})
+    from integrations.services.message_sync.recent_history import advance
+    state_metadata = advance(state_metadata, history)
     state_metadata["complete"] = not has_more
     state_metadata["source_limited"] = bool(state_metadata.get("source_limited") or response.get("is_limited"))
     state_metadata["observed_messages"] = bool(state_metadata.get("observed_messages") or history)
@@ -6921,10 +6945,11 @@ def _ensure_thread_state(
     if getattr(settings, "MESSAGE_SYNC_ENABLED", False):
         from integrations.services.message_sync.history import ensure_state
         from integrations.services.message_sync.scheduler import schedule_job
-        # This archive scan already owns a durable reply cursor. Its standalone
-        # repair job starts later, so bootstrap does not fetch every thread twice.
+        # Recent-first timeline scans do not expand legacy reply markers. The
+        # independent thread lane retains reply availability for loaded roots.
+        from integrations.services.message_sync.recent_history import enabled as recent_first
         schedule_job(ensure_state(conversation), "thread", source_object_key=parent_message_id,
-                     due_at=timezone.now() + timedelta(seconds=HISTORY_RECONCILIATION_INTERVAL_SECONDS))
+                     due_at=timezone.now() + timedelta(seconds=0 if recent_first() else HISTORY_RECONCILIATION_INTERVAL_SECONDS))
     return _ensure_history_state(
         conversation,
         source_message_id=f"{HISTORY_STATE_PREFIX}thread:{parent_message_id}",

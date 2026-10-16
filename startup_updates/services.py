@@ -3970,10 +3970,16 @@ def _default_audience_visibility_for_monthly_update(
 
     active_company = profile.active_company
     if _company_matches_organization(active_company, organization):
+        selected = (run.run_request or {}).get('audience_visibility')
+        if selected is not None:
+            return normalize_audience_visibility(selected)
         return normalize_audience_visibility(active_company.default_audience_visibility)
 
     for company in profile.companies.all():
         if _company_matches_organization(company, organization):
+            selected = (run.run_request or {}).get('audience_visibility')
+            if selected is not None:
+                return normalize_audience_visibility(selected)
             return normalize_audience_visibility(company.default_audience_visibility)
 
     return default_audience_visibility()
@@ -5932,7 +5938,7 @@ def upsert_monthly_update_draft(
     month_start = _month_start(month)
     from startup_updates.update_identity import resolve_update
     from startup_updates.revisions import RevisionConflict
-    existing_draft, _ = resolve_update(organization, month=month_start)
+    existing_draft, created_draft = resolve_update(organization, month=month_start)
     if existing_draft.current_revision_id or existing_draft.published_at:
         raise RevisionConflict("Saved monthly updates must use the revision-aware draft results endpoint.")
     # On an explicit "Run again" regenerate we replace the previous run's draft
@@ -5960,7 +5966,7 @@ def upsert_monthly_update_draft(
 
     if audience_visibility is not None:
         visibility = normalize_audience_visibility(audience_visibility)
-    elif existing_draft is not None:
+    elif not created_draft:
         visibility = monthly_update_visibility(existing_draft)
     else:
         visibility = _default_audience_visibility_for_monthly_update(

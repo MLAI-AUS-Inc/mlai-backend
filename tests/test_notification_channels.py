@@ -870,15 +870,16 @@ class NotificationChannelEndpointTests(TestCase):
         self.profile = VibeRaisingProfile.objects.create(
             user=self.user, role=VibeRaisingProfile.ROLE_FOUNDER
         )
+        self.org = Organization.objects.create(name="Acme", domain="acme.com")
         self.company = VibeRaisingCompany.objects.create(
             profile=self.profile,
+            organization=self.org,
             name="Acme",
             domain="acme.com",
             registered=True,
         )
         self.profile.active_company = self.company
         self.profile.save(update_fields=["active_company", "updated_at"])
-        self.org = Organization.objects.create(name="Acme", domain="acme.com")
         self.client.force_authenticate(user=self.user)
 
     def test_list_channels_empty(self):

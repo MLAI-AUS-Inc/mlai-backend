@@ -42,7 +42,7 @@ class NativeInstallationsView(NativeOwnerView):
                 "limits": {"personal_limit": max(0, getattr(settings, "AGENT_RUNTIME_NATIVE_PERSONAL_LIMIT", 1)),
                            "personal_used": 0}})
         rows = AgentInstallation.objects.filter(owner=request.user, community_id=community,
-            app_id="openai-dot").select_related("owner_device").order_by("-created_at")
+            app_id__in=("openai-dot", "mlai-community")).select_related("owner_device").order_by("-created_at")
         # Revoked public identities remain owner-visible tombstones so search
         # results cannot mistake them for ordinary users when directory data is absent.
         return Response({"community_id": community,
@@ -108,6 +108,9 @@ class NativeRegistryView(APIView):
         # All native keys remain agent keys forever, including expired reservations.
         registered = AgentInstallation.objects.filter(public_key=public_key, community_id__isnull=False).exists()
         response = Response({"public_key": public_key, "relay_url": relay, "registered": registered})
+        community_installation = AgentInstallation.objects.filter(public_key=public_key, app_id="mlai-community", community_id__isnull=False).first() if registered else None
+        if getattr(community_installation, "app_id", None) == "mlai-community":
+            response.data["app_id"] = "mlai-community"
         response["Cache-Control"] = "no-store"
         return response
 

@@ -422,6 +422,36 @@ services:
     restart: unless-stopped
     stop_grace_period: 30s
 
+  community-agent-worker:
+    profiles: [community-agent]
+    image: mlai-backend-web
+    logging: *default-logging
+    command: >-
+      sh -ec '
+        until python manage.py migrate --check --noinput; do
+          echo "Waiting for migrations to complete...";
+          sleep 5;
+        done;
+        exec python manage.py run_community_agent --health-file /tmp/community-agent-heartbeat
+      '
+    environment:
+      APP_ENV: ${APP_ENV:-production}
+    env_file:
+      - .env
+    depends_on:
+      - db
+    networks:
+      default:
+      mlai-shared:
+    healthcheck:
+      test: ["CMD", "python", "-c", "import os,time; p='/tmp/community-agent-heartbeat'; raise SystemExit(0 if os.path.isfile(p) and time.time() - os.path.getmtime(p) <= 300 else 1)"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 90s
+    restart: unless-stopped
+    stop_grace_period: 30s
+
   db:
     image: pgvector/pgvector:0.8.2-pg15-bookworm
     logging: *default-logging

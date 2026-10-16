@@ -8,6 +8,7 @@ from django.utils import timezone
 from .history import next_checkpoint, page_messages, timestamp
 from .coverage import record_page
 from .history_policy import history_page_limit
+from . import recent_history
 from .head_repair import finish_head, head_scope, observe_head, prepare_head
 from .scheduler import LeaseLost, finish_job, locked_job, schedule_job
 
@@ -31,12 +32,18 @@ def private_page(lease, state):
     grant = conversation.grant
     if lease.kind == "archive":
         if conversation.history_backfilled_at is None:
-            dm._enqueue_history_page(conversation, grant)
+            if recent_history.enabled():
+                if recent_history.private_page_limit(conversation, history_page_limit()) > 0:
+                    dm._enqueue_history_page(conversation, grant, timeline_only=True)
+            else:
+                dm._enqueue_history_page(conversation, grant)
         conversation.refresh_from_db()
-        finish_job(lease, checkpoint={}, complete=conversation.history_backfilled_at is not None,
-                   delay_seconds=3600 if conversation.history_backfilled_at is not None else 0)
+        paused = recent_history.enabled() and recent_history.private_page_limit(conversation, history_page_limit()) == 0
+        finish_job(lease, checkpoint={"phase": "recent_paused"} if paused else {},
+                   complete=conversation.history_backfilled_at is not None,
+                   delay_seconds=recent_history.IDLE_SECONDS if paused else 3600 if conversation.history_backfilled_at is not None else 0)
         return
-    if lease.kind == "thread" and conversation.history_backfilled_at is None:
+    if lease.kind == "thread" and conversation.history_backfilled_at is None and not recent_history.enabled():
         main = dm._history_state(conversation, dm.HISTORY_MAIN_STATE_ID)
         pending = dm._history_state(conversation, f"{dm.HISTORY_STATE_PREFIX}thread:{lease.source_object_key}")
         if (main is not None and pending is not None
@@ -55,6 +62,11 @@ def private_page(lease, state):
     history_days = dm._grant_history_days(grant)
     scan_floor = max(0, upper_seconds - history_days * 86400) if history_days else 0
     if lease.kind == "head":
+        imported = recent_history.imported_floor(state, scan_floor)
+        if imported is None:
+            finish_job(lease, checkpoint=lease.checkpoint, delay_seconds=60)
+            return
+        scan_floor = imported
         checkpoint = prepare_head(state, checkpoint, now=time.time(), consent_floor=scan_floor,
                                   scope=head_scope(state, conversation=conversation, history_days=history_days))
     # A consent/audience change can discard the old head pagination entirely.

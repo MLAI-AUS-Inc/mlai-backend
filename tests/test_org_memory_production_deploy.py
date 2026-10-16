@@ -2,6 +2,7 @@ import contextlib
 import importlib.util
 import io
 import json
+import os
 import subprocess
 import tempfile
 from pathlib import Path
@@ -262,12 +263,49 @@ class OrgMemoryProductionDeployTests(SimpleTestCase):
             deploy,
         )
 
-        # Any other staging failure still aborts the deploy through the ERR
-        # trap so web is restored.
+        # Other staging failures leave this optional subsystem disabled while
+        # the application deployment can complete.
         self.assertIn(
-            "Admin Brain production staging failed; aborting the deploy.",
+            "Admin Brain production staging failed; continuing the app deploy with retrieval disabled.",
             deploy,
         )
+        self.assertNotIn("Admin Brain production staging failed; aborting the deploy.", deploy)
+
+    def test_real_staging_failure_branches_disable_retrieval_and_continue_without_activation(self):
+        deploy = (ROOT / "deploy.sh").read_text()
+        start = deploy.index('        echo "🔐 Applying the reviewed Admin Brain production binding..."')
+        end = deploy.index("        unset stage_operator activation_operator", start)
+        block = deploy[start:end].replace("\\$", "$")
+        harness = r'''
+set -eu
+approval_manifest_container=/run/fixture.json
+stage_operator=stage@example.test
+activation_operator=activate@example.test
+stage_idempotency_key=fixture-stage
+activation_idempotency_key=fixture-activate
+compose_run_web_with_approval() {
+    case " $* " in
+        *" stage_org_memory_pilot "*) printf '%s\n' "$STAGE_STDOUT"; return 17 ;;
+        *) printf 'unexpected_activation\n' >> "$TRACE_PATH" ;;
+    esac
+}
+compose_run_web() { printf 'unexpected_verification\n' >> "$TRACE_PATH"; }
+upsert_env_value() { printf '%s=%s\n' "$1" "$2" >> "$TRACE_PATH"; }
+'''
+        failures = (_blocked_staging_stdout(["retrievable_evidence_missing"]),
+            _blocked_staging_stdout(["runtime_queues_degraded"]),
+            _blocked_staging_stdout(["provider_governance_invalid"]), "not-json", "")
+        with tempfile.TemporaryDirectory() as directory:
+            trace = Path(directory) / "trace"
+            for stdout in failures:
+                trace.unlink(missing_ok=True)
+                result = subprocess.run(["bash", "-c", harness + block + "\nprintf 'application_continued\\n'\n"],
+                    cwd=ROOT, text=True, capture_output=True, check=False,
+                    env={"PATH": os.defpath, "STAGE_STDOUT": stdout, "TRACE_PATH": str(trace)})
+                with self.subTest(stdout=stdout):
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    self.assertIn("application_continued", result.stdout)
+                    self.assertEqual(trace.read_text(), "ORG_MEMORY_QUERY_API_ENABLED=false\n")
 
     def test_main_deploy_requires_approval_key_and_independent_operators(self):
         workflow = (ROOT / ".github" / "workflows" / "deploy.yml").read_text()

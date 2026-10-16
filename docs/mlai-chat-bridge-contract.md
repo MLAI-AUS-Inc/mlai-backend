@@ -114,6 +114,64 @@ metadata is the Slack message text needed for deferred user/channel resolution;
 it is never sent to a destination without sanitization. Delete events
 deliberately retain no message content.
 
+## Recent-first Slack timeline imports
+
+`MESSAGE_SYNC_RECENT_HISTORY_ENABLED=false` is the compatibility default. With
+this switch and `MESSAGE_SYNC_ENABLED=true`, background discovery provisions
+eligible owner conversations through the existing Slack membership, device,
+consent, OAuth and history-window checks. Each conversation's archive lane first
+imports up to 50 admitted timeline messages, newest first, then saves its cursor
+and becomes idle. Existing public bridge mappings use the same 50-message first
+pass, within their existing 30-day source window. Restricted Slack apps still
+fetch at most 15 per provider call (15 + 15 + 15 + 5); verified internal and
+Marketplace distributions can fetch the 50 in one call. Shared quotas, fairness,
+leases and Retry-After remain in force. Closed/nonmember source-only private
+conversations are not pre-provisioned. Existing imported content is preserved.
+
+A shallow preload is availability, never full-archive coverage. Private rooms
+become readable through their existing acknowledged-delivery or verified
+provisional-room paths. A paused archive no longer keeps the initial-import
+status spinning once its deliveries finish. Head repair covers the imported
+range and subsequent arrivals; it cannot quietly start an unseen deep archive.
+Known thread roots retain their independent reply-repair lane. The count limits
+the conversation timeline, not the sum of all replies in those threads.
+
+Status responses advertise `recent_history_enabled`. Compatible desktop, browser
+and mobile clients request older history only after scrolling past the imported
+relay window, using the existing authenticated control endpoint:
+
+```json
+{"action":"page_history","channel_id":"<MLAI room UUID>","request_key":"<64-hex boundary event ID>"}
+```
+
+`PATCH /api/v1/community-chat/slack/` returns content-free `has_more`, `pending`
+and `retry_after_seconds` fields. The opaque request key only coalesces demand;
+it cannot choose a Slack cursor, widen consent or authorize content. Repeated
+polls and concurrent devices share a batch. A different boundary can request
+another 50 after the current target is reached. The client waits for delivery,
+revalidates its terminal relay page and extends the existing cursor chain while
+preserving visible messages. Errors, navigation, backgrounding and account or
+inventory changes cannot certify source exhaustion or project a stale response.
+`has_more=false` describes the exhausted accessible scan, including Slack source
+limits; it is not proof of complete Slack retention or message deletion.
+
+Private demand requires current owner consent, grant authority, a verified
+account device and exact room membership. Shared public bridge demand requires an
+active community account and verified device; it only schedules an existing,
+enabled admin-approved bridge. It returns no names or bodies and grants no relay
+read access. This lets community members read shared public scrollback without
+linking personal Slack. A mapping change or paused/revoked sync state rejects the
+old request. Polling uses the existing device/account snapshot throttle rather
+than consuming read-receipt or connection-management budgets.
+
+Release the compatible web, desktop and mobile clients before enabling the
+switch, and retain the switch off until the supported-client rollout permits
+older-history requests. The switch is wired through workflow, deployment,
+remote environment validation and application settings. No production switch is
+changed by this implementation. Disabling it resumes existing full-archive
+behavior from saved cursors; seed turns wake paused archives without overriding
+provider backoff or live leases. No schema migration is required.
+
 ## Delivery guarantees
 
 Slack progress and read snapshots use a separate polling budget: 120 requests

@@ -48,6 +48,7 @@ class BootstrapSetupMergeFactTests(SimpleTestCase):
             "_article_capabilities_for_context": capabilities, "_guided_steps": ([], None),
             "_recommended_next_action": {}, "_latest_runs_for_org": [],
             "_workflow_progress": {},
+            "_bootstrap_cache_seconds": 0,
         }
         with ExitStack() as stack:
             for name, value in stubs.items():
@@ -62,6 +63,7 @@ class BootstrapSetupMergeFactTests(SimpleTestCase):
                 for alias in ("articleSetupState", "article_setup_state"):
                     self.assertIs(result[alias]["setupMerged"], True)
                     self.assertEqual(result[alias]["setupRunId"], "merged-setup")
+                    self.assertEqual(result[alias]["websiteConnection"], result["websiteConnection"])
                     for flag in ("generationReady", "generation_ready", "scaffoldConnected", "published"):
                         self.assertIs(result[alias][flag], False)
                 self.assertIs(result["articleCapabilities"]["canGenerateArticle"], False)

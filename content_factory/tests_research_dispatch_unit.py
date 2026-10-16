@@ -50,6 +50,7 @@ class ResearchDispatchTests(SimpleTestCase):
             self.assertEqual(saved["mcp_request_hash"], "a" * 64)
             self.assertEqual(saved["custom_topic_title"], "Original topic")
             self.assertEqual(saved["roo_points_ledger_id"], "123")
+            self.assertEqual(saved["roo_points_required"], 3)
             if reserve_failure:
                 raise RuntimeError("Synthetic receipt failure")
         with patch.object(views, "_quoted_price_response", return_value=None), \

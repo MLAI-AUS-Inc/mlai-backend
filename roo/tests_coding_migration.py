@@ -54,7 +54,10 @@ class MicrorooMigrationPreservationTests(TransactionTestCase):
 
     def tearDown(self):
         # Always restore the latest schema for tests that follow this class.
-        MigrationExecutor(connection).migrate([self.migrate_to])
+        # migrate_to is the historical checkpoint under test, not today's leaf.
+        # Leaving the DB there removes fields used by subsequent transactions.
+        executor = MigrationExecutor(connection)
+        executor.migrate(executor.loader.graph.leaf_nodes())
         super().tearDown()
 
     def test_balances_ledger_and_pricing_are_preserved(self):

@@ -6,10 +6,47 @@ from unittest.mock import Mock, patch
 
 from django.test import SimpleTestCase, override_settings
 
-from roo.services import CoworkingService, StartupUpdateRewardService
+from roo.services import CoworkingService, StartupUpdateRewardService, BoostPostAdmissionService, PointsService
 
 
 NOW = datetime(2026, 9, 27, 2, 0, tzinfo=timezone.utc)
+
+
+class BoostBenefitCalendarTests(SimpleTestCase):
+    @override_settings(TIME_ZONE="UTC")
+    def test_admission_uses_melbourne_business_date_when_utc_is_yesterday(self):
+        from django.utils import timezone as django_timezone
+        from roo.models import BoostPostAdmission, PointsAccount
+        from core.models import User
+        clocks = [(datetime(2026, 10, 15, 15, 30, tzinfo=timezone.utc), date(2026, 10, 16)),
+            (datetime(2026, 4, 4, 15, 30, tzinfo=timezone.utc), date(2026, 4, 5)),
+            (datetime(2026, 9, 26, 16, 30, tzinfo=timezone.utc), date(2026, 9, 27))]
+        for clock, business_date in clocks:
+            with self.subTest(clock=clock):
+                user = SimpleNamespace(pk=23)
+                admission = SimpleNamespace(status="processing",workspace_id="TTEST",channel_id="CTEST",
+                    root_message_ts="1796170000.000100",poster_slack_id="UFOUNDER",save=Mock())
+                account = SimpleNamespace(balance=20,refresh_from_db=Mock())
+                with (
+                    django_timezone.override("America/Los_Angeles"),
+                    patch("roo.services.timezone.now",return_value=clock),
+                    patch.object(PointsService,"get_user_by_slack_id",return_value=user),
+                    patch.object(User.objects,"select_for_update") as users,
+                    patch.object(BoostPostAdmission.objects,"select_for_update") as admissions,
+                    patch.object(PointsAccount.objects,"select_for_update") as accounts,
+                    patch.object(CoworkingService,"_has_ready_monthly_update",side_effect=lambda member,day: day==business_date) as eligibility,
+                    patch.object(PointsService,"spend",return_value=(SimpleNamespace(pk=44),True)) as spend,
+                ):
+                    users.return_value.get.return_value=user
+                    admissions.return_value.get_or_create.return_value=(admission,True)
+                    accounts.return_value.filter.return_value.first.return_value=account
+                    result,_=BoostPostAdmissionService.admit.__wrapped__(BoostPostAdmissionService,
+                        submission_key="boost-post:TTEST:CTEST:1796170000.000100",workspace_id="TTEST",channel_id="CTEST",
+                        root_message_ts="1796170000.000100",poster_slack_id="UFOUNDER",root_text="Synthetic post",social_post_url="")
+                eligibility.assert_called_once_with(user,business_date)
+                self.assertEqual(result.charged_points,4)
+                self.assertTrue(result.discount_applied)
+                self.assertEqual(spend.call_args.kwargs["delta"],4)
 
 
 def verified_company(**overrides):

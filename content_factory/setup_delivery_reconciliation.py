@@ -16,7 +16,8 @@ from django.utils.dateparse import parse_datetime
 from workflow_runs.models import ContentFactoryRun
 from .setup_delivery_contract import MAX_BYTES, DeliveryContractError
 from .setup_delivery_receiver import (_locked_context, _metadata, _save_metadata,
-    receive_setup_delivery, DeliveryScopeError, pull_pin_matches, _original_scope_matches)
+    receive_setup_delivery, DeliveryScopeError, pull_pin_matches, _original_scope_matches,apply_enabled)
+from .setup_delivery_enrollment import article_stream,delivery_workflow
 from .website_contract import WebsiteAuthorityError
 
 logger = logging.getLogger(__name__)
@@ -26,6 +27,7 @@ WAITING_STATUSES = {"awaiting_approval", "awaiting_confirmation", "awaiting_deli
 def enrolled_run(run):
     """Enrollment comes from the saved backend dispatch, never a GET response."""
     return ((run.run_request or {}).get("setup_delivery_v1") == {"schema_version": 1}
+            or article_stream(run.run_request or {})
             or _metadata(run).get("enrolled") is True)
 
 
@@ -33,7 +35,7 @@ def _claim_pull(candidate, now):
     original = candidate.run_request or {}
     from .setup_delivery_enrollment import SCOPE_FIELDS
     scope = {key: original[key] for key in SCOPE_FIELDS if key in original}
-    envelope = {"scope": scope, "run_id": candidate.run_id, "workflow": candidate.workflow}
+    envelope = {"scope": scope, "run_id": candidate.run_id, "workflow": delivery_workflow(candidate)}
     with transaction.atomic():
         _, _, run = _locked_context(envelope)
         if run is None or not enrolled_run(run) or run.status in {"cancelled", "denied"}:
@@ -62,7 +64,7 @@ def _release_pull(run_id, pin, *, outcome, now):
     from .setup_delivery_enrollment import SCOPE_FIELDS
     original = candidate.run_request or {}
     envelope = {"scope": {key: original[key] for key in SCOPE_FIELDS if key in original},
-                "run_id": run_id, "workflow": candidate.workflow}
+                "run_id": run_id, "workflow": delivery_workflow(candidate)}
     try:
         with transaction.atomic():
             _, _, run = _locked_context(envelope)
@@ -116,7 +118,7 @@ def reconcile_setup_delivery_run(candidate, *, base_url, headers, now=None):
         envelope, _ = _read_bounded_snapshot(base_url, headers, candidate.run_id)
         if envelope is None:
             return outcome
-        if not getattr(settings, "CONTENT_FACTORY_SETUP_DELIVERY_V1_APPLY_ENABLED", False):
+        if not apply_enabled(envelope):
             from .setup_delivery_contract import validate_envelope
             validated = validate_envelope(envelope, expected_kind="run_snapshot", path_run_id=candidate.run_id)
             with transaction.atomic():
@@ -163,8 +165,8 @@ def run_setup_delivery_reconciliation_sweep(*, limit=10, now=None):
     now = now or timezone.now()
     limit = min(limit if type(limit) is int and limit > 0 else 10, 10)
     candidates = list(ContentFactoryRun.objects.filter(
-        workflow__in=["repo_scan", "article_system_setup"],
-        run_request__setup_delivery_v1__schema_version=1,
+        Q(workflow__in=["repo_scan", "article_system_setup"],run_request__setup_delivery_v1__schema_version=1)
+        | Q(workflow__in=["article_generation","direct_generate","confirmed_topic","article_publish","publish_article"],run_request__article_delivery_v1__schema_version=1),
         updated_at__lt=now - timedelta(minutes=10),
     ).exclude(status__in=["cancelled", "denied"])
         .filter(Q(reconciled_at__isnull=True) | Q(reconciled_at__lt=now - timedelta(minutes=2)))

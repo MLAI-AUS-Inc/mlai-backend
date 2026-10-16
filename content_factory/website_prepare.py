@@ -33,6 +33,11 @@ DEPLOYMENT_WAIT_CODES = frozenset({"deployment_source_unverified", "deployment_m
     "live_route_unavailable", "ci_attestation_required", "ci_evidence_unavailable", "verified_target_required",
     "deployment_verification_required", "native_ci_attestation_missing", "ci_proof_unavailable"})
 SETUP_EXAMPLE_CLEANUP_CODE = "SETUP_EXAMPLE_CLEANUP_REQUIRED"
+# Content Factory reported an authorization check it could not complete (a
+# timeout while this backend restarted, for example) as this code until it
+# split out CONNECTION_SERVICE_TRANSIENT. Such a run is resumed this many times.
+UNVERIFIED_AUTHORIZATION_CODE = "CONNECTION_AUTHORIZATION_FAILED"
+UNVERIFIED_AUTHORIZATION_RESUMES = 3
 
 
 def _setup_example_cleanup_action(raw, connection):
@@ -104,20 +109,73 @@ def _cleanup_retry_journey(op, context, config, journey):
     return journey
 
 
+SETUP_PR_RESULT_KEYS = ("pr_url", "pull_request_url", "draft_pr_url", "pr_number", "pull_request_number", "draft_pr_number")
+
+
+def _superseded_setup_binding(op, child):
+    """The replaced setup's own original identity, or None when its branch must stay.
+
+    Only a blocked or failed setup of this connection generation that never
+    recorded a pull request qualifies. Content Factory repeats these checks
+    against its own ledger and GitHub before it removes anything.
+    """
+    from .website_operations import OPERATION_FIELDS, deletion_epoch
+    connection = op.connection
+    if child.workflow != "article_system_setup" or child.status not in {"blocked", "failed"}:
+        return None
+    if str(child.github_repo or "").casefold() != connection.github_repo.casefold():
+        return None
+    result = child.result if isinstance(child.result, dict) else {}
+    nested = result.get("article_system_setup") if isinstance(result.get("article_system_setup"), dict) else {}
+    if any(payload.get(key) for payload in (result, nested) for key in SETUP_PR_RESULT_KEYS):
+        return None
+    saved = child.run_request if isinstance(child.run_request, dict) else {}
+    try:
+        original, expected = connection_contract(saved), connection_contract(contract_for(connection))
+    except WebsiteAuthorityError:
+        return None
+    if (any(original.get(key) != expected.get(key) for key in ("website_connection_id", "connection_generation", "repository_id"))
+            or any(saved.get(key) in (None, "") for key in OPERATION_FIELDS)
+            or str(saved["deletion_epoch"]) != str(deletion_epoch(connection))):
+        return None
+    return {**original, **{key: saved[key] for key in OPERATION_FIELDS}, "run_id": child.run_id,
+        "domain": connection.organization.domain, "github_repo": connection.github_repo}
+
+
+def _queue_superseded_setup_cleanup(op, child):
+    """Record the replaced setup's branch cleanup; the reconciler contacts the worker."""
+    binding = _superseded_setup_binding(op, child)
+    if binding is None:
+        return None
+    connection = op.connection
+    followup, _ = WebsiteConnectionOperation.objects.get_or_create(
+        idempotency_key=f"{connection.pk}:superseded-setup:{child.run_id}", defaults={
+            "connection": connection, "generation": connection.generation, "action": "superseded-setup-cleanup",
+            "payload": {"run_id": child.run_id, "binding": binding, "prepare_operation_id": str(op.pk),
+                "superseded_attempt": op.payload.get("attempt", 1)},
+            "receipt": {"status": "queued", "run_id": child.run_id, "repository_modified": None}})
+    return followup
+
+
 def _cancel_prepare_child(op, config):
-    """Fence a stalled child through the ordinary durable cancellation control."""
+    """Fence a stalled child through the ordinary durable cancellation control.
+
+    A blocked or failed setup child has already stopped. The new attempt
+    replaces it, so its own review branch is queued for cleanup instead.
+    """
     from workflow_runs.models import ContentFactoryRun
     from .website_operations import cancel_operation, deletion_epoch
-    child_id = op.receipt.get("child_run_id") or op.payload.get("run_id")
-    if not child_id:
-        return
-    child = ContentFactoryRun.objects.filter(run_id=child_id, organization_id=op.connection.organization_id).first()
-    if child is None or child.status in {"completed", "failed", "blocked", "cancelled", "denied"}:
-        return
-    saved = child.run_request if isinstance(child.run_request, dict) else {}
-    cancel_operation(config, data={**contract_for(op.connection), "operation_id": saved.get("operation_id"),
-        "operation_attempt": saved.get("operation_attempt", 1), "deletion_epoch": deletion_epoch(op.connection)},
-        idempotency_key=f"prepare-retry:{op.pk}:{op.payload.get('attempt', 1)}")
+    identifiers = list(dict.fromkeys(identifier for identifier in (op.receipt.get("hosted_verification_run_id"), op.receipt.get("child_run_id") or op.payload.get("run_id")) if identifier))
+    for child_id in identifiers:
+        child = ContentFactoryRun.objects.filter(run_id=child_id, organization_id=op.connection.organization_id).first()
+        if child is not None and child.status in {"failed", "blocked"}:
+            _queue_superseded_setup_cleanup(op, child)
+        if child is None or child.status in {"completed", "failed", "blocked", "cancelled", "denied"}:
+            continue
+        saved = child.run_request if isinstance(child.run_request, dict) else {}
+        cancel_operation(config, data={**contract_for(op.connection), "operation_id": saved.get("operation_id"),
+            "operation_attempt": saved.get("operation_attempt", 1), "deletion_epoch": deletion_epoch(op.connection)},
+            idempotency_key=f"prepare-retry:{op.pk}:{op.payload.get('attempt', 1)}:{child_id}")
 
 
 def _checking_owner_wait(op):
@@ -134,7 +192,7 @@ def _checking_owner_wait(op):
     return action_id is None and op.receipt.get("current_step") in {"merge", "permissions", "verify", "ci-attestation"}
 
 
-def start_prepare(config, *, expected=None, company_id=None, user=None, retry=False, target="ready", force_successor=False):
+def start_prepare(config, *, expected=None, company_id=None, user=None, retry=False, target="ready", force_successor=False, consent=None):
     """Reuse one prepare receipt for the current consent generation."""
     connection = config.website_connection
     if connection is None:
@@ -144,12 +202,15 @@ def start_prepare(config, *, expected=None, company_id=None, user=None, retry=Fa
         binding.update(domain=connection.organization.domain, github_repo=connection.github_repo)
     with authority_guard(binding, action="read") as current:
         from .website_goal import enrolled
-        if target != "ready":
+        from django.conf import settings
+        if target != "ready" and not (target == "first_article_live" and enrolled(current.organization_id)
+            and getattr(settings, "ARTICLES_FIRST_ARTICLE_GOAL_ENABLED", False)
+            and getattr(settings, "ARTICLES_SETUP_CONSENT_ENABLED", False)):
             raise WebsiteAuthorityError("website_prepare_blocked", "Only the ready goal is available until first-article publication is enabled.", status=422)
         if enrolled(current.organization_id):
             from .website_goal_runner import start_goal
             return start_goal(current, company_id=company_id, user=user, retry=retry, target=target,
-                now=timezone.now(), force_successor=force_successor)
+                now=timezone.now(), force_successor=force_successor, consent=consent)
         if hasattr(current, "operations"):
             from .website_goal_runner import owns_goal
             reserved = WebsiteConnectionOperation.objects.filter(connection_id=current.pk, generation=current.generation, action="prepare",
@@ -197,7 +258,7 @@ def start_prepare(config, *, expected=None, company_id=None, user=None, retry=Fa
 def _claim_prepare(identifier, now):
     with transaction.atomic():
         op = WebsiteConnectionOperation.objects.select_for_update().select_related("connection__organization").filter(
-            Q(state__in=["pending", "running"]) | Q(state="needs_user", receipt__user_action__id="deploy_site"),
+            Q(state__in=["pending", "running"]) | Q(state="needs_user", receipt__user_action__id__in=["deploy_site","merge_pr","review_draft"]),
             pk=getattr(identifier, "pk", identifier), action="prepare").first()
         if op is None or op.next_attempt_at and op.next_attempt_at > now:
             return None
@@ -234,6 +295,33 @@ def _prepare_context(op):
 
 
 def _persist_prepare(op, *, now):
+    from .website_notification_outbox import enabled,track_transition,reserve_notice
+    from .website_goal_runner import owns_goal
+    from .website_first_article_billing import REFUND_TERMINAL
+    from .website_first_article_refunds import reserve_refund
+    from .website_cost_recovery import pending_for, lock_connection, reserve as reserve_usage_refresh
+    from .website_operational_alerts import budget_alert, stall_alert
+    from .website_operational_alert_delivery import reserve as reserve_operational_alert
+    notify = enabled(op.connection) and owns_goal(op)
+    refund = op.state in REFUND_TERMINAL and bool(op.receipt.get("first_article_billing"))
+    accounting = bool(pending_for(op))
+    incidents = [item for item in (budget_alert(op, now=now), stall_alert(op, now=now)) if item is not None]
+    if notify or refund or accounting or incidents:
+        with transaction.atomic():
+            if (accounting or incidents) and not lock_connection(op):
+                return None
+            notice=track_transition(op,now=now) if notify else None
+            saved=_persist_prepare_state(op,now=now)
+            if saved is not None:
+                if refund:reserve_refund(op,now=now)
+                if notify:reserve_notice(op,notice,now=now)
+                if accounting:reserve_usage_refresh(op,now=now)
+                for incident in incidents:reserve_operational_alert(op,incident,now=now)
+            return saved
+    return _persist_prepare_state(op,now=now)
+
+
+def _persist_prepare_state(op, *, now):
     # Compare the lease and generation after remote work. A disconnect always wins.
     query = WebsiteConnectionOperation.objects.filter(pk=op.pk, action="prepare", state="running", attempts=op.attempts,
         updated_at=op._claimed_at, connection__generation=op.generation, connection__state="connected")
@@ -251,7 +339,7 @@ def _persist_prepare(op, *, now):
 def _finish_prepare(op, *, now):
     from .website_goal_runner import owns_goal, finish_goal
     if owns_goal(op):
-        finish_goal(op)
+        finish_goal(op, now=now)
     logger.info("website_prepare operation=%s company=%s connection=%s generation=%s step=%s state=%s reason=%s attempt=%s next_attempt=%s dispatch_outcome=%s",
         op.pk, op.payload.get("company_id"), op.connection_id, op.generation, op.receipt.get("current_step"),
         op.state, op.receipt.get("reason_code", ""), op.attempts, op.next_attempt_at, op.receipt.get("dispatch_outcome", ""))
@@ -315,6 +403,9 @@ def prepare_failure(op, step, error, *, now=None):
         if not occurrence:
             occurrence = str(uuid5(NAMESPACE_URL, f"mlai:prepare-failure:v1:{op.pk}:{op.generation}:{op.payload.get('attempt', 1)}:{op.attempts}:{step}"))
         op.receipt["failure_occurrence_id"] = occurrence
+        from . import website_strategy as goal_strategy
+        if "goal" in op.receipt and goal_strategy.enabled() and isinstance(source, dict) and "strategy_exhausted" in source:
+            op.receipt["strategy_observation_invalid"] = not goal_strategy.valid_exhaustion(op.receipt["goal"], source["strategy_exhausted"])
     if observation_enabled:
         op.receipt["failure_taxonomy_observation"] = {"failure": decision["failure"], "classification": decision["failure"]["failure_class"] if decision["failure"] else None,
             "policy_classification": classification, "contract_invalid": decision["contract_invalid"]}
@@ -336,6 +427,9 @@ def prepare_failure(op, step, error, *, now=None):
         op.receipt["waiting_observations"] = count
         started = op.receipt.setdefault("waiting_started_at", now.isoformat())
         deadline = datetime.fromisoformat(started) + timedelta(hours=24)
+        if now >= deadline:
+            from .website_operational_alerts import record_policy_stall
+            record_policy_stall(op, step=step, reason="waiting_policy_deadline", started_at=started, deadline=deadline, now=now)
         op.state = "pending" if now < deadline else "needs_attention"
         op.receipt["status"] = "waiting_for_step" if op.state == "pending" else "needs_attention"
         op.next_attempt_at = min(deadline, now + timedelta(minutes=DEPLOYMENT_RETRY_MINUTES[min(count - 1, len(DEPLOYMENT_RETRY_MINUTES) - 1)])) if op.state == "pending" else None
@@ -346,6 +440,16 @@ def prepare_failure(op, step, error, *, now=None):
         started = op.receipt.setdefault("deployment_wait_started_at", now.isoformat())
         from datetime import datetime
         deadline = datetime.fromisoformat(started) + timedelta(hours=24)
+        from .website_deployment import enabled as deploy_detection_enabled, valid as valid_deployment_hint, manual_action
+        from .website_goal import mapping
+        source = mapping(op.receipt.get("goal")).get("current_source_sha") or getattr(op.connection,"verified_sha",None)
+        deployment_hint = mapping(getattr(op.connection,"capabilities",None)).get("deploymentFingerprint")
+        manual_deploy = deploy_detection_enabled() and valid_deployment_hint(deployment_hint,op.connection,source) and deployment_hint["automation"] == "manual"
+        if manual_deploy:
+            deadline = now
+        elif now >= deadline:
+            from .website_operational_alerts import record_policy_stall
+            record_policy_stall(op, step=step, reason="deployment_policy_deadline", started_at=started, deadline=deadline, now=now)
         op.receipt["failure_class"] = "waiting"
         op.state = "pending" if now < deadline else "needs_user"
         op.receipt["status"] = "waiting_for_deployment" if op.state == "pending" else "needs_you"
@@ -354,6 +458,9 @@ def prepare_failure(op, step, error, *, now=None):
             provider = (getattr(op.connection, "capabilities", {}) or {}).get("hosting_provider") or "your hosting provider"
             op.receipt.update(message=f"Deploy your site with {provider}, then check again.",
                 user_action={"id": "deploy_site", "label": "Deploy your site", "hosting_provider": provider})
+            if deploy_detection_enabled():
+                action = manual_action(op.connection,source)
+                op.receipt.update(user_action=action,message=action["instructions"] + " We’ll check the live site and continue when it is deployed.")
             # Keep a quiet observer after the owner prompt, so a manual deploy
             # resumes without requiring another button click.
             op.next_attempt_at = now + timedelta(hours=2)
@@ -361,6 +468,9 @@ def prepare_failure(op, step, error, *, now=None):
         from datetime import datetime
         started = op.receipt.setdefault("transient_started_at", now.isoformat())
         deadline = datetime.fromisoformat(started) + timedelta(hours=24)
+        if now >= deadline:
+            from .website_operational_alerts import record_policy_stall
+            record_policy_stall(op, step=step, reason="transient_policy_deadline", started_at=started, deadline=deadline, now=now)
         op.state = "pending" if now < deadline else "needs_attention"
         op.next_attempt_at = min(deadline, now + timedelta(minutes=RETRY_MINUTES[min(failures[step] - 1, len(RETRY_MINUTES) - 1)])) if op.state == "pending" else None
         op.receipt["status"] = "working" if op.state == "pending" else "needs_attention"
@@ -397,11 +507,30 @@ def _canonical_article_route(route):
     return re.sub(r"/+", "/", route).rstrip("/") or "/"
 
 
-def _setup_surface(config, journey):
+def _setup_surface(config, journey, *, goal=None):
     """Respect a saved owner choice, then use the current scan's listing route."""
+    from django.conf import settings
+    from .website_goal import mapping
+    answers = mapping(mapping(mapping(goal).get("consent")).get("answers"))
+    if getattr(settings, "ARTICLES_AUTO_PAGE_ENABLED", False) and goal is not None and answers.get("page_policy") == "explicit":
+        return "existing" if answers.get("page_mode") == "existing" else "none", _canonical_article_route(answers["page_route"])
     pending = (config.article_system or {}).get("pending_article_system_setup") or {}
     if pending.get("mode") in {"existing", "none"} and pending.get("route_path"):
         return pending["mode"], _canonical_article_route(pending["route_path"])
+    from django.conf import settings
+    if getattr(settings, "ARTICLES_AUTO_PAGE_ENABLED", False) and goal is not None:
+        from .website_article_page import choose_page
+        from .website_goal import mapping
+        consent = mapping(mapping(goal).get("consent"))
+        answers = mapping(consent.get("answers"))
+        if answers.get("page_policy") == "explicit":
+            return "existing" if answers.get("page_mode") == "existing" else "none", _canonical_article_route(answers["page_route"])
+        selection = choose_page(mapping(journey).get("discovery"), pick_when_ambiguous=answers.get("page_policy") == "pick")
+        if selection["requiresChoice"]:
+            error = WebsiteAuthorityError("articles_page_choice_required", "Choose the articles page to prepare.", retryable=False)
+            error.user_action = {"id": "choose_articles_page", "candidates": selection["candidates"]}
+            raise error
+        return selection["mode"], selection["route"]
     discovery = (journey or {}).get("discovery") or {}
     resolution = discovery.get("resolution") or {}
     def route(item):
@@ -440,8 +569,24 @@ def _owner_request(op, context, config, step, *, user, journey=None):
         "idempotency_key": f"prepare:{op.pk}:{step}:{op.payload.get('attempt', 1)}:{op.payload.get('retry_epoch', 'initial')}",
         "retry_epoch": op.payload.get("retry_epoch", "initial"),
         "force_refresh": True}
+    from . import website_goal_budget as goal_budget, website_goal as goals
+    if "goal" in op.receipt and goal_budget.enabled() and step in {"setup", "scan"}:
+        goal = op.receipt["goal"]
+        used = goals.mapping(goal.get("budget_used"))
+        from django.conf import settings
+        data["goal_budget"] = {"version": 1, "goal_id": goal["goal_id"],
+            "scope_digest": goals.digest(goal["scope"]),
+            "remaining_active_seconds": settings.ARTICLES_GOAL_ACTIVE_SECONDS - (used.get("active_seconds") or 0),
+            "remaining_model_usd": settings.ARTICLES_GOAL_MODEL_USD - (used.get("model_cost") or 0)}
+    if "goal" in op.receipt and step == "setup":
+        from .website_strategy import request_pin
+        data.update(request_pin(op.receipt["goal"]))
+        from .website_setup_consent import valid as valid_consent
+        from .website_hosted_build import enabled as hosted_enabled
+        if valid_consent(op.receipt["goal"]) and hosted_enabled(connection):
+            data["verification_mode"] = op.receipt["goal"]["consent"]["answers"]["ci_mode"]
     if step == "setup":
-        mode, surface = _setup_surface(config, journey or journey_for_context(context, config))
+        mode, surface = _setup_surface(config, journey or journey_for_context(context, config), goal=op.receipt.get("goal"))
         pending = (config.article_system or {}).get("pending_article_system_setup") or {}
         if op.payload.get("manual_setup_example_cleanup_retry") or op.payload.get("source_reverify"):
             pending = {**pending, "source_scan_run_id": op.receipt.get("scan_run_id") or ""}
@@ -552,13 +697,47 @@ def _dispatch_prepare_step(op, context, config, step, *, user, journey=None):
     if receipt is None:
         from .website_connections import observed_source_sha
         source_sha = observed_source_sha(website) or repository.get("observedSourceSha") or website.verified_sha
-        proof = discover_source_attestation(website, target, source_sha)
-        ci = record_ci_attestation(proof)
-        receipt = ci.receipt
+        from .website_hosted_verification import enabled as hosted_attestation_enabled, advance as advance_hosted
+        if hosted_attestation_enabled(website):
+            from .website_setup_consent import valid as valid_consent
+            if valid_consent(op.receipt.get("goal")) and op.receipt["goal"]["consent"]["answers"]["ci_mode"] == "hosted":
+                outcome = advance_hosted(op, context, config, target, source_sha)
+                if outcome["status"] != "completed":return outcome
+                if step == "ci-attestation":return outcome
+                website.refresh_from_db()
+                target.refresh_from_db()
+                receipt = current_ci_attestation(website, target, capabilities={"repositorySourceSha": source_sha, "repositoryBranch": website.branch})
+                if receipt is None:raise WebsiteAuthorityError("ci_attestation_required", "Waiting for saved hosted source proof.", retryable=True)
+        if receipt is None:
+            proof = discover_source_attestation(website, target, source_sha)
+            ci = record_ci_attestation(proof)
+            receipt = ci.receipt
     if step == "verify":
         deployment = verify_live_deployment(config, data=receipt)
         return {"status": "completed", "operation_id": str(deployment.pk)}
     return {"status": "completed", "operation_id": str(ci.pk)}
+
+
+def _unverified_authorization_is_transient(op, child, code, classification, step):
+    """Whether a child stopped only because its authorization check went unanswered.
+
+    A refused connection is disconnected or regenerated, and claiming this
+    operation would already have cancelled it. While the connection still
+    grants the child run's saved generation, this backend is not refusing the
+    run, so it is resumed (a bounded number of times) instead of waiting for
+    Try again. The resumed run re-authorizes each of its actions.
+    """
+    if code != UNVERIFIED_AUTHORIZATION_CODE or classification != "repairable":
+        return False
+    from .website_connections import scoped_run_contract
+    contract, connection = scoped_run_contract(child), op.connection
+    if (connection.state != "connected" or op.generation != connection.generation
+            or str(contract.get("website_connection_id") or "") != str(connection.pk)
+            or str(contract.get("connection_generation") or "") != str(connection.generation)):
+        return False
+    if op.receipt.get("child_resume_pending"):
+        return True  # Carry out the resume already scheduled for this failure.
+    return (op.receipt.get("step_failures") or {}).get(step, 0) < UNVERIFIED_AUTHORIZATION_RESUMES
 
 
 def _resume_prepare_child(op, child, *, user, context):
@@ -604,15 +783,27 @@ def _advance_claimed_prepare(op, *, now, handlers):
     step = op.receipt.get("current_step") or "verify-access"
     try:
         context, config, user = _prepare_context(op)
+        from .website_first_article_billing import reservation_ready
+        if not reservation_ready(op):
+            op.state,op.next_attempt_at="pending",now+timedelta(minutes=1)
+            op.receipt.update(status="working",message="Completing the previous article credit.",user_action=None)
+            return _finish_prepare(op,now=now)
         journey = journey_for_context(context, config)
         journey = _cleanup_retry_journey(op, context, config, journey)
         from .website_goal_runner import owns_goal, goal_journey, ready
         if owns_goal(op):
             journey = goal_journey(op, context, config, journey, now=now)
+            if getattr(op, "_goal_wait", False):
+                return _finish_prepare(op, now=now)
         if ready(op, journey):
             op.state, op.next_attempt_at = "completed", None
             op.receipt.update(status="ready", message="Your website is ready for articles.", current_step="ready", user_action=None)
             return _finish_prepare(op, now=now)
+        if (journey.get("nextAction") or {}).get("id")=="first-article":
+            from .website_first_article import advance as advance_first_article
+            step="first-article"
+            advance_first_article(op,context,config,user=user,now=now)
+            return _finish_prepare(op,now=now)
         child_id = op.receipt.get("child_run_id")
         if (owns_goal(op) and getattr(op, "_goal_milestone", None) in {"access", "understood"}
                 and child_id == op.receipt.get("setup_run_id")):
@@ -659,6 +850,8 @@ def _advance_claimed_prepare(op, *, now, handlers):
                 result = child.result or {}
                 code = result.get("error_code") or setup.get("error_code") or "website_prepare_step_failed"
                 classification = failure_class(code, result, retryable=result.get("retryable") is True)
+                if _unverified_authorization_is_transient(op, child, code, classification, step):
+                    classification = "transient"
                 message = getattr(child, "error", "") or result.get("error") or result.get("message") or "The website step could not finish."
                 if classification == "transient" and op.receipt.get("child_resume_pending"):
                     _resume_prepare_child(op, child, user=user, context=context)
@@ -679,7 +872,7 @@ def _advance_claimed_prepare(op, *, now, handlers):
                 if owns_goal(op) and not any(item["name"] == "previewed" and item["state"] == "passed"
                         for item in op.receipt["goal"]["milestones"]):
                     raise WebsiteAuthorityError("setup_preview_verification_required", "Waiting for the exact setup preview proof.", retryable=True)
-                merge = maybe_merge_prepared_setup(child, context, config, user=user)
+                merge = maybe_merge_prepared_setup(child, context, config, user=user, goal=op.receipt.get("goal"))
                 if merge.get("status") == "needs_user":
                     review = merge["user_action"].get("id") == "review_setup" and not merge["user_action"].get("pr_number")
                     op.state, op.next_attempt_at = "needs_user", None
@@ -728,6 +921,9 @@ def _advance_claimed_prepare(op, *, now, handlers):
                 op.receipt.update(child_run_id=run_id, **{f"{step}_run_id": run_id})
                 op.payload = {**op.payload, "run_id": run_id}
                 break
+            if (outcome or {}).get("status") == "pending":
+                op.state, op.next_attempt_at = "pending", now + timedelta(minutes=1)
+                return _finish_prepare(op, now=now)
             steps = list(op.receipt.get("completed_steps") or [])
             if step not in steps:
                 steps.append(step)
@@ -768,6 +964,9 @@ def _advance_claimed_prepare(op, *, now, handlers):
 
 def advance_prepares_for_connection(connection_id):
     """Wake current preparation after scan, setup or CI callbacks commit."""
+    from .website_wakeups import enabled as event_wakes_enabled, queue_wake
+    if event_wakes_enabled():
+        return int(queue_wake(connection_id, signal={"kind": "trusted_callback", "success": True}) is not None)
     current = WebsiteConnectionOperation.objects.filter(connection_id=connection_id, action="prepare",
         state__in=["pending", "needs_user"], connection__generation=F("generation"))
     current.update(state="pending", next_attempt_at=timezone.now(), updated_at=timezone.now())
@@ -892,7 +1091,7 @@ def _restore_pending_setup_pr(config, run):
     config.save(update_fields=["article_system", "updated_at"])
 
 
-def maybe_merge_prepared_setup(run, context, config, *, user):
+def maybe_merge_prepared_setup(run, context, config, *, user, goal=None):
     """Use the shared merge path after exact preview and current consent checks."""
     from .vibe_marketing_views import _pull_request_number_from_run, _attempt_setup_publish_merge
     setup = (run.result or {}).get("article_system_setup") or {}
@@ -902,7 +1101,7 @@ def maybe_merge_prepared_setup(run, context, config, *, user):
     if not number:
         if run.status == "completed" and (run.result or {}).get("adopted") is True:
             return {"status": "completed"}
-        return approve_prepared_setup(run, context, config, user=user)
+        return approve_prepared_setup(run, context, config, user=user, goal=goal)
     url = f"https://github.com/{config.website_connection.github_repo}/pull/{number}"
     action = {"id": "merge_pr", "label": f"Merge PR #{number}", "pr_number": number, "url": url}
     # The setup run's Publish (in MLAI Chat) verifies and merges this pull request.
@@ -956,7 +1155,7 @@ def _setup_preview_proven_for_review(run, head_sha):
     )
 
 
-def approve_prepared_setup(run, context, config, *, user):
+def approve_prepared_setup(run, context, config, *, user, goal=None):
     """Use the existing setup control only after exact automatic preview proof."""
     from .website_connections import _verified_setup_run_base, scoped_run_contract, verify_repository_head
     from .vibe_marketing_views import VibeMarketingRunControlView
@@ -966,10 +1165,27 @@ def approve_prepared_setup(run, context, config, *, user):
         "url": preview.get("url") or (run.result or {}).get("preview_url"), "run_id": run.run_id}}
     if config.requires_review:
         return review
+    from .website_hosted_build import enabled as hosted_enabled, current_scan_source
+    from .website_setup_consent import valid as valid_consent
+    from .website_goal import scope_matches, scope_for, mapping
+    hosted = hosted_enabled(website)
+    if hosted and goal is not None:
+        if not valid_consent(goal) or not scope_matches(mapping(goal).get("scope"), scope_for(website, context.company.pk)):
+            raise WebsiteAuthorityError("website_operation_changed", "Setup approval requires the original owner choices for this website.")
+        if goal["consent"]["answers"]["publish_mode"] == "review":
+            return review
+    if hosted and current_scan_source(website) != mapping(run.run_request).get("expected_source_sha"):
+        raise WebsiteAuthorityError("website_source_changed", "The setup source changed. Refresh its scan and preview before approval.")
     head = str((run.result or {}).get("branch_commit_sha") or "")
     base = _verified_setup_run_base(run, head, website, automatic_approval=True)
     if not base:
-        if _setup_preview_proven_for_review(run, head):
+        if hosted and goal is not None and _setup_preview_proven_for_review(run, head):
+            from .website_hosted_build import partial_environment
+            if partial_environment(run, preview, head, website):
+                error = WebsiteAuthorityError("prepare_no_progress", "The hosted build identity is incomplete. Trying the next articles strategy.", retryable=False)
+                error.findings = [{"constraint": "incomplete_environment_identity"}]
+                raise error
+        if _setup_preview_proven_for_review(run, head) and not (hosted and goal is not None):
             return review
         raise WebsiteAuthorityError("setup_preview_verification_required", "Waiting for exact setup preview proof.", retryable=True)
     verify_repository_head(website, base)

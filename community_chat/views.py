@@ -1,5 +1,6 @@
 import base64
 import hashlib
+import logging
 import re
 import secrets
 import time
@@ -117,6 +118,8 @@ from .serializers import (
     own_chat_profile,
     public_chat_profile,
 )
+
+logger = logging.getLogger(__name__)
 
 BOOTSTRAP_ACTION = "community-chat:enrol-device"
 AUTHENTICATION_CLASSES = (
@@ -1139,6 +1142,10 @@ class LinkPreviewView(APIView):
             slack_preview = fetch_slack_file_preview(raw_url, user=request.user)
             preview = slack_preview or fetch_link_preview(raw_url)
         except SlackFilePreviewDeferred as exc:
+            logger.info(
+                "community_chat_dependency_wait endpoint=link_preview dependency=slack reason=%s retry_after_seconds=%s",
+                exc.reason, exc.retry_after,
+            )
             response = Response(
                 {
                     "error": "preview_pending",
@@ -1216,6 +1223,10 @@ class LinkPreviewImageView(APIView):
                     str(request.query_params.get("url") or "").strip()
                 )
         except SlackFilePreviewDeferred as exc:
+            logger.info(
+                "community_chat_dependency_wait endpoint=link_preview_image dependency=slack reason=%s retry_after_seconds=%s",
+                exc.reason, exc.retry_after,
+            )
             response = Response(
                 {
                     "error": "preview_pending",

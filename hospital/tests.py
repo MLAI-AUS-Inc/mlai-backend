@@ -13,6 +13,7 @@ class HospitalTeamCompatibilityTests(TestCase):
         self.client = APIClient()
         self.user = User.objects.create_user(
             email="hospital-user@example.com",
+            is_superuser=True,
             first_name="Hospital",
             last_name="User",
         )

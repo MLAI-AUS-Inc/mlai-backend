@@ -1,7 +1,7 @@
 from datetime import date
 import hashlib
 import json
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from django.contrib.auth import get_user_model
 from django.test import TestCase
@@ -213,14 +213,14 @@ class AllAccountCaptureServiceTests(AllAccountCaptureMixin, TestCase):
                 lines=[],
             )
 
-    @patch("integrations.api_views_reconciliation.fetch_active_xero_bank_accounts")
+    @patch("integrations.services.xero_reconciliation.fetch_xero_accounts")
     def test_selects_every_account_and_validates_exact_line_membership(self, fetch_accounts):
         fetch_accounts.return_value = self.xero_accounts()
         lines = self.import_capture()
 
         selection = select_current_statement_capture(self.organization)
 
-        self.assertTrue(selection.all_account_capture)
+        self.assertTrue(selection.all_account_capture, selection.blockers)
         self.assertEqual(len(selection.scan_ids), 2)
         self.assertEqual(len(selection.capture_fingerprint), 64)
         self.assertEqual(
@@ -245,7 +245,7 @@ class AllAccountCaptureServiceTests(AllAccountCaptureMixin, TestCase):
     @patch("integrations.services.xero_reconciliation.fetch_xero_accounts")
     def test_newer_partial_batch_fails_closed_instead_of_reusing_old_capture(self, fetch_accounts):
         fetch_accounts.return_value = self.xero_accounts()
-        self.import_capture("complete-before-partial")
+        old_lines = self.import_capture("complete-before-partial")
         import_xero_statement_lines(
             organization=self.organization,
             bank_account_id="bank-a",
@@ -263,7 +263,11 @@ class AllAccountCaptureServiceTests(AllAccountCaptureMixin, TestCase):
         selection = select_current_statement_capture(self.organization)
 
         self.assertFalse(selection.all_account_capture)
-        self.assertTrue(any("partial" in blocker for blocker in selection.blockers))
+        self.assertEqual(selection.capture_id, 'partial-latest')
+        self.assertEqual(len(selection.scans), 1)
+        self.assertTrue(selection.blockers)
+        with self.assertRaises(StatementCaptureValidationError):
+            validate_current_statement_line_capture(old_lines[0], expected_bank_account_id='bank-a', selection=selection)
 
     def test_posting_payload_uses_captured_bank_account_not_profile_default(self):
         line = XeroStatementLineSnapshot.objects.create(
@@ -301,20 +305,21 @@ class AllAccountCaptureApiTests(AllAccountCaptureMixin, APITestCase):
         super().setUp()
         PointsAdmin.objects.create(slack_user_id="UADMIN", role="admin", is_active=True)
 
-    @patch("integrations.services.xero_reconciliation.fetch_xero_accounts")
+    @patch("integrations.services.reconciliation_bank_accounts.http_client.get")
     @patch("core.permissions.HasRooApiKey.has_permission", return_value=True)
     def test_bank_account_catalog_returns_only_live_active_banks(self, _permission, fetch_accounts):
-        fetch_accounts.return_value = [
-            {"bank_account_id": "bank-a", "name": "Operating"},
-            {"bank_account_id": "bank-b", "name": "Savings"},
-        ]
+        fetch_accounts.return_value = Mock(status_code=200, headers={}, json=Mock(return_value={'Accounts': [
+            *self.xero_accounts(),
+            {'AccountID': 'closed', 'Name': 'Closed', 'Type': 'BANK', 'Status': 'ARCHIVED'},
+            {'AccountID': 'income', 'Name': 'Income', 'Type': 'REVENUE', 'Status': 'ACTIVE'},
+        ]}))
 
         response = self.client.get(
             reverse("reconciliation_bank_accounts"),
             {"slack_user_id": "UADMIN", "domain": "mlai.au"},
         )
 
-        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.status_code, status.HTTP_200_OK, response.data)
         self.assertEqual(response.data, {
             "schema_version": 1,
             "tenant_id": "tenant-1",

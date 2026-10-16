@@ -6,16 +6,18 @@ from django.utils import timezone
 from .website_contract import evidence_digest
 
 
-def verify_account_access(user, *, installations=(), connection=None, force=False):
-    """Probe owned installation health independently of repository selection."""
+def verify_account_access(user, *, installations=(), connection=None, force=False, allow_probe=True):
+    """Read a finite observation, probing only at an explicitly allowed boundary."""
     from integrations.services.github_app import probe_installation_liveness, INSTALLATION_LIVE
     ids = {str(row.installation_id) for row in installations}
     if connection is not None and connection.authorized_by_id == user.pk and connection.installation_id and connection.state != "revoked":
         ids.add(str(connection.installation_id))
     key = "website-account-access-v2:" + evidence_digest({"user": user.pk, "installations": sorted(ids)})
-    existing = None if force else cache.get(key)
+    existing = None if force and allow_probe else cache.get(key)
     if existing is not None:
         return existing
+    if not allow_probe:
+        return {"verified": False, "reasonCode": "github_verification_required", "status": "checking"}
     # A bounded lease prevents concurrent page reads from creating probe storms.
     lease = key + ":lease"
     if not cache.add(lease, True, timeout=15):

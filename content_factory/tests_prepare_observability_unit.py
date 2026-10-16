@@ -52,6 +52,11 @@ class PrepareObservabilityTests(SimpleTestCase):
                 patch("content_factory.website_prepare.advance_prepare", return_value=op):
             rows.return_value.exclude.return_value.order_by.return_value.values_list.return_value = list(range(25))
             rows.return_value.exists.return_value = True
+            def selected(*args, **kwargs):
+                if kwargs.get("action") and kwargs["action"] != "prepare":
+                    absent=Mock();absent.exists.return_value=False;return absent
+                return rows.return_value
+            rows.side_effect=selected
             report = reconciliation.process_website_connection_operations(limit=25)
         self.assertEqual(report["processed"], 25)
         self.assertEqual(len(report["operations"]), 20)
@@ -74,7 +79,8 @@ class PrepareObservabilityTests(SimpleTestCase):
         target = SimpleNamespace(target_key="stories", adapter="static_markdown", source_sha="b" * 40, verified_at=now)
         report = inspection_report(connection, config, [operation], snapshot, [target])
         self.assertEqual(report["connection"]["capabilities"], ["read"])
-        self.assertEqual(report["operations"][0]["receipt"], operation.receipt)
+        self.assertEqual(report["operations"][0]["receipt"]["reason_code"], "github_workflow_permission_required")
+        self.assertNotIn("message", report["operations"][0]["receipt"])
         self.assertEqual(report["pending_article_system_setup"]["route"], "/stories")
         self.assertEqual(report["inventory"]["existence_state"], "confirmed")
         self.assertEqual(report["targets"][0]["key"], "stories")
@@ -90,11 +96,12 @@ class PrepareObservabilityTests(SimpleTestCase):
             yield SimpleNamespace(execute=lambda sql: events.append(sql))
         database = SimpleNamespace(vendor="postgresql", cursor=cursor)
         website = Mock()
-        website.operations.order_by.return_value = []
+        website.blockers = []
+        website.operations.select_related.return_value.order_by.return_value = []
         website.targets.filter.return_value = []
         website.scan_snapshots.filter.return_value.exclude.return_value.filter.return_value.order_by.return_value.first.return_value = None
         config = SimpleNamespace(website_connection=website, article_system={})
-        company = SimpleNamespace(organization=SimpleNamespace(), profile=SimpleNamespace(user=SimpleNamespace()))
+        company = SimpleNamespace(pk="fixture", organization=SimpleNamespace(), profile=SimpleNamespace(user=SimpleNamespace()))
         command = inspect.Command(stdout=StringIO())
         def select_company(*args, **kwargs):
             self.assertEqual(events, ["SET TRANSACTION READ ONLY"])
