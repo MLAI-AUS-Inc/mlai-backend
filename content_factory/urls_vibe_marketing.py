@@ -2,7 +2,7 @@ from .website_metrics import WebsiteMetricsView
 from .company_billing import CompanyBillingView
 from .article_preview_lease import ArticlePreviewLeaseView, ArticlePreviewLeaseProxyView
 from .article_review_views import VibeMarketingArticleReviewView
-from .website_views import WebsiteConnectionView, WebsiteConnectionActionView, WebsiteConnectionOperationView
+from .website_views import WebsiteConnectionView, WebsiteConnectionActionView, WebsiteConnectionOperationView, WebsiteCostUsageView
 from django.urls import include, path
 
 from .custom_island_views import CustomContentIslandView
@@ -70,6 +70,8 @@ urlpatterns = [
     path("github/repository", VibeMarketingGitHubRepositoryView.as_view(), name="vibe-marketing-github-repository-no-slash"),
     path("website-connection", WebsiteConnectionView.as_view(), name="website-connection"),
     path("website-connection/", WebsiteConnectionView.as_view()),
+    path("website-connection/usage", WebsiteCostUsageView.as_view()),
+    path("website-connection/usage/", WebsiteCostUsageView.as_view()),
     path("website-connection/operations/<uuid:operation_id>", WebsiteConnectionOperationView.as_view()),
     path("website-connection/operations/<uuid:operation_id>/", WebsiteConnectionOperationView.as_view()),
     path("website-connection/<str:action>", WebsiteConnectionActionView.as_view(), name="website-connection-action"),

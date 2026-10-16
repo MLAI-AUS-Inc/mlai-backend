@@ -150,7 +150,7 @@ class PrepareVerificationRuntimeTests(SimpleTestCase):
         self.http = stack.enter_context(patch.object(views.http_client, "get", side_effect=http_get))
         stack.enter_context(patch.object(views.http_client, "delete"))
         def cached(key):
-            if key.startswith("articles-repository-access-v1:"):
+            if key.startswith("articles-repository-access-v2:"):
                 return {"verified": True, "writable": True, "branch": "main", "sha": self.website.verified_sha}
             if key.startswith("website-installation-grants-v1:"):
                 return {"workflows": self.workflows, "checks": self.checks, "statuses": self.statuses, "settingsUrl": "https://github.com/settings/installations/4"}

@@ -87,7 +87,10 @@ class BaselineCompactSerializationTest(TestCase):
         self.assertEqual(ai["displayRows"][0]["label"], "Mentioned queries")
         self.assertEqual(ai["providers"][0]["key"], "chatgpt")
         self.assertEqual(ai["providers"][0]["score"], 65)
-        self.assertNotIn("prompts", ai["providers"][0])
+        prompts = ai['providers'][0]['prompts']
+        self.assertEqual(prompts[0]['query'], 'long transcript')
+        self.assertEqual(prompts[0]['status'], 'unavailable')
+        self.assertNotIn('responseExcerpt', prompts[0])
         self.assertNotIn("queries", ai)
 
     def test_score_coverage_uses_current_measurements_instead_of_stale_raw_payload(self):

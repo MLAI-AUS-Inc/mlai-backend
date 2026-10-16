@@ -289,7 +289,7 @@ class SetupExampleCleanupActionTests(SimpleTestCase):
             stack.enter_context(patch.object(views.http_client, "delete"))
             stale_access = {"verified": True, "writable": True, "branch": "main", "sha": "a" * 40}
             stack.enter_context(patch.object(views.cache, "get", side_effect=lambda key:
-                stale_access if key.startswith("articles-repository-access-v1:") else None))
+                stale_access if key.startswith("articles-repository-access-v2:") else None))
             for method, result in (("set", None), ("add", True), ("delete", None)):
                 stack.enter_context(patch.object(views.cache, method, return_value=result))
             queue = stack.enter_context(patch.object(views, "_queue_content_factory_run", return_value=worker_run))

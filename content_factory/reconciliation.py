@@ -102,8 +102,10 @@ def _setting_int(name: str, default: int) -> int:
 
 def _legacy_delivery_rows(json_field):
     """Keep absent JSON paths: SQL NOT-equality alone also excludes NULL paths."""
-    path = f"{json_field}__setup_delivery_v1__schema_version"
-    return Q(**{path + "__isnull": True}) | ~Q(**{path: 1})
+    setup = f"{json_field}__setup_delivery_v1__schema_version"
+    article = f"{json_field}__article_delivery_v1__schema_version"
+    return (Q(**{setup + "__isnull": True}) | ~Q(**{setup: 1})) & (
+        Q(**{article + "__isnull": True}) | ~Q(**{article: 1}))
 
 
 def _stale_after() -> timedelta:

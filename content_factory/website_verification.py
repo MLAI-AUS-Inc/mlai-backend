@@ -6,6 +6,7 @@ import re
 from datetime import timedelta
 from urllib.parse import quote
 
+from django.db import transaction
 from django.utils import timezone
 from rest_framework.response import Response
 from rest_framework.views import APIView
@@ -69,8 +70,16 @@ def read_ci_proof(connection, data):
             pass
 
 
-def record_ci_attestation(data, *, owner_review=False):
+def record_ci_attestation(data, *, owner_review=False, origin="authenticated_ci"):
     """Two-phase provider verification with a final cancellation/consent fence."""
+    attestation_origin = origin
+    if attestation_origin not in {"authenticated_ci", "authenticated_hosted"}:
+        raise ValueError("Unknown native attestation origin")
+    if attestation_origin == "authenticated_hosted":
+        from .website_hosted_verification import enabled
+        from .website_models import WebsiteConnection
+        if not enabled(WebsiteConnection.objects.get(pk=data.get("website_connection_id"))):
+            raise WebsiteAuthorityError("ci_attestation_required", "Hosted native attestation is disabled.")
     data = {**data, "expected_source_sha": data.get("source_sha")}
     with authority_guard(data, action="read") as website:
         target = website.targets.filter(generation=website.generation, target_key=data.get("target_id")).first()
@@ -85,9 +94,8 @@ def record_ci_attestation(data, *, owner_review=False):
         binding = {**data, **contract_for(website)}
         changed_source = website.verified_sha != data.get("source_sha")
         reviewed_heads = list(website.repository_mutations.filter(generation=website.generation, status="applied",
-            run_id=data.get("run_id")).exclude(head_sha="").values_list("head_sha", flat=True))
-        # Setup PRs are squash-merged, so the merge commit never contains the
-        # reviewed head. The platform's own recorded merge of that run is the lineage.
+            run_id=data.get("source_run_id") if attestation_origin == "authenticated_hosted" else data.get("run_id")).exclude(head_sha="").values_list("head_sha", flat=True))
+        # Recorded setup merges prove lineage for squash-merged reviewed heads.
         owned_merge = False
         if changed_source and not owner_review and not reviewed_heads:
             owned_merge = _setup_merged_at(website, data.get("run_id"), data.get("source_sha"))
@@ -101,8 +109,12 @@ def record_ci_attestation(data, *, owner_review=False):
         except WebsiteAuthorityError as exc:
             if exc.code != "website_source_review_required" or not _setup_merged_at(website, data.get("run_id"), data.get("source_sha")):
                 raise
-    proof = read_ci_proof(website, binding)
-    receipt = {**proof, "allowed": True, "attestation_origin": "authenticated_ci", "checked_at": timezone.now().isoformat()}
+    if attestation_origin == "authenticated_hosted":
+        from .website_hosted_verification import read_completed_proof
+        proof = validated_ci_identity(binding, read_completed_proof(website, binding))
+    else:
+        proof = read_ci_proof(website, binding)
+    receipt = {**proof, "allowed": True, "attestation_origin": attestation_origin, "checked_at": timezone.now().isoformat()}
     with authority_guard(binding, action="read") as website:
         if custom_verified:
             origin.refresh_from_db()
@@ -126,7 +138,10 @@ def record_ci_attestation(data, *, owner_review=False):
             config.publish_targets = [row for row in config.publish_targets if row.get("target_id") != target.target_key] + [target.contract]
             config.save(update_fields=["default_publish_target_id", "publish_targets", "updated_at"])
         if website.verified_sha != proof["source_sha"]:
+            previous_revision = website.configuration_version
             website.configuration_version += 1
+            from .website_goal_scope import record_source_transition
+            record_source_transition(website, previous_revision=previous_revision, source_sha=proof["source_sha"])
         website.verified_sha, website.last_verified_at = proof["source_sha"], timezone.now()
         website.blockers = [row for row in website.blockers if row.get("code") != "repository_source_changed"]
         website.capabilities = {**website.capabilities, "publishingReady": website.state == "connected" and not custom_verified,
@@ -136,6 +151,11 @@ def record_ci_attestation(data, *, owner_review=False):
             "connection": website, "generation": website.generation, "action": "ci-verify", "state": "completed", "payload": dict(data), "receipt": receipt})
         from .website_prepare import wake_prepare_after_commit
         wake_prepare_after_commit(website.pk)
+        if changed_source:
+            from .website_wakeups import enabled as event_wakes_enabled
+            if event_wakes_enabled():
+                from .website_prepare import wake_prepare_for_source
+                transaction.on_commit(lambda: wake_prepare_for_source(website.pk, organization_id=website.organization_id), robust=True)
         return op
 
 
@@ -204,7 +224,7 @@ def current_ci_attestation(connection, target, *, capabilities=None):
         receipt = ci_attestation_for(connection, proof)
         now = timezone.now()
         stamp = proof_stamp(receipt, now=now)
-        if (receipt.get("allowed") is not True or receipt.get("attestation_origin") != "authenticated_ci"
+        if (receipt.get("allowed") is not True or receipt.get("attestation_origin") not in {"authenticated_ci", "authenticated_hosted"}
                 or not stamp or not now - VERIFICATION_MAX_AGE <= stamp <= now + timedelta(minutes=5)):
             return None
         operation = validate_operation(connection, {field: receipt[field] for field in IDENTITY_FIELDS})
@@ -245,11 +265,14 @@ def verify_live_deployment(config, *, data):
         binding = {**data, **contract_for(website)}
     require_unlocked_remote_call()
     verify_repository_head(website, data["source_sha"])
+    from .website_deployment import ensure_fingerprint, observe_headers
+    ensure_fingerprint(website, binding)
     observations = []
     for kind in ("listing", "detail", "unknown_slug"):
         public_url = f"https://{website.organization.domain}{routes[kind]}"
         expected_status = 404 if kind == "unknown_slug" else 200
         body, headers = fetch_live_route(public_url, website.organization.domain, expected_status=expected_status)
+        if kind == "listing":observe_headers(website, binding, headers)
         marker = headers.get("x-mlai-artifact-digest") or ""
         if expected_status == 200 and marker != artifact_digest and not re.search(rb'<meta\s+name=["\x27]mlai-artifact-digest["\x27]\s+content=["\x27]' + artifact_digest.encode() + rb'["\x27]', body):
             raise WebsiteAuthorityError("live_route_unavailable", "The public listing or article detail has not deployed this reviewed integration artifact yet.")

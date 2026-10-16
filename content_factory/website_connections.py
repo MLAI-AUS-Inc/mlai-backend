@@ -256,7 +256,7 @@ def summary_for(config, *, company_id=None):
     if target_blocked:
         capabilities.update(publishingReady=False, previewSupported=False)
         actions = [action for action in actions if action not in {"setup", "publish", "preview"}]
-    latest = connection.operations.order_by("-created_at").first()
+    latest = connection.operations.exclude(action__in=["goal-usage", "goal-alert", "usage-refresh"]).order_by("-created_at").first()
     summary = {
         "latestOperation": {"id": str(latest.pk), "action": latest.action, "state": latest.state, "receipt": latest.receipt} if latest else None,
         "connectionId": str(connection.pk), "connectionGeneration": connection.generation,
@@ -588,9 +588,11 @@ def guarded_service_write(action, *, only_repository=False, remote_actions=(), p
                         if run_id:
                             run = ContentFactoryRun.objects.filter(run_id=run_id).first()
                             if run:
-                                run.run_request = {**(run.run_request or {}), **connection_contract(payload),
+                                updated_request = {**(run.run_request or {}), **connection_contract(payload),
                                     **{key: payload[key] for key in ("operation_id", "operation_attempt", "deletion_epoch") if key in payload}}
-                                run.save(update_fields=["run_request", "updated_at"])
+                                if updated_request != run.run_request:
+                                    run.run_request = updated_request
+                                    run.save(update_fields=["run_request", "updated_at"])
                     if response is not None:
                         if response.status_code < 300 and existing_run and request.method != "GET" and (existing_run.run_request or {}).get("operation_id"):
                             from .website_operations import observe_workflow_status
@@ -834,8 +836,11 @@ def transition_connection(config, *, action, expected, idempotency_key="", verif
                     "setup_run_ids": list(connection.repository_mutations.exclude(run_id="").values_list("run_id", flat=True)), "attempt": 1},
                 receipt={"status": "proposal_requested", "requires_review": True, "repository_modified": False})
         old_generation = connection.generation
+        from .website_first_article_billing import cancel_held_goals
+        cancel_held_goals(connection)
         connection.operations.filter(generation=old_generation).exclude(
-            action__in=["disconnect", "revoke", "purge", "cancel-operation"]
+            action__in=["disconnect", "revoke", "purge", "cancel-operation", "usage-refresh"]
+        ).exclude(action="prepare", receipt__has_key="first_article_billing"
         ).exclude(state__in=["completed", "failed", "blocked", "cancelled", "deleted", "denied"]).update(
             state="cancelled", receipt={"status": "authority_revoked", "repository_modified": False}, updated_at=timezone.now())
         connection.generation += 1
@@ -866,6 +871,7 @@ def transition_connection(config, *, action, expected, idempotency_key="", verif
         if action in {"reset", "reconnect", "purge"}:
             invalidate_repository_config(config)
         if action == "purge":
+            connection.operations.filter(action__in=["goal-usage", "usage-refresh", "goal-alert"]).delete()
             connection.scan_snapshots.all().delete()
             connection.template_revisions.all().delete()
             connection.targets.all().delete()
@@ -920,6 +926,8 @@ def offboard_website_connections(organization, *, user=None, purge=False):
         if not purge:
             websites = websites.filter(authorized_by=user)
         for website in list(websites):
+            from .website_first_article_billing import cancel_held_goals
+            cancel_held_goals(website)
             if config and config.website_connection_id == website.pk:
                 transition_connection(config, action="revoke", expected=contract_for(website))
                 website.refresh_from_db()
@@ -935,14 +943,23 @@ def offboard_website_connections(organization, *, user=None, purge=False):
                     payload={"previous_generation": previous_generation, "cancel_run_ids": [], "disable_auto_merge_prs": []})
             if not purge:
                 continue
+            from .website_operations import deletion_epoch
+            watermark = max(deletion_epoch(website) + 1, website.configuration_version)
+            website.blockers = [item for item in website.blockers if isinstance(item, dict) and item.get("code") != "website_data_deleted"] + [
+                {"code": "website_data_deleted", "deletion_epoch": watermark, "message": "Previous website data was removed."}]
+            website.save(update_fields=["blockers", "updated_at"])
+            website.operations.filter(action__in=["goal-usage", "usage-refresh", "goal-alert"]).delete()
             website.scan_snapshots.all().delete()
             website.template_revisions.all().delete()
             website.targets.all().delete()
             website.repository_mutations.all().delete()
             # Cleanup approval ceases when the owning company is deleted.
-            website.operations.filter(Q(action__in=["cleanup", "worker_followup", "superseded-setup-cleanup"]) | ~Q(state="pending")).delete()
+            from .website_first_article_refunds import retain_financial_refunds_for_erasure
+            financial_pending=retain_financial_refunds_for_erasure(website)
             pending = list(website.operations.filter(state="pending"))
             for operation in pending:
+                if operation.action=="goal-refund":
+                    continue
                 operation.payload = {key: operation.payload[key] for key in
                     ("previous_generation", "cancel_run_ids", "stop_preview_run_ids", "disable_auto_merge_prs") if key in operation.payload}
                 operation.payload["purge_after_reconciliation"] = True
@@ -952,7 +969,7 @@ def offboard_website_connections(organization, *, user=None, purge=False):
                         "categories": ["worker_run_artifacts", "worker_checkpoints", "generated_media", "repository_copies"]},
                     "repository_modified": False, "remote_cleanup_pending": True}
                 operation.save(update_fields=["payload", "receipt", "updated_at"])
-            if pending:
+            if pending or financial_pending:
                 website.authorized_by = None
                 website.site_url = ""
                 website.app_root = ""
@@ -1232,6 +1249,12 @@ def _verified_setup_run_base(run, head_sha, website, *, automatic_approval=False
         return ""
     base_sha = str(saved.get("expected_source_sha") or "")
     generation = result.get("resume_generation")
+    from .website_hosted_build import enabled as hosted_enabled, current_scan_source, valid_hosted_build
+    hosted = hosted_enabled(website)
+    source_matches = base_sha == current_scan_source(website) if hosted else not website.verified_sha or website.verified_sha == base_sha
+    build_passed = gates.get("local_build") is True and gates.get("local_build_skipped") is False
+    if hosted and gates.get("local_build_skipped") is True:
+        build_passed = valid_hosted_build(run, preview, head_sha, website)
     approved_setup = (run.approval_state == "approved" and result.get("status") in SETUP_PR_OPEN_STATUSES
         and setup.get("status") in SETUP_PR_OPEN_STATUSES)
     pending_setup = (automatic_approval and run.status == "awaiting_approval" and run.approval_state == "approval_required"
@@ -1247,10 +1270,8 @@ def _verified_setup_run_base(run, head_sha, website, *, automatic_approval=False
         or not (run.status == "completed" and (approved_setup or adopted_kit) or pending_setup)
         or setup.get("setup_run_id") != run.run_id
         or not SHA_PATTERN.fullmatch(base_sha)
-        # A person approved (or adopted) this setup, so a newer branch head this
-        # generation observed may stand in for an older verified source.
-        or (website.verified_sha and website.verified_sha != base_sha
-            and not ((approved_setup or adopted_kit) and _source_observed(website, base_sha)))
+        or (not source_matches
+            and not (not hosted and (approved_setup or adopted_kit) and _source_observed(website, base_sha)))
         or result.get("source_sha") != base_sha or setup.get("source_sha") != base_sha
         or result.get("branch_commit_sha") != head_sha or setup.get("branch_commit_sha") != head_sha
         or preview.get("exactRender") is not True or preview.get("commitSha") != head_sha
@@ -1262,13 +1283,11 @@ def _verified_setup_run_base(run, head_sha, website, *, automatic_approval=False
         or proof.get("resume_generation") != generation or setup.get("resume_generation") != generation
         or gates.get("status") != "passed"
         or any(gates.get(key) is not True for key in (
-            "dependency_validation", "static_policy", "local_build", "dom_slot_compliance",
+            "dependency_validation", "static_policy", "dom_slot_compliance",
             "publish_surface", "browser", "visual_style",
         ))
-        # A person approved (or adopted) this setup, so the hosted build may
-        # prove it; automatic approval still requires a local build.
-        or not (gates.get("local_build_skipped") is False
-                or ((approved_setup or adopted_kit) and _hosted_build_proven(gates, preview, head_sha)))
+        or not (build_passed or (not hosted and (approved_setup or adopted_kit)
+                and _hosted_build_proven(gates, preview, head_sha)))
         or result.get("manual_quality_gate_override") or setup.get("manual_quality_gate_override")
     ):
         return ""
@@ -1329,10 +1348,12 @@ def validate_publish_merge_source(run, head_sha, branch):
         raise WebsiteAuthorityError("publish_commit_unverified", "The publication pull request changed or its exact commit has no applied ownership receipt. Review and regenerate it before merging.")
 
 
-def record_publish_merge_intent(run, pull, pr_number, *, action="merge"):
+def record_publish_merge_intent(run, pull, pr_number, *, action="merge", source_sha=None):
     """Save the approved PR identity before GitHub can emit its merge webhook."""
     from workflow_runs.models import ContentFactoryRun
     binding = scoped_run_contract(run)
+    if source_sha is not None and source_sha!=(run.run_request or {}).get("expected_source_sha"):
+        raise WebsiteAuthorityError("publish_commit_unverified","The original publication source changed.")
     head, base = pull.get("head") or {}, pull.get("base") or {}
     with authority_guard(binding, action=action) as website:
         for side in (head, base):
@@ -1344,7 +1365,7 @@ def record_publish_merge_intent(run, pull, pr_number, *, action="merge"):
             raise WebsiteAuthorityError("publish_commit_unverified", "The publication PR targets a different branch.")
         intent = {**contract_for(website), "run_id": run.run_id, "pr_number": pr_number,
             "github_repo": website.github_repo, "base_branch": website.branch,
-            "source_sha": website.verified_sha, "head_sha": head.get("sha"), "head_branch": head.get("ref"),
+            "source_sha": source_sha or website.verified_sha, "head_sha": head.get("sha"), "head_branch": head.get("ref"),
             "operation_id": binding.get("operation_id"), "recorded_at": timezone.now().isoformat()}
         locked = ContentFactoryRun.objects.select_for_update().get(pk=run.pk)
         locked.result = {**dict(locked.result or {}), "publish_merge_intent": intent}

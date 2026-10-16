@@ -8,11 +8,13 @@ from types import SimpleNamespace
 from unittest.mock import patch
 from urllib.parse import parse_qsl, urlencode, urlsplit
 
+from django.contrib.auth import get_user_model
 from django.db import close_old_connections, connection, connections, transaction
 from django.test import TransactionTestCase, override_settings
 import requests
 from rest_framework.test import APIRequestFactory
 
+from founder_tools.models import VibeRaisingCompany, VibeRaisingProfile
 from workflow_runs.models import ContentFactoryRun
 from .tests_website_connections import WebsiteDatabaseFixture
 from .website_connections import authority_guard, owner_operation_scope, transition_connection, require_unlocked_remote_call
@@ -27,7 +29,15 @@ class WebsiteWorkerReentryTests(WebsiteDatabaseFixture, TransactionTestCase):
         super().setUp()
         if connection.vendor != 'postgresql':
             self.skipTest('Actual row-lock reentry requires PostgreSQL')
-        self.context = SimpleNamespace(organization=self.org, profile=SimpleNamespace(user=object()))
+        self.user = get_user_model().objects.create_user(email='reentry@example.test', password='synthetic-password')
+        profile = VibeRaisingProfile.objects.create(user=self.user, role=VibeRaisingProfile.ROLE_FOUNDER)
+        company = VibeRaisingCompany.objects.create(profile=profile, organization=self.org,
+            name='Synthetic reentry company', domain=self.org.domain)
+        profile.active_company = company
+        profile.save(update_fields=['active_company'])
+        self.website.authorized_by = self.user
+        self.website.save(update_fields=['authorized_by'])
+        self.context = SimpleNamespace(organization=self.org, profile=profile, company=company)
         self.errors = []
 
     @contextmanager

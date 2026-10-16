@@ -2279,7 +2279,7 @@ class BoostPostAdmissionService:
 
         discount_applied = CoworkingService._has_ready_monthly_update(
             user,
-            timezone.localdate(),
+            timezone.localdate(timezone=ZoneInfo("Australia/Melbourne")),
         )
         charged_points = (
             cls.DISCOUNT_COST_POINTS if discount_applied else cls.BASE_COST_POINTS

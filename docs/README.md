@@ -23,11 +23,17 @@ subsystem-specific contracts and runbooks.
 
 ## Content Factory
 
+- [F2 bootstrap summary and rendering](articles-f2-bootstrap-summary-2026-10-16.md) — default compact reads, explicit full details, and remaining latency/overlay validation
+- [F3 recorded usage and operational alerts](articles-f3-cost-accounting-2026-10-16.md) — original-run accounting, company coverage and durable budget/stall/repair notices
+- [G6 preview cleanup deadline](articles-g6-preview-cleanup-2026-10-16.md) — durable 24-hour lifecycle limit and one scoped operational incident
+
 - [Articles B1 failure contract](articles-b1-implementation-2026-10-14.md) — immutable taxonomy, trusted enrollment, emitter coverage and regression/provenance evidence
 - [Articles B5 setup delivery](articles-b5-implementation-2026-10-14.md) — durable receipts, pure reconciliation and initial implementation evidence
 - [Articles B2 goal runner design](articles-b2-design-2026-10-14.md) — proposed milestone proofs, per-site execution and one backend status for Chat
 - [B2 implementation and validation](articles-b2-implementation-2026-10-14.md)
 - [Continuous one-shot implementation progress](articles-continuous-implementation-2026-10-14.md)
+- [E2 hosted attempt and recovery design](articles-e2-build-recovery-2026-10-16.md) — temporary preview branches and gated recovery for scoped partial environment receipts
+- [E1 site fingerprint](articles-e1-site-fingerprint-2026-10-15.md) — bounded immutable facts, source validation, strategy/deploy hints and pinned producer parity
 
 - [Articles Phase 2 design approvals](articles-phase2-design-notes-2026-10-12.md) — all eight designs approved; implementation waits for Phase 1 deployment
 
@@ -40,6 +46,8 @@ subsystem-specific contracts and runbooks.
 - [Daily article recommendations](daily-research.md) — fresh daily topics, one-use founder preferences and pausing after three unanswered days
 
 ## Community chat APIs
+
+- [Dependency signals and polling callers](community-chat-dependency-signals.md) — source-level G3 tracing for preview, Slack storage and cursor callback waits
 
 - [MLAI remote MCP](mlai-mcp.md) — unified Pulse, Articles and explicit-channel Community capabilities with legacy audience isolation
 

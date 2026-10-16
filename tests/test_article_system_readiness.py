@@ -1,21 +1,14 @@
-"""Detection is not readiness.
+"""Detection and old scaffold labels never replace current integration proof.
 
-A repo scan can report an article surface (`article_system.state == "existing"`)
-while explicitly failing to confirm anywhere to publish into — skedy.io's shape:
-state "existing", empty publish_targets, reason "Detected article surface at
-app/(public)/resources/guides/page.tsx, but no safe publish target could be
-confirmed." Readiness previously treated the state alone as published, so the
-setup wizard skipped the "Build articles scaffold" step straight to topic
-research (and the generation endpoint would then 409 the same org). These tests
-pin the corrected semantics: detection-only states ("existing"/"detected") count
-as published ONLY with a usable publish path (publish_targets, a
-publish_mutation_target, or a registry); explicit verdict states and the
-roo_scaffolded+articles_scaffolded path keep their meaning.
+These fixtures exercise legacy scan shapes without a verified connection. They
+must remain unpublished even when a target, registry, ready label or adoption
+decision is present. Exact current-scan proof is exercised in the rollup suite.
 """
 import os
 
 from django.test import TestCase
 from rest_framework.test import APIClient
+from tests.website_fixtures import bind_config_fixture
 
 from content_factory.article_setup_reset import (
     article_setup_reset_marker,
@@ -96,7 +89,7 @@ class ArticleSystemDetectionReadinessTests(TestCase):
 
         readiness = compute_article_readiness(self.org, self.config, [])
         self.assertFalse(readiness["generation_ready"])
-        self.assertFalse(readiness["proofs"]["article_system_published"])
+        self.assertFalse(readiness["proofs"]["integration_verified"])
 
         scaffold = _profile_checks(self.org, self.config, latest_runs=[])["scaffold"]
         self.assertFalse(scaffold["passed"])
@@ -105,28 +98,28 @@ class ArticleSystemDetectionReadinessTests(TestCase):
         self.assertFalse(scaffold["setupMerged"])
         self.assertFalse(scaffold["setupBlocked"])
 
-    def test_detected_surface_with_publish_targets_stays_ready(self):
+    def test_detected_surface_with_publish_targets_requires_verification(self):
         self._set_article_system()
         self.config.publish_targets = [{"target_id": "articles", "kind": "react_article_system"}]
         self.config.save(update_fields=["publish_targets", "updated_at"])
 
         article_system = resolve_article_system(self.config)
-        self.assertTrue(_article_system_is_published(self.config, article_system))
-        self.assertTrue(compute_article_readiness(self.org, self.config, [])["generation_ready"])
+        self.assertFalse(_article_system_is_published(self.config, article_system))
+        self.assertFalse(compute_article_readiness(self.org, self.config, [])["generation_ready"])
 
-    def test_detected_surface_with_registry_stays_ready(self):
+    def test_detected_surface_with_registry_requires_verification(self):
         self._set_article_system(registry={"path": "app/articles/registry.ts", "export_name": "ARTICLES"})
 
         article_system = resolve_article_system(self.config)
-        self.assertTrue(_article_system_is_published(self.config, article_system))
-        self.assertTrue(compute_article_readiness(self.org, self.config, [])["generation_ready"])
+        self.assertFalse(_article_system_is_published(self.config, article_system))
+        self.assertFalse(compute_article_readiness(self.org, self.config, [])["generation_ready"])
 
-    def test_detected_surface_with_publish_mutation_target_stays_ready(self):
+    def test_detected_surface_with_publish_mutation_target_requires_verification(self):
         self._set_article_system(publish_mutation_target="app/articles/registry.ts")
 
         article_system = resolve_article_system(self.config)
-        self.assertTrue(_article_system_is_published(self.config, article_system))
-        self.assertTrue(compute_article_readiness(self.org, self.config, [])["generation_ready"])
+        self.assertFalse(_article_system_is_published(self.config, article_system))
+        self.assertFalse(compute_article_readiness(self.org, self.config, [])["generation_ready"])
 
     def test_detected_surface_with_only_bundle_only_target_is_not_ready(self):
         """talathrive.com's shape: reset + rescan re-detects the repo's own /stories
@@ -159,14 +152,14 @@ class ArticleSystemDetectionReadinessTests(TestCase):
 
         readiness = compute_article_readiness(self.org, self.config, [])
         self.assertFalse(readiness["generation_ready"])
-        self.assertFalse(readiness["proofs"]["article_system_published"])
+        self.assertFalse(readiness["proofs"]["integration_verified"])
 
         scaffold = _profile_checks(self.org, self.config, latest_runs=[])["scaffold"]
         self.assertFalse(scaffold["passed"])
         self.assertFalse(scaffold["generationReady"])
         self.assertFalse(scaffold["published"])
 
-    def test_detected_surface_with_hook_target_stays_ready(self):
+    def test_detected_surface_with_hook_target_requires_verification(self):
         # A hook target is a configured, automated publish route — unlike the
         # bundle_only fallback it must keep counting as a publish path.
         self._set_article_system()
@@ -181,8 +174,8 @@ class ArticleSystemDetectionReadinessTests(TestCase):
         self.config.save(update_fields=["publish_targets", "updated_at"])
 
         article_system = resolve_article_system(self.config)
-        self.assertTrue(_article_system_is_published(self.config, article_system))
-        self.assertTrue(compute_article_readiness(self.org, self.config, [])["generation_ready"])
+        self.assertFalse(_article_system_is_published(self.config, article_system))
+        self.assertFalse(compute_article_readiness(self.org, self.config, [])["generation_ready"])
 
     def test_missing_state_with_only_bundle_only_target_is_not_published(self):
         # Same false positive through the non-detection branch (state "missing"
@@ -202,7 +195,7 @@ class ArticleSystemDetectionReadinessTests(TestCase):
         article_system = resolve_article_system(self.config)
         self.assertFalse(_article_system_is_published(self.config, article_system))
 
-    def test_missing_state_with_scan_sourced_direct_target_stays_published(self):
+    def test_scan_sourced_direct_target_requires_verification(self):
         self._set_article_system(state="missing", reason="")
         self.config.publish_targets = [
             {
@@ -215,26 +208,26 @@ class ArticleSystemDetectionReadinessTests(TestCase):
         self.config.save(update_fields=["publish_targets", "updated_at"])
 
         article_system = resolve_article_system(self.config)
-        self.assertTrue(_article_system_is_published(self.config, article_system))
+        self.assertFalse(_article_system_is_published(self.config, article_system))
 
-    def test_roo_scaffolded_org_stays_ready(self):
+    def test_scaffolded_org_requires_current_verification(self):
         self._set_article_system(state="roo_scaffolded")
         self.config.articles_scaffolded = True
         self.config.save(update_fields=["articles_scaffolded", "updated_at"])
 
         article_system = resolve_article_system(self.config)
-        self.assertTrue(_article_system_is_published(self.config, article_system))
-        self.assertTrue(compute_article_readiness(self.org, self.config, [])["generation_ready"])
+        self.assertFalse(_article_system_is_published(self.config, article_system))
+        self.assertFalse(compute_article_readiness(self.org, self.config, [])["generation_ready"])
 
-    def test_detected_surface_with_bundle_only_and_direct_targets_stays_ready(self):
+    def test_detected_direct_target_alongside_bundle_requires_verification(self):
         # A real direct target alongside the bundle-only fallback IS a publish path.
         self._set_article_system(reason=TALA_DETECTION_REASON)
         self.config.publish_targets = [dict(TALA_BUNDLE_ONLY_TARGET), dict(DIRECT_TARGET)]
         self.config.save(update_fields=["publish_targets", "updated_at"])
 
         article_system = resolve_article_system(self.config)
-        self.assertTrue(_article_system_is_published(self.config, article_system))
-        self.assertTrue(compute_article_readiness(self.org, self.config, [])["generation_ready"])
+        self.assertFalse(_article_system_is_published(self.config, article_system))
+        self.assertFalse(compute_article_readiness(self.org, self.config, [])["generation_ready"])
 
 
 class ArticleSetupResetMarkerDurabilityTests(TestCase):
@@ -259,6 +252,9 @@ class ArticleSetupResetMarkerDurabilityTests(TestCase):
         )
 
     def test_org_config_put_preserves_reset_markers(self):
+        binding = bind_config_fixture(self.config)
+        self.config.website_connection.verified_sha = "a" * 40
+        self.config.website_connection.save(update_fields=["verified_sha"])
         reset_article_setup_config(self.config, github_repo="mesieou/skedy-ai")
         self.config.refresh_from_db()
         reset_marker = self.config.article_system.get("article_setup_reset_at")
@@ -267,6 +263,8 @@ class ArticleSetupResetMarkerDurabilityTests(TestCase):
         response = self.client.put(
             "/api/content-factory/org/config/",
             {
+                **binding,
+                "expected_source_sha": "a" * 40,
                 "domain": "skedy.io",
                 "article_system": {
                     "state": "existing",
@@ -305,11 +303,7 @@ RESET_AT = "2026-07-08T14:28:17+00:00"
 
 
 class ArticleSetupResetMarkerSuppressionTests(TestCase):
-    """After a reset, a detection verdict alone must not re-complete the wizard: even
-    if a rescan re-detects a genuinely direct-publishable surface, the reset watermark
-    suppresses "published" until the founder explicitly builds or adopts. The
-    articles_scaffolded guard exempts an org they already rebuilt, and the suppression
-    is detection-only (explicit readiness verdicts keep their meaning)."""
+    """Reset, scaffold and legacy ready labels cannot mint current proof."""
 
     def setUp(self):
         self.org = Organization.objects.create(domain="talathrive.com", name="Tala Thrive")
@@ -345,7 +339,7 @@ class ArticleSetupResetMarkerSuppressionTests(TestCase):
         article_system = resolve_article_system(self.config)
         self.assertFalse(_article_system_is_published(self.config, article_system))
 
-    def test_reset_marker_does_not_suppress_scaffolded_org(self):
+    def test_reset_scaffolded_org_still_requires_verification(self):
         self._apply(
             {
                 "state": "existing",
@@ -356,11 +350,10 @@ class ArticleSetupResetMarkerSuppressionTests(TestCase):
             articles_scaffolded=True,
         )
         article_system = resolve_article_system(self.config)
-        self.assertTrue(_article_system_is_published(self.config, article_system))
+        self.assertFalse(_article_system_is_published(self.config, article_system))
 
-    def test_reset_marker_ignores_explicit_ready_states(self):
-        # A non-detection published state (e.g. registry_driven_seo_ready) is an
-        # explicit readiness verdict — the reset marker must not suppress it.
+    def test_reset_explicit_ready_label_still_requires_verification(self):
+        # An explicit legacy label still lacks current repository verification.
         article_system = {
             "state": "registry_driven_seo_ready",
             "source": "scan",
@@ -368,7 +361,7 @@ class ArticleSetupResetMarkerSuppressionTests(TestCase):
         }
         self._apply(article_system, publish_targets=[dict(DIRECT_TARGET)])
         # Pass the raw dict (normalize would coerce this state to "missing").
-        self.assertTrue(_article_system_is_published(self.config, article_system))
+        self.assertFalse(_article_system_is_published(self.config, article_system))
 
 
 class UseDetectedClearsResetMarkersTests(TestCase):
@@ -393,7 +386,7 @@ class UseDetectedClearsResetMarkersTests(TestCase):
             github_repo="Gshah810/tala-main-website",
         )
 
-    def test_use_detected_clears_reset_markers(self):
+    def test_use_detected_clears_reset_markers_without_publishing(self):
         # Reset stamps the watermark; a later rescan re-detects a direct-publishable
         # surface but the marker keeps it suppressed until the founder chooses.
         reset_article_setup_config(self.config, github_repo="Gshah810/tala-main-website")
@@ -422,6 +415,6 @@ class UseDetectedClearsResetMarkersTests(TestCase):
 
         self.config.refresh_from_db()
         self.assertFalse(article_setup_reset_marker(self.config.article_system))
-        self.assertTrue(
+        self.assertFalse(
             _article_system_is_published(self.config, resolve_article_system(self.config))
         )

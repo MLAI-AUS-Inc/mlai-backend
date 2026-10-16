@@ -278,11 +278,20 @@ class DeferredScheduledConfirmRefundTests(TestCase):
             competitors=["competitor-a.com"],
             seed_keywords=["confirm keyword"],
         )
-        OrganizationContentConfig.objects.create(
+        config = OrganizationContentConfig.objects.create(
             organization=self.org,
             github_repo="owner/confirm-repo",
             scan_summary="scan ready",
         )
+        from founder_tools.models import VibeRaisingCompany, VibeRaisingProfile
+        from tests.website_fixtures import bind_verified_target_fixture, install_github_provider_fixture
+        profile = VibeRaisingProfile.objects.create(user=self.user, role=VibeRaisingProfile.ROLE_FOUNDER)
+        company = VibeRaisingCompany.objects.create(profile=profile, organization=self.org,
+            name='Confirm Example', domain=self.org.domain)
+        profile.active_company = company
+        profile.save(update_fields=['active_company'])
+        original_scope = bind_verified_target_fixture(config, user=self.user)
+        install_github_provider_fixture(self, config.website_connection)
         self.source_job = ContentFactoryJob.objects.create(
             job_id="scheduled-source-1",
             domain="confirm-example.com",
@@ -291,6 +300,8 @@ class DeferredScheduledConfirmRefundTests(TestCase):
             selected_keyword="scheduled keyword",
             billing_status="deferred",
             request_meta={
+                **original_scope,
+                'expected_source_sha': config.website_connection.verified_sha,
                 "domain": "confirm-example.com",
                 "trigger_source": "scheduled_daily",
                 "client_request_id": "scheduled-client-1",
@@ -324,6 +335,7 @@ class DeferredScheduledConfirmRefundTests(TestCase):
             )
 
         self.source_job.refresh_from_db()
+        mock_post.assert_called_once()
         self.user.points_account.refresh_from_db()
         self.assertEqual(self.source_job.billing_status, "refunded")
         self.assertEqual(self.user.points_account.balance, 20)

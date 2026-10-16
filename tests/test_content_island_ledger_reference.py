@@ -50,7 +50,7 @@ class LedgerReferenceIdHelperTests(TestCase):
 class ContentIslandTopicChargeTests(TestCase):
     def setUp(self):
         self.user = User.objects.create_user(
-            email="island-charge@example.com", password="password", role="participant"
+            email="island-charge@example.com", password="password", role="participant", slack_id="U0FOUNDER"
         )
         from roo.models import PointsAccount
 

@@ -1,6 +1,7 @@
 import json
 import logging
 
+from django.db import DatabaseError
 from rest_framework import status
 from rest_framework.permissions import AllowAny
 from rest_framework.response import Response
@@ -12,9 +13,28 @@ from integrations.services.community_bridge.buzz import BuzzBridgeClient
 from integrations.services.community_bridge.slack import SlackBridgeClient
 from integrations.services.community_bridge.store import ingest_inbound_event, ingest_slack_event
 from integrations.services.slack_dm_mirror import ingest_mlai_dm_event, ingest_slack_dm_event
+from community_chat.adapter import MembershipAdapterUnavailable
 
 
 logger = logging.getLogger(__name__)
+
+
+def _log_cursor_dependency_wait(exc):
+    """Classify known retry dependencies without logging cursor or exception contents."""
+    if isinstance(exc, DatabaseError):
+        dependency, reason = "database", "database_unavailable"
+    elif isinstance(exc, MembershipAdapterUnavailable):
+        dependency, reason = "relay_adapter", "adapter_unavailable"
+    elif type(exc) is RuntimeError and str(exc) in {
+        "inbox_delivery_link_pending", "private_inbox_anchor_pending",
+    }:
+        dependency, reason = "bridge_delivery", "anchor_pending"
+    else:
+        dependency, reason = "read_cursor", "processing_unavailable"
+    logger.warning(
+        "community_bridge_dependency_wait endpoint=buzz_events dependency=%s reason=%s",
+        dependency, reason,
+    )
 
 
 class SlackCommunityBridgeEventView(APIView):
@@ -87,9 +107,13 @@ class BuzzCommunityBridgeEventView(APIView):
                 result = accept(payload)
             except (ValueError, TypeError, AttributeError):
                 return Response({"error": "invalid_read_cursor"}, status=status.HTTP_400_BAD_REQUEST)
-            except Exception:
+            except Exception as exc:
+                _log_cursor_dependency_wait(exc)
                 return Response({"error": "read_cursor_retry"}, status=status.HTTP_503_SERVICE_UNAVAILABLE)
             if result.get("status") == "disabled":
+                logger.info(
+                    "community_bridge_dependency_wait endpoint=buzz_events dependency=configuration reason=inbox_export_disabled"
+                )
                 return Response({"error": "inbox_export_disabled"}, status=status.HTTP_503_SERVICE_UNAVAILABLE)
             return Response({"ok": True, **result}, status=status.HTTP_200_OK)
         normalized_event = payload.get("normalized_event")

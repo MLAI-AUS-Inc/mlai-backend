@@ -12,12 +12,15 @@ from integrations.services.github_app import (
 
 
 def _cache_key(identifier):
-    return f"website-installation-grants-v1:{identifier}"
+    from django.conf import settings
+    version = "v2" if getattr(settings, "ARTICLES_SETUP_CONSENT_ENABLED", False) else "v1"
+    return f"website-installation-grants-{version}:{identifier}"
 
 
 def invalidate_installation_grants(identifier):
     """Forget grants when an authenticated installation webhook accepts updates."""
-    cache.delete(_cache_key(str(identifier)))
+    cache.delete(f"website-installation-grants-v1:{identifier}")
+    cache.delete(f"website-installation-grants-v2:{identifier}")
 
 
 def installation_grants(connection):
@@ -33,6 +36,10 @@ def installation_grants(connection):
         url = f"https://github.com/organizations/{quote(stored.account_login, safe='')}/settings/installations/{quote(identifier, safe='')}"
     result = {"workflows": False, "checks": False, "statuses": False, "settingsUrl": url}
     try:
+        from django.conf import settings
+        if getattr(settings, "ARTICLES_SETUP_CONSENT_ENABLED", False):
+            repository = _require_installation_profile_permissions(identifier, profile="repository")
+            result.update(contents=repository.get("contents") == "write", pull_requests=repository.get("pull_requests") == "write")
         try:
             workflow = _require_installation_profile_permissions(identifier, profile="workflow_files")
             result["workflows"] = workflow.get("workflows") == "write"

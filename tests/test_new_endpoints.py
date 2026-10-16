@@ -633,6 +633,13 @@ class ContentGenerateAutoWriteTests(TestCase):
             name="MLAI",
             domain="mlai.au",
         )
+        from founder_tools.models import VibeRaisingCompany, VibeRaisingProfile
+        profile = VibeRaisingProfile.objects.create(user=self.user, role="founder")
+        company = VibeRaisingCompany.objects.create(
+            profile=profile, organization=self.organization, name="MLAI", domain="mlai.au"
+        )
+        profile.active_company = company
+        profile.save(update_fields=["active_company"])
         OrganizationContentConfig.objects.create(
             organization=self.organization,
             github_repo="owner/repo",
@@ -688,7 +695,7 @@ class ContentGenerateAutoWriteTests(TestCase):
         self.assertEqual(generate_payload.get('slack_user_id'), self.integration.slack_user_id)
         self.assertEqual(generate_payload.get('request_source'), 'roo_slackbot')
 
-    def test_generate_with_topic_omits_delivery_mode_when_no_preference_exists(self):
+    def test_generate_with_topic_requires_delivery_consent_without_verified_integration(self):
         url = reverse('content_generate')
         data = self._generate_request_data(topic="best ai coding agents")
 
@@ -696,10 +703,8 @@ class ContentGenerateAutoWriteTests(TestCase):
             mock_post.return_value = self._mock_response(202, {"job_id": "job-article-456"})
             response = self.client.post(url, data, format='json')
 
-        self.assertEqual(response.status_code, status.HTTP_202_ACCEPTED)
-        payload = mock_post.call_args.kwargs.get('json') or {}
-        self.assertIsNone(payload.get('delivery_mode'))
-        self.assertIsNone(payload.get('delivery_mode_confirmed'))
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST, response.data)
+        mock_post.assert_not_called()
 
     def test_generate_with_topic_allows_repo_less_domain_without_scan_summary(self):
         config = OrganizationContentConfig.objects.get(organization=self.organization)
@@ -717,7 +722,11 @@ class ContentGenerateAutoWriteTests(TestCase):
         )
 
         url = reverse('content_generate')
-        data = self._generate_request_data(topic="best ai coding agents")
+        data = self._generate_request_data(
+            topic="best ai coding agents",
+            delivery_mode="content_only",
+            delivery_mode_confirmed=True,
+        )
 
         with patch('integrations.services.article_generation.http_requests.post') as mock_post:
             mock_post.return_value = self._mock_response(202, {"job_id": "job-article-repo-less-456"})
@@ -726,8 +735,8 @@ class ContentGenerateAutoWriteTests(TestCase):
         self.assertEqual(response.status_code, status.HTTP_202_ACCEPTED)
         payload = mock_post.call_args.kwargs.get('json') or {}
         self.assertEqual(payload.get('delivery_mode'), 'content_only')
-        self.assertFalse(payload.get('delivery_mode_confirmed'))
-        self.assertIsNone(payload.get('github_repo'))
+        self.assertTrue(payload.get('delivery_mode_confirmed'))
+        self.assertEqual(payload.get('github_repo'), '')
 
     @patch('content_factory.content_views.trigger_article_generation')
     def test_generate_passes_slack_thread_context_to_service(self, mock_trigger):
@@ -767,7 +776,7 @@ class ContentGenerateAutoWriteTests(TestCase):
 
     @patch('integrations.services.article_generation.get_github_credentials_for_domain')
     @patch('integrations.services.article_generation.http_requests.post')
-    def test_generate_with_topic_uses_scan_summary_article_system_fallback(self, mock_post, mock_get_credentials):
+    def test_scan_summary_does_not_replace_generation_admission(self, mock_post, mock_get_credentials):
         config = OrganizationContentConfig.objects.get(organization=self.organization)
         config.scan_summary = {
             "articles_status": {
@@ -792,8 +801,8 @@ class ContentGenerateAutoWriteTests(TestCase):
 
         response = self.client.post(url, data, format='json')
 
-        self.assertEqual(response.status_code, status.HTTP_202_ACCEPTED)
-        self.assertEqual(response.data['job_id'], 'job-article-123')
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST, response.data)
+        mock_post.assert_not_called()
 
     def test_generate_rejects_missing_request_source(self):
         response = self.client.post(

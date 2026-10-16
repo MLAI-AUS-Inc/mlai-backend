@@ -118,11 +118,15 @@ class SlackEndpointErrorMappingTests(SimpleTestCase):
         )
 
     def test_database_errors_are_service_unavailable(self):
-        self._assert_both_endpoints(
-            lambda: DatabaseError("database connection failed"),
-            status.HTTP_503_SERVICE_UNAVAILABLE,
-            {"error": "slack_storage_unavailable"},
-        )
+        with self.assertLogs("community_chat.slack_views", level="WARNING") as logged:
+            self._assert_both_endpoints(
+                lambda: DatabaseError("synthetic-secret-database-details"),
+                status.HTTP_503_SERVICE_UNAVAILABLE,
+                {"error": "slack_storage_unavailable"},
+            )
+        self.assertEqual(len(logged.output), 2)
+        self.assertTrue(all("dependency=database reason=database_unavailable" in item for item in logged.output))
+        self.assertNotIn("synthetic-secret", str(logged.output))
 
     def test_domain_errors_keep_the_existing_validation_contract(self):
         directory = self._request_with_service_error(

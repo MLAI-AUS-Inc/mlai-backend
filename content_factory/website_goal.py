@@ -9,11 +9,12 @@ import re
 MILESTONES = ("access", "understood", "integrated", "previewed", "approved", "merged", "live", "first_draft", "first_article_live")
 CLASSES = ("transient", "waiting", "repairable", "strategy", "needs_user", "unsupported")
 SCOPE_FIELDS = ("company_id", "organization_id", "connection_id", "connection_generation", "repository_id", "branch", "app_root", "configuration_revision", "deletion_epoch")
-ACTION_FOR = {"access": "verify-access", "understood": "scan", "integrated": "setup", "previewed": "ci-attestation", "approved": "setup", "merged": "merge", "live": "verify"}
+ACTION_FOR = {"access": "verify-access", "understood": "scan", "integrated": "setup", "previewed": "ci-attestation", "approved": "setup", "merged": "merge", "live": "verify",
+    "first_draft":"first-article","first_article_live":"first-article"}
 PROOF_KINDS = {
     "access": {"repository_access"}, "understood": {"repository_scan"},
     "integrated": {"verified_target", "setup_candidate"},
-    "previewed": {"authenticated_ci", "setup_preview"},
+    "previewed": {"authenticated_ci", "authenticated_hosted", "setup_preview"},
     "approved": {"backend_approval", "no_mutation_required"},
     "merged": {"backend_merge", "no_mutation_required"}, "live": {"deployment_marker"},
     "first_draft": {"article_draft"}, "first_article_live": {"article_deployment_marker"},
@@ -133,6 +134,8 @@ def refresh_goal(goal, proofs, *, scope, source_sha, now):
         if old and (not passed or any(mapping(old).get(key) != mapping(candidate).get(key)
                                      for key in ("kind", "scope", "source_sha", "sha", "run_id", "evidence_digest"))):
             history.append({"name": name, "evidence_digest": mapping(old).get("evidence_digest"), "invalidated_at": now.isoformat()})
+        if passed and item.get("state") != "passed":
+            item["observed_at"] = now.isoformat()
         item["proof"] = deepcopy(candidate) if passed else None
         item["state"] = "passed" if passed else "not_required" if not item["required"] else "invalidated" if old else "pending"
     result["proof_history"] = history[-MAX_HISTORY:]

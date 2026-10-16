@@ -186,7 +186,7 @@ def apply_pull_request_state(article, pr_state, *, now=None):
     return changed
 
 
-def refresh_publish_statuses(organization, config=None, *, limit=6, force=False, max_seconds=12):
+def refresh_publish_statuses(organization, config=None, *, limit=6, force=False, max_seconds=12, source_run_ids=None):
     """Best-effort refresh of historical publication and current HTTP content.
 
     Bounded work per call: one cached sitemap fetch plus at most `limit`
@@ -195,10 +195,10 @@ def refresh_publish_statuses(organization, config=None, *, limit=6, force=False,
     """
     now = timezone.now()
     deadline = time.monotonic() + max_seconds
-    candidates = list(
-        WrittenArticle.objects.filter(organization=organization)
-        .order_by(F("live_checked_at").asc(nulls_first=True), "created_at")[:25]
-    )
+    selected=WrittenArticle.objects.filter(organization=organization)
+    if source_run_ids is not None:
+        selected=selected.filter(source_run_id__in=source_run_ids)
+    candidates = list(selected.order_by(F("live_checked_at").asc(nulls_first=True), "created_at")[:25])
     if not force:
         candidates = [
             article

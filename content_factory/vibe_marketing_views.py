@@ -782,8 +782,18 @@ def _validate_article_start_reservation(context, payload):
     validate_operation(website, payload)
 
 
-def _charge_roo_points_for_article(request, *, context, payload: dict):
-    quote_error = _quoted_price_response(request, cost_points=get_content_factory_article_cost_points(context.organization.domain))
+def _charge_roo_points_for_article(request, *, context, payload: dict, goal_operation_id=None):
+    # Only the internal goal dispatcher can supply this argument. HTTP/MCP body
+    # fields cannot bypass the normal current-price and wallet checks.
+    if goal_operation_id is not None:
+        from .website_first_article_billing import generation_key
+        try:
+            payload["client_request_id"] = generation_key(goal_operation_id, context=context, user=request.user)
+            payload.update(first_article_goal_operation_id=str(goal_operation_id),first_article_goal_id=str(goal_operation_id))
+        except WebsiteAuthorityError as exc:
+            return None, None, None, Response(exc.as_dict(), status=exc.status)
+    quote_error = (_quoted_price_response(request, cost_points=get_content_factory_article_cost_points(context.organization.domain))
+        if goal_operation_id is None else None)
     if quote_error is not None:
         return None, None, None, quote_error
     editorial_error = _refresh_article_editorial_payload(organization=context.organization, payload=payload)
@@ -815,13 +825,19 @@ def _charge_roo_points_for_article(request, *, context, payload: dict):
     with transaction.atomic():
         try:
             _validate_article_start_reservation(context, payload)
-            charged_user, charge_ledger, charge_amount = charge_content_factory_request_for_user(
-                user=request.user,
-                actor_id=actor_id,
-                article_request=article_request,
-                resolved_domain=domain,
-                prevalidated_admission=True,
-            )
+            if goal_operation_id is not None:
+                from .website_first_article_billing import consume
+                charged_user, charge_ledger, charge_amount = consume(goal_operation_id,
+                    context=context, user=request.user, payload=article_request)
+                payload.update({key: article_request[key] for key in ("first_article_goal_operation_id", "first_article_goal_id")})
+            else:
+                charged_user, charge_ledger, charge_amount = charge_content_factory_request_for_user(
+                    user=request.user,
+                    actor_id=actor_id,
+                    article_request=article_request,
+                    resolved_domain=domain,
+                    prevalidated_admission=True,
+                )
         except InsufficientRooPointsError as exc:
             return None, None, None, Response(
                 getattr(exc, "payload", None) or build_roo_points_payload(
@@ -888,7 +904,6 @@ def _charge_roo_points_for_content_island_topic_generation(request, *, context, 
         "user_last_name": getattr(request.user, "last_name", ""),
         "user_avatar_url": getattr(request.user, "avatar_url", ""),
     }
-    cost_points = get_content_factory_content_island_topic_cost_points(domain)
     # MCP research has a durable original-input receipt before a worker call.
     # Existing HTTP clients retain their contract; only explicitly marked MCP
     # requests enlist the existing outbox in the same Roo spend transaction.
@@ -1560,9 +1575,10 @@ def _run_belongs_to_context(run, context) -> bool:
     return normalize_company_domain(run.domain) == normalize_company_domain(context.organization.domain)
 
 
-def _latest_runs_for_org(organization, limit=24):
+def _latest_runs_for_org(organization, limit=24, *, config=None, prefetch_feedback=False):
     rows = ContentFactoryRun.objects.filter(domain=organization.domain, workflow__in=VIBE_MARKETING_WORKFLOWS).exclude(status=ContentFactoryRunStatus.CANCELLED)
-    config = _get_config(organization)
+    if config is None:
+        config = _get_config(organization)
     connection = getattr(config, "website_connection", None)
     if connection:
         from django.db.models import Q
@@ -1581,7 +1597,11 @@ def _latest_runs_for_org(organization, limit=24):
             retained.append(selected)
     retained_ids = {run.run_id for run in retained}
     ordinary = [run for run in candidates if run.run_id not in retained_ids and not article_setup_reset_ignores_run(config, run)]
-    return sorted(retained + ordinary[:max(limit - len(retained), 0)], key=lambda run: run.updated_at, reverse=True)
+    selected_runs = sorted(retained + ordinary[:max(limit - len(retained), 0)], key=lambda run: run.updated_at, reverse=True)
+    if prefetch_feedback:
+        from django.db.models import Prefetch, prefetch_related_objects
+        prefetch_related_objects(selected_runs, Prefetch("component_comments", to_attr="_bootstrap_component_comments"))
+    return selected_runs
 
 
 
@@ -4839,9 +4859,9 @@ def _component_feedback_from_run(run):
     batch_source_run = run
     if run.workflow == "article_revision" and source_run_id:
         batch_source_run = ContentFactoryRun.objects.filter(run_id=source_run_id).first() or run
-    comments = list(
-        VibeMarketingComponentComment.objects.filter(run=run).order_by("created_at", "id")
-    )
+    prefetched_comments = getattr(run, "_bootstrap_component_comments", None)
+    comments = (list(prefetched_comments) if isinstance(prefetched_comments, list) else list(
+        VibeMarketingComponentComment.objects.filter(run=run).order_by("created_at", "id")))
     latest_batch = result.get("component_feedback_latest_batch")
     if not isinstance(latest_batch, dict):
         source_result = batch_source_run.result if isinstance(batch_source_run.result, dict) else {}
@@ -4856,7 +4876,7 @@ def _component_feedback_from_run(run):
                 "status": "running",
             }
     if not isinstance(latest_batch, dict):
-        submitted_comments = list(
+        submitted_comments = comments if batch_source_run is run else list(
             VibeMarketingComponentComment.objects.filter(run=batch_source_run)
             .exclude(batch_id="")
             .order_by("created_at", "id")
@@ -6791,6 +6811,10 @@ def _check_and_merge_publish_pr(*, run, context):
         )
         pull, checks = _github_pull_checks_state(repo=repo, pr_number=pr_number, token=token)
         if pull.get("merged"):
+            if (run.run_request or {}).get("first_article_goal_operation_id"):
+                from .website_connections import validate_publish_merge_source,record_publish_merge_intent
+                validate_publish_merge_source(run,(pull.get("head") or {}).get("sha"),(pull.get("head") or {}).get("ref"))
+                record_publish_merge_intent(run,pull,pr_number,action="read",source_sha=(run.run_request or {}).get("expected_source_sha"))
             result = dict(run.result or {})
             result["merge_status"] = "merged"
             result["checks_status"] = "merged"
@@ -6813,9 +6837,25 @@ def _check_and_merge_publish_pr(*, run, context):
                 "detail": checks.get("message") or "Publish PR checks are not ready.",
                 "checks": checks,
             }
+        from .website_first_article import goal_auto_merge
+        source_run=_publish_source_run_for_child(run,context)
+        goal_merge=goal_auto_merge((source_run,run)) is True
         from .website_connections import validate_publish_merge_source, record_publish_merge_intent
-        validate_publish_merge_source(run, (pull.get("head") or {}).get("sha"), (pull.get("head") or {}).get("ref"))
-        record_publish_merge_intent(run, pull, pr_number)
+        if goal_merge:
+            validate_publish_merge_source(run,(pull.get("head") or {}).get("sha"),(pull.get("head") or {}).get("ref"))
+            record_publish_merge_intent(run,pull,pr_number)
+            from .website_setup_merge_policy import setup_merge_policy
+            policy=setup_merge_policy(config.website_connection,pull,token=token,checks=checks)
+            if policy["decision"]!="merge":
+                result=dict(run.result or {})
+                result.update(merge_status="manual_merge_required" if policy["decision"]=="needs_user" else "pending",
+                    merge_blocked_reason=policy["reason"],checks_status=checks.get("state"))
+                run.result=result;run.save(update_fields=["result","updated_at"])
+                return {"outcome":"manual_required" if policy["decision"]=="needs_user" else "pending",
+                    "detail":policy["reason"],"checks":checks}
+        if not goal_merge:
+            validate_publish_merge_source(run, (pull.get("head") or {}).get("sha"), (pull.get("head") or {}).get("ref"))
+            record_publish_merge_intent(run, pull, pr_number)
         merge_payload = {
             "sha": (pull.get("head") or {}).get("sha"),
             "commit_title": f"Publish Content Factory article from {run.run_id}",
@@ -6829,8 +6869,23 @@ def _check_and_merge_publish_pr(*, run, context):
             expected=(200, 201),
         )
     except (ArticleGenerationError, TokenRefreshError, ValueError, http_client.RequestException) as exc:
+        if (run.run_request or {}).get("first_article_goal_operation_id"):
+            from .website_setup_merge_policy import setup_merge_refusal
+            refusal=setup_merge_refusal(exc)
+            result=dict(run.result or {})
+            result.update(merge_status="manual_merge_required" if refusal["decision"]=="needs_user" else "pending",
+                merge_blocked_reason=refusal["reason"])
+            run.result=result;run.save(update_fields=["result","updated_at"])
+            return {"outcome":"manual_required" if refusal["decision"]=="needs_user" else "pending","detail":refusal["reason"],"checks":{}}
         return {"outcome": "error", "detail": str(exc), "checks": {}}
 
+    if merged.get("merged") is not True:
+        from .website_setup_merge_policy import setup_merge_refusal
+        refusal=setup_merge_refusal(merged.get("message"))
+        result=dict(run.result or {})
+        result.update(merge_status="manual_merge_required" if refusal["decision"]=="needs_user" else "pending",merge_blocked_reason=refusal["reason"])
+        run.result=result;run.save(update_fields=["result","updated_at"])
+        return {"outcome":"manual_required" if refusal["decision"]=="needs_user" else "pending","detail":refusal["reason"],"checks":checks}
     result = dict(run.result or {})
     result["merge_status"] = "merged"
     result["checks_status"] = "success"
@@ -8221,6 +8276,9 @@ def _publish_auto_merge_enabled(*runs):
 
     run_request is the durable home (remote status syncs replace result);
     result is checked too because annotations mirror the flag there."""
+    from .website_first_article import goal_auto_merge
+    goal_permission=goal_auto_merge(runs)
+    if goal_permission is not None:return goal_permission
     for run in runs:
         if not run:
             continue
@@ -8447,6 +8505,9 @@ def _ensure_local_publish_child_from_known_id(
         "delivery_mode": "publish_code",
         "delivery_mode_confirmed": True,
     }
+    original_request=_run_mapping(source_run.run_request)
+    for key in ("operation_id","operation_attempt","deletion_epoch","first_article_goal_operation_id","first_article_goal_id","goal_budget","article_delivery_v1"):
+        if key in original_request:publish_payload[key]=original_request[key]
     # The worker creates this child by copying the source request. Mirror that
     # exact identity rather than adding today's optional consent fields.
     for key in CONNECTION_FIELDS:
@@ -8511,6 +8572,9 @@ def _sync_publish_child_from_control_response(
         ("delivery_mode", "publish_code"),
         ("delivery_mode_confirmed", True),
         ("review_source_run_id", review_source_run_id),
+        ("first_article_goal_operation_id",_run_mapping(remote_run.run_request).get("first_article_goal_operation_id")),
+        ("first_article_goal_id",_run_mapping(remote_run.run_request).get("first_article_goal_id")),
+        ("article_delivery_v1",_run_mapping(remote_run.run_request).get("article_delivery_v1")),
     ):
         if value not in (None, "") and publish_request.get(key) != value:
             publish_request[key] = value
@@ -9365,7 +9429,7 @@ def _article_setup_state_for_config(config, *, latest_runs=None, run=None, organ
     }
 
 
-def _article_setup_state(*, context=None, run=None, latest_runs=None, generation_ready=None) -> dict:
+def _article_setup_state(*, context=None, run=None, latest_runs=None, generation_ready=None, config=None) -> dict:
     organization = context.organization if context is not None else None
     if organization is None and run is not None and run.domain:
         organization = Organization.objects.filter(domain__iexact=normalize_company_domain(run.domain)).first()
@@ -9385,7 +9449,8 @@ def _article_setup_state(*, context=None, run=None, latest_runs=None, generation
             "published": False,
             "source": "none",
         }
-    config = _get_config(organization) if context is not None else OrganizationContentConfig.objects.filter(organization=organization).first()
+    if config is None:
+        config = _get_config(organization) if context is not None else OrganizationContentConfig.objects.filter(organization=organization).first()
     if config is None:
         return {
             "repo": "",
@@ -9411,16 +9476,13 @@ def _article_setup_state(*, context=None, run=None, latest_runs=None, generation
     )
 
 
-def _workflow_progress_context(*, context=None, run=None, latest_runs=None, checks=None):
+def _workflow_progress_context(*, context=None, run=None, latest_runs=None, checks=None, config=None):
     organization = context.organization if context is not None else None
     if organization is None and run is not None and run.domain:
         organization = Organization.objects.filter(domain__iexact=normalize_company_domain(run.domain)).first()
-    if organization is not None and context is not None:
-        config = _get_config(organization)
-    elif organization is not None:
-        config = OrganizationContentConfig.objects.filter(organization=organization).first()
-    else:
-        config = None
+    if config is None and organization is not None:
+        config = (_get_config(organization) if context is not None
+            else OrganizationContentConfig.objects.filter(organization=organization).first())
     if latest_runs is None:
         latest_runs = _latest_runs_for_org(organization, limit=12) if organization is not None else []
     latest_runs = list(latest_runs or [])
@@ -9894,12 +9956,13 @@ def compute_article_readiness(
             "proofs": {"integration_verified": evidence["verified"], "github_credential_available": github_ready}}
 
 
-def _workflow_progress(*, context=None, run=None, latest_runs=None, checks=None, topic_candidates=None):
+def _workflow_progress(*, context=None, run=None, latest_runs=None, checks=None, topic_candidates=None, config=None):
     organization, config, latest_runs, checks = _workflow_progress_context(
         context=context,
         run=run,
         latest_runs=latest_runs,
         checks=checks,
+        config=config,
     )
     scan_run = (run if run and run.workflow in SCAN_WORKFLOWS and not article_setup_reset_ignores_run(config, run)
         else _latest_run_matching(latest_runs, SCAN_WORKFLOWS))
@@ -10935,7 +10998,7 @@ def _nested_run_result_value(result, *keys):
 
 def _serialize_run(
     run, *, context=None, latest_runs=None, checks=None, mode="full",
-    topic_candidates=None, precomputed_article_setup_state=None,
+    topic_candidates=None, precomputed_article_setup_state=None, config=None,
 ):
     from .setup_status_projection import terminal_setup_projection
     run = terminal_setup_projection(_setup_pr_creation_failure_view(run))
@@ -10989,6 +11052,7 @@ def _serialize_run(
             run=run,
             latest_runs=latest_runs,
             generation_ready=(checks or {}).get("scaffold", {}).get("generationReady") if checks else None,
+            config=config,
         )
     )
     scan_progress, scan_progress_snake = _scan_progress_payloads(run)
@@ -11054,7 +11118,7 @@ def _serialize_run(
             "scan_progress": scan_progress_snake,
             **({"contentIsland": content_island, "content_island": content_island} if content_island else {}),
             "workflowProgress": _workflow_progress(
-                context=context, run=run, latest_runs=latest_runs, checks=checks, topic_candidates=topic_candidates
+                context=context, run=run, latest_runs=latest_runs, checks=checks, topic_candidates=topic_candidates, config=config
             ),
             "result": _strip_missing_setup_run_refs(_compact_result_for_run(run)),
             **reliability_presentation(result, status=run.status, workflow=run.workflow,
@@ -11133,7 +11197,7 @@ def _serialize_run(
         **({"contentIsland": content_island, "content_island": content_island} if content_island else {}),
         "componentFeedback": _component_feedback_from_run(run),
         "workflowProgress": _workflow_progress(
-            context=context, run=run, latest_runs=latest_runs, checks=checks, topic_candidates=topic_candidates
+            context=context, run=run, latest_runs=latest_runs, checks=checks, topic_candidates=topic_candidates, config=config
         ),
         "result": _strip_missing_setup_run_refs(response_result),
         **reliability_presentation(result, status=run.status, workflow=run.workflow,
@@ -11451,20 +11515,20 @@ def _bootstrap_cache_key(context, config, view):
         return None
 
 
-def _overlay_live_bootstrap_fields(payload, *, context, request):
-    """Recompute the only per-user / per-request fields so they are never cached.
+def _overlay_live_bootstrap_fields(payload, *, context, request, config=None, latest_runs=None, capabilities=None):
+    """Refresh current website facts and actor authority even on cache hits.
 
-    googleBaselineConnection depends on the authenticated user's Google credentials
-    and its connectUrl is derived from the request, so both must reflect the live
-    request even on a cache hit. Every other field in the payload is org-derived.
+    Optional inputs are reused only within the calling request. Google credentials
+    and connect URLs also belong to that authenticated request.
     """
     if not isinstance(payload, dict):
         return payload
-    website_config = _get_config(context.organization)
+    website_config = config if config is not None else _get_config(context.organization)
     website = website_summary(website_config, company_id=context.company.pk)
     payload["websiteConnection"] = website
-    if isinstance(payload.get("articleSetupState"), dict):
-        payload["articleSetupState"] = {**payload["articleSetupState"], "websiteConnection": website}
+    for key in ("articleSetupState", "article_setup_state"):
+        if isinstance(payload.get(key), dict):
+            payload[key] = {**payload[key], "websiteConnection": website}
     try:
         google_status = google_baseline_connection_status(context.profile.user, context.organization)
         google_status["connectUrl"] = _google_baseline_connect_url(request, context)
@@ -11474,7 +11538,10 @@ def _overlay_live_bootstrap_fields(payload, *, context, request):
             "vibe_bootstrap_google_overlay_failed org_id=%s",
             getattr(getattr(context, "organization", None), "id", None),
         )
-    capabilities = _article_capabilities_for_context(context, _get_config(context.organization))
+    runs = latest_runs if latest_runs is not None else _latest_runs_for_org(context.organization, limit=24,
+        config=website_config, prefetch_feedback=True)
+    if capabilities is None:
+        capabilities = _article_capabilities_for_context(context, website_config, latest_runs=runs, allow_probe=False)
     payload["articleCapabilities"] = capabilities
     from .website_journey import journey_for_context
     payload["websiteJourney"] = journey_for_context(context, website_config, capabilities=capabilities)
@@ -11500,19 +11567,18 @@ def _overlay_live_bootstrap_fields(payload, *, context, request):
     checks = payload.get("checks") or {}
     payload["guidedSteps"], payload["currentGuidedStep"] = _guided_steps(checks)
     payload["recommendedNextAction"] = _recommended_next_action(checks)
-    runs = _latest_runs_for_org(context.organization, limit=24)
-    payload["workflowProgress"] = _workflow_progress(context=context, latest_runs=runs,
-        checks=checks, topic_candidates=payload.get("topicCandidates") or [])
-    by_id = {run.run_id: run for run in runs}
+    from .bootstrap_progress_cache import project_workflow_progress
+    progress = project_workflow_progress(context=context, config=website_config, runs=runs, checks=checks,
+        candidates=payload.get("topicCandidates") or [], serialized_runs=payload.get("latestRuns") or [],
+        capabilities=capabilities)
+    payload["workflowProgress"] = progress["root"]
     for serialized in payload.get("latestRuns") or []:
-        row = by_id.get(serialized.get("runId"))
-        if row:
-            serialized["workflowProgress"] = _workflow_progress(context=context, run=row,
-                latest_runs=runs, checks=checks, topic_candidates=payload.get("topicCandidates") or [])
+        if serialized.get("runId") in progress["runs"]:
+            serialized["workflowProgress"] = progress["runs"][serialized["runId"]]
     return payload
 
 
-def _serialize_bootstrap(context, request=None, *, view="full"):
+def _serialize_bootstrap(context, request=None, *, view="summary"):
     config = _get_config(context.organization)
     ttl = _bootstrap_cache_seconds()
     cache_key = _bootstrap_cache_key(context, config, view) if ttl > 0 else None
@@ -11528,8 +11594,11 @@ def _serialize_bootstrap(context, request=None, *, view="full"):
             )
             payload = None
 
+    runs = _latest_runs_for_org(context.organization, config=config, prefetch_feedback=payload is None)
+    capabilities = None
     if payload is None:
-        payload = _compute_bootstrap_payload(context, request=request, view=view, config=config)
+        payload = _compute_bootstrap_payload(context, request=request, view=view, config=config, latest_runs=runs)
+        capabilities = payload.get("articleCapabilities")
         if cache_key is not None:
             try:
                 cache.set(cache_key, payload, ttl)
@@ -11540,7 +11609,8 @@ def _serialize_bootstrap(context, request=None, *, view="full"):
                 )
 
     # Per-user / per-request fields are always recomputed; never served from cache.
-    return _overlay_live_bootstrap_fields(payload, context=context, request=request)
+    return _overlay_live_bootstrap_fields(payload, context=context, request=request, config=config,
+        latest_runs=runs, capabilities=capabilities)
 
 
 _BOOTSTRAP_WORKFLOW_RUN_FIELDS = (
@@ -11557,31 +11627,14 @@ def _bootstrap_workflow_run_ref(serialized_run):
     return {key: serialized_run.get(key) for key in _BOOTSTRAP_WORKFLOW_RUN_FIELDS}
 
 
-def _compute_bootstrap_payload(context, request=None, *, view="full", config=None):
+def _compute_bootstrap_payload(context, request=None, *, view="summary", config=None, latest_runs=None):
     compact = view == "summary"
     if config is None:
         config = _get_config(context.organization)
-    latest_runs = _latest_runs_for_org(context.organization)
-    if not compact:
-        # A dashboard navigation must never wait for GitHub's PR API. The
-        # setup run page performs this refresh, and the next summary bootstrap
-        # observes its stored state through the cache fingerprint/TTL.
-        _refreshed_setup_run, setup_pr_refreshed = _refresh_pending_article_system_setup_pr_status(
-            context=context, config=config, latest_runs=latest_runs
-        )
-        if setup_pr_refreshed:
-            latest_runs = _latest_runs_for_org(context.organization)
-    if not compact:
-        # Sync written-article lifecycle (PR merged? live on the site?) so the
-        # dashboard badge reflects reality; internally throttled + bounded.
-        try:
-            refresh_publish_statuses(context.organization, config)
-        except Exception:
-            logger.warning(
-                "article_publish_status_refresh_failed org=%s",
-                getattr(context.organization, "pk", None),
-                exc_info=True,
-            )
+    if latest_runs is None:
+        latest_runs = _latest_runs_for_org(context.organization, config=config, prefetch_feedback=True)
+    # Bootstrap is a read projection. Explicit full reads must not perform
+    # GitHub reconciliation either; dedicated mutations/background work own it.
     discovery_topic_runs = _recent_discovery_topic_runs_for_org(context.organization)
     topic_limit = 8 if compact else None
     declined_topic_feedback_all = list_topic_feedback(context.organization, feedback_type="declined", limit=100)
@@ -11636,7 +11689,7 @@ def _compute_bootstrap_payload(context, request=None, *, view="full", config=Non
     serialized_runs = [
         _serialize_run(
             run, context=context, latest_runs=latest_runs, checks=checks,
-            mode=run_mode, topic_candidates=topic_candidates,
+            mode=run_mode, topic_candidates=topic_candidates, config=config,
             # Only scan/setup runs can change which scan or setup is projected.
             # Other runs are already in latest_runs and share this computed state.
             precomputed_article_setup_state=(
@@ -11703,7 +11756,7 @@ def _compute_bootstrap_payload(context, request=None, *, view="full", config=Non
         "websiteBaseline": _serialize_baseline_snapshot(baseline_snapshot, config, compact=compact),
         "googleBaselineConnection": google_status,
         "checks": checks,
-        "articleCapabilities": _article_capabilities_for_context(context, config, latest_runs=latest_runs),
+        "articleCapabilities": _article_capabilities_for_context(context, config, latest_runs=latest_runs, allow_probe=False),
         "articleSetupState": article_setup_state,
         "article_setup_state": article_setup_state,
         "latestRuns": serialized_runs,
@@ -11724,6 +11777,7 @@ def _compute_bootstrap_payload(context, request=None, *, view="full", config=Non
             latest_runs=latest_runs,
             checks=checks,
             topic_candidates=topic_candidates,
+            config=config,
         ),
         "hasCompletedArticleFlow": has_completed_article_flow,
         "startPageMode": "topic_picker" if topic_picker_ready else "first_article_setup",
@@ -11870,34 +11924,37 @@ def _serialize_bootstrap_without_domain(company):
     return payload
 
 
+class _TimedVibeResponse(Response):
+    """Measure the first negotiated rendering without serializing a second time."""
+
+    @property
+    def rendered_content(self):
+        if not hasattr(self, "_vibe_encoded_content"):
+            content = super().rendered_content
+            self._vibe_encoded_content = content
+            elapsed_ms = (time.perf_counter() - self._vibe_started_at) * 1000
+            payload_bytes = len(content)
+            logger.info(
+                "vibe_marketing_response metric=%s view=%s status=%s bytes=%s duration_ms=%.1f",
+                self._vibe_metric_name, self._vibe_view or "", self.status_code, payload_bytes, elapsed_ms,
+            )
+            self["Server-Timing"] = f"{self._vibe_metric_name};dur={elapsed_ms:.1f}"
+            self["X-MLAI-Serialize-MS"] = f"{elapsed_ms:.1f}"
+            self["X-MLAI-Payload-Bytes"] = str(payload_bytes)
+        return self._vibe_encoded_content
+
+
 def _timed_vibe_response(payload, *, started_at, metric_name, view=None, response_status=status.HTTP_200_OK):
-    elapsed_ms = (time.perf_counter() - started_at) * 1000
-    payload_bytes = 0
-    try:
-        from rest_framework.renderers import JSONRenderer
-        payload_bytes = len(JSONRenderer().render(payload))
-    except (TypeError, ValueError):
-        payload_bytes = 0
-    logger.info(
-        "vibe_marketing_response metric=%s view=%s status=%s bytes=%s duration_ms=%.1f",
-        metric_name,
-        view or "",
-        response_status,
-        payload_bytes,
-        elapsed_ms,
-    )
-    headers = {
-        "Server-Timing": f"{metric_name};dur={elapsed_ms:.1f}",
-        "X-MLAI-Serialize-MS": f"{elapsed_ms:.1f}",
-    }
+    response = _TimedVibeResponse(payload, status=response_status)
+    response._vibe_started_at = started_at
+    response._vibe_metric_name = metric_name
+    response._vibe_view = view
     if view:
-        headers["X-MLAI-View"] = str(view)
-    if payload_bytes:
-        headers["X-MLAI-Payload-Bytes"] = str(payload_bytes)
-    return Response(payload, status=response_status, headers=headers)
+        response["X-MLAI-View"] = str(view)
+    return response
 
 
-def _github_account_for_context(context, config, *, force=False):
+def _github_account_for_context(context, config, *, force=False, allow_probe=True):
     from integrations.services.github_installations import user_github_installations
     user = context.profile.user
     installations = user_github_installations(user)
@@ -11910,39 +11967,42 @@ def _github_account_for_context(context, config, *, force=False):
                    "status": "needs_verification" if connection.installation_id else "not_connected"}
     if account.get("owned") and account.get("saved"):
         from .website_github_access import verify_account_access
-        proof = verify_account_access(user, installations=installations, connection=connection, force=force)
-        account = {**account, **proof, "status": "connected" if proof.get("verified") else "needs_verification"}
+        proof = verify_account_access(user, installations=installations, connection=connection, force=force, allow_probe=allow_probe)
+        account = {**account, **proof, "status": "connected" if proof.get("verified") else proof.get("status", "needs_verification")}
     return account
 
 
-def _verify_github_repository_access(context, config, *, force=False):
+def _verify_github_repository_access(context, config, *, force=False, allow_probe=True):
     """Verify inventory reads independently from write authorization and rollout."""
     from .website_failure_scope import taxonomy_enabled
     if ((taxonomy_enabled(context.organization.pk) or taxonomy_enabled(context.organization.pk, observe=True))
             and getattr(config, "website_connection", None) is not None):
-        return _verify_github_repository_access_b1(context, config, force=force)
+        return _verify_github_repository_access_b1(context, config, force=force, allow_probe=allow_probe)
     repo = str(getattr(config, "github_repo", "") or "").strip()
     if not repo:
         return {"verified": False, "reasonCode": "github_access_required"}
     connection = getattr(config, "website_connection", None)
     fingerprint = hashlib.sha256(str((context.profile.user.pk, context.organization.pk, repo,
-        (str(connection.pk), connection.generation, connection.repository_id, connection.installation_id,
-            connection.state, connection.configuration_version, connection.verified_sha) if connection else None,
+        _repository_observation_scope(connection) if connection else None,
         config.connected_slack_user_id, config.github_installation_id,
         config.github_token_encrypted, config.github_token_expires_at)).encode()).hexdigest()
-    key = "articles-repository-access-v1:" + fingerprint
+    key = "articles-repository-access-v2:" + fingerprint
     # The context is created for one authenticated request. A forced admission
     # probe stays fresh across repeated projections within that same request.
     request_cache = context.__dict__.setdefault("_website_repository_probes", {}) if hasattr(context, "__dict__") else {}
     prior = request_cache.get(key)
-    if prior and (not force or prior["fresh"]):
+    if prior and (not force or not allow_probe or prior["fresh"]):
         return dict(prior["result"])
-    if not _github_account_for_context(context, config).get("owned"):
+    if connection is not None and connection.state in {"revoked", "disconnected"}:
+        return {"verified": False, "reasonCode": "website_disconnected"}
+    if not _github_account_for_context(context, config, allow_probe=allow_probe).get("owned"):
         return {"verified": False, "reasonCode": "github_access_required"}
-    cached = None if force else cache.get(key)
+    cached = None if force and allow_probe else cache.get(key)
     if isinstance(cached, dict):
         request_cache[key] = {"result": dict(cached), "fresh": False}
         return cached
+    if not allow_probe:
+        return {"verified": False, "reasonCode": "github_verification_required"}
     result = {"verified": False, "reasonCode": "github_unavailable"}
     try:
         if connection is not None:
@@ -11999,7 +12059,15 @@ def _verify_github_repository_access(context, config, *, force=False):
     return result
 
 
-def _verify_github_repository_access_b1(context, config, *, force=False):
+def _repository_observation_scope(connection):
+    """Identity of a provider observation, including current local revocation."""
+    return {key: str(getattr(connection, key, "")) for key in (
+        "pk", "generation", "repository_id", "installation_id", "branch", "state",
+        "configuration_version", "verified_sha", "authorized_by_id",
+    )}
+
+
+def _verify_github_repository_access_b1(context, config, *, force=False, allow_probe=True):
     """Read typed provider evidence for an explicitly enrolled saved resource."""
     from .website_failure_scope import failure_scope
     from .website_github_failure import github_failure
@@ -12008,22 +12076,26 @@ def _verify_github_repository_access_b1(context, config, *, force=False):
     from integrations.services.github_app import create_installation_access_token, require_installation_repository_permissions
     website = config.website_connection
     repo = str(config.github_repo or "")
-    key = "articles-repository-access-b1:" + evidence_digest({"organization": context.organization.pk,
-        "user": context.profile.user.pk, "repo": repo, "connection": str(website.pk), "generation": website.generation,
-        "revision": website.configuration_version, "source": website.verified_sha, "registry": load_registry()["sha256"]})
+    key = "articles-repository-access-b1-v2:" + evidence_digest({"organization": context.organization.pk,
+        "user": context.profile.user.pk, "repo": repo, "scope": _repository_observation_scope(website),
+        "registry": load_registry()["sha256"]})
+    if website.state in {"revoked", "disconnected"}:
+        return {"verified": False, "reasonCode": "website_disconnected"}
+    if not _github_account_for_context(context, config, allow_probe=allow_probe).get("owned") or not repo:
+        return {"verified": False, "reasonCode": "github_access_required"}
     request_cache = context.__dict__.setdefault("_website_taxonomy_probes", {})
     previous = request_cache.get(key)
-    if previous and (not force or previous["fresh"]):
+    if previous and (not force or not allow_probe or previous["fresh"]):
         return dict(previous["result"])
-    cached = None if force else cache.get(key)
+    cached = None if force and allow_probe else cache.get(key)
     if isinstance(cached, dict):
         request_cache[key] = {"result": dict(cached), "fresh": False}
         return cached
+    if not allow_probe:
+        return {"verified": False, "reasonCode": "github_verification_required"}
     credential, response = None, None
     with failure_scope(context.organization.pk):
         try:
-            if not _github_account_for_context(context, config).get("owned") or not repo:
-                raise WebsiteAuthorityError("github_access_required", "Authorize the selected repository.")
             credential = create_installation_access_token(installation_id=website.installation_id, repository=repo,
                 repository_id=website.repository_id, permission_mode="read", use_cache=False)
             permissions = require_installation_repository_permissions(website.installation_id)
@@ -12063,16 +12135,20 @@ def _verify_github_repository_access_b1(context, config, *, force=False):
     return result
 
 
-def _article_capabilities_for_context(context, config, *, latest_runs=None, force=False):
-    runs = list(latest_runs) if latest_runs is not None else _latest_runs_for_org(context.organization, limit=12)
-    account = _github_account_for_context(context, config, force=force)
+def _article_capabilities_for_context(context, config, *, latest_runs=None, force=False, allow_probe=None):
+    # Projections (including the website GET and MCP capability read) observe.
+    # Admission/background callers already request force=True explicitly.
+    if allow_probe is None:
+        allow_probe = force
+    runs = list(latest_runs) if latest_runs is not None else _latest_runs_for_org(context.organization, limit=12, config=config)
+    account = _github_account_for_context(context, config, force=force, allow_probe=allow_probe)
     gate = _article_system_setup_gate(config, runs, resolve_article_system(config))
     evidence = integration_evidence(config, runs, setup_gate=gate)
     if not getattr(config, "website_connection_id", None) and _missing_mlai_featured_components(organization=context.organization, config=config):
         # Legacy scaffold flags still need their original component contract;
         # a cached bootstrap overlay cannot promote an incomplete integration.
         evidence = {**evidence, "verified": False, "reasonCode": "integration_required"}
-    access = _verify_github_repository_access(context, config, force=force) if account.get("saved") and getattr(config, "github_repo", "") else {}
+    access = _verify_github_repository_access(context, config, force=force, allow_probe=allow_probe) if account.get("saved") and getattr(config, "github_repo", "") else {}
     if evidence.get("verified") and access.get("verified") and (access.get("branch") != evidence.get("branch") or access.get("sha") != evidence.get("sha")):
         evidence = {**evidence, "verified": False, "reasonCode": "verification_stale"}
     return article_capabilities(config, domain=context.organization.domain, account=account,
@@ -14791,7 +14867,7 @@ class VibeMarketingAbnLookupView(APIView):
 class VibeMarketingBootstrapView(APIView):
     def get(self, request):
         started_at = time.perf_counter()
-        view = "summary" if str(request.query_params.get("view") or "").strip().lower() == "summary" else "full"
+        view = "full" if str(request.query_params.get("view") or "").strip().lower() == "full" else "summary"
         _profile, company, error_response = _resolve_profile_company_or_response(request)
         if error_response is not None:
             return error_response
@@ -15796,7 +15872,7 @@ class VibeMarketingGitHubConnectView(APIView):
                 return_url=str(_request_value(request.data, "return_url", "returnUrl", default="") or "").strip() or None)
         except Exception:
             return Response({"status": "auth_unavailable", "error": "github_auth_url_failed",
-                "detail": "GitHub authorization could not be opened."}, status=503)
+                "connection_state": "auth_required", "detail": "GitHub authorization could not be opened."}, status=503)
         return Response({"status": "auth_required", "connection_state": "auth_required", "github_repo": repo,
             "auth_url": auth_url, "websiteConnection": website_summary(config, company_id=context.company.pk)})
 
@@ -16071,6 +16147,7 @@ class VibeMarketingScanView(APIView):
             "auto_setup_preview": auto_setup_preview,
             "generate_components": False,
             "article_surface_mode": article_surface_mode,
+            **({"goal_budget": request.data["goal_budget"]} if getattr(request, "_website_prepare_dispatch", False) and "goal_budget" in request.data else {}),
             "scan_purpose": scan_purpose,
             "force_refresh": force_refresh,
         }
@@ -16192,6 +16269,9 @@ class VibeMarketingArticleSystemSetupView(APIView):
         payload["client_request_id"] = str(request.headers.get("Idempotency-Key") or request.data.get("idempotency_key") or request.data.get("clientRequestId") or _mint_dispatch_client_request_id("article_system_setup"))
         if getattr(request, "_website_prepare_dispatch", False):
             payload["retry_epoch"] = request.data.get("retry_epoch", "initial")
+            for field in ("strategy_pin", "strategy_goal_id", "strategy_revision", "strategy_binding", "goal_budget", "verification_mode"):
+                if field in request.data:
+                    payload[field] = request.data[field]
         _mark_roo_points_gate_authorized(
             payload,
             domain=context.organization.domain,
@@ -16682,7 +16762,7 @@ def _article_selection_conflicts(*, submitted, resolved):
     return conflicts
 
 
-def start_article_generation(*, user, context, data, request_hash=None, website_contract=None):
+def start_article_generation(*, user, context, data, request_hash=None, website_contract=None, goal_operation_id=None):
     """Execute the canonical owned operation for HTTP and MCP transports."""
     command = ContentCommand(user=user, data=data)
     config = _get_config(context.organization)
@@ -16937,11 +17017,13 @@ def start_article_generation(*, user, context, data, request_hash=None, website_
         payload.update(website_contract)
     if request_hash:
         payload["mcp_request_hash"] = request_hash
-    charged_user, _charge_ledger, article_request, billing_error = _charge_roo_points_for_article(
-        command,
-        context=context,
-        payload=payload,
-    )
+    billing_kwargs = {"context": context, "payload": payload}
+    # Preserve the ordinary charging seam for all non-goal callers. The private
+    # goal selector is only meaningful to the internal controller and must not
+    # become part of its public/mock-facing call contract.
+    if goal_operation_id is not None:
+        billing_kwargs["goal_operation_id"] = goal_operation_id
+    charged_user, _charge_ledger, article_request, billing_error = _charge_roo_points_for_article(command, **billing_kwargs)
     if billing_error is not None:
         return billing_error
     logger.info(
@@ -18185,6 +18267,9 @@ def _record_article_publish_approval_receipt(run, *, actor_id, expected_identity
         current.run_request = run_request
         current.save(update_fields=["run_request", "updated_at"])
         run.run_request = run_request
+        if run_request.get("first_article_goal_operation_id") and run_request.get("website_connection_id"):
+            from .website_prepare import wake_prepare_after_commit
+            wake_prepare_after_commit(run_request["website_connection_id"])
     return True
 
 
@@ -18259,8 +18344,14 @@ def _project_setup_pr_creation_failure(run, config, remote_data):
     return detail
 
 
-def control_article_run(*, user, context, run, action, data, run_id=None):
+def control_article_run(*, user, context, run, action, data, run_id=None, goal_operation_id=None):
     """Execute the canonical owned operation for HTTP and MCP transports."""
+    if goal_operation_id is not None:
+        from .website_article_recovery import authorize_resume
+        try:
+            authorize_resume(goal_operation_id,run=run,context=context,user=user,action=action)
+        except WebsiteAuthorityError as exc:
+            return Response(exc.as_dict(),status=exc.status)
     command = ContentCommand(user=user, data=data)
     run_id = run_id or run.run_id
     gated_actions = {"restart", "resume", "revise", "regenerate-image", "regenerate-images", "retry-preview-quality", "promote-bundle", "publish-pr", "approve", "merge-publish-pr"}
@@ -18797,7 +18888,10 @@ def control_article_run(*, user, context, run, action, data, run_id=None):
             run.approval_state = ContentFactoryApprovalState.DENIED
             run.status = ContentFactoryRunStatus.DENIED
         elif action == "resume":
-            if run.workflow in ARTICLE_WORKFLOWS and not remote_data.get("already_queued"):
+            if goal_operation_id is not None and remote_data.get("status")=="noop" and remote_data.get("resume_available") is False:
+                error=WebsiteAuthorityError("ARTICLE_SETUP_STRATEGY_UNAVAILABLE","The saved article cannot recover by repeating this step.")
+                return Response(error.as_dict(),status=error.status)
+            if run.workflow in ARTICLE_WORKFLOWS and not remote_data.get("already_queued") and goal_operation_id is None:
                 previous_actions = (run.result or {}).get("user_action_count")
                 run.result = {**(run.result or {}), "user_action_count":
                               (max(0, previous_actions) if type(previous_actions) is int else 0) + 1}

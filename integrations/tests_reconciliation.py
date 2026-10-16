@@ -18,6 +18,7 @@ from integrations.services.reconciliation import (
     _dollars,
 )
 from roo.models import PointsAdmin
+from organizations.models import Organization
 
 
 def _sum_split_amounts(brief: str) -> float:
@@ -558,8 +559,10 @@ class ReconciliationServiceTests(SimpleTestCase):
         self.assertEqual(report["unmatched_charge_count"], 2)
 
 
+@override_settings(RECONCILIATION_DEFAULT_DOMAIN="mlai.au")
 class ReconciliationReportViewTests(APITestCase):
     def setUp(self):
+        Organization.objects.create(domain="mlai.au", name="MLAI")
         self.url = reverse("reconciliation_report")
         self.admin = "URADMIN"
         self.committee = "URCOMMITTEE"

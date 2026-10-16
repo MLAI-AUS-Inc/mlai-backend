@@ -139,6 +139,10 @@ class WebsiteConnectionView(MyStartupAccess, websites.WebsiteConnectionView):
     """Expose the selected company's canonical website binding to Chat sessions."""
 
 
+class WebsiteCostUsageView(MyStartupAccess, websites.WebsiteCostUsageView):
+    """Reuse explicit-company authorization for lazy Articles accounting reads."""
+
+
 class WebsiteConnectionActionView(MyStartupAccess, websites.WebsiteConnectionActionView):
     """Reuse website lifecycle consent and durable cancellation for Chat owners."""
 
@@ -258,9 +262,9 @@ class ArticleRunActionView(MyStartupAccess, marketing.VibeMarketingRunControlVie
 
 class WebsiteMetricsView(MyStartupAccess, ContentWebsiteMetricsView):
     """Read bounded article outcomes only for the selected startup."""
-    startup_read_bucket = "settings"
+    startup_read_bucket = "read"
 
 
 class WebsiteConnectionOperationView(MyStartupAccess, websites.WebsiteConnectionOperationView):
     """Read a single persisted operation under the selected company's consent."""
-    startup_read_bucket = "run"
+    startup_read_bucket = "poll"

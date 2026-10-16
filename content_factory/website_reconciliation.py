@@ -14,6 +14,7 @@ from .models import OrganizationContentConfig
 from .website_connections import contract_for, transition_connection
 from .website_contract import cleanup_plan, safe_repository_path, evidence_digest
 from .website_models import WebsiteConnection, WebsiteConnectionOperation, WebsiteScanSnapshot
+from . import website_preview_cleanup_budget as preview_budget
 
 logger = logging.getLogger(__name__)
 
@@ -384,13 +385,17 @@ def handle_website_github_event(event_type, payload):
                     run_id=f"github-head:{source_sha}", fingerprint=evidence_digest({"source_sha": source_sha}),
                     defaults={"source_sha": source_sha, "detector_version": "github_head", "evidence": {"source": "github_push", "branch": website.branch}})
                 if created:
+                    previous_revision = website.configuration_version
                     website.configuration_version += 1
+                    from .website_goal_scope import record_source_transition
+                    record_source_transition(website, previous_revision=previous_revision, source_sha=source_sha)
                     if not owned_merge:
                         website.capabilities = {**website.capabilities, "publishingReady": False, "previewSupported": False}
                     WebsiteConnectionOperation.objects.get_or_create(
                         idempotency_key=f"{website.pk}:source-reverify:{website.generation}:{source_sha}", defaults={
                             "connection": website, "generation": website.generation, "action": "source-reverify",
                             "payload": {"source_sha": source_sha, "target_id": config.default_publish_target_id,
+                                "previous_configuration_revision": previous_revision, "configuration_revision": website.configuration_version,
                                 "owned_merge_run_id": owned_merge["run_id"] if owned_merge else "", "scan_required": not bool(owned_merge)},
                             "receipt": {"status": "verification_queued", "repository_modified": False}})
                     if not owned_merge:
@@ -739,9 +744,25 @@ def process_website_connection_operations(*, limit=20, now=None, connection_id=N
     from .vibe_marketing_views import _content_factory_remote_config, _content_factory_headers
     from .website_tokens import revoke_generation_tokens
     now = now or timezone.now()
+    from django.conf import settings
+    from .website_notification_outbox import ACTION as notice_action
+    from .website_first_article_refunds import ACTION as refund_action
+    from .website_cost_recovery import ACTION as usage_action, advance as advance_usage
+    from .website_cost_ledger import enabled as accounting_enabled
+    from .website_operational_alert_delivery import ACTION as alert_action, advance as advance_alert, channel as alert_channel
+    notices_enabled=getattr(settings,"ARTICLES_GOAL_NOTIFICATIONS_ENABLED",False)
+    excluded = ["workflow"] if notices_enabled else ["workflow", notice_action]
+    if not accounting_enabled():
+        excluded.append(usage_action)
+    if not getattr(settings, "ARTICLES_OPERATIONAL_ALERTS_ENABLED", False):
+        excluded.append(alert_action)
+    unconfigured_alerts = Q(action=alert_action, state="needs_attention", receipt__status="unconfigured") if alert_channel() else Q(pk__in=[])
     due = WebsiteConnectionOperation.objects.filter(Q(next_attempt_at__isnull=True) | Q(next_attempt_at__lte=now),
-        Q(state="pending") | Q(action="prepare", state="running") |
-        Q(action="prepare", state="needs_user", receipt__user_action__id="deploy_site")).exclude(action="workflow")
+        Q(state="pending") | Q(action="prepare", state="running") | Q(action=notice_action,state="running") | Q(action=refund_action,state="running") |
+        Q(action=usage_action, state="running") |
+        Q(action=alert_action, state="running") |
+        unconfigured_alerts |
+        Q(action="prepare", state="needs_user", receipt__user_action__id__in=["deploy_site","merge_pr","review_draft"])).exclude(action__in=excluded)
     if connection_id:
         due = due.filter(connection_id=connection_id)
     ids = list(due.order_by("next_attempt_at").values_list("id", flat=True)[:limit])
@@ -749,7 +770,54 @@ def process_website_connection_operations(*, limit=20, now=None, connection_id=N
     from .website_support import reconcile_support_verifications
     reconcile_support_verifications(limit=limit, connection_id=connection_id)
     monitor_cleanup_pull_requests(limit=limit, connection_id=connection_id)
+    from .website_wakeups import enabled as event_wakes_enabled
     for identifier in ids:
+        if getattr(settings, "ARTICLES_OPERATIONAL_ALERTS_ENABLED", False) and WebsiteConnectionOperation.objects.filter(pk=identifier, action=alert_action).exists():
+            outcome = advance_alert(identifier, now=now)
+            if outcome is not None:
+                result["processed"] += 1
+                result["pending" if outcome == "pending" else "completed"] += 1
+                if len(result["operations"]) < 20:
+                    result["operations"].append({"id": str(identifier), "action": alert_action, "outcome": outcome})
+            continue
+        if accounting_enabled() and WebsiteConnectionOperation.objects.filter(pk=identifier, action=usage_action).exists():
+            outcome = advance_usage(identifier, now=now)
+            if outcome is not None:
+                result["processed"] += 1
+                result["pending" if outcome == "pending" else "completed"] += 1
+                if len(result["operations"]) < 20:
+                    result["operations"].append({"id": str(identifier), "action": usage_action, "outcome": outcome})
+            continue
+        if WebsiteConnectionOperation.objects.filter(pk=identifier,action=refund_action).exists():
+            from .website_first_article_refunds import advance_refund
+            outcome=advance_refund(identifier,now=now)
+            if outcome is not None:
+                result["processed"]+=1
+                result["pending" if outcome=="pending" else "completed"]+=1
+                if len(result["operations"])<20:result["operations"].append({"id":str(identifier),"action":refund_action,"outcome":outcome})
+                if outcome=="completed":
+                    row=WebsiteConnectionOperation.objects.filter(pk=identifier,action=refund_action).first()
+                    if row and row.payload.get("purge_after_reconciliation"):
+                        from .website_first_article_refunds import finish_purged_connection
+                        finish_purged_connection(row.connection_id)
+            continue
+        if notices_enabled and WebsiteConnectionOperation.objects.filter(pk=identifier,action=notice_action).exists():
+            from .website_notification_outbox import advance_notice
+            outcome=advance_notice(identifier,now=now)
+            if outcome is not None:
+                result["processed"]+=1
+                result["pending" if outcome=="pending" else "completed"]+=1
+                if len(result["operations"])<20:result["operations"].append({"id":str(identifier),"action":notice_action,"outcome":outcome})
+            continue
+        if event_wakes_enabled() and WebsiteConnectionOperation.objects.filter(pk=identifier, action="goal-wake").exists():
+            from .website_wakeups import advance_wake
+            outcome = advance_wake(identifier, now=now)
+            if outcome is not None:
+                result["processed"] += 1
+                result["pending" if outcome == "pending" else "completed"] += 1
+                if len(result["operations"]) < 20:
+                    result["operations"].append({"id": str(identifier), "action": "goal-wake", "outcome": outcome})
+            continue
         if WebsiteConnectionOperation.objects.filter(pk=identifier, action="prepare").exists():
             from .website_prepare import advance_prepare
             operation = advance_prepare(identifier, now=now)
@@ -802,8 +870,9 @@ def process_website_connection_operations(*, limit=20, now=None, connection_id=N
                 continue
             result["processed"] += 1
             op.attempts += 1
+            preview_budget.start(op, now=now)
             op.next_attempt_at = now + timedelta(minutes=5)
-            op.save(update_fields=["attempts", "next_attempt_at", "updated_at"])
+            op.save(update_fields=["attempts", "receipt", "next_attempt_at", "updated_at"])
             claimed_at = op.updated_at
         from .website_connections import require_unlocked_remote_call
         require_unlocked_remote_call()
@@ -811,6 +880,7 @@ def process_website_connection_operations(*, limit=20, now=None, connection_id=N
             "refunded_run_ids": op.receipt.get("refunded_run_ids", []), "closed_mutation_ids": op.receipt.get("closed_mutation_ids", []),
             "tokens": op.receipt.get("tokens", {})})
         try:
+            preview_budget.begin(op, now=now)
             if op.action == "cleanup":
                 from .website_restoration import worker_restoration
                 op.receipt = worker_restoration(op) or _cleanup_proposal(op)
@@ -916,19 +986,20 @@ def process_website_connection_operations(*, limit=20, now=None, connection_id=N
                 if not op.receipt["remote_cleanup_pending"]:
                     op.state = "completed"
                     op.receipt["status"] = "completed"
+        except preview_budget.PreviewCleanupBudgetReached:
+            pass
         except Exception:
             # No transport messages can accidentally include credentials or source bodies.
             op.receipt = {**op.receipt, "last_error": "remote_reconciliation_unavailable"}
-        op.next_attempt_at = now + timedelta(seconds=min(3600, 15 * 2 ** min(op.attempts, 8)))
+        preview_budget.completed(op, now=now)
+        op.next_attempt_at = None if op.state == "needs_attention" else now + timedelta(seconds=min(3600, 15 * 2 ** min(op.attempts, 8)))
         if op.action == "disconnect" and "remove_setup" in op.payload:
             from .website_disconnect import disconnect_retry_policy
             after_cleanup = evidence_digest({"payload": op.payload, "completed_steps": op.receipt.get("completed_steps", []),
                 "refunded_run_ids": op.receipt.get("refunded_run_ids", []), "closed_mutation_ids": op.receipt.get("closed_mutation_ids", []),
                 "tokens": op.receipt.get("tokens", {})})
             disconnect_retry_policy(op, now=now, progressed=before_cleanup != after_cleanup)
-        applied = WebsiteConnectionOperation.objects.filter(pk=op.pk, state="pending", attempts=op.attempts,
-            updated_at=claimed_at).update(receipt=op.receipt, payload=op.payload, state=op.state,
-                next_attempt_at=op.next_attempt_at, updated_at=timezone.now())
+        applied = preview_budget.persist(op, claimed_at=claimed_at, now=now)
         # Offboarding may redact the payload while transport runs. Never replace
         # that newer retention/erasure receipt with our pre-request snapshot.
         result["pending" if not applied or op.state == "pending" else "completed"] += 1
@@ -939,14 +1010,8 @@ def process_website_connection_operations(*, limit=20, now=None, connection_id=N
         if purge_connection_id:
             # Follow the same org -> connection lock order as owner lifecycle
             # writes, after releasing the operation lock to avoid inversion.
-            from organizations.models import Organization
-            candidate = WebsiteConnection.objects.filter(pk=purge_connection_id).first()
-            if candidate:
-                with transaction.atomic():
-                    Organization.objects.select_for_update().get(pk=candidate.organization_id)
-                    candidate = WebsiteConnection.objects.select_for_update().filter(pk=purge_connection_id, authorized_by__isnull=True, state="revoked").first()
-                    if candidate and not candidate.operations.filter(state="pending").exists():
-                        candidate.delete()
+            from .website_first_article_refunds import finish_purged_connection
+            finish_purged_connection(purge_connection_id)
     return result
 
 

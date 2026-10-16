@@ -2506,6 +2506,28 @@ class StartupUpdateWorkflowViewsTest(StartupUpdateApiTestCase):
         self.thread.attachment_ids = [self.attachment.id]
         self.thread.save(update_fields=["attachment_ids", "updated_at"])
 
+    def _set_run_month(self, month):
+        from startup_updates.services import set_startup_update_run_target_month
+
+        # A draft month and its frozen evidence window must refer to the same
+        # reporting period, as they do for a newly created monthly run.
+        set_startup_update_run_target_month(self.run, month)
+
+    def _set_run_window(self, now):
+        from startup_updates.activity_scope import monthly_source_period
+
+        period = monthly_source_period(
+            now.date().replace(day=1), as_of=now + timedelta(hours=1)
+        )
+        period["start"] = max(
+            datetime.fromisoformat(period["start"]), now - timedelta(hours=1)
+        ).isoformat()
+        self.run.run_request["narrative_period"] = period
+        self.run.run_request["backfill_window_start"] = period["start"]
+        self.run.run_request["backfill_window_end"] = (
+            datetime.fromisoformat(period["end"]) - timedelta(microseconds=1)
+        ).isoformat()
+
     def _create_secondary_connection(self):
         other_user = User.objects.create_user(
             email=f"other-{User.objects.count()}@example.com",
@@ -2521,6 +2543,7 @@ class StartupUpdateWorkflowViewsTest(StartupUpdateApiTestCase):
 
     def test_regeneration_creates_exact_revision_without_merging_old_bullets(self):
         month_bucket = date(2026, 3, 1)
+        self._set_run_month(month_bucket)
         MonthlyUpdateDraft.objects.create(
             organization=self.organization,
             month=month_bucket,
@@ -2641,6 +2664,7 @@ class StartupUpdateWorkflowViewsTest(StartupUpdateApiTestCase):
         self.profile.default_currency = "AUD"
         self.profile.save(update_fields=["default_currency"])
         month_bucket = date(2026, 3, 1)
+        self._set_run_month(month_bucket)
         revenue_metric = StartupMetricObservation.objects.create(
             organization=self.organization,
             run=self.run,
@@ -2927,8 +2951,7 @@ class StartupUpdateWorkflowViewsTest(StartupUpdateApiTestCase):
 
     def test_classification_batch_scopes_messages_to_run_window(self):
         now = timezone.now()
-        self.run.run_request["backfill_window_start"] = (now - timedelta(hours=1)).isoformat()
-        self.run.run_request["backfill_window_end"] = (now + timedelta(hours=1)).isoformat()
+        self._set_run_window(now)
         self.run.save(update_fields=["run_request", "updated_at"])
 
         GmailMessageArtifact.objects.create(
@@ -3042,8 +3065,7 @@ class StartupUpdateWorkflowViewsTest(StartupUpdateApiTestCase):
         self.thread.hydration_status = ArtifactProcessingStatus.PENDING
         self.thread.latest_message_internal_date = now - timedelta(minutes=20)
         self.thread.save(update_fields=["hydration_status", "latest_message_internal_date", "updated_at"])
-        self.run.run_request["backfill_window_start"] = (now - timedelta(hours=1)).isoformat()
-        self.run.run_request["backfill_window_end"] = (now + timedelta(hours=1)).isoformat()
+        self._set_run_window(now)
         self.run.run_request["max_source_threads"] = 1
         self.run.save(update_fields=["run_request", "updated_at"])
 
@@ -3315,8 +3337,7 @@ class StartupUpdateWorkflowViewsTest(StartupUpdateApiTestCase):
         self.message.save(update_fields=["internal_date", "updated_at"])
         self.thread.latest_message_internal_date = now - timedelta(minutes=20)
         self.thread.save(update_fields=["latest_message_internal_date", "updated_at"])
-        self.run.run_request["backfill_window_start"] = (now - timedelta(hours=1)).isoformat()
-        self.run.run_request["backfill_window_end"] = (now + timedelta(hours=1)).isoformat()
+        self._set_run_window(now)
         self.run.run_request["max_source_threads"] = 1
         self.run.save(update_fields=["run_request", "updated_at"])
 

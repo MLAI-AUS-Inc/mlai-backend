@@ -580,7 +580,7 @@ class PointsPurchaseModelTests(TestCase):
 
 
 class PointsPurchaseLimitTests(TestCase):
-    """Task 3 purchase limit policy tests."""
+    """Authenticated positive purchases use the current uncapped policy."""
 
     def setUp(self):
         self.user = User.objects.create_user(
@@ -616,7 +616,7 @@ class PointsPurchaseLimitTests(TestCase):
         with self.assertRaises(PermissionDeniedError):
             PointsPurchaseService.validate_purchase_limits(None, points_amount=10)
 
-    def test_rejects_guest_checkout_without_slack_link(self):
+    def test_authenticated_account_does_not_require_slack_link(self):
         guest_like_user = User.objects.create_user(
             email='guest@example.com',
             slack_id=None,
@@ -624,55 +624,49 @@ class PointsPurchaseLimitTests(TestCase):
         guest_like_user.date_joined = timezone.now() - timedelta(days=30)
         guest_like_user.save(update_fields=['date_joined'])
 
-        with self.assertRaises(PermissionDeniedError):
-            PointsPurchaseService.validate_purchase_limits(guest_like_user, points_amount=10)
+        PointsPurchaseService.validate_purchase_limits(guest_like_user, points_amount=10)
 
-    def test_rejects_purchase_above_25_points(self):
-        with self.assertRaises(ValueError) as ctx:
-            PointsPurchaseService.validate_purchase_limits(self.user, points_amount=26)
-        self.assertIn('25-point', str(ctx.exception))
+    def test_purchase_is_not_capped_at_25_points(self):
+        PointsPurchaseService.validate_purchase_limits(self.user, points_amount=26)
 
-    def test_rejects_accounts_younger_than_7_days(self):
+    def test_authenticated_new_account_can_purchase(self):
         self.user.date_joined = timezone.now() - timedelta(days=3)
         self.user.save(update_fields=['date_joined'])
 
-        with self.assertRaises(ValueError) as ctx:
-            PointsPurchaseService.validate_purchase_limits(self.user, points_amount=10)
-        self.assertIn('at least 7 days', str(ctx.exception))
+        PointsPurchaseService.validate_purchase_limits(self.user, points_amount=10)
 
-    def test_rejects_rolling_12_month_cap_above_50_points(self):
+    def test_rolling_purchase_history_does_not_cap_new_purchases(self):
         self._create_paid_purchase(points_amount=30, days_ago=20)
         self._create_paid_purchase(points_amount=19, days_ago=10)
 
-        with self.assertRaises(ValueError) as ctx:
-            PointsPurchaseService.validate_purchase_limits(self.user, points_amount=2)
-        self.assertIn('50-point rolling 12-month', str(ctx.exception))
+        PointsPurchaseService.validate_purchase_limits(self.user, points_amount=2)
 
     def test_ignores_purchases_older_than_12_month_window(self):
         self._create_paid_purchase(points_amount=50, days_ago=370)
         # Should be allowed because the old purchase is outside the rolling window.
         PointsPurchaseService.validate_purchase_limits(self.user, points_amount=25)
 
-    def test_rolling_12_month_cap_uses_paid_at_not_created_at(self):
+    def test_paid_purchase_date_does_not_introduce_a_removed_cap(self):
         self._create_paid_purchase(points_amount=50, days_ago=20, created_days_ago=370)
 
-        with self.assertRaises(ValueError) as ctx:
-            PointsPurchaseService.validate_purchase_limits(self.user, points_amount=1)
-        self.assertIn('50-point rolling 12-month', str(ctx.exception))
+        PointsPurchaseService.validate_purchase_limits(self.user, points_amount=1)
+
+    def test_rejects_nonpositive_purchase(self):
+        for amount in (0, -1):
+            with self.subTest(amount=amount), self.assertRaisesMessage(ValueError, 'positive'):
+                PointsPurchaseService.validate_purchase_limits(self.user, points_amount=amount)
 
     def test_validation_does_not_create_points_account(self):
         PointsPurchaseService.validate_purchase_limits(self.user, points_amount=10)
 
         self.assertFalse(PointsAccount.objects.filter(user=self.user).exists())
 
-    def test_rejects_balance_cap_above_100_without_approval(self):
+    def test_spendable_balance_does_not_cap_purchases(self):
         account = PointsService.get_or_create_account(self.user)
         account.balance = 90
         account.save(update_fields=['balance'])
 
-        with self.assertRaises(ValueError) as ctx:
-            PointsPurchaseService.validate_purchase_limits(self.user, points_amount=11)
-        self.assertIn('100-point spendable balance cap', str(ctx.exception))
+        PointsPurchaseService.validate_purchase_limits(self.user, points_amount=11)
 
     def test_allows_balance_cap_override_with_manual_approval(self):
         account = PointsService.get_or_create_account(self.user)
@@ -905,6 +899,11 @@ class CoworkingMonthlyUpdateDiscountTests(TestCase):
 
     VALID_ABN = '89000000019'
 
+    @staticmethod
+    def _today():
+        from zoneinfo import ZoneInfo
+        return timezone.localdate(timezone=ZoneInfo("Australia/Melbourne"))
+
     def setUp(self):
         from organizations.models import Organization
         from startup_updates.models import UserStartupBinding
@@ -971,19 +970,19 @@ class CoworkingMonthlyUpdateDiscountTests(TestCase):
         unbound = User.objects.create_user(email='nobind@example.com', slack_id='UNOBIND')
         self.assertFalse(UserStartupBinding.objects.filter(user=unbound).exists())
         self.assertEqual(
-            CoworkingService.get_coworking_cost(user=unbound, booking_date=date.today()),
+            CoworkingService.get_coworking_cost(user=unbound, booking_date=self._today()),
             8,
         )
 
     def test_standard_cost_with_binding_but_no_update(self):
         self.assertEqual(
-            CoworkingService.get_coworking_cost(user=self.user, booking_date=date.today()),
+            CoworkingService.get_coworking_cost(user=self.user, booking_date=self._today()),
             8,
         )
 
     def test_draft_status_does_not_discount(self):
         from startup_updates.models import MonthlyUpdateDraftStatus
-        today = date.today()
+        today = self._today()
         self._make_update(today, MonthlyUpdateDraftStatus.DRAFT)
         self.assertEqual(
             CoworkingService.get_coworking_cost(user=self.user, booking_date=today),
@@ -992,7 +991,7 @@ class CoworkingMonthlyUpdateDiscountTests(TestCase):
 
     def test_needs_review_status_does_not_discount(self):
         from startup_updates.models import MonthlyUpdateDraftStatus
-        today = date.today()
+        today = self._today()
         self._make_update(today, MonthlyUpdateDraftStatus.NEEDS_REVIEW)
         self.assertEqual(
             CoworkingService.get_coworking_cost(user=self.user, booking_date=today),
@@ -1001,7 +1000,7 @@ class CoworkingMonthlyUpdateDiscountTests(TestCase):
 
     def test_ready_update_discounts_to_four(self):
         from startup_updates.models import MonthlyUpdateDraftStatus
-        today = date.today()
+        today = self._today()
         self._make_update(today, MonthlyUpdateDraftStatus.READY)
         self.assertEqual(
             CoworkingService.get_coworking_cost(user=self.user, booking_date=today),
@@ -1011,7 +1010,7 @@ class CoworkingMonthlyUpdateDiscountTests(TestCase):
     def test_ready_update_does_not_discount_ineligible_binding(self):
         from startup_updates.models import MonthlyUpdateDraftStatus, UserStartupBinding
 
-        today = date.today()
+        today = self._today()
         self._make_update(today, MonthlyUpdateDraftStatus.READY)
         UserStartupBinding.objects.filter(user=self.user, organization=self.org).update(
             coworking_discount_eligible=False
@@ -1026,7 +1025,7 @@ class CoworkingMonthlyUpdateDiscountTests(TestCase):
         from startup_updates.models import MonthlyUpdateDraftStatus, UserStartupBinding
         from startup_updates.services import bind_user_to_startup
 
-        today = date.today()
+        today = self._today()
         self._make_update(today, MonthlyUpdateDraftStatus.READY)
         binding = UserStartupBinding.objects.get(user=self.user, organization=self.org)
         binding.coworking_discount_eligible = False
@@ -1059,7 +1058,7 @@ class CoworkingMonthlyUpdateDiscountTests(TestCase):
         second_org = Organization.objects.create(name='Beta', domain='eligible-beta.example')
         UserStartupBinding.objects.create(user=self.user, organization=second_org)
         self._company_for(second_org, name='Beta Pty Ltd', verified=True)
-        today = date.today()
+        today = self._today()
         MonthlyUpdateDraft.objects.create(
             organization=second_org,
             month=today.replace(day=1),
@@ -1076,7 +1075,7 @@ class CoworkingMonthlyUpdateDiscountTests(TestCase):
         # The window is time-based: a previous-month update that became ready
         # 20 days ago still discounts a booking today (no start-of-month cliff).
         from startup_updates.models import MonthlyUpdateDraftStatus
-        today = date.today()
+        today = self._today()
         previous_month = today.replace(day=1) - timedelta(days=1)
         self._make_update(previous_month, MonthlyUpdateDraftStatus.READY, ready_days_ago=20)
         self.assertEqual(
@@ -1086,7 +1085,7 @@ class CoworkingMonthlyUpdateDiscountTests(TestCase):
 
     def test_update_ready_exactly_28_days_ago_discounts(self):
         from startup_updates.models import MonthlyUpdateDraftStatus
-        today = date.today()
+        today = self._today()
         self._make_update(today, MonthlyUpdateDraftStatus.READY, ready_days_ago=28)
         self.assertEqual(
             CoworkingService.get_coworking_cost(user=self.user, booking_date=today),
@@ -1095,7 +1094,7 @@ class CoworkingMonthlyUpdateDiscountTests(TestCase):
 
     def test_update_ready_31_days_ago_does_not_discount(self):
         from startup_updates.models import MonthlyUpdateDraftStatus
-        today = date.today()
+        today = self._today()
         self._make_update(today, MonthlyUpdateDraftStatus.READY, ready_days_ago=31)
         self.assertEqual(
             CoworkingService.get_coworking_cost(user=self.user, booking_date=today),
@@ -1106,7 +1105,7 @@ class CoworkingMonthlyUpdateDiscountTests(TestCase):
         # An update ready 25 days ago discounts today but not a booking 7 days
         # out (32 days after the stamp).
         from startup_updates.models import MonthlyUpdateDraftStatus
-        today = date.today()
+        today = self._today()
         self._make_update(today, MonthlyUpdateDraftStatus.READY, ready_days_ago=25)
         self.assertEqual(
             CoworkingService.get_coworking_cost(user=self.user, booking_date=today),
@@ -1123,7 +1122,7 @@ class CoworkingMonthlyUpdateDiscountTests(TestCase):
         # ready_at is set when a draft first becomes ready and is never
         # refreshed, so re-approving an old draft can't renew the window.
         from startup_updates.models import MonthlyUpdateDraft, MonthlyUpdateDraftStatus
-        today = date.today()
+        today = self._today()
         draft = self._make_update(today, MonthlyUpdateDraftStatus.DRAFT)
         self.assertIsNone(draft.ready_at)
 
@@ -1149,7 +1148,7 @@ class CoworkingMonthlyUpdateDiscountTests(TestCase):
         second_org = Organization.objects.create(name='Beta', domain='beta.example')
         UserStartupBinding.objects.create(user=self.user, organization=second_org)
         self._company_for(second_org, name='Beta Pty Ltd', verified=True)
-        today = date.today()
+        today = self._today()
         MonthlyUpdateDraft.objects.create(
             organization=second_org,
             month=today.replace(day=1),
@@ -1172,7 +1171,7 @@ class CoworkingMonthlyUpdateDiscountTests(TestCase):
         other = User.objects.create_user(email='nocompany@example.com', slack_id='UNOCOMP')
         org = Organization.objects.create(name='Gamma', domain='gamma.example')
         UserStartupBinding.objects.create(user=other, organization=org)
-        today = date.today()
+        today = self._today()
         MonthlyUpdateDraft.objects.create(
             organization=org, month=today.replace(day=1), status=MonthlyUpdateDraftStatus.READY,
             published_at=timezone.now(),
@@ -1192,7 +1191,7 @@ class CoworkingMonthlyUpdateDiscountTests(TestCase):
         org = Organization.objects.create(name='Epsilon', domain='epsilon.example')
         UserStartupBinding.objects.create(user=other, organization=org)
         self._company_for(org, name='Epsilon Pty Ltd', verified=False, user=other)
-        today = date.today()
+        today = self._today()
         from startup_updates.models import MonthlyUpdateDraft
         MonthlyUpdateDraft.objects.create(
             organization=org, month=today.replace(day=1), status=MonthlyUpdateDraftStatus.READY,
@@ -1209,7 +1208,7 @@ class CoworkingMonthlyUpdateDiscountTests(TestCase):
 
     def test_book_charges_discounted_cost_end_to_end(self):
         from startup_updates.models import MonthlyUpdateDraftStatus
-        booking_date = date.today()
+        booking_date = self._today()
         self._make_update(booking_date, MonthlyUpdateDraftStatus.READY)
 
         balance_before = PointsAccount.objects.get(user=self.user).balance
@@ -1225,7 +1224,7 @@ class CoworkingMonthlyUpdateDiscountTests(TestCase):
         self.assertEqual(account.balance, balance_before - 4)
 
     def test_book_charges_standard_cost_without_ready_update(self):
-        booking_date = date.today()
+        booking_date = self._today()
         balance_before = PointsAccount.objects.get(user=self.user).balance
         booking, created = CoworkingService.book(
             user=self.user,
