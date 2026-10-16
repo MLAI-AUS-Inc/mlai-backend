@@ -271,12 +271,16 @@ class WebsiteConnectionAuthorizeView(APIView):
                     from .website_verification import ci_attestation_for
                     return Response(ci_attestation_for(connection, dict(request.query_params.items())))
                 portable = request.query_params.get("action") == "portable"
+                recipe_inputs = {}
+                if action == "custom_contract" and any(key in request.query_params for key in ("site_contract_digest", "site_recipe_version")):
+                    from .website_site_recipe import authorization_inputs
+                    recipe_inputs["site_recipe_verification"] = authorization_inputs(connection, dict(request.query_params.items()))
                 from .website_operations import deletion_epoch
                 return Response({"allowed": True, **contract_for(connection), "state": connection.state,
                     "operation_id": request.query_params.get("operation_id"), "operation_attempt": request.query_params.get("operation_attempt", 1),
                     "deletion_epoch": deletion_epoch(connection), "authorized_action": action,
                     "permission_mode": "none" if portable else "read", "capabilities": {} if portable else connection.capabilities,
-                    "expected_source_sha": str(request.query_params.get("expected_source_sha") or request.query_params.get("source_sha") or request.query_params.get("repo_head_sha") or "").lower()})
+                    "expected_source_sha": str(request.query_params.get("expected_source_sha") or request.query_params.get("source_sha") or request.query_params.get("repo_head_sha") or "").lower(), **recipe_inputs})
         except WebsiteAuthorityError as exc:
             return Response(exc.as_dict(), status=exc.status)
 

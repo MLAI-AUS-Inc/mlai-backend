@@ -23,6 +23,8 @@ subsystem-specific contracts and runbooks.
 
 ## Content Factory
 
+- [E5 site-recipe authorization](articles-e5-site-recipe-authority-2026-10-17.md) — default-off current target/reservation inputs outside committed v2 recipes
+
 - [E3 original inventory count disclosure](articles-e3-native-inventory-display-2026-10-17.md) — scoped “We found N” observations and immutable producer parity, with no readiness grant
 
 - [F2 bootstrap summary and rendering](articles-f2-bootstrap-summary-2026-10-16.md) — default compact reads, explicit full details, and remaining latency/overlay validation
