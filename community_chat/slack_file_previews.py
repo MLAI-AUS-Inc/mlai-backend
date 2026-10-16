@@ -36,6 +36,10 @@ SLACK_IMAGE_LIMIT_BYTES = 10 * 1024 * 1024
 SLACK_REQUEST_TIMEOUT = (3, 10)
 FAILURE_CACHE_SECONDS = 60
 NETWORK_FAILURE_RETRY_SECONDS = 15
+PREVIEW_WAIT_REASONS = frozenset({
+    "metadata_pending", "single_flight", "shared_budget", "upstream_rate_limit",
+    "upstream_unavailable", "transport",
+})
 ALLOWED_IMAGE_TYPES = frozenset(
     {
         "image/avif",
@@ -54,9 +58,10 @@ class SlackFilePreviewError(ValueError):
 class SlackFilePreviewDeferred(SlackFilePreviewError):
     """A temporary source delay that clients can retry without reconnecting."""
 
-    def __init__(self, retry_after=1):
+    def __init__(self, retry_after=1, *, reason="metadata_pending"):
         super().__init__("Slack is preparing this preview. It will retry shortly.")
         self.retry_after = max(1, int(retry_after))
+        self.reason = reason if isinstance(reason, str) and reason in PREVIEW_WAIT_REASONS else "metadata_pending"
 
 
 def _raise_cached_failure(cache_key: str) -> None:
@@ -64,7 +69,10 @@ def _raise_cached_failure(cache_key: str) -> None:
     if not isinstance(failure, dict):
         return
     if failure.get("retry_at"):
-        raise SlackFilePreviewDeferred(math.ceil(failure["retry_at"] - time.time()))
+        raise SlackFilePreviewDeferred(
+            math.ceil(failure["retry_at"] - time.time()),
+            reason=failure.get("reason", "metadata_pending"),
+        )
     raise SlackFilePreviewError("The Slack preview is temporarily unavailable.")
 
 
@@ -73,7 +81,10 @@ def _remember_failure(cache_key: str, error: SlackFilePreviewError) -> None:
     retry_after = getattr(error, "retry_after", None)
     cache.set(
         cache_key + ":failure",
-        {"retry_at": time.time() + retry_after if retry_after else None},
+        {
+            "retry_at": time.time() + retry_after if retry_after else None,
+            "reason": error.reason if isinstance(error, SlackFilePreviewDeferred) else None,
+        },
         timeout=min(FAILURE_CACHE_SECONDS, retry_after or FAILURE_CACHE_SECONDS),
     )
 
@@ -242,13 +253,14 @@ def fetch_slack_file_image(
             chunks.append(chunk)
     except requests.RequestException as exc:
         if isinstance(exc, (requests.Timeout, requests.ConnectionError)):
-            error = SlackFilePreviewDeferred(NETWORK_FAILURE_RETRY_SECONDS)
+            error = SlackFilePreviewDeferred(NETWORK_FAILURE_RETRY_SECONDS, reason="transport")
         elif (response_status := getattr(exc.response, "status_code", None)) == 429 or (
             response_status is not None and response_status >= 500
         ):
             raw_retry = exc.response.headers.get("Retry-After", "2")
             error = SlackFilePreviewDeferred(
-                int(raw_retry) if str(raw_retry).isdigit() else 2
+                int(raw_retry) if str(raw_retry).isdigit() else 2,
+                reason="upstream_rate_limit" if response_status == 429 else "upstream_unavailable",
             )
         else:
             error = SlackFilePreviewError("The Slack image could not be reached.")
@@ -410,7 +422,7 @@ def _slack_file_info(
     # Authorization still runs for every caller after this metadata lookup.
     lock_key = cache_key + ":loading"
     if not cache.add(lock_key, True, timeout=30):
-        raise SlackFilePreviewDeferred(1)
+        raise SlackFilePreviewDeferred(1, reason="single_flight")
     try:
         return _fetch_slack_file_info(file_id, access_token=access_token,
                                       workspace_id=workspace_id, cache_key=cache_key)
@@ -433,7 +445,7 @@ def _fetch_slack_file_info(file_id, *, access_token, workspace_id, cache_key):
         )
         response = client.files_info(file=file_id)
     except BudgetDeferred as exc:
-        raise SlackFilePreviewDeferred(exc.retry_after) from exc
+        raise SlackFilePreviewDeferred(exc.retry_after, reason="shared_budget") from exc
     except SlackApiError as exc:
         if exc.response.get("error") in {
             "ratelimited",
@@ -445,14 +457,15 @@ def _fetch_slack_file_info(file_id, *, access_token, workspace_id, cache_key):
                 "Retry-After", "2"
             )
             error = SlackFilePreviewDeferred(
-                int(raw_retry) if str(raw_retry).isdigit() else 2
+                int(raw_retry) if str(raw_retry).isdigit() else 2,
+                reason="upstream_rate_limit" if exc.response.get("error") == "ratelimited" else "upstream_unavailable",
             )
         else:
             error = SlackFilePreviewError("The Slack file could not be loaded.")
         _remember_failure(cache_key, error)
         raise error from exc
     except (TimeoutError, ConnectionError, URLError, SlackRequestError) as exc:
-        error = SlackFilePreviewDeferred(NETWORK_FAILURE_RETRY_SECONDS)
+        error = SlackFilePreviewDeferred(NETWORK_FAILURE_RETRY_SECONDS, reason="transport")
         _remember_failure(cache_key, error)
         raise error from exc
     except Exception as exc:

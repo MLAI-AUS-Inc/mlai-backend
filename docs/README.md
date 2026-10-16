@@ -46,6 +46,8 @@ subsystem-specific contracts and runbooks.
 
 ## Community chat APIs
 
+- [Dependency signals and polling callers](community-chat-dependency-signals.md) — source-level G3 tracing for preview, Slack storage and cursor callback waits
+
 - [MLAI remote MCP](mlai-mcp.md) — unified Pulse, Articles and explicit-channel Community capabilities with legacy audience isolation
 
 - [Personal Dot on MLAI MCP](mlai-mcp-native-dot.md) — fresh installation-bound consent, mention events and native replies on the existing connection

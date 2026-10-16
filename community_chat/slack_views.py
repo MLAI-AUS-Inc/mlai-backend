@@ -1,5 +1,6 @@
 """One-click Slack DM migration controls for Community Home."""
 
+import logging
 from urllib.parse import urlencode
 
 from django.conf import settings
@@ -53,6 +54,7 @@ from .throttles import (
     SlackSnapshotDeviceThrottle,
 )
 
+logger = logging.getLogger(__name__)
 
 def _import_history_days(data, *, default=30):
     days = data.get("history_days", default)
@@ -108,6 +110,9 @@ def _slack_endpoint_error_response(exc: Exception) -> Response:
     """Translate infrastructure failures without exposing provider details."""
 
     if isinstance(exc, DatabaseError):
+        logger.warning(
+            "community_chat_dependency_wait endpoint=slack_api dependency=database reason=database_unavailable"
+        )
         return Response(
             {"error": "slack_storage_unavailable"},
             status=status.HTTP_503_SERVICE_UNAVAILABLE,
