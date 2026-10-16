@@ -1,0 +1,17 @@
+{
+  "files": [
+    {
+      "local_path": "contracts/native-inventory-summary-v1.example.json",
+      "sha256": "ecf568c002270ea34d495910973cde0de3ea3e51429b2a5614d8fc9b04395fa6",
+      "source_path": "backend/contracts/native-inventory-summary-v1.example.json"
+    },
+    {
+      "local_path": "contracts/native-inventory-summary-v1.schema.json",
+      "sha256": "9bc3ff7439fd02f4e4095db645a0cf7b2659c164a8c1d4acb24c406244155c94",
+      "source_path": "backend/contracts/native-inventory-summary-v1.schema.json"
+    }
+  ],
+  "schema_version": 1,
+  "source_repository": "drsamdonegan/content-factory",
+  "source_revision": "1348a34cef417bd0414dc63110a48f458c9e10fb"
+}

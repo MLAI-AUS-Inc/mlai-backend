@@ -51,6 +51,14 @@ Cleanup execution requires a second explicit owner POST with `approve_cleanup:tr
 
 ## One-click preparation, disconnection and billing
 
+The default-off `ARTICLES_EXISTING_INVENTORY_DISPLAY_ENABLED` adds
+`websiteStatus.existingArticles` and one capture evidence message from a validated
+summary on the preparation's canonical setup child. The observed original SHA
+is retained separately from the current branch. Missing/foreign/conflicting
+evidence is omitted; zero requires a valid empty observation. This display has
+no effect on goal milestones, capabilities, approval or publishing. See the
+[E3 disclosure contract](articles-e3-native-inventory-display-2026-10-17.md).
+
 `python manage.py inspect_website_prepare --company-id <uuid>` (or `--domain example.test`)
 prints bounded local preparation diagnostics: connection identity and capabilities,
 the last five operation receipts, the saved setup choice, current inventory resolution,
