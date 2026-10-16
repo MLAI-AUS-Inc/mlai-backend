@@ -33,6 +33,11 @@ DEPLOYMENT_WAIT_CODES = frozenset({"deployment_source_unverified", "deployment_m
     "live_route_unavailable", "ci_attestation_required", "ci_evidence_unavailable", "verified_target_required",
     "deployment_verification_required", "native_ci_attestation_missing", "ci_proof_unavailable"})
 SETUP_EXAMPLE_CLEANUP_CODE = "SETUP_EXAMPLE_CLEANUP_REQUIRED"
+# Content Factory reported an authorization check it could not complete (a
+# timeout while this backend restarted, for example) as this code until it
+# split out CONNECTION_SERVICE_TRANSIENT. Such a run is resumed this many times.
+UNVERIFIED_AUTHORIZATION_CODE = "CONNECTION_AUTHORIZATION_FAILED"
+UNVERIFIED_AUTHORIZATION_RESUMES = 3
 
 
 def _setup_example_cleanup_action(raw, connection):
@@ -615,6 +620,28 @@ def _dispatch_prepare_step(op, context, config, step, *, user, journey=None):
     return {"status": "completed", "operation_id": str(ci.pk)}
 
 
+def _unverified_authorization_is_transient(op, child, code, classification, step):
+    """Whether a child stopped only because its authorization check went unanswered.
+
+    A refused connection is disconnected or regenerated, and claiming this
+    operation would already have cancelled it. While the connection still
+    grants the child run's saved generation, this backend is not refusing the
+    run, so it is resumed (a bounded number of times) instead of waiting for
+    Try again. The resumed run re-authorizes each of its actions.
+    """
+    if code != UNVERIFIED_AUTHORIZATION_CODE or classification != "repairable":
+        return False
+    from .website_connections import scoped_run_contract
+    contract, connection = scoped_run_contract(child), op.connection
+    if (connection.state != "connected" or op.generation != connection.generation
+            or str(contract.get("website_connection_id") or "") != str(connection.pk)
+            or str(contract.get("connection_generation") or "") != str(connection.generation)):
+        return False
+    if op.receipt.get("child_resume_pending"):
+        return True  # Carry out the resume already scheduled for this failure.
+    return (op.receipt.get("step_failures") or {}).get(step, 0) < UNVERIFIED_AUTHORIZATION_RESUMES
+
+
 def _resume_prepare_child(op, child, *, user, context):
     """Resume the saved run through existing guarded control and attempt fencing."""
     from .vibe_marketing_views import VibeMarketingRunControlView
@@ -713,6 +740,8 @@ def _advance_claimed_prepare(op, *, now, handlers):
                 result = child.result or {}
                 code = result.get("error_code") or setup.get("error_code") or "website_prepare_step_failed"
                 classification = failure_class(code, result, retryable=result.get("retryable") is True)
+                if _unverified_authorization_is_transient(op, child, code, classification, step):
+                    classification = "transient"
                 message = getattr(child, "error", "") or result.get("error") or result.get("message") or "The website step could not finish."
                 if classification == "transient" and op.receipt.get("child_resume_pending"):
                     _resume_prepare_child(op, child, user=user, context=context)
