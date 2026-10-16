@@ -174,8 +174,14 @@ class WebsiteConnectionActionView(APIView):
                 advance_prepare(operation.pk)
                 operation.refresh_from_db()
             elif action == "disconnect":
-                from .website_disconnect import start_disconnect
-                operation = start_disconnect(config, user=request.user, data=dict(request.data))
+                from .publishing_channels import enabled as channels_enabled, execute as execute_channel
+                if channels_enabled():
+                    from .publishing_channel_contract import ChannelRequest
+                    operation = execute_channel("disconnect", ChannelRequest(context=context, config=config,
+                        user=request.user, data=dict(request.data)))
+                else:
+                    from .website_disconnect import start_disconnect
+                    operation = start_disconnect(config, user=request.user, data=dict(request.data))
             elif action == "github-revoke":
                 from .website_github_revocation import revocation_plan, apply_revocation
                 if request.data.get("phase", "plan") == "plan":

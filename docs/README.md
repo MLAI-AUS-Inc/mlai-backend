@@ -23,6 +23,8 @@ subsystem-specific contracts and runbooks.
 
 ## Content Factory
 
+- [E5 publishing-channel interface](articles-e5-channel-interface-2026-10-17.md) — shared operations, original guarded Git/portable flows and separate provider authority
+
 - [E5 publishing-channel discovery](articles-e5-channel-discovery-2026-10-17.md) — bounded public/repository observations and recommendations, without publishing authority
 
 - [E5 site-recipe authorization](articles-e5-site-recipe-authority-2026-10-17.md) — default-off current target/reservation inputs outside committed v2 recipes

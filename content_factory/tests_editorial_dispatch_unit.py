@@ -201,7 +201,7 @@ class ArticleDispatchControlFlowTests(unittest.TestCase):
         }
         from content_factory.commands import ContentCommand
         self.ns["ContentCommand"] = ContentCommand
-        names = {"start_article_generation", "_run_mapping", "_request_value", "_bool_from_request", "_refresh_article_editorial_payload", "_friendly_content_factory_error", "_blocked_worker_payload",
+        names = {"start_article_generation", "_start_article_generation_for_channel", "_run_mapping", "_request_value", "_bool_from_request", "_refresh_article_editorial_payload", "_friendly_content_factory_error", "_blocked_worker_payload",
                  "_restart_article_payload_from_run", "_reserve_article_restart", "_restart_article_run", "_charge_roo_points_for_article", "_queue_content_factory_run", "_queue_content_factory_run_authorized",
                  "_run_result_from_remote", "_resolve_dispatch_token_run", "_fail_unconfirmed_dispatch_run"}
         tree = ast.parse(Path(__file__).with_name("vibe_marketing_views.py").read_text())

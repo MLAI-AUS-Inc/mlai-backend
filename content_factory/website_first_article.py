@@ -220,6 +220,16 @@ def _check_response(response):
 
 
 def advance(op, context, config, *, user, now):
+    """Advance through the common channel while retaining original Git controls."""
+    from .publishing_channels import enabled, execute
+    if enabled():
+        from .publishing_channel_contract import ChannelRequest
+        return execute("publish", ChannelRequest(context=context, config=config, user=user,
+            operation=op, step="first-article", now=now))
+    return _advance_git_first_article(op, context, config, user=user, now=now)
+
+
+def _advance_git_first_article(op, context, config, *, user, now):
     """Run the existing generation/review/publication controls from one durable goal."""
     if not active(op):
         raise WebsiteAuthorityError("website_prepare_blocked","First-article execution is disabled or its consent changed.")
