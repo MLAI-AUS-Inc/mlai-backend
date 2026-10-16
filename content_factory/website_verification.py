@@ -91,10 +91,17 @@ def record_ci_attestation(data, *, owner_review=False, origin="authenticated_ci"
             raise WebsiteAuthorityError("ci_attestation_scope_mismatch", "CI evidence differs from the reviewed custom target.")
         if not custom_verified and (target is None or target.contract.get("contract_digest") != data.get("contract_digest")):
             raise WebsiteAuthorityError("ci_attestation_contract_mismatch", "The CI check must match the reviewed target contract.")
+        if attestation_origin == "authenticated_hosted":
+            from .website_site_recipe import recheck_hosted_target
+            recheck_hosted_target(website, target, origin, data.get("source_sha"))
         binding = {**data, **contract_for(website)}
         changed_source = website.verified_sha != data.get("source_sha")
         reviewed_heads = list(website.repository_mutations.filter(generation=website.generation, status="applied",
             run_id=data.get("source_run_id") if attestation_origin == "authenticated_hosted" else data.get("run_id")).exclude(head_sha="").values_list("head_sha", flat=True))
+        if changed_source and not reviewed_heads and attestation_origin == "authenticated_hosted":
+            from .website_site_recipe_reconnect import trusted_source_review
+            if trusted_source_review(website, origin, data):
+                reviewed_heads = [data["source_sha"]]
         # Recorded setup merges prove lineage for squash-merged reviewed heads.
         owned_merge = False
         if changed_source and not owner_review and not reviewed_heads:
@@ -127,6 +134,9 @@ def record_ci_attestation(data, *, owner_review=False, origin="authenticated_ci"
             target.refresh_from_db()
             if target.contract.get("contract_digest") != data["contract_digest"]:
                 raise WebsiteAuthorityError("website_configuration_changed", "The reviewed target contract changed while CI was being verified.")
+            if attestation_origin == "authenticated_hosted":
+                origin.refresh_from_db()
+                recheck_hosted_target(website, target, origin, data.get("source_sha"))
             target.source_sha, target.verified_at = proof["source_sha"], timezone.now()
             target.contract = {**target.contract, "verification": {**proof, "status": "verified"}}
             target.capabilities = {**target.capabilities, "publishingReady": True}

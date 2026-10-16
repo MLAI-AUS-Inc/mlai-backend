@@ -1,0 +1,75 @@
+{
+  "examples": [
+    {
+      "contract_digest": "1572b11a30f379e0107f725b5d98f6f3c091840ab48a8da14d17c78d04cb16a7",
+      "name": "static-adoption-diagnostics",
+      "target": {
+        "content_path_pattern": "data/articles.json",
+        "contract": {
+          "live_marker": {
+            "diagnostics": {
+              "checked": true
+            },
+            "kind": "artifact_digest",
+            "marked_paths": [
+              "stories/index.html"
+            ],
+            "meta_name": "mlai-artifact-digest",
+            "schema_version": 1,
+            "value": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+          }
+        },
+        "delivery_adapter": "stack_native",
+        "kind": "stack_native_collection",
+        "metadata_strategy": {
+          "seo_path_template": "/stories/{slug}/",
+          "static_source_materialization": {
+            "app_root": "",
+            "detail_source_path_pattern": "stories/{slug}/index.html",
+            "listing_source_path": "stories/index.html",
+            "materializer_command": [
+              "python3",
+              "scripts/materialize_articles.py",
+              "--output-dir",
+              "cf-articles-preview"
+            ],
+            "preview_output_dir": "cf-articles-preview",
+            "schema_version": 1
+          },
+          "type": "stack_native_collection"
+        },
+        "registration_strategy": {
+          "path": "data/articles.json",
+          "store_kind": "json_data_file",
+          "type": "stack_native_collection"
+        },
+        "route_template": "/stories/{slug}/",
+        "target_id": "stack_native_collection_data_articles_json_static"
+      }
+    },
+    {
+      "contract_digest": "2e23630c7f8c91025a28571cce99c5f896e1e751808984fb449faa6ded726410",
+      "name": "opaque-unicode-target",
+      "target": {
+        "content_path_pattern": "文章/{slug}.md",
+        "contract": {
+          "live_marker": {
+            "kind": "artifact_digest",
+            "marked_paths": [
+              "文章/index.md"
+            ],
+            "meta_name": "mlai-artifact-digest",
+            "schema_version": 1,
+            "value": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+          }
+        },
+        "delivery_adapter": "markdown_file",
+        "kind": "markdown_file",
+        "route_template": "/articles/{slug}",
+        "target_id": "markdown_文章_{slug}_md__md"
+      }
+    }
+  ],
+  "kind": "native_target_identity_examples",
+  "schema_version": 1
+}

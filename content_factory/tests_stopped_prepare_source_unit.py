@@ -34,20 +34,32 @@ class OperationRows:
     @staticmethod
     def _matches(row, lookups):
         for key, value in lookups.items():
-            name, _, test = key.partition("__")
-            actual = getattr(row, name)
+            parts = key.split("__")
+            test = parts.pop() if parts[-1] in {"in", "gt"} else "eq"
+            actual = row
+            for part in parts:
+                actual = actual.get(part) if isinstance(actual, dict) else getattr(actual, part, None)
             if test == "in":
                 matched = actual in value
             elif test == "gt":
-                matched = actual > value
+                matched = actual is not None and actual > value
             else:
                 matched = actual == value
             if not matched:
                 return False
         return True
 
-    def filter(self, **lookups):
-        return OperationRows(row for row in self.rows if self._matches(row, lookups))
+    @classmethod
+    def _condition(cls, row, condition):
+        if isinstance(condition, tuple):
+            return cls._matches(row, dict([condition]))
+        values = [cls._condition(row, child) for child in condition.children]
+        matched = any(values) if condition.connector == "OR" else all(values)
+        return not matched if condition.negated else matched
+
+    def filter(self, *conditions, **lookups):
+        return OperationRows(row for row in self.rows if self._matches(row, lookups)
+            and all(self._condition(row, condition) for condition in conditions))
 
     def exclude(self, **lookups):
         return OperationRows(row for row in self.rows if not self._matches(row, lookups))
@@ -96,6 +108,12 @@ class CurrentOperationTests(SimpleTestCase):
         self.assertIs(current_operation(self.connection(scan, recheck)), scan)
         self.assertIsNone(current_operation(self.connection(recheck, self.op("worker_followup", "pending", minutes=1))))
         self.assertIsNone(current_operation(self.connection(self.op("prepare", "pending", minutes=1, generation=2))))
+
+    def test_explicit_recipe_reconnect_is_visible_while_background_source_checks_are_skipped(self):
+        reconnect = self.op("source-reverify", "pending", minutes=5)
+        reconnect.payload = {"site_recipe_reconnect": True}
+        background = self.op("source-reverify", "pending", minutes=1)
+        self.assertIs(current_operation(self.connection(reconnect, background)), reconnect)
 
 
 class NextActionLabelTests(SimpleTestCase):

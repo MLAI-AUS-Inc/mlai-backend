@@ -1194,6 +1194,59 @@ class WebsiteSourceFenceTests(WebsiteDatabaseFixture, TestCase):
 
 class WebsiteReviewRegressionTests(WebsiteDatabaseFixture, TestCase):
     @patch('content_factory.website_connections.verify_repository_access')
+    def test_v2_disconnect_reconnect_twice_retains_recipe_and_requires_fresh_proof(self, verify):
+        """Actual lifecycle transactions run on CI's disposable database only."""
+        import json
+        from pathlib import Path
+        from django.contrib.auth import get_user_model
+        from .website_models import WebsiteConnectionTarget
+        from .website_target_contract import native_target_digest
+        user = get_user_model().objects.create_user(email='recipe-fixture@example.test', password='synthetic-password')
+        self.website.authorized_by = user
+        self.website.verified_sha = SHA
+        self.website.save(update_fields=['authorized_by', 'verified_sha'])
+        definition = deepcopy(json.loads((Path(__file__).resolve().parents[1] / 'contracts/native-target-identity-v1.example.json').read_text())['examples'][0]['target'])
+        definition.update(target_id='native', site_contract_version=2, site_contract_digest='e' * 64,
+            site_verification_probe={'slug': 'fixture', 'title': 'Fixture article'}, publish_capability='direct')
+        definition['contract']['contract_digest'] = native_target_digest(definition)
+        definition['verification'] = {'status': 'verified', 'source_sha': SHA,
+            'website_connection_id': str(self.website.pk), 'connection_generation': 1, 'repository_id': 123}
+        prior = WebsiteConnectionTarget.objects.create(connection=self.website, generation=1, target_key='native',
+            contract=definition, source_sha=SHA, verified_at=timezone.now(), capabilities={'publishingReady': True})
+        self.config.default_publish_target_id = 'native'
+        self.config.save(update_fields=['default_publish_target_id'])
+        verify.return_value = {'repository_id': 123, 'github_repo': 'example/site', 'installation_id': '45', 'branch': 'main'}
+        with override_settings(ARTICLES_SITE_CONTRACT_V2_ENABLED=True, ARTICLES_HOSTED_ATTESTATION_ENABLED=True,
+                ARTICLES_HOSTED_VERIFICATION_ENABLED=True, ARTICLES_WEBSITE_GOAL_RUNNER_ENABLED=True,
+                ARTICLES_WEBSITE_GOAL_ENROLLED_ORGANIZATIONS=[str(self.org.pk)], ARTICLES_FAILURE_TAXONOMY_POLICY_ENABLED=True,
+                ARTICLES_FAILURE_TAXONOMY_ENROLLED_ORGANIZATIONS=[str(self.org.pk)]):
+            for generation in (3, 5):
+                transition_connection(self.config, action='disconnect', expected=contract_for(self.website))
+                self.website.refresh_from_db()
+                result = bind_website(self.config, user=user, repo='example/site', reconnect=True,
+                    expected=contract_for(self.website))
+                self.assertEqual(result.pk, self.website.pk)
+                self.assertEqual(result.generation, generation)
+                self.assertEqual(result.verified_sha, '')
+                self.assertFalse(result.capabilities.get('publishingReady', False))
+                current = result.targets.get(generation=generation, target_key='native')
+                self.assertEqual(current.contract['site_contract_digest'], 'e' * 64)
+                self.assertEqual(current.source_sha, '')
+                self.assertIsNone(current.verified_at)
+                self.assertTrue(current.contract['provisional'])
+                self.assertNotIn('verification', current.contract)
+                self.assertFalse(current.capabilities['publishingReady'])
+                reserved = result.operations.get(generation=generation, action='source-reverify')
+                self.assertTrue(reserved.payload['site_recipe_reconnect'])
+                self.assertEqual(reserved.payload['source_sha'], SHA)
+                self.assertEqual(reserved.payload['previous_target_id'], str(prior.pk))
+                self.assertFalse(result.operations.filter(generation=generation, payload__workflow='article_system_setup').exists())
+                self.website = result
+        prior.refresh_from_db()
+        self.assertEqual(prior.source_sha, SHA)
+        self.assertEqual(prior.contract['verification']['connection_generation'], 1)
+
+    @patch('content_factory.website_connections.verify_repository_access')
     def test_archives_old_repository_seeds_under_original_connection(self, verify):
         verify.return_value = {'repository_id': 987, 'github_repo': 'other/site', 'installation_id': '99', 'branch': 'main'}
         new = bind_website(self.config, user=None, repo='other/site', expected=self.binding)

@@ -21,6 +21,18 @@ Every repository request, saved run, child run, token request, callback and repo
 
 `GET /api/content-factory/connections/authorize` accepts that tuple, `domain`, `github_repo`, and `action=read|scan|config_write|preview|setup|publish|merge|cleanup`. It uses existing internal API-key authentication. Missing, stale, revoked, cross-company and mismatched repository authority returns a stable 409 error. No legacy OAuth fallback overrides denial. A successful check is not a lease: workers recheck immediately before each external mutation. The backend serializes its writes with lifecycle changes using organization/connection row locks.
 
+The default-off E5 extension accepts `action=custom_contract` with explicit
+`site_recipe_version=2`, `site_contract_digest`, `target_id`, `branch` and
+`app_root`. With `ARTICLES_SITE_CONTRACT_V2_ENABLED` plus hosted-verification
+enablement and goal enrollment, it returns `site_recipe_verification` only for
+the exact saved current hosted-verification reservation and accepted target
+definition. The worker must produce fresh evidence at the reserved source. Its
+closed read/build projection contains `version`, `scope`, `binding`, `target`
+and the backend-selected `probe`; query commands, probe data and target
+definitions are ignored. It cannot enroll a recipe or grant publication
+readiness. Ordinary v1 reads keep their existing response. See the
+[E5 design and acceptance boundary](articles-e5-site-recipe-authority-2026-10-17.md).
+
 The separate `action=portable` validates the current reviewed tuple and any supplied observed source SHA, including for a disconnected connection. It does not contact GitHub or grant repository access: its receipt contains `permission_mode=none`, empty repository capabilities and the checked `expected_source_sha`. Token endpoints reject this action. Backend portable dispatch drops the reviewed repository tuple and starts a new unbound draft.
 
 `GET /api/content-factory/org/config?article_admission=1` resolves the founder's persisted ownership of the exact startup domain. Repository admission also requires the reviewed connection tuple and fresh current-head readiness. Explicit `delivery_mode=content_only&delivery_mode_confirmed=true` admission permits a portable draft without a repository; if a reviewed tuple is supplied it must still be current. Responses echo that tuple and source SHA. `articleCapabilities.canGeneratePortableDraft` is separate from `canGenerateArticle` and `canPublishArticle`, which require current-generation durable target proof and fresh GitHub access. Historical scan flags cannot replace proof after a durable connection exists. Original repository-bound runs cannot acquire the portable callback or resume exception by changing their delivery mode.
