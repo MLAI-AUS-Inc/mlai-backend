@@ -5,10 +5,14 @@ run or applied. Per AGENTS.md this needs explicit operator approval for this
 specific migration before anyone runs `makemigrations`, `migrate`, or any
 database-backed test.
 
-Until the migration exists, `python manage.py makemigrations --check --dry-run`
-(and the CI step "Check migrations are committed") will report the new
-`mentoring` models. That is expected on this branch and is the signal that the
-approved migration still has to be generated.
+Until the migration exists the `mentoring` tables do not exist. Note that
+`makemigrations --check --dry-run` does NOT flag this: an app that has no
+`migrations` package is not considered by `makemigrations --check`, so CI stays
+green and nothing warns you. Do not rely on that check. Until the migration is
+applied, the Django admin pages for mentoring return 500 and every user deletion
+queries the mentoring tables (the PROTECT foreign keys), so apply the migration
+before deploying this code to any database (the staging rollout doc says the
+same). The feature flag being off does not avoid either of those.
 
 ## Scope
 
@@ -101,3 +105,14 @@ There are no rating, strike, testimonial or report columns by design.
   written or run yet; they also need this approval.
 - The feature flag MENTOR_BOOKING_ENABLED is off by default, so applying the
   migration changes no behavior.
+
+## Open items (not changed yet, need a decision before the migration is generated)
+
+- PROTECT vs SET_NULL on user deletion: `MentorSession.mentor` and `.founder` are PROTECT,
+  so deleting a user who has any session raises ProtectedError (account deletion and
+  admin delete). Decide the account-deletion behavior (anonymise, SET_NULL with nullable
+  fields, or block with a clear message) and confirm the account deletion path.
+- Optional exclusion constraint against overlapping active sessions per mentor. It
+  needs the `btree_gist` extension and an ExclusionConstraint on (mentor, tstzrange of
+  starts_at and ends_at) for statuses requested and accepted. Today only the Postgres
+  advisory locks and the in-transaction slot recheck protect this.

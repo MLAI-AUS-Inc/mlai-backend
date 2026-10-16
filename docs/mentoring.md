@@ -50,17 +50,33 @@ Everything returns 404 `mentor_booking_disabled` while the flag is off.
 | GET `mentors/` | List active mentors (no email or Slack id) |
 | GET `mentors/<id>/availability/?from=&to=` | Free slots (UTC ISO times), up to 31 days, default next 14 |
 | GET, PUT `mentor/profile/` | The mentor's own profile and weekly `availability` list |
-| POST `mentor/sessions/` | Founder request: `mentor_id`, `starts_at`, `location_type`, `brief`, `client_request_id`, optional `expected_price` |
+| POST `mentor/sessions/` | Founder request: `mentor_id` (whole number), `starts_at`, `location_type`, `brief`, `client_request_id`, and `expected_price` (required, the whole-number price the founder was shown) |
 | GET `mentor/sessions/?role=founder\|mentor&status=` | My sessions |
 | POST `mentor/sessions/<uuid>/accept/` | Mentor accepts |
 | POST `mentor/sessions/<uuid>/decline/` | Mentor declines (refund) |
 | POST `mentor/sessions/<uuid>/cancel/` | Founder or mentor, before the start (refund) |
-| POST `mentor/sessions/<uuid>/complete/` | Mentor marks done, after the start (payout) |
+| POST `mentor/sessions/<uuid>/complete/` | Mentor marks done, only once the session has ended (payout) |
+
+A missing or non-integer `expected_price` returns 400 `expected_price_required`; a
+mismatch with the mentor's current price returns 400 `price_changed`. A boolean or
+non-integer `mentor_id` returns 400 `invalid_mentor_id`. When the flag is off the
+flag is checked before authentication and throttling, so every caller gets 404.
+If an action hits a request that has just expired, the expiry and refund are committed
+first and the call then returns 409 `request_expired`.
 
 Creating a request is idempotent per founder through `client_request_id`. A
 repeat with the same id and same mentor and time returns the original session
-with 200; a different mentor or time returns 409 `idempotency_conflict`. A
-Postgres advisory lock per mentor serialises writers, like `MeetingRoomService`.
+with 200 (even if the mentor was deactivated or the price changed in between); a
+different mentor or time returns 409 `idempotency_conflict`. A
+Postgres advisory locks (per mentor, per founder and per request id) serialise
+writers, like `MeetingRoomService`, so the two-founders-one-slot and
+one-founder-two-mentors races are closed.
+
+Important: overlap protection relies on those Postgres advisory locks plus a slot
+recheck inside the transaction. Production and staging are Postgres. On any other
+database (for example SQLite in a local run) the locks are no-ops, so double
+bookings are not prevented there. There is no database constraint yet; see the open
+items in the migration proposal.
 
 The home endpoint exposes `feature_flags.mentor_booking`.
 
@@ -84,7 +100,10 @@ is accepted for the pilot and is an open decision for the operator.
 ## Notifications
 
 A new request sends the mentor a Slack DM through `SlackService.send_dm`, best
-effort, only when the mentor has a Slack id. The outcome is stored in
+effort, after the booking transaction commits (via `transaction.on_commit`; on staging,
+where requests are atomic, that is when the request commits). The DM runs in the
+request thread, so a slow Slack call delays the response by up to its timeout. It is
+not queued, only when the mentor has a Slack id. The outcome is stored in
 `notification_status` (pending, sent, failed, skipped), never in `status`, so a
 failed DM cannot change a booking. Mentors can also poll
 `mentor/sessions/?role=mentor&status=requested`.
