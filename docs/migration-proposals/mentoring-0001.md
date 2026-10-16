@@ -1,10 +1,12 @@
 # Migration: mentoring 0001_initial
 
-Status: CHANGED, AWAITING OPERATOR APPROVAL (16-10-26). The Google Meet and free/busy work
-changes the field list below. The existing file `mentoring/migrations/0001_initial.py` is left
-in place unchanged and is **to be regenerated after approval** (it still has `video_link` and
-lacks the new fields, so `makemigrations --check` reports changes until then). Do not apply it.
-Nothing has been applied anywhere.
+Status: APPROVED 16-10-26 by operator (approved 16-10-26 by operator). The file
+`mentoring/migrations/0001_initial.py` was regenerated with `makemigrations mentoring` under
+dummy no-database settings, replacing the earlier draft (which had `video_link` and lacked the
+new fields). It has NOT been applied to any production or staging database. It may be applied
+only to a disposable local database on the operator's Mac. The field list below is final.
+
+- File sha256: `f787b567f1fcdbfc11b415d89136d85a33ba003b00935ea67f40b720d97304e9`
 
 Field changes against the previously approved file (the tables below show the new list):
 
@@ -14,17 +16,11 @@ Field changes against the previously approved file (the tables below show the ne
   failed, unavailable); `meeting_error` Char(40), blank, default ''; `meeting_path` Char(16),
   blank, default '' (meet_api or calendar).
 - No new tables, constraints or indexes. Still a single initial migration (nothing is
-  applied, so no 0002 is needed); the regenerated file would also change the sha256 and the
-  `APPROVED_MIGRATION_PLAN_SHA256` text below stays valid only if the plan text is unchanged
-  (it is, because the operation list is the same).
+  applied, so no 0002 is needed); the regenerated file changed the file sha256, but the plan text below is unchanged
+  (same operation list), so `APPROVED_MIGRATION_PLAN_SHA256` was recomputed and is the same value.
 
-Previous status: APPROVED by the operator on 16-10-26 for this private copy only. The file
-`mentoring/migrations/0001_initial.py` was generated with
-`makemigrations mentoring` under dummy no-database settings. It has NOT been applied
-to any database (no `migrate`, no database-backed test). This document describes the
-generated file exactly.
+Previous file sha256 (superseded): `2e808c71547fc854d09cc1b194669f818dbefe203906f44c6d8434e1a633c635`.
 
-- File sha256: `2e808c71547fc854d09cc1b194669f818dbefe203906f44c6d8434e1a633c635`
 - Dependencies: `roo.0041_apple_iap_digital_credits` (Ledger) and the swappable user
   model (`core.User`).
 - Checks: `makemigrations --check --dry-run` reports "No changes detected" and
