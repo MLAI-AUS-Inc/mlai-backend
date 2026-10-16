@@ -130,4 +130,3 @@ class MeetingRoomFacadeTests(unittest.TestCase):
         response = view(request)
         self.assertEqual(response.status_code, 401)
         self.service.my_bookings.assert_not_called()
-

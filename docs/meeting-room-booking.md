@@ -13,8 +13,8 @@ one source of truth.
 It does not use Roo API Key. Intended to be used for UIs that are running outside
 of Roo Context.
 
-Todo - I think we need a generalised strategy for agent + api access, rather than a patchwork 
-of adapters. 
+Todo - I think we need a generalised strategy for agent + api access, rather than a patchwork
+of adapters.
 
 | Method | Path | Purpose |
 | --- | --- | --- |
