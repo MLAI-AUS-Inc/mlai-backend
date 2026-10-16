@@ -29,8 +29,8 @@ required. The Chat companion must consume this display field without turning
 it into publishing readiness.
 
 Validation: 36 database-free source/status/doctor/goal cases and three immutable
-contract-parity cases pass. All 514 test modules are fully assigned in CI. The
-692-emission canonical failure audit, Python compilation and whitespace checks
+contract-parity cases pass. All 533 test modules are fully assigned in CI. The
+700-emission canonical failure audit, Python compilation and whitespace checks
 pass. No local database, migration, production credentials or deployment was
 used. Existing remote CI still needs to validate the final PR head and pinned
 private producer access.
