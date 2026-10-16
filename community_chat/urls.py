@@ -37,6 +37,13 @@ from .coding_views import (
 from .home_views import CommunityHomeView
 from .insight_views import TokenInsightsView
 from .coworking_views import CoworkingTodayView
+from .meeting_room_views import (
+    MeetingRoomAvailabilityView,
+    MeetingRoomBookView,
+    MeetingRoomCancelView,
+    MeetingRoomListView,
+    MyMeetingRoomBookingsView,
+)
 from .slack_action_views import SlackMessageActionView
 from .slack_views import SlackDmMirrorView, SlackDmStartView, SlackOwnerConversationOpenView, SlackOwnerConversationView, SlackUserDirectoryView
 from .usage_views import (
@@ -67,6 +74,11 @@ urlpatterns = [
     path("volunteer/", include("community_chat.volunteer.urls")),
     path("home/", CommunityHomeView.as_view(), name="community_chat_home"),
     path("coworking/today/", CoworkingTodayView.as_view(), name="community_chat_coworking_today"),
+    path("meeting-rooms/rooms/", MeetingRoomListView.as_view(), name="community_chat_meeting_room_list"),
+    path("meeting-rooms/availability/", MeetingRoomAvailabilityView.as_view(), name="community_chat_meeting_room_availability"),
+    path("meeting-rooms/book/", MeetingRoomBookView.as_view(), name="community_chat_meeting_room_book"),
+    path("meeting-rooms/my-bookings/", MyMeetingRoomBookingsView.as_view(), name="community_chat_meeting_room_my_bookings"),
+    path("meeting-rooms/cancel/", MeetingRoomCancelView.as_view(), name="community_chat_meeting_room_cancel"),
     path("slack/message/", SlackMessageActionView.as_view(), name="community_chat_slack_message"),
     path("slack/", SlackDmMirrorView.as_view(), name="community_chat_slack"),
     path("slack/conversations/", SlackOwnerConversationView.as_view(), name="community_chat_slack_conversations"),
