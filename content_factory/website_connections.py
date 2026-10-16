@@ -1085,6 +1085,8 @@ def record_scan_evidence(connection, data):
             "generation": connection.generation, "source_sha": sha, "provenance": str(data.get("template_provenance") or "worker_generated"),
             "status": "validated" if validation["valid"] else "quarantined", "body": body, "validation": validation})
     config = OrganizationContentConfig.objects.get(website_connection=connection)
+    from .website_publishing_channels import refresh_repository_hint
+    refresh_repository_hint(connection, config, source_sha=sha, inventory=inventory)
     caps = dict(connection.capabilities or {})
     caps["templatesValid"] = all(template_validation(getattr(config, field))["valid"] for field in ("article_template", "design_guide"))
     caps["generationReady"] = bool(caps.get("publishingReady"))

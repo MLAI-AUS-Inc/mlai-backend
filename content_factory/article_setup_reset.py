@@ -86,11 +86,16 @@ def carry_reset_markers(source, target):
     drops these keys and silently un-resets the articles setup. Call this when
     re-writing article_system to keep an existing reset intact.
     """
-    if not isinstance(source, dict) or not isinstance(target, dict):
+    if not isinstance(target, dict):
         return target
+    source = source if isinstance(source, dict) else {}
     for key in (*ARTICLE_SETUP_RESET_KEYS, "publish_disconnected_at"):
         if key in source and key not in target:
             target[key] = source[key]
+    from .website_publishing_channels import preserve_choice
+    protected = preserve_choice(source, target)
+    target.clear()
+    target.update(protected)
     return target
 
 

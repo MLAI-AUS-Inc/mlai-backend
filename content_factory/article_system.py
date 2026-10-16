@@ -258,7 +258,9 @@ def resolve_article_system_with_source(config) -> tuple[Dict[str, Any], str]:
     raw = getattr(config, 'article_system', None) or {}
     if raw:
         resolved = normalize_article_system(raw)
-        if resolved["state"] != "missing" or resolved["directory_name"] or resolved["reason"]:
+        from .website_publishing_channels import preserve_choice
+        resolved = preserve_choice(raw, resolved)
+        if resolved["state"] != "missing" or resolved["directory_name"] or resolved["reason"] or resolved.get("publishing_channel"):
             return resolved, "canonical_field"
 
     updated_at = getattr(config, 'updated_at', None)
@@ -304,7 +306,8 @@ def merge_article_system(current_value: Optional[Dict[str, Any]], incoming_value
     merged = _merge_article_system_detection(current_value, incoming_value)
     if isinstance(current_value, dict) and current_value.get("publish_disconnected_at"):
         merged["publish_disconnected_at"] = current_value["publish_disconnected_at"]
-    return merged
+    from .website_publishing_channels import preserve_choice
+    return preserve_choice(current_value, merged)
 
 
 def _merge_article_system_detection(current_value: Optional[Dict[str, Any]], incoming_value: Optional[Dict[str, Any]]) -> Dict[str, Any]:

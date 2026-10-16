@@ -1,0 +1,60 @@
+{
+  "schema_version": 1,
+  "fixtures": [
+    {
+      "platform": "wordpress",
+      "source_url": "https://developer.wordpress.org/rest-api/using-the-rest-api/discovery/",
+      "observed_at": "2026-10-16T22:49:55.783501+00:00",
+      "source_prefix_sha256": "3b3e737cfc319e72eb9759f5ab36dfd84ed43fa96da56945b5bb6849094ed48d",
+      "source_coverage": "prefix",
+      "fixture_note": "Minimized observed structural markers; identifiers and resource paths replaced, scripts and page prose omitted.",
+      "html": "<html><head></head><body></body></html>",
+      "link_header": "<https://example.test/wp-json/>; rel=\"https://api.w.org/\""
+    },
+    {
+      "platform": "ghost",
+      "source_url": "https://demo.ghost.io/",
+      "observed_at": "2026-10-16T22:49:52.631299+00:00",
+      "source_prefix_sha256": "8a9000fc0f6d8d40016f901da321ba17461b74ea75d9b8e4d2ebeeb561d8e818",
+      "source_coverage": "complete",
+      "fixture_note": "Minimized observed structural markers; identifiers and resource paths replaced, scripts and page prose omitted.",
+      "html": "<html><head><meta name=\"generator\" content=\"Ghost 6.71\"></head><body></body></html>"
+    },
+    {
+      "platform": "webflow",
+      "source_url": "https://webflow.com/",
+      "observed_at": "2026-10-16T22:49:54.159526+00:00",
+      "source_prefix_sha256": "d53c7dfa871db76786a1cbfcf64a9a2a0d812c838368046331103c0671e3602c",
+      "source_coverage": "prefix",
+      "fixture_note": "Minimized observed structural markers; identifiers and resource paths replaced, scripts and page prose omitted.",
+      "html": "<html data-wf-site=\"observed\"><head><script src=\"https://cdn.prod.website-files.com/example.js\"></script><meta name=\"generator\" content=\"Webflow\"></head><body></body></html>"
+    },
+    {
+      "platform": "shopify",
+      "source_url": "https://theme-dawn-demo.myshopify.com/",
+      "observed_at": "2026-10-16T22:49:52.747995+00:00",
+      "source_prefix_sha256": "78ccb642f08abcba061c748d948c32e8ff3018c87c8b012b726aa50965e47d75",
+      "source_coverage": "prefix",
+      "fixture_note": "Minimized observed structural markers; identifiers and resource paths replaced, scripts and page prose omitted.",
+      "html": "<html><head><script src=\"https://fonts.shopifycdn.com/example.js\"></script><script src=\"https://cdn.shopify.com/example.js\"></script></head><body></body></html>"
+    },
+    {
+      "platform": "wix",
+      "source_url": "https://www.wix.com/",
+      "observed_at": "2026-10-16T22:49:53.159227+00:00",
+      "source_prefix_sha256": "58c0116e4e3d143e4eb2cffbaa5d012cc35b2cca9ed04e7e98c0afa03294d149",
+      "source_coverage": "prefix",
+      "fixture_note": "Minimized observed structural markers; identifiers and resource paths replaced, scripts and page prose omitted.",
+      "html": "<html><head><meta name=\"generator\" content=\"Wix.com Website Builder\"><script src=\"https://static.parastorage.com/example.js\"></script></head><body></body></html>"
+    },
+    {
+      "platform": "squarespace",
+      "source_url": "https://www.squarespace.com/",
+      "observed_at": "2026-10-16T22:49:54.166077+00:00",
+      "source_prefix_sha256": "59d1574e5a07463f0a4a0bdb3b81809e796c25fd7580785f891f4642305e28cc",
+      "source_coverage": "prefix",
+      "fixture_note": "Minimized observed structural markers; identifiers and resource paths replaced, scripts and page prose omitted.",
+      "html": "<html><head><script src=\"https://static1.squarespace.com/example.js\"></script><script src=\"https://assets.squarespace.com/example.js\"></script></head><body></body></html>"
+    }
+  ]
+}
