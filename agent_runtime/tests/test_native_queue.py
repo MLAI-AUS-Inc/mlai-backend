@@ -380,7 +380,9 @@ class NativeDeliveryStatusTests(SimpleTestCase):
         installation.native_cursor = {"needs": "reconnect_required", "last_error": {"code": "native_source_unavailable", "at": NOW.isoformat()}}
         invocation.reply = None
         with patch.object(native_delivery.AgentInvocation, "objects") as rows, \
-                patch.object(native_delivery.AgentAuditEvent, "objects") as audits:
+                patch.object(native_delivery.AgentAuditEvent, "objects") as audits, \
+                patch.object(native_delivery.AgentSubscription, "objects") as subscriptions:
+            subscriptions.filter.return_value.order_by.return_value = []
             pending = rows.filter.return_value.order_by.return_value
             pending.first.return_value = invocation
             pending.count.return_value = 1

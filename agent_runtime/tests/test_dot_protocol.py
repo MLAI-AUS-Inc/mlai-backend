@@ -165,12 +165,14 @@ class DotBindingTests(SimpleTestCase):
         self.assertNotIn(SECRET, json.dumps(defaults["delivery"]))
 
     def test_expired_old_binding_can_be_replaced_and_stored_secret_is_purged(self):
-        binding = SimpleNamespace(is_active=True, save=MagicMock(),
+        binding = SimpleNamespace(pk=uuid4(), is_active=True, save=MagicMock(),
                                   delivery={"expires_at": NOW.isoformat(), "sealed": "expired-secret"})
         self.subscriptions.objects.filter.return_value.exclude.return_value = [binding]
         event_webhooks.subscribe(self.principal, self.params, now=NOW)
         self.assertFalse(binding.is_active)
-        self.assertEqual(binding.delivery, {"mode": "webhook", "stopped": True})
+        self.assertEqual(binding.delivery["stop_reason"], "lease_expired")
+        self.assertEqual(binding.delivery["stopped_at"], NOW.isoformat())
+        self.assertNotIn("sealed", binding.delivery)
         self.verify.assert_called_once()
 
     def test_reconnect_uses_same_row_but_starts_after_existing_events(self):
@@ -205,12 +207,17 @@ class DotBindingTests(SimpleTestCase):
     def test_unsubscribe_can_stop_previous_grant_binding_idempotently(self):
         delivery = {key: value for key, value in self.params["delivery"].items() if key != "secret"}
         params = {**self.params, "delivery": delivery}
+        row = SimpleNamespace(pk=uuid4(), is_active=True, save=MagicMock(), delivery={"mode": "webhook", "sealed": "old"})
+        self.subscriptions.objects.filter.return_value.__iter__.return_value = iter([row])
         self.assertEqual(event_webhooks.unsubscribe(self.principal, params), {})
         self.subscriptions.objects.filter.assert_called_once_with(
             pk=event_webhooks.identity(self.grant, params, subscribing=False)[0],
             grant__installation_id=self.grant.installation_id)
-        self.subscriptions.objects.filter.return_value.update.assert_called_once_with(
-            is_active=False, delivery={"mode": "webhook", "stopped": True})
+        self.assertFalse(row.is_active)
+        self.assertEqual(row.delivery["stop_reason"], "client_unsubscribe")
+        self.assertTrue(row.delivery["stopped_by_client"])
+        self.assertNotIn("sealed", row.delivery)
+        row.save.assert_called_once()
 
 
 class SyntheticDotCallback:
@@ -332,6 +339,7 @@ class CallbackFixtureRoundTripTests(SimpleTestCase):
             with self.subTest(status=status):
                 self.subscription.is_active = True
                 self.subscription.cursor = 0
+                self.subscription.delivery["sealed"] = event_webhooks.seal({"url": "https://callback.invalid/selected-dot", "secret": SECRET})
                 self.subscription.delivery["attempts"] = 0
                 self.subscription.delivery.pop("retry_at", None)
                 transport = MagicMock(return_value=WebhookResponse(status, b"{}"))

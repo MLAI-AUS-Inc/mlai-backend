@@ -2,7 +2,7 @@
 
 Subscriptions use existing durable records. Callback secrets are encrypted,
 never included in tools, task inputs, audit metadata or worker credentials.
-There is no replay promise in this extension; portable cursor reads are separate.
+Native replay is server-chosen from the live queue; portable cursors stay separate.
 """
 
 import base64
@@ -17,12 +17,13 @@ import uuid
 from cryptography.fernet import Fernet, InvalidToken
 from django.conf import settings
 from django.db import transaction
+from django.db.models import Min
 from django.utils import timezone
 from django.utils.dateparse import parse_datetime
 
 from .authentication import validate_credential
 from .events import event_payload, should_wake
-from .models import AgentCredential, AgentEvent, AgentSubscription
+from .models import AgentCredential, AgentEvent, AgentInvocation, AgentSubscription
 from .policy import AgentPermissionDenied, authorize, bounded_json
 from .runtime import _grant, locked, audit
 from .scheduler_health import report_failure
@@ -220,20 +221,76 @@ def event_definitions(principal):
     return {"events": definitions}
 
 
-def _check_delivery_binding(grant, resource, subscription_id, *, now):
-    # _authorized holds the installation lock. That serialization covers grant
-    # renewals too: a second Dot/chat callback cannot silently hijack mentions.
+def durable_watch(grant, subscription=None):
+    """Keep native durability opt-in without changing Slack watch policy."""
+    return bool(getattr(settings, "AGENT_RUNTIME_NATIVE_DURABLE_WATCH", False)
+                and getattr(grant.installation, "community_id", None) is not None
+                and (subscription is None or MENTION_EVENT in subscription.event_types))
+
+
+def stop_delivery(subscription, reason, *, grant, now, by_client=False):
+    """Stop sending, preserve diagnostics, and discard callback credentials."""
+    if not subscription.is_active:
+        return
+    delivery = dict(subscription.delivery)
+    for key in ("sealed", "retry_at", "deny_since", "held_reason"):
+        delivery.pop(key, None)
+    delivery.update(mode="webhook", stopped=True, stopped_at=now.isoformat(),
+                    stop_reason=reason, stopped_by_client=by_client)
+    subscription.is_active, subscription.delivery = False, delivery
+    subscription.save(update_fields=["is_active", "delivery", "updated_at"])
+    audit("webhook_stopped", grant=grant, subscription_id=str(subscription.pk),
+          reason=reason, by_client=by_client)
+
+
+def _check_delivery_binding(grant, resource, subscription_id, *, now, existing=None):
+    # _authorized holds the installation lock, including across grant changes.
     bindings = locked(AgentSubscription.objects.filter(
         grant__installation_id=grant.installation_id, resource=resource,
         event_types=[MENTION_EVENT], is_active=True, delivery__mode="webhook",
     )).exclude(pk=subscription_id)
+    supersede = []
     for binding in bindings:
         if not lease_live(binding.delivery, now):
-            binding.is_active = False
-            binding.delivery = {"mode": "webhook", "stopped": True}
-            binding.save(update_fields=["is_active", "delivery", "updated_at"])
+            stop_delivery(binding, "lease_expired", grant=grant, now=now)
             continue
-        raise AgentPermissionDenied("delivery_binding_exists")
+        if not durable_watch(grant) or binding.grant_id != grant.pk or binding.generation != grant.generation:
+            raise AgentPermissionDenied("delivery_binding_exists")
+        supersede.append(binding)
+    if (existing and existing.delivery.get("stop_reason") == "superseded"
+            and any(str(row.pk) == existing.delivery.get("superseded_by") for row in supersede)):
+        raise AgentPermissionDenied("delivery_binding_superseded")
+    return supersede
+
+
+def _lease(grant, params, now):
+    value = params.get("ttlMs")
+    if "ttlMs" in params and value is not None and (type(value) is not int or value <= 0):
+        raise AgentPermissionDenied("invalid_subscription_lifetime")
+    requested = "omitted" if "ttlMs" not in params else "null" if value is None else value
+    remaining = max(0, (grant.expires_at - now) // timedelta(milliseconds=1))
+    unbounded = lease_policy() == "grant" and requested == "null"
+    if unbounded:
+        return {"lease": "unbounded", "granted_at": now.isoformat(), "requested_ttl_ms": requested}, None
+    duration = min(remaining, requested if type(requested) is int else remaining)
+    if lease_policy() == "24h":
+        duration = min(duration, MAX_TTL_MS)
+    expires = (now + timedelta(milliseconds=duration)).isoformat()
+    return {"expires_at": expires, "granted_at": now.isoformat(), "requested_ttl_ms": requested}, expires
+
+
+def _start_cursor(grant, resource, existing, latest, now):
+    if not getattr(settings, "AGENT_RUNTIME_NATIVE_BACKLOG_REPLAY", False):
+        return latest
+    identifiers = AgentInvocation.objects.filter(installation_id=grant.installation_id, grant=grant,
+        generation=grant.generation, resource=resource, status="pending", expires_at__gt=now
+    ).values_list("pk", flat=True)
+    oldest = AgentEvent.objects.filter(source="native", event_type=MENTION_EVENT, resource=resource,
+        source_event_id__in=[str(pk) for pk in identifiers]).aggregate(oldest=Min("pk"))["oldest"]
+    start = min(latest, oldest - 1) if oldest is not None else latest
+    if existing and existing.grant_id == grant.pk and existing.generation == grant.generation:
+        start = max(existing.cursor, start)
+    return start
 
 
 def subscribe(principal, params, *, now=None, transport=post_webhook):
@@ -241,50 +298,55 @@ def subscribe(principal, params, *, now=None, transport=post_webhook):
     subscription_id, resource, url = identity(principal.grant, params)
     if params.get("cursor") is not None:
         raise AgentPermissionDenied("webhook_replay_not_supported")
-    ttl = params.get("ttlMs", MAX_TTL_MS)
-    if ttl is None:
-        ttl = MAX_TTL_MS
-    if type(ttl) is not int or ttl <= 0:
-        raise AgentPermissionDenied("invalid_subscription_lifetime")
     secret = params["delivery"]["secret"]
     signing_key(secret)
-    # Validation and connection-time validation are both intentional. The
-    # transport pins its own freshly validated resolution before sending.
     with transaction.atomic():
         current = _authorized(principal, resource)
         grant = current.grant
-        if params["name"] == MENTION_EVENT:
-            _mention_arguments(grant, params["arguments"])
-            _check_delivery_binding(grant, resource, subscription_id, now=now)
-        resolve_callback(url)
+        lease, refresh_before = _lease(grant, params, now)
         existing_filter = {"pk": subscription_id}
         existing_filter["grant__installation_id" if params["name"] == MENTION_EVENT else "grant"] = grant.installation_id if params["name"] == MENTION_EVENT else grant
         existing = locked(AgentSubscription.objects.all()).filter(**existing_filter).first()
+        supersede = []
+        if params["name"] == MENTION_EVENT:
+            _mention_arguments(grant, params["arguments"])
+            supersede = _check_delivery_binding(grant, resource, subscription_id, now=now, existing=existing)
+        resolve_callback(url)
         if not existing or not existing.is_active:
             active_count = AgentSubscription.objects.filter(grant=grant, is_active=True, delivery__mode="webhook").count()
-            if active_count >= MAX_SUBSCRIPTIONS_PER_GRANT:
+            if active_count - len(supersede) >= MAX_SUBSCRIPTIONS_PER_GRANT:
                 raise AgentPermissionDenied("subscription_limit_reached")
         old = unseal(existing.delivery.get("sealed", "")) if existing and existing.is_active else {}
-        verified_at = parse_datetime(old.get("verified_at", "")) if old else None
+        verified_at = _iso(old.get("verified_at"))
         if not (verified_at and verified_at > now - timedelta(minutes=5) and old.get("url") == url and old.get("secret") == secret):
             verify_callback(subscription_id, url, secret, transport=transport, now=now)
-        expires = min(grant.expires_at, now + timedelta(milliseconds=min(ttl, MAX_TTL_MS)))
+        # A failed callback challenge must never retire the working binding.
+        for binding in supersede:
+            binding.delivery = {**binding.delivery, "superseded_by": str(subscription_id)}
+            stop_delivery(binding, "superseded", grant=grant, now=now)
+            audit("webhook_superseded", grant=grant, subscription_id=str(binding.pk), superseded_by=str(subscription_id))
         config = {"url": url, "secret": secret, "verified_at": now.isoformat()}
         if old.get("secret") and old["secret"] != secret:
             config.update(old_secret=old["secret"], old_until=(now + timedelta(minutes=5)).isoformat())
-        # New subscriptions start at the latest committed event of this
-        # resource, under the same serialization boundary used by ingestion.
         from .events import lock_event_resource
         lock_event_resource(resource)
         continuing = (existing and existing.is_active and lease_live(existing.delivery, now)
                       and existing.grant_id == grant.pk and existing.generation == grant.generation)
-        cursor = existing.cursor if continuing else (AgentEvent.objects.filter(resource=resource).order_by("-pk").values_list("pk", flat=True).first() or 0)
-        delivery = {"mode": "webhook", "sealed": seal(config), "expires_at": expires.isoformat(), "attempts": 0}
+        latest = AgentEvent.objects.filter(resource=resource).order_by("-pk").values_list("pk", flat=True).first() or 0
+        # A live refresh retains its cursor. A newly verified native callback
+        # starts before the oldest live queued event, never at a client cursor.
+        cursor = existing.cursor if continuing else (_start_cursor(grant, resource, existing, latest, now)
+                  if params["name"] == MENTION_EVENT else latest)
+        delivery = {"mode": "webhook", "sealed": seal(config), "attempts": 0, **lease}
+        if existing:
+            if existing.delivery.get("last_delivered_at"):
+                delivery["last_delivered_at"] = existing.delivery["last_delivered_at"]
+            if existing.delivery.get("stopped_at"):
+                delivery["previous_stop"] = {key: existing.delivery.get(key) for key in ("stopped_at", "stop_reason")}
+            elif existing.delivery.get("previous_stop"):
+                delivery["previous_stop"] = existing.delivery["previous_stop"]
         if params["name"] == MENTION_EVENT:
             delivery["binding"] = {"installation_id": str(grant.installation_id), "resource": resource}
-            # created_at belongs to the stable record, not this listening
-            # session. A stopped/expired/rebound monitor must not replay old
-            # native mentions when the same callback is explicitly enabled again.
             delivery["listening_since"] = (existing.delivery.get("listening_since", now.isoformat())
                                             if continuing else now.isoformat())
         AgentSubscription.objects.update_or_create(pk=subscription_id, defaults={
@@ -292,8 +354,9 @@ def subscribe(principal, params, *, now=None, transport=post_webhook):
             "event_types": [params["name"]], "cursor": cursor, "instruction": "", "is_active": True,
             "allow_agent_events": False, "delivery": delivery,
         })
-        audit("webhook_subscribed", grant=grant, subscription_id=str(subscription_id))
-    return {"id": str(subscription_id), "refreshBefore": expires.isoformat(), "cursor": None, "truncated": False}
+        audit("webhook_subscribed", grant=grant, subscription_id=str(subscription_id),
+              requested_ttl_ms=lease["requested_ttl_ms"], refreshBefore=refresh_before)
+    return {"id": str(subscription_id), "refreshBefore": refresh_before, "cursor": None, "truncated": False}
 
 
 def unsubscribe(principal, params):
@@ -302,7 +365,9 @@ def unsubscribe(principal, params):
         current = _authorized(principal, resource)
         matching = {"pk": subscription_id}
         matching["grant__installation_id" if params["name"] == MENTION_EVENT else "grant"] = current.grant.installation_id if params["name"] == MENTION_EVENT else current.grant
-        AgentSubscription.objects.filter(**matching).update(is_active=False, delivery={"mode": "webhook", "stopped": True})
+        rows = locked(AgentSubscription.objects.filter(**matching))
+        for row in rows:
+            stop_delivery(row, "client_unsubscribe", grant=current.grant, now=timezone.now(), by_client=True)
         audit("webhook_unsubscribed", grant=current.grant, subscription_id=str(subscription_id))
     return {}
 
@@ -344,8 +409,10 @@ def dispatch_webhooks(*, limit=50, now=None, transport=post_webhook):
     if not enabled():
         return 0
     sent = 0
-    ids = list(AgentSubscription.objects.filter(is_active=True, delivery__mode="webhook")
-               .order_by("updated_at").values_list("pk", flat=True)[:min(100, max(1, limit))])
+    subscriptions = AgentSubscription.objects.filter(is_active=True, delivery__mode="webhook")
+    if getattr(settings, "AGENT_RUNTIME_NATIVE_DURABLE_WATCH", False):
+        subscriptions = subscriptions.exclude(grant__installation__state="paused")
+    ids = list(subscriptions.order_by("updated_at").values_list("pk", flat=True)[:min(100, max(1, limit))])
     for subscription_id in ids:
         try:
             sent += _dispatch_one(subscription_id, now or timezone.now(), transport=transport)
@@ -372,12 +439,19 @@ def _dispatch_one(subscription_id, now, *, transport=post_webhook):
         if not subscription.is_active or subscription.grant_id != grant.pk:
             return 0
         delivery = dict(subscription.delivery)
+        durable = durable_watch(grant, subscription)
+        if durable:
+            if not _watch_authorized(subscription, grant, now):
+                return 0
+            delivery = dict(subscription.delivery)
         try:
             from .unified_authority import assert_record_authority
-            assert_record_authority(grant, delivery)
+            if not durable:
+                assert_record_authority(grant, delivery)
             from .sources import access_checker_for
             checker = access_checker_for(grant) if getattr(grant.installation, "community_id", None) is not None else live_access
-            authorize(grant, "events:read", subscription.resource, expected_generation=subscription.generation, access_checker=checker)
+            if not durable:
+                authorize(grant, "events:read", subscription.resource, expected_generation=subscription.generation, access_checker=checker)
             if MENTION_EVENT in subscription.event_types and not native_mentions_allowed(grant):
                 raise AgentPermissionDenied("native_mentions_disabled")
             if not lease_live(delivery, now):
@@ -387,12 +461,11 @@ def _dispatch_one(subscription_id, now, *, transport=post_webhook):
             if isinstance(exc, AgentPermissionDenied) and exc.code == "resource_unavailable":
                 subscription.save(update_fields=["updated_at"])
                 return 0
-            subscription.is_active = False
-            subscription.delivery = {"mode": "webhook", "stopped": True}
-            subscription.save(update_fields=["is_active", "delivery", "updated_at"])
+            reason = "lease_expired" if getattr(exc, "code", None) == "subscription_expired" else "access_denied:" + getattr(exc, "code", getattr(exc, "reason", "credentials_unavailable"))
+            stop_delivery(subscription, reason, grant=grant, now=now)
             return 0
         retry_at = _iso(delivery.get("retry_at"))
-        if retry_at and retry_at > now:
+        if not durable and retry_at and retry_at > now:
             subscription.save(update_fields=["updated_at"])
             return 0
         # One bounded event per subscription each tick. Keeping the cursor
@@ -421,6 +494,15 @@ def _dispatch_one(subscription_id, now, *, transport=post_webhook):
             else:
                 data = {"resource": subscription.resource,
                         "identifiers": bounded_json(event.payload, max_bytes=16384)}
+            if durable:
+                if delivery.get("attempt_event") != event.pk:
+                    delivery.update(attempt_event=event.pk, attempts=0)
+                    delivery.pop("retry_at", None)
+                    delivery.pop("last_error", None)
+                    delivery.pop("failing_since", None)
+                retry_at = _iso(delivery.get("retry_at"))
+                if retry_at and retry_at > now:
+                    break
             public = event_payload(event, grant)
             envelope = {"eventId": public["id"], "name": event.event_type,
                 "timestamp": event.occurred_at.isoformat(), "data": data, "cursor": None}
@@ -438,16 +520,103 @@ def _dispatch_one(subscription_id, now, *, transport=post_webhook):
             if accepted:
                 subscription.cursor = event.pk
                 delivery.update(attempts=0, last_delivered_at=now.isoformat())
-                delivery.pop("retry_at", None)
-                delivery.pop("last_error", None)
+                for key in ("retry_at", "last_error", "attempt_event", "failing_since"):
+                    delivery.pop(key, None)
+                if durable and event.event_type == MENTION_EVENT:
+                    audit("native.invocation.sent_to_dot", grant=grant, invocation_id=data["invocation_id"],
+                          subscription_id=str(subscription.pk), event_id=str(event.pk))
                 sent += 1
+            elif durable and reason == "http_410":
+                delivery["last_error"] = reason
+                subscription.delivery = delivery
+                stop_delivery(subscription, "webhook_gone_410", grant=grant, now=now, by_client=True)
+                return 0
+            elif durable and reason == "http_413":
+                audit("native.invocation.delivery_failed", grant=grant, invocation_id=data["invocation_id"],
+                      subscription_id=str(subscription.pk), event_id=str(event.pk), reason=reason)
+                subscription.cursor = event.pk
+                delivery.update(attempts=0, last_error=reason)
+                for key in ("retry_at", "attempt_event", "failing_since"):
+                    delivery.pop(key, None)
             else:
-                attempts = int(delivery.get("attempts", 0)) + 1
+                attempts = min(1000000, int(delivery.get("attempts", 0)) + 1)
                 delivery.update(attempts=attempts, last_error=reason,
                                 retry_at=(now + timedelta(seconds=min(300, 5 * 2 ** min(attempts, 8)))).isoformat())
-                if permanent or attempts >= 8:
-                    subscription.is_active = False
+                delivery.setdefault("failing_since", now.isoformat())
+                stop = (permanent and attempts >= 8) if durable else (permanent or attempts >= 8)
+                if stop:
+                    subscription.delivery = delivery
+                    stop_delivery(subscription, "webhook_gone_410" if reason == "http_410" else "webhook_attempts",
+                                  grant=grant, now=now, by_client=reason == "http_410")
+                    return 0
             break
         subscription.delivery = delivery
         subscription.save(update_fields=["cursor", "delivery", "is_active", "updated_at"])
     return sent
+
+
+def hold_delivery(subscription, reason, *, grant, now, countdown=False):
+    """Hold the exact callback and cursor until current authority recovers."""
+    delivery = dict(subscription.delivery)
+    if delivery.get("held_reason") != reason:
+        audit("webhook_held", grant=grant, subscription_id=str(subscription.pk), reason=reason)
+        delivery["held_at"] = now.isoformat()
+    delivery["held_reason"] = reason
+    if countdown:
+        delivery.setdefault("deny_since", now.isoformat())
+    else:
+        delivery.pop("deny_since", None)
+    subscription.delivery = delivery
+    subscription.save(update_fields=["delivery", "updated_at"])
+
+
+def _watch_authorized(subscription, grant, now):
+    installation = grant.installation
+    if getattr(installation, "state", "active") == "paused":
+        return False
+    if (grant.revoked_at is not None or not installation.is_active
+            or getattr(installation, "state", "") == "revoked" or not installation.owner.is_active):
+        stop_delivery(subscription, "grant_revoked", grant=grant, now=now)
+        return False
+    if not lease_live(subscription.delivery, now):
+        stop_delivery(subscription, "lease_expired", grant=grant, now=now)
+        return False
+    if grant.expires_at <= now:
+        hold_delivery(subscription, "grant_expired", grant=grant, now=now)
+        return False
+    try:
+        from .unified_authority import assert_record_authority
+        if not native_mentions_allowed(grant):
+            raise AgentPermissionDenied("native_mentions_disabled")
+        assert_record_authority(grant, subscription.delivery)
+        from .sources import access_checker_for
+        authorize(grant, "events:read", subscription.resource, expected_generation=subscription.generation,
+                  access_checker=access_checker_for(grant), now=now)
+    except AgentPermissionDenied as exc:
+        code = exc.code
+        if code in {"resource_unavailable", "unified_agent_disabled", "native_mentions_disabled"}:
+            hold_delivery(subscription, code, grant=grant, now=now)
+            return False
+        if code == "unified_authority_changed":
+            from .unified_authority import pending_activation
+            if pending_activation(grant, subscription.delivery.get("unified_credential_id"), now=now):
+                hold_delivery(subscription, "awaiting_activation", grant=grant, now=now)
+                return False
+        grace = (getattr(settings, "AGENT_RUNTIME_NATIVE_UNIFIED_GRACE_SECONDS", 86400)
+                 if code == "unified_authority_changed" else
+                 getattr(settings, "AGENT_RUNTIME_NATIVE_DENIAL_GRACE_SECONDS", 600)
+                 if code in {"current_access_denied", "installation_inactive"} else 0)
+        since = _iso(subscription.delivery.get("deny_since")) or now
+        if grace and now < since + timedelta(seconds=grace):
+            hold_delivery(subscription, code, grant=grant, now=now, countdown=True)
+        else:
+            stop_delivery(subscription, "access_denied:" + code, grant=grant, now=now)
+        return False
+    if subscription.delivery.get("held_reason") or subscription.delivery.get("deny_since"):
+        delivery = dict(subscription.delivery)
+        for key in ("held_reason", "deny_since"):
+            delivery.pop(key, None)
+        subscription.delivery = delivery
+        subscription.save(update_fields=["delivery", "updated_at"])
+        audit("webhook_resumed", grant=grant, subscription_id=str(subscription.pk))
+    return True

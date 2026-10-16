@@ -340,7 +340,10 @@ def revoke_grant(grant_id, *, owner, now=None):
         grant.save(update_fields=("revoked_at", "generation", "updated_at"))
     AgentCredential.objects.filter(grant=grant, revoked_at__isnull=True).update(revoked_at=now)
     AgentResponsibility.objects.filter(grant=grant).update(is_active=False)
-    AgentSubscription.objects.filter(grant=grant).update(is_active=False)
+    from .event_webhooks import stop_delivery
+    for subscription in locked(AgentSubscription.objects.filter(grant=grant, is_active=True, delivery__mode="webhook")):
+        stop_delivery(subscription, "grant_revoked", grant=grant, now=now)
+    AgentSubscription.objects.filter(grant=grant, is_active=True).update(is_active=False)
     if getattr(grant.installation, "community_id", None) is not None:
         from .models import AgentInvocation, AgentInvocationReply
         AgentInvocation.objects.filter(grant=grant, status="pending").update(status="cancelled")

@@ -81,3 +81,15 @@ def assert_credential_authority(grant, credential):
         raise AgentPermissionDenied("unified_credential_unavailable")
     marker = AgentOAuthBinding.objects.filter(credential_id=credential.pk, client_id__startswith=PREFIX).exists()
     return assert_unified_authority(grant, credential_id=credential.pk if marker else None)
+
+
+def pending_activation(grant, credential_id, *, now=None):
+    """Recognize valid consent waiting for the provider's first bearer use."""
+    if not credential_id:
+        return False
+    try:
+        assert_unified_authority(grant, credential_id=credential_id, allow_pending=True)
+    except AgentPermissionDenied:
+        return False
+    return AgentCredential.objects.filter(pk=credential_id, grant=grant, kind="access",
+        generation=grant.generation, revoked_at__isnull=True, expires_at__lte=now or timezone.now()).exists()

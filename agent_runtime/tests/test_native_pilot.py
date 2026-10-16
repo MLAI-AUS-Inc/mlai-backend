@@ -322,7 +322,9 @@ class NativeDisabledBoundaryTests(SimpleTestCase):
         with patch("agent_runtime.native_views.AgentInstallation.objects") as rows, patch(
                 "agent_runtime.native_installations.AgentInvocationReply.objects") as replies, patch(
                 "agent_runtime.native_installations.limits", return_value={"personal_limit": 1, "personal_used": 0}), patch(
-                "agent_runtime.native_delivery.AgentInvocation.objects") as invocations:
+                "agent_runtime.native_delivery.AgentInvocation.objects") as invocations, patch(
+                "agent_runtime.native_delivery.AgentSubscription.objects") as subscriptions:
+            subscriptions.filter.return_value.order_by.return_value = []
             invocations.filter.return_value.select_related.return_value.order_by.return_value.__getitem__.return_value = []
             rows.filter.return_value.select_related.return_value.order_by.return_value = [revoked]
             replies.filter.return_value.order_by.return_value.first.return_value = None

@@ -78,16 +78,18 @@ the existing 15-minute mention lifetime and live subscription requirement still
 apply. With it enabled, eligible owner mentions are admitted without a live
 watch, expire after the configured queue TTL (24 hours by default, capped by
 grant expiry), and wait for the Dot to fetch them. This cannot wake a Dot that
-has no watch; automatic backlog webhook replay is a later, separately gated step.
+has no watch. With `AGENT_RUNTIME_NATIVE_BACKLOG_REPLAY=true`, a newly verified
+callback starts just before the oldest live queued invocation. Same-id refreshes
+retain their cursor, and clients still cannot supply a replay cursor.
 Verify a release with a fresh mention
 from a verified device beyond the first 20, without passing an invocation ID
 to the provider manually.
 
 ## Disabled-by-default rollout
 
-The following controls are plumbed for later rollout. Admission, replay, durable
-watch, alerts and renewal remain disabled. The lease policy remains `24h`.
-Changing these defaults is a separate owner deployment action.
+The following controls default off. Admission, replay, durable watches and lapse
+alerts are implemented; renewal is a separate release. The default lease policy
+remains `24h`. Changing these defaults is a separate owner deployment action.
 
 | Setting | Default | Allowed |
 | --- | --- | --- |
@@ -145,7 +147,7 @@ contain IDs and derived queued/sent-to-Dot/fetched/replied/expired/failed states
 never message text. A successful content fetch is distinct from webhook receipt.
 Refresh or rescan the MLAI connector after deployment to discover the pending
 tool and updated descriptions. Asking for no end date does not itself implement
-the later durable-watch policy or override the provider's ability to stop.
+the durable-watch policy or override the provider's ability to stop.
 
 The existing MLAI availability requirements remain in force. A deployment must
 configure the existing public MCP origin and shared Redis and explicitly enable
@@ -218,3 +220,69 @@ These checks use synthetic providers, relays and callbacks. They do not certify
 an actual Dot subscription, a production native reply, portal publication or
 deployment. Those require an actual owner connection and its explicit test
 mention after the compatible backend, relay and client are deployed.
+
+
+## Durable native watches and lapse recovery
+
+PR-4 adds no migration, scope, channel or client requirement. After the compatible
+relay is deployed, explicitly enable `AGENT_RUNTIME_NATIVE_ALWAYS_ADMIT`,
+`AGENT_RUNTIME_NATIVE_BACKLOG_REPLAY`, `AGENT_RUNTIME_NATIVE_DURABLE_WATCH`, and
+`AGENT_RUNTIME_NATIVE_LAPSE_ALERTS`, and set
+`AGENT_RUNTIME_MCP_EVENTS_LEASE_POLICY=grant`. Leave renewal controls off until
+the separate renewal implementation is reviewed. Use the normal deployment
+workflow to install validated values in every runtime; do not edit subscription
+rows or invent provider callback credentials.
+
+Under the grant lease policy, an explicit `ttlMs: null` request stores an
+unbounded lease and returns `refreshBefore: null`. An omitted lifetime defaults
+to the remaining grant lifetime; a positive numeric lifetime is capped at that
+remaining time before constructing a timedelta. A finite lease still expires
+at its returned deadline. Every delivery rechecks current grant, generation,
+owner, session and source authority, including for an unbounded lease. Returning
+to the `24h` lease policy bounds existing unbounded rows to 24 hours from their
+recorded grant time.
+
+Native durable delivery holds through source outages, disabled operator gates,
+pending activation and (for an unbounded watch) grant expiry. Real access denials
+use bounded grace windows; revoked grants/installations and invalid binding or
+scope stop delivery immediately. Pause preserves subscriptions, pending work and
+cursor; Resume keeps its epoch/sequence. The pause lock also fences both webhook
+and reply sends. These durability changes are restricted to native mention
+watches; Slack retains its existing delivery policy.
+
+Success advances one event and records a content-free sent-to-Dot audit. HTTP
+410 stops with the client's stop marker. HTTP 413 skips that event, audits the
+failure and allows later events through; it does not retry the rejected payload.
+Other non-transient 4xx stop after eight attempts for the same event. Transport
+errors, 5xx, 408 and 429 back off without terminating the native watch. Retries
+preserve event IDs and exact reply signing/idempotency behavior. There is still
+no guarantee that a provider which acknowledges a webhook will produce a reply.
+
+A verified callback may supersede another live callback only within the same
+native grant and generation. Failed verification leaves the working callback
+untouched. Superseded callbacks cannot immediately replace their successor;
+cross-grant conflicts remain refused. Explicit unsubscribe remains authoritative.
+Stop paths erase encrypted callback material and preserve non-secret history.
+
+The additive owner `delivery` object includes `listening`, `held_reason`,
+`lease_expires_at`, `last_delivered_at`, `stopped_at` and `stop_reason`, and uses
+`needs=subscribe|reconnect|renew|resume|null` when durable watches are enabled.
+The existing top-level mentionable status values stay unchanged.
+
+Lapse alerts use the existing email adapter and record one acknowledged send
+per lapse. Their bodies contain counts, stop/hold reason and time, plus the
+existing guarded setup prompt; never chat text. Recipient addresses and provider
+exception details are never recorded in audit/log metadata. Failed sends back
+off for five minutes. The idempotency key is stable for a lapse. A renewed hold
+uses its held-at time as a fresh lapse, rather than incorrectly sharing an old
+stop's debounce key. External delivery and the audit commit are not atomic;
+provider-side idempotency remains subject to the existing email adapter.
+
+To recover an already stopped watch, ask Maek in its own Dot to establish a new
+subscription through the MLAI plugin. Only that provider handshake can supply
+and verify its callback URL and signing secret. Confirm the lease, queue a fresh
+owner mention in the approved channel, and verify webhook acceptance, content
+fetch and a correlated native reply. The existing unqueued posts from before
+rollout are not retroactively admitted by this release.
+
+Lease contract: [official OpenAI MCP Events documentation](https://developers.openai.com/plugins/build/mcp-events).
