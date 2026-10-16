@@ -23,6 +23,41 @@ def native_target_digest(target):
     return hashlib.sha256(json.dumps(value, sort_keys=True, separators=(",", ":"), allow_nan=False).encode()).hexdigest()
 
 
+def _valid_probe(probe):
+    return (isinstance(probe, dict) and not set(probe) - {"slug", "title", "port", "is_setup_example", "marker_on_listing_only"}
+        and isinstance(probe.get("slug"), str) and re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,127}", probe["slug"])
+        and isinstance(probe.get("title"), str) and 0 < len(probe["title"]) <= 256
+        and not any(ord(c) < 32 for c in probe["title"])
+        and type(probe.get("port", 3000)) is int and 1024 <= probe.get("port", 3000) <= 65535
+        and all(key not in probe or type(probe[key]) is bool for key in ("is_setup_example", "marker_on_listing_only")))
+
+
+def dispatch_selection(connection, target, source):
+    """Choose v2 only from an already enrolled current target; never from caller data."""
+    from .website_hosted_verification import enabled
+    if not getattr(settings, "ARTICLES_SITE_CONTRACT_V2_ENABLED", False) or not enabled(connection):
+        return None
+    stored = target.contract if isinstance(target.contract, dict) else {}
+    if "site_contract_version" not in stored:
+        return None
+    try:
+        probe = stored.get("site_verification_probe")
+        if (type(stored["site_contract_version"]) is not int or stored["site_contract_version"] != 2
+                or str(target.connection_id) != str(connection.pk) or type(target.generation) is not int
+                or target.generation != connection.generation or target.source_sha != source
+                or not isinstance(source, str) or not _SHA.fullmatch(source)
+                or stored.get("target_id") != target.target_key
+                or not isinstance(stored.get("site_contract_digest"), str) or not _DIGEST.fullmatch(stored["site_contract_digest"])
+                or stored.get("contract_digest") != native_target_digest(stored) or not _valid_probe(probe)):
+            raise ValueError("A current enrolled site recipe is required")
+        raw = json.dumps(probe, sort_keys=True, separators=(",", ":"), allow_nan=False)
+        if redact_secret_text(raw) != raw:
+            raise ValueError("Secret-free verification probe required")
+        return {"site_recipe_version": 2, "site_contract_digest": stored["site_contract_digest"], "probe": deepcopy(probe)}
+    except (ValueError, TypeError, KeyError, AttributeError, RecursionError):
+        raise WebsiteAuthorityError("verified_target_required", "The current enrolled site recipe is unavailable.") from None
+
+
 def authorization_inputs(connection, query):
     """Project only a saved current reservation while the caller holds authority_guard.
 
@@ -72,12 +107,7 @@ def authorization_inputs(connection, query):
             or stored.get("site_contract_digest") != original["site_contract_digest"]
             or stored.get("contract_digest") != original["contract_digest"]
             or type(stored.get("adapter_version", 1)) is not int or stored.get("adapter_version", 1) != 1
-            or not isinstance(probe, dict) or set(probe) - {"slug", "title", "port", "is_setup_example", "marker_on_listing_only"}
-            or not isinstance(probe.get("slug"), str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,127}", probe["slug"])
-            or not isinstance(probe.get("title"), str) or not 0 < len(probe["title"]) <= 256
-            or any(ord(c) < 32 for c in probe["title"])
-            or type(probe.get("port", 3000)) is not int or not 1024 <= probe.get("port", 3000) <= 65535
-            or any(key in probe and type(probe[key]) is not bool for key in ("is_setup_example", "marker_on_listing_only"))):
+            or not _valid_probe(probe)):
         deny()
     try:
         selected = {key: stored.get(key) for key in _TARGET_FIELDS}

@@ -137,3 +137,60 @@ class SiteRecipeAuthorityTests(SimpleTestCase):
         self.assertEqual(response.status_code, 409)
         self.assertFalse(response.data["allowed"])
         self.assertNotIn("site_recipe_verification", response.data)
+
+    def enrolled_target(self):
+        self.target.update(site_contract_version=2, site_verification_probe={"slug": "fixture", "title": "Fixture article"})
+        return SimpleNamespace(connection_id=self.connection.pk, generation=2, source_sha="a" * 40,
+            target_key="articles", contract=self.target)
+
+    def test_dispatch_requires_current_enrollment_and_never_selects_v2_for_legacy(self):
+        target = self.enrolled_target()
+        with patch("content_factory.website_hosted_verification.enabled", return_value=True):
+            selected = recipe.dispatch_selection(self.connection, target, "a" * 40)
+            self.assertEqual(selected, {"site_recipe_version": 2, "site_contract_digest": "e" * 64,
+                "probe": {"slug": "fixture", "title": "Fixture article"}})
+            for field, value in (("generation", 1), ("connection_id", "other"), ("source_sha", "b" * 40)):
+                original = getattr(target, field)
+                setattr(target, field, value)
+                with self.subTest(field=field), self.assertRaises(WebsiteAuthorityError):
+                    recipe.dispatch_selection(self.connection, target, "a" * 40)
+                setattr(target, field, original)
+            self.target.pop("site_contract_version")
+            self.assertIsNone(recipe.dispatch_selection(self.connection, target, "a" * 40))
+        with override_settings(ARTICLES_SITE_CONTRACT_V2_ENABLED=False):
+            self.assertIsNone(recipe.dispatch_selection(self.connection, target, "a" * 40))
+
+    def test_actual_dispatch_saves_server_probe_separately_from_api_body_and_authorizes_it(self):
+        from . import website_hosted_verification as hosted
+        from workflow_runs.models import ContentFactoryRun
+        target = self.enrolled_target()
+        child = self.operation
+        child.payload = {"workflow": "hosted_native_verification", "attempt": 1}
+        child.refresh_from_db = Mock()
+        child.save = Mock()
+        incoming = {}
+
+        def reserve(connection, *, workflow, payload):
+            incoming.update(deepcopy(payload))
+            payload.update(operation_id=str(child.pk), operation_attempt=1, deletion_epoch=0)
+            return child
+
+        op = SimpleNamespace(pk="prepare-goal", payload={}, receipt={"setup_run_id": "setup-parent", "goal": {}})
+        with patch.object(hosted, "enabled", return_value=True), \
+                patch("content_factory.website_operations.reserve_workflow_operation", side_effect=reserve), \
+                patch.object(hosted, "authority_guard", return_value=nullcontext(self.connection)), \
+                patch("content_factory.website_goal_budget.enabled", return_value=False), \
+                patch.object(ContentFactoryRun.objects, "get_or_create", return_value=(SimpleNamespace(run_id=str(child.pk)), True)), \
+                patch("content_factory.website_goal_runner.retain_child_references", return_value={}):
+            result, payload = hosted.request_for(op, SimpleNamespace(organization=self.connection.organization),
+                SimpleNamespace(website_connection=self.connection), target, "a" * 40)
+        self.assertIs(result, child)
+        self.assertEqual(payload["site_recipe_version"], 2)
+        self.assertNotIn("site_recipe_probe", payload)
+        self.assertEqual(incoming["site_recipe_probe"], child.payload["site_recipe_probe"])
+        self.assertIn(":site-v2:", payload["client_request_id"])
+        self.assertEqual(child.payload["binding"], payload)
+        self.query = {key: str(value) for key, value in payload.items()}
+        receipt = self.call()
+        self.assertEqual(receipt["probe"], {"slug": "fixture", "title": "Fixture article"})
+        self.assertEqual(receipt["binding"]["site_contract_digest"], payload["site_contract_digest"])

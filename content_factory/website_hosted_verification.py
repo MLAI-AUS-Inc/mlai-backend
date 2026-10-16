@@ -39,6 +39,12 @@ def request_for(op,context,config,target,source):
         "branch":connection.branch,"expected_source_sha":source,"source_run_id":source_run,
         "target_id":target.target_key,"contract_digest":target.contract.get("contract_digest"),
         "client_request_id":f"goal:{op.pk}:hosted:{source}:{op.payload.get('attempt',1)}:{op.payload.get('retry_epoch','initial')}"}
+    from .website_site_recipe import dispatch_selection
+    selection = dispatch_selection(connection, target, source)
+    if selection:
+        payload.update(site_recipe_version=2, site_contract_digest=selection["site_contract_digest"],
+            site_recipe_probe=selection["probe"])
+        payload["client_request_id"] += f":site-v2:{selection['site_contract_digest'][:16]}:{goals.digest(selection['probe'])[:16]}"
     from .website_goal_budget import enabled as budget_enabled
     if budget_enabled():
         goal=op.receipt["goal"];used=goals.mapping(goal.get("budget_used"))
@@ -46,10 +52,15 @@ def request_for(op,context,config,target,source):
             "remaining_active_seconds":settings.ARTICLES_GOAL_ACTIVE_SECONDS-(used.get("active_seconds") or 0),
             "remaining_model_usd":settings.ARTICLES_GOAL_MODEL_USD-(used.get("model_cost") or 0)}
     child=reserve_workflow_operation(connection,workflow="hosted_native_verification",payload=payload)
+    probe = payload.pop("site_recipe_probe", None)
     payload["run_id"]=str(child.pk)
     with authority_guard(payload,action="read"):
         child.refresh_from_db()
         child.payload={**child.payload,"run_id":payload["run_id"],"source_run_id":source_run,"binding":dict(payload)}
+        if selection:
+            if "site_recipe_probe" in child.payload and child.payload["site_recipe_probe"] != probe:
+                raise WebsiteAuthorityError("website_configuration_changed", "The saved site recipe probe changed.")
+            child.payload["site_recipe_probe"] = probe
         child.save(update_fields=["payload","updated_at"])
         run,_=ContentFactoryRun.objects.get_or_create(run_id=payload["run_id"],defaults={"organization":context.organization,
             "domain":context.organization.domain,"github_repo":connection.github_repo,"workflow":"hosted_native_verification","status":"queued","run_request":dict(payload)})
