@@ -30,6 +30,18 @@ def make_session(status='requested', **kw):
     return s
 
 
+class AtomicProbe:
+    """Records how the atomic block was left (None means a normal exit = commit)."""
+    exit_exc = 'never exited'
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        self.exit_exc = exc_type
+        return False
+
+
 class Base(unittest.TestCase):
     def setUp(self):
         self.points = MagicMock()
@@ -38,10 +50,14 @@ class Base(unittest.TestCase):
         self.points.spend.return_value = ('hold-ledger', True)
         self.points.roo_to_microroo.side_effect = lambda n: n * 1_000_000
         self.clock = NOW
+        self.txn = MagicMock()
+        self.txn.on_commit.side_effect = lambda fn: fn()
+        self.txn.atomic.return_value = AtomicProbe()
+        self.lock_keys = MagicMock()
         for p in (
             patch.object(service, 'PointsService', self.points),
-            patch.object(service, 'transaction', MagicMock()),
-            patch.object(service, '_lock_keys'),
+            patch.object(service, 'transaction', self.txn),
+            patch.object(service, '_lock_keys', self.lock_keys),
             patch.object(service.timezone, 'now', side_effect=lambda: self.clock),
         ):
             p.start()
@@ -107,6 +123,21 @@ class TransitionTests(Base):
         self.assertEqual(s.status, 'expired')
         self.assertEqual(self.points.refund.call_args.kwargs['idempotency_key'], f'mentor_release:{SID}')
 
+    def test_expiry_refund_commits_before_the_error_is_raised(self):
+        s = make_session()
+        self.load(s)
+        probe = self.txn.atomic.return_value
+        self.clock = NOW + timedelta(hours=49)
+        with self.assertRaises(MentoringError) as ctx:
+            MentoringService.decline(SID, self.actor_mentor)
+        # the block exited normally (None), so the refund and status commit
+        self.assertIsNone(probe.exit_exc)
+        self.assertEqual(ctx.exception.code, 'request_expired')
+        self.assertIn('refunded', ctx.exception.message)
+        self.assertEqual(s.status, 'expired')
+        self.points.refund.assert_called_once()
+        s.save.assert_called()
+
     def test_cancel_by_founder_or_mentor_before_start_refunds(self):
         for actor in (self.actor_founder, self.actor_mentor):
             self.points.refund.reset_mock()
@@ -128,7 +159,7 @@ class TransitionTests(Base):
     def test_complete_pays_mentor_with_payout_key(self):
         s = make_session('accepted')
         self.load(s)
-        self.clock = START + timedelta(minutes=45)
+        self.clock = s.ends_at
         MentoringService.complete(SID, self.actor_mentor)
         kw = self.points.award.call_args.kwargs
         self.assertEqual(kw['idempotency_key'], f'mentor_payout:{SID}')
@@ -138,12 +169,16 @@ class TransitionTests(Base):
         self.assertEqual(kw['reference_type'], 'MENTOR_SESSION')
         self.assertEqual(s.status, 'completed')
 
-    def test_complete_before_start_is_refused(self):
-        self.load(make_session('accepted'))
-        with self.assertRaises(MentoringError) as ctx:
-            MentoringService.complete(SID, self.actor_mentor)
-        self.assertEqual(ctx.exception.code, 'session_not_started')
+    def test_complete_before_the_session_ends_is_refused(self):
+        s = make_session('accepted')
+        for when in (NOW, START, s.ends_at - timedelta(seconds=1)):
+            self.clock = when
+            self.load(s)
+            with self.assertRaises(MentoringError) as ctx:
+                MentoringService.complete(SID, self.actor_mentor)
+            self.assertEqual(ctx.exception.code, 'session_not_ended')
         self.points.award.assert_not_called()
+        self.assertEqual(s.status, 'accepted')
 
     def test_auto_complete_24h_after_end_pays_once_on_read(self):
         s = make_session('accepted')
@@ -239,6 +274,7 @@ class RequestTests(Base):
         FakeSession.objects = MagicMock()
         FakeSession.objects.select_for_update.return_value.select_related.return_value.filter.return_value.first.return_value = None
         FakeSession.objects.filter.return_value.exists.return_value = False
+        FakeSession.objects.select_related.return_value.filter.return_value.first.return_value = None
         self.profile = SimpleNamespace(
             pk=7, user=SimpleNamespace(pk=2, slack_id='UMENTOR'), user_id=2, is_active=True,
             price_roo=40, session_minutes=30, timezone='Australia/Melbourne',
@@ -267,7 +303,7 @@ class RequestTests(Base):
     def call(self, **kw):
         args = dict(
             founder=self.founder, mentor_id=7, starts_at=START.isoformat(), location_type=None,
-            brief=self.brief, client_request_id=str(uuid.uuid4()), expected_price=None,
+            brief=self.brief, client_request_id=str(uuid.uuid4()), expected_price=40,
         )
         args.update(kw)
         return MentoringService.request_session(**args)
@@ -287,6 +323,11 @@ class RequestTests(Base):
         self.assertEqual(session.location_detail, 'https://meet.example/mia')
         self.assertEqual(session.ends_at - session.starts_at, timedelta(minutes=30))
         service.MentoringService.notify_mentor.assert_called_once()
+        self.assertEqual(kw['purchased_delta_microroo'], 15_000_000)
+        self.assertEqual(kw['purchased_delta_microroo'], session.purchased_points_cost_microroo)
+        keys = self.lock_keys.call_args.args
+        self.assertIn('mentoring:founder:1', keys)
+        self.assertIn('mentoring:mentor:7', keys)
 
     def test_insufficient_points_maps_to_409_and_no_session_is_returned(self):
         self.points.spend.side_effect = service.InsufficientBalanceError('no')
@@ -302,10 +343,36 @@ class RequestTests(Base):
         self.assertEqual(ctx.exception.code, 'slot_unavailable')
         self.points.spend.assert_not_called()
 
-    def test_price_changed_is_rejected(self):
+    def test_price_changed_is_a_400(self):
         with self.assertRaises(MentoringError) as ctx:
             self.call(expected_price=35)
-        self.assertEqual(ctx.exception.code, 'price_changed')
+        self.assertEqual((ctx.exception.code, ctx.exception.status_code), ('price_changed', 400))
+        self.points.spend.assert_not_called()
+
+    def test_expected_price_is_required(self):
+        for bad in (None, '40', 40.0, True, [40]):
+            with self.subTest(bad=bad), self.assertRaises(MentoringError) as ctx:
+                self.call(expected_price=bad)
+            self.assertEqual((ctx.exception.code, ctx.exception.status_code), ('expected_price_required', 400))
+        self.points.spend.assert_not_called()
+
+    def test_mentor_id_must_be_a_real_integer(self):
+        for bad in (True, False, '1', 1.0, None, 0, -3):
+            with self.subTest(bad=bad), self.assertRaises(MentoringError) as ctx:
+                self.call(mentor_id=bad)
+            self.assertEqual((ctx.exception.code, ctx.exception.status_code), ('invalid_mentor_id', 400))
+        self.points.spend.assert_not_called()
+
+    def test_retry_after_mentor_deactivated_returns_existing_session(self):
+        existing = make_session(starts_at=START)
+        existing.mentor_id = 7
+        FakeSession.objects.select_related.return_value.filter.return_value.first.return_value = existing
+        with patch.object(MentoringService, '_get_active_mentor',
+                          side_effect=MentoringError('mentor_not_found', 'Mentor not found.', 404)) as get:
+            session, created = self.call()
+        self.assertFalse(created)
+        self.assertIs(session, existing)
+        get.assert_not_called()
         self.points.spend.assert_not_called()
 
     def test_cannot_book_yourself(self):

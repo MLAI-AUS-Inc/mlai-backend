@@ -44,6 +44,17 @@ class MentoringViewTests(unittest.TestCase):
             self.assertEqual(response.data['code'], 'mentor_booking_disabled')
         self.service.list_mentors.assert_not_called()
 
+    @override_settings(MENTOR_BOOKING_ENABLED=False)
+    def test_flag_off_is_404_for_anonymous_users_and_skips_throttling(self):
+        # Even with throttling enabled, the flag is checked first.
+        for view, kwargs in ((views.MentorListView, {}), (views.MentorSessionsView, {})):
+            request = self.factory.get('/x/')
+            response = view.as_view()(request, **kwargs)
+            self.assertEqual(response.status_code, 404)
+            self.assertEqual(response.data['code'], 'mentor_booking_disabled')
+        request = self.factory.post('/x/', {}, format='json')
+        self.assertEqual(views.MentorSessionActionView.as_view(action='accept')(request, session_id=SID).status_code, 404)
+
     @override_settings(MENTOR_BOOKING_ENABLED=True)
     def test_unauthenticated_is_rejected(self):
         response = self.call(views.MentorListView, authenticated=False)

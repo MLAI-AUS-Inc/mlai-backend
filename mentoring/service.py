@@ -97,6 +97,13 @@ def parse_aware_datetime(value):
     return parsed.astimezone(dt_timezone.utc)
 
 
+def parse_mentor_id(value):
+    # bool is an int subclass: JSON true must not resolve to mentor 1.
+    if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+        raise MentoringError('invalid_mentor_id', 'mentor_id must be a whole number.', 400)
+    return value
+
+
 def parse_request_id(value):
     try:
         return uuid.UUID(str(value))
@@ -538,9 +545,23 @@ class MentoringService:
     @classmethod
     def request_session(cls, *, founder, mentor_id, starts_at, location_type, brief,
                         client_request_id, expected_price=None):
+        mentor_id = parse_mentor_id(mentor_id)
         starts_at = parse_aware_datetime(starts_at)
         request_id = parse_request_id(client_request_id)
+        if isinstance(expected_price, bool) or not isinstance(expected_price, int):
+            raise MentoringError(
+                'expected_price_required',
+                'expected_price (the whole-number price you were shown) is required.', 400,
+            )
         brief_fields = validate_brief(brief)
+        # A retry of an already created request is answered from the stored
+        # session, even if the mentor was deactivated or the price changed since.
+        previous = (
+            MentorSession.objects.select_related('mentor__user', 'founder')
+            .filter(founder=founder, client_request_id=request_id).first()
+        )
+        if previous:
+            return cls._replay(previous, mentor_id, starts_at), False
         mentor = cls._get_active_mentor(mentor_id)
         if mentor.user_id == founder.pk:
             raise MentoringError('own_mentor_profile', 'You cannot book yourself.', 409)
@@ -548,19 +569,22 @@ class MentoringService:
         now = timezone.now()
         try:
             with transaction.atomic():
-                _lock_keys(f'mentoring:mentor:{mentor.pk}', f'mentoring:request:{request_id}')
+                _lock_keys(
+                    f'mentoring:mentor:{mentor.pk}', f'mentoring:founder:{founder.pk}',
+                    f'mentoring:request:{request_id}',
+                )
                 existing = (
                     MentorSession.objects.select_for_update()
                     .select_related('mentor__user', 'founder')
                     .filter(founder=founder, client_request_id=request_id).first()
                 )
                 if existing:
-                    return cls._replay(existing, mentor, starts_at), False
+                    return cls._replay(existing, mentor.pk, starts_at), False
                 mentor = MentorProfile.objects.select_for_update().select_related('user').get(pk=mentor.pk)
                 if not mentor.is_active:
                     raise MentoringError('mentor_not_found', 'Mentor not found.', 404)
-                if expected_price is not None and expected_price != mentor.price_roo:
-                    raise MentoringError('price_changed', 'The price has changed. Please review it.', 409)
+                if expected_price != mentor.price_roo:
+                    raise MentoringError('price_changed', 'The price has changed. Please review it.', 400)
                 chosen, detail = cls._resolve_location(mentor, location_type)
                 ends_at = starts_at + timedelta(minutes=mentor.session_minutes)
                 day = starts_at.astimezone(ZoneInfo(mentor.timezone)).date()
@@ -594,6 +618,7 @@ class MentoringService:
                     created_by_slack_id=founder.slack_id or '',
                     idempotency_key=f'mentor_hold:{session.pk}',
                     reference_type=LEDGER_REFERENCE_TYPE, reference_id=str(session.pk),
+                    purchased_delta_microroo=purchased,
                 )
                 session.hold_ledger_entry = ledger
                 session.save(update_fields=['hold_ledger_entry', 'updated_at'])
@@ -604,17 +629,23 @@ class MentoringService:
                 founder=founder, client_request_id=request_id).first()
             if existing is None:
                 raise
-            return cls._replay(existing, mentor, starts_at), False
-        try:
-            cls.notify_mentor(session.pk)
-        except Exception:
-            # Notification trouble must never fail or alter a committed booking.
-            logger.exception('mentor notification raised for %s', session.pk)
+            return cls._replay(existing, mentor_id, starts_at), False
+        # After commit, in this request thread, best effort. Under
+        # ATOMIC_REQUESTS (staging) Django runs it when the request commits.
+        transaction.on_commit(lambda: cls._notify_safely(session.pk))
         return session, True
 
+    @classmethod
+    def _notify_safely(cls, session_id):
+        try:
+            cls.notify_mentor(session_id)
+        except Exception:
+            # Notification trouble must never fail or alter a committed booking.
+            logger.exception('mentor notification raised for %s', session_id)
+
     @staticmethod
-    def _replay(existing, mentor, starts_at):
-        if existing.mentor_id != mentor.pk or existing.starts_at != starts_at:
+    def _replay(existing, mentor_id, starts_at):
+        if existing.mentor_id != mentor_id or existing.starts_at != starts_at:
             raise MentoringError('idempotency_conflict', 'That request id was used for a different session.', 409)
         return existing
 
@@ -665,6 +696,7 @@ class MentoringService:
 
     @classmethod
     def _transition(cls, session_id, actor, *, require_mentor, target):
+        expired = False
         with transaction.atomic():
             session = cls._load_for_update(session_id, actor)
             _lock_keys(f'mentoring:mentor:{session.mentor_id}')
@@ -673,12 +705,15 @@ class MentoringService:
             if session.status == target:
                 return session  # a retried call is a success
             session = cls._apply_settlement(session)
-            if session.status == MentorSession.STATUS_EXPIRED and target != MentorSession.STATUS_EXPIRED:
-                raise MentoringError('request_expired', 'This request expired and your points were refunded.', 409)
-            now = timezone.now()
-            handler = getattr(cls, f'_do_{target}')
-            handler(session, actor, now)
-            return session
+            if session.status == MentorSession.STATUS_EXPIRED:
+                # Leave the atomic block normally so the refund commits, then report.
+                expired = True
+            else:
+                handler = getattr(cls, f'_do_{target}')
+                handler(session, actor, timezone.now())
+        if expired:
+            raise MentoringError('request_expired', 'This request has expired. The points were refunded.', 409)
+        return session
 
     @classmethod
     def accept(cls, session_id, actor):
@@ -739,8 +774,8 @@ class MentoringService:
     @classmethod
     def _do_completed(cls, session, actor, now):
         cls._need(session, MentorSession.STATUS_ACCEPTED)
-        if now < session.starts_at:
-            raise MentoringError('session_not_started', 'The session has not started yet.', 409)
+        if now < session.ends_at:
+            raise MentoringError('session_not_ended', 'The session has not ended yet.', 409)
         _pay_mentor(session)
         session.status = MentorSession.STATUS_COMPLETED
         session.completed_at = now

@@ -36,9 +36,11 @@ class MentoringBaseView(APIView):
         return 'community_chat_mentoring_write'
 
     def initial(self, request, *args, **kwargs):
-        super().initial(request, *args, **kwargs)
+        # Flag first: while off, every caller (even anonymous) gets 404 and no
+        # authentication or throttle work is done.
         if not mentor_booking_enabled():
             raise MentoringDisabled()
+        super().initial(request, *args, **kwargs)
 
     def finalize_response(self, request, response, *args, **kwargs):
         response = super().finalize_response(request, response, *args, **kwargs)
