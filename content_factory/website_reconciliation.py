@@ -728,6 +728,11 @@ def _process_setup_pr_merge(identifier, now):
     return state
 
 
+# A stop follow-up whose runs are cancelled waits this long for Content Factory
+# to confirm its preview teardown: the TTL of CF's preview worker reaper.
+CANCEL_PREVIEW_STOP_DEADLINE = timedelta(days=7)
+
+
 def process_website_connection_operations(*, limit=20, now=None, connection_id=None):
     """Retry cancellation/token revocation, and build bounded cleanup proposals."""
     from integrations import http_client
@@ -869,6 +874,17 @@ def process_website_connection_operations(*, limit=20, now=None, connection_id=N
                     "purge_run_ids": op.payload.get("purge_run_ids", preview_ids)}
                 op.receipt = {**op.receipt, "tokens": tokens, "preview_cleanup_pending": bool(preview_pending),
                     "remote_cleanup_pending": bool(pending or preview_pending or pending_merges or tokens["pending"])}
+                if (op.action == "cancel-operation" and remote["enabled"] and preview_pending
+                        and not (pending or pending_merges or tokens["pending"])
+                        and not op.payload.get("purge_after_reconciliation")
+                        and now - op.created_at >= CANCEL_PREVIEW_STOP_DEADLINE):
+                    # The stopped runs are cancelled and their tokens revoked. Only
+                    # Content Factory's own preview teardown is unconfirmed, and it
+                    # can stay so indefinitely (a missing provider credential), so
+                    # stop retrying it hourly. The receipt keeps the run ids.
+                    op.state = "completed"
+                    op.receipt.update(status="timed_out", unconfirmed_preview_run_ids=preview_pending,
+                        message="Stopped. Content Factory did not confirm its preview was removed.")
                 if op.action == "purge":
                     from .website_operations import deletion_epoch
                     manifest = {"phase": "apply", "approved": True, "connection_generation": op.payload["previous_generation"],
@@ -1099,6 +1115,22 @@ def approve_cleanup_proposal(config, *, user, data):
 SETTLED_SOURCE_RESCAN_STATES = frozenset({"failed", "cancelled", "denied", "deleted"})
 
 
+def _source_rescan_identity(op):
+    """Return this source check's rescan dispatch count and request identity."""
+    count = op.payload.get("rescan_dispatch", 0)
+    count = count if type(count) is int and count >= 0 else 0
+    return count, f"source-rescan:{op.pk}:{count}" if count else f"source-rescan:{op.pk}"
+
+
+def _source_rescan_finished(op, website):
+    """Whether the rescan this check dispatched can no longer record targets."""
+    from .website_operations import TERMINAL_WORKFLOW_STATES
+    _, request_id = _source_rescan_identity(op)
+    scan = WebsiteConnectionOperation.objects.filter(
+        idempotency_key=f"{website.pk}:workflow:{request_id}").first()
+    return scan is not None and scan.state in TERMINAL_WORKFLOW_STATES | SETTLED_SOURCE_RESCAN_STATES
+
+
 def _source_rescan_request(op, website, attempt):
     """Name this source's rescan dispatch, moving past a settled failed one.
 
@@ -1108,9 +1140,7 @@ def _source_rescan_request(op, website, attempt):
     forever. Count up instead and persist the count under this claim.
     Returns the request identity and its existing reserved operation, if any.
     """
-    count = op.payload.get("rescan_dispatch", 0)
-    count = count if type(count) is int and count >= 0 else 0
-    request_id = f"source-rescan:{op.pk}:{count}" if count else f"source-rescan:{op.pk}"
+    count, request_id = _source_rescan_identity(op)
     prior = WebsiteConnectionOperation.objects.filter(
         idempotency_key=f"{website.pk}:workflow:{request_id}").first()
     if prior is None or prior.state not in SETTLED_SOURCE_RESCAN_STATES:
@@ -1214,15 +1244,24 @@ def _process_source_reverification(identifier, now):
                 github_repo=website.github_repo, payload=scan_payload, remote_data=remote_run)
             bind_operation_run(scan_op, run)
             receipt["scan_run_id"] = run.run_id
-        if target is None:
+        if target is None and op.receipt.get("scan_run_id") and _source_rescan_finished(op, website):
+            # An earlier attempt's rescan finished without recording the pinned
+            # or the selected target, so no row this check could verify will
+            # appear. Only a setup registers and verifies one, so it owns this
+            # source now.
+            state = "cancelled"
+            receipt.update(status="superseded", code="verified_target_required", retryable=False,
+                message="No publishing target exists at this source. Setting up articles verifies it.")
+        elif target is None:
             raise WebsiteAuthorityError("verified_target_required", "Waiting for a current verified publishing target.", retryable=True)
-        proof = discover_source_attestation(website, target, op.payload["source_sha"])
-        ci = record_ci_attestation(proof)
-        config = OrganizationContentConfig.objects.get(website_connection=website)
-        deployment = verify_live_deployment(config, data=ci.receipt)
-        state, receipt = "completed", {**receipt, "status": "verified", "source_sha": op.payload["source_sha"],
-            "target_id": target.target_key, "ci_operation_id": str(ci.pk), "deployment_operation_id": str(deployment.pk),
-            "repository_modified": False}
+        else:
+            proof = discover_source_attestation(website, target, op.payload["source_sha"])
+            ci = record_ci_attestation(proof)
+            config = OrganizationContentConfig.objects.get(website_connection=website)
+            deployment = verify_live_deployment(config, data=ci.receipt)
+            state, receipt = "completed", {**receipt, "status": "verified", "source_sha": op.payload["source_sha"],
+                "target_id": target.target_key, "ci_operation_id": str(ci.pk), "deployment_operation_id": str(deployment.pk),
+                "repository_modified": False}
     except WebsiteAuthorityError as exc:
         receipt.update(status="verification_pending", code=exc.code, retryable=exc.retryable)
         if exc.code in {"website_disconnected", "website_connection_changed", "website_operation_cancelled"}:
