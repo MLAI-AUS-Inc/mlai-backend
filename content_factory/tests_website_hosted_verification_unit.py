@@ -22,6 +22,22 @@ class HostedPromotionTests(SimpleTestCase):
         value.origin.refresh_from_db=Mock()
         return value
 
+    def v2_fixture(self):
+        from .website_target_contract import native_target_digest
+        value = self.fixture()
+        value.target.contract.update(target_id="native", kind="react_article_system", delivery_adapter="react_component",
+            content_path_pattern="src/articles/{slug}.tsx", site_contract_version=2, site_contract_digest="f" * 64,
+            site_verification_probe={"slug": "fixture", "title": "Fixture article"},
+            contract={"live_marker": {"kind": "artifact_digest", "value": "e" * 64}})
+        digest = native_target_digest(value.target.contract)
+        value.target.contract["contract_digest"] = digest
+        value.origin.payload["binding"].update(source_run_id=None, site_recipe_version=2,
+            site_contract_digest="f" * 64, contract_digest=digest)
+        value.origin.payload["site_recipe_probe"] = dict(value.target.contract["site_verification_probe"])
+        value.sealed["contract_digest"] = digest
+        value.sealed["evidence_digest"] = evidence_digest({k:v for k,v in value.sealed.items() if k!="evidence_digest"})
+        return value
+
     def promote(self,value,proof=None):
         from .website_models import WebsiteConnection
         with value.boundaries(),patch.object(WebsiteConnection.objects,"get",return_value=value.website),patch.object(hosted,"remote_request",return_value={"status":"completed","run_id":"native-run","verification":proof or value.sealed}),patch("content_factory.website_operations.validate_operation",return_value=value.origin):
@@ -57,14 +73,66 @@ class HostedPromotionTests(SimpleTestCase):
                 hosted.read_completed_proof(value.website, {**value.sealed, "run_id": "native-run", "source_run_id": None})
             fetch.assert_not_called()
 
+    @override_settings(ARTICLES_SITE_CONTRACT_V2_ENABLED=True)
     def test_parentless_v2_cannot_skip_changed_source_review(self):
-        value = self.fixture()
-        value.origin.payload["binding"].update(source_run_id=None, site_recipe_version=2, site_contract_digest="f" * 64)
+        value = self.v2_fixture()
         value.website.verified_sha = ""
         with self.assertRaises(WebsiteAuthorityError) as error:
             self.promote(value)
         self.assertEqual(error.exception.code, "website_source_review_required")
         value.target.save.assert_not_called()
+
+    @override_settings(ARTICLES_SITE_CONTRACT_V2_ENABLED=True)
+    def test_recipe_changed_during_completed_proof_read_cannot_promote(self):
+        from .website_models import WebsiteConnection
+        value = self.v2_fixture()
+        value.target.capabilities = {"publishingReady": False}
+        def completed(*args, **kwargs):
+            value.target.contract["site_contract_digest"] = "a" * 64
+            return {"status": "completed", "run_id": "native-run", "verification": value.sealed}
+        with value.boundaries(), patch.object(WebsiteConnection.objects, "get", return_value=value.website), \
+                patch.object(hosted, "remote_request", side_effect=completed), \
+                patch("content_factory.website_operations.validate_operation", return_value=value.origin), self.assertRaises(WebsiteAuthorityError):
+            verification.record_ci_attestation({**value.sealed, "run_id": "native-run", "source_run_id": None}, origin="authenticated_hosted")
+        value.target.save.assert_not_called()
+        self.assertFalse(value.target.capabilities["publishingReady"])
+
+    @override_settings(ARTICLES_SITE_CONTRACT_V2_ENABLED=True)
+    def test_actual_fresh_hosted_promotion_uses_exact_reconnect_source_provenance(self):
+        from .website_models import WebsiteConnection, WebsiteConnectionTarget, WebsiteConnectionOperation
+        value = self.v2_fixture()
+        previous = WebsiteConnectionTarget(connection=value.website, generation=2, target_key="native",
+            source_sha=value.sealed["source_sha"], contract=deepcopy(value.target.contract),
+            verified_at=value.now, capabilities={"publishingReady": True})
+        previous.contract["verification"] = {**value.sealed, "connection_generation": 2, "status": "verified"}
+        parent = WebsiteConnectionOperation(connection=value.website, generation=3, action="source-reverify", state="pending",
+            payload={"site_recipe_reconnect": True, "requested_by_user_id": str(value.user.pk), "deletion_epoch": 0,
+                "source_sha": value.sealed["source_sha"], "target_id": "native", "contract_digest": value.sealed["contract_digest"],
+                "site_contract_digest": "f" * 64, "previous_target_id": str(previous.pk), "previous_generation": 2,
+                "scope": {key: getattr(value.website, key) for key in ("repository_id", "github_repo", "branch", "app_root", "site_url")}})
+        value.origin.payload["site_recipe_reconnect_operation_id"] = str(parent.pk)
+        value.website.verified_sha = ""
+        value.target.source_sha, value.target.verified_at = "", None
+        value.target.contract.pop("verification", None)
+        value.target.capabilities = {"publishingReady": False}
+        operations, targets = Mock(), Mock()
+        operations.filter.side_effect = lambda **kw: value.rows(first=parent if str(kw.get("pk")) == str(parent.pk) else value.origin,
+            exists=str(kw.get("pk")) == str(parent.pk))
+        targets.filter.side_effect = lambda **kw: value.rows(first=previous if str(kw.get("pk")) == str(previous.pk) else value.target)
+        provider = Mock(status_code=200)
+        provider.json.return_value = {"sha": value.sealed["source_sha"], "status": "identical"}
+        with value.boundaries(), patch.object(WebsiteConnection, "operations", operations), \
+                patch.object(WebsiteConnection, "targets", targets), \
+                patch.object(WebsiteConnection.objects, "get", return_value=value.website), \
+                patch("integrations.http_client.get", return_value=provider), \
+                patch.object(hosted, "remote_request", return_value={"status": "completed", "run_id": "native-run", "verification": value.sealed}), \
+                patch("content_factory.website_operations.validate_operation", return_value=value.origin):
+            result = verification.record_ci_attestation({**value.sealed, "run_id": "native-run", "source_run_id": None}, origin="authenticated_hosted")
+        self.assertEqual(result.receipt["source_sha"], value.sealed["source_sha"])
+        self.assertTrue(value.target.capabilities["publishingReady"])
+        self.assertEqual(value.target.contract["verification"]["connection_generation"], 3)
+        self.assertEqual(previous.contract["verification"]["connection_generation"], 2)
+        self.assertNotEqual(result.receipt["evidence_digest"], evidence_digest(previous.contract["verification"]))
 
     def test_foreign_parent_or_cancelled_original_operation_never_fetches_service_proof(self):
         value=self.fixture()

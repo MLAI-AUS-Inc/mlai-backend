@@ -117,8 +117,9 @@ def status_for_context(context, config, *, journey, now=None):
         return None
     connection = config.website_connection
     from django.db.models import Q
-    op = connection.operations.filter(generation=connection.generation, action__in=["prepare", "disconnect"]).filter(
-        Q(action="disconnect") | Q(payload__company_id=str(context.company.pk))).order_by("-created_at", "-pk").first()
+    op = connection.operations.filter(generation=connection.generation).filter(
+        Q(action="disconnect") | Q(action="prepare", payload__company_id=str(context.company.pk)) |
+        Q(action="source-reverify", payload__site_recipe_reconnect=True)).order_by("-created_at", "-pk").first()
     if op is None:
         return {"version": 1, "state": "stopped", "step": None, "title": "Articles setup is available",
             "message": "Set up articles to create a website goal.", "nextAttemptAt": None,

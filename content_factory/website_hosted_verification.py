@@ -46,7 +46,7 @@ def request_for(op,context,config,target,source):
             site_recipe_probe=selection["probe"])
         payload["client_request_id"] += f":site-v2:{selection['site_contract_digest'][:16]}:{goals.digest(selection['probe'])[:16]}"
     from .website_goal_budget import enabled as budget_enabled
-    if budget_enabled():
+    if budget_enabled() and "goal" in op.receipt:
         goal=op.receipt["goal"];used=goals.mapping(goal.get("budget_used"))
         payload["goal_budget"]={"version":1,"goal_id":goal["goal_id"],"scope_digest":goals.digest(goal["scope"]),
             "remaining_active_seconds":settings.ARTICLES_GOAL_ACTIVE_SECONDS-(used.get("active_seconds") or 0),
@@ -61,13 +61,18 @@ def request_for(op,context,config,target,source):
             if "site_recipe_probe" in child.payload and child.payload["site_recipe_probe"] != probe:
                 raise WebsiteAuthorityError("website_configuration_changed", "The saved site recipe probe changed.")
             child.payload["site_recipe_probe"] = probe
+            if getattr(op, "action", None) == "source-reverify" and op.payload.get("site_recipe_reconnect") is True:
+                reference = str(op.pk)
+                if child.payload.get("site_recipe_reconnect_operation_id", reference) != reference:
+                    raise WebsiteAuthorityError("website_configuration_changed", "The reconnect verification reservation changed.")
+                child.payload["site_recipe_reconnect_operation_id"] = reference
         child.save(update_fields=["payload","updated_at"])
         run,_=ContentFactoryRun.objects.get_or_create(run_id=payload["run_id"],defaults={"organization":context.organization,
             "domain":context.organization.domain,"github_repo":connection.github_repo,"workflow":"hosted_native_verification","status":"queued","run_request":dict(payload)})
-    goal=op.receipt["goal"]
     op.receipt["hosted_verification_run_id"]=run.run_id
-    from .website_goal_runner import retain_child_references
-    op.receipt["goal"]=retain_child_references(goal,op.receipt)
+    if "goal" in op.receipt:
+        from .website_goal_runner import retain_child_references
+        op.receipt["goal"]=retain_child_references(op.receipt["goal"],op.receipt)
     return child,payload
 
 

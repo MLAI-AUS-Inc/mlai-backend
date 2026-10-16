@@ -192,7 +192,7 @@ class SiteRecipeAuthorityTests(SimpleTestCase):
         with override_settings(ARTICLES_SITE_CONTRACT_V2_ENABLED=False):
             self.assertIsNone(recipe.dispatch_selection(self.connection, target, "a" * 40))
 
-    def dispatch_site_request(self, source_run="setup-parent"):
+    def dispatch_site_request(self, source_run="setup-parent", reconnect=False):
         from . import website_hosted_verification as hosted
         from workflow_runs.models import ContentFactoryRun
         target = self.enrolled_target()
@@ -208,6 +208,8 @@ class SiteRecipeAuthorityTests(SimpleTestCase):
             return child
 
         op = SimpleNamespace(pk="prepare-goal", payload={}, receipt={"goal": {}})
+        if reconnect:
+            op.action, op.payload, op.receipt = "source-reverify", {"site_recipe_reconnect": True}, {}
         if source_run:
             op.receipt["setup_run_id"] = source_run
         with patch.object(hosted, "enabled", return_value=True), \
@@ -224,6 +226,12 @@ class SiteRecipeAuthorityTests(SimpleTestCase):
         self.assertEqual(incoming["site_recipe_probe"], child.payload["site_recipe_probe"])
         self.assertIn(":site-v2:", payload["client_request_id"])
         self.assertEqual(child.payload["binding"], payload)
+        if reconnect:
+            self.assertEqual(child.payload["site_recipe_reconnect_operation_id"], str(op.pk))
+            self.assertNotIn("site_recipe_reconnect_operation_id", payload)
+            self.assertNotIn("goal_budget", payload)
+            self.connection.operations = Mock()
+            self.connection.operations.filter.return_value.exists.return_value = True
         self.query = {key: str(value) for key, value in payload.items()}
         receipt = self.call()
         self.assertEqual(receipt["probe"], {"slug": "fixture", "title": "Fixture article"})
@@ -235,6 +243,12 @@ class SiteRecipeAuthorityTests(SimpleTestCase):
 
     def test_enrolled_v2_dispatch_has_no_dependency_on_a_setup_parent(self):
         self.assertIsNone(self.dispatch_site_request(source_run=None)["source_run_id"])
+
+    def test_reconnect_dispatch_has_private_parent_fence_and_no_goal_dependency(self):
+        self.dispatch_site_request(source_run=None, reconnect=True)
+        self.connection.operations.filter.return_value.exists.return_value = False
+        with self.assertRaises(WebsiteAuthorityError):
+            self.call()
 
     def test_legacy_without_setup_parent_cannot_reserve_or_dispatch(self):
         from . import website_hosted_verification as hosted

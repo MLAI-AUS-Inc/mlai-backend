@@ -228,8 +228,10 @@ def current_operation(connection):
     the operation until newer owner work starts; its queued cleanup follow-up
     never stands in for it.
     """
+    from django.db.models import Q
     current = connection.operations.filter(generation=connection.generation)
-    latest = current.filter(action__in=["prepare", "disconnect"]).order_by("-created_at").first()
+    latest = current.filter(Q(action__in=["prepare", "disconnect"]) |
+        Q(action="source-reverify", payload__site_recipe_reconnect=True)).order_by("-created_at").first()
     if latest is None or latest.state == "cancelled":
         newer = current.exclude(action__in=BACKGROUND_OPERATION_ACTIONS)
         if latest is not None:

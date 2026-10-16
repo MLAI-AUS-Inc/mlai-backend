@@ -766,6 +766,10 @@ def bind_website(config, *, user, repo, app_root="", branch="", site_url="", rec
                 raise WebsiteAuthorityError("website_connection_changed", "The connection changed during authorization. Refresh and retry.")
         same = bool(current and current.repository_id == metadata["repository_id"] and current.app_root == app_root
                     and current.branch == (branch or metadata["branch"]) and current.site_url == (site_url or config.organization.domain))
+        reconnect_recipe = None
+        if same and reconnect:
+            from .website_site_recipe_reconnect import candidate_for
+            reconnect_recipe = candidate_for(current, config)
         if same and current.state == "connected" and not reconnect:
             return current
         if same and current.state != "connected" and not reconnect:
@@ -800,6 +804,9 @@ def bind_website(config, *, user, repo, app_root="", branch="", site_url="", rec
         config.github_repo = metadata["github_repo"]
         config.github_installation_id = metadata["installation_id"]
         config.save(update_fields=["website_connection", "github_repo", "github_installation_id", "updated_at"])
+        if reconnect_recipe:
+            from .website_site_recipe_reconnect import enroll_after_bind
+            enroll_after_bind(config, connection, reconnect_recipe, user=user)
         return connection
 
 

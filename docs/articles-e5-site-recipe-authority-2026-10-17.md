@@ -25,8 +25,8 @@ unchanged. CF must reauthorize after reading the pinned recipe and after the
 build. This receipt authorizes only the current read/build; existing publication,
 provider-proof, source-review, cancellation and consent gates remain required.
 
-Reconnect scheduling and the existing
-runner upgrade remain separate acceptance work. Do not copy
+The existing runner upgrade and live fixture lifecycle remain separate acceptance
+work. Do not copy
 historical target capabilities or relabel old evidence into a new generation.
 Tests use database-free model boundaries and the actual authorization view; no
 local database or migration is run.
@@ -45,8 +45,8 @@ source-review and publication promotion gates remain in place, and the old
 target source/proof is never relabeled. Requiring the old target source to equal
 the commit awaiting verification would prevent post-merge verification itself.
 
-The existing setup lineage requirement remains; reconnect without a new setup
-still needs its own scheduling and enrollment integration.
+V1 retains its setup-lineage requirement. Explicit v2 dispatch and reconnect use
+the committed recipe and a fresh reservation without an original setup parent.
 
 ## Native target ingestion compatibility
 
@@ -85,3 +85,46 @@ run. Completed hosted proof still has to match the saved request, exact source,
 current operation/generation and all provider/source-review checks. This removes
 one transport dependency; reconnect enrollment and owner-source review remain
 separate work before reconnect can be claimed complete.
+
+## Reconnect enrollment and durable verification
+
+On an explicit reconnect to the same immutable repository, branch, application
+root and site, retain only a previously certified v2 definition. Select the prior
+default, or the sole certified target in the latest historical generation when
+disconnect cleared the selection. Ambiguous or malformed targets keep the old
+scan/setup path. Project a closed definition: no prior proof, source, readiness,
+capability, consent or credentials crosses the generation boundary. The new
+target starts provisional, with no source SHA or verification timestamp.
+
+Reserve a durable source-reverification operation for the exact previously
+certified source and reference the original target row separately. Reuse the
+hosted verifier and live-deployment checks, with no setup PR, model planning or
+paid generation. The hosted child privately references this reconnect operation;
+callers cannot submit that reference. A changed provider head is superseded and
+must follow the existing changed-source policy.
+
+For this exact unchanged commit only, the original certified target supplies
+source-review provenance. Validate the pending reconnect operation, current owner,
+repository/branch/root/generation/deletion epoch, exact target/recipe/native digests
+and original row before accepting that provenance. It supplies no build evidence:
+the current hosted job must complete and pass the existing source/tree/environment/
+render/marker checks. Ordinary changed-source verification keeps its review gate.
+Cancellation/rebind fences and bounded retries remain in force throughout.
+
+The implementation uses the existing durable `source-reverify` processor and
+hosted verifier. Pending work retains its child reference; an accepted build is
+reused while deployment waits. Deterministic build failures stop, and the 24-hour
+window is checked before new remote work. Deployment uses the existing bounded
+minute schedule. Current status includes the owner-initiated reconnect operation.
+The worker's authorization and final backend promotion both recheck the saved
+recipe/probe and reconnect reservation, so changed configuration or cancellation
+during a completed-proof read cannot promote readiness.
+
+Local evidence includes actual fresh hosted-proof promotion from a provisional
+target and rejection of changed source/recipe, plus routing, retry and budget
+checks. The actual bind/disconnect transactions are covered by a new CI-only
+disposable-database test that reconnects twice and asserts an unchanged recipe,
+new empty proof state and no setup workflow. Its remote result is still required.
+This does not establish the E4 live lifecycle, automatic template refresh and scan
+selection retention after reconnect, or acceptance of a source changed while
+disconnected. Neither rollout flag is enabled.

@@ -203,8 +203,14 @@ class WebsiteConnectionActionView(APIView):
                     branch=current.branch, site_url=current.site_url, reconnect=True, expected=request.data)
                 from .website_prepare import start_prepare, advance_prepare
                 config.refresh_from_db()
-                operation = start_prepare(config, company_id=context.company.pk, user=request.user)
-                advance_prepare(operation.pk)
+                operation = config.website_connection.operations.filter(generation=config.website_connection.generation,
+                    action="source-reverify", state="pending", payload__site_recipe_reconnect=True).first()
+                if operation:
+                    from .website_reconciliation import process_website_connection_operations
+                    process_website_connection_operations(limit=5, connection_id=config.website_connection.pk)
+                else:
+                    operation = start_prepare(config, company_id=context.company.pk, user=request.user)
+                    advance_prepare(operation.pk)
                 operation.refresh_from_db()
             else:
                 operation = transition_connection(config, action=action, expected=request.data,

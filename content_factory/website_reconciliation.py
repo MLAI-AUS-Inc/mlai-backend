@@ -4,6 +4,7 @@ from datetime import timedelta
 import base64
 import hashlib
 import logging
+from types import SimpleNamespace
 from urllib.parse import quote
 
 from django.db import transaction
@@ -1237,10 +1238,17 @@ def _process_source_reverification(identifier, now):
         attempt = op.attempts
         op.next_attempt_at = now + timedelta(minutes=5)
         op.save(update_fields=["attempts", "next_attempt_at", "updated_at"])
+    if op.payload.get("site_recipe_reconnect") is True and now - op.created_at >= timedelta(hours=24):
+        receipt = {**op.receipt, "status": "needs_attention", "code": "ci_attestation_required", "retryable": False,
+            "message": "Reconnect verification did not complete within its verification window."}
+        WebsiteConnectionOperation.objects.filter(pk=identifier, attempts=attempt, state="pending").update(
+            state="needs_attention", receipt=receipt, next_attempt_at=None, updated_at=timezone.now())
+        return "needs_attention"
     binding = {**contract_for(op.connection), "domain": op.connection.organization.domain,
         "connection_generation": getattr(op, "generation", op.connection.generation),
         "github_repo": op.connection.github_repo, "expected_source_sha": op.payload["source_sha"]}
     state, receipt = "pending", dict(op.receipt)
+    ci_receipt = None
     try:
         with authority_guard(binding, action="read") as website:
             pinned = op.payload.get("target_id")
@@ -1320,13 +1328,39 @@ def _process_source_reverification(identifier, now):
         elif target is None:
             raise WebsiteAuthorityError("verified_target_required", "Waiting for a current verified publishing target.", retryable=True)
         else:
-            proof = discover_source_attestation(website, target, op.payload["source_sha"])
-            ci = record_ci_attestation(proof)
             config = OrganizationContentConfig.objects.get(website_connection=website)
-            deployment = verify_live_deployment(config, data=ci.receipt)
-            state, receipt = "completed", {**receipt, "status": "verified", "source_sha": op.payload["source_sha"],
-                "target_id": target.target_key, "ci_operation_id": str(ci.pk), "deployment_operation_id": str(deployment.pk),
-                "repository_modified": False}
+            ci_receipt, ci_id = None, None
+            if op.payload.get("site_recipe_reconnect") is True:
+                from .website_site_recipe_reconnect import enabled as recipe_reconnect_enabled
+                from .website_verification import current_ci_attestation
+                from .website_hosted_verification import advance as advance_hosted
+                from .website_site_recipe import dispatch_selection
+                if not recipe_reconnect_enabled(website) or dispatch_selection(website, target, op.payload["source_sha"]) is None:
+                    raise WebsiteAuthorityError("verified_target_required", "The enrolled reconnect recipe is unavailable.")
+                ci_receipt = current_ci_attestation(website, target)
+                if ci_receipt is None:
+                    outcome = advance_hosted(op, SimpleNamespace(organization=website.organization), config, target, op.payload["source_sha"])
+                    receipt.update(op.receipt)
+                    if outcome["status"] == "completed":
+                        website.refresh_from_db()
+                        target.refresh_from_db()
+                        ci_receipt = current_ci_attestation(website, target)
+                        ci_id = outcome["operation_id"]
+                        if ci_receipt is None:
+                            raise WebsiteAuthorityError("ci_attestation_required", "Waiting for saved reconnect build proof.", retryable=True)
+                if ci_receipt is not None and ci_id is None:
+                    ci_id = receipt.get("ci_operation_id")
+                if ci_id:
+                    receipt["ci_operation_id"] = ci_id
+            else:
+                proof = discover_source_attestation(website, target, op.payload["source_sha"])
+                ci = record_ci_attestation(proof)
+                ci_receipt, ci_id = ci.receipt, str(ci.pk)
+            if ci_receipt is not None:
+                deployment = verify_live_deployment(config, data=ci_receipt)
+                state, receipt = "completed", {**receipt, "status": "verified", "source_sha": op.payload["source_sha"],
+                    "target_id": target.target_key, "ci_operation_id": ci_id, "deployment_operation_id": str(deployment.pk),
+                    "repository_modified": False}
     except WebsiteAuthorityError as exc:
         receipt.update(status="verification_pending", code=exc.code, retryable=exc.retryable)
         if exc.code in {"website_disconnected", "website_connection_changed", "website_operation_cancelled"}:
@@ -1343,8 +1377,19 @@ def _process_source_reverification(identifier, now):
             state = "needs_attention"
             receipt.update(status="needs_attention", code="operation_key_conflict", retryable=False,
                 message="The repository scan for this change could not be restarted. Scan the repository again.")
+        elif op.payload.get("site_recipe_reconnect") is True:
+            from .website_prepare import DEPLOYMENT_WAIT_CODES
+            if ci_receipt is not None and exc.authority_code in DEPLOYMENT_WAIT_CODES:
+                receipt.update(retryable=True)
+            elif not exc.retryable:
+                state = "needs_attention"
+                receipt.update(status="needs_attention", retryable=False)
     except Exception:
         receipt.update(status="verification_pending", code="source_reverification_unavailable", retryable=True)
+    delay = timedelta(seconds=min(3600, 15 * 2 ** min(attempt, 8)))
+    if op.payload.get("site_recipe_reconnect") is True and ci_receipt is not None:
+        from .website_prepare import DEPLOYMENT_RETRY_MINUTES
+        delay = timedelta(minutes=DEPLOYMENT_RETRY_MINUTES[min(attempt - 1, len(DEPLOYMENT_RETRY_MINUTES) - 1)])
     WebsiteConnectionOperation.objects.filter(pk=identifier, attempts=attempt, state="pending").update(
-        state=state, receipt=receipt, next_attempt_at=now + timedelta(seconds=min(3600, 15 * 2 ** min(attempt, 8))), updated_at=timezone.now())
+        state=state, receipt=receipt, next_attempt_at=now + delay if state == "pending" else None, updated_at=timezone.now())
     return state

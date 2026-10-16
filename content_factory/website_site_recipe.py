@@ -65,6 +65,30 @@ def dispatch_selection(connection, target, source):
         raise WebsiteAuthorityError("verified_target_required", "The current enrolled site recipe is unavailable.") from None
 
 
+def _reconnect_reservation_active(connection, saved, original):
+    reference = saved.get("site_recipe_reconnect_operation_id")
+    return not reference or connection.operations.filter(pk=reference,
+        generation=connection.generation, action="source-reverify", state__in=["pending", "completed"],
+        payload__site_recipe_reconnect=True, payload__source_sha=original.get("expected_source_sha"),
+        payload__target_id=original.get("target_id"), payload__contract_digest=original.get("contract_digest"),
+        payload__site_contract_digest=original.get("site_contract_digest")).exists()
+
+
+def recheck_hosted_target(connection, target, operation, source):
+    """Fence proof promotion against recipe or probe changes during provider reads."""
+    saved = operation.payload if operation and isinstance(operation.payload, dict) else {}
+    original = saved.get("binding") if isinstance(saved.get("binding"), dict) else {}
+    if "site_recipe_version" not in original:
+        return
+    selected = dispatch_selection(connection, target, source)
+    if (type(original["site_recipe_version"]) is not int or original["site_recipe_version"] != 2
+            or not selected or selected["site_contract_digest"] != original.get("site_contract_digest")
+            or selected["probe"] != saved.get("site_recipe_probe")
+            or target.contract.get("contract_digest") != original.get("contract_digest")
+            or not _reconnect_reservation_active(connection, saved, original)):
+        raise WebsiteAuthorityError("website_configuration_changed", "The accepted site recipe changed during verification.")
+
+
 def authorization_inputs(connection, query):
     """Project only a saved current reservation while the caller holds authority_guard.
 
@@ -103,6 +127,8 @@ def authorization_inputs(connection, query):
             or not isinstance(original.get("expected_source_sha"), str) or not _SHA.fullmatch(original["expected_source_sha"])
             or not isinstance(original.get("site_contract_digest"), str) or not _DIGEST.fullmatch(original["site_contract_digest"])
             or not isinstance(original.get("contract_digest"), str) or not _DIGEST.fullmatch(original["contract_digest"])):
+        deny()
+    if not _reconnect_reservation_active(connection, saved, original):
         deny()
     # This is an accepted recipe definition, not a build fact about the new
     # commit. CF must read the matching recipe at the reserved source and emit
