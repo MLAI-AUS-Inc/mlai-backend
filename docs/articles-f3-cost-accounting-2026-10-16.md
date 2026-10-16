@@ -82,8 +82,23 @@ lifecycle projection and generic operation receipt reads.
 Precise quality ingestion matches CF's optional version-1 accounting object:
 tokens/provider time expose known subtotals and call coverage; USD remains a
 configured bound. Legacy token reservations never become exact accounting.
-Actual build/preview invocation meters and operational alerts remain subsequent
-F3 work. The lazy client and durable observation recovery are described below.
+The optional isolated-verifier admission meter, lazy client, durable
+observation recovery and operational alerts are described below. Compiler
+subprocess invocation counts remain unavailable.
+
+The admission-meter follow-up accepts CF's explicit
+`isolated_verifier_admissions` basis for build/preview counters, independently
+of workflow-step attempts. These are admitted isolated verification jobs,
+including failed or uncertain executions, rather than compiler subprocesses or
+hosted deployments. The company/goal detail read preserves that basis. Legacy
+step estimates and incomplete admission coverage remain null; known zero stays
+zero. Original-run admission peaks survive unknown gaps, and a later lower
+counter produces incomplete accounting instead of reducing the total. Report
+identity ordering, deduplication, erasure fences and B4 budget arithmetic remain
+unchanged. The matching lazy client must accept/display this basis before the
+default-off accounting rollout is enabled. Dedicated directory-verifier Celery
+handoffs retain an explicit coverage gap until their original-run receipt
+protocol is implemented; they cannot appear as measured zero.
 
 The follow-up recovery path records `cost_pending_run_ids` with the accepted
 goal transition. `_persist_prepare` reserves one `usage-refresh` operation in
@@ -102,8 +117,9 @@ retry is pending, running or exhausted, the separate company read includes its
 bounded source references as unknown observations (without exposing run IDs).
 An older ledger value cannot become a complete current total during recovery.
 Both ledger and recovery reads are bounded, and no accounting scan enters
-bootstrap. Chat's optional lazy view is MLAI-AUS-Inc/mlai-chat#505. Actual
-invocation meters and operational alert delivery remain subsequent work.
+bootstrap. Chat's optional lazy view is MLAI-AUS-Inc/mlai-chat#505. The
+admission meter and budget/stall/repair outbox use the separate rollout paths
+below. Compiler subprocess counts remain unavailable.
 
 Ledger writes lock the connection and compare its retained deletion watermark
 to the original scope. A logical website purge removes internal accounting

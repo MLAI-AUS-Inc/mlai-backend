@@ -48,6 +48,21 @@ class LedgerPersistenceTests(WebsiteDatabaseFixture, TransactionTestCase):
     def read(self, **kwargs):
         return ledger.read(company_id=self.company_id, organization_id=self.org.pk, **kwargs)
 
+    def test_original_run_verifier_admissions_are_persisted_once_with_their_basis(self):
+        for key, count in (("builds", 3), ("previews", 0)):
+            self.run.result["usage"]["accounting"][key].update(basis="isolated_verifier_admissions", invocations=count)
+        first = ledger.record(self.run)
+        repeated = ledger.record(self.run)
+        self.assertEqual(first.pk, repeated.pk)
+        self.assertEqual(self.read()["metrics"]["builds"]["total"], 3)
+        self.assertEqual(self.read()["metrics"]["builds"]["basis"], "isolated_verifier_admissions")
+        self.assertEqual(self.read()["metrics"]["previews"]["total"], 0)
+        self.run.result["usage"]["state_version"] = 2
+        self.run.result["usage"]["accounting"]["builds"]["invocations"] = 4
+        ledger.record(self.run)
+        self.assertEqual(self.read()["recordedRuns"], 1)
+        self.assertEqual(self.read()["metrics"]["builds"]["total"], 4)
+
     def test_replay_reuse_and_out_of_order_observations_count_one_original_run(self):
         first = ledger.record(self.run)
         self.assertEqual(ledger.record(self.run).pk, first.pk)

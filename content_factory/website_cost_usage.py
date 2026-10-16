@@ -6,6 +6,7 @@ BASES = {"model_calls": "admitted_calls", "tokens": "provider_reported", "provid
     "active_seconds": "admitted_activity_elapsed", "model_usd": "configured_token_rate_upper_bound",
     "builds": "workflow_step_attempts", "previews": "workflow_step_attempts"}
 INTEGER = {"model_calls", "tokens", "builds", "previews"}
+VERIFIER_BASIS = "isolated_verifier_admissions"
 
 
 def _nullable(value, *, integer=False):
@@ -18,7 +19,8 @@ def accounting(value, usage):
         raise ValueError("Unknown accounting projection")
     for key, basis in BASES.items():
         metric = value[key]
-        if not isinstance(metric, dict) or metric.get("basis") != basis:
+        allowed = {basis, VERIFIER_BASIS} if key in {"builds", "previews"} else {basis}
+        if not isinstance(metric, dict) or not isinstance(metric.get("basis"), str) or metric["basis"] not in allowed:
             raise ValueError("Unknown accounting basis")
         if key in {"tokens", "provider_seconds"}:
             if set(metric) != {"basis", "total", "known_subtotal", "measured_calls", "total_calls"}:
@@ -34,7 +36,9 @@ def accounting(value, usage):
                     or usage[key] is not None and known > usage[key]):
                 raise ValueError("Accounting coverage contradicts its total")
         elif key in {"builds", "previews"}:
-            if (set(metric) != {"basis", "attempts", "invocations"} or metric["invocations"] is not None
+            if (set(metric) != {"basis", "attempts", "invocations"}
+                    or not _nullable(metric["invocations"], integer=True)
+                    or metric["basis"] == "workflow_step_attempts" and metric["invocations"] is not None
                     or not _nullable(metric["attempts"], integer=True) or metric["attempts"] != usage[key]):
                 raise ValueError("Workflow attempts are not invocation measurements")
         else:
@@ -85,7 +89,26 @@ def merge(previous, report, *, run_id, now):
         if old:
             return {**deepcopy(prior), "incomplete_reason": "counter_reset"}
         raise
-    return {**candidate, "budget_peaks": charged.get("usage_high_water", {}).get(run_id, {}), "observed_at": now.isoformat()}
+    verifier_peaks = deepcopy(prior.get("verifier_peaks", {}))
+    if (not isinstance(verifier_peaks, dict) or set(verifier_peaks) - {"builds", "previews"}
+            or any(not _nullable(value, integer=True) or value is None for value in verifier_peaks.values())):
+        raise ValueError("Stored verifier admission peaks are invalid")
+    for key in ("builds", "previews"):
+        prior_metric = goals.mapping(goals.mapping(prior.get("accounting")).get(key))
+        value = prior_metric.get("invocations")
+        if prior_metric.get("basis") == VERIFIER_BASIS and value is not None:
+            if not _nullable(value, integer=True):
+                raise ValueError("Stored verifier admission count is invalid")
+            verifier_peaks[key] = max(verifier_peaks.get(key, 0), value)
+    current = {key: goals.mapping(goals.mapping(measured).get(key)).get("invocations") for key in ("builds", "previews")}
+    if any(value is not None and value < verifier_peaks.get(key, 0) for key, value in current.items()):
+        candidate.update(accounting=None, incomplete_reason="verifier_counter_reset")
+    else:
+        verifier_peaks.update({key: value for key, value in current.items() if value is not None})
+    result = {**candidate, "budget_peaks": charged.get("usage_high_water", {}).get(run_id, {}), "observed_at": now.isoformat()}
+    if verifier_peaks:
+        result["verifier_peaks"] = verifier_peaks
+    return result
 
 
 def attribution(operation, run):
@@ -154,7 +177,7 @@ def aggregate(records, *, now, truncated=False, incomplete=False):
             values.append(value if _nullable(value, integer=key in INTEGER) else None)
             subtotals.append(subtotal if _nullable(subtotal, integer=key in INTEGER) else None)
         known = [value for value in subtotals if value is not None]
-        metrics[key] = {"basis": "invocations" if key in {"builds", "previews"} else basis,
+        metrics[key] = {"basis": VERIFIER_BASIS if key in {"builds", "previews"} else basis,
             "total": sum(values) if values and not truncated and not incomplete and all(value is not None for value in values) else None,
             "knownSubtotal": sum(known) if known else None, "measuredRuns": sum(value is not None for value in values),
             "recordedRuns": len(records)}

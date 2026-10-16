@@ -28,6 +28,58 @@ class CostUsageTests(SimpleTestCase):
     def merge(self, previous, value):
         return costs.merge(previous, value, run_id="meter-run", now=self.now)
 
+    def verifiers(self, *, builds=3, previews=0, version=1):
+        value = deepcopy(self.report)
+        value["state_version"] = version
+        for key, count in (("builds", builds), ("previews", previews)):
+            value["accounting"][key].update(basis=costs.VERIFIER_BASIS, invocations=count)
+        return value
+
+    def test_verifier_admissions_and_workflow_attempts_remain_distinct(self):
+        recorded = self.merge(None, self.verifiers())
+        summary = costs.aggregate([recorded], now=self.now)
+        self.assertEqual(recorded["accounting"]["builds"]["attempts"], self.report["builds"])
+        self.assertEqual(summary["metrics"]["builds"]["basis"], "isolated_verifier_admissions")
+        self.assertEqual(summary["metrics"]["builds"]["total"], 3)
+        self.assertEqual(summary["metrics"]["previews"]["total"], 0)
+        partial = costs.aggregate([recorded, self.merge(None, self.report)], now=self.now)
+        self.assertIsNone(partial["metrics"]["builds"]["total"])
+        self.assertEqual(partial["metrics"]["builds"]["knownSubtotal"], 3)
+        self.assertEqual(partial["metrics"]["builds"]["measuredRuns"], 1)
+
+    def test_admission_replays_and_older_snapshots_cannot_duplicate_or_replace_counts(self):
+        value = self.verifiers()
+        first = self.merge(None, value)
+        self.assertEqual(self.merge(first, value), first)
+        second = self.merge(first, self.verifiers(builds=4, version=2))
+        self.assertEqual(self.merge(second, value), second)
+        conflict = self.merge(second, self.verifiers(builds=5, version=2))
+        self.assertEqual(conflict["incomplete_reason"], "conflicting_snapshot")
+        self.assertEqual(conflict["accounting"]["builds"]["invocations"], 4)
+
+    def test_counter_peaks_survive_missing_coverage_and_reject_a_later_reset(self):
+        first = self.merge(None, self.verifiers())
+        gap = self.merge(first, self.verifiers(builds=None, version=2))
+        self.assertEqual(gap["verifier_peaks"]["builds"], 3)
+        reset = self.merge(gap, self.verifiers(builds=1, version=3))
+        self.assertEqual(reset["incomplete_reason"], "verifier_counter_reset")
+        self.assertIsNone(costs.aggregate([reset], now=self.now)["metrics"]["builds"]["total"])
+        restored = self.merge(reset, self.verifiers(builds=5, version=4))
+        self.assertEqual(restored["verifier_peaks"]["builds"], 5)
+        self.assertEqual(restored["accounting"]["builds"]["invocations"], 5)
+        self.assertIsNone(restored["incomplete_reason"])
+
+    def test_invalid_admission_values_and_corrupt_peaks_cannot_become_measurements(self):
+        for count in (True, -1, "3", float("nan"), float("inf"), 0.5):
+            with self.subTest(count=count):
+                result = self.merge(None, self.verifiers(builds=count))
+                self.assertEqual(result["incomplete_reason"], "invalid_accounting")
+                self.assertIsNone(result["accounting"])
+        first = self.merge(None, self.verifiers())
+        for peaks in ([], {"provider_text": 3}, {"builds": True}, {"builds": None}):
+            with self.subTest(peaks=peaks), self.assertRaises(ValueError):
+                self.merge({**first, "verifier_peaks": peaks}, self.verifiers(builds=4, version=2))
+
     def test_settlement_and_replay_keep_exact_measurements_separate_from_peaks(self):
         reserved = self.merge(None, report())
         settled = self.merge(reserved, {**self.report, "state_version": 2, "provider_message": "must-remain-private"})
