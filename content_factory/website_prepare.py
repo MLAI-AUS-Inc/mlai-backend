@@ -661,6 +661,17 @@ def attach_selected_setup_run(config, run, *, company_id):
 
 
 def _dispatch_prepare_step(op, context, config, step, *, user, journey=None):
+    from .publishing_channels import enabled, execute
+    if enabled():
+        from .publishing_channel_contract import ChannelRequest
+        action = "capture_existing" if step == "scan" else "verify" if step in {"verify", "ci-attestation"} else "prepare"
+        return execute(action, ChannelRequest(context=context, config=config, user=user, operation=op,
+            data={"journey": journey}, step=step))
+    return _dispatch_git_prepare_step(op, context, config, step, user=user, journey=journey)
+
+
+def _dispatch_git_prepare_step(op, context, config, step, *, user, journey=None):
+    """Original Git implementation, also used by the common channel wrapper."""
     from .vibe_marketing_views import VibeMarketingScanView, VibeMarketingArticleSystemSetupView, _article_capabilities_for_context
     if step == "permissions":
         grants = (journey or {}).get("githubPermissions") or {}

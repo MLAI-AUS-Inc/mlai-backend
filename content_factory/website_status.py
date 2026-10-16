@@ -141,7 +141,12 @@ def status_for_context(context, config, *, journey, now=None):
 def add_status(payload, context, config, *, journey):
     """Add the shared server contract only when the status rollout is enabled."""
     from .website_publishing_channels import projection
-    channel = projection(context, config)
+    from .publishing_channels import enabled as channels_enabled, inspect as inspect_channel
+    if channels_enabled():
+        from .publishing_channel_contract import ChannelRequest
+        channel = inspect_channel(ChannelRequest(context=context, config=config))["planning"]
+    else:
+        channel = projection(context, config)
     if channel is not None:
         payload["publishingChannel"] = channel
     result = status_for_context(context, config, journey=journey)

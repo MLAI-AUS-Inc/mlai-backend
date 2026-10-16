@@ -16763,6 +16763,21 @@ def _article_selection_conflicts(*, submitted, resolved):
 
 
 def start_article_generation(*, user, context, data, request_hash=None, website_contract=None, goal_operation_id=None):
+    """Route the original owned generation command through its publishing channel."""
+    from .publishing_channels import enabled, execute
+    if enabled():
+        from .publishing_channel_contract import ChannelRequest
+        try:
+            return execute("publish", ChannelRequest(context=context, config=_get_config(context.organization), user=user,
+                step="generation", data={"data": data, "request_hash": request_hash,
+                    "website_contract": website_contract, "goal_operation_id": goal_operation_id}))
+        except WebsiteAuthorityError as exc:
+            return Response(exc.as_dict(), status=exc.status)
+    return _start_article_generation_for_channel(user=user, context=context, data=data, request_hash=request_hash,
+        website_contract=website_contract, goal_operation_id=goal_operation_id)
+
+
+def _start_article_generation_for_channel(*, user, context, data, request_hash=None, website_contract=None, goal_operation_id=None):
     """Execute the canonical owned operation for HTTP and MCP transports."""
     command = ContentCommand(user=user, data=data)
     config = _get_config(context.organization)
@@ -18345,6 +18360,21 @@ def _project_setup_pr_creation_failure(run, config, remote_data):
 
 
 def control_article_run(*, user, context, run, action, data, run_id=None, goal_operation_id=None):
+    """Route publication through the channel while retaining original run consent."""
+    from .publishing_channels import enabled, execute
+    if enabled() and action in {"publish-pr", "promote-bundle", "merge-publish-pr"}:
+        from .publishing_channel_contract import ChannelRequest
+        try:
+            return execute("publish", ChannelRequest(context=context, config=_get_config(context.organization), user=user,
+                run=run, step="publication", data={"action": action, "data": data,
+                    "run_id": run_id, "goal_operation_id": goal_operation_id}))
+        except WebsiteAuthorityError as exc:
+            return Response(exc.as_dict(), status=exc.status)
+    return _control_article_run_for_channel(user=user, context=context, run=run, action=action, data=data,
+        run_id=run_id, goal_operation_id=goal_operation_id)
+
+
+def _control_article_run_for_channel(*, user, context, run, action, data, run_id=None, goal_operation_id=None):
     """Execute the canonical owned operation for HTTP and MCP transports."""
     if goal_operation_id is not None:
         from .website_article_recovery import authorize_resume
