@@ -1,11 +1,9 @@
 # Vibe Mentoring (pilot)
 
-Status: pilot, built on the private branch `mentoring/pilot`. Not in `main`.
-The migration `mentoring/migrations/0001_initial.py` was approved by the operator for
-this private copy, but it is now TO BE REGENERATED after approval: the Google work removed
-`video_link` and added fields (see `docs/migration-proposals/mentoring-0001.md`). Until the
-operator approves the changed field list the migration file and the models disagree, and
-nothing has been applied anywhere.
+Status: pilot, built on the branch `mentoring/pilot`. Not in `main`.
+The initial migration `mentoring/migrations/0001_initial.py` is proposed and ready for
+review (field list and checksum in `docs/migration-proposals/mentoring-0001.md`). It has not
+been applied to any shared database.
 
 ## What it is
 
@@ -106,7 +104,7 @@ All movements use `PointsService`, ledger source `MANUAL`, reference type
    `award()`, key `mentor_payout:{session id}`.
 
 Known side effect: `PointsService.award` raises the mentor's lifetime earned
-total, which also gates the Conference Room and committee eligibility. The operator
+total, which also gates the Conference Room and committee eligibility. Maintainers
 decided this is fine: the payout is plain Roo points, with no special earned handling.
 
 Deleting a user deletes their mentor profile and sessions (cascade) so account deletion
@@ -157,7 +155,7 @@ unavailable on isolated staging (capability `google`, never called).
   accepted or completed, and sessions are only ever returned to their two participants.
   `busy_calendar_email` is returned only on the mentor's own profile.
 
-## Google setup (for the operator)
+## Google setup (for maintainers)
 
 1. Create a free Google account just for MLAI mentoring (a normal Gmail address, not
    Workspace). Use a shared mailbox the team controls, and turn on two-step sign-in.
@@ -178,7 +176,7 @@ unavailable on isolated staging (capability `google`, never called).
 5. Put the three values in the backend environment, never in git or docs:
    `MENTORING_GOOGLE_CLIENT_ID`, `MENTORING_GOOGLE_CLIENT_SECRET`,
    `MENTORING_GOOGLE_REFRESH_TOKEN`, then set `MENTORING_GOOGLE_ENABLED=true`. They go in the
-   laptop vault later; until then keep them only in the host env file.
+   secrets store; until then keep them only in the host env file.
 6. Mentor step, "Share free/busy with <MLAI account>": in Google Calendar on the web, open
    Settings, pick the calendar, "Share with specific people or groups", add the MLAI
    account's address with the permission "See only free/busy (hide details)". Then the mentor
@@ -195,11 +193,11 @@ Open questions that need a live test before the pilot relies on them:
 
 ## Rollout order
 
-1. The migration `mentoring/migrations/0001_initial.py` is generated and approved
-   (private copy). Review it against the proposal.
+1. The migration `mentoring/migrations/0001_initial.py` is generated and ready for
+   review. Review it against the proposal.
 2. Run the database-backed tests (not yet written) on a disposable database.
 3. Apply the migration before or with the code (the app's tables must exist before
-   any user deletion or admin page touches them). Operator sets
+   any user deletion or admin page touches them). The deployer sets
    `APPROVED_MIGRATION_PLAN_SHA256` on the host (see the proposal for the exact value
    and how to recompute it), then merge and deploy (the flag is off, so nothing
    changes for users).

@@ -1,6 +1,6 @@
-# Vibe Mentoring: staging rollout handoff
+# Vibe Mentoring: staging rollout checklist
 
-For the staging operator. Source: branch `mentoring/staging` (= `staging` plus the
+For the staging deployer. Source: branch `mentoring/staging` (= `staging` plus the
 mentoring commits). The auto-deploy timer will NOT ship it: the change touches
 `mlai/settings.py` (an OPERATIONAL path) and adds a migration, and
 `ops/staging-chat/auto-deploy.py` refuses both. This is the separate reviewed
@@ -11,15 +11,15 @@ Do not start until the steps in section 1 are done.
 
 ## 1. Approvals
 
-The operator approved generating `mentoring/migrations/0001_initial.py` for this private
-copy (done; it is in the branch). Still needed from the staging operator side:
+The proposed migration `mentoring/migrations/0001_initial.py` is in the branch. Still needed
+before rollout:
 
 1. Review the file against `docs/migration-proposals/mentoring-0001.md` (they match exactly:
    3 new tables, nothing existing changes, depends on `roo.0041_apple_iap_digital_credits`).
 2. Record the file's sha256 in the staging `migration_hashes` inventory (the auto-deploy
    `compatible` check compares those hashes). The sha256 of the file as committed is in the
    migration proposal.
-3. Approval to apply it to the staging database only. Nothing has been applied anywhere.
+3. Maintainer approval to apply it to the staging database only. Nothing has been applied anywhere.
 
 ## 2. What the manual rollout contains
 

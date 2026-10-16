@@ -1,14 +1,14 @@
 # Migration: mentoring 0001_initial
 
-Status: APPROVED 16-10-26 by operator (approved 16-10-26 by operator). The file
-`mentoring/migrations/0001_initial.py` was regenerated with `makemigrations mentoring` under
-dummy no-database settings, replacing the earlier draft (which had `video_link` and lacked the
-new fields). It has NOT been applied to any production or staging database. It may be applied
-only to a disposable local database on the operator's Mac. The field list below is final.
+Status: proposed initial migration for the mentoring app, ready for review. The file
+`mentoring/migrations/0001_initial.py` was generated with `makemigrations mentoring` under
+dummy no-database settings. It has NOT been applied to any production or staging database. It
+may be applied only to a local disposable database until it is reviewed. The field list below
+is the proposed list.
 
 - File sha256: `f787b567f1fcdbfc11b415d89136d85a33ba003b00935ea67f40b720d97304e9`
 
-Field changes against the previously approved file (the tables below show the new list):
+Field changes against the earlier draft of the file (the tables below show the current list):
 
 - mentoring_mentorprofile: REMOVE `video_link`; ADD `busy_calendar_email` Email(254), blank, default ''.
 - mentoring_mentorsession: ADD `meet_link` URL(500), blank, default ''; `calendar_event_id`
@@ -136,7 +136,7 @@ mentoring.0001_initial
 and its sha256 is `35394050fd862c66860acd992b562efd24f8793f7938dd021ed2c7db09b94393`.
 
 If anything else is pending on the host (on staging the 98 commits it is behind main may add
-migrations), the value differs. The staging or production operator must run, on that host
+migrations), the value differs. The deployer must run, on that host
 after pulling the branch and before deploying:
 
 ```
