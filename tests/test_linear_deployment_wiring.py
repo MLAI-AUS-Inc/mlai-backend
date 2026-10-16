@@ -253,6 +253,7 @@ class LinearDeploymentWiringTests(unittest.TestCase):
 
         values = {
             "MESSAGE_SYNC_ENABLED": "false",
+            "MESSAGE_SYNC_RECENT_HISTORY_ENABLED": "false",
             "MESSAGE_SYNC_QUIET_HEAD_BACKOFF_ENABLED": "false",
             "MESSAGE_SYNC_OPEN_PRIORITY_ENABLED": "true",
             "MESSAGE_SYNC_UNREAD_PREFETCH_ENABLED": "false",
