@@ -1,13 +1,14 @@
 """Current service-owned verifier inputs, separate from repository recipe data."""
 from copy import deepcopy
-import hashlib
 import json
+from pathlib import PurePosixPath
 import re
 
 from django.conf import settings
 
 from .website_contract import WebsiteAuthorityError
 from .website_failure_redaction import redact_secret_text
+from .website_target_contract import native_target_digest
 
 _DIGEST = re.compile(r"[a-f0-9]{64}")
 _SHA = re.compile(r"[a-f0-9]{40}(?:[a-f0-9]{24})?")
@@ -16,20 +17,26 @@ _TARGET_FIELDS = ("target_id", "kind", "delivery_adapter", "content_path_pattern
 _SCOPE_FIELDS = ("website_connection_id", "connection_generation", "repository_id", "github_repo", "branch", "app_root")
 
 
-def native_target_digest(target):
-    """Use CF's existing route/storage/adapter/marker canonical target identity."""
-    value = {key: target.get(key) for key in _TARGET_FIELDS}
-    value["live_marker"] = (target.get("contract") or {}).get("live_marker")
-    return hashlib.sha256(json.dumps(value, sort_keys=True, separators=(",", ":"), allow_nan=False).encode()).hexdigest()
-
-
 def _valid_probe(probe):
-    return (isinstance(probe, dict) and not set(probe) - {"slug", "title", "port", "is_setup_example", "marker_on_listing_only"}
+    def existing_source(value):
+        if value is None:
+            return True
+        if not isinstance(value, dict) or set(value) != {"path", "sha256"}:
+            return False
+        path, digest = value["path"], value["sha256"]
+        return (isinstance(path, str) and 0 < len(path) <= 500 and path != "." and path == str(PurePosixPath(path))
+            and not path.startswith("/") and not any(c in path for c in "\\%:?#{}")
+            and not any(ord(c) < 32 or ord(c) == 127 for c in path)
+            and not any(part in {"..", ".git"} or part.startswith(".env") for part in path.split("/"))
+            and isinstance(digest, str) and _DIGEST.fullmatch(digest) is not None)
+
+    return (isinstance(probe, dict) and not set(probe) - {"slug", "title", "port", "is_setup_example", "marker_on_listing_only", "existing_seed_source"}
         and isinstance(probe.get("slug"), str) and re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,127}", probe["slug"])
         and isinstance(probe.get("title"), str) and 0 < len(probe["title"]) <= 256
         and not any(ord(c) < 32 for c in probe["title"])
         and type(probe.get("port", 3000)) is int and 1024 <= probe.get("port", 3000) <= 65535
-        and all(key not in probe or type(probe[key]) is bool for key in ("is_setup_example", "marker_on_listing_only")))
+        and all(key not in probe or type(probe[key]) is bool for key in ("is_setup_example", "marker_on_listing_only"))
+        and existing_source(probe.get("existing_seed_source")))
 
 
 def dispatch_selection(connection, target, source):
@@ -113,10 +120,14 @@ def authorization_inputs(connection, query):
         deny()
     try:
         selected = {key: stored.get(key) for key in _TARGET_FIELDS}
-        marker = (stored.get("contract") or {}).get("live_marker")
-        if (not isinstance(marker, dict) or set(marker) - {"kind", "value", "meta_name", "schema_version"}
+        raw_marker = (stored.get("contract") or {}).get("live_marker")
+        marker = {key: raw_marker[key] for key in ("kind", "value", "meta_name", "schema_version") if key in raw_marker} if isinstance(raw_marker, dict) else None
+        if (not isinstance(marker, dict)
                 or marker.get("kind") != "artifact_digest" or not isinstance(marker.get("value"), str)
-                or not _DIGEST.fullmatch(marker["value"])):
+                or not _DIGEST.fullmatch(marker["value"])
+                or "schema_version" in marker and (type(marker["schema_version"]) is not int or marker["schema_version"] != 1)
+                or "meta_name" in marker and (not isinstance(marker["meta_name"], str)
+                    or not re.fullmatch(r"[A-Za-z][A-Za-z0-9_.:-]{0,99}", marker["meta_name"]))):
             deny()
         selected.update(contract={"live_marker": marker}, site_contract_digest=original["site_contract_digest"])
         if native_target_digest(selected) != original["contract_digest"]:

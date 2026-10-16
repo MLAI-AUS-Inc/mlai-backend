@@ -1,0 +1,12 @@
+{
+  "files": [
+    {
+      "local_path": "contracts/native-target-identity-v1.example.json",
+      "sha256": "1ee89827db7ce046b8c05e73d6154b636c07ba420d47557b8204090634b4e2f8",
+      "source_path": "backend/contracts/native-target-identity-v1.example.json"
+    }
+  ],
+  "schema_version": 1,
+  "source_repository": "drsamdonegan/content-factory",
+  "source_revision": "9a3e5dfbe1cebd55edb588345c9662db8a23f45f"
+}

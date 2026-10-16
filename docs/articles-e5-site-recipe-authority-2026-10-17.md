@@ -25,8 +25,8 @@ unchanged. CF must reauthorize after reading the pinned recipe and after the
 build. This receipt authorizes only the current read/build; existing publication,
 provider-proof, source-review, cancellation and consent gates remain required.
 
-Recipe enrollment, reconnect scheduling and the
-opportunistic writer/runner upgrade remain separate acceptance work. Do not copy
+Reconnect scheduling and the existing
+runner upgrade remain separate acceptance work. Do not copy
 historical target capabilities or relabel old evidence into a new generation.
 Tests use database-free model boundaries and the actual authorization view; no
 local database or migration is run.
@@ -48,10 +48,29 @@ the commit awaiting verification would prevent post-merge verification itself.
 The existing setup lineage requirement remains; reconnect without a new setup
 still needs its own scheduling and enrollment integration.
 
-Validation: 97 database-free authority/hosted/permissions/status/goal/recovery/
-fingerprint checks pass. The actual authorization view adds a receipt only for an
+## Native target ingestion compatibility
+
+CF's final native target contains its marker and native digest in the nested
+`contract` object, while backend verifier and activation consumers read them at
+the target root. Ingestion now validates the canonical identity before exposing
+those two fields at the root. It rejects conflicting non-null claims, retains
+the complete descriptor and preserves all source, provider-proof and readiness
+gates. Legacy root-only and custom-contract targets retain their existing paths.
+No publishing capability or verification state comes from this normalization.
+
+Both services hash only the four stable marker fields, excluding adoption
+diagnostics. Pinned producer examples cover static diagnostic markers and opaque
+Unicode target identifiers. CI verifies exact vendored bytes against an immutable
+CF commit using the existing read-only contract token. Static probes can carry
+their existing detail source path/hash outside the site recipe; authority checks
+validate these bounded inputs without reusing a source proof.
+
+Validation: 172 database-free authority/hosted/permissions/status/goal/recovery/
+fingerprint/ingestion checks pass. The actual authorization view adds a receipt only for an
 explicit v2 request, and a denial returns no partial receipt. Ordinary v1 reads
 are unchanged. An actual dispatch-to-authorization test checks the saved private
-probe and closed API payload. The canonical failure audit covers 703 production
-emissions. Compile and diff checks pass. This remains gated: no target is enrolled
-and no reconnect path is switched to v2 by this change.
+probe and closed API payload. An actual ingestion test stores the validated
+identity while the target remains unverified and publishing stays unavailable.
+The canonical failure audit covers 704 production emissions. Compile and diff
+checks pass. This remains gated: no production target is enrolled and no reconnect
+path is switched to v2 by this change.

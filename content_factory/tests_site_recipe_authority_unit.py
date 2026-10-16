@@ -113,6 +113,23 @@ class SiteRecipeAuthorityTests(SimpleTestCase):
             with self.subTest(change=change), self.assertRaises(WebsiteAuthorityError):
                 self.call()
 
+    def test_existing_detail_hash_is_retained_only_as_scoped_probe_data(self):
+        witness = {"path": "stories/fixture/index.html", "sha256": "a" * 64}
+        self.operation.payload["site_recipe_probe"]["existing_seed_source"] = witness
+        self.assertEqual(self.call()["probe"]["existing_seed_source"], witness)
+        for bad in ({"path": "../outside", "sha256": "a" * 64}, {"path": ".env.local", "sha256": "a" * 64},
+                {"path": "stories/fixture/index.html", "sha256": True}, {**witness, "source_sha": "a" * 40}):
+            self.operation.payload["site_recipe_probe"]["existing_seed_source"] = bad
+            with self.subTest(witness=bad), self.assertRaises(WebsiteAuthorityError):
+                self.call()
+
+    def test_native_identity_uses_stable_marker_fields(self):
+        before = recipe.native_target_digest(self.target)
+        self.target["contract"]["live_marker"].update(marked_paths=["stories/index.html"], diagnostics={"observed": True})
+        self.assertEqual(recipe.native_target_digest(self.target), before)
+        self.target["contract"]["live_marker"]["value"] = "e" * 64
+        self.assertNotEqual(recipe.native_target_digest(self.target), before)
+
     def test_actual_authorization_view_adds_receipt_only_for_explicit_v2_request(self):
         from .website_views import WebsiteConnectionAuthorizeView
         with patch("content_factory.website_views.authority_guard", return_value=nullcontext(self.connection)), \

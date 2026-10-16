@@ -1024,6 +1024,8 @@ def record_scan_evidence(connection, data):
         for target in targets:
             if not isinstance(target, dict) or not target.get("target_id"):
                 continue
+            from .website_target_contract import normalize_native_metadata
+            target = normalize_native_metadata(target)
             proof = target.get("verification") if isinstance(target.get("verification"), dict) else {}
             ready = native_allowed and proof.get("status") in {"passed", "verified"} and proof.get("source_sha") == sha
             verified |= bool(ready and target.get("publish_capability") in {"direct", "hook"})
