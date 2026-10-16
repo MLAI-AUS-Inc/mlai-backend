@@ -10,7 +10,7 @@ from uuid import UUID
 FLAGS = {"MLAI_MCP_NATIVE_AGENTS_ENABLED", "AGENT_RUNTIME_ENABLED", "AGENT_RUNTIME_NATIVE_ENABLED",
          "AGENT_RUNTIME_NATIVE_REPLIES_ENABLED", "AGENT_RUNTIME_MCP_EVENTS_ENABLED"}
 # These remain independently switchable even while the pilot is enabled.
-OPTIONAL_FLAGS = {"AGENT_RUNTIME_NATIVE_ALWAYS_ADMIT", "AGENT_RUNTIME_NATIVE_BACKLOG_REPLAY",
+OPTIONAL_FLAGS = {"AGENT_RUNTIME_COMMUNITY_ENABLED", "AGENT_RUNTIME_NATIVE_ALWAYS_ADMIT", "AGENT_RUNTIME_NATIVE_BACKLOG_REPLAY",
                   "AGENT_RUNTIME_NATIVE_DURABLE_WATCH", "AGENT_RUNTIME_NATIVE_LAPSE_ALERTS",
                   "AGENT_RUNTIME_NATIVE_RENEWAL_ENABLED", "MLAI_MCP_AGENT_GRANT_EXTENSION_ENABLED"}
 BOUNDED_INTEGERS = {
@@ -89,13 +89,28 @@ def validate_single(key, value):
         raise ValueError("Unsupported native pilot configuration key")
 
 
-def validate(environment):
+def validate(environment, *, check_provider=False):
     """Keep dormant settings optional and require complete explicit activation."""
     for key in FLAGS | OPTIONAL_FLAGS:
         validate_single(key, environment.get(key, "false"))
     for key in (VALUES | SECRETS) - FLAGS:
         if environment.get(key):
             validate_single(key, environment[key])
+    community = environment.get("AGENT_RUNTIME_COMMUNITY_ENABLED") == "true"
+    if community and any(environment.get(key) != "true" for key in FLAGS):
+        raise ValueError("Community replies require the complete native gateway")
+    # Model credentials stay in the host's secret environment. The local deploy
+    # preflight cannot see them; the remote preflight validates readiness below.
+    if community and check_provider:
+        if (not https_url(environment.get("AGENT_RUNTIME_MODEL_BASE_URL", ""))
+                or not environment.get("AGENT_RUNTIME_MODEL_NAME")
+                or not environment.get("AGENT_RUNTIME_MODEL_API_KEY")
+                or any(c in environment["AGENT_RUNTIME_MODEL_API_KEY"] for c in "\r\n")):
+            raise ValueError("Community replies require configured HTTPS inference")
+        for key in ("AGENT_RUNTIME_MODEL_INPUT_MICROUNITS_PER_MILLION", "AGENT_RUNTIME_MODEL_OUTPUT_MICROUNITS_PER_MILLION"):
+            value = environment.get(key, "0")
+            if not re.fullmatch(r"[1-9][0-9]{0,9}", value) or int(value) > 1000000000:
+                raise ValueError("Community inference requires valid nonzero pricing")
     if environment.get("MLAI_MCP_NATIVE_AGENTS_ENABLED", "false") != "true":
         return
     if any(environment.get(key) != "true" for key in FLAGS | {"MLAI_MCP_ENABLED"}):
@@ -121,8 +136,8 @@ if __name__ == "__main__":
     try:
         if len(sys.argv) == 3 and sys.argv[1] == "--stdin":
             validate_single(sys.argv[2], sys.stdin.read())
-        elif len(sys.argv) == 1:
-            validate(dict(os.environ))
+        elif len(sys.argv) == 1 or sys.argv[1:] == ["--provider"]:
+            validate(dict(os.environ), check_provider=sys.argv[1:] == ["--provider"])
         else:
             raise ValueError("Use no arguments, or --stdin with one native configuration key")
     except ValueError as exc:

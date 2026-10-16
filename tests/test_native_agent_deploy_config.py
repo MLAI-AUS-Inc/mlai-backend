@@ -189,3 +189,34 @@ class MaekSafetyConfigTests(unittest.TestCase):
                                             capture_output=True, env={"PATH": os.defpath}, timeout=5)
                     self.assertNotEqual(result.returncode, 0)
                     self.assertEqual(before, env_file.read_bytes())
+
+class CommunityDeployConfigTests(unittest.TestCase):
+    def test_community_is_off_by_default_and_requires_gateway_and_host_provider(self):
+        validate({})
+        with self.assertRaises(ValueError):
+            validate({"AGENT_RUNTIME_COMMUNITY_ENABLED": "true"})
+        enabled = {**active(), "AGENT_RUNTIME_COMMUNITY_ENABLED": "true"}
+        validate(enabled)
+        with self.assertRaises(ValueError):
+            validate(enabled, check_provider=True)
+        configured = {**enabled, "AGENT_RUNTIME_MODEL_BASE_URL": "https://model.example/v1",
+            "AGENT_RUNTIME_MODEL_API_KEY": "synthetic-only-provider-key", "AGENT_RUNTIME_MODEL_NAME": "test-model",
+            "AGENT_RUNTIME_MODEL_INPUT_MICROUNITS_PER_MILLION": "1000000",
+            "AGENT_RUNTIME_MODEL_OUTPUT_MICROUNITS_PER_MILLION": "1000000"}
+        validate(configured, check_provider=True)
+        for change in ({"AGENT_RUNTIME_MODEL_BASE_URL": "http://model.example"},
+                       {"AGENT_RUNTIME_MODEL_INPUT_MICROUNITS_PER_MILLION": "0"},
+                       {"AGENT_RUNTIME_MODEL_API_KEY": "invalid\nkey"}):
+            with self.assertRaises(ValueError):
+                validate({**configured, **change}, check_provider=True)
+
+    def test_community_worker_is_separate_and_in_shutdown_inventory(self):
+        compose = (ROOT / "docker-compose.yml").read_text().split("  community-agent-worker:\n", 1)[1].split("\n  db:", 1)[0]
+        self.assertIn("profiles: [community-agent]", compose)
+        self.assertIn("run_community_agent", compose)
+        self.assertIn("migrate --check --noinput", compose)
+        self.assertNotIn("migrate --noinput", compose)
+        inventory = (ROOT / "scripts/runtime-services.sh").read_text()
+        self.assertIn('"${community_agent_runtime_services[@]}"', inventory.split("all_runtime_writer_services=(", 1)[1])
+        self.assertIn('AGENT_RUNTIME_COMMUNITY_ENABLED=false', (ROOT / ".env.example").read_text())
+        self.assertIn("scripts/validate_native_agent_deploy_config.py --provider", (ROOT / "deploy.sh").read_text())

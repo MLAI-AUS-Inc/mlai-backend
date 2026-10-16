@@ -45,6 +45,8 @@ subsystem-specific contracts and runbooks.
 
 - [Personal Dot on MLAI MCP](mlai-mcp-native-dot.md) — fresh installation-bound consent, mention events and native replies on the existing connection
 
+- [Personal Maek and Maek · community](mlai-community-agent.md) — separate guest identity, tool-free inference and opt-in rollout
+
 - [Valley remote MCP](valley-mcp.md) — client installation, scoped OAuth consent, private narrative handoff and rollout
 
 - [Private member onboarding](community-chat-onboarding.md) — email signup,

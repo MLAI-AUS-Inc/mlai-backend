@@ -329,7 +329,7 @@ class NativeDisabledBoundaryTests(SimpleTestCase):
             rows.filter.return_value.select_related.return_value.order_by.return_value = [revoked]
             replies.filter.return_value.order_by.return_value.first.return_value = None
             response = NativeInstallationsView.as_view()(request)
-        rows.filter.assert_called_once_with(owner=owner, community_id=COMMUNITY, app_id="openai-dot")
+        rows.filter.assert_called_once_with(owner=owner, community_id=COMMUNITY, app_id__in=("openai-dot", "mlai-community"))
         rows.filter.return_value.exclude.assert_not_called()
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.data["installations"][0]["public_key"], revoked.public_key)
@@ -378,7 +378,7 @@ class NativeDisabledBoundaryTests(SimpleTestCase):
             response = NativeRegistryView.as_view()(request, public_key="a" * 64)
         self.assertEqual(response.status_code, 200)
         self.assertTrue(response.data["registered"])
-        self.assertEqual(rows.filter.call_args.kwargs, {"public_key": "a" * 64, "community_id__isnull": False})
+        self.assertEqual(rows.filter.call_args_list[0].kwargs, {"public_key": "a" * 64, "community_id__isnull": False})
 
     def test_registry_bad_service_secret_stops_before_database(self):
         request = APIRequestFactory().get("/registry/", {"relay_url": "https://chat.example"}, HTTP_AUTHORIZATION="Bearer wrong")

@@ -537,7 +537,7 @@ def dispatch_native_replies(*, limit=50, now=None):
     except PermissionDenied:
         return 0
     sent = 0
-    replies = AgentInvocationReply.objects.filter(status__in=("pending", "unknown"))
+    replies = AgentInvocationReply.objects.filter(status__in=("pending", "unknown"), invocation__installation__app_id="openai-dot")
     if getattr(settings, "AGENT_RUNTIME_NATIVE_DURABLE_WATCH", False):
         replies = replies.exclude(invocation__installation__state="paused")
     ids = list(replies.order_by("created_at").values_list("invocation_id", flat=True)[:min(limit, 100)])
