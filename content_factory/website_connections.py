@@ -940,7 +940,7 @@ def offboard_website_connections(organization, *, user=None, purge=False):
             website.targets.all().delete()
             website.repository_mutations.all().delete()
             # Cleanup approval ceases when the owning company is deleted.
-            website.operations.filter(Q(action__in=["cleanup", "worker_followup"]) | ~Q(state="pending")).delete()
+            website.operations.filter(Q(action__in=["cleanup", "worker_followup", "superseded-setup-cleanup"]) | ~Q(state="pending")).delete()
             pending = list(website.operations.filter(state="pending"))
             for operation in pending:
                 operation.payload = {key: operation.payload[key] for key in

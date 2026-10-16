@@ -104,14 +104,68 @@ def _cleanup_retry_journey(op, context, config, journey):
     return journey
 
 
+SETUP_PR_RESULT_KEYS = ("pr_url", "pull_request_url", "draft_pr_url", "pr_number", "pull_request_number", "draft_pr_number")
+
+
+def _superseded_setup_binding(op, child):
+    """The replaced setup's own original identity, or None when its branch must stay.
+
+    Only a blocked or failed setup of this connection generation that never
+    recorded a pull request qualifies. Content Factory repeats these checks
+    against its own ledger and GitHub before it removes anything.
+    """
+    from .website_operations import OPERATION_FIELDS, deletion_epoch
+    connection = op.connection
+    if child.workflow != "article_system_setup" or child.status not in {"blocked", "failed"}:
+        return None
+    if str(child.github_repo or "").casefold() != connection.github_repo.casefold():
+        return None
+    result = child.result if isinstance(child.result, dict) else {}
+    nested = result.get("article_system_setup") if isinstance(result.get("article_system_setup"), dict) else {}
+    if any(payload.get(key) for payload in (result, nested) for key in SETUP_PR_RESULT_KEYS):
+        return None
+    saved = child.run_request if isinstance(child.run_request, dict) else {}
+    try:
+        original, expected = connection_contract(saved), connection_contract(contract_for(connection))
+    except WebsiteAuthorityError:
+        return None
+    if (any(original.get(key) != expected.get(key) for key in ("website_connection_id", "connection_generation", "repository_id"))
+            or any(saved.get(key) in (None, "") for key in OPERATION_FIELDS)
+            or str(saved["deletion_epoch"]) != str(deletion_epoch(connection))):
+        return None
+    return {**original, **{key: saved[key] for key in OPERATION_FIELDS}, "run_id": child.run_id,
+        "domain": connection.organization.domain, "github_repo": connection.github_repo}
+
+
+def _queue_superseded_setup_cleanup(op, child):
+    """Record the replaced setup's branch cleanup; the reconciler contacts the worker."""
+    binding = _superseded_setup_binding(op, child)
+    if binding is None:
+        return None
+    connection = op.connection
+    followup, _ = WebsiteConnectionOperation.objects.get_or_create(
+        idempotency_key=f"{connection.pk}:superseded-setup:{child.run_id}", defaults={
+            "connection": connection, "generation": connection.generation, "action": "superseded-setup-cleanup",
+            "payload": {"run_id": child.run_id, "binding": binding, "prepare_operation_id": str(op.pk),
+                "superseded_attempt": op.payload.get("attempt", 1)},
+            "receipt": {"status": "queued", "run_id": child.run_id, "repository_modified": None}})
+    return followup
+
+
 def _cancel_prepare_child(op, config):
-    """Fence a stalled child through the ordinary durable cancellation control."""
+    """Fence a stalled child through the ordinary durable cancellation control.
+
+    A blocked or failed setup child has already stopped. The new attempt
+    replaces it, so its own review branch is queued for cleanup instead.
+    """
     from workflow_runs.models import ContentFactoryRun
     from .website_operations import cancel_operation, deletion_epoch
     child_id = op.receipt.get("child_run_id") or op.payload.get("run_id")
     if not child_id:
         return
     child = ContentFactoryRun.objects.filter(run_id=child_id, organization_id=op.connection.organization_id).first()
+    if child is not None and child.status in {"failed", "blocked"}:
+        _queue_superseded_setup_cleanup(op, child)
     if child is None or child.status in {"completed", "failed", "blocked", "cancelled", "denied"}:
         return
     saved = child.run_request if isinstance(child.run_request, dict) else {}
