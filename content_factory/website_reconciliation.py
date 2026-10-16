@@ -1249,6 +1249,7 @@ def _process_source_reverification(identifier, now):
         "github_repo": op.connection.github_repo, "expected_source_sha": op.payload["source_sha"]}
     state, receipt = "pending", dict(op.receipt)
     ci_receipt = None
+    recipe_reconnect = op.payload.get("site_recipe_reconnect") is True
     try:
         with authority_guard(binding, action="read") as website:
             pinned = op.payload.get("target_id")
@@ -1265,7 +1266,21 @@ def _process_source_reverification(identifier, now):
         # merge receipt proves provenance, but cannot replace the inventory scan
         # that discovers the newly committed integration.
         scan_required = bool(op.payload.get("scan_required") or target is None)
-        if scan_required and target is not None and not receipt.get("scan_run_id"):
+        if recipe_reconnect:
+            from .website_site_recipe_reconnect import enabled as recipe_reconnect_enabled
+            from .website_verification import current_ci_attestation
+            from .website_hosted_verification import advance as advance_hosted
+            from .website_site_recipe import dispatch_selection
+            if (not recipe_reconnect_enabled(website) or target is None
+                    or dispatch_selection(website, target, op.payload["source_sha"]) is None
+                    or target.contract.get("contract_digest") != op.payload.get("contract_digest")
+                    or target.contract.get("site_contract_digest") != op.payload.get("site_contract_digest")):
+                raise WebsiteAuthorityError("verified_target_required", "The enrolled reconnect recipe is unavailable.")
+            ci_receipt = current_ci_attestation(website, target)
+            # New-generation inventory must run after a fresh certificate exists:
+            # the existing certified-config guard then preserves this selection.
+            scan_required = bool(op.payload.get("scan_required") and ci_receipt is not None)
+        if scan_required and target is not None and not receipt.get("scan_run_id") and not recipe_reconnect:
             owned_merge = _find_owned_merge(website, website.organization_id, op.payload["source_sha"])
             if owned_merge:
                 with authority_guard(binding, action="read") as current:
@@ -1295,7 +1310,7 @@ def _process_source_reverification(identifier, now):
             scan_payload = {**binding, "client_request_id": request_id, "force_refresh": True,
                 "request_source": CONTENT_FACTORY_REQUEST_SOURCE, "slack_user_id": founder_actor_id_for_user(owner),
                 "scan_purpose": "setup", "scaffold_if_missing": False,
-                "auto_setup_preview": False, "generate_components": False}
+                "auto_setup_preview": False, "generate_components": recipe_reconnect}
             _mark_roo_points_gate_authorized(scan_payload, domain=website.organization.domain,
                 action="repo_scan", current_balance=balance)
             try:
@@ -1328,16 +1343,9 @@ def _process_source_reverification(identifier, now):
         elif target is None:
             raise WebsiteAuthorityError("verified_target_required", "Waiting for a current verified publishing target.", retryable=True)
         else:
-            config = OrganizationContentConfig.objects.get(website_connection=website)
-            ci_receipt, ci_id = None, None
-            if op.payload.get("site_recipe_reconnect") is True:
-                from .website_site_recipe_reconnect import enabled as recipe_reconnect_enabled
-                from .website_verification import current_ci_attestation
-                from .website_hosted_verification import advance as advance_hosted
-                from .website_site_recipe import dispatch_selection
-                if not recipe_reconnect_enabled(website) or dispatch_selection(website, target, op.payload["source_sha"]) is None:
-                    raise WebsiteAuthorityError("verified_target_required", "The enrolled reconnect recipe is unavailable.")
-                ci_receipt = current_ci_attestation(website, target)
+            ci_id = None
+            if recipe_reconnect:
+                config = OrganizationContentConfig.objects.get(website_connection=website)
                 if ci_receipt is None:
                     outcome = advance_hosted(op, SimpleNamespace(organization=website.organization), config, target, op.payload["source_sha"])
                     receipt.update(op.receipt)
@@ -1356,11 +1364,28 @@ def _process_source_reverification(identifier, now):
                 proof = discover_source_attestation(website, target, op.payload["source_sha"])
                 ci = record_ci_attestation(proof)
                 ci_receipt, ci_id = ci.receipt, str(ci.pk)
+                config = OrganizationContentConfig.objects.get(website_connection=website)
             if ci_receipt is not None:
-                deployment = verify_live_deployment(config, data=ci_receipt)
-                state, receipt = "completed", {**receipt, "status": "verified", "source_sha": op.payload["source_sha"],
-                    "target_id": target.target_key, "ci_operation_id": ci_id, "deployment_operation_id": str(deployment.pk),
-                    "repository_modified": False}
+                inventory_ready = True
+                if recipe_reconnect:
+                    if not receipt.get("scan_run_id"):
+                        updated = {**op.payload, "scan_required": True}
+                        if WebsiteConnectionOperation.objects.filter(pk=identifier, attempts=attempt,
+                                state="pending", generation=website.generation).update(payload=updated, updated_at=timezone.now()) != 1:
+                            raise WebsiteAuthorityError("website_operation_cancelled", "Reconnect changed while its scan was reserved.")
+                        op.payload = updated
+                        inventory_ready = False
+                    else:
+                        from .website_site_recipe_reconnect import scan_complete
+                        with authority_guard(binding, action="read") as current:
+                            inventory_ready = scan_complete(current, config, op, receipt)
+                    if not inventory_ready:
+                        receipt.update(status="inventory_pending", message="Refreshing article templates and component inventory at the verified source.")
+                if inventory_ready:
+                    deployment = verify_live_deployment(config, data=ci_receipt)
+                    state, receipt = "completed", {**receipt, "status": "verified", "source_sha": op.payload["source_sha"],
+                        "target_id": target.target_key, "ci_operation_id": ci_id, "deployment_operation_id": str(deployment.pk),
+                        "repository_modified": False}
     except WebsiteAuthorityError as exc:
         receipt.update(status="verification_pending", code=exc.code, retryable=exc.retryable)
         if exc.code in {"website_disconnected", "website_connection_changed", "website_operation_cancelled"}:
@@ -1387,7 +1412,11 @@ def _process_source_reverification(identifier, now):
     except Exception:
         receipt.update(status="verification_pending", code="source_reverification_unavailable", retryable=True)
     delay = timedelta(seconds=min(3600, 15 * 2 ** min(attempt, 8)))
-    if op.payload.get("site_recipe_reconnect") is True and ci_receipt is not None:
+    if recipe_reconnect and receipt.get("status") == "inventory_pending":
+        # Scan callbacks update local records; this wait performs no repeated
+        # model dispatch, provider build or deployment request.
+        delay = timedelta(seconds=30)
+    elif recipe_reconnect and ci_receipt is not None:
         from .website_prepare import DEPLOYMENT_RETRY_MINUTES
         delay = timedelta(minutes=DEPLOYMENT_RETRY_MINUTES[min(attempt - 1, len(DEPLOYMENT_RETRY_MINUTES) - 1)])
     WebsiteConnectionOperation.objects.filter(pk=identifier, attempts=attempt, state="pending").update(

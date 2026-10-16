@@ -125,6 +125,38 @@ target and rejection of changed source/recipe, plus routing, retry and budget
 checks. The actual bind/disconnect transactions are covered by a new CI-only
 disposable-database test that reconnects twice and asserts an unchanged recipe,
 new empty proof state and no setup workflow. Its remote result is still required.
-This does not establish the E4 live lifecycle, automatic template refresh and scan
-selection retention after reconnect, or acceptance of a source changed while
-disconnected. Neither rollout flag is enabled.
+This does not establish the E4 live lifecycle or acceptance of a source changed
+while disconnected. Neither rollout flag is enabled.
+
+## Fresh inventory and templates after reconnect
+
+Do not copy archived generation templates or component caches into the new
+generation. First obtain current-generation hosted build proof. Then use the
+existing guarded source-rescan dispatch once at that same source, retaining its
+durable identity. The already-certified target is protected by the existing
+`protect_certified_config` and `target_update_allowed` guards while the scan
+refreshes templates, component inventory and source facts. A scanner's weaker
+candidate cannot replace the selected certified target.
+
+Keep reconnect pending until that exact current-generation scan has completed,
+its operation is still valid and the config records the same source with valid
+article/design templates. Failed/cancelled/mismatched scans do not complete
+reconnect or cause an unbounded sequence of new scans. Only then run live
+deployment verification and complete the reconnect receipt. The original
+24-hour verification budget covers all these stages; there is no article charge,
+setup PR, copied old proof or new goal-consent seal.
+
+This stage is integrated into the existing source-reverification processor. The
+first current build reserves a subsequent read-only rescan; only then can that
+scan refresh the component library. Its exact run/request/reservation, generation,
+repository, branch, root and source are checked, with both setup-mutation flags
+required false. Completed scans must record the same source and valid article and
+design templates. A pending local scan does not redispatch models or builds, and
+uses a 30-second local observer; deployment retains its slower existing schedule.
+
+All 830 cases in the exact database-free website CI group pass after this stage.
+The run includes the previously failing current-operation and owner-merge recheck
+regressions, actual fresh hosted promotion, read-only scan admission, invalid/stale
+template rejection and the real certified-config selection guard. The failure
+audit validates 715 production emissions. Remote database and live fixture
+acceptance remain distinct required evidence.

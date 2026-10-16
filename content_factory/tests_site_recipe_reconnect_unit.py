@@ -152,7 +152,7 @@ class SiteRecipeReconnectTests(SimpleTestCase):
             self.previous.contract["site_contract_digest"] = "f" * 64
             self.assertFalse(reconnect.trusted_source_review(self.connection, origin, data))
 
-    def reconcile_routing(self, *, saved_ci=None, expired=False, failure=None):
+    def reconcile_routing(self, *, saved_ci=None, expired=False, failure=None, scan_ready=False):
         """Test reconciliation routing; separate tests execute actual proof promotion."""
         from . import website_connections as authority, website_hosted_verification as hosted
         from . import website_reconciliation as reconciliation, website_verification as verification
@@ -163,6 +163,8 @@ class SiteRecipeReconnectTests(SimpleTestCase):
         now = timezone.now()
         op.created_at, op.next_attempt_at, op.save = now - timedelta(hours=25) if expired else now, None, Mock()
         op.receipt["ci_operation_id"] = "saved-ci" if saved_ci else None
+        if scan_ready:
+            op.receipt["scan_run_id"] = "fresh-scan"
         current = WebsiteConnectionTarget(connection=self.connection, generation=3, target_key="articles", **target_defaults)
         self.rows.first.return_value = current
         def hosted_step(parent, *args):
@@ -178,9 +180,11 @@ class SiteRecipeReconnectTests(SimpleTestCase):
                 patch.object(OrganizationContentConfig.objects, "get", return_value=self.config), \
                 patch.object(hosted, "advance", side_effect=hosted_step) as build, \
                 patch.object(verification, "current_ci_attestation", return_value=saved_ci), \
+                patch.object(reconnect, "scan_complete", return_value=scan_ready), \
                 patch.object(verification, "discover_source_attestation", side_effect=AssertionError("Reconnect must not request legacy GitHub CI")), \
                 patch.object(verification, "verify_live_deployment", side_effect=WebsiteAuthorityError("live_route_unavailable", "Waiting for deployment.")) as deploy:
             claim.return_value.select_related.return_value.filter.return_value.first.return_value = op
+            update.return_value.update.return_value = 1
             state = reconciliation._process_source_reverification(op.pk, now)
         return state, update.return_value.update.call_args.kwargs, build, deploy, current
 
@@ -194,13 +198,20 @@ class SiteRecipeReconnectTests(SimpleTestCase):
         self.assertFalse(target.capabilities["publishingReady"])
 
     def test_deployment_wait_reuses_saved_build_and_retains_bounded_schedule(self):
-        state, saved, build, deploy, _ = self.reconcile_routing(saved_ci={"source_sha": "a" * 40})
+        state, saved, build, deploy, _ = self.reconcile_routing(saved_ci={"source_sha": "a" * 40}, scan_ready=True)
         self.assertEqual(state, "pending")
         self.assertEqual(saved["receipt"]["ci_operation_id"], "saved-ci")
         self.assertTrue(saved["receipt"]["retryable"])
         self.assertIsNotNone(saved["next_attempt_at"])
         build.assert_not_called()
         deploy.assert_called_once()
+
+    def test_inventory_refresh_is_reserved_after_proof_before_live_completion(self):
+        state, saved, build, deploy, _ = self.reconcile_routing(saved_ci={"source_sha": "a" * 40})
+        self.assertEqual(state, "pending")
+        self.assertEqual(saved["receipt"]["status"], "inventory_pending")
+        build.assert_not_called()
+        deploy.assert_not_called()
 
     def test_exhausted_window_stops_before_any_new_verification(self):
         state, saved, build, deploy, _ = self.reconcile_routing(expired=True)
@@ -216,3 +227,84 @@ class SiteRecipeReconnectTests(SimpleTestCase):
         self.assertIsNone(saved["next_attempt_at"])
         build.assert_called_once()
         deploy.assert_not_called()
+
+    def scan_fixture(self):
+        from workflow_runs.models import ContentFactoryRun
+        from .website_connections import contract_for
+        parent, _, _ = self.enroll()
+        scan = WebsiteConnectionOperation(connection=self.connection, generation=3, action="workflow", state="completed",
+            payload={"workflow": "repo_scan", "run_id": "reconnect-scan", "attempt": 1})
+        request = {**contract_for(self.connection), "run_id": "reconnect-scan", "operation_id": str(scan.pk),
+            "operation_attempt": 1, "deletion_epoch": 0, "expected_source_sha": "a" * 40,
+            "scaffold_if_missing": False, "auto_setup_preview": False, "scan_purpose": "setup"}
+        run = ContentFactoryRun(run_id="reconnect-scan", workflow="repo_scan", status="completed",
+            organization=self.connection.organization, domain="fixture.test", github_repo="fixture/site", run_request=request)
+        operations = MagicMock()
+        operations.filter.return_value.first.return_value = scan
+        self.config.refresh_from_db = Mock()
+        self.config.last_scanned_sha = "a" * 40
+        self.config.article_template, self.config.design_guide = "# Article\nTemplate", "# Design\nGuide"
+        return parent, scan, run, operations
+
+    def test_current_completed_read_only_scan_accepts_templates_without_granting_proof(self):
+        from workflow_runs.models import ContentFactoryRun
+        parent, _, run, operations = self.scan_fixture()
+        with patch.object(ContentFactoryRun.objects, "filter") as load, patch.object(WebsiteConnection, "operations", operations):
+            load.return_value.first.return_value = run
+            self.assertTrue(reconnect.scan_complete(self.connection, self.config, parent, {"scan_run_id": run.run_id}))
+            run.status = "running"
+            self.assertFalse(reconnect.scan_complete(self.connection, self.config, parent, {"scan_run_id": run.run_id}))
+        self.assertEqual(self.connection.verified_sha, "")
+        self.assertEqual(self.connection.capabilities, {})
+
+    def test_foreign_writable_failed_or_cancelled_scan_cannot_complete_reconnect(self):
+        from workflow_runs.models import ContentFactoryRun
+        from .website_contract import WebsiteAuthorityError
+        parent, scan, run, operations = self.scan_fixture()
+        original = deepcopy(run.run_request)
+        with patch.object(ContentFactoryRun.objects, "filter") as load, patch.object(WebsiteConnection, "operations", operations):
+            load.return_value.first.return_value = run
+            for key, value in (("connection_generation", 2), ("connection_generation", True), ("expected_source_sha", "b" * 40),
+                    ("repository_id", 13), ("branch", "other"), ("app_root", "other"), ("scaffold_if_missing", True),
+                    ("auto_setup_preview", True), ("scan_purpose", "article")):
+                run.run_request = {**original, key: value}
+                with self.subTest(key=key), self.assertRaises(WebsiteAuthorityError):
+                    reconnect.scan_complete(self.connection, self.config, parent, {"scan_run_id": run.run_id})
+            run.run_request = original
+            for state in ("failed", "cancelled", "denied"):
+                run.status = state
+                with self.subTest(state=state), self.assertRaises(WebsiteAuthorityError):
+                    reconnect.scan_complete(self.connection, self.config, parent, {"scan_run_id": run.run_id})
+            run.status, scan.state = "completed", "cancelled"
+            with self.assertRaises(WebsiteAuthorityError):
+                reconnect.scan_complete(self.connection, self.config, parent, {"scan_run_id": run.run_id})
+
+    def test_wrong_source_or_invalid_template_from_completed_scan_stays_unavailable(self):
+        from workflow_runs.models import ContentFactoryRun
+        from .website_contract import WebsiteAuthorityError
+        parent, _, run, operations = self.scan_fixture()
+        with patch.object(ContentFactoryRun.objects, "filter") as load, patch.object(WebsiteConnection, "operations", operations):
+            load.return_value.first.return_value = run
+            self.config.last_scanned_sha = "b" * 40
+            with self.assertRaises(WebsiteAuthorityError):
+                reconnect.scan_complete(self.connection, self.config, parent, {"scan_run_id": run.run_id})
+            self.config.last_scanned_sha = "a" * 40
+            self.config.design_guide = ""
+            with self.assertRaises(WebsiteAuthorityError):
+                reconnect.scan_complete(self.connection, self.config, parent, {"scan_run_id": run.run_id})
+
+    def test_post_verification_scan_cannot_replace_enrolled_selection_with_weaker_candidate(self):
+        from .incident_guards import protect_certified_config
+        _, defaults, _ = self.enroll()
+        selected = WebsiteConnectionTarget(connection=self.connection, generation=3, target_key="articles", **defaults)
+        selected.source_sha, selected.verified_at = "a" * 40, timezone.now()
+        selected.capabilities = {"publishingReady": True}
+        selected.contract["verification"] = {"status": "verified", "source_sha": "a" * 40}
+        self.connection.verified_sha = "a" * 40
+        self.rows.__iter__.side_effect = lambda: iter([selected])
+        raw = {"publish_targets": [{"target_id": "scanned-fallback", "delivery_adapter": "react_component"}],
+            "default_publish_target_id": "scanned-fallback"}
+        kept = protect_certified_config(self.config, raw, sha="a" * 40)
+        self.assertEqual(kept["default_publish_target_id"], "articles")
+        self.assertIn(selected.contract, kept["publish_targets"])
+        self.assertEqual(next(row for row in kept["publish_targets"] if row["target_id"] == "articles")["site_contract_digest"], "e" * 64)

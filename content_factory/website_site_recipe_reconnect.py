@@ -137,3 +137,44 @@ def trusted_source_review(connection, origin, data):
         and definition["target_id"] == data.get("target_id")
         and definition["contract_digest"] == data.get("contract_digest")
         and definition["site_contract_digest"] == binding.get("site_contract_digest"))
+
+
+def scan_complete(connection, config, op, receipt):
+    """Accept only this reconnect's current read-only scan and fresh template data."""
+    from workflow_runs.models import ContentFactoryRun
+    from .website_contract import WebsiteAuthorityError, template_validation
+    from .website_operations import validate_operation
+    identifier = receipt.get("scan_run_id")
+    if not identifier:
+        return False
+    run = ContentFactoryRun.objects.filter(run_id=identifier, organization_id=connection.organization_id,
+        workflow="repo_scan").first()
+    if run is None:
+        raise WebsiteAuthorityError("source_reverification_unavailable", "Waiting for the saved reconnect scan.", retryable=True)
+    saved = goals.mapping(run.run_request)
+    if (run.run_id != identifier or run.organization_id != connection.organization_id
+            or run.github_repo.casefold() != connection.github_repo.casefold()
+            or run.domain.casefold() != connection.organization.domain.casefold()
+            or saved.get("website_connection_id") != str(connection.pk)
+            or type(saved.get("connection_generation")) is not int or saved["connection_generation"] != connection.generation
+            or type(saved.get("repository_id")) is not int or saved["repository_id"] != connection.repository_id
+            or saved.get("github_repo") != connection.github_repo or saved.get("branch") != connection.branch
+            or (saved.get("app_root") or "") != connection.app_root
+            or saved.get("expected_source_sha") != op.payload.get("source_sha")
+            or saved.get("scaffold_if_missing") is not False or saved.get("auto_setup_preview") is not False
+            or saved.get("scan_purpose") != "setup"):
+        raise WebsiteAuthorityError("website_operation_changed", "The reconnect scan belongs to different source or scope.")
+    original = validate_operation(connection, {**saved, "run_id": identifier})
+    if (not original or original.action != "workflow" or original.state not in {"pending", "running", "completed"}
+            or original.payload.get("workflow") != "repo_scan"
+            or original.payload.get("run_id") != identifier):
+        raise WebsiteAuthorityError("website_operation_changed", "The original reconnect scan reservation is unavailable.")
+    if run.status in {"failed", "blocked", "cancelled", "denied", "deleted"}:
+        raise WebsiteAuthorityError("website_prepare_blocked", "The reconnect scan needs repair before article generation is available.")
+    if run.status != "completed":
+        return False
+    config.refresh_from_db()
+    if (config.last_scanned_sha != op.payload["source_sha"]
+            or not all(template_validation(getattr(config, key))["valid"] for key in ("article_template", "design_guide"))):
+        raise WebsiteAuthorityError("TEMPLATE_VALIDATION_FAILED", "The reconnect scan did not record valid templates at this source.")
+    return True
