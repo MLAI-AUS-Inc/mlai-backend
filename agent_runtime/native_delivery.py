@@ -1,9 +1,11 @@
 """Content-free owner delivery diagnostics derived from existing durable rows."""
 
-from .models import AgentAuditEvent, AgentInvocation
+from django.conf import settings
+
+from .models import AgentAuditEvent, AgentInvocation, AgentSubscription
 
 
-def delivery_payload(installation, grant, *, now):
+def delivery_payload(installation, grant, *, now, authorized=None):
     """Keep queue state additive so shipped mention pickers keep working."""
     pending = AgentInvocation.objects.filter(installation=installation, grant=grant,
         generation=grant.generation, status="pending", expires_at__gt=now, reply__isnull=True
@@ -49,4 +51,32 @@ def delivery_payload(installation, grant, *, now):
             state, updated = evidence[str(row.pk)]
         recent.append({"source_event_id": row.source_event_id, "state": state,
                        "updated_at": updated.isoformat(), "reason": reason})
+    delivery.update(listening_payload(installation, grant, now=now, authorized=authorized))
     return {"delivery": delivery, "recent_invocations": recent}
+
+
+def listening_payload(installation, grant, *, now, authorized=None):
+    """Report held and stopped watches without changing mentionable statuses."""
+    from .event_webhooks import lease_live
+    rows = list(AgentSubscription.objects.filter(grant__installation=installation,
+        event_types=["agent.mentioned"], delivery__mode="webhook").order_by("-updated_at", "-pk"))
+    current = [row for row in rows if grant and row.grant_id == grant.pk and row.generation == grant.generation]
+    live = next((row for row in current if row.is_active and lease_live(row.delivery, now)), None)
+    stopped = next((row for row in rows if not row.is_active), None)
+    metadata = live.delivery if live else {}
+    listening = bool(live and not metadata.get("held_reason") and authorized is not False
+                     and installation.state == "active" and grant.expires_at > now)
+    result = {"listening": listening, "held_reason": metadata.get("held_reason"),
+        "lease_expires_at": ("unbounded" if metadata.get("lease") == "unbounded" else metadata.get("expires_at")),
+        "last_delivered_at": metadata.get("last_delivered_at") or next(
+            (row.delivery["last_delivered_at"] for row in rows if row.delivery.get("last_delivered_at")), None),
+        "stopped_at": stopped.delivery.get("stopped_at") if stopped else None,
+        "stop_reason": stopped.delivery.get("stop_reason") if stopped else None}
+    if getattr(settings, "AGENT_RUNTIME_NATIVE_DURABLE_WATCH", False):
+        latest = grant or installation.grants.filter(revoked_at__isnull=True).order_by("-created_at").first()
+        result["needs"] = ("resume" if installation.state == "paused" else
+            "renew" if latest and latest.expires_at <= now else
+            "reconnect" if not latest or authorized is False else
+            "reconnect" if metadata.get("held_reason") in {"awaiting_activation", "unified_authority_changed"} else
+            "subscribe" if not live else None)
+    return result

@@ -537,8 +537,10 @@ def dispatch_native_replies(*, limit=50, now=None):
     except PermissionDenied:
         return 0
     sent = 0
-    ids = list(AgentInvocationReply.objects.filter(status__in=("pending", "unknown"))
-               .order_by("created_at").values_list("invocation_id", flat=True)[:min(limit, 100)])
+    replies = AgentInvocationReply.objects.filter(status__in=("pending", "unknown"))
+    if getattr(settings, "AGENT_RUNTIME_NATIVE_DURABLE_WATCH", False):
+        replies = replies.exclude(invocation__installation__state="paused")
+    ids = list(replies.order_by("created_at").values_list("invocation_id", flat=True)[:min(limit, 100)])
     for invocation_id in ids:
         now = supplied_now or timezone.now()
         with transaction.atomic():
@@ -548,6 +550,9 @@ def dispatch_native_replies(*, limit=50, now=None):
             invocation.installation, invocation.grant = grant.installation, grant
             row = runtime.locked(AgentInvocationReply.objects.all()).get(invocation=invocation)
             row.invocation = invocation
+            if (getattr(settings, "AGENT_RUNTIME_NATIVE_DURABLE_WATCH", False)
+                    and grant.installation.state == "paused"):
+                continue
             if row.status not in {"pending", "unknown"}:
                 continue
             try:

@@ -59,6 +59,9 @@ def tick(*, schedule=False, fanout=False, deliver=False, webhooks=False, native=
     if webhooks:
         from agent_runtime.event_webhooks import dispatch_webhooks
         stage("webhooks", lambda: dispatch_webhooks(limit=limit))
+    if native:
+        from agent_runtime.native_alerts import check_native_listening
+        stage("native_alerts", lambda: check_native_listening())
 
     def deliver_actions():
         from agent_runtime.sources import execute_approved_action

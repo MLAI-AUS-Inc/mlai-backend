@@ -298,7 +298,7 @@ def installation_payload(installation, *, now=None):
             subscription = False
     enrollment = installation.enrollments.order_by("-created_at").first() if installation.state == "awaiting_owner_proof" else None
     from .native_delivery import delivery_payload
-    diagnostics = delivery_payload(installation, grant, now=now)
+    diagnostics = delivery_payload(installation, grant, now=now, authorized=authorized)
     if always and limit_reached:
         diagnostics["delivery"]["problem"] = diagnostics["delivery"]["problem"] or {"code": "daily_limit_reached", "at": None}
     return {"installation_id": str(installation.pk), "app_id": installation.app_id, "name": installation.name,
@@ -320,14 +320,22 @@ def change_state(owner, installation_id, state):
         raise PermissionDenied("Installation state cannot be changed.")
     if installation.state not in {"paused", "active"}:
         raise PermissionDenied("Finish enrollment before changing state.")
-    for grant in installation.grants.filter(revoked_at__isnull=True):
-        AgentSubscription.objects.filter(grant=grant).update(is_active=False)
-        AgentInvocation.objects.filter(grant=grant, status="pending").update(status="cancelled")
-        AgentInvocationReply.objects.filter(invocation__grant=grant, status="pending").update(status="cancelled")
-        AgentInvocationReply.objects.filter(invocation__grant=grant, status="unknown").update(
-            status="stopped_unknown", error_code="paused_after_ambiguous_send")
+    if installation.state == state:
+        return installation
+    durable = bool(getattr(settings, "AGENT_RUNTIME_NATIVE_DURABLE_WATCH", False))
+    if not durable:
+        for grant in installation.grants.filter(revoked_at__isnull=True):
+            AgentSubscription.objects.filter(grant=grant).update(is_active=False)
+            AgentInvocation.objects.filter(grant=grant, status="pending").update(status="cancelled")
+            AgentInvocationReply.objects.filter(invocation__grant=grant, status="pending").update(status="cancelled")
+            AgentInvocationReply.objects.filter(invocation__grant=grant, status="unknown").update(
+                status="stopped_unknown", error_code="paused_after_ambiguous_send")
     installation.state = state
-    installation.native_cursor = {}
+    if not durable:
+        installation.native_cursor = {}
+    elif state == "active":
+        installation.native_cursor = {key: value for key, value in installation.native_cursor.items()
+                                      if key not in {"gap_detected", "error_code"}}
     installation.save(update_fields=("state", "native_cursor", "updated_at"))
     runtime.audit("native.installation.state", installation_id=str(installation.pk), state=state)
     return installation
