@@ -10,7 +10,7 @@ The original private reservation binds the founder/company, current CMS connecti
 
 Dispatch retries recheck this reservation after editorial refresh. Before the first worker POST the backend persists a provisional run carrying the exact original request, allowing callbacks to bind a lost-response dispatch without creating a second run. Sparse callbacks retain the envelope and billing history. Content callbacks and polling recheck current scope; worker claims of approval, Git effects, CMS credentials or live proof are refused. Cancellation/disconnect fences the exact nested CMS connection; no empty-repository query can cancel another portable run. Private artifact reservations are excluded from the generic Git operation scheduler, public operation receipts and journey projection; purge erases their payloads.
 
-Resume and artifact preview retain the original paid intent and recheck current authority. CMS approval, publication, paid revisions and image regeneration still require their own original-artifact/attempt/price boundaries. CMS generation currently requires manual review: an old Git auto-approval or an `auto_publish` preference cannot grant CMS publication approval.
+Resume and artifact preview retain the original paid intent and recheck current authority. CMS approval, publication, paid revisions and image regeneration still require their own original-artifact/attempt/price boundaries. The legacy article editor refuses CMS mutations before billing, comment changes or worker calls; owned historical reads remain available. CMS generation currently requires manual review: an old Git auto-approval or an `auto_publish` preference cannot grant CMS publication approval.
 
 ## Rollout and acceptance still required
 
