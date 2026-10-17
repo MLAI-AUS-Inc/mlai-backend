@@ -111,11 +111,14 @@ def project_status(op, *, scope, source_sha, journey, now=None):
         "milestones": milestones, "expectedTime": None, "mode": "goal" if not legacy else "legacy"}
 
 
-def status_for_context(context, config, *, journey, now=None):
+def status_for_context(context, config, *, journey, now=None, user=None):
     """Select one current owned operation; feature-off responses remain unchanged."""
     if not getattr(settings, "ARTICLES_WEBSITE_STATUS_V1_ENABLED", False) or config.website_connection is None:
         return None
     connection = config.website_connection
+    if "_cms_binding" in (getattr(connection, "capabilities", None) or {}):
+        from .cms_goal_status import for_context
+        return for_context(context, config, user=user, now=now)
     from django.db.models import Q
     op = connection.operations.filter(generation=connection.generation).filter(
         Q(action="disconnect") | Q(action="prepare", payload__company_id=str(context.company.pk)) |
@@ -138,7 +141,7 @@ def status_for_context(context, config, *, journey, now=None):
     return result
 
 
-def add_status(payload, context, config, *, journey):
+def add_status(payload, context, config, *, journey, user=None):
     """Add the shared server contract only when the status rollout is enabled."""
     from .website_publishing_channels import projection
     from .publishing_channels import enabled as channels_enabled, inspect as inspect_channel
@@ -149,10 +152,10 @@ def add_status(payload, context, config, *, journey):
         channel = projection(context, config)
     if channel is not None:
         payload["publishingChannel"] = channel
-    result = status_for_context(context, config, journey=journey)
+    result = status_for_context(context, config, journey=journey, user=user)
     if result is not None:
         from .website_setup_consent import setup_plan
-        plan = setup_plan(context, config, journey)
+        plan = setup_plan(context, config, journey) if result.get("channel") != "cms" else None
         if plan is not None:
             result["setupPlan"] = plan
         payload["websiteStatus"] = result

@@ -1203,6 +1203,18 @@
       "site_sha256": "ed6432bc990d44072b4cf385abc63a4bfb533cc69be4947bcd3030142b80fdd4",
       "source": "The publication child is selected from this goal's owned source run; WebsiteAuthorityError and prepare_failure validate its B1 failure before recovery policy.",
       "test": "content_factory.tests_website_article_recovery_unit.ArticleRecoveryControllerTests.test_unknown_publication_failure_stops_at_the_enrolled_registry_boundary"
+    },
+    {
+      "adapter": "validated_v1_projection",
+      "allowed_codes_ref": "contracts/failure-codes.json#/codes",
+      "expression": "safe_code(failure.get('code'))",
+      "field": "code",
+      "function": "_doctor",
+      "owner": "backend.cms_goal_status",
+      "path": "content_factory/cms_goal_status.py",
+      "site_sha256": "fea4d22af255dfd4eac376d5b52fbd283c879613564885ace3c5ee601eefc184",
+      "source": "Read-only native diagnostic projection after strict validate_failure; no dispatch, failure-policy or publication authority. Private receipts, credentials and provider bodies are omitted.",
+      "test": "content_factory.tests_cms_goal_status_unit.CmsGoalStatusTests.test_doctor_projects_only_registered_valid_failure_causes"
     }
   ],
   "entry_points": [

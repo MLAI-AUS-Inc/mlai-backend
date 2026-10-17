@@ -5,7 +5,7 @@ Do not run locally without separate migration approval. Adds no migration files.
 from copy import deepcopy
 from threading import Barrier, Thread
 from uuid import uuid4
-from django.db import close_old_connections
+from django.db import close_old_connections, connections
 from django.test import TransactionTestCase, override_settings
 from django.utils import timezone
 from founder_tools.models import VibeRaisingCompany, VibeRaisingProfile
@@ -97,7 +97,9 @@ class LedgerPersistenceTests(WebsiteDatabaseFixture, TransactionTestCase):
             except Exception as exc:
                 errors.append(exc)
             finally:
-                close_old_connections()
+                # Healthy thread-local connections survive close_old_connections;
+                # they must close before PostgreSQL can drop the test database.
+                connections.close_all()
         workers = [Thread(target=write, args=(value,)) for value in (self.run, newer)]
         for worker in workers:
             worker.start()
