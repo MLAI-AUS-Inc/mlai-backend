@@ -327,6 +327,11 @@ class ArticleSourceFenceTests(SimpleTestCase):
         self.assertEqual(self.parent.state, "cancelled")
         self.assertEqual(fence.state, "cancelled")
 
+    def test_unrelated_setup_cancellation_does_not_require_article_metadata_or_fence_lookup(self):
+        with patch.object(fences, "_fenced_operation_for_run", side_effect=AssertionError("No article fence lookup for a setup")):
+            self.assertIsNone(fences.owner_stop_for_run(context=self.fixture.chain.context,
+                run=SimpleNamespace(workflow="article_system_setup", run_id="setup-without-article-request"), action="cancel"))
+
     def test_owner_stop_wins_when_source_fence_is_recorded_during_legacy_worker_http(self):
         from workflow_runs.models import ContentFactoryRun
         from . import vibe_marketing_views as views

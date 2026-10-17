@@ -330,12 +330,12 @@ def owner_stop_for_run(*, context, run, action):
     Look up the durable marker even after rollback disables source refresh.
     Caller data cannot choose the goal, operation, or automatic-stop argument.
     """
-    from .vibe_marketing_views import _get_config
+    from .vibe_marketing_views import _get_config, ARTICLE_WORKFLOWS
     from .website_connections import contract_for, authority_guard
     from .website_operations import cancel_operation, deletion_epoch
-    if action not in {"cancel", "deny"}:
+    if action not in {"cancel", "deny"} or getattr(run, "workflow", None) not in ARTICLE_WORKFLOWS | {"article_publish", "publish_article"}:
         return None
-    request = goals.mapping(run.run_request)
+    request = goals.mapping(getattr(run, "run_request", None))
     operation = _fenced_operation_for_run(context, request)
     if operation is None:
         return None

@@ -47,6 +47,8 @@ after flag rollback; they cannot silently erase the automatic-stop cause while
 leaving its original goal eligible to refresh. Their marker lookup is scoped to
 the run's recorded connection/generation and the current company, then rechecked
 under authority. Existing draft controls without a fence retain their path.
+The probe applies only to article workflows. Setup/scan cancellation and sparse
+legacy run projections do not require article metadata or an article-fence query.
 A second lookup after legacy worker HTTP closes the race where source
 supersession is recorded while the owner control is in flight. Later review
 metadata cannot prevent an owner stop of the exact recorded run/operation
@@ -87,7 +89,9 @@ source edges, changed owner/goal/request/attempt, an earlier owner cancellation,
 unknown versions, flag rollback, completed shared-operation publication children,
 exact root/child cancellation receipts, missing original payment/refund proof,
 and later owner whole-goal stop. No schema or migration is introduced.
-The combined related/control selection passes 440 tests, including 19 source-fence
+The combined related/control selection passes 440 tests before the final facade
+scope fix; the exact facade/profile/settings CI lane plus the expanded source-fence
+suite then passes 118 tests, including 20 source-fence
 cases and activation, approval, setup merge/failure, environment and hosted-build
 controls. CI fully selects all 603 test modules. The offline failure audit covers 860
 production emissions, immutable inspection/transport parity passes, and model
