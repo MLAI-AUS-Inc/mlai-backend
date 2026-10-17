@@ -18,12 +18,12 @@ def public_summary(connection, *, company_id=None):
         platform = binding["platform"]
     except CmsContractError:
         platform = "unknown"
-    latest = connection.operations.exclude(action__in=["channel-credential", "cms-artifact", "cms-review", "cms-media", "cms-stage", "goal-usage", "goal-alert", "usage-refresh"]).only("id", "action", "state", "receipt").order_by("-created_at").first()
+    latest = connection.operations.exclude(action__in=["channel-credential", "cms-artifact", "cms-review", "cms-media", "cms-stage", "cms-policy", "goal-usage", "goal-alert", "usage-refresh"]).only("id", "action", "state", "receipt").order_by("-created_at").first()
     return {"channel": "cms", "platform": platform, "connectionId": str(connection.pk),
         "connectionGeneration": connection.generation, "companyId": str(company_id) if company_id else None,
         "repositoryId": None, "githubRepo": "", "appRoot": "", "branch": "", "siteUrl": connection.site_url,
         "status": connection.state, "capabilities": {key: False for key in CAPABILITY_KEYS},
-        "allowedActions": ["cms-connect", "disconnect"] if connection.state in {"connected", "paused"} else ["cms-connect"],
+        "allowedActions": ["cms-connect", "cms-configure", "disconnect"] if connection.state == "connected" else ["cms-connect", "disconnect"] if connection.state == "paused" else ["cms-connect"],
         "blockers": [], "verifiedSha": None, "scannedSha": None, "observedSha": None,
         "configurationVersion": connection.configuration_version,
         "latestOperation": {"id": str(latest.pk), "action": latest.action, "state": latest.state, "receipt": latest.receipt} if latest else None}

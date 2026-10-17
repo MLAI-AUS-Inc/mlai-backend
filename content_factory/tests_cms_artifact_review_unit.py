@@ -189,7 +189,7 @@ class CmsArtifactSurfaceTests(SimpleTestCase):
         context = SimpleNamespace(organization=SimpleNamespace(pk=7))
         with patch.object(website_views, "_context", return_value=(context, None, None)), \
                 patch.object(WebsiteConnectionOperation.objects, "filter") as rows:
-            for action in ("cms-review", "cms-media", "cms-stage"):
+            for action in ("cms-review", "cms-media", "cms-stage", "cms-policy"):
                 rows.return_value.first.return_value = SimpleNamespace(action=action, payload={"handoff": "private"})
                 response = website_views.WebsiteConnectionOperationView().get(SimpleNamespace(), "private-operation")
                 self.assertEqual(response.status_code, 404)

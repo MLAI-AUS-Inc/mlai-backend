@@ -1244,6 +1244,15 @@ class WebsiteReviewRegressionTests(WebsiteDatabaseFixture, TestCase):
                 from .dispatch_models import ContentFactoryDispatchOutbox
                 from .website_connections import owner_write_guard
                 from .service_views import _sync_content_factory_run_snapshot
+                from . import cms_publication_policy
+                native_data = {**contract_for(website), 'client_request_id': str(uuid.uuid4()),
+                    'review_policy': 'auto', 'publication_confirmed': True, 'native_defaults_confirmed': True,
+                    'expected_policy_id': None}
+                native_user = {'id': 7, 'name': 'Existing author', 'capabilities': {'edit_posts': True, 'publish_posts': True}}
+                with patch.object(cms_publication_policy, 'request_json', side_effect=[(native_user, {}),
+                        ([{'id': 39, 'taxonomy': 'category', 'name': 'Existing category'}], {})]):
+                    native = cms_publication_policy.configure(context, self.config, user=user, data=native_data)
+                self.assertEqual(cms_publication_policy.current_policy(context, self.config, user=user), native)
                 artifact_payload = {'domain': self.org.domain, 'client_request_id': 'cms-artifact:' + uuid.uuid4().hex,
                     'delivery_mode': 'content_only', 'delivery_mode_confirmed': True, 'github_repo': '',
                     'topic': 'A synthetic CMS article', 'target_keyword': 'A synthetic CMS article',
@@ -1263,6 +1272,7 @@ class WebsiteReviewRegressionTests(WebsiteDatabaseFixture, TestCase):
                         config=self.config, user=user, payload=artifact_payload)
                     reserve_dispatch(organization=self.org, payload=artifact_payload, billing_user_id=user.pk, actor_id='cms-fixture')
                 self.assertEqual(str(channel_artifacts.authorize_payload(artifact_payload).operation.pk), str(artifact_operation.pk))
+                self.assertEqual(artifact_payload['publishing_channel_artifact']['review_policy'], 'auto')
                 rollback_payload = {key: value for key, value in artifact_payload.items() if key != 'publishing_channel_artifact'}
                 rollback_payload['client_request_id'] = 'cms-rollback:' + uuid.uuid4().hex
                 with self.assertRaisesRegex(RuntimeError, 'synthetic rollback'):
@@ -1372,6 +1382,8 @@ class WebsiteReviewRegressionTests(WebsiteDatabaseFixture, TestCase):
             self.assertEqual((media.state, media.payload), ('deleted', {}))
             stage.refresh_from_db()
             self.assertEqual((stage.state, stage.payload), ('deleted', {}))
+            native_row = website.operations.get(pk=native['operation_id'])
+            self.assertEqual((native_row.state, native_row.payload), ('deleted', {}))
 
     @override_settings(ARTICLES_PUBLISHING_CHANNELS_ENABLED=True, ARTICLES_CMS_CHANNEL_ENABLED=True)
     def test_private_cms_credential_binding_is_scoped_and_git_read_denied(self):

@@ -29,7 +29,8 @@ def response(value, **changes):
             "link": "https://fixture.test/articles/" + value["slug"] + "/", **changes}
     return {"id": "d" * 24, "title": value["title"], "slug": value["slug"], "status": value["status"],
         "html": posts.marked_html(value), "visibility": "public", "url": "https://fixture.test/" + value["slug"] + "/",
-        **{name: [{"id": item} for item in refs] for name, refs in value["native_fields"].items()}, **changes}
+        **{name: [{"id": item} for item in value["native_fields"][name]] for name in ("authors", "tags")},
+        **({"feature_image": value["native_fields"]["feature_image"]} if "feature_image" in value["native_fields"] else {}), **changes}
 
 
 def collection(value, rows):
@@ -43,6 +44,18 @@ def issued(value):
 
 
 class CmsPostContractTests(SimpleTestCase):
+    def test_ghost_can_explicitly_disable_duplicate_theme_image_and_recovery_checks_that_field(self):
+        value = intent("ghost", native_fields={"authors": ["a" * 24], "tags": [], "feature_image": None})
+        state = posts.new_post_state(value)
+        ready = posts.observe_posts(value, state, collection(value, []))
+        sent, effect = posts.issue_create(value, ready)
+        self.assertIsNone(effect.payload["posts"][0]["feature_image"])
+        self.assertEqual(posts.observe_posts(value, sent, collection(value, [response(value)]))["phase"], "provider_confirmed")
+        with self.assertRaises(CmsApiError):
+            posts.observe_posts(value, sent, collection(value, [response(value, feature_image="https://foreign.test/image.png")]))
+        with self.assertRaises(CmsApiError):
+            intent("ghost", native_fields={"authors": ["a" * 24], "tags": [], "feature_image": "https://foreign.test/image.png"})
+
     def test_intent_binds_original_artifact_approval_editorial_and_current_scope(self):
         value = intent()
         self.assertEqual(value["slug"], "approved-native-article-" + value["operation_id"].replace("-", ""))

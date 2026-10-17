@@ -80,7 +80,7 @@ class _PostHtml(HTMLParser):
         raise CmsApiError("unsafe_artifact")
 
 
-def _native_fields(value, platform):
+def _native_fields(value, platform, binding):
     if not isinstance(value, dict):
         raise CmsApiError("invalid_request")
     if platform == "wordpress":
@@ -94,13 +94,16 @@ def _native_fields(value, platform):
         if type(value["featured_media"]) is not int or not 0 <= value["featured_media"] < 10**19:
             raise CmsApiError("invalid_request")
     else:
-        if set(value) != {"authors", "tags"}:
+        if set(value) not in ({"authors", "tags"}, {"authors", "tags", "feature_image"}):
             raise CmsApiError("invalid_request")
         for name in ("authors", "tags"):
             if (not isinstance(value[name], list) or len(value[name]) > 100 or
                     name == "authors" and not value[name] or len(set(value[name])) != len(value[name])):
                 raise CmsApiError("invalid_request")
             for identifier in value[name]: _identifier(identifier, platform)
+        if "feature_image" in value and value["feature_image"] is not None:
+            from .cms_media_transport import _media_url
+            _media_url(value["feature_image"], binding)
     return value
 
 
@@ -126,7 +129,7 @@ def validate_intent(value):
                 hashlib.sha256(value["html"].encode()).hexdigest() != value["body_sha256"] or
                 _digest({key: item for key, item in value.items() if key != "digest"}) != value["digest"]):
             raise CmsApiError("invalid_request")
-        _native_fields(value["native_fields"], value["binding"]["platform"])
+        _native_fields(value["native_fields"], value["binding"]["platform"], value["binding"])
         _PostHtml(convert_charrefs=True).feed(value["html"])
         return value
     except CmsApiError:
@@ -234,7 +237,9 @@ def issue_create(intent, state):
             "status": "publish" if intent["status"] == "published" else "draft", **deepcopy(intent["native_fields"])}
         effect = PostEffect("POST", query={"context": "edit"}, payload=payload)
     else:
-        native = {key: [{"id": item} for item in value] for key, value in intent["native_fields"].items()}
+        native = {key: [{"id": item} for item in intent["native_fields"][key]] for key in ("authors", "tags")}
+        if "feature_image" in intent["native_fields"]:
+            native["feature_image"] = intent["native_fields"]["feature_image"]
         payload = {"posts": [{"title": intent["title"], "slug": intent["slug"], "status": intent["status"],
             "html": "<!--kg-card-begin: html-->" + marked_html(intent) + "<!--kg-card-end: html-->", **native}]}
         effect = PostEffect("POST", query={"source": "html", "formats": "html"}, payload=payload)
@@ -266,6 +271,8 @@ def _owned_record(row, intent):
     else:
         body, title, status, url = row.get("html"), row.get("title"), row.get("status"), row.get("url")
         if row.get("visibility") != "public": raise CmsApiError("post_ownership_conflict")
+        if "feature_image" in intent["native_fields"] and ("feature_image" not in row or row["feature_image"] != intent["native_fields"]["feature_image"]):
+            raise CmsApiError("post_ownership_conflict")
         for name in ("authors", "tags"):
             actual = row.get(name)
             if not isinstance(actual, list) or len(actual) > 100:
