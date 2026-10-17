@@ -1192,11 +1192,24 @@ class WebsiteSourceFenceTests(WebsiteDatabaseFixture, TestCase):
         self.assertFalse(any(item.get('code') == 'repository_source_changed' for item in self.website.blockers))
 
 
+class WebsiteInitialCmsTransactionTests(WebsiteDatabaseFixture, TransactionTestCase):
+    def test_initial_paid_publication_runs_without_an_outer_test_transaction(self):
+        """Use actual PostgreSQL row-lock rules between unlocked provider reads."""
+        self.assertFalse(connection.in_atomic_block)
+        WebsiteReviewRegressionTests._cms_native_round_trip(self, initial=True)
+
+
 class WebsiteReviewRegressionTests(WebsiteDatabaseFixture, TestCase):
+    def test_cms_owner_connect_persists_private_key_and_disconnect_erases_every_generation(self):
+        self._cms_native_round_trip()
+
+    def test_initial_cms_acceptance_reaches_same_paid_first_publication_after_worker_loss(self):
+        self._cms_native_round_trip(initial=True)
+
     @override_settings(ARTICLES_CHANNEL_DISCOVERY_ENABLED=True, ARTICLES_PUBLISHING_CHANNELS_ENABLED=True,
         ARTICLES_CMS_CHANNEL_ENABLED=True, ARTICLES_CHANNEL_ARTIFACTS_ENABLED=True,
         ARTICLES_CMS_GOAL_RECOVERY_ENABLED=True, ARTICLES_WEBSITE_GOAL_BUDGETS_ENABLED=True)
-    def test_cms_owner_connect_persists_private_key_and_disconnect_erases_every_generation(self):
+    def _cms_native_round_trip(self, *, initial=False):
         """Actual connect/replay/revoke persistence runs on disposable remote CI."""
         import json
         from django.contrib.auth import get_user_model
@@ -1210,7 +1223,7 @@ class WebsiteReviewRegressionTests(WebsiteDatabaseFixture, TestCase):
         profile = VibeRaisingProfile.objects.create(user=user, role='founder')
         company = VibeRaisingCompany.objects.create(profile=profile, organization=self.org, name='Synthetic CMS', domain=self.org.domain)
         context = SimpleNamespace(profile=profile, company=company, organization=self.org)
-        self.config.website_connection, self.config.github_repo = None, ''
+        self.config.website_connection, self.config.github_repo = None, None if initial else ''
         self.config.save(update_fields=['website_connection', 'github_repo'])
         with patch('content_factory.website_publishing_channels.observe_homepage', return_value=classify_prefix(b'<head><meta name="generator" content="WordPress"></head>')):
             inspected = update_choice(context, self.config, expected_scope=scope_for(context, self.config), expected_revision=0)
@@ -1221,12 +1234,64 @@ class WebsiteReviewRegressionTests(WebsiteDatabaseFixture, TestCase):
             'username': 'fixture-owner', 'secret': 'synthetic-application-password'}
         identity = {'schema_version': 1, 'platform': 'wordpress', 'principal_id': '7',
             'can_edit_posts': True, 'can_publish_posts': True, 'can_upload_media': False}
+        from roo.models import Ledger
+        def synthetic_hold(**options):
+            return Ledger.objects.create(user=user, kind='SPEND', source='CONTENT_FACTORY', delta=-6,
+                delta_microroo=-6_000_000, reference_type='CONTENT_FACTORY', reference_id=options['reference_id'],
+                idempotency_key=options['idempotency_key']), True
+        initial_root = None
         with override_settings(CONNECTOR_CREDENTIAL_KEYS=json.dumps({'test': TEST_KEY}), CONNECTOR_CREDENTIAL_ACTIVE_KEY_ID='test'), \
                 patch.object(cms_owner, 'inspect_identity', return_value=identity) as provider:
-            website = cms_owner.connect(context, self.config, user=user, data=data)
+            if initial:
+                from . import cms_initial_start, cms_initial_controller, cms_initial_status, cms_onboarding_offer
+                with override_settings(ARTICLES_CMS_ONBOARDING_ENABLED=True, ARTICLES_CMS_GOALS_ENABLED=True,
+                        ARTICLES_CMS_SETUP_ENABLED=True, ARTICLES_CMS_STATUS_ENABLED=True,
+                        ARTICLES_FIRST_ARTICLE_GOAL_ENABLED=True, ARTICLES_WEBSITE_GOAL_RUNNER_ENABLED=True,
+                        ARTICLES_WEBSITE_GOAL_ENROLLED_ORGANIZATIONS=[str(self.org.pk)],
+                        ARTICLES_FAILURE_TAXONOMY_POLICY_ENABLED=True, ARTICLES_FAILURE_TAXONOMY_ENROLLED_ORGANIZATIONS=[str(self.org.pk)]), \
+                        patch('content_factory.billing.get_content_factory_article_cost_points', return_value=6), \
+                        patch('content_factory.company_billing.billing_user_for_organization', return_value=user), \
+                        patch('roo.services.PointsService.spend', side_effect=synthetic_hold) as initial_spend:
+                    offer = cms_onboarding_offer.for_context(context, self.config, user=user,
+                        data={key: data[key] for key in cms_onboarding_offer.INPUT_FIELDS})
+                    initial_data = {'client_request_id': data['client_request_id'], 'offer': offer, 'credential_origin_confirmed': True,
+                        'username': data['username'], 'secret': data['secret'], 'review_policy': 'auto', 'publication_confirmed': True,
+                        'native_defaults_confirmed': True, 'expected_cost_points': 6, 'billing_confirmed': True}
+                    initial_root = cms_initial_start.start(context, self.config, user=user, data=initial_data)
+                    website = self.config.website_connection
+                    job = website.operations.get(action='cms-initial-connect')
+                    original_intent = deepcopy(job.payload['plan']['native_intent'])
+                    self.assertEqual(website.state, 'paused')
+                    with self.assertRaises(WebsiteAuthorityError): current_credential(context, self.config, website, user=user)
+                    # A process exit after its persisted claim must leave the
+                    # lease and bounds intact for the ordinary remote worker.
+                    with patch.object(cms_initial_controller, 'request_json', side_effect=RuntimeError('Synthetic worker exit')):
+                        with self.assertRaises(RuntimeError): cms_initial_controller.advance(job.pk)
+                    job.refresh_from_db()
+                    self.assertEqual(job.state, 'running')
+                    website.operations.filter(pk=job.pk).update(next_attempt_at=timezone.now() - timedelta(seconds=1))
+                    cms_initial_controller.advance(job.pk)
+                    website.operations.filter(pk=job.pk).update(next_attempt_at=timezone.now() - timedelta(seconds=1))
+                    replies = [({'home': data['public_origin'], 'url': data['api_origin']}, {}),
+                        ({'id': 7, 'capabilities': {'edit_posts': True, 'publish_posts': True}}, {})]
+                    with patch.object(cms_initial_controller, 'request_json', side_effect=replies) as identity_gets:
+                        self.assertEqual(cms_initial_controller.advance(job.pk).state, 'completed')
+                    self.config.refresh_from_db(); website.refresh_from_db(); initial_root.refresh_from_db()
+                    self.assertEqual(str(cms_initial_start.start(context, self.config, user=user, data=initial_data).pk), str(initial_root.pk))
+                    recovered = cms_initial_status.packet(context, self.config, user=user, request_id=data['client_request_id'])
+                    self.assertEqual(recovered['cmsInitial']['state'], 'completed')
+                    self.assertNotIn(data['secret'], json.dumps(recovered))
+                    self.assertEqual(website.operations.get(pk=job.pk).payload['plan']['native_intent'], original_intent)
+                    self.assertIsNone(website.operations.get(action='cms-initial-grant').payload['sealed_credential'])
+                    self.assertEqual(identity_gets.call_count, 2)
+                    initial_spend.assert_called_once()
+                    provider.assert_not_called()
+            else:
+                website = cms_owner.connect(context, self.config, user=user, data=data)
             self.config.refresh_from_db()
             self.assertEqual(str(cms_owner.connect(context, self.config, user=user, data=data).pk), str(website.pk))
-            provider.assert_called_once()
+            if initial: provider.assert_not_called()
+            else: provider.assert_called_once()
             self.assertEqual(current_credential(context, self.config, website, user=user)[1].secret, data['secret'])
             private = website.operations.get(action='channel-credential')
             self.assertNotIn(data['secret'], json.dumps(private.payload))
@@ -1254,23 +1319,24 @@ class WebsiteReviewRegressionTests(WebsiteDatabaseFixture, TestCase):
                 native_user = {'id': 7, 'name': 'Existing author', 'capabilities': {'edit_posts': True, 'publish_posts': True}}
                 from . import cms_goal_billing, cms_goal_controller, cms_setup_start, cms_setup_controller, cms_setup_quote
                 from roo.models import Ledger
-                def synthetic_hold(**options):
-                    return Ledger.objects.create(user=user, kind='SPEND', source='CONTENT_FACTORY', delta=-6,
-                        delta_microroo=-6_000_000, reference_type='CONTENT_FACTORY', reference_id=options['reference_id'],
-                        idempotency_key=options['idempotency_key']), True
                 with patch('content_factory.billing.get_content_factory_article_cost_points', return_value=6) as quoted_price, \
                         patch('content_factory.company_billing.billing_user_for_organization', return_value=user), \
                         patch('roo.services.PointsService.spend', side_effect=synthetic_hold) as held:
                     quote = cms_setup_quote.for_context(context, self.config, user=user,
                         expected_binding=website.capabilities['_cms_binding'])
-                    native_start_data = {**contract_for(website), 'company_id': str(company.pk), 'client_request_id': str(uuid.uuid4()),
-                        'setup_quote_digest': quote['digest'], 'review_policy': 'auto', 'publication_confirmed': True,
-                        'native_defaults_confirmed': True, 'expected_cost_points': 6, 'billing_confirmed': True}
-                    preparatory = cms_setup_start.start(context, self.config, user=user, data=native_start_data)
+                    if initial:
+                        self.assertIsNone(quote)
+                        preparatory = initial_root
+                    else:
+                        native_start_data = {**contract_for(website), 'company_id': str(company.pk), 'client_request_id': str(uuid.uuid4()),
+                            'setup_quote_digest': quote['digest'], 'review_policy': 'auto', 'publication_confirmed': True,
+                            'native_defaults_confirmed': True, 'expected_cost_points': 6, 'billing_confirmed': True}
+                        preparatory = cms_setup_start.start(context, self.config, user=user, data=native_start_data)
                     self.assertEqual(preparatory.action, 'cms-setup')
                     self.assertNotIn('goal', preparatory.receipt)
                     original_hold = preparatory.receipt['first_article_billing']
-                    self.assertEqual(str(cms_setup_start.start(context, self.config, user=user, data=native_start_data).pk), str(preparatory.pk))
+                    if not initial:
+                        self.assertEqual(str(cms_setup_start.start(context, self.config, user=user, data=native_start_data).pk), str(preparatory.pk))
                     quoted_price.return_value = 99
                     # Model a previously saved native choice without changing
                     # its preferences. The actual recheck must use GET and the
@@ -1289,7 +1355,8 @@ class WebsiteReviewRegressionTests(WebsiteDatabaseFixture, TestCase):
                     self.assertEqual(managed_native.receipt['first_article_billing'], original_hold)
                     self.assertEqual(managed_native.receipt['native_budget']['setup_usage']['active_seconds'], 180)
                     self.assertEqual(managed_native.receipt['native_budget']['setup_usage']['provider_seconds'], 540)
-                    self.assertEqual(str(cms_setup_start.start(context, self.config, user=user, data=native_start_data).pk), str(managed_native.pk))
+                    if not initial:
+                        self.assertEqual(str(cms_setup_start.start(context, self.config, user=user, data=native_start_data).pk), str(managed_native.pk))
                     self.assertEqual(defaults_get.call_count, 2)
                     access_get.assert_called_once()
                     self.assertEqual(access_get.call_args.kwargs['method'], 'GET')
@@ -1300,7 +1367,8 @@ class WebsiteReviewRegressionTests(WebsiteDatabaseFixture, TestCase):
                 self.config.refresh_from_db()
                 native = cms_publication_policy.current_policy(context, self.config, user=user)
                 self.assertEqual(native['operation_id'], managed_native.payload['policy_operation_id'])
-                held.assert_called_once()
+                if initial: held.assert_not_called()
+                else: held.assert_called_once()
                 from .cms_first_article_subject import from_goal as financial_subject
                 from .cms_goal_authority import historical as financial_authority
                 from .website_first_article_billing import _binding as financial_binding, request_key as financial_key
@@ -1630,8 +1698,10 @@ class WebsiteReviewRegressionTests(WebsiteDatabaseFixture, TestCase):
                     'binding': financial_records._binding(cms_goal_billing._financial_context(value)),
                     'client_request_id': financial_key, 'payer_user_id': str(user.pk), 'requester_user_id': str(user.pk),
                     'cost_points': 6, 'spend_ledger_id': str(held_spend.pk), 'reserved_at': timezone.now().isoformat(), 'status': 'reserved'})
-                with patch('roo.services.PointsService.spend') as debit:
-                    held = cms_goal_billing.reserve(financial_parent, user=user, now=timezone.now())
+                with transaction.atomic():
+                    Organization.objects.select_for_update().get(pk=self.org.pk)
+                    with patch('roo.services.PointsService.spend') as debit:
+                        held = cms_goal_billing.reserve(financial_parent, user=user, now=timezone.now())
                 debit.assert_not_called()
                 self.assertEqual(held['spend_ledger_id'], str(held_spend.pk))
             website.refresh_from_db()
@@ -1698,6 +1768,10 @@ class WebsiteReviewRegressionTests(WebsiteDatabaseFixture, TestCase):
             self.assertEqual((publication.state, publication.payload), ('deleted', {}))
             verified = website.operations.get(action='cms-credential-renewal')
             self.assertEqual((verified.state, verified.payload), ('deleted', {}))
+            if initial:
+                for private_action in ('cms-initial-connect', 'cms-initial-grant'):
+                    erased = website.operations.get(action=private_action)
+                    self.assertEqual((erased.state, erased.payload), ('deleted', {}))
             financial_parent.refresh_from_db()
             self.assertEqual((financial_parent.state, financial_parent.payload), ('deleted', {}))
             native_row = website.operations.get(pk=native['operation_id'])

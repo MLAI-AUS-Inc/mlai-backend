@@ -2,6 +2,7 @@
 
 from copy import deepcopy
 from datetime import timedelta
+from types import SimpleNamespace
 from unittest.mock import patch
 from uuid import uuid4
 
@@ -92,6 +93,21 @@ class CmsSetupControllerTests(SimpleTestCase):
         self.assertEqual(result.receipt["native_budget"]["setup_usage"]["provider_seconds"], 180)
         self.assertEqual(self.access_http.call_args.kwargs, {"method": "GET", "resource": "users", "identifier": "me", "query": {"context": "edit"}})
         self.http.assert_called_once(); self.spend.assert_called_once()
+
+    def test_old_policy_hold_guards_use_short_transactions_while_provider_get_remains_unlocked(self):
+        self.old_policy()
+        from . import cms_setup_billing as billing
+        actual = billing.require_held
+        def require_locked(parent):
+            self.assertGreater(self.depth, 0)
+            return actual(parent)
+        with patch("django.db.transaction.get_connection", side_effect=lambda: SimpleNamespace(in_atomic_block=self.depth > 0)), \
+                patch.object(billing, "require_held", side_effect=require_locked) as held:
+            result = self.advance()
+        self.assertEqual((result.action, result.state), ("cms-goal", "pending"))
+        self.assertGreater(held.call_count, 2)
+        self.assertEqual(self.depth, 0)
+        self.access_http.assert_called_once(); self.http.assert_called_once(); self.spend.assert_called_once()
 
     def test_lost_promotion_after_real_access_commit_reuses_that_observation_and_original_hold(self):
         saved, row = self.old_policy()

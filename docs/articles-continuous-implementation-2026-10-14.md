@@ -782,3 +782,19 @@ keeps its active-goal/budget check, with no caller-selected bypass. All 1,196
 website checks pass; paired CF reader code and disposable CI remain pending.
 All rollout flags stay off. No live service/provider/model call, local database,
 merge or deployment ran.
+
+## 17 October: durable initial CMS acceptance
+
+The initial owner command persists its encrypted key proposal, paused site,
+original native intent and one accepted hold before provider I/O. A private
+expiring lease verifies real WordPress/Ghost identity and returns the same root
+to existing setup/discovery/goal handling. Credential replacement preserves
+original consent, price, payment identity and cumulative budgets. Initial nonce
+recovery is read-only; independent expiry erases orphan ciphertext with rollout
+off, and lifecycle cleanup fences both private action types.
+
+Twenty-eight focused no-database cases pass. The disposable ORM round trip has
+an initial-acceptance variant with an injected worker exit and the same original
+payment/source through publication; remote CI is still required. The combined
+Chat initial form, real provider/browser acceptance, transfer, hosted fallback
+and actual nightly coverage remain unfinished. All rollout flags remain off.

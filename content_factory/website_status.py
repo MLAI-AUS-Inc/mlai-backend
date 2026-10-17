@@ -117,6 +117,9 @@ def status_for_context(context, config, *, journey, now=None, user=None):
         return None
     connection = config.website_connection
     if "_cms_binding" in (getattr(connection, "capabilities", None) or {}):
+        from .cms_initial_status import for_context as initial_status
+        initial = initial_status(context, config, user=user, now=now)
+        if initial is not None: return initial
         from .cms_goal_status import for_context
         return for_context(context, config, user=user, now=now)
     from django.db.models import Q

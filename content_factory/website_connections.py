@@ -877,6 +877,8 @@ def transition_connection(config, *, action, expected, idempotency_key="", verif
         if cms_marker is not None:
             from .cms_access_controller import cancel_for_connection
             cancel_for_connection(connection)
+            from .cms_initial_controller import cancel_for_connection as cancel_initial
+            cancel_initial(connection)
         if cms_marker is not None and connection.capabilities.get("_cms_financial_records") is True:
             cms_marker["_cms_financial_records"] = True
             from .cms_goal_refunds import cancel_held_goals as cancel_native_holds
@@ -922,7 +924,7 @@ def transition_connection(config, *, action, expected, idempotency_key="", verif
         if action in {"reset", "reconnect", "purge"}:
             invalidate_repository_config(config)
         if action == "purge":
-            connection.operations.filter(action__in=["cms-capture", "cms-artifact", "cms-review", "cms-media", "cms-stage", "cms-policy", "cms-approval", "cms-publish", "cms-credential-renewal"]).update(payload={}, state="deleted", receipt={"status": "erased"}, updated_at=timezone.now())
+            connection.operations.filter(action__in=["cms-capture", "cms-artifact", "cms-review", "cms-media", "cms-stage", "cms-policy", "cms-approval", "cms-publish", "cms-credential-renewal", "cms-initial-connect", "cms-initial-grant"]).update(payload={}, state="deleted", receipt={"status": "erased"}, updated_at=timezone.now())
             if cms_marker is not None and cms_marker.get("_cms_financial_records") is True:
                 from .cms_goal_refunds import retain_for_erasure
                 retain_for_erasure(connection)
@@ -992,6 +994,8 @@ def offboard_website_connections(organization, *, user=None, purge=False):
             if cms_marker is not None:
                 from .cms_access_controller import cancel_for_connection
                 cancel_for_connection(website)
+                from .cms_initial_controller import cancel_for_connection as cancel_initial
+                cancel_initial(website)
             if cms_marker is not None and website.capabilities.get("_cms_financial_records") is True:
                 cms_marker["_cms_financial_records"] = True
                 from .cms_goal_refunds import cancel_held_goals as cancel_native_holds
@@ -1015,7 +1019,7 @@ def offboard_website_connections(organization, *, user=None, purge=False):
                     payload={"previous_generation": previous_generation, "cancel_run_ids": [], "disable_auto_merge_prs": []})
             if not purge:
                 continue
-            website.operations.filter(action__in=["cms-capture", "cms-artifact", "cms-review", "cms-media", "cms-stage", "cms-policy", "cms-approval", "cms-publish", "cms-credential-renewal"]).update(payload={}, state="deleted", receipt={"status": "erased"}, updated_at=timezone.now())
+            website.operations.filter(action__in=["cms-capture", "cms-artifact", "cms-review", "cms-media", "cms-stage", "cms-policy", "cms-approval", "cms-publish", "cms-credential-renewal", "cms-initial-connect", "cms-initial-grant"]).update(payload={}, state="deleted", receipt={"status": "erased"}, updated_at=timezone.now())
             from .website_operations import deletion_epoch
             watermark = max(deletion_epoch(website) + 1, website.configuration_version)
             website.blockers = [item for item in website.blockers if isinstance(item, dict) and item.get("code") != "website_data_deleted"] + [

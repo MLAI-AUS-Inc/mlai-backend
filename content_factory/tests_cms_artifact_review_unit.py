@@ -189,7 +189,7 @@ class CmsArtifactSurfaceTests(SimpleTestCase):
         context = SimpleNamespace(organization=SimpleNamespace(pk=7))
         with patch.object(website_views, "_context", return_value=(context, None, None)), \
                 patch.object(WebsiteConnectionOperation.objects, "filter") as rows:
-            for action in ("cms-review", "cms-media", "cms-stage", "cms-policy", "cms-approval", "cms-publish", "cms-goal", "cms-goal-refund", "cms-setup", "cms-setup-intent", "cms-setup-refund", "cms-credential-renewal"):
+            for action in ("cms-review", "cms-media", "cms-stage", "cms-policy", "cms-approval", "cms-publish", "cms-goal", "cms-goal-refund", "cms-setup", "cms-setup-intent", "cms-setup-refund", "cms-credential-renewal", "cms-initial-connect", "cms-initial-grant"):
                 rows.return_value.first.return_value = SimpleNamespace(action=action, payload={"handoff": "private"})
                 response = website_views.WebsiteConnectionOperationView().get(SimpleNamespace(), "private-operation")
                 self.assertEqual(response.status_code, 404)
@@ -287,3 +287,71 @@ class CmsArtifactSurfaceTests(SimpleTestCase):
             lock["files"][0]["source_path"] = "backend/private.py"
             path.write_text(json.dumps(lock))
             with self.assertRaises(ContractCheckError): verify(root)
+
+
+@override_settings(ARTICLES_CHANNEL_DISCOVERY_ENABLED=True, ARTICLES_PUBLISHING_CHANNELS_ENABLED=True,
+    ARTICLES_CMS_CHANNEL_ENABLED=True, ARTICLES_CHANNEL_ARTIFACTS_ENABLED=True)
+class CmsWakeQueryTypesTests(SimpleTestCase):
+    """Compile the real correlated selectors without opening any database."""
+
+    def selectors(self):
+        from django.db.models.query import QuerySet
+        from . import cms_owned_media, cms_staged_review, cms_article_approval, cms_article_publication
+        queries = []
+        def empty(rows):
+            queries.append(rows.query.clone())
+            return iter(())
+        with patch.object(QuerySet, "__iter__", autospec=True, side_effect=empty):
+            for select in (review.ensure_reviews, cms_owned_media.ensure_media, cms_staged_review.ensure_stages,
+                    cms_article_approval.ensure_approvals, cms_article_publication.ensure_publications):
+                self.assertEqual(select(connection_id="11111111-1111-4111-8111-111111111111"), 0)
+        self.assertEqual(len(queries), 5)
+        return queries
+
+    def expressions(self, expression):
+        from django.db.models.sql.query import Query
+        yield expression
+        if isinstance(expression, Query):
+            yield from self.expressions(expression.where)
+            for item in expression.annotations.values(): yield from self.expressions(item)
+        elif hasattr(expression, "children"):
+            for item in expression.children: yield from self.expressions(item)
+        elif hasattr(expression, "get_source_expressions"):
+            for item in expression.get_source_expressions():
+                if item is not None: yield from self.expressions(item)
+
+    def test_native_wake_correlations_do_not_compare_json_to_native_sql_scalar_fields(self):
+        from django.db.models import JSONField
+        from django.db.models.lookups import Exact
+        mismatches = []
+        for query in self.selectors():
+            for expression in self.expressions(query):
+                if not isinstance(expression, Exact) or not hasattr(expression.rhs, "output_field"): continue
+                left, right = expression.lhs.output_field, expression.rhs.output_field
+                if isinstance(left, JSONField) != isinstance(right, JSONField):
+                    mismatches.append((query.model.__name__, type(left).__name__, type(right).__name__))
+        self.assertEqual(mismatches, [], "Native/JSON comparisons need the same SQL value type before PostgreSQL executes them")
+
+    def test_actual_selectors_compile_for_sqlite_and_postgresql_versions_without_database_access(self):
+        from django.db.backends.postgresql.base import DatabaseWrapper as Postgres
+        from django.db.backends.sqlite3.base import DatabaseWrapper as Sqlite
+        configuration = {"NAME": "never-opened", "TIME_ZONE": None, "OPTIONS": {}, "AUTOCOMMIT": True,
+            "CONN_MAX_AGE": 0, "CONN_HEALTH_CHECKS": False}
+        sqlite = Sqlite(configuration, alias="compile-only-sqlite")
+        # This is a compiler profile for CI's JSON-capable SQLite. Probing the
+        # runtime capability would execute a SELECT, which this suite forbids.
+        sqlite.features.supports_json_field = True
+        engines = [("sqlite", sqlite)]
+        for version in (150000, 160000):
+            postgres = Postgres(configuration, alias="compile-only-postgresql")
+            postgres.pg_version = version
+            engines.append((str(version), postgres))
+        for name, engine in engines:
+            with self.subTest(engine=name), patch.object(engine, "ensure_connection", side_effect=AssertionError("No database may open")) as connect:
+                for query in self.selectors():
+                    sql, parameters = query.get_compiler(connection=engine).as_sql()
+                    self.assertTrue(sql and parameters)
+                    if query.model is ContentFactoryRun:
+                        self.assertTrue("JSON_OBJECT" in sql or "JSONB_BUILD_OBJECT" in sql)
+                        self.assertTrue(any(isinstance(value, str) and "source_run_id" in value for value in parameters))
+                connect.assert_not_called()

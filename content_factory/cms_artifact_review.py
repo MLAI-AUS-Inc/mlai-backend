@@ -11,6 +11,8 @@ from bs4 import BeautifulSoup
 from bs4.element import Comment, Tag
 from django.db import transaction
 from django.db.models import Exists, F, OuterRef
+from django.db.models.fields.json import KeyTransform
+from django.db.models.functions import JSONObject
 from django.utils import timezone
 import requests
 
@@ -283,14 +285,19 @@ def ensure_reviews(*, limit=20, connection_id=None):
         return 0
     from workflow_runs.models import ContentFactoryRun
     from .website_models import WebsiteConnectionOperation
+    # Preserve JSON scalar types when comparing stored envelope values with
+    # real SQL columns. Casting untrusted JSON to an integer can abort the
+    # whole batch; comparing jsonb directly with varchar/integer fails on PG.
+    selected_generation = KeyTransform("value", JSONObject(value=F("organization__content_config__website_connection__generation")))
+    original_run_id = KeyTransform("value", JSONObject(value=OuterRef("run_id")))
     runs = ContentFactoryRun.objects.filter(status__in=["completed", "awaiting_approval", "approval_required"],
         run_request__publishing_channel_artifact__channel="cms",
         organization__content_config__website_connection__state="connected",
         organization__content_config__website_connection__authorized_by__is_active=True,
-        run_request__publishing_channel_artifact__connection_generation=F("organization__content_config__website_connection__generation"))
+        run_request__publishing_channel_artifact__connection_generation=selected_generation)
     if connection_id:
         runs = runs.filter(run_request__publishing_channel_artifact__connection_id=str(connection_id))
-    existing = WebsiteConnectionOperation.objects.filter(action=ACTION, payload__source_run_id=OuterRef("run_id"),
+    existing = WebsiteConnectionOperation.objects.filter(action=ACTION, payload__source_run_id=original_run_id,
         payload__source_generation=OuterRef("result__generation"))
     runs = runs.annotate(_cms_review_exists=Exists(existing)).filter(_cms_review_exists=False)
     count = 0
