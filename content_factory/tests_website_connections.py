@@ -1469,6 +1469,22 @@ class WebsiteReviewRegressionTests(WebsiteDatabaseFixture, TestCase):
                     if effect['method'] == 'POST':
                         issued = website.operations.get(pk=publication.pk)
                         self.assertEqual(issued.payload['post_state']['create_count'], 1)
+                        # A replacement key for the same actual principal must
+                        # preserve the already-issued post and original source.
+                        renewed_data = {**data, 'client_request_id': str(uuid.uuid4()),
+                            'channel_scope': scope_for(context, self.config),
+                            'channel_revision': self.config.article_system['publishing_channel']['revision'],
+                            'secret': 'synthetic-renewed-application-password'}
+                        renewed = cms_owner.connect(context, self.config, user=user, data=renewed_data)
+                        self.assertEqual((str(renewed.pk), renewed.generation), (str(website.pk), website.generation))
+                        self.assertEqual(renewed.capabilities['_cms_credential_operation_id'], str(private.pk))
+                        self.assertEqual(current_credential(context, self.config, renewed, user=user)[1].secret, renewed_data['secret'])
+                        self.assertTrue(channel_artifacts.authorize_payload(artifact_payload))
+                        replayed = website.operations.get(pk=publication.pk)
+                        self.assertEqual(replayed.payload, issued.payload)
+                        self.assertEqual(website.operations.filter(action='channel-credential').count(), 1)
+                        self.assertEqual(str(cms_owner.connect(context, self.config, user=user, data=renewed_data).pk), str(website.pk))
+                        with self.assertRaises(WebsiteAuthorityError): cms_owner.connect(context, self.config, user=user, data=data)
                         posted.append(row)
                         return row, {}
                     return (posted[0] if effect['identifier'] is not None else posted), {}

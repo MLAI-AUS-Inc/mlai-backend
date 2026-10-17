@@ -68,8 +68,8 @@ def _existing(context, config, user, request_id, binding, credential):
 def connect(context, config, *, user, data):
     """Verify an explicit owner destination, then commit one encrypted binding.
 
-    A repeated acknowledged request reuses the current receipt. Reconnection
-    creates new consent and cannot replay a prior generation's credential.
+    A repeated acknowledged request reuses the current receipt. The same native
+    principal may renew its key without abandoning its original paid article.
     """
     if not enabled():
         raise WebsiteAuthorityError("publishing_adapter_required", "CMS connections are not available.", status=404)
@@ -87,6 +87,8 @@ def connect(context, config, *, user, data):
     prior = WebsiteConnectionOperation.objects.filter(idempotency_key=operation_key).first()
     if prior and (not config.website_connection or str(prior.connection_id) != str(config.website_connection.pk)):
         raise WebsiteAuthorityError("operation_key_conflict", "Start a new request for this CMS connection.")
+    if prior and config.website_connection.capabilities.get("_cms_connect_request_id") != request_id:
+        raise WebsiteAuthorityError("operation_key_conflict", "This CMS credential request has already been superseded.")
     existing = _existing(context, config, user, request_id, binding, credential)
     if existing:
         return existing
@@ -97,6 +99,10 @@ def connect(context, config, *, user, data):
         raise WebsiteAuthorityError("website_prepare_blocked", "Choose the CMS publishing channel first.", status=422)
     if record["selection"]["platform"] not in {"unknown", binding["platform"]}:
         raise WebsiteAuthorityError("website_configuration_changed", "Review the selected CMS platform.")
+    from . import cms_credential_renewal as renewal
+    selected = renewal.candidate(context, config, user=user, proposal=binding)
+    if selected is None:
+        renewal.require_replaceable(config.website_connection)
     from .website_connections import require_unlocked_remote_call
     require_unlocked_remote_call()
     try:
@@ -123,6 +129,10 @@ def connect(context, config, *, user, data):
             return existing
         _require_current(locked_context, config, expected_scope, revision)
         record = saved_record(config.article_system)
+        if selected is not None:
+            return renewal.renew(selected, locked_context, config, user=user, proposal=binding, credential=credential,
+                identity=identity, request_id=request_id, operation_key=operation_key)
+        renewal.require_replaceable(config.website_connection)
         if config.website_connection:
             from .website_disconnect import start_disconnect
             from .website_connections import contract_for
