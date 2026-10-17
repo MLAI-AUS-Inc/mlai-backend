@@ -760,14 +760,16 @@ def process_website_connection_operations(*, limit=20, now=None, connection_id=N
     from .cms_owned_media import ensure_media, advance_media
     from .cms_staged_review import ensure_stages
     from .cms_article_approval import ensure_approvals, advance_approval
+    from .cms_article_publication import ensure_publications, advance_publication
     artifact_reviews_enabled = artifacts_enabled()
     if artifact_reviews_enabled:
         ensure_reviews(limit=limit, connection_id=connection_id)
         ensure_media(limit=limit, connection_id=connection_id)
         ensure_stages(limit=limit, connection_id=connection_id)
         ensure_approvals(limit=limit, connection_id=connection_id)
+        ensure_publications(limit=limit, connection_id=connection_id)
     else:
-        excluded.extend(["cms-review", "cms-media", "cms-approval"])
+        excluded.extend(["cms-review", "cms-media", "cms-approval", "cms-publish"])
     if not cms_enabled:
         # Frozen provider jobs must never fall through to Git token cleanup.
         excluded.extend(["cms-capture", "cms-publish", "cms-unpublish"])
@@ -784,6 +786,7 @@ def process_website_connection_operations(*, limit=20, now=None, connection_id=N
         Q(action="cms-review", state="running") |
         Q(action="cms-media", state="running") |
         Q(action="cms-approval", state="running") |
+        Q(action="cms-publish", state="running") |
         unconfigured_alerts |
         Q(action="prepare", state="needs_user", receipt__user_action__id__in=["deploy_site","merge_pr","review_draft"])).exclude(action__in=excluded)
     if connection_id:
@@ -795,6 +798,14 @@ def process_website_connection_operations(*, limit=20, now=None, connection_id=N
     monitor_cleanup_pull_requests(limit=limit, connection_id=connection_id)
     from .website_wakeups import enabled as event_wakes_enabled
     for identifier in ids:
+        if WebsiteConnectionOperation.objects.filter(pk=identifier, action="cms-publish").exists():
+            operation = advance_publication(identifier, now=now) if artifact_reviews_enabled else None
+            if operation is not None:
+                result["processed"] += 1
+                result["pending" if operation.state in {"pending", "running"} else "completed"] += 1
+                if len(result["operations"]) < 20:
+                    result["operations"].append({"id": str(identifier), "action": "cms-publish", "outcome": operation.state})
+            continue
         if WebsiteConnectionOperation.objects.filter(pk=identifier, action="cms-approval").exists():
             operation = advance_approval(identifier, now=now) if artifact_reviews_enabled else None
             if operation is not None:

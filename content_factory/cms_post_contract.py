@@ -240,7 +240,7 @@ def issue_create(intent, state):
         native = {key: [{"id": item} for item in intent["native_fields"][key]] for key in ("authors", "tags")}
         if "feature_image" in intent["native_fields"]:
             native["feature_image"] = intent["native_fields"]["feature_image"]
-        payload = {"posts": [{"title": intent["title"], "slug": intent["slug"], "status": intent["status"],
+        payload = {"posts": [{"title": intent["title"], "slug": intent["slug"], "status": intent["status"], "visibility": "public",
             "html": "<!--kg-card-begin: html-->" + marked_html(intent) + "<!--kg-card-end: html-->", **native}]}
         effect = PostEffect("POST", query={"source": "html", "formats": "html"}, payload=payload)
     updated = {**deepcopy(state), "phase": "create_issued", "create_count": 1, "outcome_unknown": True}
@@ -328,6 +328,37 @@ def observe_posts(intent, state, response, *, lookup=True):
     """Decode a provider observation without leaking malformed response fields."""
     try:
         return _observe_posts(intent, state, response, lookup=lookup)
+    except CmsApiError:
+        raise
+    except (CmsContractError, ValueError, TypeError, KeyError, AttributeError, RecursionError):
+        raise CmsApiError("invalid_response") from None
+
+
+def confirmation_effect(intent, state):
+    """Re-read the exact acknowledged provider ID before public verification."""
+    validate_post_state(state, intent)
+    if state["phase"] != "provider_confirmed":
+        raise CmsApiError("invalid_request")
+    return PostEffect("GET", identifier=state["provider_id"], query={"context": "edit"}
+        if intent["binding"]["platform"] == "wordpress" else {"formats": "html"})
+
+
+def observe_confirmation(intent, state, response):
+    """Deny modified/replaced posts without adopting another ID or public URL."""
+    confirmation_effect(intent, state)
+    try:
+        if intent["binding"]["platform"] == "wordpress":
+            row = response
+        else:
+            rows = response.get("posts") if isinstance(response, dict) else None
+            if not isinstance(rows, list) or len(rows) != 1:
+                raise CmsApiError("invalid_response")
+            row = rows[0]
+        observed = _owned_record(row, intent)
+        if (_digest(observed) != state["observation_digest"] or observed["provider_id"] != state["provider_id"] or
+                type(observed["provider_id"]) is not type(state["provider_id"])):
+            raise CmsApiError("post_ownership_conflict")
+        return deepcopy(state)
     except CmsApiError:
         raise
     except (CmsContractError, ValueError, TypeError, KeyError, AttributeError, RecursionError):

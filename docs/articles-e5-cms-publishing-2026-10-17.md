@@ -59,8 +59,10 @@ No CMS source is represented as a Git commit or on-main publication fact.
 Subsequent draft work adds the immutable artifact-only CF envelope and private
 handoff, durable owned media staging, exact final native preview, explicit native
 publication choices and [durable manual/automatic approval](articles-e5-cms-approval-2026-10-17.md).
-**Still incomplete:** durable post publication/reconciliation, unpublish, public
-proof/goal integration, owner UI and remote WordPress/Ghost acceptance runs.
+The following draft adds [durable native publication](articles-e5-cms-publication-2026-10-17.md)
+with one-create recovery, exact provider re-read and public body observation.
+**Still incomplete:** unpublish, native goal/status/UI and strategy integration,
+paid revision lineage and remote WordPress/Ghost container/browser acceptance.
 Connection summaries deliberately advertise no generation or publication
 readiness. Keep rollout flags off.
 
