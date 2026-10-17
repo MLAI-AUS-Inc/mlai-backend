@@ -11019,7 +11019,7 @@ def _nested_run_result_value(result, *keys):
 
 def _serialize_run(
     run, *, context=None, latest_runs=None, checks=None, mode="full",
-    topic_candidates=None, precomputed_article_setup_state=None, config=None,
+    topic_candidates=None, precomputed_article_setup_state=None, config=None, include_workflow_progress=True,
 ):
     from .setup_status_projection import terminal_setup_projection
     run = terminal_setup_projection(_setup_pr_creation_failure_view(run))
@@ -11140,7 +11140,7 @@ def _serialize_run(
             **({"contentIsland": content_island, "content_island": content_island} if content_island else {}),
             "workflowProgress": _workflow_progress(
                 context=context, run=run, latest_runs=latest_runs, checks=checks, topic_candidates=topic_candidates, config=config
-            ),
+            ) if include_workflow_progress else None,
             "result": _strip_missing_setup_run_refs(_compact_result_for_run(run)),
             **reliability_presentation(result, status=run.status, workflow=run.workflow,
                                        current_step=run.current_step, resume_available=run.resume_available,
@@ -11219,7 +11219,7 @@ def _serialize_run(
         "componentFeedback": _component_feedback_from_run(run),
         "workflowProgress": _workflow_progress(
             context=context, run=run, latest_runs=latest_runs, checks=checks, topic_candidates=topic_candidates, config=config
-        ),
+        ) if include_workflow_progress else None,
         "result": _strip_missing_setup_run_refs(response_result),
         **reliability_presentation(result, status=run.status, workflow=run.workflow,
                                    current_step=run.current_step, resume_available=run.resume_available,
@@ -11619,7 +11619,10 @@ def _serialize_bootstrap(context, request=None, *, view="summary"):
     try:
         capabilities = None
         if payload is None:
-            payload = _compute_bootstrap_payload(context, request=request, view=view, config=config, latest_runs=runs)
+            # The live overlay projects progress once for root + displayed runs,
+            # after current capabilities. Do not compute the same graph here too.
+            payload = _compute_bootstrap_payload(context, request=request, view=view, config=config,
+                latest_runs=runs, defer_workflow_progress=True)
             capabilities = payload.get("articleCapabilities")
             if cache_key is not None:
                 try:
@@ -11652,7 +11655,7 @@ def _bootstrap_workflow_run_ref(serialized_run):
     return {key: serialized_run.get(key) for key in _BOOTSTRAP_WORKFLOW_RUN_FIELDS}
 
 
-def _compute_bootstrap_payload(context, request=None, *, view="summary", config=None, latest_runs=None):
+def _compute_bootstrap_payload(context, request=None, *, view="summary", config=None, latest_runs=None, defer_workflow_progress=False):
     compact = view == "summary"
     if config is None:
         config = _get_config(context.organization)
@@ -11715,6 +11718,7 @@ def _compute_bootstrap_payload(context, request=None, *, view="summary", config=
         _serialize_run(
             run, context=context, latest_runs=latest_runs, checks=checks,
             mode=run_mode, topic_candidates=topic_candidates, config=config,
+            include_workflow_progress=not defer_workflow_progress,
             # Only scan/setup runs can change which scan or setup is projected.
             # Other runs are already in latest_runs and share this computed state.
             precomputed_article_setup_state=(
@@ -11803,7 +11807,7 @@ def _compute_bootstrap_payload(context, request=None, *, view="summary", config=
             checks=checks,
             topic_candidates=topic_candidates,
             config=config,
-        ),
+        ) if not defer_workflow_progress else None,
         "hasCompletedArticleFlow": has_completed_article_flow,
         "startPageMode": "topic_picker" if topic_picker_ready else "first_article_setup",
     }
