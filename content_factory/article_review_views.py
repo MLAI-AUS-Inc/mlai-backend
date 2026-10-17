@@ -14,8 +14,20 @@ from . import vibe_marketing_views as views
 from .article_export import article_export
 
 
+def _cms_mutation_blocked(run):
+    """CMS edits require their own attempt/media lineage, including with flags off."""
+    original = getattr(run, "run_request", None)
+    if isinstance(original, dict) and "publishing_channel_artifact" in original:
+        return Response({"code": "publishing_adapter_required", "detail": "Editing this CMS draft is not available yet."}, status=409)
+    return None
+
+
 def remote_review(run, *, payload=None):
     """Forward a scoped review operation without passing browser credentials."""
+    if payload is not None:
+        blocked = _cms_mutation_blocked(run)
+        if blocked is not None:
+            return blocked
     views.require_unlocked_remote_call()
     if payload is not None:
         original = views.scoped_run_contract(run)
@@ -270,6 +282,9 @@ def _review_dispatch_contract(run, payload):
 
 def apply_article_review_update(*, user, context, run, data):
     """Apply the same exact-revision update from an owned HTTP or MCP command."""
+    blocked = _cms_mutation_blocked(run)
+    if blocked is not None:
+        return blocked
     from .commands import ContentCommand
     command = ContentCommand(user=user, data=data)
     try:
@@ -412,6 +427,9 @@ class VibeMarketingArticleReviewView(views.VibeMarketingRunCommentsMixin, APIVie
         context, run, error = self._resolve_run(request, run_id)
         if error is not None:
             return error
+        blocked = _cms_mutation_blocked(run)
+        if blocked is not None:
+            return blocked
         if run.workflow not in {*views.ARTICLE_WORKFLOWS, "article_system_setup"}:
             return Response({"detail": "This run does not have an article preview."}, status=400)
         setup_revision = (run.workflow == "article_system_setup"
