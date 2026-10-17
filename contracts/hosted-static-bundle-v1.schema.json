@@ -1,0 +1,129 @@
+{
+  "$id": "https://contracts.mlai.au/hosted-static-bundle-v1.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "articles": {
+      "items": {
+        "additionalProperties": false,
+        "properties": {
+          "article_id": {
+            "format": "uuid",
+            "type": "string"
+          },
+          "body_bytes": {
+            "maximum": 262144,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "body_offset": {
+            "maximum": 33554432,
+            "minimum": 0,
+            "type": "integer"
+          },
+          "body_sha256": {
+            "pattern": "^[a-f0-9]{64}$",
+            "type": "string"
+          },
+          "path": {
+            "pattern": "^articles/[a-z0-9-]{1,190}/$",
+            "type": "string"
+          },
+          "title_sha256": {
+            "pattern": "^[a-f0-9]{64}$",
+            "type": "string"
+          }
+        },
+        "required": [
+          "article_id",
+          "body_bytes",
+          "body_offset",
+          "body_sha256",
+          "path",
+          "title_sha256"
+        ],
+        "type": "object"
+      },
+      "maxItems": 500,
+      "minItems": 1,
+      "type": "array"
+    },
+    "digest": {
+      "pattern": "^[a-f0-9]{64}$",
+      "type": "string"
+    },
+    "files": {
+      "items": {
+        "additionalProperties": false,
+        "properties": {
+          "bytes": {
+            "maximum": 33554432,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "media_type": {
+            "enum": [
+              "text/html; charset=utf-8",
+              "text/css; charset=utf-8",
+              "application/xml; charset=utf-8",
+              "text/plain; charset=utf-8",
+              "image/png",
+              "image/jpeg",
+              "image/webp"
+            ]
+          },
+          "path": {
+            "pattern": "^(?:index\\.html|robots\\.txt|sitemap\\.xml|page/[1-9][0-9]*/index\\.html|articles/[a-z0-9-]{1,190}/index\\.html|assets/[a-f0-9]{64}\\.(?:css|png|jpg|webp))$",
+            "type": "string"
+          },
+          "sha256": {
+            "pattern": "^[a-f0-9]{64}$",
+            "type": "string"
+          }
+        },
+        "required": [
+          "bytes",
+          "media_type",
+          "path",
+          "sha256"
+        ],
+        "type": "object"
+      },
+      "maxItems": 1024,
+      "minItems": 1,
+      "type": "array"
+    },
+    "kind": {
+      "const": "hosted_static_bundle"
+    },
+    "public_origin": {
+      "maxLength": 1024,
+      "pattern": "^https://[a-z0-9.-]+/$",
+      "type": "string"
+    },
+    "renderer_version": {
+      "const": 1,
+      "type": "integer"
+    },
+    "schema_version": {
+      "const": 1,
+      "type": "integer"
+    },
+    "scope_sha256": {
+      "pattern": "^[a-f0-9]{64}$",
+      "type": "string"
+    }
+  },
+  "required": [
+    "articles",
+    "digest",
+    "files",
+    "kind",
+    "public_origin",
+    "renderer_version",
+    "schema_version",
+    "scope_sha256"
+  ],
+  "title": "Prepared hosted static bundle; no publication authority",
+  "type": "object"
+}

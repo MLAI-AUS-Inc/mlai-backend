@@ -1,0 +1,90 @@
+{
+  "articles": [
+    {
+      "article_id": "00000000-0000-0000-0000-0000000003e8",
+      "body_html": "<article data-cf-article-body=\"\"><p>Recorded content explains the original subject with useful detail and concrete examples. Recorded content explains the original subject with useful detail and concrete examples. Recorded content explains the original subject with useful detail and concrete examples. Recorded content explains the original subject with useful detail and concrete examples. </p><pre><code>A\tB\n1\t2\n</code></pre></article>\n",
+      "body_sha256": "4098d93b2ad27007285722129e9a5e3c0693d2fc2eada2720e4fa804353b5399",
+      "created_at": "2026-10-18T00:00:00Z",
+      "description": "Useful recorded article",
+      "slug": "recorded-article-0",
+      "title": "Recorded article 0"
+    }
+  ],
+  "brand_name": "Fixture & Company",
+  "envelope": {
+    "artifact_operation_id": "11111111-1111-4111-8111-111111111111",
+    "billing_request_id": "vibe-article:7:original-request",
+    "channel": "hosted",
+    "company_id": "22222222-2222-4222-8222-222222222222",
+    "connection_generation": 1,
+    "connection_id": "33333333-3333-4333-8333-333333333333",
+    "digest": "9f757028613f53b665da5c297547dea5757bb323014b5495436949cfb186705e",
+    "kind": "publishing_channel_artifact",
+    "organization_id": "7",
+    "owner_user_id": "4",
+    "platform": "unknown",
+    "policy_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "public_origin": "https://fixture.test/",
+    "review_policy": "review",
+    "schema_version": 1,
+    "scope_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+  },
+  "manifest": {
+    "articles": [
+      {
+        "article_id": "00000000-0000-0000-0000-0000000003e8",
+        "body_bytes": 439,
+        "body_offset": 793,
+        "body_sha256": "4098d93b2ad27007285722129e9a5e3c0693d2fc2eada2720e4fa804353b5399",
+        "path": "articles/recorded-article-0-000000000000000000000000000003e8/",
+        "title_sha256": "8c8cb3c49d40f8c0e9cc018f5aeb34d244b080273ae8f33a0a5f1305e56faf22"
+      }
+    ],
+    "digest": "f57c8fef804386d92aea34516810bb1ccc0651a5f557d7d873e69597f6a43232",
+    "files": [
+      {
+        "bytes": 1292,
+        "media_type": "text/html; charset=utf-8",
+        "path": "articles/recorded-article-0-000000000000000000000000000003e8/index.html",
+        "sha256": "8461a6942f6c0ad349c7bc26d70cd4df5734c6c4f1d816377145707b04b4ec3f"
+      },
+      {
+        "bytes": 740,
+        "media_type": "text/css; charset=utf-8",
+        "path": "assets/ebf2499ac0626bc8e968b94e36f10dd9f694ed752cd41881255e42f990f4ff7c.css",
+        "sha256": "ebf2499ac0626bc8e968b94e36f10dd9f694ed752cd41881255e42f990f4ff7c"
+      },
+      {
+        "bytes": 1034,
+        "media_type": "text/html; charset=utf-8",
+        "path": "index.html",
+        "sha256": "273625c3be357d9e701c8892ba7a90f560cb88ec9e8b1d7f5bcccb937339630b"
+      },
+      {
+        "bytes": 65,
+        "media_type": "text/plain; charset=utf-8",
+        "path": "robots.txt",
+        "sha256": "293247037b5417534152ff1beee9b872a274e3c50e6c57cdf3a5bab06e55784c"
+      },
+      {
+        "bytes": 347,
+        "media_type": "application/xml; charset=utf-8",
+        "path": "sitemap.xml",
+        "sha256": "1290f791af1f363b31f3fc7a06622aa2fa65d04ac2212b9942788f378e6ca92c"
+      }
+    ],
+    "kind": "hosted_static_bundle",
+    "public_origin": "https://fixture.test/",
+    "renderer_version": 1,
+    "schema_version": 1,
+    "scope_sha256": "9f757028613f53b665da5c297547dea5757bb323014b5495436949cfb186705e"
+  },
+  "public_files": {
+    "articles/recorded-article-0-000000000000000000000000000003e8/index.html": "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><meta http-equiv=\"Content-Security-Policy\" content=\"default-src &#x27;none&#x27;; img-src &#x27;self&#x27;; style-src &#x27;self&#x27;; base-uri &#x27;none&#x27;; form-action &#x27;none&#x27;\"><title>Recorded article 0</title><meta name=\"description\" content=\"Useful recorded article\"><link rel=\"canonical\" href=\"https://fixture.test/articles/recorded-article-0-000000000000000000000000000003e8/\"><link rel=\"stylesheet\" href=\"/assets/ebf2499ac0626bc8e968b94e36f10dd9f694ed752cd41881255e42f990f4ff7c.css\"></head><body><header><a href=\"/\">Fixture &amp; Company</a></header><main><h1>Recorded article 0</h1><time datetime=\"2026-10-18T00:00:00.000000Z\">2026-10-18</time>\n<article data-cf-article-body=\"\"><p>Recorded content explains the original subject with useful detail and concrete examples. Recorded content explains the original subject with useful detail and concrete examples. Recorded content explains the original subject with useful detail and concrete examples. Recorded content explains the original subject with useful detail and concrete examples. </p><pre><code>A\tB\n1\t2\n</code></pre></article>\n</main><footer>Fixture &amp; Company</footer></body></html>\n",
+    "assets/ebf2499ac0626bc8e968b94e36f10dd9f694ed752cd41881255e42f990f4ff7c.css": ":root{color-scheme:light}*{box-sizing:border-box}body{margin:0;background:#ffffff;color:#172033;font:1rem/1.7 system-ui,sans-serif}header,main,footer{max-width:70rem;margin:auto;padding:1.5rem}a{color:#175a8b}h1,h2,h3{color:#172033;font-family:system-ui,sans-serif;line-height:1.2}.cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,18rem),1fr));gap:1.5rem}.card{padding:1.5rem;border:1px solid #d6dce4;border-radius:1rem;background:#ffffff}article{overflow-wrap:anywhere}img{max-width:100%;height:auto}pre,table{display:block;max-width:100%;overflow:auto}pre{white-space:pre}nav{display:flex;gap:1rem;flex-wrap:wrap}time,footer{color:#4c596c}@media(max-width:40rem){h1{font-size:2rem}header,main,footer{padding:1rem}}",
+    "index.html": "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><meta http-equiv=\"Content-Security-Policy\" content=\"default-src &#x27;none&#x27;; img-src &#x27;self&#x27;; style-src &#x27;self&#x27;; base-uri &#x27;none&#x27;; form-action &#x27;none&#x27;\"><title>Articles from Fixture &amp; Company</title><meta name=\"description\" content=\"Articles from Fixture &amp; Company\"><link rel=\"canonical\" href=\"https://fixture.test/\"><link rel=\"stylesheet\" href=\"/assets/ebf2499ac0626bc8e968b94e36f10dd9f694ed752cd41881255e42f990f4ff7c.css\"></head><body><header><a href=\"/\">Fixture &amp; Company</a></header><main><h1>Articles from Fixture &amp; Company</h1><section class=\"cards\" aria-label=\"Articles\"><article class=\"card\"><h2><a href=\"/articles/recorded-article-0-000000000000000000000000000003e8/\">Recorded article 0</a></h2><p>Useful recorded article</p></article></section><nav aria-label=\"Archive pages\"></nav></main><footer>Fixture &amp; Company</footer></body></html>\n",
+    "robots.txt": "User-agent: *\nAllow: /\nSitemap: https://fixture.test/sitemap.xml\n",
+    "sitemap.xml": "<?xml version=\"1.0\" encoding=\"UTF-8\"?><urlset xmlns=\"http://www.sitemaps.org/schemas/sitemap/0.9\"><url><loc>https://fixture.test/</loc><lastmod>2026-10-18T00:00:00.000000Z</lastmod></url><url><loc>https://fixture.test/articles/recorded-article-0-000000000000000000000000000003e8/</loc><lastmod>2026-10-18T00:00:00.000000Z</lastmod></url></urlset>\n"
+  },
+  "zip_sha256": "2b113438ee0ea82bc4f47d4bbc45e86906f702629bf641548fcfa7a7b44b9b5f"
+}
