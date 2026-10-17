@@ -8771,12 +8771,18 @@ def _merge_django_owned_run_request(existing_request, incoming_request):
     from .website_contract import CONNECTION_FIELDS
     existing = existing_request if isinstance(existing_request, dict) else {}
     incoming = incoming_request if isinstance(incoming_request, dict) else {}
+    if "publishing_channel_artifact" in existing:
+        if any(incoming[key] != value for key, value in existing.items() if key in incoming):
+            raise EditorialRunConflict("Worker snapshots cannot replace original channel artifact inputs")
+        # Preserve every backend-reserved input, even when a worker model omits
+        # optional fields. Extra observations cannot erase the original intent.
+        incoming = {**deepcopy(incoming), **deepcopy(existing)}
     merged = {key: deepcopy(value) for key, value in incoming.items()
-              if key not in {"setup_delivery_v1","article_delivery_v1"} or key in existing}
+              if key not in {"setup_delivery_v1","article_delivery_v1", "publishing_channel_artifact"} or key in existing}
     merged = {key: value for key, value in merged.items()
               if not (key.startswith("roo_points_") or key in {"article_publish_approval_receipt", "article_publish_approval_revoked", "website_access_lost", "first_article_goal_operation_id", "first_article_goal_id"}) or key in existing}
     for key, value in existing.items():
-        if key in CONNECTION_FIELDS:
+        if key in CONNECTION_FIELDS or key == "publishing_channel_artifact":
             if key in incoming and incoming[key] != value:
                 raise EditorialRunConflict("Worker snapshots cannot change the original website connection identity")
             merged[key] = deepcopy(value)
@@ -8895,7 +8901,13 @@ def _sync_content_factory_run_snapshot(*, run_id: str, data: dict, step_states: 
         original_request = existing_run.run_request if isinstance(existing_run.run_request, dict) else {}
         from .portable_drafts import portable_run_update_allowed
         from .website_contract import connection_contract
-        if original_request.get("delivery_mode") == "content_only" and not connection_contract(original_request):
+        if "publishing_channel_artifact" in original_request:
+            from .channel_artifacts import artifact_run_update_allowed
+            if not artifact_run_update_allowed(existing_run, data):
+                raise EditorialRunConflict("A CMS artifact snapshot cannot acquire publication or repository authority")
+            data["run_request"] = {**(data.get("run_request") or {}), "delivery_mode": "content_only", "delivery_mode_confirmed": True}
+            data["domain"] = existing_run.domain
+        elif original_request.get("delivery_mode") == "content_only" and not connection_contract(original_request):
             if not portable_run_update_allowed(existing_run, data):
                 raise EditorialRunConflict("A portable draft snapshot cannot acquire repository authority")
             # Only a previously confirmed original reaches this branch. Sparse

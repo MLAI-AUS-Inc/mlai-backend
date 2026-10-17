@@ -67,6 +67,9 @@ def owner_operation_contract():
 def owner_write_guard(payload=None):
     """Fence a local persistence phase after remote work against revocation."""
     original = payload if payload is not None else owner_operation_contract()
+    if "publishing_channel_artifact" in original:
+        from .channel_artifacts import artifact_write_guard
+        return artifact_write_guard(original)
     return authority_guard(original, action="read") if connection_contract(original) else nullcontext()
 
 
@@ -539,13 +542,33 @@ def guarded_service_write(action, *, only_repository=False, remote_actions=(), p
             if portable:
                 from workflow_runs.models import ContentFactoryRun
                 run_id = str(payload.get("run_id") or payload.get("job_id") or "")
-                with transaction.atomic():
-                    original = ContentFactoryRun.objects.select_for_update().filter(run_id=run_id).first() if run_id else None
-                    if original is None and run_id:
-                        from .dispatch_binding import bind_portable_dispatch_snapshot
-                        original = bind_portable_dispatch_snapshot(remote_run_id=run_id, payload=payload)
-                    if portable_run_update_allowed(original, payload, event_type=str(payload.get("event_type") or payload.get("event") or "")):
-                        return method(self, request, *args, **kwargs)
+                from .channel_artifacts import enabled as artifacts_enabled, callback_candidate, artifact_write_guard
+                candidate = None
+                try:
+                    if artifacts_enabled():
+                        candidate = callback_candidate(run_id, payload)
+                    artifact_fence = artifact_write_guard(candidate.run_request) if candidate is not None else nullcontext()
+                except WebsiteAuthorityError as exc:
+                    return Response(exc.as_dict(), status=exc.status)
+                try:
+                    with artifact_fence, transaction.atomic():
+                        original = ContentFactoryRun.objects.select_for_update().filter(run_id=run_id).first() if run_id else None
+                        if original is None and run_id:
+                            from .dispatch_binding import bind_portable_dispatch_snapshot
+                            original = bind_portable_dispatch_snapshot(remote_run_id=run_id, payload=payload)
+                        if original is not None and "publishing_channel_artifact" in (original.run_request or {}):
+                            from .channel_artifacts import artifact_run_update_allowed, artifact_write_guard
+                            try:
+                                with artifact_write_guard(original.run_request):
+                                    if not artifact_run_update_allowed(original, payload, event_type=str(payload.get("event_type") or payload.get("event") or "")):
+                                        raise WebsiteAuthorityError("website_connection_changed", "This callback does not match the original CMS artifact.")
+                                    return method(self, request, *args, **kwargs)
+                            except WebsiteAuthorityError as exc:
+                                return Response(exc.as_dict(), status=exc.status)
+                        if portable_run_update_allowed(original, payload, event_type=str(payload.get("event_type") or payload.get("event") or "")):
+                            return method(self, request, *args, **kwargs)
+                except WebsiteAuthorityError as exc:
+                    return Response(exc.as_dict(), status=exc.status)
             if only_repository and not needs_repository_authority(payload):
                 return method(self, request, *args, **kwargs)
             cancellation_receipt_attempt = (cancellation_receipts and payload.get("status") == "cancelled"
@@ -665,6 +688,8 @@ def queue_website_followup(kind, *, data, arguments):
 
 def needs_repository_authority(data):
     """Research-only callbacks remain independent of website publishing consent."""
+    if "publishing_channel_artifact" in data or isinstance(data.get("run_request"), dict) and "publishing_channel_artifact" in data["run_request"]:
+        return True
     if any(key in data for key in CONNECTION_FIELDS) or REPOSITORY_CONFIG_FIELDS.intersection(data) or (data.get("github_repo") and not data.get("workflow")):
         return True
     if str(data.get("workflow") or "") in REPOSITORY_WORKFLOWS:
@@ -889,7 +914,7 @@ def transition_connection(config, *, action, expected, idempotency_key="", verif
         if action in {"reset", "reconnect", "purge"}:
             invalidate_repository_config(config)
         if action == "purge":
-            connection.operations.filter(action="cms-capture").update(payload={}, state="deleted", receipt={"status": "erased"}, updated_at=timezone.now())
+            connection.operations.filter(action__in=["cms-capture", "cms-artifact"]).update(payload={}, state="deleted", receipt={"status": "erased"}, updated_at=timezone.now())
             connection.operations.filter(action__in=["goal-usage", "usage-refresh", "goal-alert"]).delete()
             connection.scan_snapshots.all().delete()
             connection.template_revisions.all().delete()
@@ -903,6 +928,8 @@ def transition_connection(config, *, action, expected, idempotency_key="", verif
             ResearchAutomation.objects.filter(organization=connection.organization, status="active").update(status="paused", updated_at=timezone.now())
         from workflow_runs.models import ContentFactoryRun
         run_scope = Q(run_request__website_connection_id=str(connection.pk))
+        if cms_marker is not None:
+            run_scope |= Q(run_request__publishing_channel_artifact__connection_id=str(connection.pk))
         if cms_marker is None:
             run_scope |= Q(github_repo__iexact=connection.github_repo, run_request__website_connection_id__isnull=True)
         scoped_runs = ContentFactoryRun.objects.filter(organization=connection.organization, workflow__in=REPOSITORY_WORKFLOWS).filter(run_scope)
@@ -970,7 +997,7 @@ def offboard_website_connections(organization, *, user=None, purge=False):
                     payload={"previous_generation": previous_generation, "cancel_run_ids": [], "disable_auto_merge_prs": []})
             if not purge:
                 continue
-            website.operations.filter(action="cms-capture").update(payload={}, state="deleted", receipt={"status": "erased"}, updated_at=timezone.now())
+            website.operations.filter(action__in=["cms-capture", "cms-artifact"]).update(payload={}, state="deleted", receipt={"status": "erased"}, updated_at=timezone.now())
             from .website_operations import deletion_epoch
             watermark = max(deletion_epoch(website) + 1, website.configuration_version)
             website.blockers = [item for item in website.blockers if isinstance(item, dict) and item.get("code") != "website_data_deleted"] + [

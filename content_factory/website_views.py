@@ -36,6 +36,11 @@ def guarded_owner_operation(action, *, bind_selected=False, run_operation=False,
                 return error
             try:
                 from .portable_drafts import explicit_portable_request, original_portable_run
+                if not run_operation and action == "read" and not explicit_portable_request(request.data):
+                    from .channel_artifacts import enabled as artifacts_enabled, prepare_generation
+                    if artifacts_enabled() and config.website_connection and "_cms_binding" in (config.website_connection.capabilities or {}):
+                        prepare_generation(context, config, user=request.user)
+                        return method(self, request, *args, **kwargs)
                 if not run_operation and action == "read" and explicit_portable_request(request.data):
                     expected = connection_contract(request.data)
                     if expected:
@@ -53,6 +58,11 @@ def guarded_owner_operation(action, *, bind_selected=False, run_operation=False,
                     run = ContentFactoryRun.objects.filter(run_id=run_id).first()
                     if run is None or not _run_belongs_to_context(run, context):
                         return Response({"detail": "Run not found."}, status=404)
+                    if "publishing_channel_artifact" in (run.run_request or {}):
+                        from .channel_artifacts import artifact_run_control_allowed
+                        if action not in {"read", "setup"} or not artifact_run_control_allowed(run, run_action, dict(request.data)):
+                            raise WebsiteAuthorityError("publishing_adapter_required", "Use this CMS artifact's editorial controls or its separate publication review.")
+                        return method(self, request, *args, **kwargs)
                     if original_portable_run(run) and run_action not in {"approve", "publish-pr", "promote-bundle", "merge-publish-pr", "retry-preview-quality"}:
                         if connection_contract(request.data):
                             raise WebsiteAuthorityError("website_connection_changed", "A portable draft cannot acquire repository authority.")
@@ -292,7 +302,7 @@ class WebsiteConnectionOperationView(APIView):
         from .website_models import WebsiteConnectionOperation
         from .website_operations import operation_summary
         operation = WebsiteConnectionOperation.objects.filter(pk=operation_id, connection__organization=context.organization).first()
-        if operation is None or operation.action in {"goal-usage", "goal-alert", "usage-refresh", "channel-credential"}:
+        if operation is None or operation.action in {"goal-usage", "goal-alert", "usage-refresh", "channel-credential", "cms-artifact"}:
             return Response({"detail": "Operation not found."}, status=404)
         return Response({"operation": operation_summary(operation)})
 
@@ -328,6 +338,9 @@ class WebsiteConnectionAuthorizeView(APIView):
     def get(self, request):
         try:
             action = str(request.query_params.get("action") or "read")
+            if action == "channel_artifact":
+                from .channel_artifacts import admission_receipt
+                return Response(admission_receipt(dict(request.query_params.items())), headers={"Cache-Control": "private, no-store"})
             with authority_guard(dict(request.query_params.items()), action="read" if action == "ci_attestation" else action) as connection:
                 if action == "ci_attestation":
                     from .website_verification import ci_attestation_for

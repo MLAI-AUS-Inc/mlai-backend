@@ -1,0 +1,176 @@
+{
+  "$comment": "A valid envelope/checksum never grants authority. The original private backend reservation and current owner/site/policy/payment must match. The canonical validator also enforces exact UUID, integer and HTTPS-origin normalization.",
+  "$id": "urn:mlai:publishing-channel-artifact:v1",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "allOf": [
+    {
+      "else": {
+        "properties": {
+          "platform": {
+            "const": "unknown"
+          }
+        }
+      },
+      "if": {
+        "properties": {
+          "channel": {
+            "const": "cms"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "platform": {
+            "enum": [
+              "wordpress",
+              "ghost"
+            ]
+          }
+        }
+      }
+    },
+    {
+      "else": {
+        "properties": {
+          "connection_generation": {
+            "maximum": 999999999999,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "connection_id": {
+            "pattern": "^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$",
+            "type": "string"
+          }
+        }
+      },
+      "if": {
+        "properties": {
+          "channel": {
+            "const": "portable"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "connection_generation": {
+            "type": "null"
+          },
+          "connection_id": {
+            "type": "null"
+          }
+        }
+      }
+    }
+  ],
+  "properties": {
+    "artifact_operation_id": {
+      "pattern": "^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$",
+      "type": "string"
+    },
+    "billing_request_id": {
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,254}$",
+      "type": "string"
+    },
+    "channel": {
+      "enum": [
+        "cms",
+        "hosted",
+        "portable"
+      ]
+    },
+    "company_id": {
+      "pattern": "^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$",
+      "type": "string"
+    },
+    "connection_generation": {
+      "oneOf": [
+        {
+          "type": "null"
+        },
+        {
+          "maximum": 999999999999,
+          "minimum": 1,
+          "type": "integer"
+        }
+      ]
+    },
+    "connection_id": {
+      "oneOf": [
+        {
+          "type": "null"
+        },
+        {
+          "pattern": "^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$",
+          "type": "string"
+        }
+      ]
+    },
+    "digest": {
+      "pattern": "^[a-f0-9]{64}$",
+      "type": "string"
+    },
+    "kind": {
+      "const": "publishing_channel_artifact"
+    },
+    "organization_id": {
+      "pattern": "^[1-9][0-9]{0,18}$",
+      "type": "string"
+    },
+    "owner_user_id": {
+      "pattern": "^[1-9][0-9]{0,18}$",
+      "type": "string"
+    },
+    "platform": {
+      "enum": [
+        "wordpress",
+        "ghost",
+        "unknown"
+      ]
+    },
+    "policy_sha256": {
+      "pattern": "^[a-f0-9]{64}$",
+      "type": "string"
+    },
+    "public_origin": {
+      "maxLength": 1024,
+      "minLength": 1,
+      "pattern": "^https://[a-z0-9.-]+/[^?#%\\\\\\s]*$",
+      "type": "string"
+    },
+    "review_policy": {
+      "enum": [
+        "auto",
+        "review"
+      ]
+    },
+    "schema_version": {
+      "const": 1,
+      "type": "integer"
+    },
+    "scope_sha256": {
+      "pattern": "^[a-f0-9]{64}$",
+      "type": "string"
+    }
+  },
+  "required": [
+    "artifact_operation_id",
+    "billing_request_id",
+    "channel",
+    "company_id",
+    "connection_generation",
+    "connection_id",
+    "digest",
+    "kind",
+    "organization_id",
+    "owner_user_id",
+    "platform",
+    "policy_sha256",
+    "public_origin",
+    "review_policy",
+    "schema_version",
+    "scope_sha256"
+  ],
+  "title": "Publishing-channel artifact reservation reference",
+  "type": "object"
+}
