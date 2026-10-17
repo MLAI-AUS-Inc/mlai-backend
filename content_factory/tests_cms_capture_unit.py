@@ -53,6 +53,12 @@ class Rows:
 
     def first(self): return self.selected[0] if self.selected else None
 
+    def order_by(self, *fields):
+        selected = list(self.selected)
+        for name in reversed(fields):
+            selected.sort(key=lambda row: str(getattr(row, name.lstrip("-"), None) or ""), reverse=name.startswith("-"))
+        return Rows(self.rows, selected)
+
     def update(self, **values):
         for row in self.selected:
             for key, value in values.items(): setattr(row, key, deepcopy(value))
