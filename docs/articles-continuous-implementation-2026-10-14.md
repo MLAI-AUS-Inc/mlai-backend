@@ -671,3 +671,22 @@ off; no local DB, provider write, paid generation, merge or deployment occurred.
 See `articles-e5-cms-approval-2026-10-17.md` for the API and remaining acceptance.
 Next implementation is durable native post publication, public proof and CMS
 first-article goal/UI integration; hosting and zoo prerequisites remain unresolved.
+
+## 17 October: durable native CMS post and public-body proof
+
+Exact private approval now reserves one native publication journal. WordPress
+and Ghost progress through unique-slug preflight, persisted sole POST allowance,
+provider acknowledgement, exact provider-ID re-read and credential-free public
+body/canonical observation. Lost or malformed replies reconcile by GET only;
+unknown outcomes prohibit another create or automatic fallback publication.
+Original source, private policy, spend/refund and current owner/key fence effects
+and late results. Aged image checks reuse the original approval and media URLs.
+
+All 1,078 no-database website checks pass, with 18 new publisher/provider-recheck
+cases. Model dry-run reports no changes, failure audit covers 778 emissions and
+all 558 test modules are assigned. Actual ORM full-path reservation, proof,
+refund denial and purge are assigned to disposable remote CI. Flags remain off;
+no actual CMS write, paid generation, local database, merge or deployment ran.
+Native first-article goal/status/UI, strategy handoff, revision lineage,
+unpublish and real-provider/container/browser acceptance remain implementation
+work. See `articles-e5-cms-publication-2026-10-17.md`.

@@ -1304,6 +1304,14 @@ class WebsiteReviewRegressionTests(WebsiteDatabaseFixture, TestCase):
                 from .tests_cms_artifact_review_unit import fixture, seal
                 handoff = fixture()
                 handoff.update(run_id=synced.run_id, run_generation=0, envelope=artifact_payload['publishing_channel_artifact'])
+                from .cms_native_html import native_fragment, profile_receipt, preview_document
+                fragment = native_fragment(handoff['article']['html'].replace('</article>',
+                    '<p>This synthetic article preserves the original approved explanation, concrete examples, useful evidence, '
+                    'clear next steps and every reviewed detail. It contains enough readable words to exercise public '
+                    'article verification against a native theme.</p></article>'), title=handoff['article']['title'])
+                handoff['article'].update(html=fragment, profile=profile_receipt(fragment, title=handoff['article']['title']))
+                handoff['editorial_acceptance']['transport_sha256'] = handoff['article']['profile']['html_sha256']
+                handoff['preview_html'] = preview_document(fragment, title=handoff['article']['title'])
                 seal(handoff)
                 self.assertEqual(cms_artifact_review.ensure_reviews(connection_id=website.pk), 1)
                 self.assertEqual(cms_artifact_review.ensure_reviews(connection_id=website.pk), 0)
@@ -1341,11 +1349,38 @@ class WebsiteReviewRegressionTests(WebsiteDatabaseFixture, TestCase):
                     data={**contract_for(website), 'source_run_id': synced.run_id})
                 self.assertTrue(visible['approvalRecorded'])
                 self.assertEqual(visible['stageId'], str(stage.pk))
+                from . import cms_article_publication
+                from .tests_cms_post_contract_unit import response as post_response
+                self.assertEqual(cms_article_publication.ensure_publications(connection_id=website.pk), 1)
+                self.assertEqual(cms_article_publication.ensure_publications(connection_id=website.pk), 0)
+                publication = website.operations.get(action='cms-publish')
+                posted = []
+                def native_post(binding, credential, **effect):
+                    intent = publication.payload['intent']
+                    row = post_response(intent, link=binding['public_origin'] + 'articles/' + intent['slug'] + '/')
+                    if effect['method'] == 'POST':
+                        issued = website.operations.get(pk=publication.pk)
+                        self.assertEqual(issued.payload['post_state']['create_count'], 1)
+                        posted.append(row)
+                        return row, {}
+                    return (posted[0] if effect['identifier'] is not None else posted), {}
+                def public_post(intent, state):
+                    return '<html><head><link rel="canonical" href="' + state['public_url'] + '"></head><body><h1>' + intent['title'] + '</h1>' + intent['html'] + '</body></html>'
+                with patch.object(cms_artifact_review, 'fetch_handoff', return_value=handoff), \
+                        patch.object(cms_article_publication, 'request_json', side_effect=native_post), \
+                        patch.object(cms_article_publication.public, 'fetch_public_article', side_effect=public_post):
+                    for _ in range(3):
+                        publication = cms_article_publication.advance_publication(publication.pk, now=timezone.now() + timedelta(seconds=1))
+                self.assertEqual((publication.state, len(posted)), ('completed', 1))
+                self.assertEqual(cms_article_publication.current_publication(publication)[0].billing['spend_ledger_id'], str(spend.pk))
+                self.assertIs(publication.receipt['publishing_verified'], True)
+                self.assertNotIn('cms-publish', json.dumps(summary_for(self.config, company_id=company.pk)))
                 with transaction.atomic():
                     Ledger.objects.create(user=user, kind='REFUND', source='CONTENT_FACTORY', delta=6, delta_microroo=6_000_000,
                         refund_of=spend, idempotency_key='content_factory:refund:' + artifact_payload['client_request_id'])
                     with self.assertRaises(WebsiteAuthorityError): cms_article_source.current_article(review)
                     with self.assertRaises(WebsiteAuthorityError): cms_article_approval.current_approval(approval)
+                    with self.assertRaises(WebsiteAuthorityError): cms_article_publication.current_publication(publication)
                     transaction.set_rollback(True)
             from . import cms_capture
             from .tests_cms_inventory_contract_unit import wordpress_post
@@ -1397,6 +1432,8 @@ class WebsiteReviewRegressionTests(WebsiteDatabaseFixture, TestCase):
             self.assertEqual((stage.state, stage.payload), ('deleted', {}))
             approval.refresh_from_db()
             self.assertEqual((approval.state, approval.payload), ('deleted', {}))
+            publication.refresh_from_db()
+            self.assertEqual((publication.state, publication.payload), ('deleted', {}))
             native_row = website.operations.get(pk=native['operation_id'])
             self.assertEqual((native_row.state, native_row.payload), ('deleted', {}))
 

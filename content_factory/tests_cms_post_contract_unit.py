@@ -44,6 +44,24 @@ def issued(value):
 
 
 class CmsPostContractTests(SimpleTestCase):
+    def test_public_verification_reloads_the_same_exact_acknowledged_provider_record(self):
+        for platform in ("wordpress", "ghost"):
+            value = intent(platform)
+            state, effect = issued(value)
+            ack = response(value) if platform == "wordpress" else {"posts": [response(value)]}
+            confirmed = posts.observe_posts(value, state, ack, lookup=False)
+            read = posts.confirmation_effect(value, confirmed)
+            self.assertEqual((read.method, read.identifier), ("GET", confirmed["provider_id"]))
+            self.assertEqual(posts.observe_confirmation(value, confirmed, ack), confirmed)
+            for change in ({"id": 43 if platform == "wordpress" else "e" * 24},
+                    {"link" if platform == "wordpress" else "url": "https://fixture.test/other/"},
+                    {"slug": "foreign-post"}):
+                changed = response(value, **change)
+                with self.assertRaises(CmsApiError):
+                    posts.observe_confirmation(value, confirmed, changed if platform == "wordpress" else {"posts": [changed]})
+            if platform == "ghost":
+                self.assertEqual(effect.payload["posts"][0]["visibility"], "public")
+
     def test_ghost_can_explicitly_disable_duplicate_theme_image_and_recovery_checks_that_field(self):
         value = intent("ghost", native_fields={"authors": ["a" * 24], "tags": [], "feature_image": None})
         state = posts.new_post_state(value)
