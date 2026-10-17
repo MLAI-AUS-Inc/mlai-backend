@@ -117,6 +117,24 @@ unrelated pre-existing slug. Store the returned post/media ID before later effec
 repeating an acknowledged operation reuses those IDs. Unknown outcomes remain
 bounded pending work rather than an invented success.
 
+The post recovery contract reserves an operation-unique public slug (a bounded
+title seed plus the full operation UUID), sealed along with the original artifact,
+editorial and approval digests before dispatch. A fixed GET checks that slug first.
+The sole POST sends the approved body and requested draft/published status
+together; it does not promote or overwrite an unrelated CMS draft. Persist
+`create_issued` before sending. A lost reply can only probe that same slug and
+validate the exact operation marker, body, title, status and native references.
+After eight empty probes the outcome remains explicitly unknown: no new POST,
+second public copy or fabricated live proof follows. A recovery read is not
+authority to republish through another channel while the first publication's
+outcome is unknown. Provider acknowledgement remains separate from public proof.
+
+WordPress's documented update handler has no optimistic body/version check like
+Ghost's `updated_at` contract. The initial create path therefore sends the approved
+content and publication status in one new-post request. It does not claim atomic
+compare-and-swap for later WordPress edits. Existing customer posts remain intact;
+edit/unpublish flows need their own explicit owned-resource review and checks.
+
 Verify the public post URL and expected content/operation marker independently of
 the authenticated API response. A draft/export or provider 201 is not live proof.
 Provider URLs cannot redirect verification to a private or foreign origin.
