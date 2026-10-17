@@ -254,3 +254,164 @@ class FirstArticleControllerTests(SimpleTestCase):
             patch.object(ContentFactoryRun.objects,"select_for_update") as locked:
             self.assertFalse(article.observe_manual_merge(self.op,self.child,now=self.now))
         locked.assert_not_called()
+
+
+@override_settings(ARTICLES_FIRST_ARTICLE_GOAL_ENABLED=True, ARTICLES_SETUP_CONSENT_ENABLED=True,
+    ARTICLES_WEBSITE_GOAL_RUNNER_ENABLED=True, ARTICLES_WEBSITE_GOAL_ENROLLED_ORGANIZATIONS=["7"],
+    ARTICLES_FAILURE_TAXONOMY_POLICY_ENABLED=True, ARTICLES_FAILURE_TAXONOMY_ENROLLED_ORGANIZATIONS=["7"],
+    ARTICLES_WEBSITE_GOAL_BUDGETS_ENABLED=True, ARTICLES_ARTICLE_RECOVERY_ENABLED=True,
+    ARTICLES_ARTICLE_SOURCE_REFRESH_ENABLED=True)
+class ArticleSourceRefreshIntentTests(SimpleTestCase):
+    def setUp(self):
+        from .website_goal_scope import rebind_source_scope
+        self.chain = FirstArticleControllerTests("runTest")
+        self.chain.setUp()
+        self.addCleanup(self.chain.doCleanups)
+        self.op, self.run, self.now = self.chain.op, self.chain.run, self.chain.now
+        self.run.status = "completed"
+        self.run.result = {"generation": 1, "state_version": 5}
+        self.run.run_request.update(configuration_revision=1, branch="main", app_root="")
+        self.op.receipt.update(first_article_run_id=self.run.run_id, current_step="first-article")
+        self.chain.connection.configuration_version = 2
+        self.chain.connection.verified_sha = "c" * 40
+        self.edges = [{"from_revision": 1, "to_revision": 2, "source_sha": "c" * 40}]
+        self.chain.connection.operations.filter.side_effect = self.operation_rows
+        self.op.receipt["goal"] = rebind_source_scope(self.op.receipt["goal"], self.chain.connection, company_id=9, now=self.now)
+        self.assertIsNotNone(self.op.receipt["goal"])
+        self.op._claimed_goal_revision = self.op.receipt["goal"]["revision"]
+
+    def operation_rows(self, *args, **kwargs):
+        if kwargs.get("action") == "goal-source-scope":
+            query = rows()
+            query.__getitem__.side_effect = lambda key: [SimpleNamespace(payload=edge) for edge in self.edges][key]
+            return query
+        return self.chain.find_operation(*args, **kwargs)
+
+    def reserve(self):
+        from .website_article_refresh_intent import reserve
+        return reserve(self.op, self.chain.context, self.chain.config, user=self.chain.fixture.user, now=self.now)
+
+    def test_journal_replay_reuses_proposal_identity_and_original_spend_without_dispatch(self):
+        from .website_article_refresh_intent import valid_intent
+        held = deepcopy(self.op.receipt["first_article_billing"])
+        self.op.receipt.update(first_article_approval={"old": "approval"}, first_article_live_receipt={"old": "live"},
+            article_recovery={"old": "resume"})
+        with patch.object(views, "start_article_generation") as generate, patch.object(views, "control_article_run") as control, \
+            patch("content_factory.website_operations.reserve_workflow_operation") as operation:
+            first = self.reserve()
+            self.assertEqual(first, self.reserve())
+        self.assertTrue(valid_intent(first))
+        self.assertEqual(first["state"], "pending_reconciliation")
+        self.assertEqual(first["binding"]["paid_root"]["run_id"], self.run.run_id)
+        self.assertEqual(first["binding"]["billing"]["spend_ledger_id"], "11")
+        self.assertEqual(self.op.receipt["first_article_billing"], held)
+        self.assertEqual(self.chain.fixture.spend.call_count, 1)
+        for key in ("first_article_approval", "first_article_live_receipt", "article_recovery"):
+            self.assertNotIn(key, self.op.receipt)
+        generate.assert_not_called(); control.assert_not_called(); operation.assert_not_called()
+        first["binding"]["source_sha"] = "mutated returned copy"
+        self.assertNotEqual(first, self.reserve())
+
+    def test_each_new_trusted_source_gets_one_identity_with_a_fixed_goal_limit(self):
+        from .website_goal_scope import rebind_source_scope
+        previous = self.reserve()
+        for revision in (3, 4, 5):
+            self.chain.connection.configuration_version = revision
+            self.chain.connection.verified_sha = str(revision) * 40
+            self.edges.append({"from_revision": revision - 1, "to_revision": revision, "source_sha": str(revision) * 40})
+            self.op.receipt["goal"] = rebind_source_scope(self.op.receipt["goal"], self.chain.connection, company_id=9, now=self.now)
+            current = self.reserve()
+            self.assertNotEqual(current["proposed_run_id"], previous["proposed_run_id"])
+            self.assertEqual(current, self.reserve())
+            previous = current
+        self.chain.connection.configuration_version = 6
+        self.chain.connection.verified_sha = "6" * 40
+        self.edges.append({"from_revision": 5, "to_revision": 6, "source_sha": "6" * 40})
+        self.op.receipt["goal"] = rebind_source_scope(self.op.receipt["goal"], self.chain.connection, company_id=9, now=self.now)
+        with self.assertRaises(WebsiteAuthorityError): self.reserve()
+        self.assertEqual(self.chain.fixture.spend.call_count, 1)
+
+    def test_missing_trusted_edges_or_same_source_cannot_create_an_intent(self):
+        self.edges = []
+        with self.assertRaises(WebsiteAuthorityError): self.reserve()
+        self.assertNotIn("article_source_refresh", self.op.receipt)
+        self.op.receipt["goal"]["current_source_sha"] = "a" * 40
+        with self.assertRaises(WebsiteAuthorityError): self.reserve()
+
+    def test_disabled_rollout_has_no_journal_or_payment_effect(self):
+        with override_settings(ARTICLES_ARTICLE_SOURCE_REFRESH_ENABLED=False):
+            self.assertIsNone(self.reserve())
+        self.assertNotIn("article_source_refresh", self.op.receipt)
+        self.assertEqual(self.chain.fixture.spend.call_count, 1)
+
+    def test_cancelled_root_never_becomes_refresh_authority(self):
+        self.run.status = "cancelled"
+        with self.assertRaises(WebsiteAuthorityError): self.reserve()
+        self.assertNotIn("article_source_refresh", self.op.receipt)
+
+    def test_cancelled_goal_and_changed_owner_do_not_acquire_intents(self):
+        self.op.state = "cancelled"
+        self.assertIsNone(self.reserve())
+        self.op.state = "running"
+        self.chain.fixture.user.pk = 999
+        with self.assertRaises(WebsiteAuthorityError): self.reserve()
+
+    def test_refunded_or_changed_original_payment_cannot_fund_a_refresh(self):
+        self.chain.fixture.refunds.return_value.exists.return_value = True
+        with self.assertRaises(WebsiteAuthorityError): self.reserve()
+        self.chain.fixture.refunds.return_value.exists.return_value = False
+        self.run.run_request["roo_points_ledger_id"] = "999"
+        with self.assertRaises(WebsiteAuthorityError): self.reserve()
+
+    def test_foreign_company_and_changed_selected_branch_are_refused(self):
+        self.run.organization_id = 99
+        with self.assertRaises(WebsiteAuthorityError): self.reserve()
+        self.run.organization_id = 7
+        self.run.run_request["branch"] = "other"
+        with self.assertRaises(WebsiteAuthorityError): self.reserve()
+
+    def test_unknown_usage_stops_before_a_new_intent(self):
+        self.op.receipt["goal"]["missing_usage_run_ids"] = [self.run.run_id]
+        self.assertIsNone(self.reserve())
+        self.assertEqual(self.op.receipt["budget_stop_reason"], "usage_unknown")
+        self.assertNotIn("article_source_refresh", self.op.receipt)
+
+    def test_stale_prepare_lease_cannot_save_a_proposal_identity(self):
+        self.chain.fixture.rows.return_value.filter.return_value.first.return_value = None
+        with self.assertRaises(WebsiteAuthorityError): self.reserve()
+        self.assertNotIn("article_source_refresh", self.op.receipt)
+
+    def test_malformed_or_changed_original_intents_cannot_mint_a_replacement(self):
+        original = self.reserve()
+        for key, value in (("version", 2), ("state", "submitted"), ("binding", {}), ("proposed_run_id", "bad")):
+            self.op.receipt["article_source_refresh"] = {**original, key: value}
+            with self.subTest(key=key), self.assertRaises(WebsiteAuthorityError): self.reserve()
+        self.op.receipt["article_source_refresh"] = original
+        self.run.result["state_version"] += 1
+        with self.assertRaises(WebsiteAuthorityError): self.reserve()
+
+    def test_missing_or_boolean_original_revisions_are_not_refresh_evidence(self):
+        request, result = deepcopy(self.run.run_request), deepcopy(self.run.result)
+        for field, value in (("configuration_revision", None), ("configuration_revision", True),
+                ("configuration_revision", 2), ("app_root", "other")):
+            self.run.run_request = {**request, field: value}
+            with self.subTest(field=field, value=value), self.assertRaises(WebsiteAuthorityError): self.reserve()
+        self.run.run_request = request
+        for field, value in (("generation", -1), ("generation", True), ("state_version", None)):
+            self.run.result = {**result, field: value}
+            with self.subTest(field=field, value=value), self.assertRaises(WebsiteAuthorityError): self.reserve()
+
+    def test_duplicate_or_foreign_historical_intents_are_refused(self):
+        from .website_article_refresh_intent import valid_intent
+        current = self.reserve()
+        self.op.receipt["article_source_refresh_history"] = [deepcopy(current)]
+        with self.assertRaises(WebsiteAuthorityError): self.reserve()
+        foreign = deepcopy(current)
+        foreign["binding"]["goal"]["goal_id"] = "foreign"
+        foreign["binding"]["billing"]["client_request_id"] = "articles-first:" + goals.digest({
+            "goal_id": "foreign", "scope": {key: value for key, value in foreign["binding"]["current_scope"].items()
+                if key != "configuration_revision"}})
+        foreign["id"] = goals.digest(foreign["binding"])
+        self.assertTrue(valid_intent(foreign), "A syntactically valid foreign journal is still unauthorized")
+        self.op.receipt["article_source_refresh_history"] = [foreign]
+        with self.assertRaises(WebsiteAuthorityError): self.reserve()
