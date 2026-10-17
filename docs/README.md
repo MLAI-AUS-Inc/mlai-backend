@@ -65,6 +65,7 @@ subsystem-specific contracts and runbooks.
 - [E5 CMS publishing](articles-e5-cms-publishing-2026-10-17.md) — independent provider authority, encrypted credentials and WordPress/Ghost publication recovery
 
 - [E5 publishing-channel interface](articles-e5-channel-interface-2026-10-17.md) — shared operations, original guarded Git/portable flows and separate provider authority
+- [E5 hosted bundle contract](articles-e5-hosted-bundle-contract-2026-10-18.md) — immutable producer parity and bounded inert static export validation, without hosted execution authority
 
 - [E5 publishing-channel discovery](articles-e5-channel-discovery-2026-10-17.md) — bounded public/repository observations and recommendations, without publishing authority
 

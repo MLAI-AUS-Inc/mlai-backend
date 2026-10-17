@@ -98,6 +98,7 @@ jobs:
         python scripts/check_native_inventory_summary_contract.py --remote
         python scripts/check_native_target_identity_contract.py --remote
         python scripts/check_channel_artifact_contract.py --remote
+        python scripts/check_hosted_bundle_contract.py --remote
         python scripts/check_cms_artifact_contract.py --remote
         python scripts/check_cms_goal_recovery_contract.py --remote
         python -m unittest tests.test_native_inventory_summary_contract tests.test_native_target_identity_contract -q
@@ -496,6 +497,7 @@ jobs:
           core.tests.test_account_ban_guards \
           tests.test_runtime_hardening \
           tests.test_worker_memory_profile_unit \
+          content_factory.tests_hosted_bundle_contract_unit \
           tests.test_scheduled_discovery_operability \
           tests.test_ci_reuse_pr_checks \
           integrations.tests_fields \
