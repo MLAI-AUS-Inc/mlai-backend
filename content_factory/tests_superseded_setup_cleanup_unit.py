@@ -240,6 +240,7 @@ class SupersededSetupCleanupFollowupTests(SimpleTestCase):
             query.exists.return_value = kwargs.get("action") == "superseded-setup-cleanup"
             return query
         with patch.object(reconciliation.WebsiteConnectionOperation.objects, "filter", side_effect=filtered), \
+                patch("content_factory.cms_access_status.expire_due"), \
                 patch.object(reconciliation, "monitor_cleanup_pull_requests"), \
                 patch("content_factory.website_support.reconcile_support_verifications"), \
                 patch.object(reconciliation, "_process_superseded_setup_cleanup", return_value="completed") as processed:

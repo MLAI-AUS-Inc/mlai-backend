@@ -62,6 +62,8 @@ def project(operation, context, config, *, user, binding, now):
         result.update(title="Article setup is paused", message="Article setup is currently paused.")
     elif operation.state in {"stopped", "cancelled", "needs_attention"}:
         result.update(title="Article setup stopped", message="View the recorded setup details.")
+    from .cms_access_status import apply as access_progress
+    access_progress(result, operation)
     if getattr(settings, "ARTICLES_WEBSITE_DOCTOR_ENABLED", False):
         result["doctor"] = {"version": 1, "channel": "cms", "companyId": binding["company_id"], "connectionId": binding["connection_id"],
             "connectionGeneration": binding["generation"], "configurationRevision": config.website_connection.configuration_version,

@@ -18,7 +18,7 @@ def public_summary(connection, *, company_id=None):
         platform = binding["platform"]
     except CmsContractError:
         platform = "unknown"
-    latest = connection.operations.exclude(action__in=["channel-credential", "cms-artifact", "cms-review", "cms-media", "cms-stage", "cms-policy", "cms-approval", "cms-publish", "cms-goal", "cms-goal-refund", "cms-setup", "cms-setup-intent", "cms-setup-refund", "goal-usage", "goal-alert", "usage-refresh"]).only("id", "action", "state", "receipt").order_by("-created_at").first()
+    latest = connection.operations.exclude(action__in=["channel-credential", "cms-artifact", "cms-review", "cms-media", "cms-stage", "cms-policy", "cms-approval", "cms-publish", "cms-goal", "cms-goal-refund", "cms-setup", "cms-setup-intent", "cms-setup-refund", "cms-credential-renewal", "goal-usage", "goal-alert", "usage-refresh"]).only("id", "action", "state", "receipt").order_by("-created_at").first()
     return {"channel": "cms", "platform": platform, "connectionId": str(connection.pk),
         "connectionGeneration": connection.generation, "companyId": str(company_id) if company_id else None,
         "repositoryId": None, "githubRepo": "", "appRoot": "", "branch": "", "siteUrl": connection.site_url,

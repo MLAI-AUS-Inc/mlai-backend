@@ -250,7 +250,7 @@ class OutboxTests(SimpleTestCase):
         # Evaluate the real scheduler predicate: a crashed running notice must
         # re-enter after its lease, while a live lease and unrelated task do not.
         from django.db.models import Q
-        predicates=next(call.args for call in select.call_args_list if call.args)
+        predicates=next(call.args for call in select.call_args_list if call.args and not call.kwargs.get("action"))
         def matches(node,row):
             def leaf(value):
                 key,expected=value;parts=key.split("__");actual=row.get(parts[0])

@@ -9,6 +9,7 @@ from . import cms_credential_renewal as renewal
 from .cms_connection_authority import validate_current, current_credential
 from .website_contract import WebsiteAuthorityError
 from .website_publishing_channels import saved_record, scope_for
+from .cms_access_contract import wait_epoch
 
 
 def _deny():
@@ -78,19 +79,27 @@ def for_operation(context, config, *, user, operation_id):
         if (record is None or record["scope"] != scope or not record["selection"] or
                 record["selection"]["channel"] != "cms" or record["selection"]["platform"] not in {"unknown", binding["platform"]}):
             raise _deny()
-        waiting = operation.state == "needs_user" and (operation.receipt.get("user_action") or {}).get("id") == "connect_cms"
+        epoch = wait_epoch(operation)
+        waiting = epoch is not None
         receipt = _receipt(context, config, user)
         form = {"version": 1, "companyId": binding["company_id"], "connectionId": binding["connection_id"],
             "connectionGeneration": binding["generation"], "configurationRevision": config.website_connection.configuration_version,
             "operationId": str(operation.pk), "platform": binding["platform"], "publicOrigin": binding["public_origin"],
-            "apiOrigin": binding["api_origin"], "channelScope": deepcopy(scope), "channelRevision": record["revision"]} if waiting else None
+            "apiOrigin": binding["api_origin"], "channelScope": deepcopy(scope), "channelRevision": record["revision"],
+            "accessEpoch": epoch} if waiting else None
         _refresh(context, config, user)
         operation.refresh_from_db()
         if (validate_current(context, config, config.website_connection, user=user) != binding or
                 renewal.candidate(context, config, user=user, proposal=binding) != selected or
                 saved_record(config.article_system) != record or _receipt(context, config, user) != receipt or
-                waiting != (operation.state == "needs_user" and (operation.receipt.get("user_action") or {}).get("id") == "connect_cms")):
+                epoch != wait_epoch(operation)):
             raise _deny()
-        return {"cmsAccess": form, "cmsConnectionReceipt": receipt}
+        from .cms_access_status import for_root
+        progress = for_root(operation)
+        if progress is not None and progress["state"] in {"pending", "running"}: form = None
+        from .cms_access_authority import enabled
+        if not enabled(): form = None
+        return {"cmsAccess": form, "cmsConnectionReceipt": receipt,
+            **({"cmsAccessOperation": progress} if progress is not None else {})}
     except (ObjectDoesNotExist, ValueError, TypeError, KeyError, AttributeError, RecursionError):
         raise _deny() from None

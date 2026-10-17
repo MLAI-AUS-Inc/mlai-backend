@@ -342,6 +342,8 @@ def advance_goal(identifier, *, now=None):
             if operation is None or operation.state not in authority.ACTIVE or operation.next_attempt_at and operation.next_attempt_at > now:
                 return operation
             authority.current(operation)
+            from .cms_access_status import defer_parent
+            if defer_parent(operation, now=now): return operation
             operation.payload = {**deepcopy(operation.payload), "lease_id": lease}
             operation.state, operation.next_attempt_at = "running", now + timedelta(seconds=LEASE_SECONDS)
             operation.attempts += 1

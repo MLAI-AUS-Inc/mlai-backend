@@ -183,12 +183,18 @@ class WebsiteConnectionActionView(APIView):
             return Response(exc.as_dict(), status=exc.status, headers=headers)
 
     def post(self, request, action):
-        if action not in {"prepare", "pause", "disconnect", "reconnect", "reset", "cleanup", "purge", "cancel-operation", "reconcile", "verify-access", "verify", "custom-contract", "ci-attestation", "github-revoke", "verify-cleanup", "inspect-channel", "select-channel", "cms-connect", "cms-configure", "cms-start-articles", "cms-setup-articles", "cms-review-article", "cms-approve-article", "capture-existing"}:
+        if action not in {"prepare", "pause", "disconnect", "reconnect", "reset", "cleanup", "purge", "cancel-operation", "reconcile", "verify-access", "verify", "custom-contract", "ci-attestation", "github-revoke", "verify-cleanup", "inspect-channel", "select-channel", "cms-connect", "cms-restore-access", "cms-configure", "cms-start-articles", "cms-setup-articles", "cms-review-article", "cms-approve-article", "capture-existing"}:
             return Response({"code": "invalid_connection_action", "detail": "Unknown website action."}, status=400)
         context, config, error = _context(request)
         if error:
             return error
         try:
+            if action == "cms-restore-access":
+                from .cms_access_start import start
+                from .cms_access_status import projection
+                job = start(context, config, user=request.user, data=dict(request.data))
+                return Response({"cmsAccessOperation": projection(job)}, status=202 if job.state in {"pending", "running"} else 200,
+                    headers={"Cache-Control": "private, no-store"})
             if action == "cms-setup-articles":
                 from .cms_setup_start import start
                 from .cms_goal_status import for_context as native_status
@@ -358,7 +364,7 @@ class WebsiteConnectionOperationView(APIView):
         from .website_models import WebsiteConnectionOperation
         from .website_operations import operation_summary
         operation = WebsiteConnectionOperation.objects.filter(pk=operation_id, connection__organization=context.organization).first()
-        if operation is None or operation.action in {"goal-usage", "goal-alert", "usage-refresh", "channel-credential", "cms-artifact", "cms-review", "cms-media", "cms-stage", "cms-policy", "cms-approval", "cms-publish", "cms-goal", "cms-goal-refund", "cms-setup", "cms-setup-intent", "cms-setup-refund"}:
+        if operation is None or operation.action in {"goal-usage", "goal-alert", "usage-refresh", "channel-credential", "cms-artifact", "cms-review", "cms-media", "cms-stage", "cms-policy", "cms-approval", "cms-publish", "cms-goal", "cms-goal-refund", "cms-setup", "cms-setup-intent", "cms-setup-refund", "cms-credential-renewal"}:
             return Response({"detail": "Operation not found."}, status=404)
         return Response({"operation": operation_summary(operation)})
 

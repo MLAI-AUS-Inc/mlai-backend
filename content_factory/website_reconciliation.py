@@ -754,7 +754,7 @@ def process_website_connection_operations(*, limit=20, now=None, connection_id=N
     from .website_cost_ledger import enabled as accounting_enabled
     from .website_operational_alert_delivery import ACTION as alert_action, advance as advance_alert, channel as alert_channel
     notices_enabled=getattr(settings,"ARTICLES_GOAL_NOTIFICATIONS_ENABLED",False)
-    excluded = ["workflow", "cms-artifact", "cms-stage", "cms-policy", "cms-goal", "cms-setup", "cms-setup-intent"] if notices_enabled else ["workflow", "cms-artifact", "cms-stage", "cms-policy", "cms-goal", "cms-setup", "cms-setup-intent", notice_action]
+    excluded = ["workflow", "cms-artifact", "cms-stage", "cms-policy", "cms-goal", "cms-setup", "cms-setup-intent", "cms-credential-renewal"] if notices_enabled else ["workflow", "cms-artifact", "cms-stage", "cms-policy", "cms-goal", "cms-setup", "cms-setup-intent", "cms-credential-renewal", notice_action]
     from .cms_connection_authority import enabled as cms_channel_enabled
     cms_enabled = cms_channel_enabled()
     from .channel_artifacts import enabled as artifacts_enabled
@@ -768,6 +768,10 @@ def process_website_connection_operations(*, limit=20, now=None, connection_id=N
     if native_goals_enabled: excluded.remove("cms-goal")
     setup_enabled = native_goals_enabled and getattr(settings, "ARTICLES_CMS_SETUP_ENABLED", False)
     if setup_enabled: excluded.remove("cms-setup")
+    from .cms_access_status import expire_due
+    expire_due(limit=limit, connection_id=connection_id, now=now)
+    access_enabled = native_goals_enabled and getattr(settings, "ARTICLES_CMS_ACCESS_RENEWAL_ENABLED", False)
+    if access_enabled: excluded.remove("cms-credential-renewal")
     if artifact_reviews_enabled:
         ensure_reviews(limit=limit, connection_id=connection_id)
         ensure_media(limit=limit, connection_id=connection_id)
@@ -797,12 +801,13 @@ def process_website_connection_operations(*, limit=20, now=None, connection_id=N
         Q(action="cms-publish", state="running") |
         Q(action="cms-goal", state__in=["running", "needs_user"]) |
         Q(action="cms-setup", state__in=["running", "needs_user"]) |
+        Q(action="cms-credential-renewal", state="running") |
         unconfigured_alerts |
         Q(action="prepare", state="needs_user", receipt__user_action__id__in=["deploy_site","merge_pr","review_draft"])).exclude(action__in=excluded)
     if connection_id:
         due = due.filter(connection_id=connection_id)
     if native_goals_enabled:
-        due = due.exclude(Q(action__in=["cms-goal", "cms-setup"]) & ~Q(connection__organization_id__in=
+        due = due.exclude(Q(action__in=["cms-goal", "cms-setup", "cms-credential-renewal"]) & ~Q(connection__organization_id__in=
             getattr(settings, "ARTICLES_WEBSITE_GOAL_ENROLLED_ORGANIZATIONS", [])))
     ids = list(due.order_by("next_attempt_at").values_list("id", flat=True)[:limit])
     result = {"status": "completed", "processed": 0, "completed": 0, "pending": 0, "operations": []}
@@ -811,6 +816,15 @@ def process_website_connection_operations(*, limit=20, now=None, connection_id=N
     monitor_cleanup_pull_requests(limit=limit, connection_id=connection_id)
     from .website_wakeups import enabled as event_wakes_enabled
     for identifier in ids:
+        if WebsiteConnectionOperation.objects.filter(pk=identifier, action="cms-credential-renewal").exists():
+            from .cms_access_controller import advance
+            operation = advance(identifier, now=now) if access_enabled else None
+            if operation is not None:
+                result["processed"] += 1
+                result["pending" if operation.state in {"pending", "running"} else "completed"] += 1
+                if len(result["operations"]) < 20:
+                    result["operations"].append({"id": str(identifier), "action": "cms-credential-renewal", "outcome": operation.state})
+            continue
         if WebsiteConnectionOperation.objects.filter(pk=identifier, action="cms-setup").exists():
             from .cms_setup_controller import advance_setup
             operation = advance_setup(identifier, now=now) if setup_enabled else None

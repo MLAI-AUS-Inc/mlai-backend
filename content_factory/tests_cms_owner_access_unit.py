@@ -14,9 +14,10 @@ from . import tests_cms_setup_controller_unit as setup_fixtures
 from .website_contract import WebsiteAuthorityError
 from .website_views import WebsiteConnectionActionView
 from .website_models import WebsiteConnectionOperation
+from .website_failure_contract import classify_failure
 
 
-@override_settings(**fixtures.CmsCredentialRenewalTests._overridden_settings)
+@override_settings(**{**fixtures.CmsCredentialRenewalTests._overridden_settings, "ARTICLES_CMS_ACCESS_RENEWAL_ENABLED": True})
 class CmsOwnerAccessTests(SimpleTestCase):
     configure = fixtures.CmsCredentialRenewalTests.configure
     reserve = fixtures.CmsCredentialRenewalTests.reserve
@@ -30,6 +31,8 @@ class CmsOwnerAccessTests(SimpleTestCase):
         fixtures.CmsCredentialRenewalTests.setUp(self)
         self.goal_operation.state = "needs_user"
         self.goal_operation.receipt["user_action"] = {"id": "connect_cms"}
+        self.goal_operation.receipt.update(failure=classify_failure("missing_or_expired_credentials", "cms_access"),
+            failure_occurrence_id=str(uuid4()))
 
     def read(self, identifier=None):
         return access.for_operation(self.context, self.config, user=self.user, operation_id=identifier or str(self.goal_operation.pk))
@@ -116,7 +119,7 @@ class CmsOwnerAccessTests(SimpleTestCase):
         self.assertNotIn(self.binding["api_origin"], json.dumps(response.data))
 
 
-@override_settings(**setup_fixtures.CmsSetupControllerTests._overridden_settings)
+@override_settings(**{**setup_fixtures.CmsSetupControllerTests._overridden_settings, "ARTICLES_CMS_ACCESS_RENEWAL_ENABLED": True})
 class CmsPreparatoryAccessTests(SimpleTestCase):
     configure = setup_fixtures.CmsSetupControllerTests.configure
     reserve = setup_fixtures.CmsSetupControllerTests.reserve
@@ -129,6 +132,8 @@ class CmsPreparatoryAccessTests(SimpleTestCase):
         self.accept()
         self.parent.state = "needs_user"
         self.parent.receipt["user_action"] = {"id": "connect_cms"}
+        self.parent.receipt.update(failure=classify_failure("missing_or_expired_credentials", "cms_access"),
+            failure_occurrence_id=str(uuid4()))
 
     def test_pre_policy_access_form_uses_the_original_setup_without_inventing_native_goal_or_policy(self):
         before = deepcopy((self.parent.payload, self.parent.receipt))
