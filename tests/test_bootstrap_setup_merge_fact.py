@@ -14,6 +14,7 @@ if not apps.ready:
 
 from content_factory import vibe_marketing_views as views
 from content_factory.website_journey import project_journey
+from content_factory.website_status import add_status
 
 
 class BootstrapSetupMergeFactTests(SimpleTestCase):
@@ -54,7 +55,12 @@ class BootstrapSetupMergeFactTests(SimpleTestCase):
             for name, value in stubs.items():
                 stack.enter_context(patch.object(views, name, Mock(return_value=value)))
             stack.enter_context(patch("content_factory.website_journey.journey_for_context", return_value=journey))
-            return views._overlay_live_bootstrap_fields(payload, context=context, request=None)
+            status = stack.enter_context(patch("content_factory.website_status.add_status", wraps=add_status))
+            request = SimpleNamespace(user=SimpleNamespace(pk=3))
+            result = views._overlay_live_bootstrap_fields(payload, context=context, request=request)
+            self.assertIs(status.call_args.kwargs["user"], request.user)
+            self.assertIsNot(status.call_args.kwargs["user"], context.profile.user)
+            return result
 
     def test_merged_setup_survives_stale_proof_without_granting_article_authority(self):
         for access in (True, False):
