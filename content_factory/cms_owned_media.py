@@ -58,7 +58,7 @@ def _current(operation, *, lease_id=None, allow_completed=False):
     return source
 
 
-def completed_media(operation, *, now=None):
+def completed_media(operation, *, now=None, fresh=True):
     """Require current private ownership and fresh public bytes before final review."""
     source = _current(operation, allow_completed=True)
     if operation.state != "completed" or operation.receipt != _progress(operation):
@@ -66,12 +66,43 @@ def completed_media(operation, *, now=None):
     for intent, state in zip(operation.payload["intents"], operation.payload["states"]):
         if state["phase"] != "public_verified":
             raise _deny()
-        journal.validate_state(state, intent, now=now or timezone.now())
+        journal.validate_state(state, intent, now=(now or timezone.now()) if fresh else None)
     return source
+
+
+def request_public_recheck(operation, *, now=None):
+    """Refresh existing public URLs on demand, preserving every upload allowance.
+
+    Final review/publishing can request this when observations expired. It does
+    no HTTP, starts no upload, and is not a periodic polling loop or approval.
+    """
+    from organizations.models import Organization
+    from .website_models import WebsiteConnectionOperation
+    now = now or timezone.now()
+    source = completed_media(operation, fresh=False)
+    with transaction.atomic():
+        Organization.objects.select_for_update().get(pk=source.run.organization_id)
+        saved = WebsiteConnectionOperation.objects.select_for_update().filter(pk=operation.pk, action=ACTION).first()
+        completed_media(saved, fresh=False)
+        try:
+            completed_media(saved, now=now)
+            return saved
+        except CmsApiError:
+            pass
+        saved.payload = deepcopy(saved.payload)
+        saved.payload["states"] = [{**state, "phase": "provider_ack", "evidence": None}
+            for state in saved.payload["states"]]
+        saved.payload["failures"] = 0
+        saved.state, saved.next_attempt_at = "pending", now
+        saved.receipt = _progress(saved)
+        saved.save(update_fields=["payload", "receipt", "state", "next_attempt_at", "updated_at"])
+        return saved
 
 
 def start_media(review_operation):
     """Reserve all image slots together from a current private reviewed artifact."""
+    if not enabled():
+        raise _deny()
     from organizations.models import Organization
     from .website_models import WebsiteConnectionOperation
     source = current_article(review_operation)
