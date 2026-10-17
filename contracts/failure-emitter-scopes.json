@@ -1203,6 +1203,18 @@
       "site_sha256": "607f3e7eda26cddf7eb14734dc55f720275c3d5d9fb0fef0f25c41671642f5f5",
       "source": "The publication child is selected from this goal's owned source run; WebsiteAuthorityError and prepare_failure validate its B1 failure before recovery policy.",
       "test": "content_factory.tests_website_article_recovery_unit.ArticleRecoveryControllerTests.test_unknown_publication_failure_stops_at_the_enrolled_registry_boundary"
+    },
+    {
+      "adapter": "audited_v0_observation",
+      "allowed_codes_ref": "contracts/failure-codes.json#/codes",
+      "expression": "capabilities['reasonCode']",
+      "field": "reasonCode",
+      "function": "_start_website_preview_article",
+      "owner": "backend.vibe_marketing_views",
+      "path": "content_factory/vibe_marketing_views.py",
+      "site_sha256": "180440e98254d17e8975e7caa2e473a1b680cf5f66dcfb213f23291f7b012975",
+      "source": "saved or authenticated v0 result/capability observation; strict B1 metadata goes through validate_failure/resolve_failure before policy",
+      "test": "content_factory.tests_failure_contract_unit.ScannerTests.test_dynamic_audits_are_exact_and_bounded"
     }
   ],
   "entry_points": [
@@ -2006,6 +2018,19 @@
       "site_sha256": "ece0cddfe04cd360dc90d9dd1f961819bc2118e429604c25996aa5c3868d98d0",
       "source": "retryable HTTP submission response outside the initial enrolled setup/scan executions; leaves the saved run and its causal failure unchanged",
       "test": "content_factory.tests_setup_pr_changes_unit.ChangedSetupHeadTests.test_an_unreachable_content_factory_is_a_retryable_error"
+    },
+    {
+      "adapter": "nonfailure_category",
+      "allowed_codes_ref": "contracts/failure-codes.json#/codes",
+      "category": "owner/company/billing/measurement request schema; not a causal Articles run failure",
+      "expression": "'website_preview_required'",
+      "field": "code",
+      "function": "_start_website_preview_article",
+      "owner": "backend.vibe_marketing_views",
+      "path": "content_factory/vibe_marketing_views.py",
+      "site_sha256": "9685e6639eed613947cd195ee6111cdee9b003664cc5ef912044ca13db620c7a",
+      "source": "owner/company/billing/measurement request schema; not a causal Articles run failure",
+      "test": "content_factory.tests_failure_contract_unit.ScannerTests.test_dynamic_audits_are_exact_and_bounded"
     }
   ],
   "owner": "backend.content_factory",
