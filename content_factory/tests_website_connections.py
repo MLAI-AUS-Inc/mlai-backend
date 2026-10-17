@@ -1270,7 +1270,7 @@ class WebsiteReviewRegressionTests(WebsiteDatabaseFixture, TestCase):
                         patch('content_factory.company_billing.billing_user_for_organization', return_value=user), \
                         patch('roo.services.PointsService.spend', side_effect=synthetic_hold) as held:
                     managed_native = cms_goal_start.start(context, self.config, user=user, data=native_start_data)
-                    self.assertEqual(cms_goal_start.start(context, self.config, user=user, data=native_start_data).pk, managed_native.pk)
+                    self.assertEqual(str(cms_goal_start.start(context, self.config, user=user, data=native_start_data).pk), str(managed_native.pk))
                 held.assert_called_once()
                 managed_key = managed_native.receipt['first_article_billing']['client_request_id']
                 managed_spend = Ledger.objects.get(pk=managed_native.receipt['first_article_billing']['spend_ledger_id'])
