@@ -91,7 +91,9 @@ def _provider_json(path, *, headers, deadline):
     try:
         response = read_limited("GET", "https://api.github.com" + path, headers=headers,
             maximum=65536, deadline=min(12, remaining))
-        if response.status_code == 429 or response.status_code >= 500:
+        if (response.status_code == 429 or response.status_code >= 500
+                or response.status_code == 403 and (response.headers.get("retry-after")
+                    or response.headers.get("x-ratelimit-remaining") == "0")):
             _transient()
         if response.status_code != 200:
             # A missing/inaccessible PR or branch is not proof of no effect.

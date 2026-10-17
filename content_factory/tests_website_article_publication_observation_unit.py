@@ -163,6 +163,22 @@ class ArticlePublicationObservationTests(SimpleTestCase):
         self.assertNotIn(observation.KEY, self.parent.receipt)
         self.revoke.assert_called_once()
 
+    def test_provider_rate_limit_403_is_transient_without_inventing_missing_owner_access(self):
+        from .bounded_service_read import read_limited
+        self.advance()
+        self.provider.side_effect = read_limited
+        original = httpx.AsyncClient
+        peer = httpx.MockTransport(lambda request: httpx.Response(403,
+            headers={"x-ratelimit-remaining": "0"}, stream=httpx.ByteStream(b"private-provider-canary")))
+        with patch("content_factory.bounded_service_read.httpx.AsyncClient",
+                side_effect=lambda **kwargs: original(transport=peer, **kwargs)):
+            with self.assertRaises(WebsiteAuthorityError) as error: self.advance()
+        self.assertTrue(error.exception.retryable)
+        self.assertEqual(error.exception.code, "website_prepare_dependency_transient")
+        self.assertNotIn("private-provider-canary", str(error.exception))
+        self.assertNotIn(observation.KEY, self.parent.receipt)
+        self.revoke.assert_called_once()
+
     def test_foreign_backend_mutation_is_refused_before_token_or_provider_read(self):
         self.effect()
         self.rows[0].connection_id = "foreign"

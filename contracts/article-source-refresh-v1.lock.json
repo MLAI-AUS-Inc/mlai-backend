@@ -7,7 +7,7 @@
     },
     {
       "local_path": "content_factory/bounded_service_read.py",
-      "sha256": "40a91899a73bc9274693eca8aa9dd6c4c53680c656df683a247f2e3e3716607a",
+      "sha256": "2e66a3a994fb4cec56970f03a93ac7ee99e0b8888081b6c072d01cda7d7732da",
       "source_path": "backend/bounded_service_read.py"
     },
     {
@@ -23,5 +23,5 @@
   ],
   "schema_version": 1,
   "source_repository": "drsamdonegan/content-factory",
-  "source_revision": "5321fa22ba62602d35d536b35f9cf2e380c96362"
+  "source_revision": "0eb18400cd4caa74812763804cc9904718687e33"
 }

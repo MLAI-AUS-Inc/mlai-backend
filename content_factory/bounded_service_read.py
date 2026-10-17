@@ -23,7 +23,12 @@ async def _read(method, url, *, headers, params, body, maximum, deadline):
                 async with client.stream(method, url, headers=headers, params=params, json=body) as response:
                     if response.status_code != 200:
                         # Error bodies carry no authority and need not be read.
-                        return httpx.Response(response.status_code, content=b"")
+                        # Retain only bounded numeric rate-limit hints. Cookies,
+                        # locations and arbitrary provider headers stay private.
+                        safe = {key: value for key in ("retry-after", "x-ratelimit-remaining")
+                            if (value := response.headers.get(key)) is not None and 0 < len(value) <= 12
+                            and value.isascii() and value.isdecimal()}
+                        return httpx.Response(response.status_code, headers=safe, content=b"")
                     content_type = response.headers.get("content-type", "").split(";", 1)[0].strip().lower()
                     if content_type != "application/json" or response.headers.get("content-encoding", "identity").lower() != "identity":
                         raise ServiceBodyInvalid("The service metadata encoding is invalid")

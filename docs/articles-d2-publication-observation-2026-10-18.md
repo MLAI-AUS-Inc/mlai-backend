@@ -60,12 +60,15 @@ CAS with persistence/provider seams. They cover both ledgers, missing ledgers,
 unattributed references, merged and auto-merge facts, foreign repositories,
 contributor heads, owner cancellation, concurrent mutation, missing/inaccessible
 provider facts, transient/lost reads, budget exhaustion and disabled recovery.
+Numeric throttling hints survive the pinned transport; an actual HTTPX 403
+rate-limit response remains transient and cannot become an owner access action.
 The inspection retry fixture now advances the controller's actual clock and
 asserts a second HTTP request after expiry. No schema or migration changes.
-The related selection passes 216 tests, including 13 publication-observation
+The related selection passes 217 tests, including 14 publication-observation
 cases. CI fully selects all 602 test modules; the offline canonical failure
 audit covers 857 production emissions. The immutable inspection contract and
-transport bytes are unchanged and pass local parity verification.
+transport bytes are pinned to immutable producer
+`0eb18400cd4caa74812763804cc9904718687e33` and pass local parity verification.
 
 Leave both existing flags false to retain the previous public behavior. No
 production/customer, paid model, hosting, merge or deployment operation is part
