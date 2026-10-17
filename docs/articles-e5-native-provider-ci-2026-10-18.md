@@ -100,6 +100,11 @@ pass (remote pinned provenance not rechecked locally). Model checks report no
 changes. No database or container was run locally. Actual remote WordPress/Ghost
 acceptance remains required.
 
+Both actual provider identity checks now pass. The next fixture assertion
+compared a newly created model's string UUID with a reloaded model's UUID
+object. It now compares the canonical UUID strings, retaining the requirement
+that replay returns the same connection. This changes the fixture only.
+
 Final local validation passes 109 database-free fixture/assignment/validation
 route and CMS contract cases. Python syntax and the workflow/Compose YAML parse;
 all 595 test modules are assigned. Isolation assertions check pinned images,

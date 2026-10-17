@@ -66,7 +66,7 @@ class CmsProviderAcceptanceTests(TransactionTestCase):
                 "username": fixture["username"], "secret": fixture["secret"]}
             self.assertFalse(connection.in_atomic_block)
             website = owner.connect(context, config, user=user, data=data)
-            self.assertEqual(owner.connect(context, config, user=user, data=data).pk, website.pk)
+            self.assertEqual(str(owner.connect(context, config, user=user, data=data).pk), str(website.pk))
             binding, credential = current_credential(context, config, website, user=user)
             private = website.operations.get(action="channel-credential")
             self.assertTrue(fixture["secret"] not in json.dumps(private.payload))
