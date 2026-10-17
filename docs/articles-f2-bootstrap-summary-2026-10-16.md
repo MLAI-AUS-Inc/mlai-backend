@@ -104,3 +104,14 @@ same comment read to infer the latest submitted batch. Prefetch only on a base
 payload miss, so warm presentation hits need no comment bodies. Mutation/read
 callers outside bootstrap keep their existing fresh model reads. The website
 GET fixture must send explicit company scope, as the real client does.
+
+The corrected full endpoint fixture now passes in disposable PostgreSQL CI on
+`e78e88676ec0ed5a5c3a7c6fbaa0907824b4e686`,
+[run 39047803872](https://github.com/MLAI-AUS-Inc/mlai-backend/actions/runs/39047803872).
+All five samples contain 245,558 bytes. Cold execution uses 168 queries and
+847.75 ms; warm executions use 56 queries and 319.02–357.64 ms. The maximum of
+these five samples, its nearest-rank p95, meets the existing 300,000-byte and
+one-second assertions. The lane passes 47 first-article/cost/alert/cleanup/budget
+cases, followed by the remaining database suites. These are complete synthetic
+endpoint measurements in CI, not a production latency distribution. Sustained
+application-worker memory measurements for G4 remain pending.
