@@ -49,3 +49,46 @@ The full failing website journey/lifecycle CI lane plus the related controls,
 source-stop/source-policy and facade/profile lanes now pass 1,807 checks
 across 130 modules with database/network access denied. No production
 authority or test mutation assertion was relaxed.
+
+## Independent historical editorial sealing
+
+A later prepare pass now advances a distinct action=article-source-history
+outbox once the local stop receipt is saved. It inherits the original goal wall
+and failure budgets. This purpose preserves content before full external quiet;
+it grants no execution. One operation/request is reused for the same stop cause,
+current canonical connection/configuration/deletion scope and source SHA. The
+original paid key, payer and actual spend/refund are rechecked; no new fee or
+paid dispatch is reserved. Current scope comes from the freshly locked connection.
+
+Private service admission reloads the original owner/company/consent/payment,
+causal fence, unchanged original request/attempt, exact saved stop receipt and
+current goal/source. The response has permission_mode=none, empty capabilities
+and the exact history request. Generic operation validation permanently denies
+the private history action, including cleanup/cancellation variants after flags
+are disabled. A 60-second nonce lease and exact prepare claim CAS guard HTTP and
+receipt commits. Lost replies retry the same request; a completed seal is replayed
+without repeating HTTP. No connection lock is held during the worker request.
+
+The actual worker captures only an allowlist of original editorial JSON in the
+original run's purge ownership. Its response returns hashes and bounded metadata,
+never content, credentials, approval or a replacement grant. Stable observed
+original/fenced generations come from the real local control memo, including
+when backend execution_version was unknown. Usage-only status updates do not
+change the saved seal. The receipt fixes quiet=false, effect_authority=false and
+approval_carried=false; a source hash returning to its original value still needs
+fresh admission for its new current scope. Neither old v1 inspection nor generic
+source/cancellation/approval rules are relaxed.
+
+The combined strict database/network-denying check passes 1,665 tests across
+123 explicitly selected CI modules. Current history/producer/provenance guards
+also pass. All 606 modules are fully assigned in CI and the offline failure audit
+validates 868 emissions. The expanded ten-file contract/transport/example lock
+pins CF d2cc94a8f755b7deed59a35ce76520aeac2fb5f0; synthetic examples are
+generated through the actual worker and reproduce byte-for-byte. Full latest-head
+remote CI remains required. No model or migration changes are introduced.
+
+Remaining D2 work is complete task/async-resource/token inventory closure,
+uncertain provider and owned publication/auto-merge reconciliation, then separately
+admitted current-source execution with the original paid root and distinct
+execution idempotency. Fresh build, policy review, merge and live proofs remain
+mandatory. All rollout flags stay off and the changes remain draft-only.

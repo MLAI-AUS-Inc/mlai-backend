@@ -1,0 +1,15 @@
+{
+  "approval_carried": false,
+  "content_state": "draft_available",
+  "digest": "cadb5eddcbfef537fa5aab8f0d664db735724d72f9b9bd33033aa4d796965559",
+  "effect_authority": false,
+  "file_count": 1,
+  "kind": "article_source_history_seal",
+  "quiet": false,
+  "request_digest": "4f97e443ddcfe34bf3ab6b4cb23da53932edea12b8a1558424ce15a4493d60b4",
+  "schema_version": 1,
+  "seal_sha256": "ad94e8d1799baf7b76cd55ecbb7f06317719513a91b7d3cc5925fb5fa56538d6",
+  "sealed_at": "2026-10-18T00:00:00+00:00",
+  "source_fence_id": "77777777-7777-4777-8777-777777777777",
+  "source_run_id": "original-article"
+}

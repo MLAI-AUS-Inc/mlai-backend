@@ -151,6 +151,18 @@ def advance(parent, config, *, now):
     from .website_connections import authority_guard, contract_for
     from .website_first_article import _save_fields, _wait
     operation, request = reserve(parent, config)
+    if parent.receipt.get("article_source_stop") is not None:
+        from . import website_goal_budget as budget
+        reason = budget.exhaustion(parent.receipt["goal"], now=now) if budget.enabled() else None
+        if reason:
+            from .website_goal_runner import stop_goal
+            stop_goal(parent, parent.receipt["goal"], reason=reason, now=now)
+            return True
+        from .website_article_source_history import advance as seal_original_history
+        seal_original_history(parent, config, now=now)
+        _wait(parent, now, "Reconciling outstanding article work after preserving the original editorial content.")
+        return True
+
     with authority_guard(contract_for(parent.connection), action="read"):
         _fresh(parent, config)
         operation = _operation(str(operation.pk), lock=True)
