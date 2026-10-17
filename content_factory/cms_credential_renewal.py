@@ -94,11 +94,16 @@ def renew(selected, context, config, *, user, proposal, credential, identity, re
     WebsiteConnectionOperation.objects.filter(connection_id=connection.pk, generation=connection.generation,
         action__in={"cms-goal", "cms-setup"}, state="needs_user", payload__binding=selected.binding,
         receipt__user_action__id="connect_cms").update(next_attempt_at=timezone.now())
+    # Resume only the original status-only request's explicit key wait. Its
+    # deadline, read allowances and issued-write journal remain unchanged.
+    WebsiteConnectionOperation.objects.filter(connection_id=connection.pk, generation=connection.generation,
+        action="cms-unpublish", state="needs_user", payload__binding=selected.binding,
+        receipt__user_action__id="connect_cms").update(state="pending", next_attempt_at=timezone.now())
     return connection
 
 
 def require_replaceable(connection):
     """Do not abandon original paid/issued native work for another binding."""
     if connection is not None and "_cms_binding" in (connection.capabilities or {}) and connection.operations.filter(
-            action__in={"cms-setup", "cms-goal", "cms-artifact", "cms-publish"}).exclude(state="deleted").exists():
+            action__in={"cms-setup", "cms-goal", "cms-artifact", "cms-publish", "cms-unpublish"}).exclude(state="deleted").exists():
         raise _deny()

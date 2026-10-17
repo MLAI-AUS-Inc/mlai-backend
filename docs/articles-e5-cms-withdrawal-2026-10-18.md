@@ -57,8 +57,7 @@ The closed contract now binds the original confirmed publication and one fixed
 provider ID, keeps status-only writes separate from ownership/public-absence
 proofs, and limits unknown recovery to eight GET observations. Eleven synthetic
 cases plus the existing fifteen post-journal cases pass without database or
-network access. Owner admission, leased execution, public-absence observations
-and UI remain to implement; this contract alone enables no CMS effect.
+network access. The first checkpoint covered the contract only; the coordinator and UI follow it below.
 
 A separate credential-free, DNS/TLS-pinned exact-URL fetch now accepts only an
 actual 404/410 after the owned provider draft observation. It preserves the
@@ -67,5 +66,51 @@ body and exports no transport exception or credential. The closed proof binds
 site, owner generation, original post, withdrawal UUID, provider draft digest and
 checked time. Current proof has a five-minute window; a historical proof grants
 no new request permission. Eight additional cases pass, for 34 focused cases
-including existing post-journal regressions. Actor/lease coordination, fencing
-the original active publisher/goal, owner routes, status and UI remain next.
+including existing post-journal regressions. The coordinator continuation below adds actor/lease coordination, fencing and owner routes. The owner interface and real provider acceptance remain unfinished.
+
+
+The backend coordinator is implemented behind `ARTICLES_CMS_UNPUBLISH_ENABLED=false`.
+Its owner POST accepts only the original confirmed publication, exact intent
+digest, original public URL and explicit confirmation. An actual owner nonce
+GET recovers acceptance without repeating a write, including after the original
+deadline. Neither path quotes or touches a wallet. Admission fences active
+publishers/goals only for that writing source, retaining completed achievements
+and unrelated goals. The current key and selected owner are re-read at every
+effect and fenced journal commit.
+
+The independent 15-minute deadline, durable provider/public GET allowances and
+three-minute private leases survive restarts. The status update is persisted as
+issued before HTTP; lost/malformed replies can use only the original ID's GET
+reconciliation. Eight still-published observations stop without resending. A
+second identical failure or worker loss stops; credential failure waits for
+renewal of the same actual key without resetting the journal/deadline. Provider
+and public requests run outside owning database transactions. Generic operation,
+journey and connection projections exclude this private action; purge erases it.
+
+Owner metadata exposes the title, original URL/digest and actual request/schedule,
+without the body, API origin or key. Goal status removes the live link during a
+withdrawal and records the verified result separately from the earlier passed
+publication checklist. A past absence proof does not authorize another request
+or certify the future state of an owner-edited CMS. Rollout pauses produce no
+provider request.
+
+Thirty-six synthetic WordPress/Ghost runtime cases pass, covering lost replies,
+lease replacement, repeated worker loss, exact-ID recovery exhaustion, public
+absence limits, owner revocation, no-store nonce reads, and preserved financial
+and historical facts. The full real-ORM initial/setup/publication fixture now
+also exercises a committed withdrawal with a lost reply, one charge, no refund,
+retained achievement and private erasure. That fixture is syntax checked only
+locally and must pass disposable SQLite/PostgreSQL CI. Owner UI, real provider
+acceptance and rollout remain unfinished; no actual CMS, paid generation,
+production service or local database was used.
+
+
+A new explicit nonce is permitted after a proven completed withdrawal (for
+example, after the owner republishes the same post). It cannot replace an
+unfinished, failed or uncertain original request. Each accepted command retains
+its own deadline, read allowances and single status-write journal. The old
+receipt remains unchanged. Ghost's
+[Admin URL serializer](https://github.com/TryGhost/Ghost/blob/main/ghost/core/server/api/endpoints/utils/serializers/output/utils/url.js)
+can return a draft preview URL; withdrawal ownership ignores that draft URL and
+verifies public absence only at the saved original published URL. Synthetic
+preview tokens never enter a receipt or a public request.

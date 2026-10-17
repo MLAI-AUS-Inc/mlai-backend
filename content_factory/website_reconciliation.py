@@ -754,7 +754,7 @@ def process_website_connection_operations(*, limit=20, now=None, connection_id=N
     from .website_cost_ledger import enabled as accounting_enabled
     from .website_operational_alert_delivery import ACTION as alert_action, advance as advance_alert, channel as alert_channel
     notices_enabled=getattr(settings,"ARTICLES_GOAL_NOTIFICATIONS_ENABLED",False)
-    excluded = ["workflow", "cms-artifact", "cms-stage", "cms-policy", "cms-goal", "cms-setup", "cms-setup-intent", "cms-credential-renewal", "cms-initial-connect", "cms-initial-grant"] if notices_enabled else ["workflow", "cms-artifact", "cms-stage", "cms-policy", "cms-goal", "cms-setup", "cms-setup-intent", "cms-credential-renewal", "cms-initial-connect", "cms-initial-grant", notice_action]
+    excluded = ["workflow", "cms-unpublish", "cms-artifact", "cms-stage", "cms-policy", "cms-goal", "cms-setup", "cms-setup-intent", "cms-credential-renewal", "cms-initial-connect", "cms-initial-grant"] if notices_enabled else ["workflow", "cms-unpublish", "cms-artifact", "cms-stage", "cms-policy", "cms-goal", "cms-setup", "cms-setup-intent", "cms-credential-renewal", "cms-initial-connect", "cms-initial-grant", notice_action]
     from .cms_connection_authority import enabled as cms_channel_enabled
     cms_enabled = cms_channel_enabled()
     from .channel_artifacts import enabled as artifacts_enabled
@@ -784,6 +784,9 @@ def process_website_connection_operations(*, limit=20, now=None, connection_id=N
         ensure_publications(limit=limit, connection_id=connection_id)
     else:
         excluded.extend(["cms-review", "cms-media", "cms-approval", "cms-publish"])
+    from .cms_unpublish_authority import enabled as withdrawal_enabled
+    withdrawal_allowed = withdrawal_enabled()
+    if withdrawal_allowed: excluded.remove("cms-unpublish")
     if not cms_enabled:
         # Frozen provider jobs must never fall through to Git token cleanup.
         excluded.extend(["cms-capture", "cms-publish", "cms-unpublish"])
@@ -803,6 +806,7 @@ def process_website_connection_operations(*, limit=20, now=None, connection_id=N
         Q(action="cms-media", state="running") |
         Q(action="cms-approval", state="running") |
         Q(action="cms-publish", state="running") |
+        Q(action="cms-unpublish", state="running") |
         Q(action="cms-goal", state__in=["running", "needs_user"]) |
         Q(action="cms-setup", state__in=["running", "needs_user"]) |
         Q(action="cms-credential-renewal", state="running") |
@@ -882,6 +886,15 @@ def process_website_connection_operations(*, limit=20, now=None, connection_id=N
                 if row and outcome == "completed" and row.payload.get("purge_after_reconciliation"):
                     from .website_first_article_refunds import finish_purged_connection
                     finish_purged_connection(row.connection_id)
+            continue
+        if WebsiteConnectionOperation.objects.filter(pk=identifier, action="cms-unpublish").exists():
+            from .cms_unpublish_controller import advance as advance_withdrawal
+            operation = advance_withdrawal(identifier, now=now) if withdrawal_allowed else None
+            if operation is not None:
+                result["processed"] += 1
+                result["pending" if operation.state in {"pending", "running"} else "completed"] += 1
+                if len(result["operations"]) < 20:
+                    result["operations"].append({"id": str(identifier), "action": "cms-unpublish", "outcome": operation.state})
             continue
         if WebsiteConnectionOperation.objects.filter(pk=identifier, action="cms-publish").exists():
             operation = advance_publication(identifier, now=now) if artifact_reviews_enabled else None
