@@ -584,7 +584,7 @@ jobs:
       env:
         CMS_PROVIDER: ${{ matrix.provider }}
       run: |
-        docker compose -p mlai-cms-provider -f ops/cms-provider-ci/compose.yml up -d "$CMS_PROVIDER"
+        docker compose -p mlai-cms-provider -f ops/cms-provider-ci/compose.yml up -d "$CMS_PROVIDER" loopback
         python scripts/cms_provider_fixture.py "$CMS_PROVIDER"
     - name: Test actual provider adapters against a fresh backend database
       env:

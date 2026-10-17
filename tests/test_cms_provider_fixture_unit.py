@@ -16,10 +16,19 @@ class CmsProviderFixtureTests(unittest.TestCase):
         import yaml
         compose = yaml.safe_load((fixture.ROOT / "ops/cms-provider-ci/compose.yml").read_text())
         self.assertIs(compose["networks"]["default"]["internal"], True)
+        self.assertEqual(compose["services"]["loopback"]["networks"], ["default", "access"])
+        for name in ("wordpress", "ghost", "mysql", "wpcli"):
+            self.assertNotIn("networks", compose["services"][name])
+            self.assertNotIn("ports", compose["services"][name])
         for service in compose["services"].values():
             self.assertTrue(re.fullmatch(r"[a-z0-9:./-]+@sha256:[a-f0-9]{64}", service["image"]))
             for port in service.get("ports", []):
                 self.assertTrue(port.startswith("127.0.0.1:"))
+        proxy = (fixture.ROOT / "ops/cms-provider-ci/loopback.conf").read_text()
+        self.assertEqual(proxy.count("proxy_pass http://$cms_backend$request_uri;"), 2)
+        self.assertIn("set $cms_backend wordpress:80;", proxy)
+        self.assertIn("set $cms_backend ghost:2368;", proxy)
+        self.assertIn("access_log off;", proxy)
 
     def test_ci_has_both_providers_without_secrets_and_always_erases_keys_and_volumes(self):
         import yaml

@@ -52,6 +52,17 @@ Primary references checked on 18 October 2026:
 All article rollout flags remain off. This is draft implementation; actual CI
 results must be recorded after the new lane executes.
 
+The first remote run pulled and started both CMS containers, then both fixed
+loopback readiness checks timed out before authentication. Docker's internal
+bridge did not expose the published listener to the runner. A digest-pinned
+Nginx gateway now joins the internal bridge and a separate host-facing bridge;
+the CMS/database containers retain only the internal network and no published
+ports. The gateway has two fixed upstreams, checks the synthetic Host and turns
+off access logs. It supplies no arbitrary forwarding destination. See Docker's
+[Compose network isolation](https://docs.docker.com/compose/how-tos/networking/)
+and [port publishing](https://docs.docker.com/engine/network/port-publishing/).
+Actual acceptance still requires the repaired remote matrix to pass.
+
 Final local validation passes 109 database-free fixture/assignment/validation
 route and CMS contract cases. Python syntax and the workflow/Compose YAML parse;
 all 595 test modules are assigned. Isolation assertions check pinned images,

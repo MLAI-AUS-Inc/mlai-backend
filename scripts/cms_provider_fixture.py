@@ -162,7 +162,7 @@ def wait_ready(provider):
         finally:
             client.close()
         time.sleep(2)
-    raise ValueError("Disposable CMS did not become ready")
+    raise FixtureFailure("Disposable CMS loopback listener did not become ready")
 
 
 if __name__ == "__main__":
