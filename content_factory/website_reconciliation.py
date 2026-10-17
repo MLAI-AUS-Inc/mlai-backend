@@ -755,6 +755,8 @@ def process_website_connection_operations(*, limit=20, now=None, connection_id=N
     from .website_operational_alert_delivery import ACTION as alert_action, advance as advance_alert, channel as alert_channel
     notices_enabled=getattr(settings,"ARTICLES_GOAL_NOTIFICATIONS_ENABLED",False)
     excluded = ["workflow", "cms-unpublish", "cms-artifact", "cms-stage", "cms-policy", "cms-goal", "cms-setup", "cms-setup-intent", "cms-credential-renewal", "cms-initial-connect", "cms-initial-grant"] if notices_enabled else ["workflow", "cms-unpublish", "cms-artifact", "cms-stage", "cms-policy", "cms-goal", "cms-setup", "cms-setup-intent", "cms-credential-renewal", "cms-initial-connect", "cms-initial-grant", notice_action]
+    from .website_article_credentials import PRIVATE_ACTIONS
+    excluded.extend(PRIVATE_ACTIONS)
     from .cms_connection_authority import enabled as cms_channel_enabled
     cms_enabled = cms_channel_enabled()
     from .channel_artifacts import enabled as artifacts_enabled

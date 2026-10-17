@@ -219,6 +219,8 @@ def mint_website_token(data, *, permission_mode="read", action="read"):
     preflight = raw_preflight in ("1", "true", True)
     if preflight and profile != "workflow_files":
         raise WebsiteAuthorityError("invalid_permission_preflight", "Permission preflight requires the workflow-files profile.", status=400)
+    from . import website_article_credentials as credential_inventory
+    reservation = None
     with authority_guard(data, action=action) as connection:
         if not connection.repository_id or not connection.installation_id:
             raise WebsiteAuthorityError("github_verification_required", "Reconnect GitHub to verify repository identity.")
@@ -226,6 +228,8 @@ def mint_website_token(data, *, permission_mode="read", action="read"):
             _workflow_operation(connection, data, action)
         elif profile == "ci_evidence":
             _ci_evidence_operation(connection, data)
+        if not preflight:
+            reservation = credential_inventory.reserve(connection, data, mode=permission_mode, action=action, profile=profile)
         binding = {**dict(data), **contract_for(connection)}
         installation_id, repository, repository_id = connection.installation_id, connection.github_repo, connection.repository_id
     from .website_connections import require_unlocked_remote_call
@@ -246,25 +250,32 @@ def mint_website_token(data, *, permission_mode="read", action="read"):
             kwargs["permission_profile"] = profile
         token = create_installation_access_token(**kwargs)
     except RequestException as exc:
+        credential_inventory.uncertain(reservation)
         from .website_github_failure import github_failure
         raise github_failure(exc, legacy_code="github_temporarily_unavailable", legacy_message="GitHub could not issue a repository credential. Retry shortly.", legacy_retryable=True) from exc
     except GitHubPermissionLookupUnavailable as exc:
+        credential_inventory.uncertain(reservation)
         from .website_github_failure import github_failure
         raise github_failure(exc, legacy_code="github_temporarily_unavailable", legacy_message="GitHub permission evidence is temporarily unavailable. Retry shortly.", legacy_retryable=True) from exc
     except GitHubWorkflowPermissionRequired as exc:
+        credential_inventory.uncertain(reservation)
         raise _workflow_permission_denial() from exc
     except GitHubCIEvidencePermissionRequired as exc:
+        credential_inventory.uncertain(reservation)
         raise WebsiteAuthorityError("github_ci_evidence_permission_required", CI_EVIDENCE_PERMISSION_DETAIL) from exc
     except GitHubAppTokenError as exc:
+        credential_inventory.uncertain(reservation)
         from .website_github_failure import github_failure
         raise github_failure(exc, legacy_code="github_repository_unavailable", legacy_message="GitHub access could not be verified. Reconnect the selected repository.") from exc
     try:
+        credential_inventory.issued(reservation, token)
         with authority_guard(binding, action=action) as connection:
             if profile == "workflow_files":
                 _workflow_operation(connection, binding, action)
             elif profile == "ci_evidence":
                 _ci_evidence_operation(connection, binding)
-            reference = str(uuid.uuid4())
+            reference = reservation["id"] if reservation is not None else str(uuid.uuid4())
+            credential_inventory.delivery_possible(reservation)
             cache.set(f"website-issued-token:{reference}", token.token, timeout=3600)
             for index in (token_index_key(connection.pk, connection.generation),
                     token_index_key(connection.pk, f"operation:{data.get('operation_id')}")):
@@ -275,34 +286,65 @@ def mint_website_token(data, *, permission_mode="read", action="read"):
             return {**token.as_content_factory_payload(domain=connection.organization.domain),
                 **_token_contract(connection, binding), "credential_reference": reference, "permission_mode": permission_mode,
                 "permission_profile": profile}
-    except WebsiteAuthorityError:
-        # Minting can race disconnect. Do not deliver a credential after consent
-        # changed; revoke the just-created token outside the failed transaction.
+    except Exception:
+        # Never deliver after a revoke or a durable/cache write failure. The
+        # provider call and metadata settlement happen after the guard exits.
         from integrations import http_client
+        confirmed = False
         try:
-            http_client.delete("https://api.github.com/installation/token", headers={"Authorization": f"Bearer {token.token}"}, timeout=(3, 10))
+            response = http_client.delete("https://api.github.com/installation/token", headers={"Authorization": f"Bearer {token.token}"}, timeout=(3, 10))
+            confirmed = response.status_code == 204
         except Exception:
+            pass
+        try:
+            credential_inventory.revocation(reservation, confirmed=confirmed)
+        except Exception:
+            # The pre-mint row remains pending/uncertain. Failed persistence is
+            # never converted into confirmed revocation or a missing token.
             pass
         raise
 
 
+
 def revoke_generation_tokens(connection_id, generation):
-    """Best-effort remote revocation with retryable reference-only receipts."""
+    """Revoke bounded known references; cache loss never proves a tracked token gone."""
     from integrations import http_client
+    from . import website_article_credentials as inventory
+    from .website_connections import require_unlocked_remote_call
+    require_unlocked_remote_call()
+    durable, overflow = inventory.discover(connection_id, generation)
     index = token_index_key(connection_id, generation)
-    pending = []
+    references = list(dict.fromkeys([*(cache.get(index) or []), *durable]))
+    pending, candidates = [], []
     revoked = 0
-    for reference in cache.get(index) or []:
+    for reference in references:
+        tracked = durable.get(reference)
+        if tracked is not None and inventory.settled(*tracked):
+            inventory.mark_expired(tracked[0])
+            cache.delete(f"website-issued-token:{reference}")
+        else:
+            candidates.append(reference)
+    # A cleanup pass cannot occupy a worker for hundreds of provider timeouts.
+    pending.extend(candidates[20:])
+    for reference in candidates[:20]:
+        tracked = durable.get(reference)
+        reservation = tracked[0] if tracked is not None else None
         key = f"website-issued-token:{reference}"
         token = cache.get(key)
         if not token:
+            if tracked is not None:
+                pending.append(reference)
             continue
+        confirmed = False
         try:
             response = http_client.delete("https://api.github.com/installation/token", headers={"Authorization": f"Bearer {token}", "Accept": "application/vnd.github+json"}, timeout=(3, 10))
-            if response.status_code not in {204, 401, 404}:
-                pending.append(reference)
-                continue
+            confirmed = response.status_code == 204
+            # Preserve the historical broker's result for untracked credentials.
+            accepted = confirmed or tracked is None and response.status_code in {401, 404}
         except Exception:
+            accepted = False
+        inventory.revocation(reservation, confirmed=confirmed)
+        if not accepted:
             pending.append(reference)
             continue
         cache.delete(key)
@@ -311,4 +353,4 @@ def revoke_generation_tokens(connection_id, generation):
         cache.set(index, pending, timeout=3600)
     else:
         cache.delete(index)
-    return {"revoked": revoked, "pending": len(pending)}
+    return {"revoked": revoked, "pending": len(pending) + int(overflow)}

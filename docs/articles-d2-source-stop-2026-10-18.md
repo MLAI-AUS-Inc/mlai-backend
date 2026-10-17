@@ -92,3 +92,64 @@ uncertain provider and owned publication/auto-merge reconciliation, then separat
 admitted current-source execution with the original paid root and distinct
 execution idempotency. Fresh build, policy review, merge and live proofs remain
 mandatory. All rollout flags stay off and the changes remain draft-only.
+
+## Original website-token broker inventory
+
+New server-enrolled Git first-article workflow operations now create an independent
+article-credential-inventory record at operation birth, before dispatch. The
+original workflow retains a server-owned marker with the inventory ID and scope
+digest. Enrollment requires the existing default-off source-refresh and article
+stream flags. Replaying an older operation never retrofits known-zero history.
+Original markers remain effective after rollout rollback; a missing/corrupt
+channel or a lost marker for a known channel refuses a new mint.
+
+Coverage is explicitly website_token_broker only. The record binds original goal,
+workflow operation, connection/repository/source/deletion scope and paid client
+key. Each broker call appends a distinct article-credential metadata row before
+provider HTTP. Canonical authority guards carry their validated operation only
+while locked; nested guards without an operation shadow the outer scope. No
+incoming request marker grants enrollment. Admitted attempts keep the original
+inventory and accumulated count; each token records its actual attempt/run.
+
+Credential values stay in the existing cache. Durable rows contain only references,
+scope metadata, unknown/issued mint state, actual provider expiry, possible-delivery
+state and revocation observations. Possible exposure is recorded before returning
+a bearer, so a lost reply remains conservative. Missing/invalid expiry is never
+delivered for an enrolled broker call. Owner revocation after mint, or metadata/cache
+failure, withholds delivery and attempts provider revocation outside locks. Late
+metadata settlement does not reauthorize a cancelled run. Neither workflow receipt
+updates nor admitted attempt changes can erase an independent credential row.
+
+Revocation discovers retained references from the database as well as cache indexes.
+Cache-index loss can still revoke a cached known bearer. Loss of the bearer and
+indexes remains pending until its recorded actual expiry or a confirmed revoke.
+Unknown mint replies have no invented expiry. Only an observed HTTP 204 confirms
+a tracked provider revocation; other outcomes remain uncertain, and a late failure
+cannot downgrade a confirmed result. Original-generation credentials can be retired
+after reconnect. Each pass limits provider calls to 20, retaining the remainder for
+later work. Legacy untracked response handling remains unchanged and never proves
+complete coverage. Known channel/credential scope mismatches refuse provider work.
+
+Private records have a metadata state and are permanently denied by generic
+operation authority. All private source/inventory actions are also excluded from
+the legacy cleanup scheduler, public latest-operation projection and business
+pending/overdue metrics. They cannot masquerade as owner tasks or create polling
+work. No schema or migration change is required; existing operation envelopes are
+used, with separate rows to avoid losing inventory when workflow receipts change.
+
+Validation includes the real canonical authority guard, workflow reservation,
+broker and revoker with only ORM/provider boundaries replaced. Two cache-eviction
+regressions fail with the preceding revoker. The focused suite passes 22 checks,
+including rollback, no retrofit, corruption, lost replies, withheld delivery,
+reconnect, scope/context isolation, bounded passes and public projection. Two real
+database cases are assigned to disposable remote CI for scheduler isolation and
+atomic workflow/channel rollback; no local database or migration was run. The combined strict database/network-denying suite passes 1,695 checks across
+125 explicit labels. All 608 modules are assigned in CI; the offline audit checks
+869 emissions and the read-only model check reports no changes. Current remote
+results are recorded in the PR.
+
+This does not establish complete credential/resource coverage or quiet. Direct
+backend verification, deployment and merge token issuers, historical/unregistered
+work, deeper operation/task/async-resource inventory and automatic source-stop
+reconciliation still need integration. No token state alone proves outstanding
+Git/provider mutations have finished. All rollout flags remain off; draft only.

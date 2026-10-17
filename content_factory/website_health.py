@@ -41,7 +41,8 @@ def website_connection_health(*, domain=None, now=None, hours=24, row_limit=2000
         connections = connections.filter(organization__domain=domain)
         configs = configs.filter(organization__domain=domain)
         runs = runs.filter(organization__domain=domain)
-    operations = WebsiteConnectionOperation.objects.filter(connection__in=connections)
+    from .website_article_credentials import PRIVATE_ACTIONS
+    operations = WebsiteConnectionOperation.objects.filter(connection__in=connections).exclude(action__in=PRIVATE_ACTIONS)
     pending = operations.exclude(state__in=["completed", "review_required", "needs_user", "cancelled", "failed", "denied", "deleted", "stopped"])
     oldest = pending.aggregate(value=Min("created_at"))["value"]
     rows = list(runs.order_by("-created_at").values("status", "result__error_code", "created_at", "updated_at")[:row_limit + 1])

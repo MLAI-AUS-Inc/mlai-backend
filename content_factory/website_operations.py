@@ -109,7 +109,7 @@ def validate_operation(connection, payload, *, worker_cleanup=False, restoration
     op = connection.operations.filter(pk=identifier).first()
     if op is None:
         raise WebsiteAuthorityError("website_operation_changed", "The operation does not belong to this website.")
-    if getattr(op, "action", None) in {"article-source-fence", "article-source-stop", "article-source-history"}:
+    if getattr(op, "action", None) in {"article-source-fence", "article-source-stop", "article-source-history", "article-credential-inventory", "article-credential"}:
         raise WebsiteAuthorityError("website_operation_changed", "A private article stop cannot authorize a generic operation.")
     if "article_source_refresh_inspection_only" in op.payload or op.payload.get("workflow") == "article_source_refresh_inspect":
         raise WebsiteAuthorityError("website_operation_changed", "The private article inspection cannot authorize a generic operation.")
@@ -261,6 +261,9 @@ def reserve_workflow_operation(connection, *, workflow, payload):
         from .setup_delivery_enrollment import enroll_setup_delivery
         fields = ["receipt", "updated_at"]
         if enroll_setup_delivery(op, payload, connection, workflow):
+            fields.insert(0, "payload")
+        from .website_article_credentials import enroll as enroll_credential_inventory
+        if enroll_credential_inventory(op, payload, connection, created=created) and "payload" not in fields:
             fields.insert(0, "payload")
         op.receipt = {**(getattr(op, "receipt", None) or {}), "dispatch_outcome": "new_attempt" if created else "replayed"}
         op.save(update_fields=fields)
