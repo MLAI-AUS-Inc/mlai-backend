@@ -75,6 +75,11 @@ class CmsGoalAchievementTests(SimpleTestCase):
         self.assertEqual(before, (self.root.payload, self.root.receipt, self.operation.payload))
         self.fetch.assert_not_called(); self.http.assert_not_called(); self.public_get.assert_not_called()
 
+    def test_original_completion_uses_the_existing_bounded_clock_allowance(self):
+        self.assertEqual(self.read(now=self.completed_at - timedelta(seconds=1))["published_at"],
+            self.operation.payload["public_observation"]["checked_at"])
+        with self.assertRaises(WebsiteAuthorityError): self.read(now=self.completed_at - timedelta(seconds=31))
+
     def test_readonly_status_keeps_original_proof_dates_and_historical_wording(self):
         with patch.object(status.dispatch, "original_dispatch", return_value=None):
             value = status.project(self.root, self.context, self.config, user=self.user, binding=self.binding,

@@ -6,6 +6,7 @@ and current owner. The snapshot grants no model, provider or retry permission.
 """
 
 from copy import deepcopy
+from datetime import timedelta
 from uuid import UUID
 
 from . import cms_goal_contract as goals
@@ -73,7 +74,7 @@ def read(operation, *, user, now):
                 value["digest"] != digest({key: item for key, item in value.items() if key != "digest"})):
             raise _deny()
         completed_at = goals._time(value["completed_at"])
-        if completed_at > now or completed_at < goals._time(goal["started_at"]):
+        if completed_at > now + timedelta(seconds=30) or completed_at < goals._time(goal["started_at"]):
             raise _deny()
         publication = WebsiteConnectionOperation.objects.filter(pk=value["publication_operation_id"], action=publications.ACTION,
             connection_id=operation.connection_id, generation=operation.generation).first()
