@@ -1,6 +1,6 @@
 """Encrypted access survives page/worker loss without another owner grant."""
 
-from copy import deepcopy
+from copy import copy, deepcopy
 from datetime import timedelta
 from unittest.mock import patch
 from uuid import uuid4
@@ -328,6 +328,47 @@ class CmsAccessControllerTests(SimpleTestCase):
         self.assertEqual((self.job.state, self.job.payload["sealed_credential"]), ("cancelled", None))
         self.assertEqual(self.private.payload, original)
         self.assertEqual(self.advance().state, "cancelled")
+        self.transport.assert_not_called()
+
+    def test_private_access_lease_is_reloaded_after_waiting_for_the_original_hold_lock(self):
+        from organizations.models import Organization
+        from .website_models import WebsiteConnectionOperation
+        from .tests_cms_capture_unit import Rows
+        self.accept()
+        old, newer = str(uuid4()), str(uuid4())
+        self.job.state, self.job.next_attempt_at = "running", self.now + timedelta(seconds=180)
+        self.job.payload = {**self.job.payload, "lease_id": old}
+        snapshot = copy(self.job); snapshot.payload = deepcopy(self.job.payload)
+        original_filter = WebsiteConnectionOperation.objects.filter.side_effect
+        def locate(**filters):
+            if str(filters.get("pk")) == str(self.job.pk) and filters.get("action") == authority.ACTION:
+                return Rows([snapshot])
+            return original_filter(**filters)
+        def newer_worker(**_kwargs):
+            self.job.payload = {**self.job.payload, "lease_id": newer}
+            return self.org
+        with patch.object(WebsiteConnectionOperation.objects, "filter", side_effect=locate), \
+                patch.object(Organization.objects, "select_for_update") as org_lock:
+            org_lock.return_value.get.side_effect = newer_worker
+            with self.assertRaises(WebsiteAuthorityError):
+                controller._guard(authority.CmsAccessDispatch(str(self.job.pk), old))
+        self.assertEqual(self.job.payload["lease_id"], newer)
+        self.transport.assert_not_called()
+
+    def test_lease_expiry_during_the_original_payment_check_does_not_open_the_pending_proposal(self):
+        from organizations.models import Organization
+        self.accept()
+        lease = str(uuid4())
+        self.job.state, self.job.next_attempt_at = "running", self.now + timedelta(seconds=30)
+        self.job.payload = {**self.job.payload, "lease_id": lease}
+        def elapsed(**_kwargs):
+            self.now += timedelta(seconds=31)
+            return self.org
+        with patch.object(Organization.objects, "select_for_update") as org_lock, \
+                patch.object(authority, "open_credential", wraps=authority.open_credential) as proposal:
+            org_lock.return_value.get.side_effect = elapsed
+            with self.assertRaises(WebsiteAuthorityError): authority.current(self.job, lease_id=lease)
+            proposal.assert_not_called()
         self.transport.assert_not_called()
 
     def test_identity_gets_are_unlocked_and_original_spend_reads_own_short_transactions(self):

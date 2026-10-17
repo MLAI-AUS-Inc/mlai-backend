@@ -116,7 +116,7 @@ verifies public absence only at the saved original published URL. Synthetic
 preview tokens never enter a receipt or a public request.
 
 
-Final backend checks: all 1,551 database-free journey cases pass, including the
+Final backend checks: all 1,553 database-free journey cases pass, including the
 original-key renewal wake regression. The assignment guard selects all 593 test
 modules, the failure audit covers 849 production emissions, and the model check
 reports no changes. The audit's vendored digests pass; remote pinned provenance
@@ -124,3 +124,13 @@ was not rechecked locally. A completed withdrawal cannot complete an unfinished
 setup: only an already completed publication checklist retains `done`. The
 companion Chat decoder must accept the closed withdrawal proof before it can
 show a completed historical checklist without an active article link.
+
+
+The credential worker also re-reads its actual job under the organisation lock
+before the original hold checks, and rechecks lease/proposal expiry after those
+potentially waiting financial reads. Two new regressions reproduce the earlier
+stale lease and expiry-during-lock failures; both fail before the fix. The
+pending proposal is not opened after expiry. All 92 focused access/initial/setup
+cases and all 1,553 database-free journey cases pass; provider I/O stays outside
+owning transactions. This protects the existing key renewal that can wake a
+withdrawal without changing its original deadline or write allowance.
