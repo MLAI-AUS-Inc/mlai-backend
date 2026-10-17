@@ -63,8 +63,10 @@ def collect(goal, context, config, *, user, run=None, artifact_operation_id=None
     # The original native-policy controller verified the authenticated native
     # author and permissions. Re-reading its current private choice cannot grant
     # a provider lease, but records that completed setup observation.
-    put("access", {"binding": binding, "credential_operation_id": saved_policy["policy"]["credential_operation_id"]},
-        policy_row.updated_at, row=policy_row)
+    from .cms_policy_access import observation as access_observation
+    access_at, access = access_observation(policy_row, saved_policy)
+    put("access", {"binding": binding, "credential_operation_id": saved_policy["policy"]["credential_operation_id"],
+        **({"access_observation_digest": access["digest"]} if access is not None else {})}, access_at, row=policy_row)
     put("integrated", saved_policy["policy"], policy_row.updated_at, row=policy_row)
     captures = rows.filter(action=CAPTURE_ACTION, state="completed")
     if capture_operation_id is not None:

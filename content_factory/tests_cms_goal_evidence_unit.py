@@ -62,6 +62,7 @@ class CmsGoalEvidenceTests(SimpleTestCase):
         for row in self.saved:
             if row.action in {evidence.policies.ACTION, capture.ACTION, evidence.reviews.ACTION}:
                 row.updated_at = prepared_at
+                row.created_at = prepared_at
         self.goal = goals.new_goal(self.goal["goal_id"], self.scope, now=prepared_at - timedelta(minutes=1))
         self.advance(); self.advance(); self.advance()
         proofs, original, _references = self.collect()
