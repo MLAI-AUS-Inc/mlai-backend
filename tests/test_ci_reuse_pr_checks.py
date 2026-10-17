@@ -117,7 +117,7 @@ class ReusePrChecksTests(TestCase):
 
         self.assertIn("validation-route:", workflow)
         self.assertNotIn("record-pr-validation:", workflow)
-        self.assertEqual(workflow.count("reuse_pr_checks != 'true'"), 4)
+        self.assertEqual(workflow.count("reuse_pr_checks != 'true'"), 5)
         self.assertIn("needs.validation-route.outputs.reuse_pr_checks == 'true'", workflow)
         self.assertIn("needs.checks.result == 'success'", workflow)
         self.assertIn("needs.cms-provider-acceptance.result == 'success'", workflow)
