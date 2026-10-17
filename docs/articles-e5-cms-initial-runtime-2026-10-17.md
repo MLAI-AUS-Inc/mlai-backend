@@ -102,3 +102,16 @@ locking its ledger outside a transaction; its actual root and original spend
 now share a short owning transaction as well. HTTP remains outside those locks.
 Regressions assert actual financial lock depth and unlocked provider traffic;
 87 focused initial/setup/access cases and all 1,482 database-free journey cases pass. The real transaction regression remains in both disposable SQLite and PostgreSQL CI lanes.
+
+
+The real PostgreSQL continuation next exposed two JSON/native SQL comparisons
+in native review discovery: the original run ID and the current connection
+generation. Both SQL references now become JSON scalars through Django's
+`JSONObject`/`KeyTransform`, preserving JSON type equality without casting
+untrusted stored JSON to integers. All five native wake selectors have a type
+regression; their real ORM queries compile for JSON-capable SQLite and
+PostgreSQL 15/16 without opening a database. Those regressions fail before the
+fix. The synthetic unused-hold replay in the real transaction fixture now uses
+the same owning org transaction that production reservation requires. No
+financial guard is relaxed. All 88 focused cases and 1,484 database-free journey
+cases pass. Actual disposable database CI remains required.

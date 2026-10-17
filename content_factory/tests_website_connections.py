@@ -1698,8 +1698,10 @@ class WebsiteReviewRegressionTests(WebsiteDatabaseFixture, TestCase):
                     'binding': financial_records._binding(cms_goal_billing._financial_context(value)),
                     'client_request_id': financial_key, 'payer_user_id': str(user.pk), 'requester_user_id': str(user.pk),
                     'cost_points': 6, 'spend_ledger_id': str(held_spend.pk), 'reserved_at': timezone.now().isoformat(), 'status': 'reserved'})
-                with patch('roo.services.PointsService.spend') as debit:
-                    held = cms_goal_billing.reserve(financial_parent, user=user, now=timezone.now())
+                with transaction.atomic():
+                    Organization.objects.select_for_update().get(pk=self.org.pk)
+                    with patch('roo.services.PointsService.spend') as debit:
+                        held = cms_goal_billing.reserve(financial_parent, user=user, now=timezone.now())
                 debit.assert_not_called()
                 self.assertEqual(held['spend_ledger_id'], str(held_spend.pk))
             website.refresh_from_db()
