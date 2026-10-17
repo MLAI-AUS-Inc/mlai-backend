@@ -145,6 +145,8 @@ def advance_setup(identifier, *, now=None):
                 return operation
             attempt = operation.attempts
             value = authority.current(operation)
+            from .cms_access_status import defer_parent
+            if defer_parent(operation, now=now): return operation
             billing.require_held(operation)
             selected = _budget(operation, value.intent, now=now)
             selected = budget.update_owner_wait(selected, waiting=False, now=now)

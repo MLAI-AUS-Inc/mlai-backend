@@ -9,7 +9,7 @@ from .website_goal import CLASSES
 from .website_contract import WebsiteAuthorityError
 
 FIELDS = {"version", "started_at", "revision", "attempts_by_class", "budget_used", "usage_reports", "owner_wait_completed_seconds"}
-OPTIONAL = {"owner_wait_started_at", "usage_high_water", "missing_usage_run_ids", "usage_invalid", "fingerprint_counts", "failure_policy_occurrences", "setup_usage"}
+OPTIONAL = {"owner_wait_started_at", "usage_high_water", "missing_usage_run_ids", "usage_invalid", "fingerprint_counts", "failure_policy_occurrences", "setup_usage", "access_usage"}
 
 
 def initial(goal):
@@ -41,6 +41,23 @@ def _setup_usage(value, operation_id):
     return usage
 
 
+def _backend_usage(value, operation_id):
+    setup = _setup_usage(value, operation_id)
+    totals = {key: setup[key] if setup is not None else 0 for key in ("active_seconds", "provider_seconds")}
+    access = value.get("access_usage", {})
+    if not isinstance(access, dict) or len(access) > 64:
+        raise ValueError("Invalid access usage")
+    for identifier, usage in access.items():
+        if (not isinstance(identifier, str) or str(UUID(identifier)) != identifier or not isinstance(usage, dict) or
+                set(usage) != {"version", "operation_id", "counter_semantics", "active_seconds", "provider_seconds"} or
+                type(usage["version"]) is not int or usage["version"] != 1 or usage["operation_id"] != identifier or
+                usage["counter_semantics"] != policy.BOUND_SEMANTICS or any(not policy.numeric(usage[key]) for key in totals)):
+            raise ValueError("Invalid access usage")
+        for key in totals:
+            totals[key] += usage[key]
+    return totals
+
+
 def validate_at(value, *, started_at, operation_id, now):
     """Validate the original accepted lifetime without inventing a native goal."""
     try:
@@ -62,10 +79,10 @@ def validate_at(value, *, started_at, operation_id, now):
         goals._time(value["started_at"])
         policy.owner_wait_seconds(value, now=now)
         policy._usage_peaks(value, value["usage_reports"])
-        usage = _setup_usage(value, operation_id)
-        if usage is not None and any(value["budget_used"].get(key) is not None and value["budget_used"][key] < usage[key]
+        usage = _backend_usage(value, operation_id)
+        if any(value["budget_used"].get(key) is not None and value["budget_used"][key] < usage[key]
                 for key in ("active_seconds", "provider_seconds")):
-            raise ValueError("Setup usage was erased")
+            raise ValueError("Backend usage was erased")
         return deepcopy(value)
     except (ValueError, TypeError, KeyError, AttributeError, RecursionError):
         raise WebsiteAuthorityError("website_operation_changed", "The original native articles budget could not be verified.") from None
@@ -75,21 +92,53 @@ def account_usage(value, report, *, run_id):
     """Keep real backend setup bounds separate from original CF usage snapshots."""
     selected = deepcopy(value)
     metadata = selected.get("setup_usage")
-    setup = _setup_usage(selected, metadata.get("operation_id") if isinstance(metadata, dict) else None)
-    if setup is not None:
+    backend = _backend_usage(selected, metadata.get("operation_id") if isinstance(metadata, dict) else None)
+    carried = "setup_usage" in selected or "access_usage" in selected
+    if carried:
         # The shared meter sums only real CF reports. Remove and then add the
         # separate backend source once, including on repeated/stale callbacks.
         for key in ("active_seconds", "provider_seconds"):
             if selected["budget_used"].get(key) is not None:
-                if selected["budget_used"][key] < setup[key]:
-                    raise ValueError("Setup usage was erased")
-                selected["budget_used"][key] -= setup[key]
+                if selected["budget_used"][key] < backend[key]:
+                    raise ValueError("Backend usage was erased")
+                selected["budget_used"][key] -= backend[key]
     selected = policy.account_usage(selected, report, run_id=run_id)
-    if setup is not None:
+    if carried:
         for key in ("active_seconds", "provider_seconds"):
             if selected["budget_used"].get(key) is not None:
-                selected["budget_used"][key] += setup[key]
+                selected["budget_used"][key] += backend[key]
     return selected
+
+
+def reserve_access_usage(value, *, started_at, operation_id, access_operation_id, active_seconds=0, provider_seconds=0, now):
+    """Record a real private credential job's admission bounds beside CF usage.
+
+    Its owning worker must validate the actual job/parent and fence each lease
+    or GET transaction. This meter grants no permission and fabricates no run.
+    Lost work remains counted; later original CF reports cannot erase it.
+    """
+    result = validate_at(value, started_at=started_at, operation_id=operation_id, now=now)
+    try:
+        if (not isinstance(access_operation_id, str) or str(UUID(access_operation_id)) != access_operation_id or
+                any(not policy.numeric(item) for item in (active_seconds, provider_seconds))):
+            raise ValueError("Invalid access allowance")
+        sources = deepcopy(result.get("access_usage", {}))
+        if access_operation_id not in sources and len(sources) >= 64:
+            raise ValueError("Access allowance sources exhausted")
+        previous = sources.get(access_operation_id) or {"version": 1, "operation_id": access_operation_id,
+            "counter_semantics": policy.BOUND_SEMANTICS, "active_seconds": 0, "provider_seconds": 0}
+        sources[access_operation_id] = {**previous, "active_seconds": previous["active_seconds"] + active_seconds,
+            "provider_seconds": previous["provider_seconds"] + provider_seconds}
+        result["access_usage"] = sources
+        for key, amount in (("active_seconds", active_seconds), ("provider_seconds", provider_seconds)):
+            if key not in result["budget_used"] and not result["usage_reports"]:
+                result["budget_used"][key] = 0
+            if result["budget_used"].get(key) is not None:
+                result["budget_used"][key] += amount
+        result["revision"] += 1
+        return validate_at(result, started_at=started_at, operation_id=operation_id, now=now)
+    except (ValueError, TypeError, KeyError, AttributeError, RecursionError):
+        raise WebsiteAuthorityError("website_operation_changed", "The original native access accounting changed.") from None
 
 
 def reserve_setup_usage(value, *, started_at, operation_id, active_seconds=0, provider_seconds=0, now):
@@ -107,7 +156,11 @@ def reserve_setup_usage(value, *, started_at, operation_id, active_seconds=0, pr
     usage = {**previous, "active_seconds": previous["active_seconds"] + active_seconds,
         "provider_seconds": previous["provider_seconds"] + provider_seconds}
     result["setup_usage"] = usage
-    result["budget_used"] = {**result["budget_used"], "active_seconds": usage["active_seconds"], "provider_seconds": usage["provider_seconds"]}
+    for key, amount in (("active_seconds", active_seconds), ("provider_seconds", provider_seconds)):
+        if key not in result["budget_used"]:
+            result["budget_used"][key] = 0
+        if result["budget_used"][key] is not None:
+            result["budget_used"][key] += amount
     result["revision"] += 1
     return validate_at(result, started_at=started_at, operation_id=operation_id, now=now)
 

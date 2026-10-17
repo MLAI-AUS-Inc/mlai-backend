@@ -32,13 +32,14 @@ def matches(row, predicate):
         return not result if predicate.negated else result
     key, expected = predicate
     parts = key.split("__")
-    op = parts.pop() if parts[-1] in {"isnull", "in", "has_key"} else "exact"
+    op = parts.pop() if parts[-1] in {"isnull", "in", "has_key", "lte"} else "exact"
     actual = row
     for part in parts:
         actual = actual.get(part) if isinstance(actual, dict) else getattr(actual, part, None)
     if op == "isnull": return (actual is None) == expected
     if op == "in": return actual in expected
     if op == "has_key": return isinstance(actual, dict) and expected in actual
+    if op == "lte": return actual is not None and actual <= expected
     foreign_pk = "__" not in key and key.endswith("_id") and type(actual) is int and isinstance(expected, str)
     return str(actual) == str(expected) if key == "pk" or isinstance(actual, UUID) or foreign_pk else actual == expected
 
@@ -53,6 +54,8 @@ class Rows:
     def select_related(self, *args, **kwargs): return self
 
     def __iter__(self): return iter(self.selected)
+
+    def __getitem__(self, key): return self.selected[key]
 
     def exists(self): return bool(self.selected)
 

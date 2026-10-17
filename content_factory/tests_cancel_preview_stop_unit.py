@@ -58,6 +58,7 @@ class CancelPreviewStopDeadlineTests(SimpleTestCase):
             return SimpleNamespace(status_code=cancel_status, json=lambda: {"status": "cancelled"})
 
         with patch.object(reconciliation.transaction, "atomic", side_effect=lambda: nullcontext()), \
+                patch("content_factory.cms_access_status.expire_due"), \
                 patch.object(reconciliation.WebsiteConnectionOperation, "objects", manager), \
                 patch.object(reconciliation, "monitor_cleanup_pull_requests"), \
                 patch.object(reconciliation, "disable_pending_native_auto_merge", return_value=[]), \

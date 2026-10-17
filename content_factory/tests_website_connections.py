@@ -1239,7 +1239,7 @@ class WebsiteReviewRegressionTests(WebsiteDatabaseFixture, TestCase):
             # disposable CI only. Only synthetic ledger rows are seeded; no
             # wallet service, CF job or CMS write occurs.
             with override_settings(ARTICLES_CHANNEL_ARTIFACTS_ENABLED=True, ARTICLES_CMS_GOALS_ENABLED=True,
-                    ARTICLES_CMS_SETUP_ENABLED=True, ARTICLES_CMS_STATUS_ENABLED=True,
+                    ARTICLES_CMS_SETUP_ENABLED=True, ARTICLES_CMS_STATUS_ENABLED=True, ARTICLES_CMS_ACCESS_RENEWAL_ENABLED=True,
                     ARTICLES_FIRST_ARTICLE_GOAL_ENABLED=True, ARTICLES_WEBSITE_GOAL_RUNNER_ENABLED=True,
                     ARTICLES_WEBSITE_GOAL_ENROLLED_ORGANIZATIONS=[str(self.org.pk)],
                     ARTICLES_FAILURE_TAXONOMY_POLICY_ENABLED=True, ARTICLES_FAILURE_TAXONOMY_ENROLLED_ORGANIZATIONS=[str(self.org.pk)]):
@@ -1471,7 +1471,10 @@ class WebsiteReviewRegressionTests(WebsiteDatabaseFixture, TestCase):
                         self.assertEqual(issued.payload['post_state']['create_count'], 1)
                         managed_native.state = 'needs_user'
                         managed_native.next_attempt_at = timezone.now() + timedelta(minutes=5)
-                        managed_native.receipt = {**managed_native.receipt, 'user_action': {'id': 'connect_cms'}}
+                        from .website_failure_contract import classify_failure
+                        managed_native.receipt = {**managed_native.receipt, 'user_action': {'id': 'connect_cms'},
+                            'failure': classify_failure('missing_or_expired_credentials', 'cms_access'),
+                            'failure_occurrence_id': str(uuid.uuid4())}
                         managed_native.save(update_fields=['state', 'next_attempt_at', 'receipt', 'updated_at'])
                         from .cms_owner_access import for_operation as access_form, connection_receipt
                         access_wait = access_form(context, self.config, user=user, operation_id=str(managed_native.pk))
@@ -1482,6 +1485,29 @@ class WebsiteReviewRegressionTests(WebsiteDatabaseFixture, TestCase):
                             'channel_scope': scope_for(context, self.config),
                             'channel_revision': self.config.article_system['publishing_channel']['revision'],
                             'secret': 'synthetic-renewed-application-password'}
+                        from . import cms_access_start, cms_access_controller
+                        form = access_wait['cmsAccess']
+                        durable_data = {**renewed_data, 'company_id': form['companyId'],
+                            'website_connection_id': form['connectionId'], 'connection_generation': form['connectionGeneration'],
+                            'configuration_revision': form['configurationRevision'], 'operation_id': form['operationId'],
+                            'access_epoch': form['accessEpoch']}
+                        queued = cms_access_start.start(context, self.config, user=user, data=durable_data)
+                        self.assertEqual(queued.state, 'pending')
+                        self.assertNotIn(renewed_data['secret'], json.dumps(queued.payload))
+                        self.assertEqual(current_credential(context, self.config, website, user=user)[1].secret, data['secret'])
+                        def identity_read(binding, credential, **options):
+                            self.assertEqual(options['method'], 'GET')
+                            if options['resource'] == 'site':
+                                self.assertIsNone(credential)
+                                return {'home': binding['public_origin'], 'url': binding['api_origin']}, {}
+                            self.assertEqual(credential.secret, renewed_data['secret'])
+                            return native_user, {}
+                        with patch.object(cms_access_controller, 'request_json', side_effect=identity_read) as access_reads:
+                            verified = cms_access_controller.advance(queued.pk)
+                        verified.refresh_from_db()
+                        self.assertEqual((verified.state, verified.payload['sealed_credential']), ('completed', None))
+                        self.assertEqual(access_reads.call_count, 2)
+                        self.assertEqual(str(cms_access_start.start(context, self.config, user=user, data=durable_data).pk), str(queued.pk))
                         renewed = cms_owner.connect(context, self.config, user=user, data=renewed_data)
                         self.assertEqual((str(renewed.pk), renewed.generation), (str(website.pk), website.generation))
                         self.assertEqual(renewed.capabilities['_cms_credential_operation_id'], str(private.pk))
@@ -1670,6 +1696,8 @@ class WebsiteReviewRegressionTests(WebsiteDatabaseFixture, TestCase):
             self.assertEqual((approval.state, approval.payload), ('deleted', {}))
             publication.refresh_from_db()
             self.assertEqual((publication.state, publication.payload), ('deleted', {}))
+            verified = website.operations.get(action='cms-credential-renewal')
+            self.assertEqual((verified.state, verified.payload), ('deleted', {}))
             financial_parent.refresh_from_db()
             self.assertEqual((financial_parent.state, financial_parent.payload), ('deleted', {}))
             native_row = website.operations.get(pk=native['operation_id'])
