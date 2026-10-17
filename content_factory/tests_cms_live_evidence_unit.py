@@ -17,7 +17,7 @@ def article(platform="wordpress", **changes):
     body = '<article data-cf-article-body><h1>' + title + '</h1><p>' + " ".join(
         ["This practical article explains a concrete task with approved instructions, evidence, useful examples and clear next steps."] * 3
     ) + '</p><h2>The next step</h2><p><a href="/about/">Read about the team</a></p><img src="https://fixture.test/media/owned.png" alt="The approved image"></article>'
-    value = intent(platform, html=body, **changes)
+    value = intent(platform, **{"html": body, **changes})
     state, _ = issued(value)
     ack = response(value)
     state = posts.observe_posts(value, state, ack if platform == "wordpress" else {"posts": [ack]}, lookup=False)
@@ -26,7 +26,7 @@ def article(platform="wordpress", **changes):
 
 def document(value, state, *, body=None, canonical=None):
     canonical = '<link rel="canonical" href="' + state["public_url"] + '">' if canonical is None else canonical
-    return '<html><head>' + canonical + '</head><body><article class="native-theme"><h1>Theme title outside the owned body</h1>' + (body or value["html"]) + '</article></body></html>'
+    return '<html><head>' + canonical + '</head><body><article class="native-theme"><h1>' + value["title"] + '</h1>' + (body or value["html"]) + '</article></body></html>'
 
 
 class CmsLiveEvidenceTests(SimpleTestCase):
@@ -47,6 +47,38 @@ class CmsLiveEvidenceTests(SimpleTestCase):
         changed = value["html"].replace('<p>', '<p class="wp-block-paragraph">').replace('href="/about/"', 'href="https://fixture.test/about/"')
         changed = changed.replace('<img ', '<img loading="lazy" srcset="https://fixture.test/media/owned.png 1024w" ')
         self.assertEqual(live.observe_public_article(value, state, document(value, state, body=changed))["body_source_sha256"], value["body_sha256"])
+
+    def test_standard_native_typography_keeps_prose_semantics_without_changing_source_identity(self):
+        original, _ = article()
+        plain = '"Practical" -- don\'t ... 1024x768 (tm)'
+        body = original["html"].replace("practical", plain)
+        value, state = article(html=body)
+        native = body.replace(plain, '“Practical” — don’t … 1024×768 ™')
+        proof = live.observe_public_article(value, state, document(value, state, body=native))
+        self.assertEqual(proof["semantic_profile"], "cms_public_semantics_v1")
+        self.assertEqual(proof["body_source_sha256"], value["body_sha256"])
+
+    def test_native_theme_can_supply_the_headline_without_duplicate_h1_in_post_content(self):
+        original, _ = article()
+        fragment = original["html"].replace('<h1>Approved native article</h1>', '')
+        value, state = article(html=fragment)
+        proof = live.observe_public_article(value, state, document(value, state))
+        self.assertEqual(proof["post_title"], value["title"])
+        self.assertEqual(proof["title"], "")
+
+    def test_native_theme_must_show_the_exact_post_headline(self):
+        original, _ = article()
+        value, state = article(html=original["html"].replace('<h1>Approved native article</h1>', ''))
+        for document_html in (document(value, state).replace('<h1>Approved native article</h1>', '<h1>Old title</h1>'),
+                document(value, state).replace('<h1>Approved native article</h1>', '<h1 hidden>Approved native article</h1>')):
+            with self.assertRaises(CmsApiError): live.observe_public_article(value, state, document_html)
+
+    def test_typography_equivalence_never_masks_changed_executable_code_samples(self):
+        original, _ = article()
+        body = original["html"].replace('</article>', '<pre><code>x = \'\'\nprint("hello")</code></pre></article>')
+        value, state = article(html=body)
+        native = body.replace('print("hello")', 'print(“hello”)')
+        with self.assertRaises(CmsApiError): live.observe_public_article(value, state, document(value, state, body=native))
 
     def test_copy_heading_links_and_images_cannot_be_substituted_by_a_successful_page(self):
         value, state = article()

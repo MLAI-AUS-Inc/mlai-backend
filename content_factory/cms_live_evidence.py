@@ -17,7 +17,7 @@ from .website_live_fetch import public_addresses, PinnedHTTPSConnection
 MAX_HTML_BYTES = 2 * 1024 * 1024
 EVIDENCE_FIELDS = {"schema_version", "kind", "status", "platform", "post_operation_id", "source_run_id", "run_generation",
     "scope_sha256", "intent_digest", "provider_id", "public_url", "body_source_sha256", "title", "text_sha256", "headings_sha256",
-    "links_sha256", "images_sha256", "checked_at", "digest"}
+    "links_sha256", "images_sha256", "code_sha256", "semantic_profile", "post_title", "checked_at", "digest"}
 
 
 def fetch_public_article(intent, state):
@@ -70,6 +70,12 @@ def fetch_public_article(intent, state):
 
 
 def _text(value):
+    # WordPress's standard wptexturize presentation changes punctuation in
+    # prose. Keep destinations/images exact and bind code separately below.
+    value = value.translate(str.maketrans({"‘": "'", "’": "'", "′": "'", "“": '"', "”": '"', "″": '"', "…": "...", "™": "(tm)"}))
+    value = value.replace("``", '"').replace("''", '"')
+    value = re.sub(r"\s*(?:-{2,}|[–—])\s*", " - ", value)
+    value = re.sub(r"(?<=\d)×(?=\d)", "x", value)
     return re.sub(r"\s+", " ", value).strip()
 
 
@@ -91,7 +97,7 @@ def _body(html, public_url):
     if len(candidates) != 1:
         raise CmsApiError("public_article_unverified")
     body = candidates[0]
-    if body.name != "article" or len(body.find_all("h1")) != 1:
+    if body.name != "article" or len(body.find_all("h1")) > 1:
         raise CmsApiError("public_article_unverified")
     if body.find(["script", "style", "template", "iframe", "object", "embed", "form", "input", "button", "select", "textarea", "base", "meta", "link"]):
         raise CmsApiError("public_article_unverified")
@@ -107,10 +113,13 @@ def _body(html, public_url):
     headings = [(element.name, _text(element.get_text(" ", strip=True))) for element in body.find_all(re.compile(r"^h[1-6]$"))]
     links = [(_text(element.get_text(" ", strip=True)), _url(element.get("href"), public_url)) for element in body.find_all("a")]
     images = [(_url(element.get("src"), public_url), _text(element.get("alt", ""))) for element in body.find_all("img")]
+    code = [element.get_text("", strip=False).replace("\r\n", "\n") for element in body.find_all(["pre", "code"])]
     # Native themes may wrap markup or add classes/srcset. They cannot replace
     # approved copy, heading order, destinations, image sources or alternatives.
-    return {"title": headings[0][1] if headings and headings[0][0] == "h1" else "", "text_sha256": hashlib.sha256(visible.encode()).hexdigest(),
-        "headings_sha256": digest(headings), "links_sha256": digest(links), "images_sha256": digest(images)}, soup
+    headline = body.find("h1")
+    return {"title": _text(headline.get_text(" ", strip=True)) if headline else "", "text_sha256": hashlib.sha256(visible.encode()).hexdigest(),
+        "headings_sha256": digest(headings), "links_sha256": digest(links), "images_sha256": digest(images),
+        "code_sha256": digest(code), "semantic_profile": "cms_public_semantics_v1"}, soup
 
 
 def observe_public_article(intent, state, public_html, *, checked_at=None):
@@ -129,7 +138,21 @@ def observe_public_article(intent, state, public_html, *, checked_at=None):
         actual, soup = _body(public_html, state["public_url"])
         head = soup.find("head")
         canonicals = [element for element in soup.find_all("link") if any(str(token).lower() == "canonical" for token in element.get("rel", []))]
-        if (expected["title"] != intent["title"] or actual != expected or head is None or len(canonicals) != 1 or
+        title = _text(intent["title"])
+        visible_headlines = []
+        for headline in soup.find_all("h1"):
+            if _text(headline.get_text(" ", strip=True)) != title:
+                continue
+            visible = True
+            for element in [headline, *headline.parents]:
+                if (element.name in {"head", "template", "noscript"} or element.has_attr("hidden") or element.has_attr("inert") or
+                        str(element.get("aria-hidden", "")).lower() == "true" or
+                        re.search(r"(?:display\s*:\s*none|visibility\s*:\s*hidden)", str(element.get("style", "")), re.I)):
+                    visible = False
+                    break
+            if visible:
+                visible_headlines.append(headline)
+        if (expected["title"] not in {"", title} or not visible_headlines or actual != expected or head is None or len(canonicals) != 1 or
                 canonicals[0].parent is not head or canonicals[0].get("href") != state["public_url"]):
             raise CmsApiError("public_article_unverified")
         now = checked_at or datetime.now(timezone.utc)
@@ -138,7 +161,7 @@ def observe_public_article(intent, state, public_html, *, checked_at=None):
         evidence = {"schema_version": 1, "kind": "cms_public_article_observation", "status": "body_verified", "platform": intent["binding"]["platform"],
             "post_operation_id": intent["operation_id"], "source_run_id": intent["source_run_id"], "run_generation": intent["run_generation"],
             "scope_sha256": digest(intent["binding"]), "intent_digest": intent["digest"], "provider_id": state["provider_id"],
-            "public_url": state["public_url"], "body_source_sha256": intent["body_sha256"], **actual,
+            "public_url": state["public_url"], "body_source_sha256": intent["body_sha256"], "post_title": title, **actual,
             "checked_at": now.astimezone(timezone.utc).isoformat()}
         return {**evidence, "digest": digest(evidence)}
     except CmsApiError:
@@ -164,7 +187,7 @@ def validate_public_observation(value, *, intent, state, now=None):
             "platform": intent["binding"]["platform"], "post_operation_id": intent["operation_id"],
             "source_run_id": intent["source_run_id"], "run_generation": intent["run_generation"],
             "scope_sha256": digest(intent["binding"]), "intent_digest": intent["digest"], "provider_id": state["provider_id"],
-            "public_url": state["public_url"], "body_source_sha256": intent["body_sha256"], **expected_body}
+            "public_url": state["public_url"], "body_source_sha256": intent["body_sha256"], "post_title": _text(intent["title"]), **expected_body}
         if (any(value[key] != item or type(value[key]) is not type(item) for key, item in expected.items()) or
                 value["digest"] != digest({key: item for key, item in value.items() if key != "digest"})):
             raise CmsApiError("public_article_unverified")
