@@ -19,6 +19,7 @@ from .tests_cms_media_evidence_unit import raster
 from .cms_media_transport import UploadedImage, prepare_image
 from .cms_native_html import native_fragment, preview_document, profile_receipt
 from .channel_artifact_contract import digest
+from .cms_goal_effects import CmsGoalWorkDenied
 
 
 @override_settings(ARTICLES_CHANNEL_DISCOVERY_ENABLED=True, ARTICLES_PUBLISHING_CHANNELS_ENABLED=True,
@@ -112,6 +113,28 @@ class CmsOwnedMediaTests(SimpleTestCase):
         self.advance(operation, now=operation.next_attempt_at + timedelta(seconds=1))
         self.assertEqual(operation.state, "completed")
         self.assertEqual(self.provider_post.call_count, 1)
+
+    def test_stopped_goal_before_upload_allowance_does_not_create_native_media(self):
+        operation = self.start(); self.advance(operation)
+        with patch.object(staging, "require_work", side_effect=CmsGoalWorkDenied()): self.advance(operation)
+        self.assertEqual((operation.state, operation.payload["states"][0]["create_count"]), ("blocked", 0))
+        self.assertEqual(operation.receipt["status"], "goal_work_stopped")
+        self.provider_post.assert_not_called()
+
+    def test_stop_between_upload_reservation_and_http_preserves_get_only_recovery(self):
+        operation = self.start(); self.advance(operation)
+        with patch.object(staging, "require_work", side_effect=[None, CmsGoalWorkDenied()]): self.advance(operation)
+        self.assertEqual((operation.state, operation.payload["states"][0]["create_count"]), ("pending", 1))
+        self.assertEqual(operation.payload["states"][0]["phase"], "upload_issued")
+        self.provider_post.assert_not_called()
+        intent = operation.payload["intents"][0]
+        self.provider_get.return_value = ([row(intent, self.image)], {})
+        with patch.object(staging, "require_work", side_effect=CmsGoalWorkDenied()) as work:
+            self.advance(operation, now=operation.next_attempt_at + timedelta(seconds=1))
+            self.advance(operation, now=operation.next_attempt_at + timedelta(seconds=1))
+        work.assert_not_called()
+        self.assertEqual(operation.state, "completed")
+        self.provider_post.assert_not_called()
 
     def test_worker_crash_after_issue_allowance_recovers_by_get_even_if_post_was_not_sent(self):
         operation = self.start(); self.advance(operation)

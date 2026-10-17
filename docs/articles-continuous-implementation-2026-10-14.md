@@ -727,3 +727,18 @@ are assigned to disposable CI. No actual wallet/provider service, paid work,
 local database, merge or deployment ran. The native goal start/controller,
 write/admission guards, budgets/strategy/status/doctor/UI remain integration
 work; every rollout flag remains off. See `articles-e5-cms-goal-payments-2026-10-17.md`.
+
+
+## 17 October: native work guards and proof refresh
+
+Managed CMS model work and provider POST allowances require the original
+private active goal, original outbox/held spend and bounded native budget.
+The guard covers charge consumption, model dispatch/admission and both media
+and post writes. Stopping after a reserved allowance preserves the unknown
+journal and GET-only reconciliation. On-demand public proof refresh retains
+the same post/provider IDs/create count and exact original approval.
+
+The native start/controller, automatic inventory/topic/dispatch recovery,
+status/doctor/Chat integration and real provider/browser acceptance remain
+unfinished. All rollout flags stay off; no paid generation, local database,
+provider mutation, merge or deployment ran.

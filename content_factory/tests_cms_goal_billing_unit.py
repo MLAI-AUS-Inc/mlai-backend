@@ -35,6 +35,8 @@ class CmsGoalBillingTests(SimpleTestCase):
         fixtures.CmsGoalConsentTests.setUp(self)
         self.goal_operation.state = "pending"
         self.goal_operation.payload.pop("lease_id")
+        from .cms_goal_budget import initial
+        self.goal_operation.receipt["native_budget"] = initial(self.goal)
         value = authority.current(self.goal_operation)
         self.key = billing.request_key(value)
         self.payer = SimpleNamespace(pk=5, is_active=True)
