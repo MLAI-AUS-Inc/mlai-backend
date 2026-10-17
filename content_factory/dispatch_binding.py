@@ -109,7 +109,11 @@ def reserve_portable_dispatch_intent(*, organization, workflow, actor_id, payloa
         raise WebsiteAuthorityError("portable_dispatch_intent_changed", "This draft request is no longer current. Start a new reviewed attempt.")
     intent = {**deepcopy(payload), PORTABLE_DISPATCH_RESERVATION: True, "dispatch_pending_resolution": True,
         "roo_points_dispatch_actor_id": actor_id}
-    with transaction.atomic():
+    artifact = "publishing_channel_artifact" in payload
+    if artifact:
+        from .channel_artifacts import authorize_payload, artifact_write_guard
+        authorize_payload(payload)
+    with artifact_write_guard(payload) if artifact else transaction.atomic():
         run = ContentFactoryRun.objects.select_for_update().filter(
             organization=organization, domain=organization.domain,
             run_request__client_request_id=key,
@@ -122,8 +126,8 @@ def reserve_portable_dispatch_intent(*, organization, workflow, actor_id, payloa
                 "current_step": "queued", "run_request": intent,
             })
         saved = run.run_request or {}
-        identity_fields = ("client_request_id", "topic", "target_keyword", "source_run_id", "author_id", "editorial_brief")
-        if (not key or not original_portable_run(run) or run.organization_id != organization.pk
+        identity_fields = ("client_request_id", "topic", "target_keyword", "source_run_id", "author_id", "editorial_brief", "publishing_channel_artifact")
+        if (not key or not (artifact or original_portable_run(run)) or run.organization_id != organization.pk
                 or run.workflow not in {"article_generation", "direct_generate", "confirmed_topic"}
                 # A worker snapshot may omit its observational Slack identity.
                 # The backend-owned request metadata retains the original actor.
@@ -144,11 +148,21 @@ def bind_portable_dispatch_snapshot(*, remote_run_id, payload):
         return None
     with transaction.atomic():
         original = ContentFactoryRun.objects.select_for_update().filter(run_id=key).first()
-        if not portable_dispatch_snapshot_allowed(original, remote_run_id, payload):
+        artifact = original is not None and "publishing_channel_artifact" in (original.run_request or {})
+        if artifact:
+            from .channel_artifacts import artifact_run_update_allowed
+            target = deepcopy(original)
+            target.run_id = remote_run_id
+            if (remote_run_id == key or original.status not in {ContentFactoryRunStatus.QUEUED, ContentFactoryRunStatus.BLOCKED} or
+                    original.run_request.get(PORTABLE_DISPATCH_RESERVATION) is not True or
+                    original.run_request.get("dispatch_pending_resolution") is not True or
+                    not artifact_run_update_allowed(target, payload)):
+                return None
+        elif not portable_dispatch_snapshot_allowed(original, remote_run_id, payload):
             return None
         existing = ContentFactoryRun.objects.select_for_update().filter(run_id=remote_run_id).first()
         if existing is not None and (existing.organization_id != original.organization_id
-                or not portable_run_update_allowed(existing, payload)):
+                or not (artifact_run_update_allowed(existing, payload) if artifact else portable_run_update_allowed(existing, payload))):
             return None
         bound = bind_dispatch_token_run(client_request_id=key, remote_run_id=remote_run_id)
         if bound is not None:
@@ -167,6 +181,23 @@ def _merge_provisional_into_real(token_run, real_run) -> None:
     update_fields = []
     token_request = token_run.run_request if isinstance(token_run.run_request, dict) else {}
     real_request = real_run.run_request if isinstance(real_run.run_request, dict) else {}
+    if "publishing_channel_artifact" in token_request:
+        from .channel_artifacts import artifact_run_update_allowed
+        target = deepcopy(real_run)
+        target.run_request = deepcopy(token_request)
+        if not artifact_run_update_allowed(target, {"run_request": real_request, "domain": real_run.domain,
+                "workflow": real_run.workflow or token_run.workflow}):
+            from .editorial_run_state import EditorialRunConflict
+            raise EditorialRunConflict("An artifact binding cannot change its original CMS reservation")
+        # Even a legacy/no-brief callback must retain the original channel and
+        # paid metadata. Incoming worker fields cannot replace backend intent.
+        from .service_views import _merge_django_owned_run_request
+        merged = _merge_django_owned_run_request(token_request, real_request)
+        merged = {**deepcopy(token_request), **merged}
+        if merged != real_run.run_request:
+            real_run.run_request = merged
+            update_fields.append("run_request")
+        real_request = merged
     has_editorial_decision = any(
         key in request and request[key] is not None
         for request in (token_request, real_request) for key in BRIEF_KEYS

@@ -1233,6 +1233,49 @@ class WebsiteReviewRegressionTests(WebsiteDatabaseFixture, TestCase):
             self.assertFalse(summary['capabilities']['publishingReady'])
             self.assertEqual(summary['githubRepo'], '')
             self.assertNotIn('sealed_credential', json.dumps(summary))
+            # Exercise real reservation/outbox rollback and callback binding on
+            # disposable CI only. No wallet charge, CF job or CMS write occurs.
+            with override_settings(ARTICLES_CHANNEL_ARTIFACTS_ENABLED=True):
+                from django.db import transaction
+                from . import channel_artifacts
+                from .dispatch_binding import reserve_portable_dispatch_intent
+                from .dispatch_outbox import reserve_dispatch
+                from .dispatch_models import ContentFactoryDispatchOutbox
+                from .website_connections import owner_write_guard
+                from .service_views import _sync_content_factory_run_snapshot
+                artifact_payload = {'domain': self.org.domain, 'client_request_id': 'cms-artifact:' + uuid.uuid4().hex,
+                    'delivery_mode': 'content_only', 'delivery_mode_confirmed': True, 'github_repo': '',
+                    'topic': 'A synthetic CMS article', 'target_keyword': 'A synthetic CMS article',
+                    'roo_points_ledger_id': 'synthetic-fixture-ledger', 'roo_points_cost': 6,
+                    'roo_points_requested_by_user_id': user.pk, 'roo_points_billing_user_id': user.pk}
+                artifact_scope = channel_artifacts.prepare_generation(context, self.config, user=user)
+                with transaction.atomic():
+                    artifact_operation = channel_artifacts.reserve_generation(artifact_scope, context=context,
+                        config=self.config, user=user, payload=artifact_payload)
+                    reserve_dispatch(organization=self.org, payload=artifact_payload, billing_user_id=user.pk, actor_id='cms-fixture')
+                self.assertEqual(str(channel_artifacts.authorize_payload(artifact_payload).operation.pk), str(artifact_operation.pk))
+                rollback_payload = {key: value for key, value in artifact_payload.items() if key != 'publishing_channel_artifact'}
+                rollback_payload['client_request_id'] = 'cms-rollback:' + uuid.uuid4().hex
+                with self.assertRaisesRegex(RuntimeError, 'synthetic rollback'):
+                    with transaction.atomic():
+                        rollback_operation = channel_artifacts.reserve_generation(artifact_scope, context=context,
+                            config=self.config, user=user, payload=rollback_payload)
+                        reserve_dispatch(organization=self.org, payload=rollback_payload, billing_user_id=user.pk, actor_id='cms-fixture')
+                        raise RuntimeError('synthetic rollback')
+                self.assertFalse(website.operations.filter(pk=rollback_operation.pk).exists())
+                self.assertFalse(ContentFactoryDispatchOutbox.objects.filter(client_request_id=rollback_payload['client_request_id']).exists())
+                artifact_run = reserve_portable_dispatch_intent(organization=self.org, workflow='article_generation',
+                    actor_id='cms-fixture', payload=artifact_payload)
+                self.assertFalse(__import__('content_factory.portable_drafts', fromlist=['original_portable_run']).original_portable_run(artifact_run))
+                with owner_write_guard(artifact_payload):
+                    synced, created = _sync_content_factory_run_snapshot(run_id=artifact_run.run_id, data={
+                        'workflow': 'article_generation', 'domain': self.org.domain, 'status': 'completed',
+                        'current_step': 'render_article', 'approval_state': 'not_required', 'run_request': {},
+                        'result': {'content_package': {'article_html': '<article><p>Synthetic body</p></article>'}}}, step_states={})
+                self.assertFalse(created)
+                self.assertEqual(synced.run_request['publishing_channel_artifact'], artifact_payload['publishing_channel_artifact'])
+                self.assertNotIn('article_publish_approval_receipt', synced.run_request)
+                self.assertFalse(channel_artifacts.artifact_run_update_allowed(synced, {'approval_state': 'approved'}))
             from . import cms_capture
             from .tests_cms_inventory_contract_unit import wordpress_post
             capture_data = {**contract_for(website), 'client_request_id': str(uuid.uuid4())}

@@ -1,0 +1,22 @@
+{
+  "files": [
+    {
+      "local_path": "content_factory/channel_artifact_contract.py",
+      "sha256": "3d5ef2ebad958e9d91f4a0846b62ef812ca8cba08f70b2e250badb714f79c85f",
+      "source_path": "backend/channel_artifact_contract.py"
+    },
+    {
+      "local_path": "contracts/publishing-channel-artifact-v1.schema.json",
+      "sha256": "c1bd54efba6e9287825125062b1d0aa27495621f11dd0f41c75d3870192650ae",
+      "source_path": "backend/contracts/publishing-channel-artifact-v1.schema.json"
+    },
+    {
+      "local_path": "contracts/channel-artifact-envelope-v1.example.json",
+      "sha256": "a99963dae3406b75360c8c0bb103daf81ac9033742e2c1bd4db664a8a6b15139",
+      "source_path": "backend/tests/fixtures/channel-artifact-envelope-v1.json"
+    }
+  ],
+  "schema_version": 1,
+  "source_repository": "drsamdonegan/content-factory",
+  "source_revision": "979da46e05a63039192806cd60862951f49ff542"
+}

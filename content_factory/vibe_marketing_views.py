@@ -782,7 +782,7 @@ def _validate_article_start_reservation(context, payload):
     validate_operation(website, payload)
 
 
-def _charge_roo_points_for_article(request, *, context, payload: dict, goal_operation_id=None):
+def _charge_roo_points_for_article(request, *, context, payload: dict, goal_operation_id=None, channel_artifact_scope=None):
     # Only the internal goal dispatcher can supply this argument. HTTP/MCP body
     # fields cannot bypass the normal current-price and wallet checks.
     if goal_operation_id is not None:
@@ -824,7 +824,15 @@ def _charge_roo_points_for_article(request, *, context, payload: dict, goal_oper
         return None, None, None, Response({"detail": str(exc), "code": getattr(exc, "code", "article_admission_required")}, status=409)
     with transaction.atomic():
         try:
-            _validate_article_start_reservation(context, payload)
+            if channel_artifact_scope is not None:
+                from .channel_artifacts import reserve_generation
+                reserve_generation(channel_artifact_scope, context=context, config=_get_config(context.organization),
+                    user=request.user, payload=payload)
+                article_request.update(payload)
+            else:
+                if "publishing_channel_artifact" in payload:
+                    raise WebsiteAuthorityError("website_connection_changed", "An article artifact requires its private CMS controller.")
+                _validate_article_start_reservation(context, payload)
             if goal_operation_id is not None:
                 from .website_first_article_billing import consume
                 charged_user, charge_ledger, charge_amount = consume(goal_operation_id,
@@ -839,6 +847,8 @@ def _charge_roo_points_for_article(request, *, context, payload: dict, goal_oper
                     prevalidated_admission=True,
                 )
         except InsufficientRooPointsError as exc:
+            if channel_artifact_scope is not None:
+                transaction.set_rollback(True)
             return None, None, None, Response(
                 getattr(exc, "payload", None) or build_roo_points_payload(
                     domain=domain,
@@ -851,6 +861,8 @@ def _charge_roo_points_for_article(request, *, context, payload: dict, goal_oper
             )
 
         except (ArticleGenerationError, WebsiteAuthorityError) as exc:
+            if channel_artifact_scope is not None:
+                transaction.set_rollback(True)
             return None, None, None, Response({"detail": str(exc), "code": getattr(exc, "code", "company_billing_founder_unavailable")}, status=409)
 
         payload.update(
@@ -12157,6 +12169,13 @@ def _article_capabilities_for_context(context, config, *, latest_runs=None, forc
 
 def _setup_blocked_response_for_generation(context, config, *, run=None, publishing=False, request_data=None):
     from .portable_drafts import explicit_portable_request, original_portable_run
+    if run is not None and "publishing_channel_artifact" in (run.run_request or {}) and not publishing:
+        from .channel_artifacts import authorize_payload
+        try:
+            authorize_payload(run.run_request)
+            return None
+        except WebsiteAuthorityError as exc:
+            return Response(exc.as_dict(), status=exc.status)
     if not publishing and (original_portable_run(run) if run is not None else explicit_portable_request(request_data or {})):
         return None
     capabilities = _article_capabilities_for_context(context, config, force=True)
@@ -13051,21 +13070,35 @@ def _create_local_run(*, workflow, domain, github_repo="", actor_id="", payload=
     except WebsiteAuthorityError as exc:
         from .website_models import WebsiteConnection, WebsiteConnectionOperation
         binding = connection_contract(payload)
+        artifact_envelope = None
+        if "publishing_channel_artifact" in payload:
+            from .channel_artifact_contract import validate_envelope, ArtifactContractError
+            try:
+                artifact_envelope = validate_envelope(payload["publishing_channel_artifact"])
+                binding = {"website_connection_id": artifact_envelope["connection_id"],
+                    "connection_generation": artifact_envelope["connection_generation"]}
+            except ArtifactContractError:
+                raise exc from None
         remote_data = remote_data if isinstance(remote_data, dict) else {}
         remote_id = str(remote_data.get("run_id") or remote_data.get("job_id") or remote_data.get("task_id") or "")
         run_id = remote_id or fallback_run_id or f"revoked-{uuid.uuid4()}"
         with transaction.atomic():
             website = WebsiteConnection.objects.filter(pk=binding.get("website_connection_id")).first()
+            if artifact_envelope is not None and website is not None and str(website.organization_id) != artifact_envelope["organization_id"]:
+                raise exc
             if website:
                 # Match the lifecycle lock order before recording late cleanup.
                 Organization.objects.select_for_update().get(pk=website.organization_id)
                 website = WebsiteConnection.objects.select_for_update().get(pk=website.pk)
             run, created = ContentFactoryRun.objects.get_or_create(run_id=run_id, defaults={
+                **({"organization": website.organization} if artifact_envelope is not None and website is not None else {}),
                 "workflow": workflow, "domain": domain, "github_repo": github_repo, "slack_user_id": actor_id,
                 "run_request": payload, "status": ContentFactoryRunStatus.CANCELLED,
                 "current_step": "website_connection_changed", "error": str(exc),
                 "result": {"error_code": exc.code, "remote_dispatch_accepted": bool(remote_id)},
             })
+            if artifact_envelope is not None and not created and str(run.organization_id) != artifact_envelope["organization_id"]:
+                raise exc
             if not created and run.status not in {ContentFactoryRunStatus.COMPLETED, ContentFactoryRunStatus.CANCELLED}:
                 run.status = ContentFactoryRunStatus.CANCELLED
                 run.resume_available = False
@@ -13302,12 +13335,20 @@ def _sync_local_run_from_remote(run, remote_data):
     if not isinstance(remote_data, dict) or not remote_data:
         return run
     try:
-        fence = (authority_guard(scoped_run_contract(run), action="config_write")
-                 if run.workflow in REPOSITORY_WORKFLOWS and not portable_run_update_allowed(run, remote_data)
-                 else nullcontext())
+        if "publishing_channel_artifact" in (run.run_request or {}):
+            from .channel_artifacts import artifact_run_update_allowed, artifact_write_guard
+            if not artifact_run_update_allowed(run, remote_data):
+                return run
+            fence = artifact_write_guard(run.run_request)
+        else:
+            fence = (authority_guard(scoped_run_contract(run), action="config_write")
+                     if run.workflow in REPOSITORY_WORKFLOWS and not portable_run_update_allowed(run, remote_data)
+                     else nullcontext())
         with fence, transaction.atomic():
             ContentFactoryRun.objects.select_for_update().get(pk=run.pk)
             run.refresh_from_db()
+            if "publishing_channel_artifact" in (run.run_request or {}) and not artifact_run_update_allowed(run, remote_data):
+                return run
             if stale_execution_event(run.result, remote_data, saved_status=run.status):
                 return run
             return _sync_local_run_from_remote_locked(run, remote_data)
@@ -13848,6 +13889,13 @@ def _queue_content_factory_run_authorized(*, endpoint, workflow, context, config
                 editorial_rejection = _refresh_article_editorial_payload(organization=context.organization, payload=payload)
                 if editorial_rejection is not None:
                     break
+                if "publishing_channel_artifact" in payload:
+                    from .channel_artifacts import authorize_payload
+                    try:
+                        authorize_payload(payload)
+                    except WebsiteAuthorityError as exc:
+                        editorial_rejection = Response(exc.as_dict(), status=exc.status)
+                        break
                 if payload.get("delivery_mode") == "content_only" and payload.get("delivery_mode_confirmed") is True:
                     portable_reservation = reserve_portable_dispatch_intent(
                         organization=context.organization, workflow=workflow, actor_id=actor_id, payload=payload)
@@ -14190,7 +14238,12 @@ def _call_content_factory_run_action(
     if action not in {"cancel", "deny"}:
         from .portable_drafts import portable_run_control_allowed
         scoped_run = ContentFactoryRun.objects.filter(run_id=run_id).first()
-        if (scoped_run and scoped_run.workflow in REPOSITORY_WORKFLOWS
+        if scoped_run and "publishing_channel_artifact" in (scoped_run.run_request or {}):
+            from .channel_artifacts import artifact_run_control_allowed
+            if not artifact_run_control_allowed(scoped_run, action, payload):
+                return {"allowed": False, "status": "blocked", "code": "publishing_adapter_required",
+                    "detail": "The original CMS artifact cannot perform this action.", "content_factory_status_code": 409}
+        elif (scoped_run and scoped_run.workflow in REPOSITORY_WORKFLOWS
                 and not portable_run_control_allowed(scoped_run, action, payload)):
             try:
                 saved = scoped_run_contract(scoped_run)
@@ -16777,7 +16830,7 @@ def start_article_generation(*, user, context, data, request_hash=None, website_
         website_contract=website_contract, goal_operation_id=goal_operation_id)
 
 
-def _start_article_generation_for_channel(*, user, context, data, request_hash=None, website_contract=None, goal_operation_id=None):
+def _start_article_generation_for_channel(*, user, context, data, request_hash=None, website_contract=None, goal_operation_id=None, channel_artifact_scope=None):
     """Execute the canonical owned operation for HTTP and MCP transports."""
     command = ContentCommand(user=user, data=data)
     config = _get_config(context.organization)
@@ -17038,6 +17091,8 @@ def _start_article_generation_for_channel(*, user, context, data, request_hash=N
     # become part of its public/mock-facing call contract.
     if goal_operation_id is not None:
         billing_kwargs["goal_operation_id"] = goal_operation_id
+    if channel_artifact_scope is not None:
+        billing_kwargs["channel_artifact_scope"] = channel_artifact_scope
     charged_user, _charge_ledger, article_request, billing_error = _charge_roo_points_for_article(command, **billing_kwargs)
     if billing_error is not None:
         return billing_error
@@ -18361,6 +18416,14 @@ def _project_setup_pr_creation_failure(run, config, remote_data):
 
 def control_article_run(*, user, context, run, action, data, run_id=None, goal_operation_id=None):
     """Route publication through the channel while retaining original run consent."""
+    if action not in {"cancel", "deny"} and "publishing_channel_artifact" in (run.run_request or {}):
+        from .channel_artifacts import artifact_run_control_allowed
+        if goal_operation_id is not None or not artifact_run_control_allowed(run, action, data):
+            return Response({"code": "publishing_adapter_required", "detail": "Use this CMS artifact's editorial recovery or separate publication review."}, status=409)
+        from .website_connections import owner_operation_scope
+        with owner_operation_scope(scoped_run_contract(run)):
+            return _control_article_run_for_channel(user=user, context=context, run=run, action=action,
+                data=data, run_id=run_id, goal_operation_id=None)
     from .publishing_channels import enabled, execute
     if enabled() and action in {"publish-pr", "promote-bundle", "merge-publish-pr"}:
         from .publishing_channel_contract import ChannelRequest

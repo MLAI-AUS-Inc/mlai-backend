@@ -75,7 +75,23 @@ class CmsChannel(UnavailableChannel):
     """Authenticated CMS effects are supplied by v2 3.3 and 3.6."""
 
     name = "cms"
-    effect_capabilities = frozenset({"capture_existing", "disconnect"})
+    effect_capabilities = frozenset({"capture_existing", "disconnect", "publish"})
+
+    def publish(self, request):
+        """Generate a CMS-bound artifact through existing editorial and Roo gates."""
+        if request.step != "generation" or request.run is not None or request.operation is not None:
+            return self._unavailable(request)
+        from .channel_artifacts import prepare_generation
+        from .vibe_marketing_views import _start_article_generation_for_channel
+        scope = prepare_generation(request.context, request.config, user=request.user)
+        if request.data.get("website_contract") or request.data.get("goal_operation_id") is not None:
+            raise WebsiteAuthorityError("website_connection_changed", "CMS artifacts cannot inherit a repository or Git goal.")
+        data = dict(request.data.get("data") or {})
+        if "publishing_channel_artifact" in data:
+            raise WebsiteAuthorityError("website_connection_changed", "The backend reserves the original CMS artifact.")
+        data.update(delivery_mode="content_only", delivery_mode_explicit=True, delivery_mode_confirmed=True)
+        return _start_article_generation_for_channel(user=request.user, context=request.context,
+            data=data, request_hash=request.data.get("request_hash"), channel_artifact_scope=scope)
 
     def capture_existing(self, request):
         """Reserve and advance bounded public-post capture with private authority."""

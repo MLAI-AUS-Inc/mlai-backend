@@ -134,12 +134,17 @@ def _deliver(row):
         if audience != request.get("research_audience"):
             raise WebsiteAuthorityError("research_audience_changed", "The approved research audience changed.")
     else:
-        if not explicit_portable_request(request):
+        if "publishing_channel_artifact" in request:
+            from .channel_artifacts import authorize_payload
+            authorize_payload(request)
+        elif not explicit_portable_request(request):
             with authority_guard(request, action="read"):
                 pass
         policy_error = _refresh_article_editorial_payload(organization=row.organization, payload=request)
         if policy_error is not None:
             return "pending", str(policy_error.data.get("code") or "editorial_policy_recheck_required")[:100], ""
+        if "publishing_channel_artifact" in request:
+            authorize_payload(request)
         from integrations.services.article_generation import require_article_activation
         requester = get_user_model().objects.get(pk=request["roo_points_requested_by_user_id"], is_active=True)
         require_article_activation(domain=row.organization.domain, actor_id=row.payload.get("actor_id") or "",

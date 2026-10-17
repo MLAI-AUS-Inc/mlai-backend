@@ -151,6 +151,7 @@ def original_portable_run(run):
     original = getattr(run, "run_request", None)
     try:
         return (isinstance(original, dict) and explicit_portable_request(original)
+                and "publishing_channel_artifact" not in original
                 and not connection_contract(original)
                 and original.get("resolved_delivery_mode") in (None, "", "content_only"))
     except WebsiteAuthorityError:
