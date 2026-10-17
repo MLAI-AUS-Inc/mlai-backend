@@ -114,6 +114,31 @@ class CmsGoalControllerTests(SimpleTestCase):
         self.assertEqual(rows["first_article_live"]["state"], "pending")
         self.assertEqual(rows["merged"]["state"], "not_required")
 
+    def test_stopped_goal_keeps_paid_artifact_reads_but_cannot_readmit_model_execution(self):
+        self.prepared(); self.paid_run()
+        self.goal_operation.state = "stopped"
+        from .channel_artifacts import artifact_read_receipt, admission_receipt
+        envelope = self.run.run_request["publishing_channel_artifact"]
+        query = {"billing_request_id": self.key, "artifact_operation_id": envelope["artifact_operation_id"],
+            "envelope_digest": envelope["digest"], "domain": self.run.domain, "for_execution": False}
+        self.assertTrue(artifact_read_receipt(query)["allowed"])
+        from .website_contract import WebsiteAuthorityError
+        with self.assertRaises(WebsiteAuthorityError): admission_receipt(query)
+        with override_settings(ARTICLES_CMS_GOALS_ENABLED=False): self.assertTrue(artifact_read_receipt(query)["allowed"])
+
+    def test_artifact_read_still_requires_actual_original_unrefunded_spend_and_current_owner(self):
+        self.prepared(); self.paid_run()
+        from .channel_artifacts import artifact_read_receipt
+        from .website_contract import WebsiteAuthorityError
+        envelope = self.run.run_request["publishing_channel_artifact"]
+        query = {"billing_request_id": self.key, "artifact_operation_id": envelope["artifact_operation_id"],
+            "envelope_digest": envelope["digest"], "domain": self.run.domain}
+        self.refunds.return_value.exists.return_value = True
+        with self.assertRaises(WebsiteAuthorityError): artifact_read_receipt(query)
+        self.refunds.return_value.exists.return_value = False
+        self.user.is_active = False
+        with self.assertRaises(WebsiteAuthorityError): artifact_read_receipt(query)
+
     def test_goal_finishes_only_when_private_reader_supplies_every_current_native_proof(self):
         self.prepared(); self.paid_run()
         self.run.status = "completed"

@@ -39,7 +39,8 @@ def matches(row, predicate):
     if op == "isnull": return (actual is None) == expected
     if op == "in": return actual in expected
     if op == "has_key": return isinstance(actual, dict) and expected in actual
-    return str(actual) == str(expected) if key == "pk" or isinstance(actual, UUID) else actual == expected
+    foreign_pk = "__" not in key and key.endswith("_id") and type(actual) is int and isinstance(expected, str)
+    return str(actual) == str(expected) if key == "pk" or isinstance(actual, UUID) or foreign_pk else actual == expected
 
 
 class Rows:

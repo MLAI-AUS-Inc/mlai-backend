@@ -365,6 +365,9 @@ class WebsiteConnectionAuthorizeView(APIView):
             if action == "channel_artifact":
                 from .channel_artifacts import admission_receipt
                 return Response(admission_receipt(dict(request.query_params.items())), headers={"Cache-Control": "private, no-store"})
+            if action == "channel_artifact_read":
+                from .channel_artifacts import artifact_read_receipt
+                return Response(artifact_read_receipt(dict(request.query_params.items())), headers={"Cache-Control": "private, no-store"})
             with authority_guard(dict(request.query_params.items()), action="read" if action == "ci_attestation" else action) as connection:
                 if action == "ci_attestation":
                     from .website_verification import ci_attestation_for
