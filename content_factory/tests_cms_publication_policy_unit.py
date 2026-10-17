@@ -78,6 +78,18 @@ class CmsPublicationPolicyTests(SimpleTestCase):
         self.assertNotIn("credential_operation_id", projected)
         self.assertFalse(self.connection.capabilities.get("publishingReady", False))
 
+    def test_valid_native_identity_without_publishing_permission_needs_owner_access_before_category_discovery(self):
+        for capabilities in ({"edit_posts": True, "publish_posts": False}, {"edit_posts": False, "publish_posts": True}, {}):
+            with self.subTest(capabilities=capabilities):
+                self.http.side_effect = None
+                self.http.return_value = ({"id": 7, "capabilities": capabilities}, {})
+                self.http.reset_mock()
+                with self.assertRaises(WebsiteAuthorityError) as failure:
+                    self.configure()
+                self.assertEqual(failure.exception.authority_code, "missing_or_expired_credentials")
+                self.http.assert_called_once()
+                self.assertFalse(any(row.action == policies.ACTION for row in self.saved))
+
     def test_manual_choice_stays_manual_and_neither_git_preference_nor_worker_approval_grants_cms_auto(self):
         self.config.auto_publish = True
         legacy = channel_artifacts.prepare_generation(self.context, self.config, user=self.user)

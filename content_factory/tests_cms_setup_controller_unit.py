@@ -163,6 +163,17 @@ class CmsSetupControllerTests(SimpleTestCase):
             with self.subTest(users=users), self.assertRaises(CmsApiError):
                 access._verify_author({"platform": "ghost"}, template, lambda **_options: {"users": users})
 
+    def test_valid_changed_or_reduced_wordpress_identity_is_an_owner_access_failure_not_unsupported(self):
+        for author in ({"id": 8, "capabilities": {"edit_posts": True, "publish_posts": True}},
+                {"id": 7, "capabilities": {"edit_posts": True}}, {"id": 7, "capabilities": {}}):
+            with self.subTest(author=author), self.assertRaises(CmsApiError) as error:
+                access._verify_author({"platform": "wordpress"}, {"author": 7}, lambda **_options: author)
+            self.assertEqual(error.exception.category, "credentials_required")
+        for malformed in ({"id": True, "capabilities": {}}, {"id": 7, "capabilities": None}):
+            with self.subTest(malformed=malformed), self.assertRaises(CmsApiError) as error:
+                access._verify_author({"platform": "wordpress"}, {"author": 7}, lambda **_options: malformed)
+            self.assertEqual(error.exception.category, "native_defaults_unavailable")
+
     def test_transient_occurrences_repair_then_escalate_without_polling_burning_new_attempts(self):
         self.accept()
         self.http.side_effect = CmsApiError("transient")
