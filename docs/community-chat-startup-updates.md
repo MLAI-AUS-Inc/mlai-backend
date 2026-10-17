@@ -70,6 +70,22 @@ substitutes cached Linear evidence. Network failures and provider outages return
 HTTP 503 without marking the credentials as revoked; rate limits include
 `Retry-After`. These changes require no schema migration.
 
+## Valley queue availability
+
+Valley validates that a worker consumes its run queue before accepting new jobs
+or retries. A worker outage returns HTTP 503 with the existing saved run ID,
+`retryable: true`, and `valleyDispatch.failureKind: worker_unavailable`.
+The member-facing message explains that no worker is ready and the update is
+saved; it does not incorrectly describe this as a sign-in or source failure.
+Queue admission failures retain the existing run and its source selection.
+
+Status reads show a warning for a failed dispatch or an acknowledged run that
+has remained queued beyond the redispatch threshold. They retain `state: queued`
+and do not imply that source collection has started, fail the run, or publish
+another job as a side effect of polling. Running and completed runs do not
+inherit this queue warning. The Linear authentication fix is independent: it
+cannot restore a worker whose queue subscription was cancelled.
+
 ## Evidence, editing and disclosure
 
 - Generated content is private. Curation may include sensitive supported facts for founder assessment. Automated candidate selection is not human approval.
