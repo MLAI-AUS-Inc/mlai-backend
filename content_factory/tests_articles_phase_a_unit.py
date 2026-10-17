@@ -332,4 +332,5 @@ class SourceProofTests(SimpleTestCase):
             companies.return_value.first.return_value = fixture.context.company
             operations.return_value.update.return_value = 0
             self.assertIsNone(prepare.wake_prepare_for_source(website.pk, organization_id=7))
-        website.operations.filter.assert_not_called()
+        website.operations.filter.assert_called_once_with(generation=website.generation, action="prepare")
+        website.operations.filter.return_value.update.assert_not_called()
