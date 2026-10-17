@@ -1273,6 +1273,14 @@ class WebsiteReviewRegressionTests(WebsiteDatabaseFixture, TestCase):
                     managed_native = cms_goal_start.start(context, self.config, user=user, data=native_start_data)
                     self.assertEqual(str(cms_goal_start.start(context, self.config, user=user, data=native_start_data).pk), str(managed_native.pk))
                 held.assert_called_once()
+                from .cms_first_article_subject import from_goal as financial_subject
+                from .cms_goal_authority import historical as financial_authority
+                from .website_first_article_billing import _binding as financial_binding, request_key as financial_key
+                self.assertEqual(managed_native.payload['financial_subject_version'], 2)
+                original_money = financial_subject(financial_authority(managed_native))
+                self.assertEqual(managed_native.receipt['first_article_billing']['binding'], financial_binding(original_money))
+                self.assertEqual(managed_native.receipt['first_article_billing']['client_request_id'], financial_key(original_money))
+                self.assertNotIn('policy_operation_id', original_money['scope'])
                 managed_key = managed_native.receipt['first_article_billing']['client_request_id']
                 managed_spend = Ledger.objects.get(pk=managed_native.receipt['first_article_billing']['spend_ledger_id'])
                 artifact_payload = {'domain': self.org.domain, 'client_request_id': managed_key,

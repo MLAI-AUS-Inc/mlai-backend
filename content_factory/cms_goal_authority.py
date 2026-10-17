@@ -49,9 +49,12 @@ def historical(operation):
     """
     try:
         payload = operation.payload
-        if (operation.action != ACTION or not isinstance(payload, dict) or set(payload) - {"lease_id"} != FIELDS or
+        if (operation.action != ACTION or not isinstance(payload, dict) or set(payload) - {"lease_id", "financial_subject_version"} != FIELDS or
                 type(payload["schema_version"]) is not int or payload["schema_version"] != 1 or
                 type(payload["failures"]) is not int or not 0 <= payload["failures"] <= 5):
+            raise _deny()
+        financial_version = payload.get("financial_subject_version", 1)
+        if type(financial_version) is not int or financial_version not in {1, 2}:
             raise _deny()
         expected = goals.scope(payload["binding"], policy_operation_id=payload["policy_operation_id"], policy_digest=payload["policy_digest"])
         goal = goals.validate_goal(operation.receipt.get("goal"), expected)
@@ -70,7 +73,7 @@ def historical(operation):
         if (goal["source"] is not None and goal["source"]["run_id"] != payload["source_run_id"] or
                 goals._time(selected["accepted_at"]) < goals._time(goal["started_at"])):
             raise _deny()
-        return SimpleNamespace(goal=goal, consent=selected, scope=expected)
+        return SimpleNamespace(goal=goal, consent=selected, scope=expected, financial_subject_version=financial_version)
     except WebsiteAuthorityError:
         raise
     except (goals.CmsGoalError, ValueError, TypeError, KeyError, AttributeError, RecursionError):

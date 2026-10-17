@@ -38,7 +38,7 @@ class CmsGoalConsentTests(SimpleTestCase):
         self.consent = consent.seal(self.goal, user_id=self.user.pk, review_policy="auto", expected_points=6, confirmed=True, now=self.now)
         self.goal_operation = WebsiteConnectionOperation(pk=identifier, action=authority.ACTION, connection=self.connection,
             generation=1, state="running", next_attempt_at=self.now + timedelta(seconds=90),
-            payload={"schema_version": 1, "binding": deepcopy(self.binding), "credential_operation_id": str(self.private.pk),
+            payload={"schema_version": 1, "financial_subject_version": 2, "binding": deepcopy(self.binding), "credential_operation_id": str(self.private.pk),
                 "policy_operation_id": self.policy["operation_id"], "policy_digest": self.policy["policy"]["digest"],
                 "company_id": self.binding["company_id"], "requested_by_user_id": str(self.user.pk),
                 "consent": self.consent, "capture_operation_id": None, "generation_data": None, "source_run_id": None,

@@ -23,7 +23,7 @@ def enabled(connection):
 
 def request_key(goal):
     """Keep the charge and worker request stable across source-only goal changes."""
-    prefix = "cms-articles-first:" if goal.get("kind") == "cms_site_goal" else "articles-first:"
+    prefix = "cms-articles-first:" if goal.get("kind") in ("cms_site_goal", "cms_first_article_subject") else "articles-first:"
     return prefix + goals.digest({"goal_id": goal["goal_id"],
         "scope": {key: value for key, value in goal["scope"].items() if key != "configuration_revision"}})
 

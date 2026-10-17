@@ -15,9 +15,19 @@ def _deny():
 
 
 def _financial_context(value):
-    # These common helpers bind opaque scope/answer data and original ledger
-    # fields. No legacy repository goal validation or permission is reused.
-    return {**value.goal, "target": "first_article_live", "consent": value.consent}
+    # Money belongs to the original site/owner/accepted choices. Policy and
+    # source permission are independently rechecked by the actual native goal.
+    # Keeping policy IDs out lets a future preparatory hold survive discovery
+    # without inventing a policy, changing its key or charging another article.
+    version = getattr(value, "financial_subject_version", 1)
+    if type(version) is not int or version not in {1, 2}:
+        raise _deny()
+    if version == 1:
+        # Preserve the exact keys and bindings of older native holds. A format
+        # upgrade must never rewrite their recorded financial identity.
+        return {**value.goal, "target": "first_article_live", "consent": value.consent}
+    from .cms_first_article_subject import from_goal
+    return from_goal(value)
 
 
 def request_key(value):
