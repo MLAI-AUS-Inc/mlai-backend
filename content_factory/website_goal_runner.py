@@ -272,7 +272,14 @@ def wake_goal_for_source(config, *, company_id, user, now):
                 return None
             goal = rebound
         goal = retain_child_references(goal, latest.receipt)
-        _cancel_prepare_child(latest, config)
+        from .website_article_source_fence import record as record_article_fence
+        fence = record_article_fence(latest, config, rebound=goal, now=now)
+        if fence is not None:
+            latest.receipt = {**latest.receipt, "goal": goal}
+            latest.save(update_fields=["receipt", "updated_at"])
+            _cancel_prepare_child(latest, config, source_fence=fence)
+        else:
+            _cancel_prepare_child(latest, config)
         goal = goals.refresh_goal(goal, {}, scope=goal["scope"], source_sha=connection.verified_sha, now=now)
         goal["current_source_sha"] = connection.verified_sha
         receipt = {key: value for key, value in latest.receipt.items() if key not in

@@ -69,6 +69,9 @@ def article_run(op, config):
         or str(saved.get("roo_points_ledger_id") or "")!=str(billing.get("spend_ledger_id") or "")
         or str(saved.get("roo_points_billing_user_id"))!=billing.get("payer_user_id")):
         raise WebsiteAuthorityError("website_operation_changed","The saved first article does not match this goal.")
+    from .website_article_source_fence import KEY as SOURCE_FENCE_KEY, read_original
+    if SOURCE_FENCE_KEY in op.receipt:
+        return read_original(op,config,run)
     original=validate_operation(connection,{**saved,"run_id":run.run_id})
     if original is None or original.action!="workflow" or original.payload.get("run_id")!=run.run_id:
         raise WebsiteAuthorityError("website_operation_changed","The first article has no original reserved workflow operation.")

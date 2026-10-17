@@ -111,6 +111,9 @@ def validate_operation(connection, payload, *, worker_cleanup=False, restoration
         raise WebsiteAuthorityError("website_operation_changed", "The operation does not belong to this website.")
     if "article_source_refresh_inspection_only" in op.payload or op.payload.get("workflow") == "article_source_refresh_inspect":
         raise WebsiteAuthorityError("website_operation_changed", "The private article inspection cannot authorize a generic operation.")
+    from .website_article_source_fence import KEY as SOURCE_FENCE_KEY
+    if SOURCE_FENCE_KEY in (getattr(op, "receipt", None) or {}) and getattr(op, "action", None) != "prepare" and not (cancellation or cancellation_receipt):
+        raise WebsiteAuthorityError("website_operation_cancelled", "The original article was fenced after its source changed.")
     parent_id=op.payload.get("first_article_goal_operation_id")
     if parent_id and not (worker_cleanup or restoration or cancellation or cancellation_receipt):
         from . import website_goal as goals
@@ -163,14 +166,18 @@ def validate_operation(connection, payload, *, worker_cleanup=False, restoration
         publish_continuation = _approved_publish_child_continuation(connection, op, run)
         if not review_replay and not publish_continuation and ((incoming_status and incoming_status != op.state and not same_failure) or (event and event not in terminal_events[op.state])):
             raise WebsiteAuthorityError("website_operation_terminal", "This operation is terminal. Start a new reviewed attempt.")
+    fenced_cancel_target = False
+    if (cancellation or cancellation_receipt) and SOURCE_FENCE_KEY in (getattr(op, "receipt", None) or {}):
+        from .website_article_source_fence import cancellation_run_matches
+        fenced_cancel_target = cancellation_run_matches(connection, op, run_id)
     if cancellation_receipt:
         if (op.action != "workflow" or op.state not in {"pending", "running", "failed", "blocked", "cancelled"}
                 or op.generation != connection.generation or str(payload.get("connection_generation")) != str(connection.generation)
-                or payload.get("status") != "cancelled" or not run_id or run_id != op.payload.get("run_id")):
+                or payload.get("status") != "cancelled" or not run_id or run_id != op.payload.get("run_id") and not fenced_cancel_target):
             raise WebsiteAuthorityError("cancellation_scope_mismatch", "A cancellation receipt must match the saved workflow attempt.")
     elif cancellation:
         if (op.action != "workflow" or op.state != "cancelled" or op.generation != connection.generation
-                or str(payload.get("connection_generation")) != str(connection.generation) or not run_id or run_id != op.payload.get("run_id")):
+                or str(payload.get("connection_generation")) != str(connection.generation) or not run_id or run_id != op.payload.get("run_id") and not fenced_cancel_target):
             raise WebsiteAuthorityError("cancellation_scope_mismatch", "Cancellation is limited to the already-fenced operation.")
     elif worker_cleanup:
         allowed = op.payload.get("purge_run_ids", op.payload.get("stop_preview_run_ids", []))
@@ -357,7 +364,7 @@ def operation_summary(op):
         "nextAttemptAt": next_attempt.isoformat() if next_attempt else None}
 
 
-def cancel_operation(config, *, data, idempotency_key):
+def cancel_operation(config, *, data, idempotency_key, source_fence=None):
     """Fence exactly one operation before remote cancellation is reconciled."""
     from .website_connections import authority_guard, contract_for
     from workflow_runs.models import ContentFactoryRun
@@ -374,10 +381,24 @@ def cancel_operation(config, *, data, idempotency_key):
         attempt = positive_integer(data.get("operation_attempt", 1), name="operation_attempt")
         if attempt != op.payload.get("attempt", 1) or str(data.get("deletion_epoch", 0)) != str(deletion_epoch(connection)):
             raise WebsiteAuthorityError("website_operation_changed", "Refresh this operation before cancelling it.")
-        if op.state in {"completed", "failed", "denied", "deleted"} or (op.action == "prepare" and op.state not in {"pending", "running", "needs_user", "needs_attention", "cancelled"}):
+        from .website_article_source_fence import KEY as SOURCE_FENCE_KEY, cancellation_parent, authorize_automatic_cancellation
+        if source_fence is not None:
+            authorize_automatic_cancellation(connection, op, source_fence)
+        elif SOURCE_FENCE_KEY in (op.receipt or {}):
+            parent, fence = cancellation_parent(connection, op)
+            if op.action != "prepare":
+                return cancel_operation(config, data={**binding, "operation_id": str(parent.pk),
+                    "operation_attempt": parent.payload.get("attempt", 1), "deletion_epoch": deletion_epoch(connection)},
+                    idempotency_key=evidence_digest({"owner_stop": idempotency_key, "source_fence": str(fence.pk)}))
+            fence.state = "cancelled"
+            fence.receipt = {**(fence.receipt or {}), "status": "revoked_by_owner", "revoked_at": timezone.now().isoformat(),
+                "remote_confirmed": False, "effect_authority": False}
+            fence.save(update_fields=["state", "receipt", "updated_at"])
+        source_stop = source_fence is not None and op.action == "workflow" and op.state in {"pending", "running", "completed", "failed", "blocked"}
+        if not source_stop and (op.state in {"completed", "failed", "denied", "deleted"} or (op.action == "prepare" and op.state not in {"pending", "running", "needs_user", "needs_attention", "cancelled"})):
             raise WebsiteAuthorityError("website_operation_terminal", "This operation has finished. Review its recorded effects or prepare a removal proposal.")
         run = ContentFactoryRun.objects.filter(run_id=op.payload.get("run_id"), organization=connection.organization).first()
-        if op.action != "prepare" and run and workflow_operation_state(run) in {"completed", "failed", "denied", "blocked"}:
+        if not source_stop and op.action != "prepare" and run and workflow_operation_state(run) in {"completed", "failed", "denied", "blocked"}:
             raise WebsiteAuthorityError("website_operation_terminal", "The worker has finished this operation. Review its recorded effects.")
         effects = list(connection.repository_mutations.filter(run_id=op.payload.get("run_id", "")).values("pr_url", "branch", "head_sha", "status"))
         op.state = "cancelled"

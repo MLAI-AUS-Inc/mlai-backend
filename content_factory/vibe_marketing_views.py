@@ -18449,6 +18449,15 @@ def _project_setup_pr_creation_failure(run, config, remote_data):
 
 def control_article_run(*, user, context, run, action, data, run_id=None, goal_operation_id=None):
     """Route publication through the channel while retaining original run consent."""
+    if action in {"cancel", "deny"}:
+        from .website_article_source_fence import owner_stop_for_run
+        try:
+            stopped = owner_stop_for_run(context=context, run=run, action=action)
+        except WebsiteAuthorityError as exc:
+            return Response(exc.as_dict(), status=exc.status)
+        if stopped is not None:
+            run.refresh_from_db()
+            return Response(_serialize_run(run, context=context), status=status.HTTP_202_ACCEPTED)
     if action not in {"cancel", "deny"} and "publishing_channel_artifact" in (run.run_request or {}):
         from .channel_artifacts import artifact_run_control_allowed
         if goal_operation_id is not None or not artifact_run_control_allowed(run, action, data):

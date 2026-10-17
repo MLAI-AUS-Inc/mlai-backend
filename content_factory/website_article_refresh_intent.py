@@ -81,6 +81,11 @@ def _current_binding(op, context, config, *, user, connection):
     if parent.pk != op.pk or parent.receipt.get("goal") != op.receipt.get("goal"):
         _deny()
     run = article_run(op, config)
+    fenced = getattr(run, "_article_source_fence_read", None)
+    if run is not None and fenced and (run.status == "cancelled" or fenced.get("execution_version") is None):
+        # The v1 worker inspector cannot read cancelled artifacts. The paired
+        # explicit historical grant must first confirm the remote source fence.
+        raise WebsiteAuthorityError("website_prepare_dependency_transient", "Waiting for the original article source fence to be confirmed.", retryable=True)
     if run is None or run.status not in {"completed", "failed", "blocked", "awaiting_approval"}:
         _deny()
     request, result, goal = goals.mapping(run.run_request), goals.mapping(run.result), op.receipt["goal"]

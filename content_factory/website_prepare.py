@@ -157,7 +157,7 @@ def _queue_superseded_setup_cleanup(op, child):
     return followup
 
 
-def _cancel_prepare_child(op, config):
+def _cancel_prepare_child(op, config, *, source_fence=None):
     """Fence a stalled child through the ordinary durable cancellation control.
 
     A blocked or failed setup child has already stopped. The new attempt
@@ -175,7 +175,9 @@ def _cancel_prepare_child(op, config):
         saved = child.run_request if isinstance(child.run_request, dict) else {}
         cancel_operation(config, data={**contract_for(op.connection), "operation_id": saved.get("operation_id"),
             "operation_attempt": saved.get("operation_attempt", 1), "deletion_epoch": deletion_epoch(op.connection)},
-            idempotency_key=f"prepare-retry:{op.pk}:{op.payload.get('attempt', 1)}:{child_id}")
+            idempotency_key=f"prepare-retry:{op.pk}:{op.payload.get('attempt', 1)}:{child_id}",
+            **({"source_fence": str(source_fence.pk)} if source_fence is not None
+                and child.run_request.get("operation_id") in {item["operation_id"] for item in source_fence.payload["binding"]["runs"]} else {}))
 
 
 def _checking_owner_wait(op):

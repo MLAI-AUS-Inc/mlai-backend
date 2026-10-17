@@ -118,7 +118,14 @@ def queue_wake(connection_id, *, signal, expected_generation=None):
                 from .website_prepare import _cancel_prepare_child
                 from .models import OrganizationContentConfig
                 config=OrganizationContentConfig.objects.get(website_connection=connection)
-                _cancel_prepare_child(parent,config)
+                from .website_article_source_fence import record as record_article_fence
+                fence=record_article_fence(parent,config,rebound=rebound,now=now)
+                if fence is not None:
+                    parent.receipt={**parent.receipt,"goal":rebound}
+                    parent.save(update_fields=["receipt","updated_at"])
+                    _cancel_prepare_child(parent,config,source_fence=fence)
+                else:
+                    _cancel_prepare_child(parent,config)
                 from .website_goal_runner import retain_child_references
                 rebound=retain_child_references(rebound,parent.receipt)
                 parent.receipt={**{key:value for key,value in parent.receipt.items() if key not in {"child_run_id","setup_run_id","scan_run_id","child_resume_pending"}},"goal":rebound}
