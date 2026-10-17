@@ -41,6 +41,22 @@ spoofed. Squarespace currently offers hosted/portable. Channel execution,
 credentials, hosted domains and publication acceptance belong to later steps.
 See the [channel discovery design and evidence](articles-e5-channel-discovery-2026-10-17.md).
 
+Default-off `ARTICLES_CMS_CHANNEL_ENABLED` adds owner action `cms-connect` when
+channel discovery and execution are enabled. It requires the current saved CMS
+choice, `channel_scope`, integer `channel_revision`, UUID `client_request_id`,
+`platform=wordpress|ghost`, HTTPS `public_origin`/`api_origin`, explicit
+`credential_origin_confirmed=true`, and the provider `secret` (plus WordPress
+`username`). No field is accepted as worker or repository authority. Provider
+identity is read outside locks, then the same company/founder/site/choice is
+checked again before saving a non-Git binding and context-bound encrypted private
+credential operation. Replays reuse the current binding; changed inputs conflict.
+Responses are private/no-store and contain no credential or provider response.
+CMS disconnect erases stored key payloads, fences old work and retains provider
+content, including when rollout flags are disabled. It instructs the owner to
+revoke the key in the CMS too. These are connection primitives; CMS generation,
+publication, live proof and the full goal remain unavailable pending adapter
+acceptance. See [CMS implementation and remaining work](articles-e5-cms-publishing-2026-10-17.md).
+
 Every repository request, saved run, child run, token request, callback and repository-derived config update carries `website_connection_id` and `connection_generation`. `repository_id` verifies GitHub's immutable identity. `connection_target_id` identifies a verified target for publishing; when omitted the selected default must be verified. Worker retry `generation` is a separate counter.
 
 `GET /api/content-factory/connections/authorize` accepts that tuple, `domain`, `github_repo`, and `action=read|scan|config_write|preview|setup|publish|merge|cleanup`. It uses existing internal API-key authentication. Missing, stale, revoked, cross-company and mismatched repository authority returns a stable 409 error. No legacy OAuth fallback overrides denial. A successful check is not a lease: workers recheck immediately before each external mutation. The backend serializes its writes with lifecycle changes using organization/connection row locks.

@@ -1,0 +1,136 @@
+# E5 / v2 3.3: CMS authority and WordPress, then Ghost
+
+This implements the owner's instruction to continue all phases. All code remains
+behind default-off flags and draft PRs. No real CMS key, account, website write,
+wallet action, deployment or backend migration is included.
+
+## Implemented connection boundary
+
+`ARTICLES_CMS_CHANNEL_ENABLED=false` requires the separate channel-execution and
+channel-discovery flags. The existing authenticated company action `cms-connect`
+accepts the saved channel scope/revision, a fresh UUID `client_request_id`,
+`platform`, `public_origin`, `api_origin`, `credential_origin_confirmed=true`,
+and the application/integration credential (`username` for WordPress, `secret`).
+It requires the owner's saved CMS choice. It refreshes founder/company/site
+before HTTP and repeats the choice, owner and selection after HTTP under the
+organization lock. A replay reuses the acknowledged binding; different settings
+on the same request ID conflict, and a revoked or superseded request cannot
+recreate a connection.
+
+The WordPress root index must report the exact selected `home` and installation
+`url`, followed by authenticated `users/me?context=edit` with `edit_posts`.
+Ghost's unauthenticated `site/` must name the selected public site, followed by
+an authenticated bounded posts request. Neither public response alone proves
+authentication. An owner explicitly confirms a separate Ghost admin origin;
+it is never inferred from a homepage link. Names, email, HTML and raw provider
+responses are discarded. This is provider identity, not a public live proof.
+
+A repository-to-CMS switch reserves the existing composite keep-content
+disconnect, including its cancellation/refund outbox. The new binding uses no
+GitHub identity and clears repository-derived projections. Channel preference is
+rebound to the new saved scope. Private credentials are excluded from operation
+and status projections. Every lifecycle generation change erases private key
+payloads and retains a CMS discriminator tombstone so even Git cleanup/token
+paths reject an old CMS connection. CMS disconnect remains available with the
+rollouts disabled and tells the owner to revoke the application/integration key
+in the provider too. The backend cannot revoke an arbitrary provider-owned key.
+
+**Still incomplete:** capture, media, durable post publication/reconciliation,
+unpublish, live proof, CMS goal milestones, artifact-only CF envelope, owner UI,
+and the remote WordPress/Ghost acceptance runs. Connection summaries deliberately
+advertise no generation or publication readiness. Keep rollout flags off.
+
+Local evidence: the full 899-test website group includes 40 CMS credential,
+transport, identity and owner cases; 15 observability tests also pass. Two actual ORM
+credential/connect/replay/disconnect regressions are assigned to disposable CI
+and have not been run locally. The final run and exact PR CI head are recorded
+in the PR validation notes.
+
+## Independent provider authority
+
+Use an explicitly authorized non-repository WebsiteConnection, with empty GitHub
+repository/installation/branch/root and null repository ID. A closed backend-owned
+channel discriminator identifies CMS + platform + company + public site + founder.
+It is stored only by the owner connection controller. Git/token/read/build guards
+must reject this discriminator before any GitHub call. CMS uses its own guard;
+page detection and the channel preference remain informational.
+
+Keep the active credential in a private `channel-credential` operation payload,
+using the existing versioned `encrypt_credential_value` / `decrypt_credential_value`
+keyring helpers. Never reuse GitHub columns or pass a credential to Content Factory,
+GitHub, a browser preview, article JSON, logs or public receipts. The private
+operation action is excluded from owner operation reads. Connection summaries
+contain only an opaque provider reference and bounded capability status. Existing
+JSON columns and lifecycle records avoid a new database migration.
+
+Connect verifies the exact founder/company/domain and the current channel-choice
+revision, reads the provider identity outside locks, then repeats all checks before
+persisting a new generation/binding and encrypted credential. No guessed API origin
+receives a token. CMS API URLs must be HTTPS on the owner's explicitly selected
+origin, without userinfo or secret query data; DNS/socket/TLS are pinned and every
+credential-bearing redirect is refused. Ghost can use a different admin domain;
+that domain requires a separately proved owner binding before credential use.
+
+## WordPress operations
+
+Use an Application Password with HTTPS Basic authentication. Read the authenticated
+current user and permissions, capture posts page by page, and keep inventory
+completion/coverage explicit. Fixed bounded query parameters and response limits
+prevent unbounded provider output. API error bodies are not returned or logged.
+Posts map title, HTML, slug, status, author, categories, tags and featured-media
+references. Only explicitly mapped fields are written. Media uploads use already
+owned artifact bytes; arbitrary image URLs are not fetched with credentials.
+Draft versus publication follows the saved original owner review/auto policy.
+
+A durable operation records the provider binding/generation, owner request,
+article/approval digest, deterministic operation marker and attempted external
+action before HTTP. A timeout keeps that same operation and reconciles the marker
+and content using authenticated reads. It never blindly repeats POST or edits an
+unrelated pre-existing slug. Store the returned post/media ID before later effects;
+repeating an acknowledged operation reuses those IDs. Unknown outcomes remain
+bounded pending work rather than an invented success.
+
+Verify the public post URL and expected content/operation marker independently of
+the authenticated API response. A draft/export or provider 201 is not live proof.
+Provider URLs cannot redirect verification to a private or foreign origin.
+Unpublish requires explicit owner intent and the exact current MLAI-owned post
+reference/content; disconnect erases stored credential material and revokes future
+operations while retaining published content by default. Tell the owner to revoke
+the corresponding WordPress Application Password as well.
+
+## Ghost operations
+
+Use the owner-provided Admin API integration key only on the backend. Generate a
+fresh HS256 JWT per request with the key ID, `/admin/` audience and expiry at most
+five minutes. Use a pinned API-version header and bounded paginated JSON. The
+posts/images adapters share the same reservation, ownership, uncertain-outcome,
+review, verification and disconnect contracts. Do not reuse Content API keys or
+browser sessions for write authority. Confirm current posts/image/HTML conversion
+semantics against primary documentation before implementation.
+
+## Pipeline and evidence
+
+A CMS generation is artifact-only in Content Factory. Provider credentials and
+publishing stay on the backend. Preserve editorial policy, reserved billing,
+mandatory review, original draft identity and body digest. Add channel-specific
+proof kinds/waivers for repository-only milestones; never fabricate a commit,
+GitHub review, merge or CI attestation. The shared status and publishing interface
+must be used throughout the CMS goal. Original Git goals and portable exports keep
+their current semantics.
+
+Before rollout, require fake-transport security/race/idempotency tests, then a
+remote disposable WordPress container exercising connect, paginated capture,
+draft/publish/media, exact public verification, uncertain replies and disconnect.
+Add Ghost under the same contract. Production transport always retains public
+HTTPS pinning; any container-only transport injection lives in tests. Run no local
+database, migration, Docker or framework compiler. E4's dedicated account/wallet,
+distinct hostnames and missing environment/token remain separate live-zoo blockers.
+
+## Primary references checked on 17 October 2026
+
+- [WordPress authentication](https://developer.wordpress.org/rest-api/using-the-rest-api/authentication/)
+- [Application Passwords](https://developer.wordpress.org/advanced-administration/security/application-passwords/)
+- [Posts](https://developer.wordpress.org/rest-api/reference/posts/), [media](https://developer.wordpress.org/rest-api/reference/media/), [users](https://developer.wordpress.org/rest-api/reference/users/)
+- [Ghost Admin API](https://docs.ghost.org/admin-api/)
+- [WordPress root site identity](https://developer.wordpress.org/reference/classes/wp_rest_server/get_index/)
+- [Ghost site identity](https://docs.ghost.org/admin-api/site/overview/), [HTML creation](https://docs.ghost.org/admin-api/posts/creating-a-post/), [update collision detection](https://docs.ghost.org/admin-api/posts/updating-a-post/)

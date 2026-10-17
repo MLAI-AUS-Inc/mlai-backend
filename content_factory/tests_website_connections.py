@@ -1193,6 +1193,102 @@ class WebsiteSourceFenceTests(WebsiteDatabaseFixture, TestCase):
 
 
 class WebsiteReviewRegressionTests(WebsiteDatabaseFixture, TestCase):
+    @override_settings(ARTICLES_CHANNEL_DISCOVERY_ENABLED=True, ARTICLES_PUBLISHING_CHANNELS_ENABLED=True, ARTICLES_CMS_CHANNEL_ENABLED=True)
+    def test_cms_owner_connect_persists_private_key_and_disconnect_erases_every_generation(self):
+        """Actual connect/replay/revoke persistence runs on disposable remote CI."""
+        import json
+        from django.contrib.auth import get_user_model
+        from founder_tools.models import VibeRaisingCompany, VibeRaisingProfile
+        from . import cms_owner_connection as cms_owner
+        from .cms_connection_authority import current_credential
+        from .website_channel_observation import classify_prefix
+        from .website_publishing_channels import update_choice, scope_for
+        from .tests_cms_connection_contract_unit import TEST_KEY
+        user = get_user_model().objects.create_user(email='cms-connect@example.test', password='synthetic-password')
+        profile = VibeRaisingProfile.objects.create(user=user, role='founder')
+        company = VibeRaisingCompany.objects.create(profile=profile, organization=self.org, name='Synthetic CMS', domain=self.org.domain)
+        context = SimpleNamespace(profile=profile, company=company, organization=self.org)
+        self.config.website_connection, self.config.github_repo = None, ''
+        self.config.save(update_fields=['website_connection', 'github_repo'])
+        with patch('content_factory.website_publishing_channels.observe_homepage', return_value=classify_prefix(b'<head><meta name="generator" content="WordPress"></head>')):
+            inspected = update_choice(context, self.config, expected_scope=scope_for(context, self.config), expected_revision=0)
+        selected = update_choice(context, self.config, expected_scope=inspected['scope'], expected_revision=1, selected='cms')
+        data = {'client_request_id': str(uuid.uuid4()), 'channel_scope': selected['scope'], 'channel_revision': 2,
+            'platform': 'wordpress', 'public_origin': f'https://{self.org.domain}/',
+            'api_origin': f'https://{self.org.domain}/', 'credential_origin_confirmed': True,
+            'username': 'fixture-owner', 'secret': 'synthetic-application-password'}
+        identity = {'schema_version': 1, 'platform': 'wordpress', 'principal_id': '7',
+            'can_edit_posts': True, 'can_publish_posts': True, 'can_upload_media': False}
+        with override_settings(CONNECTOR_CREDENTIAL_KEYS=json.dumps({'test': TEST_KEY}), CONNECTOR_CREDENTIAL_ACTIVE_KEY_ID='test'), \
+                patch.object(cms_owner, 'inspect_identity', return_value=identity) as provider:
+            website = cms_owner.connect(context, self.config, user=user, data=data)
+            self.config.refresh_from_db()
+            self.assertEqual(str(cms_owner.connect(context, self.config, user=user, data=data).pk), str(website.pk))
+            provider.assert_called_once()
+            self.assertEqual(current_credential(context, self.config, website, user=user)[1].secret, data['secret'])
+            private = website.operations.get(action='channel-credential')
+            self.assertNotIn(data['secret'], json.dumps(private.payload))
+            summary = summary_for(self.config, company_id=company.pk)
+            self.assertEqual(summary['latestOperation']['action'], 'cms-connect')
+            self.assertFalse(summary['capabilities']['publishingReady'])
+            self.assertEqual(summary['githubRepo'], '')
+            self.assertNotIn('sealed_credential', json.dumps(summary))
+            old_contract = contract_for(website)
+            operation = transition_connection(self.config, action='disconnect', expected=old_contract)
+            website.refresh_from_db(); private.refresh_from_db()
+            self.assertEqual(private.state, 'deleted')
+            self.assertEqual(private.payload, {})
+            self.assertEqual(website.generation, 2)
+            self.assertIn('_cms_binding', website.capabilities)
+            with self.assertRaises(WebsiteAuthorityError):
+                current_credential(context, self.config, website, user=user)
+            for action in ('read', 'worker_cleanup', 'restoration', 'cancel_operation'):
+                with self.subTest(action=action), self.assertRaises(WebsiteAuthorityError):
+                    with authority_guard(contract_for(website), action=action):
+                        self.fail('Revoked CMS must not acquire Git authority')
+            self.assertEqual(operation.payload['cancel_run_ids'], [])
+
+    @override_settings(ARTICLES_PUBLISHING_CHANNELS_ENABLED=True, ARTICLES_CMS_CHANNEL_ENABLED=True)
+    def test_private_cms_credential_binding_is_scoped_and_git_read_denied(self):
+        """Real private-row lookup runs only on CI's disposable database."""
+        import json
+        from django.contrib.auth import get_user_model
+        from founder_tools.models import VibeRaisingCompany, VibeRaisingProfile
+        from . import cms_connection_authority as cms
+        from .cms_connection_contract import seal_credential
+        from .tests_cms_connection_contract_unit import TEST_KEY
+        user = get_user_model().objects.create_user(email='cms-fixture@example.test', password='synthetic-password')
+        profile = VibeRaisingProfile.objects.create(user=user, role='founder')
+        company = VibeRaisingCompany.objects.create(profile=profile, organization=self.org, name='Synthetic CMS', domain=self.org.domain)
+        context = SimpleNamespace(profile=profile, company=company, organization=self.org)
+        website = WebsiteConnection.objects.create(organization=self.org, authorized_by=user, github_repo='',
+            site_url=f'https://{self.org.domain}/')
+        binding = {'schema_version': 1, 'channel': 'cms', 'platform': 'wordpress', 'company_id': str(company.pk),
+            'organization_id': str(self.org.pk), 'owner_user_id': str(user.pk), 'connection_id': str(website.pk),
+            'generation': 1, 'public_origin': website.site_url, 'api_origin': website.site_url}
+        with override_settings(CONNECTOR_CREDENTIAL_KEYS=json.dumps({'test': TEST_KEY}), CONNECTOR_CREDENTIAL_ACTIVE_KEY_ID='test'):
+            private = WebsiteConnectionOperation.objects.create(connection=website, generation=1,
+                action='channel-credential', state='completed', idempotency_key=f'{website.pk}:credential:1',
+                payload={'schema_version': 1, 'binding': binding, 'sealed_credential': seal_credential(binding,
+                    username='fixture-owner', secret='synthetic-application-password')})
+            website.capabilities = {'_cms_binding': binding, '_cms_credential_operation_id': str(private.pk)}
+            website.save(update_fields=['capabilities'])
+            self.config.website_connection, self.config.github_repo = website, ''
+            self.config.save(update_fields=['website_connection', 'github_repo'])
+            saved_binding, credential = cms.current_credential(context, self.config, website, user=user)
+            self.assertEqual(saved_binding, binding)
+            self.assertEqual(credential.secret, 'synthetic-application-password')
+            private.refresh_from_db()
+            self.assertNotIn('synthetic-application-password', json.dumps(private.payload))
+            with self.assertRaises(WebsiteAuthorityError):
+                with authority_guard(contract_for(website), action='read'):
+                    self.fail('CMS cannot authorize GitHub')
+            website.generation = 2
+            website.capabilities['_cms_binding'] = {**binding, 'generation': 2}
+            website.save(update_fields=['generation', 'capabilities'])
+            with self.assertRaises(WebsiteAuthorityError):
+                cms.current_credential(context, self.config, website, user=user)
+
     @override_settings(ARTICLES_CHANNEL_DISCOVERY_ENABLED=True, ARTICLES_SITE_FINGERPRINT_ENABLED=True)
     def test_channel_owner_choice_survives_current_scan_and_fingerprint_refresh(self):
         """Real persistence and consent locking run only on disposable remote CI."""

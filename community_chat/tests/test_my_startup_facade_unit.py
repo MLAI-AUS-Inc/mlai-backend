@@ -202,7 +202,7 @@ class MyStartupFacadeTests(SimpleTestCase):
         binding = {"website_connection_id": OTHER, "connection_generation": 1, "repository_id": 123}
         operation = Obj(pk="reset-receipt", state="pending", receipt={"repository_modified": False,
                         "retained": ["company_details", "editorial_policy", "history"]})
-        config = Obj(refresh_from_db=MagicMock())
+        config = Obj(website_connection=None, refresh_from_db=MagicMock())
         request = self.factory.post(f"/?company_id={COMPANY}", binding, format="json",
                                     HTTP_IDEMPOTENCY_KEY="reviewed-reset")
         force_authenticate(request, self.user)
@@ -223,7 +223,7 @@ class MyStartupFacadeTests(SimpleTestCase):
 
     def test_website_reset_preserves_stale_tuple_conflict_without_remote_calls(self):
         binding = {"website_connection_id": OTHER, "connection_generation": 1}
-        config = Obj(refresh_from_db=MagicMock())
+        config = Obj(website_connection=None, refresh_from_db=MagicMock())
         with patch.object(views.websites, "_context", return_value=(Obj(company=self.company), config, None)), \
              patch.object(views.websites, "transition_connection", side_effect=WebsiteAuthorityError(
                  "website_connection_changed", "Refresh and retry.")) as transition, \
@@ -238,7 +238,7 @@ class MyStartupFacadeTests(SimpleTestCase):
         cleanup.assert_not_called()
 
     def test_website_cleanup_still_requires_explicit_reviewed_approval(self):
-        config = Obj(refresh_from_db=MagicMock())
+        config = Obj(website_connection=None, refresh_from_db=MagicMock())
         operation = Obj(pk="cleanup-receipt", state="pending", receipt={"requires_review": True})
         binding = {"website_connection_id": OTHER, "connection_generation": 2}
         reviewed = {**binding, "approve_cleanup": True, "operation_id": "proposal-1",
