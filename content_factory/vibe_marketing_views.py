@@ -14248,11 +14248,20 @@ def _call_content_factory_run_action(
     workflow="article_generation",
     timeout=(3, 15),
     transport_errors_are_pending=False,
+    cms_goal_scope=None,
 ):
     require_unlocked_remote_call()
+    if cms_goal_scope is not None:
+        from . import cms_goal_recovery
+        if action != "resume" or payload:
+            raise WebsiteAuthorityError("website_operation_changed", "Native recovery requires its original private control.")
+        return cms_goal_recovery.deliver(cms_goal_scope, expected_run_id=run_id)
     if action not in {"cancel", "deny"}:
         from .portable_drafts import portable_run_control_allowed
         scoped_run = ContentFactoryRun.objects.filter(run_id=run_id).first()
+        if scoped_run and action == "resume" and (scoped_run.run_request or {}).get("cms_goal_operation_id"):
+            return {"allowed": False, "status": "blocked", "code": "website_operation_changed",
+                "content_factory_status_code": 409, "detail": "Native recovery requires its original private control."}
         if scoped_run and "publishing_channel_artifact" in (scoped_run.run_request or {}):
             from .channel_artifacts import artifact_run_control_allowed
             if not artifact_run_control_allowed(scoped_run, action, payload):
@@ -18454,8 +18463,11 @@ def control_article_run(*, user, context, run, action, data, run_id=None, goal_o
         run_id=run_id, goal_operation_id=goal_operation_id)
 
 
-def _control_article_run_for_channel(*, user, context, run, action, data, run_id=None, goal_operation_id=None):
+def _control_article_run_for_channel(*, user, context, run, action, data, run_id=None, goal_operation_id=None, cms_goal_scope=None):
     """Execute the canonical owned operation for HTTP and MCP transports."""
+    if cms_goal_scope is not None:
+        from . import cms_goal_recovery
+        return cms_goal_recovery.control(scope=cms_goal_scope, user=user, context=context, run=run, action=action, data=data)
     if goal_operation_id is not None:
         from .website_article_recovery import authorize_resume
         try:

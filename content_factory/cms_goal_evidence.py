@@ -91,7 +91,8 @@ def collect(goal, context, config, *, user, run=None, artifact_operation_id=None
             admitted.envelope["artifact_operation_id"] != artifact_operation_id or
             admitted.operation.payload["policy"].get("cms_publication_policy") !=
                 {"operation_id": saved_policy["operation_id"], "digest": saved_policy["policy"]["digest"]} or
-            str(run.organization_id) != binding["organization_id"] or run.workflow != "article_generation" or run.github_repo or
+            str(run.organization_id) != binding["organization_id"] or
+            run.workflow not in {"article_generation", "direct_generate", "confirmed_topic"} or run.github_repo or
             not isinstance(run.result, dict) or type(run.result.get("generation")) is not int):
         raise _deny()
     original_source = goals.source({"run_id": run.run_id, "run_generation": run.result["generation"], "envelope_digest": admitted.envelope["digest"]})

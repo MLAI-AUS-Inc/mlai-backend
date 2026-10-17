@@ -81,6 +81,17 @@ def _require_work(payload, *, now, action):
         ledger = billing.records._original_spend(held)
         if ledger is not None and (ledger.user is None or ledger.user.is_active is not True):
             raise _deny()
+        if "native_recovery" in operation.receipt:
+            from . import cms_goal_recovery as recovery
+            from .cms_goal_dispatch import original_run
+            plan = recovery.validate_plan(operation.receipt["native_recovery"], operation)
+            run = original_run(operation)
+            if (run is None or plan["locator"]["run_id"] != run.run_id or plan["locator"]["envelope_digest"] != envelope["digest"] or
+                    type(run.result.get("generation")) is not int or
+                    run.result.get("generation") not in {plan["locator"]["run_generation"], plan["locator"]["run_generation"] + 1}):
+                raise _deny()
+            if not recovery.enabled(operation) or action != "first-article-generation" and recovery.blocks_provider_work(operation):
+                raise _deny()
         if budget.exhaustion(operation, now=now, action=action) is not None:
             raise _deny()
         return operation

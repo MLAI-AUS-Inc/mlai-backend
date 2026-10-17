@@ -1,0 +1,22 @@
+{
+  "schema_version": 1,
+  "source_repository": "drsamdonegan/content-factory",
+  "source_revision": "efca859a1f6781edeb0c286f9286f519f2d0d0b3",
+  "files": [
+    {
+      "source_path": "backend/cms_goal_recovery_contract.py",
+      "local_path": "content_factory/cms_goal_recovery_contract.py",
+      "sha256": "a465558e2f499bfcbe20b68b6acbc3ce6ec8c2a930bf1cf61e69b510854984fc"
+    },
+    {
+      "source_path": "backend/contracts/cms-goal-recovery-v1.schema.json",
+      "local_path": "contracts/cms-goal-recovery-v1.schema.json",
+      "sha256": "e7cdb4409ce21507450dc1360bc11268f3f1e8347f8cf3558aca8ffd71273d3f"
+    },
+    {
+      "source_path": "backend/contracts/cms-goal-recovery-v1.example.json",
+      "local_path": "contracts/cms-goal-recovery-v1.example.json",
+      "sha256": "dc0f8b62adc6457651eee127f92fe2832d6966c201f2f300e78c45144737acfa"
+    }
+  ]
+}

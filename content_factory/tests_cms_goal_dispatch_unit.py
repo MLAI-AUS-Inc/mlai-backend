@@ -40,6 +40,16 @@ class CmsGoalDispatchTests(SimpleTestCase):
             self.assertIs(self.advance(), self.run)
         start.assert_not_called(); self.spend.assert_called_once()
 
+    def test_producer_workflow_names_keep_the_original_paid_run(self):
+        self.paid_run(); self.claim()
+        with patch("content_factory.vibe_marketing_views._start_article_generation_for_channel") as start:
+            for workflow in ("direct_generate", "confirmed_topic"):
+                self.run.workflow = workflow
+                self.assertIs(self.advance(), self.run)
+            self.run.workflow = "repo_scan"
+            with self.assertRaises(WebsiteAuthorityError): self.advance()
+        start.assert_not_called(); self.spend.assert_called_once()
+
     def test_missing_mirror_recovers_from_original_outbox_without_rebuilding_paid_request(self):
         self.paid_run(); self.claim()
         self.outbox.payload["request"]["analytics_article_id"] = "original-analytics-id"

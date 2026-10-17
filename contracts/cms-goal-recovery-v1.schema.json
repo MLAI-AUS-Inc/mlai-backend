@@ -1,0 +1,134 @@
+{
+  "$defs": {
+    "locator": {
+      "additionalProperties": false,
+      "properties": {
+        "digest": {
+          "pattern": "^[a-f0-9]{64}$",
+          "type": "string"
+        },
+        "envelope_digest": {
+          "pattern": "^[a-f0-9]{64}$",
+          "type": "string"
+        },
+        "failure_fingerprint": {
+          "pattern": "^sha256:[a-f0-9]{64}$",
+          "type": "string"
+        },
+        "failure_occurrence_id": {
+          "format": "uuid",
+          "pattern": "^[a-f0-9]{8}(-[a-f0-9]{4}){3}-[a-f0-9]{12}$",
+          "type": "string"
+        },
+        "failure_registry_sha256": {
+          "pattern": "^[a-f0-9]{64}$",
+          "type": "string"
+        },
+        "goal_operation_id": {
+          "format": "uuid",
+          "pattern": "^[a-f0-9]{8}(-[a-f0-9]{4}){3}-[a-f0-9]{12}$",
+          "type": "string"
+        },
+        "kind": {
+          "const": "cms_goal_recovery_locator"
+        },
+        "run_generation": {
+          "maximum": 999999999999,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "run_id": {
+          "pattern": "^[A-Za-z0-9_-]{1,100}$",
+          "type": "string"
+        },
+        "schema_version": {
+          "const": 1
+        },
+        "state_version": {
+          "maximum": 999999999999,
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "digest",
+        "envelope_digest",
+        "failure_fingerprint",
+        "failure_occurrence_id",
+        "failure_registry_sha256",
+        "goal_operation_id",
+        "kind",
+        "run_generation",
+        "run_id",
+        "schema_version",
+        "state_version"
+      ],
+      "type": "object"
+    },
+    "receipt": {
+      "additionalProperties": false,
+      "properties": {
+        "digest": {
+          "pattern": "^[a-f0-9]{64}$",
+          "type": "string"
+        },
+        "kind": {
+          "const": "cms_goal_recovery_receipt"
+        },
+        "locator_digest": {
+          "pattern": "^[a-f0-9]{64}$",
+          "type": "string"
+        },
+        "queued_at": {
+          "format": "date-time",
+          "maxLength": 40,
+          "pattern": "\\+00:00$",
+          "type": "string"
+        },
+        "recovery_id": {
+          "pattern": "^[a-f0-9]{32}$",
+          "type": "string"
+        },
+        "schema_version": {
+          "const": 1
+        },
+        "source_run_id": {
+          "pattern": "^[A-Za-z0-9_-]{1,100}$",
+          "type": "string"
+        },
+        "step": {
+          "pattern": "^[A-Za-z][A-Za-z0-9_]{0,127}$",
+          "type": "string"
+        },
+        "target_generation": {
+          "maximum": 1000000000000,
+          "minimum": 1,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "digest",
+        "kind",
+        "locator_digest",
+        "queued_at",
+        "recovery_id",
+        "schema_version",
+        "source_run_id",
+        "step",
+        "target_generation"
+      ],
+      "type": "object"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "description": "Closed private references only. Checksums grant no permission; current original paid source and lease must be verified.",
+  "oneOf": [
+    {
+      "$ref": "#/$defs/locator"
+    },
+    {
+      "$ref": "#/$defs/receipt"
+    }
+  ],
+  "title": "Native CMS original goal recovery references"
+}
