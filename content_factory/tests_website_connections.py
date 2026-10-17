@@ -1422,6 +1422,11 @@ class WebsiteReviewRegressionTests(WebsiteDatabaseFixture, TestCase):
                 self.assertEqual((managed_native.state, managed_native.receipt['status']), ('completed', 'first_article_live'))
                 self.assertEqual(managed_native.receipt['first_article_billing']['spend_ledger_id'], str(spend.pk))
                 self.assertEqual(managed_native.receipt['references']['first_article_live'], str(publication.pk))
+                original_query = {'billing_request_id': managed_key, 'artifact_operation_id': str(artifact_operation.pk),
+                    'envelope_digest': artifact_payload['publishing_channel_artifact']['digest'], 'domain': self.org.domain}
+                with override_settings(ARTICLES_CMS_GOALS_ENABLED=False):
+                    self.assertTrue(channel_artifacts.artifact_read_receipt(original_query)['allowed'])
+                    with self.assertRaises(WebsiteAuthorityError): channel_artifacts.admission_receipt(original_query)
             native_scope, _policy = cms_goal_evidence.current_scope(context, self.config, user=user)
             native_goal = cms_goal_contract.new_goal(str(uuid.uuid4()), native_scope, now=timezone.now())
             native_proofs, native_source, references = cms_goal_evidence.collect(native_goal, context, self.config,

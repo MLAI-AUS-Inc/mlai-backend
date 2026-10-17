@@ -771,3 +771,14 @@ handling, shared status/doctor/Chat, paid revisions, unpublish, hosted fallback
 and real provider/browser acceptance remain unfinished. The current recovery
 status never authorizes a different paid run. No local DB, actual wallet/CMS/CF
 service, paid model work, merge or deployment ran.
+
+
+## 17 October: original artifact read/execution split
+
+The service-only read action preserves the exact paid handoff for GET-only
+resource recovery after stopping native model work. Current owner/site/policy/
+key and actual original spend/credit checks remain required. Model admission
+keeps its active-goal/budget check, with no caller-selected bypass. All 1,196
+website checks pass; paired CF reader code and disposable CI remain pending.
+All rollout flags stay off. No live service/provider/model call, local database,
+merge or deployment ran.

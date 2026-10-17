@@ -185,15 +185,25 @@ def authorize_payload(payload, *, require_outbox=True):
 
 
 def admission_receipt(query):
-    """Resolve the original outbox request; incoming values can only select it."""
+    """Admit new model work from the original outbox and current native goal."""
+    return _original_receipt(query, for_execution=True)
+
+
+def artifact_read_receipt(query):
+    """Read original paid artifacts without granting model work or a provider POST."""
+    return _original_receipt(query, for_execution=False)
+
+
+def _original_receipt(query, *, for_execution):
     from .dispatch_models import ContentFactoryDispatchOutbox
     row = ContentFactoryDispatchOutbox.objects.filter(client_request_id=query.get("billing_request_id")).first()
     payload = row.payload.get("request") if row and isinstance(row.payload, dict) else None
     if not isinstance(payload, dict):
         raise _deny()
     authorized = authorize_payload(payload)
-    from .cms_goal_effects import require_work
-    require_work(payload, action="first-article-generation")
+    if for_execution:
+        from .cms_goal_effects import require_work
+        require_work(payload, action="first-article-generation")
     envelope = authorized.envelope
     if (query.get("artifact_operation_id") != envelope["artifact_operation_id"] or
             query.get("envelope_digest") != envelope["digest"] or query.get("domain") != payload.get("domain")):
@@ -203,6 +213,12 @@ def admission_receipt(query):
         run_request__client_request_id=envelope["billing_request_id"])
     if runs.filter(status__in=["cancelled", "denied"]).exists():
         raise _deny()
+    if not for_execution:
+        from .cms_article_source import original_billing
+        run = runs.order_by("-created_at", "-pk").first()
+        if run is None:
+            raise _deny()
+        original_billing(run)
     return {"allowed": True, "permission_mode": "none", "capabilities": {}, ENVELOPE: deepcopy(envelope)}
 
 
