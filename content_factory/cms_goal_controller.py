@@ -11,6 +11,7 @@ from . import cms_goal_authority as authority
 from . import cms_goal_budget as native_budget
 from . import cms_goal_contract as goals
 from . import cms_goal_dispatch as dispatch
+from . import cms_goal_recovery as recovery
 from . import cms_goal_evidence as evidence
 from . import cms_goal_refunds as refunds
 from . import website_goal_budget as budget
@@ -64,7 +65,7 @@ def _save(operation, lease, *, now, state="pending", status, step=None, payload=
         return saved
 
 
-def _failure(operation, lease, failure, *, occurrence, now, child=None, progress=None, payload=None):
+def _failure(operation, lease, failure, *, occurrence, now, child=None, progress=None, payload=None, run=None):
     """Account a real occurrence once; polling the same child never burns retries."""
     value = authority.current(operation, lease_id=lease)
     progress = deepcopy(progress or {})
@@ -78,6 +79,20 @@ def _failure(operation, lease, failure, *, occurrence, now, child=None, progress
     if reason is not None:
         return _save(operation, lease, now=now, state="stopped", status="budget_stopped", payload=payload,
             receipt={**progress, "budget_stop_reason": reason, "native_budget": accounting})
+    if run is not None and effective in {"transient", "repairable"} and recovery.enabled(operation):
+        updates = {**progress, "failure": failure, "failure_occurrence_id": occurrence,
+            "effective_failure_class": effective, "native_budget": accounting}
+        try:
+            recovery.locator(operation, run)
+            # Persist this occurrence and its known usage before reserving a
+            # repair. The next lease can require the updated original budget.
+            if not fresh:
+                recovery.prepare(authority.CmsGoalDispatch(str(operation.pk), lease), now=now)
+        except WebsiteAuthorityError as exc:
+            return _save(operation, lease, now=now, state="needs_attention", status="native_recovery_blocked",
+                payload=payload, receipt={**updates, "recovery_block_reason": exc.code})
+        return _save(operation, lease, now=now, status="native_recovery_pending", step="first_draft",
+            payload=payload, receipt=updates, delay=0)
     terminal = effective in {"strategy", "unsupported", "repairable"}
     state = "needs_attention" if terminal else "needs_user" if effective == "needs_user" else "pending"
     if fresh and effective == "transient" and child is not None:
@@ -180,6 +195,33 @@ def _advance(operation, lease, *, now):
     reason = budget.exhaustion(accounting, now=now)
     if reason is not None:
         return _save(operation, lease, now=now, state="stopped", status="budget_stopped", receipt={"budget_stop_reason": reason, "native_budget": accounting})
+    plan = operation.receipt.get("native_recovery")
+    if plan is not None:
+        plan = recovery.validate_plan(plan, operation)
+        if plan["state"] in recovery.ACTIVE:
+            if not recovery.enabled(operation):
+                return _save(operation, lease, now=now, status="native_recovery_paused", receipt={"native_budget": accounting}, delay=300)
+            scope = authority.CmsGoalDispatch(str(operation.pk), lease)
+            if not recovery.observe_progress(scope, now=now):
+                if plan["state"] == "reserved":
+                    try:
+                        from .vibe_marketing_views import _control_article_run_for_channel
+                        _control_article_run_for_channel(user=value.user, context=value.context, run=run,
+                            action="resume", data={}, cms_goal_scope=scope)
+                    except WebsiteAuthorityError as exc:
+                        return _save(operation, lease, now=now, state="pending" if exc.retryable else "needs_attention",
+                            status="native_recovery_pending" if exc.retryable else "native_recovery_blocked",
+                            receipt={"native_budget": accounting, **({} if exc.retryable else {"recovery_block_reason": exc.code})}, delay=30)
+                return _save(operation, lease, now=now, status="native_recovery_pending", receipt={"native_budget": accounting}, delay=15)
+            operation.refresh_from_db()
+            run.refresh_from_db()
+            value = authority.current(operation, lease_id=lease)
+            goal = value.goal
+            accounting = _account(operation, run, now=now)
+            reason = budget.exhaustion(accounting, now=now)
+            if reason is not None:
+                return _save(operation, lease, now=now, state="stopped", status="budget_stopped",
+                    receipt={"budget_stop_reason": reason, "native_budget": accounting})
     capture_id = operation.payload["capture_operation_id"]
     inventory = WebsiteConnectionOperation.objects.filter(pk=capture_id, action=capture.ACTION).first() if capture_id else None
     if inventory is None:
@@ -219,8 +261,10 @@ def _advance(operation, lease, *, now):
     if run.status in {"failed", "blocked", "cancelled", "denied"}:
         try: failure = validate_failure(run.result.get("failure"))
         except (FailureContractError, AttributeError): failure = classify_failure("PUBLISHING_ADAPTER_REQUIRED", "cms_goal_generation")
-        return _failure(operation, lease, failure, occurrence=digest({"run": run.run_id, "generation": run.result.get("generation"),
-            "state_version": run.result.get("state_version"), "failure": failure["failure_fingerprint"]}), now=now)
+        occurrence = run.result.get("failure_occurrence_id") or digest({"run": run.run_id,
+            "generation": run.result.get("generation"), "failure": failure["failure_fingerprint"]})
+        return _failure(operation, lease, failure, occurrence=occurrence, now=now, run=run,
+            progress={"native_budget": accounting}, payload={"source_run_id": run.run_id})
     proofs, actual_source, references = evidence.collect(goal, value.context, value.config, user=value.user,
         run=actual_run, artifact_operation_id=artifact_id, capture_operation_id=str(inventory.pk), now=now)
     if actual_source is not None: goal = goals.bind_source(goal, actual_source, expected_scope=value.scope, now=now)

@@ -63,6 +63,15 @@ class CmsGoalEvidenceTests(SimpleTestCase):
         value = goals.bind_source(self.goal, original, expected_scope=self.scope, now=self.now)
         self.assertFalse(goals.complete(goals.refresh(value, proofs, expected_scope=self.scope, now=self.now), expected_scope=self.scope, now=self.now))
 
+    def test_producer_article_workflow_names_preserve_paid_source_evidence(self):
+        for workflow in ("direct_generate", "confirmed_topic"):
+            self.run.workflow = workflow
+            proofs, original, _references = self.collect()
+            self.assertIn("first_draft", proofs)
+            self.assertEqual(original["run_id"], self.run.run_id)
+        self.run.workflow = "repo_scan"
+        with self.assertRaises(WebsiteAuthorityError): self.collect()
+
     def test_rechecksummed_completed_publication_receipt_does_not_replace_owning_validation(self):
         self.advance(); self.advance(); self.advance()
         self.operation.receipt["publicProofDigest"] = "f" * 64

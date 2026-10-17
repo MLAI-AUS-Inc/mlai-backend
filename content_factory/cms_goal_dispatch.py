@@ -43,7 +43,7 @@ def original_run(operation, dispatch=None):
     run = runs.first()
     if run is None:
         return None
-    if (run.github_repo or run.workflow != "article_generation" or
+    if (run.github_repo or run.workflow not in {"article_generation", "direct_generate", "confirmed_topic"} or
             run.run_request.get("cms_goal_operation_id") != str(operation.pk) or
             run.run_request.get("cms_goal_id") != str(operation.pk) or
             run.run_request.get("publishing_channel_artifact") != original["publishing_channel_artifact"] or

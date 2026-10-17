@@ -1194,7 +1194,8 @@ class WebsiteSourceFenceTests(WebsiteDatabaseFixture, TestCase):
 
 class WebsiteReviewRegressionTests(WebsiteDatabaseFixture, TestCase):
     @override_settings(ARTICLES_CHANNEL_DISCOVERY_ENABLED=True, ARTICLES_PUBLISHING_CHANNELS_ENABLED=True,
-        ARTICLES_CMS_CHANNEL_ENABLED=True, ARTICLES_CHANNEL_ARTIFACTS_ENABLED=True)
+        ARTICLES_CMS_CHANNEL_ENABLED=True, ARTICLES_CHANNEL_ARTIFACTS_ENABLED=True,
+        ARTICLES_CMS_GOAL_RECOVERY_ENABLED=True, ARTICLES_WEBSITE_GOAL_BUDGETS_ENABLED=True)
     def test_cms_owner_connect_persists_private_key_and_disconnect_erases_every_generation(self):
         """Actual connect/replay/revoke persistence runs on disposable remote CI."""
         import json
@@ -1276,6 +1277,9 @@ class WebsiteReviewRegressionTests(WebsiteDatabaseFixture, TestCase):
                 managed_spend = Ledger.objects.get(pk=managed_native.receipt['first_article_billing']['spend_ledger_id'])
                 artifact_payload = {'domain': self.org.domain, 'client_request_id': managed_key,
                     'cms_goal_operation_id': str(managed_native.pk), 'cms_goal_id': str(managed_native.pk),
+                    'goal_budget': {'version': 1, 'goal_id': str(managed_native.pk),
+                        'scope_digest': __import__('content_factory.channel_artifact_contract', fromlist=['digest']).digest(managed_native.receipt['goal']['scope']),
+                        'remaining_active_seconds': 7200, 'remaining_model_usd': 25},
                     'delivery_mode': 'content_only', 'delivery_mode_confirmed': True, 'github_repo': '',
                     'topic': 'A synthetic CMS article', 'target_keyword': 'A synthetic CMS article',
                     'roo_points_ledger_id': 'synthetic-fixture-ledger', 'roo_points_cost': 6,
@@ -1310,7 +1314,7 @@ class WebsiteReviewRegressionTests(WebsiteDatabaseFixture, TestCase):
                 self.assertIsNotNone(artifact_run)
                 with owner_write_guard(artifact_payload):
                     synced, created = _sync_content_factory_run_snapshot(run_id=artifact_run.run_id, data={
-                        'workflow': 'article_generation', 'domain': self.org.domain, 'status': 'completed',
+                        'workflow': 'direct_generate', 'domain': self.org.domain, 'status': 'completed',
                         'generation': 0, 'state_version': 1,
                         'current_step': 'render_article', 'approval_state': 'not_required', 'run_request': {},
                         'result': {'content_package': {'article_html': '<article><p>Synthetic body</p></article>'}}}, step_states={})
@@ -1318,10 +1322,59 @@ class WebsiteReviewRegressionTests(WebsiteDatabaseFixture, TestCase):
                 self.assertEqual(synced.run_request['publishing_channel_artifact'], artifact_payload['publishing_channel_artifact'])
                 self.assertNotIn('article_publish_approval_receipt', synced.run_request)
                 self.assertFalse(channel_artifacts.artifact_run_update_allowed(synced, {'approval_state': 'approved'}))
+                # Original synthetic ORM hold, outbox and native generation
+                # survive one protocol recovery. This block runs only in CI.
+                from . import cms_goal_recovery, cms_goal_effects
+                from .cms_goal_recovery_contract import make_receipt
+                from .website_failure_contract import classify_failure
+                lease = str(uuid.uuid4())
+                managed_native.payload = {**managed_native.payload, 'lease_id': lease, 'source_run_id': synced.run_id}
+                managed_native.state = 'running'
+                managed_native.next_attempt_at = timezone.now() + timedelta(seconds=180)
+                managed_native.save(update_fields=['payload', 'state', 'next_attempt_at', 'updated_at'])
+                synced.status = 'failed'
+                synced.result = {'generation': 0, 'state_version': 2,
+                    'failure': classify_failure('TEMPLATE_VALIDATION_FAILED', 'assemble_article'),
+                    'failure_occurrence_id': str(uuid.uuid4()), 'user_action_count': 0,
+                    'usage': {'version': 1, 'run_id': synced.run_id, 'generation': 0, 'state_version': 2,
+                        'model_calls': 1, 'tokens': 50, 'provider_seconds': 1, 'active_seconds': 1,
+                        'model_usd': 1, 'builds': 0, 'previews': 0}}
+                synced.save(update_fields=['status', 'result', 'updated_at'])
+                with override_settings(ARTICLES_CMS_GOAL_RECOVERY_ENABLED=True, ARTICLES_WEBSITE_GOAL_BUDGETS_ENABLED=True):
+                    scope = cms_goal_recovery.authority.CmsGoalDispatch(str(managed_native.pk), lease)
+                    plan = cms_goal_recovery.prepare(scope, now=timezone.now())
+                    with self.assertRaises(cms_goal_effects.CmsGoalWorkDenied): cms_goal_effects.require_work(artifact_payload)
+                    repaired = make_receipt(plan['locator'], step='assemble_article', queued_at=timezone.now().isoformat())
+                    capability = {'schema_version': 1, 'kind': 'cms_goal_recovery_capability', 'run_id': synced.run_id,
+                        'generation': 0, 'state_version': 2, 'locator': plan['locator'],
+                        'failure': plan['failure'], 'recovery_receipt': None}
+                    def wire(body):
+                        return __import__('types').SimpleNamespace(status_code=200, content=json.dumps(body).encode(),
+                            headers={'Content-Type': 'application/json'}, json=lambda: body)
+                    with override_settings(CONTENT_FACTORY_URL='https://factory.test', CONTENT_FACTORY_API_KEY='synthetic-service-key'), \
+                            patch('integrations.http_client.get', return_value=wire(capability)), \
+                            patch('integrations.http_client.post', return_value=wire(repaired)) as recover:
+                        self.assertEqual(cms_goal_recovery.deliver(scope)['recovery_receipt'], repaired)
+                    self.assertEqual(recover.call_args.kwargs['json'], {'locator': plan['locator']})
+                    synced.refresh_from_db()
+                    self.assertEqual(synced.result['user_action_count'], 0)
+                    with owner_write_guard(artifact_payload):
+                        synced, _created = _sync_content_factory_run_snapshot(run_id=synced.run_id, data={
+                            'workflow': 'direct_generate', 'domain': self.org.domain, 'status': 'completed',
+                            'generation': 1, 'state_version': 1, 'current_step': 'render_article',
+                            'approval_state': 'not_required', 'run_request': {}, 'result': {}}, step_states={})
+                    self.assertTrue(cms_goal_recovery.observe_progress(scope, now=timezone.now()))
+                    managed_native.refresh_from_db()
+                    self.assertEqual(managed_native.receipt['goal']['source']['run_generation'], 1)
+                    self.assertEqual(managed_native.receipt['native_recovery']['state'], 'observed')
+                    self.assertEqual(managed_native.receipt['first_article_billing']['spend_ledger_id'], str(spend.pk))
+                    managed_native.payload.pop('lease_id')
+                    managed_native.state, managed_native.next_attempt_at = 'pending', timezone.now()
+                    managed_native.save(update_fields=['payload', 'state', 'next_attempt_at', 'updated_at'])
                 from . import cms_artifact_review
                 from .tests_cms_artifact_review_unit import fixture, seal
                 handoff = fixture()
-                handoff.update(run_id=synced.run_id, run_generation=0, envelope=artifact_payload['publishing_channel_artifact'])
+                handoff.update(run_id=synced.run_id, run_generation=1, envelope=artifact_payload['publishing_channel_artifact'])
                 from .cms_native_html import native_fragment, profile_receipt, preview_document
                 fragment = native_fragment(handoff['article']['html'].replace('</article>',
                     '<p>This synthetic article preserves the original approved explanation, concrete examples, useful evidence, '
