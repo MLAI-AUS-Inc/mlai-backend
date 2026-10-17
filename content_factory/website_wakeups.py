@@ -65,6 +65,8 @@ def signal_for(event, payload):
 def policy_allows(op, signal):
     """Events cannot resurrect deterministic failures, terminal work or spent budgets."""
     receipt = goals.mapping(op.receipt)
+    if receipt.get("budget_stop_reason") or receipt.get("strategy_observation_invalid"):
+        return False
     if op.state in {"pending","running","needs_user"}:
         return True
     return (op.state=="needs_attention" and signal.get("success") is True
@@ -111,6 +113,10 @@ def queue_wake(connection_id, *, signal, expected_generation=None):
         if connection.state!="connected" or expected_generation is not None and connection.generation!=expected_generation:
             return None
         parent = connection.operations.select_for_update().filter(generation=connection.generation,action="prepare").order_by("-created_at","-pk").first()
+        # Rebinding itself changes receipts and may stop children. A disallowed
+        # event must be inert before those effects, not only before dispatch.
+        if parent is None or not policy_allows(parent, signal):
+            return None
         if parent and parent.state in {"pending", "running", "needs_user", "needs_attention"} and not goals.valid_goal(goals.mapping(parent.receipt).get("goal"),goals.scope_for(connection,parent.payload.get("company_id"))):
             from .website_goal_scope import rebind_source_scope
             rebound=rebind_source_scope(goals.mapping(parent.receipt).get("goal"),connection,company_id=parent.payload.get("company_id"),now=now)

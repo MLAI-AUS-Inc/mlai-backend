@@ -252,19 +252,18 @@ def finish_goal(op, *, now=None):
 def wake_goal_for_source(config, *, company_id, user, now):
     """Preserve terminal history and active-goal budgets on an accepted source change."""
     from .website_connections import authority_guard, contract_for
-    from .website_prepare import start_prepare, _cancel_prepare_child
+    from .website_prepare import _cancel_prepare_child
     with authority_guard(contract_for(config.website_connection), action="read") as connection:
         latest = connection.operations.select_for_update().filter(generation=connection.generation,
             action="prepare").order_by("-created_at", "-pk").first()
         if latest is None or not owns_goal(latest):
             return None
         goal = goals.mapping(latest.receipt.get("goal"))
-        if not goals.enrolled(connection.organization_id) or latest.state in {"cancelled", "denied", "deleted"}:
+        from .website_wakeups import policy_allows
+        if not goals.enrolled(connection.organization_id) or not policy_allows(latest, {}):
             return None
         if goal.get("current_source_sha") == connection.verified_sha:
             return latest
-        if latest.state in TERMINAL:
-            return start_prepare(config, company_id=company_id, user=user, force_successor=True, target=goal.get("target", "ready"))
         if not goals.valid_goal(goal, goals.scope_for(connection, company_id)):
             from .website_goal_scope import rebind_source_scope
             rebound = rebind_source_scope(goal, connection, company_id=company_id, now=now)

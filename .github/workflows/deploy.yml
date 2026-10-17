@@ -202,7 +202,7 @@ jobs:
       run: python scripts/test_without_database.py content_factory.tests_failure_contract_unit
 
     - name: Check article recovery controller policy without database access
-      run: python scripts/test_without_database.py content_factory.tests_website_article_recovery_unit content_factory.tests_website_article_publication_observation_unit content_factory.tests_website_article_source_fence_unit content_factory.tests_website_article_source_stop_unit
+      run: python scripts/test_without_database.py content_factory.tests_website_article_recovery_unit content_factory.tests_website_article_publication_observation_unit content_factory.tests_website_article_source_fence_unit content_factory.tests_website_article_source_stop_unit content_factory.tests_website_terminal_source_policy_unit
 
     - name: Check shared article publication policy without database access
       run: python scripts/test_without_database.py content_factory.tests_article_publication_policy_unit

@@ -10,7 +10,7 @@ sentence. These run without a database or provider access.
 from contextlib import nullcontext
 from datetime import timedelta
 from types import SimpleNamespace
-from unittest.mock import Mock, patch
+from unittest.mock import Mock, patch, call
 from uuid import uuid4
 
 from django.test import SimpleTestCase
@@ -234,14 +234,17 @@ class SourceWakeTests(SimpleTestCase):
         self.assertEqual((payload["attempt"], payload["source_reverify"]), (12, True))
         self.assertNotIn("repair_setup", payload)
         self.assertNotIn("run_id", payload)
-        self.website.operations.filter.assert_called_once_with(generation=3, action="source-reverify", state="pending")
+        self.assertEqual(self.website.operations.filter.call_args_list, [
+            call(generation=3, action="prepare"),
+            call(generation=3, action="source-reverify", state="pending")])
         self.assertEqual(self.website.operations.filter.return_value.update.call_args.kwargs["receipt"]["status"], "managed_by_prepare")
 
     def test_customer_push_leaves_stopped_preparation_stopped(self):
         result, lookups, _ = self.wake()
         self.assertIsNone(result)
         self.assertNotIn("cancelled", lookups["state__in"])
-        self.website.operations.filter.assert_not_called()
+        self.website.operations.filter.assert_called_once_with(generation=3, action="prepare")
+        self.website.operations.filter.return_value.update.assert_not_called()
 
     def test_owned_merge_of_anything_but_a_current_setup_leaves_it_stopped(self):
         result, lookups, _ = self.wake("published-article")
