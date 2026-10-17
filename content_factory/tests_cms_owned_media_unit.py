@@ -8,6 +8,7 @@ import html
 from unittest.mock import patch
 
 from django.test import SimpleTestCase, override_settings
+from django.utils import timezone
 
 from . import cms_owned_media as staging
 from . import cms_media_contract as journal
@@ -30,6 +31,12 @@ class CmsOwnedMediaTests(SimpleTestCase):
 
     def setUp(self):
         source_fixtures.CmsArticleSourceTests.setUp(self)
+        # All controller claims and media proof reads in this fixture share the
+        # supplied clock. Host contention must not make a newly reserved stage
+        # fall after the fixture's one-second scheduling allowance.
+        self.now = timezone.now()
+        clock = patch("django.utils.timezone.now", side_effect=lambda: self.now)
+        clock.start(); self.addCleanup(clock.stop)
         self.empty_value = deepcopy(self.value)
         self.image = prepare_image(raster())
         asset = {"component_id": "hero-image", "src": "https://firebasestorage.googleapis.com/v0/b/fixture/o/image.png?alt=media",

@@ -48,6 +48,7 @@ class PrepareObservabilityTests(SimpleTestCase):
         op = fixtures.PrepareJourneyTests().operation()
         with patch.object(reconciliation.WebsiteConnectionOperation.objects, "filter") as rows, \
                 patch("content_factory.cms_access_status.expire_due"), \
+                patch("content_factory.cms_initial_status.expire_due"), \
                 patch.object(reconciliation, "monitor_cleanup_pull_requests"), \
                 patch("content_factory.website_support.reconcile_support_verifications"), \
                 patch("content_factory.website_prepare.advance_prepare", return_value=op):

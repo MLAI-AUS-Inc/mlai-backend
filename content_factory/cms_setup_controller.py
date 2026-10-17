@@ -136,6 +136,9 @@ def advance_setup(identifier, *, now=None):
     candidate = WebsiteConnectionOperation.objects.filter(pk=identifier, action=authority.ACTION).first()
     if candidate is None or not authority.enabled(candidate.connection.organization_id):
         return None
+    if candidate.receipt.get("status") in {"initial_connecting", "initial_access_required"}:
+        from .cms_initial_controller import for_root
+        return for_root(candidate, now=now)
     now, lease, claimed, attempt = now or timezone.now(), str(uuid4()), False, candidate.attempts
     try:
         with transaction.atomic():

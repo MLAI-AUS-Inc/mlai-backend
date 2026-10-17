@@ -71,7 +71,8 @@ class CmsGoalEvidenceTests(SimpleTestCase):
         self.assertEqual(proofs["first_draft"]["at"], prepared_at.isoformat())
         current = goals.bind_source(self.goal, original, expected_scope=self.scope, now=self.now)
         current = goals.refresh(current, proofs, expected_scope=self.scope, now=self.now)
-        self.assertTrue(goals.complete(current, expected_scope=self.scope, now=self.now))
+        self.assertTrue(goals.complete(current, expected_scope=self.scope, now=self.now),
+            [(row["name"], row["state"], row["proof"]["at"] if row["proof"] else None) for row in current["milestones"]])
         self.assertFalse(goals.valid_proof("access", proofs["access"], expected_scope=self.scope, original_source=original, now=self.now))
         from .cms_goal_achievement import capture as record
         completed_at = goals._time(self.operation.payload["public_observation"]["checked_at"]) + timedelta(seconds=1)
