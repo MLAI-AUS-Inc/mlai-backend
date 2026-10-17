@@ -116,7 +116,7 @@ class ActivationAdmissionTests(SimpleTestCase):
         queue.assert_not_called()
 
     def test_all_article_control_mutations_reject_before_remote_work(self):
-        run = SimpleNamespace(workflow="article_generation", github_repo="founder/site")
+        run = SimpleNamespace(workflow="article_generation", github_repo="founder/site", run_request={})
         for action in ("restart", "resume", "revise", "regenerate-image", "regenerate-images", "publish-pr", "promote-bundle", "approve", "merge-publish-pr", "retry-preview-quality"):
             with self.subTest(action=action), \
                  patch.object(views, "_resolve_context_or_response", return_value=(self.context, None)), \
