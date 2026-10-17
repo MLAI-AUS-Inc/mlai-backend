@@ -1329,10 +1329,23 @@ class WebsiteReviewRegressionTests(WebsiteDatabaseFixture, TestCase):
                 stage = website.operations.get(action='cms-stage')
                 self.assertEqual(cms_staged_review.current_stage(stage)[1]['article']['html'], handoff['article']['html'])
                 self.assertIs(stage.receipt['approval_recorded'], False)
+                from . import cms_article_approval
+                self.assertEqual(cms_article_approval.ensure_approvals(connection_id=website.pk), 1)
+                self.assertEqual(cms_article_approval.ensure_approvals(connection_id=website.pk), 0)
+                approval = website.operations.get(action='cms-approval')
+                with patch.object(cms_artifact_review, 'fetch_handoff', return_value=handoff):
+                    approval = cms_article_approval.advance_approval(approval.pk, now=timezone.now() + timedelta(seconds=1))
+                self.assertEqual(approval.state, 'completed')
+                self.assertEqual(cms_article_approval.current_approval(approval)[3]['basis'], 'owner_setup_auto')
+                visible = cms_article_approval.review(context, self.config, user=user,
+                    data={**contract_for(website), 'source_run_id': synced.run_id})
+                self.assertTrue(visible['approvalRecorded'])
+                self.assertEqual(visible['stageId'], str(stage.pk))
                 with transaction.atomic():
                     Ledger.objects.create(user=user, kind='REFUND', source='CONTENT_FACTORY', delta=6, delta_microroo=6_000_000,
                         refund_of=spend, idempotency_key='content_factory:refund:' + artifact_payload['client_request_id'])
                     with self.assertRaises(WebsiteAuthorityError): cms_article_source.current_article(review)
+                    with self.assertRaises(WebsiteAuthorityError): cms_article_approval.current_approval(approval)
                     transaction.set_rollback(True)
             from . import cms_capture
             from .tests_cms_inventory_contract_unit import wordpress_post
@@ -1382,6 +1395,8 @@ class WebsiteReviewRegressionTests(WebsiteDatabaseFixture, TestCase):
             self.assertEqual((media.state, media.payload), ('deleted', {}))
             stage.refresh_from_db()
             self.assertEqual((stage.state, stage.payload), ('deleted', {}))
+            approval.refresh_from_db()
+            self.assertEqual((approval.state, approval.payload), ('deleted', {}))
             native_row = website.operations.get(pk=native['operation_id'])
             self.assertEqual((native_row.state, native_row.payload), ('deleted', {}))
 

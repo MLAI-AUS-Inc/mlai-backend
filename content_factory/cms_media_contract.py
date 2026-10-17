@@ -16,7 +16,9 @@ INTENT_FIELDS = {"schema_version", "kind", "binding", "review_operation_id", "ha
     "source_generation", "asset", "upload_id", "title", "digest"}
 STATE_FIELDS = {"schema_version", "intent_digest", "phase", "create_count", "probe_count", "acknowledgement", "evidence"}
 ACK_FIELDS = {"platform", "provider_id", "upload_id", "source_sha256", "url", "public_bytes_verified"}
-PHASES = {"reserved", "create_ready", "upload_issued", "provider_ack", "public_verified", "reconcile_exhausted", "recovery_unsupported"}
+PHASES = {"reserved", "create_ready", "upload_issued", "provider_ack", "public_verified", "public_recheck", "reconcile_exhausted", "recovery_unsupported"}
+ACK_PHASES = {"provider_ack", "public_verified", "public_recheck"}
+PROOF_PHASES = {"public_verified", "public_recheck"}
 
 
 def validate_intent(value):
@@ -85,13 +87,13 @@ def validate_state(state, intent, *, now=None):
                 phase in {"upload_issued", "reconcile_exhausted", "recovery_unsupported"} and state["create_count"] != 1 or
                 (phase == "reconcile_exhausted") != (state["probe_count"] == 8) or
                 phase == "recovery_unsupported" and (intent["binding"]["platform"] != "ghost" or state["probe_count"] != 0) or
-                phase in {"provider_ack", "public_verified"} and not isinstance(state["acknowledgement"], dict) or
-                phase not in {"provider_ack", "public_verified"} and state["acknowledgement"] is not None or
-                (phase == "public_verified") != (state["evidence"] is not None)):
+                phase in ACK_PHASES and not isinstance(state["acknowledgement"], dict) or
+                phase not in ACK_PHASES and state["acknowledgement"] is not None or
+                (phase in PROOF_PHASES) != (state["evidence"] is not None)):
             raise CmsApiError("invalid_request")
-        if phase in {"provider_ack", "public_verified"}:
+        if phase in ACK_PHASES:
             ack = acknowledgement(state["acknowledgement"], intent)
-            if phase == "public_verified":
+            if phase in PROOF_PHASES:
                 # A durable journal retains historical observations. Freshness
                 # must be requested by the final review/publisher, not used to
                 # cancel unfinished staging after an ordinary scheduler wait.
@@ -170,7 +172,7 @@ def ghost_unknown(intent, state):
 def record_public(intent, state, evidence):
     """Complete only after exact original public raster bytes were observed."""
     validate_state(state, intent)
-    if state["phase"] != "provider_ack":
+    if state["phase"] not in {"provider_ack", "public_recheck"}:
         raise CmsApiError("invalid_request")
     result = {**deepcopy(state), "phase": "public_verified", "evidence": deepcopy(evidence)}
     validate_state(result, intent)

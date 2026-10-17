@@ -56,10 +56,13 @@ failure evidence for the goal's later fallback handling. Page, record and byte
 limits remain explicitly partial, and purge erases captured private manifests.
 No CMS source is represented as a Git commit or on-main publication fact.
 
-**Still incomplete:** media, durable post publication/reconciliation,
-unpublish, live proof, CMS goal milestones, artifact-only CF envelope, owner UI,
-and the remote WordPress/Ghost acceptance runs. Connection summaries deliberately
-advertise no generation or publication readiness. Keep rollout flags off.
+Subsequent draft work adds the immutable artifact-only CF envelope and private
+handoff, durable owned media staging, exact final native preview, explicit native
+publication choices and [durable manual/automatic approval](articles-e5-cms-approval-2026-10-17.md).
+**Still incomplete:** durable post publication/reconciliation, unpublish, public
+proof/goal integration, owner UI and remote WordPress/Ghost acceptance runs.
+Connection summaries deliberately advertise no generation or publication
+readiness. Keep rollout flags off.
 
 Local evidence: the full 925-test website group includes 66 CMS credential,
 transport, identity, owner and capture cases; 15 observability and 24 Chat facade

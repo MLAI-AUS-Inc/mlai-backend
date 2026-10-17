@@ -23,6 +23,8 @@ subsystem-specific contracts and runbooks.
 
 ## Content Factory
 
+- [E5 exact CMS approval](articles-e5-cms-approval-2026-10-17.md) — original owner review/automatic consent, durable proof refresh and exact final native preview
+
 - [E5 CMS publishing](articles-e5-cms-publishing-2026-10-17.md) — independent provider authority, encrypted credentials and WordPress/Ghost publication recovery
 
 - [E5 publishing-channel interface](articles-e5-channel-interface-2026-10-17.md) — shared operations, original guarded Git/portable flows and separate provider authority

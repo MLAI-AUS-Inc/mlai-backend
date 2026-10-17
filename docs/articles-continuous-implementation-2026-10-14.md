@@ -652,3 +652,22 @@ the remaining plan stay open. CF E2 bdf64cab carries E1/source scope into the
 verifier, after all 14 container cases passed at 2f68fcd1. E2 remains off and
 incomplete. This evidence does not establish nightly acceptance or any production
 release.
+
+## 17 October: native CMS approval and image-proof refresh
+
+Private native CMS setup choices are sealed before generation, followed by exact
+staged review and durable approval. The owner confirms one exact final revision;
+only the private original automatic policy can skip that final action. Approval
+rechecks CF handoff/current binding/policy/original spend and fresh public image
+bytes, and survives aged observations without another click or upload. A
+historical proof stays available during refresh, with an unchanged review
+revision. Late replies, cancellation, crash leases and refunds are fenced.
+
+The full 1,060-check no-database website group passes, including 13 new approval
+cases; models/migration dry-run show no changes, 777 failure emissions are audited
+and all 557 test modules are assigned. Actual ORM approval/deduplication/readback,
+refund denial and purge are assigned to disposable remote CI. All flags remain
+off; no local DB, provider write, paid generation, merge or deployment occurred.
+See `articles-e5-cms-approval-2026-10-17.md` for the API and remaining acceptance.
+Next implementation is durable native post publication, public proof and CMS
+first-article goal/UI integration; hosting and zoo prerequisites remain unresolved.

@@ -4,7 +4,7 @@ from contextlib import nullcontext
 from copy import deepcopy
 from datetime import timedelta
 from unittest.mock import Mock, patch
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 from django.contrib.auth import get_user_model
 from django.db.models import Q
@@ -38,7 +38,7 @@ def matches(row, predicate):
         actual = actual.get(part) if isinstance(actual, dict) else getattr(actual, part, None)
     if op == "isnull": return (actual is None) == expected
     if op == "in": return actual in expected
-    return str(actual) == str(expected) if key == "pk" else actual == expected
+    return str(actual) == str(expected) if key == "pk" or isinstance(actual, UUID) else actual == expected
 
 
 class Rows:

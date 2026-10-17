@@ -13,7 +13,7 @@ from .cms_api_transport import CmsApiError
 from .website_contract import WebsiteAuthorityError
 
 ACTION = "cms-stage"
-FIELDS = {"schema_version", "binding", "credential_operation_id", "media_operation_id", "handoff_digest", "staged"}
+FIELDS = {"schema_version", "binding", "credential_operation_id", "media_operation_id", "handoff_digest", "review_policy", "staged"}
 
 
 def _deny():
@@ -40,7 +40,8 @@ def start_stage(media_operation):
         value = build_staged_article(source, media_intents=media.payload["intents"], media_states=media.payload["states"])
         private = {"schema_version": 1, "binding": source.admitted.scope.binding,
             "credential_operation_id": source.admitted.operation.payload["credential_operation_id"],
-            "media_operation_id": str(media.pk), "handoff_digest": source.handoff["digest"], "staged": value}
+            "media_operation_id": str(media.pk), "handoff_digest": source.handoff["digest"],
+            "review_policy": source.handoff["envelope"]["review_policy"], "staged": value}
         operation, created = WebsiteConnectionOperation.objects.get_or_create(idempotency_key="cms-stage:" + value["revision"],
             defaults={"action": ACTION, "connection": source.admitted.scope.connection,
                 "generation": source.admitted.scope.binding["generation"], "state": "completed",
@@ -53,7 +54,7 @@ def start_stage(media_operation):
         return operation
 
 
-def current_stage(operation, *, fresh_media=True, now=None):
+def current_stage(operation, *, fresh_media=True, now=None, allow_media_recheck=False):
     """Resolve only private persisted source/proofs; never accept owner artifact JSON."""
     from .website_models import WebsiteConnectionOperation
     try:
@@ -63,9 +64,12 @@ def current_stage(operation, *, fresh_media=True, now=None):
             raise _deny()
         payload = operation.payload
         media = WebsiteConnectionOperation.objects.filter(pk=payload["media_operation_id"], action=MEDIA_ACTION).first()
-        source = completed_media(media, now=now, fresh=fresh_media)
-        value = validate_staged_article(payload["staged"], source, media_intents=media.payload["intents"], media_states=media.payload["states"])
+        if allow_media_recheck and fresh_media:
+            raise _deny()
+        source = completed_media(media, now=now, fresh=fresh_media, allow_rechecking=allow_media_recheck)
+        value = validate_staged_article(payload["staged"], source, media_intents=media.payload["intents"], media_states=media.payload["states"], allow_rechecking=allow_media_recheck)
         if (payload["binding"] != source.admitted.scope.binding or payload["handoff_digest"] != source.handoff["digest"] or
+                payload["review_policy"] != source.handoff["envelope"]["review_policy"] or
                 payload["credential_operation_id"] != source.admitted.operation.payload["credential_operation_id"] or
                 operation.generation != payload["binding"]["generation"] or str(operation.connection_id) != payload["binding"]["connection_id"] or
                 canonical_bytes(operation.receipt) != canonical_bytes(_receipt(value))):
