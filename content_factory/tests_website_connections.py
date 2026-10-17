@@ -1267,15 +1267,33 @@ class WebsiteReviewRegressionTests(WebsiteDatabaseFixture, TestCase):
                 artifact_run = reserve_portable_dispatch_intent(organization=self.org, workflow='article_generation',
                     actor_id='cms-fixture', payload=artifact_payload)
                 self.assertFalse(__import__('content_factory.portable_drafts', fromlist=['original_portable_run']).original_portable_run(artifact_run))
+                from .dispatch_binding import bind_dispatch_token_run
+                artifact_run = bind_dispatch_token_run(client_request_id=artifact_payload['client_request_id'],
+                    remote_run_id='cms-fixture-run-' + uuid.uuid4().hex)
+                self.assertIsNotNone(artifact_run)
                 with owner_write_guard(artifact_payload):
                     synced, created = _sync_content_factory_run_snapshot(run_id=artifact_run.run_id, data={
                         'workflow': 'article_generation', 'domain': self.org.domain, 'status': 'completed',
+                        'generation': 0, 'state_version': 1,
                         'current_step': 'render_article', 'approval_state': 'not_required', 'run_request': {},
                         'result': {'content_package': {'article_html': '<article><p>Synthetic body</p></article>'}}}, step_states={})
                 self.assertFalse(created)
                 self.assertEqual(synced.run_request['publishing_channel_artifact'], artifact_payload['publishing_channel_artifact'])
                 self.assertNotIn('article_publish_approval_receipt', synced.run_request)
                 self.assertFalse(channel_artifacts.artifact_run_update_allowed(synced, {'approval_state': 'approved'}))
+                from . import cms_artifact_review
+                from .tests_cms_artifact_review_unit import fixture, seal
+                handoff = fixture()
+                handoff.update(run_id=synced.run_id, run_generation=0, envelope=artifact_payload['publishing_channel_artifact'])
+                seal(handoff)
+                self.assertEqual(cms_artifact_review.ensure_reviews(connection_id=website.pk), 1)
+                self.assertEqual(cms_artifact_review.ensure_reviews(connection_id=website.pk), 0)
+                review = website.operations.get(action='cms-review')
+                with patch.object(cms_artifact_review, 'fetch_handoff', return_value=handoff):
+                    review = cms_artifact_review.advance_review(review.pk, now=timezone.now() + timedelta(seconds=1))
+                self.assertEqual((review.state, review.payload['handoff']), ('completed', handoff))
+                self.assertIs(review.receipt['approval_recorded'], False)
+                self.assertNotIn('Fixture guide', json.dumps(summary_for(self.config, company_id=company.pk)))
             from . import cms_capture
             from .tests_cms_inventory_contract_unit import wordpress_post
             capture_data = {**contract_for(website), 'client_request_id': str(uuid.uuid4())}
@@ -1318,6 +1336,8 @@ class WebsiteReviewRegressionTests(WebsiteDatabaseFixture, TestCase):
             transition_connection(self.config, action='purge', expected=contract_for(website))
             captured.refresh_from_db()
             self.assertEqual((captured.state, captured.payload), ('deleted', {}))
+            review.refresh_from_db()
+            self.assertEqual((review.state, review.payload), ('deleted', {}))
 
     @override_settings(ARTICLES_PUBLISHING_CHANNELS_ENABLED=True, ARTICLES_CMS_CHANNEL_ENABLED=True)
     def test_private_cms_credential_binding_is_scoped_and_git_read_denied(self):

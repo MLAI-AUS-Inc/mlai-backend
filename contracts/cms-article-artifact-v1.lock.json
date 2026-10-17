@@ -1,0 +1,37 @@
+{
+  "files": [
+    {
+      "local_path": "content_factory/cms_native_html.py",
+      "sha256": "d2109aedf33457706b6ea4e032899f4d268783d3f55e39009dc25565782b9c1e",
+      "source_path": "backend/cms_native_html.py"
+    },
+    {
+      "local_path": "contracts/cms-native-html-v1.schema.json",
+      "sha256": "76f729c850f100fc4b1b7695c95b137d74a61c1f141929ecdbb00dbf0dee48fe",
+      "source_path": "backend/contracts/cms-native-html-v1.schema.json"
+    },
+    {
+      "local_path": "contracts/cms-native-html-v1.example.json",
+      "sha256": "3397bc2dd055ee737ab22e6a018313d171c44d3be82d19aea345f5d235e75e83",
+      "source_path": "backend/contracts/cms-native-html-v1.example.json"
+    },
+    {
+      "local_path": "content_factory/cms_artifact_contract.py",
+      "sha256": "86b79e60c2cabfe7e2da6eaded9fe877f63389034b57d4176872cec306cfcc48",
+      "source_path": "backend/cms_artifact_contract.py"
+    },
+    {
+      "local_path": "contracts/cms-article-artifact-v1.schema.json",
+      "sha256": "f092a43b819cb74f9e7cd48c1a09b807bf9452680e023cb84a60b0c4ac13dca0",
+      "source_path": "backend/contracts/cms-article-artifact-v1.schema.json"
+    },
+    {
+      "local_path": "contracts/cms-article-artifact-v1.example.json",
+      "sha256": "c796e45aec42aa19d229aee0d997ed982b9e87c2b1edad2b3ea3a7c51cb485db",
+      "source_path": "backend/contracts/cms-article-artifact-v1.example.json"
+    }
+  ],
+  "schema_version": 1,
+  "source_repository": "drsamdonegan/content-factory",
+  "source_revision": "3c566b5c8f09451806c276371c8e3e0192ef6503"
+}
