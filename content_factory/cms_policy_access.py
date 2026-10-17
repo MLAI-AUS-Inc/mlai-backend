@@ -46,10 +46,12 @@ def observation(row, saved):
 def _verify_author(binding, template, read):
     if binding["platform"] == "wordpress":
         author = read(resource="users", identifier="me", query={"context": "edit"})
-        if (not isinstance(author, dict) or type(author.get("id")) is not int or author["id"] != template["author"] or
-                not isinstance(author.get("capabilities"), dict) or
-                any(author["capabilities"].get(key) is not True for key in ("edit_posts", "publish_posts"))):
+        if (not isinstance(author, dict) or not policies._identifier(author.get("id"), "wordpress") or
+                not isinstance(author.get("capabilities"), dict)):
             raise CmsApiError("native_defaults_unavailable")
+        if (author["id"] != template["author"] or
+                any(author["capabilities"].get(key) is not True for key in ("edit_posts", "publish_posts"))):
+            raise CmsApiError("credentials_required")
     else:
         response = read(resource="users", query={"limit": 100, "filter": "status:active", "order": "id asc"})
         authors = response.get("users") if isinstance(response, dict) else None

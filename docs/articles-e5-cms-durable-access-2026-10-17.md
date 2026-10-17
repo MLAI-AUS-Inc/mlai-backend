@@ -52,3 +52,10 @@ request-body mutation cache: retain only scope metadata/UUID, clear secret
 inputs on close/completion and recover uncertainty through owner GETs. Initial
 CMS onboarding, account/site transfer, hosted fallback and real CMS/nightly
 acceptance remain release prerequisites.
+
+WordPress discovery and old-policy rechecks distinguish an actual well-formed
+identity with missing publishing permission (or the wrong original author) from
+an unreadable provider response. The former is `credentials_required`, reaching
+the original `needs_user / connect_cms` recovery path; malformed provider data
+keeps the adapter failure. No category discovery occurs after access is denied,
+and no native author or policy is silently replaced.

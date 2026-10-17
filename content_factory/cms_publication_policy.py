@@ -104,9 +104,10 @@ def resolve_native_defaults(read, platform):
     if platform == "wordpress":
         user = read(resource="users", identifier="me", query={"context": "edit"})
         if (not isinstance(user, dict) or not _identifier(user.get("id"), platform) or
-                not isinstance(user.get("capabilities"), dict) or
-                user["capabilities"].get("edit_posts") is not True or user["capabilities"].get("publish_posts") is not True):
+                not isinstance(user.get("capabilities"), dict)):
             raise CmsApiError("native_defaults_unavailable")
+        if any(user["capabilities"].get(key) is not True for key in ("edit_posts", "publish_posts")):
+            raise CmsApiError("credentials_required")
         terms = read(resource="categories", query={"per_page": 1, "orderby": "id", "order": "asc", "hide_empty": "false"})
         if (not isinstance(terms, list) or len(terms) != 1 or not isinstance(terms[0], dict) or
                 not _identifier(terms[0].get("id"), platform) or terms[0].get("taxonomy") != "category"):
