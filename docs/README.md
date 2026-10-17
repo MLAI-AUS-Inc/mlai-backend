@@ -23,6 +23,9 @@ subsystem-specific contracts and runbooks.
 
 ## Content Factory
 
+- [E5 preparatory setup authority](articles-e5-cms-setup-authority-2026-10-17.md) — private original intent, expiring discovery lease and lost-acknowledgement policy replay
+- [E5 stable setup payment identity](articles-e5-cms-financial-subject-2026-10-17.md) — one original site/owner price through real policy discovery, preserving legacy holds
+
 - [E5 original artifact reads](articles-e5-cms-artifact-read-2026-10-17.md) — paid original handoff access without model or provider-write permission after stopping
 
 - [E5 native per-site controller](articles-e5-cms-goal-controller-2026-10-17.md) — one owner start/hold, exact capture/topic, original dispatch recovery and private proof completion

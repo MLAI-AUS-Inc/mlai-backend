@@ -124,7 +124,7 @@ def resolve_native_defaults(read, platform):
         {"author": _label(author.get("name"), "Existing CMS author"), "category": ""})
 
 
-def configure(context, config, *, user, data):
+def configure(context, config, *, user, data, setup_scope=None):
     """Record the setup owner's exact review/auto choice after scoped native reads."""
     if not enabled():
         raise WebsiteAuthorityError("publishing_adapter_required", "CMS publication setup is not available.", status=404)
@@ -136,7 +136,12 @@ def configure(context, config, *, user, data):
     config.refresh_from_db()
     original_reference = (config.website_connection.capabilities or {}).get(REFERENCE) if config.website_connection else None
     expected_reference = data.get("expected_policy_id")
+    def setup_guard():
+        if setup_scope is not None:
+            from .cms_setup_authority import for_policy
+            for_policy(setup_scope, context=context, config=config, user=user, data=data)
     def guard():
+        setup_guard()
         for value in (context.organization, context.profile, context.company, user, config): value.refresh_from_db()
         _owner(context, config, user)
         binding, credential = current_credential(context, config, config.website_connection, user=user)
@@ -151,6 +156,7 @@ def configure(context, config, *, user, data):
     from .website_models import WebsiteConnectionOperation
     key = "cms-policy:" + binding["connection_id"] + ":" + str(binding["generation"]) + ":" + request_id
     def replay(prior):
+        setup_guard()
         for value in (context.organization, context.profile, context.company, user, config): value.refresh_from_db()
         _owner(context, config, user)
         saved = current_policy(context, config, user=user)
@@ -174,6 +180,9 @@ def configure(context, config, *, user, data):
     try:
         template, labels = resolve_native_defaults(read, binding["platform"])
     except CmsApiError as exc:
+        if exc.category in {"transient", "origin_unavailable"}:
+            raise WebsiteAuthorityError("website_prepare_dependency_transient", "The CMS discovery service is temporarily unavailable.",
+                retryable=True, status=503) from None
         raise WebsiteAuthorityError("missing_or_expired_credentials" if exc.category == "credentials_required" else "publishing_adapter_required",
             "The CMS author or category could not be verified for publishing.") from None
     with transaction.atomic():
