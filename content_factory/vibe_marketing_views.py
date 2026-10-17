@@ -3240,22 +3240,41 @@ def _serialize_article_draft(run, *, written_keys):
     }
 
 
-def _recent_article_drafts(organization, *, limit=8, scan_limit=50):
+def _article_draft_run_window(organization, *, scan_limit, loaded_runs=None):
+    """Reuse only identical request-owned versions, preserving the whole draft window."""
+    rows = ContentFactoryRun.objects.filter(domain=organization.domain, workflow__in=ARTICLE_WORKFLOWS).exclude(
+        status=ContentFactoryRunStatus.CANCELLED).order_by("-updated_at")
+    def full(query):
+        # These cards need result/request/acceptance fields, including legacy
+        # nested packages; do not replace them with an incomplete JSON allowlist.
+        return list(query.defer("verification_summary", "step_order").prefetch_related("steps"))
+    if loaded_runs is None:
+        owned = full(rows[:scan_limit])
+        return owned, owned
+    identities = list(rows.values_list("pk", "updated_at")[:scan_limit])
+    versions = dict(identities)
+    available = {run.pk: run for run in loaded_runs if getattr(run, "pk", None) in versions
+        and run.updated_at == versions[run.pk] and run.domain == organization.domain
+        and run.workflow in ARTICLE_WORKFLOWS and run.status != ContentFactoryRunStatus.CANCELLED}
+    missing = [identifier for identifier, _ in identities if identifier not in available]
+    owned = full(rows.filter(pk__in=missing)) if missing else []
+    available.update({run.pk: run for run in owned})
+    return [available[identifier] for identifier, _ in identities if identifier in available], owned
+
+
+def _recent_article_drafts(organization, *, limit=8, scan_limit=50, loaded_runs=None):
     written_keys = _written_article_identity_keys(organization)
+    runs, owned = _article_draft_run_window(organization, scan_limit=scan_limit, loaded_runs=loaded_runs)
+    try:
+        return _article_draft_cards(runs, written_keys=written_keys, limit=limit)
+    finally:
+        from .bootstrap_run_lifetime import release_projection_runs
+        release_projection_runs(owned)
+
+
+def _article_draft_cards(runs, *, written_keys, limit):
     drafts = []
     seen = set()
-    runs = list(
-        ContentFactoryRun.objects.filter(domain=organization.domain, workflow__in=ARTICLE_WORKFLOWS)
-        .exclude(status=ContentFactoryRunStatus.CANCELLED)
-        # verification_summary (can be ~tens of KB/run) and step_order are not read
-        # by _serialize_article_draft or its helpers; defer them so the draft scan
-        # (up to scan_limit rows) doesn't haul those blobs out of Postgres.
-        # NOTE: result / run_request / acceptance_summary ARE read here, so they
-        # must stay loaded to avoid a per-row deferred-field query (N+1).
-        .defer("verification_summary", "step_order")
-        .prefetch_related("steps")
-        .order_by("-updated_at")[:scan_limit]
-    )
     # Collapse every attempt at a topic into one card. Edits, failed publishes,
     # restarts (which deliberately start a fresh run with no source_run_id) and
     # independent regenerations of the same keyword are one job, keyed by the topic
@@ -11795,7 +11814,7 @@ def _compute_bootstrap_payload(context, request=None, *, view="summary", config=
         **({"islandGraph": island_graph} if island_graph is not None else {}),
         "hiddenTopicCandidates": hidden_topic_candidates,
         "declinedTopicFeedback": [serialize_topic_feedback(item) for item in declined_topic_feedback],
-        "draftArticles": _recent_article_drafts(context.organization, scan_limit=20 if compact else 50),
+        "draftArticles": _recent_article_drafts(context.organization, scan_limit=20 if compact else 50, loaded_runs=latest_runs),
         "writtenTopics": _recent_written_topics(context.organization),
         "publishEvidence": _publish_evidence_from_run(latest_article_run, compact=compact),
         "guidedSteps": guided_steps,

@@ -113,6 +113,32 @@ class BootstrapEndpointBudgetTests(ContentIslandBootstrapTestCase):
             for boundary in forbidden:
                 boundary.assert_not_called()
 
+    def test_draft_window_reuses_identical_loaded_versions_and_refreshes_changed_rows(self):
+        from datetime import timedelta
+        from django.utils import timezone
+        from content_factory.bootstrap_run_lifetime import release_projection_runs
+        self.seed_runs(24)
+        loaded = views._latest_runs_for_org(self.organization, config=self.config)
+        try:
+            selected, owned = views._article_draft_run_window(self.organization, scan_limit=20, loaded_runs=loaded)
+            self.assertEqual(len(selected), 20)
+            self.assertEqual(owned, [])
+            self.assertTrue(all(any(run is original for original in loaded) for run in selected))
+            changed = selected[-1]
+            ContentFactoryRun.objects.filter(pk=changed.pk).update(result={"title": "Updated draft fixture"},
+                updated_at=timezone.now() + timedelta(seconds=1))
+            selected, owned = views._article_draft_run_window(self.organization, scan_limit=20, loaded_runs=loaded)
+            try:
+                self.assertEqual(len(owned), 1)
+                self.assertEqual(owned[0].pk, changed.pk)
+                self.assertEqual(owned[0].result["title"], "Updated draft fixture")
+                self.assertIsNot(owned[0], changed)
+                self.assertIs(selected[0], owned[0])
+            finally:
+                release_projection_runs(owned)
+        finally:
+            release_projection_runs(loaded)
+
     def test_website_journey_get_also_observes_without_provider_calls(self):
         with ExitStack() as stack:
             forbidden = self.read_boundaries(stack)
