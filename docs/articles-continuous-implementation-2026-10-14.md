@@ -742,3 +742,14 @@ The native start/controller, automatic inventory/topic/dispatch recovery,
 status/doctor/Chat integration and real provider/browser acceptance remain
 unfinished. All rollout flags stay off; no paid generation, local database,
 provider mutation, merge or deployment ran.
+
+
+## 17 October: native stop-before-credit recovery
+
+Unused native holds now wait for original-key CF no-work/cancellation evidence
+before credit. The financial lease spans a claim, unlocked remote observation
+and a fenced original-dispatch recheck. Unknown/lost replies retry without
+releasing money; late replies cannot overwrite a newer worker. Useful accepted
+drafts retain their charge and source for uncertain provider reconciliation.
+All 1,166 website checks pass; full disposable CI is pending. Native start/
+controller and UI integration remain unfinished, with all rollout flags off.

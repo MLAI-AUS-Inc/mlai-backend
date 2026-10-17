@@ -2,6 +2,7 @@
 
 from copy import deepcopy
 from datetime import timedelta
+from uuid import uuid4
 
 from django.db import transaction
 from django.utils import timezone
@@ -78,19 +79,19 @@ def _record_settlement(parent, receipt, *, subject, now):
 
 
 def advance_refund(identifier, *, now=None):
-    """Lock organization before credit/parent rows, surviving purge and lost replies."""
+    """Stop unused original CF work outside locks, then settle the held money."""
     from organizations.models import Organization
     from .website_models import WebsiteConnectionOperation
+    from . import cms_goal_cancellation as cancellation
     candidate = WebsiteConnectionOperation.objects.filter(pk=identifier, action=ACTION).first()
     if candidate is None or candidate.state not in {"pending", "running"}:
         return None
-    now, before = now or timezone.now(), None
+    now, before, claimed, lease = now or timezone.now(), None, False, str(uuid4())
     try:
         with transaction.atomic():
             Organization.objects.select_for_update().get(pk=candidate.connection.organization_id)
             row = WebsiteConnectionOperation.objects.select_for_update().filter(pk=identifier, action=ACTION).first()
-            if (row is None or row.state not in {"pending", "running"} or row.connection_id != candidate.connection_id or
-                    row.next_attempt_at is not None and row.next_attempt_at > now):
+            if row is None or row.state not in {"pending", "running"} or row.next_attempt_at and row.next_attempt_at > now:
                 return None
             before = row.attempts
             parent = WebsiteConnectionOperation.objects.select_for_update().filter(
@@ -98,12 +99,42 @@ def advance_refund(identifier, *, now=None):
             if parent is None:
                 raise _deny()
             _validate(row, parent)
+            credited = billing.existing_credit(parent)
+            subject = row.payload["retention_subject"] or billing.retention_subject(parent)
+            needs_stop = credited is None and subject is None
             row.state, row.attempts, row.next_attempt_at = "running", before + 1, now + timedelta(minutes=2)
-            row.save(update_fields=["state", "attempts", "next_attempt_at", "updated_at"])
+            row.receipt = {"status": "stopping_original_work" if needs_stop else "settling_original_hold", "lease_id": lease}
+            row.save(update_fields=["state", "attempts", "next_attempt_at", "receipt", "updated_at"])
+        claimed = True
+        # Accepted drafts retain their original charge and CF handoff. Clearing
+        # those artifacts would break GET-only uncertain-post reconciliation.
+        stopped = cancellation.stop_unused(parent, now=now) if needs_stop else None
+        with transaction.atomic():
+            Organization.objects.select_for_update().get(pk=candidate.connection.organization_id)
+            row = WebsiteConnectionOperation.objects.select_for_update().filter(pk=identifier, action=ACTION,
+                state="running", receipt__lease_id=lease).first()
+            if row is None:
+                return None
+            parent = WebsiteConnectionOperation.objects.select_for_update().filter(
+                pk=row.payload["goal_operation_id"], action=authority.ACTION, connection_id=row.connection_id, generation=row.generation).first()
+            if parent is None:
+                raise _deny()
+            _validate(row, parent)
+            if needs_stop:
+                original = cancellation.original(parent)
+                if original is not None:
+                    from .dispatch_models import ContentFactoryDispatchOutbox
+                    original = ContentFactoryDispatchOutbox.objects.select_for_update().filter(pk=original.pk).first()
+                    if original is None:
+                        raise _deny()
+                    proof = cancellation.validate(original, stopped)
+                    original.payload = {**deepcopy(original.payload), cancellation.REFERENCE: proof}
+                    original.state = "cancelled"
+                    original.save(update_fields=["payload", "state", "updated_at"])
+                elif stopped is not None:
+                    raise _deny()
             receipt = billing.historical_reservation(parent)
-            subject = row.payload["retention_subject"]
-            # A real credit may have committed before a parent receipt update.
-            # Inspect it even when useful work would otherwise retain the hold.
+            subject = row.payload["retention_subject"] or billing.retention_subject(parent)
             credited = billing.existing_credit(parent)
             if credited is not None:
                 receipt = credited
@@ -125,11 +156,11 @@ def advance_refund(identifier, *, now=None):
             raise
         permanent = not exc.retryable if isinstance(exc, WebsiteAuthorityError) else isinstance(exc, (ValueError, TypeError))
         state = "needs_attention" if permanent else "pending"
-        WebsiteConnectionOperation.objects.filter(pk=identifier, action=ACTION, attempts=before,
-            state__in=["pending", "running"]).update(state=state, attempts=before + 1,
-                next_attempt_at=None if permanent else now + timedelta(minutes=5), updated_at=now,
-                receipt={"status": "credit_needs_review" if permanent else "credit_pending",
-                    "reason_code": "website_operation_changed" if permanent else "website_prepare_dependency_transient"})
+        owned = {"state": "running", "receipt__lease_id": lease} if claimed else {"state__in": ["pending", "running"], "attempts": before}
+        WebsiteConnectionOperation.objects.filter(pk=identifier, action=ACTION, **owned).update(state=state, attempts=before + 1,
+            next_attempt_at=None if permanent else now + timedelta(minutes=5), updated_at=now,
+            receipt={"status": "credit_needs_review" if permanent else "credit_pending",
+                "reason_code": "website_operation_changed" if permanent else "website_prepare_dependency_transient"})
         return state
 
 

@@ -14,6 +14,7 @@ from . import cms_goal_refunds as refunds
 from . import cms_goal_billing as billing
 from . import cms_goal_contract as goals
 from . import cms_goal_settlement as settlement
+from . import cms_goal_cancellation as cancellation
 from . import tests_cms_goal_billing_unit as fixtures
 from .dispatch_models import ContentFactoryDispatchOutbox
 from .website_models import WebsiteConnectionOperation
@@ -38,12 +39,15 @@ class CmsGoalRefundTests(SimpleTestCase):
         (_payer, _ledger, _cost), payload = self.consume()
         payload.update(roo_points_authorized=True, roo_points_action="article_generation", roo_points_billing_status="charged")
         self.outbox.client_request_id = self.key
+        self.outbox.pk = 21
         self.outbox.payload = {"request": deepcopy(payload)}
         self.outbox.save = Mock()
         self.dispatch_lock = self.stack.enter_context(patch.object(ContentFactoryDispatchOutbox.objects, "select_for_update"))
         self.dispatch_lock.return_value.filter.return_value.first.return_value = self.outbox
         self.credit = SimpleNamespace(user_id=5, delta_microroo=6_000_000, idempotency_key="content_factory:refund:" + self.key)
         self.credit_call = self.stack.enter_context(patch("integrations.services.article_generation._refund_content_factory_request", return_value=self.credit))
+        self.stop_work = self.stack.enter_context(patch.object(cancellation, "stop_unused", side_effect=lambda *args, **kwargs:
+            cancellation._receipt(self.outbox, run_id=None, status="not_received", at=self.now)))
         @contextmanager
         def atomic(*args, **kwargs):
             # Model the DB transaction boundary, including rollback before the
@@ -107,6 +111,31 @@ class CmsGoalRefundTests(SimpleTestCase):
         self.assertEqual(self.goal_operation.receipt["first_article_billing"]["status"], "reserved")
         self.assertEqual(settlement.validate(self.outbox)["decision"], "retained")
         self.credit_call.assert_not_called()
+        self.stop_work.assert_not_called()
+
+    def test_unknown_original_dispatch_does_not_credit_until_its_worker_stop_is_confirmed(self):
+        row = self.reserve_credit()
+        self.stop_work.side_effect = cancellation._pending()
+        self.assertEqual(self.advance_credit(row), "pending")
+        self.assertEqual(row.receipt["status"], "credit_pending")
+        self.credit_call.assert_not_called()
+        self.assertNotIn(cancellation.REFERENCE, self.outbox.payload)
+        self.stop_work.side_effect = lambda *args, **kwargs: cancellation._receipt(self.outbox, run_id="original-run", status="cancelled", at=self.now)
+        self.assertEqual(self.advance_credit(row, now=row.next_attempt_at + timedelta(seconds=1)), "completed")
+        self.assertEqual(cancellation.validate(self.outbox, self.outbox.payload[cancellation.REFERENCE])["run_id"], "original-run")
+        self.assertEqual(self.outbox.state, "cancelled")
+        self.credit_call.assert_called_once()
+
+    def test_late_stop_reply_cannot_replace_a_newer_credit_worker_lease(self):
+        row = self.reserve_credit()
+        def newer(*args, **kwargs):
+            row.receipt = {"status": "stopping_original_work", "lease_id": "newer-worker"}
+            return cancellation._receipt(self.outbox, run_id="original-run", status="cancelled", at=self.now)
+        self.stop_work.side_effect = newer
+        self.assertIsNone(self.advance_credit(row))
+        self.assertEqual(row.receipt["lease_id"], "newer-worker")
+        self.credit_call.assert_not_called()
+        self.assertNotIn(cancellation.REFERENCE, self.outbox.payload)
 
     def test_handoff_snapshot_prevents_credit_after_purge_even_before_parent_collected_draft(self):
         fixtures.CmsGoalBillingTests.test_private_accepted_handoff_retains_generation_charge_even_before_parent_collects_draft_proof(self)
