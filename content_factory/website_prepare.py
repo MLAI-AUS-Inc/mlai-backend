@@ -801,6 +801,11 @@ def _advance_claimed_prepare(op, *, now, handlers):
             op.state,op.next_attempt_at="pending",now+timedelta(minutes=1)
             op.receipt.update(status="working",message="Completing the previous article credit.",user_action=None)
             return _finish_prepare(op,now=now)
+        # Source stopping must advance independently of journey/proof/budget
+        # reads, which may otherwise wait before reaching the article step.
+        from .website_article_source_stop import advance as advance_source_stop
+        if advance_source_stop(op, config, now=now):
+            return _finish_prepare(op, now=now)
         journey = journey_for_context(context, config)
         journey = _cleanup_retry_journey(op, context, config, journey)
         from .website_goal_runner import owns_goal, goal_journey, ready

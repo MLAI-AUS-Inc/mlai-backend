@@ -16,6 +16,9 @@ else:
 ROOT = Path(__file__).resolve().parents[1]
 PAIRS = {
     "backend/article_source_refresh_contract.py": "content_factory/article_source_refresh_contract.py",
+    "backend/article_source_stop_contract.py": "content_factory/article_source_stop_contract.py",
+    "backend/contracts/article-source-stop-v1-request.example.json": "contracts/article-source-stop-v1-request.example.json",
+    "backend/contracts/article-source-stop-v1-receipt.example.json": "contracts/article-source-stop-v1-receipt.example.json",
     "backend/bounded_service_read.py": "content_factory/bounded_service_read.py",
     "backend/contracts/article-source-refresh-v1-request.example.json": "contracts/article-source-refresh-v1-request.example.json",
     "backend/contracts/article-source-refresh-v1-inspection.example.json": "contracts/article-source-refresh-v1-inspection.example.json",

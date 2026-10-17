@@ -1,0 +1,27 @@
+{
+  "digest": "7cf998018e8f573212e85185dd90c7eb2e2713d61d22955e8a40ff1cad3b2672",
+  "effect_authority": false,
+  "inventory_complete": false,
+  "kind": "article_source_stop",
+  "local_execution_fenced": true,
+  "observed_at": "2026-10-18T00:00:00+00:00",
+  "quiet": false,
+  "request_digest": "59cf8187e4d9aaf7f45938c3c2482dab45282d6bdb62cf03647851850bbcf28f",
+  "runs": [
+    {
+      "activities": "unknown",
+      "lease": "unknown",
+      "models": "unknown",
+      "operation_attempt": 1,
+      "operation_id": "22222222-2222-4222-8222-222222222222",
+      "origin_generation": 0,
+      "request_sha256": "c06ab6bc2c6ee941c6b7d7367899d2bf0697633dcb94306188ee6376567dded0",
+      "run_id": "original-article",
+      "state_version": 7,
+      "target_generation": 1
+    }
+  ],
+  "schema_version": 1,
+  "source_fence_digest": "b70d26ec2eb4f5db7e2ec4540e95a01e0255b001ad0c047066be52c94e57b4e6",
+  "source_fence_id": "77777777-7777-4777-8777-777777777777"
+}

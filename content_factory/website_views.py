@@ -434,6 +434,9 @@ class WebsiteConnectionAuthorizeView(APIView):
     def get(self, request):
         try:
             action = str(request.query_params.get("action") or "read")
+            if action == "article_source_stop":
+                from .website_article_source_stop import admission_receipt
+                return Response(admission_receipt(dict(request.query_params.items())), headers={"Cache-Control": "private, no-store"})
             if action == "article_source_refresh_inspect":
                 from .website_article_refresh import admission_receipt
                 return Response(admission_receipt(dict(request.query_params.items())), headers={"Cache-Control": "private, no-store"})

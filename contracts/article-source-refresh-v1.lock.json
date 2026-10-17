@@ -6,6 +6,21 @@
       "source_path": "backend/article_source_refresh_contract.py"
     },
     {
+      "local_path": "content_factory/article_source_stop_contract.py",
+      "sha256": "34581770cfe241d4615e3d5ec3358cb753230b742336a543981c92b6a14a2891",
+      "source_path": "backend/article_source_stop_contract.py"
+    },
+    {
+      "local_path": "contracts/article-source-stop-v1-request.example.json",
+      "sha256": "5b5551aefb24f0d0bac766c83ee8e937d7a8a44073f8e42f184b8a3a91bf89fc",
+      "source_path": "backend/contracts/article-source-stop-v1-request.example.json"
+    },
+    {
+      "local_path": "contracts/article-source-stop-v1-receipt.example.json",
+      "sha256": "8b27b881a771a34ed5b52fba242b341276fa0fb4ceaeeef2e765b9d6f60de092",
+      "source_path": "backend/contracts/article-source-stop-v1-receipt.example.json"
+    },
+    {
       "local_path": "content_factory/bounded_service_read.py",
       "sha256": "2e66a3a994fb4cec56970f03a93ac7ee99e0b8888081b6c072d01cda7d7732da",
       "source_path": "backend/bounded_service_read.py"
@@ -23,5 +38,5 @@
   ],
   "schema_version": 1,
   "source_repository": "drsamdonegan/content-factory",
-  "source_revision": "0eb18400cd4caa74812763804cc9904718687e33"
+  "source_revision": "bdf4bf31fda728839c2dde322c14adc219470187"
 }

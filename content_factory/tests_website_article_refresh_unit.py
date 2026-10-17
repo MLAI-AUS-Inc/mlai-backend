@@ -52,7 +52,7 @@ class ArticleRefreshProvenanceTests(SimpleTestCase):
             return self.producer[path]
         fetch = Mock(side_effect=producer)
         self.checker.verify(self.root, remote=True, token="synthetic-read-only-token", fetch=fetch)
-        self.assertEqual(fetch.call_count, 4)
+        self.assertEqual(fetch.call_count, len(self.checker.PAIRS))
         with self.assertRaises(self.checker.ContractCheckError):
             self.checker.verify(self.root, remote=True, token="synthetic-read-only-token", fetch=lambda *args: b"foreign bytes")
 
