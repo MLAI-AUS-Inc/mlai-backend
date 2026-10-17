@@ -128,6 +128,8 @@ def _start(stage, *, basis, expected_revision):
         _current(operation)
         if operation.state == "completed":
             current_approval(operation, fresh_media=False)
+        from .cms_goal_controller import wake_for_approval
+        wake_for_approval(stage, source)
         return operation
 
 

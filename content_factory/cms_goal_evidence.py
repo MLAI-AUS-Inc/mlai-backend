@@ -37,7 +37,7 @@ def current_scope(context, config, *, user):
     return value, saved
 
 
-def collect(goal, context, config, *, user, run=None, artifact_operation_id=None, now):
+def collect(goal, context, config, *, user, run=None, artifact_operation_id=None, capture_operation_id=None, now):
     """Collect facts for the controller's original reservation; never schedule.
 
     The controller owns the immutable artifact-operation reference. This reader
@@ -66,7 +66,10 @@ def collect(goal, context, config, *, user, run=None, artifact_operation_id=None
     put("access", {"binding": binding, "credential_operation_id": saved_policy["policy"]["credential_operation_id"]},
         policy_row.updated_at, row=policy_row)
     put("integrated", saved_policy["policy"], policy_row.updated_at, row=policy_row)
-    capture = rows.filter(action=CAPTURE_ACTION, state="completed").order_by("-created_at", "-pk").first()
+    captures = rows.filter(action=CAPTURE_ACTION, state="completed")
+    if capture_operation_id is not None:
+        captures = captures.filter(pk=capture_operation_id)
+    capture = captures.order_by("-created_at", "-pk").first()
     if capture is not None:
         payload = capture.payload
         if (not isinstance(payload, dict) or payload.get("binding") != binding or

@@ -23,6 +23,8 @@ subsystem-specific contracts and runbooks.
 
 ## Content Factory
 
+- [E5 native per-site controller](articles-e5-cms-goal-controller-2026-10-17.md) — one owner start/hold, exact capture/topic, original dispatch recovery and private proof completion
+
 - [E5 native stop-before-credit](articles-e5-cms-goal-stop-2026-10-17.md) — original-key CF cancellation proofs, financial leases and retained artifact recovery
 
 - [E5 native work guards](articles-e5-cms-goal-work-guards-2026-10-17.md) — original dispatch/goal/budget admission and GET-only proof recovery after stopping
