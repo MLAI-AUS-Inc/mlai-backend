@@ -130,7 +130,8 @@ class WebsiteConnectionView(APIView):
         except WebsiteAuthorityError:
             native_goal = None
         if native_goal is not None: payload["cmsGoal"] = native_goal
-        return Response(add_status(payload, context, config, journey=payload["websiteJourney"], user=request.user))
+        return Response(add_status(payload, context, config, journey=payload["websiteJourney"], user=request.user),
+            headers={"Cache-Control": "private, no-store"})
 
     def post(self, request):
         context, config, error = _context(request)
@@ -262,9 +263,17 @@ class WebsiteConnectionActionView(APIView):
                 selected = request.data.get("channel") if action == "select-channel" else None
                 if action == "select-channel" and selected is None:
                     raise WebsiteAuthorityError("website_prepare_blocked", "Choose an offered channel.", status=422)
+                options = {}
+                if action == "select-channel" and "cms_platform" in request.data:
+                    from .cms_onboarding_offer import entry_for_context
+                    if selected != "cms" or entry_for_context(context, config, user=request.user) is None:
+                        raise WebsiteAuthorityError("website_prepare_blocked", "Refresh the initial CMS owner form.", status=422)
+                    options["platform"] = request.data["cms_platform"]
+                    if options["platform"] is None:
+                        raise WebsiteAuthorityError("website_prepare_blocked", "Choose WordPress or Ghost.", status=422)
                 record = update_choice(context, config, expected_scope=request.data.get("channel_scope"),
-                    expected_revision=request.data.get("channel_revision"), selected=selected)
-                return Response({"publishingChannel": record})
+                    expected_revision=request.data.get("channel_revision"), selected=selected, **options)
+                return Response({"publishingChannel": record}, headers={"Cache-Control": "private, no-store"})
             current = config.website_connection
             if current and "_cms_binding" in (current.capabilities or {}) and action not in {"disconnect", "purge", "pause"}:
                 raise WebsiteAuthorityError("publishing_adapter_required", "Use the CMS connection actions for this website.")

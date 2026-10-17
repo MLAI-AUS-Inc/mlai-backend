@@ -7,6 +7,7 @@ from urllib.parse import urlsplit
 from uuid import UUID
 
 from django.conf import settings
+from django.core.exceptions import ObjectDoesNotExist
 from django.utils import timezone
 
 from .channel_artifact_contract import canonical_bytes, digest
@@ -27,6 +28,25 @@ FIELDS = {"version", "kind", "scope", "channel_revision", "platform", "public_or
 
 def _deny():
     return WebsiteAuthorityError("website_prepare_blocked", "Refresh the current CMS destination, startup and first-article price.", status=422)
+
+
+def entry_for_context(context, config, *, user):
+    """Advertise an initial owner form without selecting a channel or quoting money."""
+    from .website_publishing_channels import enabled as discovery_enabled, _revision
+    if (user is None or not getattr(settings, "ARTICLES_CMS_ONBOARDING_ENABLED", False) or
+            not getattr(settings, "ARTICLES_CMS_STATUS_ENABLED", False) or not discovery_enabled() or
+            not setup_enabled(context.organization.pk)):
+        return None
+    try:
+        def current():
+            for item in (context.organization, context.profile, context.company, user, config): item.refresh_from_db()
+            if getattr(config, "github_repo", None) not in (None, ""): raise _deny()
+            return _scope(_owner(context, config, user)), _revision(config)
+        scope, revision = current()
+        if current() != (scope, revision): return None
+        return {"version": 1, "kind": "cms_onboarding_entry", "scope": scope, "channel_revision": revision}
+    except (WebsiteAuthorityError, ObjectDoesNotExist, ValueError, TypeError, KeyError, AttributeError, RecursionError):
+        return None
 
 
 def _scope(value):

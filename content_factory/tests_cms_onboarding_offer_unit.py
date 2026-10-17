@@ -96,6 +96,10 @@ class CmsOnboardingOfferTests(SimpleTestCase):
         with self.assertRaises(WebsiteAuthorityError): self.read()
         self.price.assert_not_called()
 
+    def test_nullable_new_config_repository_is_still_an_initial_site(self):
+        self.config.github_repo = None
+        self.assertEqual(self.read()["scope"], self.scope)
+
     def test_public_host_alias_subdirectory_and_ghost_admin_destination_are_explicit(self):
         value = self.read(public_origin="https://www.native.example.com/blog", api_origin="https://www.native.example.com/wordpress")
         self.assertEqual(value["public_origin"], "https://www.native.example.com/blog/")
@@ -121,3 +125,69 @@ class CmsOnboardingOfferTests(SimpleTestCase):
     def test_disabled_initial_rollout_performs_no_owner_refresh_or_quote_read(self):
         with override_settings(ARTICLES_CMS_ONBOARDING_ENABLED=False): self.assertIsNone(self.read())
         self.price.assert_not_called(); self.config.refresh_from_db.assert_not_called()
+
+
+@override_settings(**{**CmsOnboardingOfferTests._overridden_settings, "ARTICLES_CMS_STATUS_ENABLED": True})
+class CmsOnboardingEntryTests(SimpleTestCase):
+    setUp = CmsOnboardingOfferTests.setUp
+
+    def entry(self): return offers.entry_for_context(self.context, self.config, user=self.user)
+
+    def test_initial_form_entry_is_local_owner_metadata_without_channel_consent_price_or_work(self):
+        before = deepcopy(self.config.article_system)
+        with patch("content_factory.website_publishing_channels.observe_homepage") as http, \
+                patch("roo.services.PointsService.spend") as debit:
+            value = self.entry()
+        self.assertEqual(value, {"version": 1, "kind": "cms_onboarding_entry", "scope": self.scope, "channel_revision": 2})
+        self.assertEqual(self.config.article_system, before)
+        self.price.assert_not_called(); http.assert_not_called(); debit.assert_not_called()
+
+    def test_uninspected_initial_site_can_open_the_form_without_fabricating_a_recommendation(self):
+        self.config.article_system = {}
+        self.config.github_repo = None
+        self.assertEqual(self.entry()["channel_revision"], 0)
+        self.assertEqual(self.config.article_system, {})
+        self.price.assert_not_called()
+
+    def test_inactive_foreign_or_concurrently_revoked_founder_cannot_receive_old_entry_metadata(self):
+        self.user.is_active = False
+        self.assertIsNone(self.entry())
+        self.user.is_active = True
+        self.profile.user_id = 99
+        self.assertIsNone(self.entry())
+        self.profile.user_id = self.user.pk
+        count = 0
+        def revoke():
+            nonlocal count
+            count += 1
+            if count == 2: self.user.is_active = False
+        self.config.refresh_from_db.side_effect = revoke
+        self.assertIsNone(self.entry())
+
+    def test_existing_connections_and_legacy_repositories_are_not_initial_entry_points(self):
+        for state in ("connected", "paused", "disconnected", "revoked"):
+            self.config.website_connection = SimpleNamespace(pk=uuid4(), generation=1, state=state, github_repo="", branch="", app_root="")
+            with self.subTest(state=state): self.assertIsNone(self.entry())
+        self.config.website_connection = None
+        self.config.github_repo = "fixture/original-site"
+        self.assertIsNone(self.entry())
+
+    def test_default_off_status_discovery_setup_and_enrollment_gates_prevent_owner_reads(self):
+        for values in ({"ARTICLES_CMS_ONBOARDING_ENABLED": False}, {"ARTICLES_CMS_STATUS_ENABLED": False},
+                {"ARTICLES_CHANNEL_DISCOVERY_ENABLED": False}, {"ARTICLES_CMS_SETUP_ENABLED": False},
+                {"ARTICLES_WEBSITE_GOAL_ENROLLED_ORGANIZATIONS": []}):
+            with self.subTest(values=values), override_settings(**values): self.assertIsNone(self.entry())
+        self.config.refresh_from_db.assert_not_called(); self.price.assert_not_called()
+
+    def test_shared_bootstrap_and_connection_status_include_only_an_eligible_initial_owner_entry(self):
+        from .website_status import add_status
+        with patch("content_factory.publishing_channels.inspect", return_value={"planning": None}), \
+                patch("content_factory.website_status.status_for_context", return_value=None):
+            value = add_status({"websiteConnection": None}, self.context, self.config, journey={}, user=self.user)
+            self.assertEqual(value["cmsOnboarding"], self.entry())
+            self.assertNotIn("cmsOnboarding", add_status({"websiteConnection": {"connectionId": str(uuid4())}}, self.context,
+                self.config, journey={}, user=self.user))
+            self.assertNotIn("cmsOnboarding", add_status({}, self.context, self.config, journey={}))
+            with override_settings(ARTICLES_CMS_ONBOARDING_ENABLED=False):
+                self.assertNotIn("cmsOnboarding", add_status(value, self.context, self.config, journey={}, user=self.user))
+        self.price.assert_not_called()

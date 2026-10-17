@@ -179,11 +179,13 @@ def _require_current(context, config, expected_scope, expected_revision):
         raise WebsiteAuthorityError("website_configuration_changed", "Refresh the website channel choices before continuing.")
 
 
-def update_choice(context, config, *, expected_scope, expected_revision, selected=None):
+def update_choice(context, config, *, expected_scope, expected_revision, selected=None, platform=None):
     """Inspect outside locks, then save after exact company/site/revision checks.
 
     ``selected`` records an owner preference only. No CMS, hosting, GitHub,
     generation, billing or publishing authority is created by this action.
+    A supported explicit platform may override a missed public hint only for an
+    initial site; existing connections and repositories cannot be rebound here.
     """
     if not enabled():
         raise WebsiteAuthorityError("website_prepare_blocked", "Channel discovery is not available.", status=404)
@@ -195,6 +197,8 @@ def update_choice(context, config, *, expected_scope, expected_revision, selecte
     observed_version = config.website_connection.configuration_version if config.website_connection else None
     current = saved_record(config.article_system)
     if selected is None:
+        if platform is not None:
+            raise WebsiteAuthorityError("website_prepare_blocked", "Choose the CMS platform in the initial form.", status=422)
         observation = observe_homepage(scope["domain"])
         connection = config.website_connection
         repository_scope = None
@@ -209,11 +213,16 @@ def update_choice(context, config, *, expected_scope, expected_revision, selecte
             "recommendation": recommendation, "selection": current["selection"] if current and current["scope"] == scope else None,
             "observed_at": timezone.now().isoformat()}
     else:
+        manual_cms = platform is not None
+        if manual_cms and (not getattr(settings, "ARTICLES_CMS_ONBOARDING_ENABLED", False) or selected != "cms" or
+                not isinstance(platform, str) or platform not in {"wordpress", "ghost"} or
+                scope.get("connection_id") is not None or getattr(config, "github_repo", None) not in (None, "")):
+            raise WebsiteAuthorityError("website_prepare_blocked", "Choose WordPress or Ghost for the current initial website.", status=422)
         if (not isinstance(selected, str) or selected not in CHANNELS or not current or current["scope"] != scope or
-                selected not in current["recommendation"]["options"]):
+                selected not in current["recommendation"]["options"] and not manual_cms):
             raise WebsiteAuthorityError("website_prepare_blocked", "Inspect this website and choose an offered channel.", status=422)
         record = {**current, "revision": expected_revision + 1,
-            "selection": {"channel": selected, "platform": current["recommendation"]["platform"] if selected == "cms" else "unknown"}}
+            "selection": {"channel": selected, "platform": platform if manual_cms else current["recommendation"]["platform"] if selected == "cms" else "unknown"}}
     with transaction.atomic():
         # Same serialization order as repository bind, config PUT and revocation.
         Organization.objects.select_for_update().get(pk=config.organization_id)
