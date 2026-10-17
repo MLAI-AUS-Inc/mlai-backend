@@ -83,6 +83,7 @@ def historical(operation):
         if p["public_observation"] is not None:
             public.validate_observation(p["public_observation"], intent, journal,
                 publication=original.intent, published_state=original.state)
+            if not accepted <= public._time(p["public_observation"]["checked_at"]) < deadline: raise deny()
         return SimpleNamespace(intent=deepcopy(intent), journal=journal, original=original, accepted=accepted, deadline=deadline)
     except (CmsApiError, ValueError, TypeError, KeyError, AttributeError, RecursionError):
         raise deny() from None

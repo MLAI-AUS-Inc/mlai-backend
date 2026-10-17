@@ -296,6 +296,16 @@ class CmsUnpublishRuntimeTests(SimpleTestCase):
         self.assertNotIn("publicUrl", result)
         self.assertEqual(result["milestones"], [{"name": "first_article_live", "state": "passed"}])
 
+    def test_verified_withdrawal_cannot_complete_a_first_article_goal_that_never_finished(self):
+        from .cms_unpublish_status import apply
+        self.accept(); self.advance(); self.advance()
+        root = SimpleNamespace(pk=uuid4(), connection_id=self.connection.pk, generation=self.connection.generation,
+            payload={"source_run_id": self.intent["source_run_id"]})
+        result = {"state": "stopped", "milestones": [{"name": "first_article_live", "state": "pending"}]}
+        apply(result, root, self.context, self.config, user=self.user)
+        self.assertEqual((result["state"], result["title"]), ("stopped", "Article unpublished"))
+        self.assertEqual(result["milestones"], [{"name": "first_article_live", "state": "pending"}])
+
     def test_owner_api_is_no_store_and_generic_operation_read_cannot_export_private_journal(self):
         from .website_views import WebsiteConnectionActionView, WebsiteConnectionOperationView
         self.accept()

@@ -23,7 +23,7 @@ subsystem-specific contracts and runbooks.
 
 ## Content Factory
 
-- [E5 explicit CMS withdrawal](articles-e5-cms-withdrawal-2026-10-18.md) — single-write draft journal and public-absence proof; owner worker/routes/UI remain in progress
+- [E5 explicit CMS withdrawal](articles-e5-cms-withdrawal-2026-10-18.md) — owner-scoped status-only journal, leased execution and public-absence proof; UI/provider acceptance pending
 - [E5 initial CMS intake](articles-e5-cms-initial-intake-2026-10-18.md) — initial owner entry, explicit platform preference and original acceptance recovery
 
 - [E5 initial CMS runtime](articles-e5-cms-initial-runtime-2026-10-17.md) — one original acceptance/hold through encrypted verification, expiry, lifecycle and native setup

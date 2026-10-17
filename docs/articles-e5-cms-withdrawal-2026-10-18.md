@@ -94,7 +94,7 @@ publication checklist. A past absence proof does not authorize another request
 or certify the future state of an owner-edited CMS. Rollout pauses produce no
 provider request.
 
-Thirty-six synthetic WordPress/Ghost runtime cases pass, covering lost replies,
+Thirty-eight synthetic WordPress/Ghost runtime cases pass, covering lost replies,
 lease replacement, repeated worker loss, exact-ID recovery exhaustion, public
 absence limits, owner revocation, no-store nonce reads, and preserved financial
 and historical facts. The full real-ORM initial/setup/publication fixture now
@@ -114,3 +114,13 @@ receipt remains unchanged. Ghost's
 can return a draft preview URL; withdrawal ownership ignores that draft URL and
 verifies public absence only at the saved original published URL. Synthetic
 preview tokens never enter a receipt or a public request.
+
+
+Final backend checks: all 1,551 database-free journey cases pass, including the
+original-key renewal wake regression. The assignment guard selects all 593 test
+modules, the failure audit covers 849 production emissions, and the model check
+reports no changes. The audit's vendored digests pass; remote pinned provenance
+was not rechecked locally. A completed withdrawal cannot complete an unfinished
+setup: only an already completed publication checklist retains `done`. The
+companion Chat decoder must accept the closed withdrawal proof before it can
+show a completed historical checklist without an active article link.

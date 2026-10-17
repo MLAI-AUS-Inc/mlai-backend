@@ -81,13 +81,17 @@ def apply(result, operation, context, config, *, user):
     if selected is None: return result
     result["cmsWithdrawal"] = selected
     if selected["state"] == "available": return result
+    completed_setup = result.get("state") == "done"
     result.pop("publicUrl", None)
     result.update(action=None, nextAttemptAt=selected["nextAttemptAt"])
     if selected["state"] == "completed":
-        result.update(state="done", title="Article unpublished", message="The article was returned to a draft. The checklist records its earlier publication.")
+        result.update(state="done" if completed_setup else "stopped", title="Article unpublished",
+            message="The article was returned to a draft. The checklist records its earlier publication." if completed_setup else
+                "The article was returned to a draft. First article setup stopped before completion.")
     elif selected["state"] in authority.ACTIVE:
         result.update(state="working", title="Unpublishing article", message="Checking the original article and its public URL.")
     else:
         result.update(state="stopped", title="Article withdrawal needs attention", message="Review the original withdrawal request.",
-            action={"id": "inspect_goal", "label": "View details", "operationId": selected["operationId"]})
+            action={"id": "inspect_goal", "label": "View details", "operationId": str(operation.pk)})
+    if result["state"] != "done": result.pop("publishedAt", None)
     return result
