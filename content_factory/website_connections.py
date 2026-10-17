@@ -262,7 +262,8 @@ def summary_for(config, *, company_id=None):
     if target_blocked:
         capabilities.update(publishingReady=False, previewSupported=False)
         actions = [action for action in actions if action not in {"setup", "publish", "preview"}]
-    latest = connection.operations.exclude(action__in=["goal-usage", "goal-alert", "usage-refresh", "channel-credential"]).order_by("-created_at").first()
+    from .website_article_credentials import PRIVATE_ACTIONS
+    latest = connection.operations.exclude(action__in=["goal-usage", "goal-alert", "usage-refresh", "channel-credential", *PRIVATE_ACTIONS]).order_by("-created_at").first()
     summary = {
         "latestOperation": {"id": str(latest.pk), "action": latest.action, "state": latest.state, "receipt": latest.receipt} if latest else None,
         "connectionId": str(connection.pk), "connectionGeneration": connection.generation,
@@ -469,11 +470,11 @@ def authority_guard(data, *, action="read", domain="", github_repo="", require_s
                 from .website_github_failure import taxonomy_active
                 raise WebsiteAuthorityError("website_authority_raced" if taxonomy_active() else "website_connection_changed", "Website authority changed during verification. Refresh and retry.", retryable=True)
             if cleanup:
-                validate_operation(connection, {**payload, "action": action}, worker_cleanup=action == "worker_cleanup",
+                operation = validate_operation(connection, {**payload, "action": action}, worker_cleanup=action == "worker_cleanup",
                     restoration=action in {"restoration", "restoration_read"}, cancellation=action == "cancel_operation", cancellation_receipt=action == "cancel_receipt")
             else:
                 validate_authority(connection, payload, action=action, domain=domain, github_repo=github_repo)
-                validate_operation(connection, payload)
+                operation = validate_operation(connection, payload)
                 require_repository_write_policy(action=action, domain=connection.organization.domain)
             if require_selected and not OrganizationContentConfig.objects.filter(organization_id=connection.organization_id,
                     website_connection=connection, github_repo__iexact=connection.github_repo).exists():
@@ -498,7 +499,9 @@ def authority_guard(data, *, action="read", domain="", github_repo="", require_s
             try:
                 if needs_head and observed and expected != observed:
                     check_source_identity(connection, payload)
-                yield connection
+                from .website_article_credentials import operation_scope
+                with operation_scope(operation):
+                    yield connection
             finally:
                 _authority_depth.reset(depth_token)
                 _verified_heads.reset(heads_token)
