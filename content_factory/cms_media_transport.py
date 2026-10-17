@@ -141,8 +141,8 @@ def upload_image(binding, credential, *, upload_id, image, title="", alt_text=""
     if binding["platform"] == "wordpress":
         fields = {"slug": slug, "title": html.escape(title), "alt_text": alt_text, "caption": html.escape(caption),
             "description": _marker(upload_id, image)}
-        base = binding["api_origin"] + "wp-json/wp/v2/media"
-        query = "context=edit"
+        base = binding["api_origin"] + "index.php"
+        query = "rest_route=%2Fwp%2Fv2%2Fmedia&context=edit"
     else:
         fields = {"purpose": "image", "ref": _marker(upload_id, image)}
         base = binding["api_origin"] + "ghost/api/admin/images/upload/"

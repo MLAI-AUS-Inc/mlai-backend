@@ -78,6 +78,28 @@ reads the actual CMS homepage through the same fixed loopback gateway and uses
 the existing explicit owner platform choice. Public hints still grant neither
 authentication nor publication proof. The actual provider matrix must be rerun.
 
+Real connect then exposed a WordPress compatibility gap: the transport assumed
+`/wp-json/`, which the default plain-permalink installation does not route. It
+now sends one fixed `index.php?rest_route=...` request, including media upload,
+without discovering another credential origin, following redirects or retrying
+a write. Caller query validation still forbids overriding the route. This is
+WordPress's documented [plain-permalink API form](https://developer.wordpress.org/rest-api/using-the-rest-api/discovery/);
+its [front-controller implementation](https://developer.wordpress.org/reference/functions/get_rest_url/)
+uses `index.php` to avoid POST redirects. A simulated plain-permalink server
+regression fails on the previous transport.
+
+Ghost's [6.71 integration output mapper](https://github.com/TryGhost/Ghost/blob/v6.71.0/ghost/core/server/api/endpoints/utils/serializers/output/mappers/integrations.js)
+already combines the key ID and secret. The fixture now accepts that combined
+key instead of adding the ID twice, with an exact closed shape check and no
+secret output. Its corrected protocol regression also fails before the fix.
+
+After these compatibility corrections, all 1,558 database-free journey cases
+and 60 focused fixture/transport/owner/capture cases pass. All 595 test modules
+are assigned, 849 production failure emissions are audited and vendored digests
+pass (remote pinned provenance not rechecked locally). Model checks report no
+changes. No database or container was run locally. Actual remote WordPress/Ghost
+acceptance remains required.
+
 Final local validation passes 109 database-free fixture/assignment/validation
 route and CMS contract cases. Python syntax and the workflow/Compose YAML parse;
 all 595 test modules are assigned. Isolation assertions check pinned images,

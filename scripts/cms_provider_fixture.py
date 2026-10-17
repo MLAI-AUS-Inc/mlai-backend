@@ -6,6 +6,7 @@ from http.cookies import SimpleCookie
 import json
 import os
 from pathlib import Path
+import re
 import secrets
 import subprocess
 import time
@@ -70,6 +71,8 @@ class FixtureConnection:
             raise AssertionError("Unexpected CMS acceptance destination")
         self.hostname = hostname
         provider = next(key for key, value in HOSTS.items() if value == hostname)
+        self.provider = provider
+        self.method = "unknown"
         self.connection = http.client.HTTPConnection("127.0.0.1", PORTS[provider], timeout=15)
 
     def request(self, method, target, body=None, headers=None):
@@ -79,10 +82,14 @@ class FixtureConnection:
         if headers.get("Host", self.hostname) != self.hostname:
             raise AssertionError("Unexpected CMS acceptance host header")
         headers.update(Host=self.hostname, **{"X-Forwarded-Proto": "https"})
+        self.method = method if method in {"GET", "POST", "PUT", "DELETE", "OPTIONS"} else "unknown"
         return self.connection.request(method, target, body=body, headers=headers)
 
     def getresponse(self):
-        return self.connection.getresponse()
+        response = self.connection.getresponse()
+        if type(response.status) is int and not 200 <= response.status < 300:
+            print(f"CMS fixture response: provider={self.provider} method={self.method} status={response.status}")
+        return response
 
     def close(self):
         self.connection.close()
@@ -151,7 +158,10 @@ def bootstrap(provider):
         value, _ = _ghost_call("POST", "integrations/?include=api_keys", {"integrations": [{"name": "MLAI disposable CI"}]}, cookie)
         keys = value["integrations"][0]["api_keys"]
         admin = next(key for key in keys if key["type"] == "admin")
-        secret = admin["id"] + ":" + admin["secret"]
+        # Ghost's integration output mapper already returns id:hex-secret.
+        secret = admin["secret"]
+        if not isinstance(secret, str) or re.fullmatch(re.escape(admin["id"]) + r":[a-fA-F0-9]{64}", secret) is None:
+            raise FixtureFailure("Ghost fixture admin key shape invalid")
     path.parent.mkdir(mode=0o700, exist_ok=True)
     # An existing file is an error; never overwrite/recover a persistent key.
     descriptor = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)

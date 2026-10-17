@@ -95,7 +95,7 @@ class CmsProviderFixtureTests(unittest.TestCase):
                 {"GITHUB_ACTIONS": "true", "GITHUB_REPOSITORY": "MLAI-AUS-Inc/mlai-backend", "RUNNER_TEMP": directory}, clear=True):
             secret = "b" * 64
             replies = [({}, ""), ({}, "synthetic-session"),
-                ({"integrations": [{"api_keys": [{"type": "admin", "id": "a" * 24, "secret": secret}]}]}, "")]
+                ({"integrations": [{"api_keys": [{"type": "admin", "id": "a" * 24, "secret": "a" * 24 + ":" + secret}]}]}, "")]
             output = StringIO()
             with patch.object(fixture, "_ghost_call", side_effect=replies) as api, redirect_stdout(output):
                 fixture.bootstrap("ghost")
@@ -103,6 +103,7 @@ class CmsProviderFixtureTests(unittest.TestCase):
             self.assertEqual(api.call_args_list[2].args[1], "integrations/?include=api_keys")
             self.assertTrue(secret not in output.getvalue())
             self.assertTrue("synthetic-session" not in output.getvalue())
+            self.assertEqual(fixture.load_fixture("ghost")["secret"].count(":"), 1)
             self.assertEqual(fixture.fixture_path("ghost").stat().st_mode & 0o777, 0o600)
 
     @patch.object(fixture.http.client, "HTTPConnection")
