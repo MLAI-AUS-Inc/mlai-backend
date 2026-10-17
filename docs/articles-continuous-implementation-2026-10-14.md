@@ -690,3 +690,21 @@ no actual CMS write, paid generation, local database, merge or deployment ran.
 Native first-article goal/status/UI, strategy handoff, revision lineage,
 unpublish and real-provider/container/browser acceptance remain implementation
 work. See `articles-e5-cms-publication-2026-10-17.md`.
+
+## 17 October: native CMS goal ledger and proof reader
+
+Native milestones now have a separate provider scope and proof contract, using
+actual original CF run/generation/envelope identities. Merge is explicitly not
+required. The reader revalidates current native policy/key/owner, complete
+inventory, original spend/refund state and private draft/stage/approval/public
+observation records. It performs no effects. Source generation changes invalidate
+old dependent proofs; provider acknowledgements and copied receipts cannot
+complete a native article goal.
+
+All 1,096 no-database website checks pass, including 18 new native ledger/reader
+checks. Models/dry-run show no changes; 779 failure emissions are audited and all
+560 test modules are assigned. Real ORM full-native-proof reconstruction is
+assigned to disposable CI. Native runtime reservation/billing/dispatch/recovery,
+budgets/strategy/status/doctor/Chat UI remain integration work. The ledger and
+reader do not enable a CMS goal or claim complete end-to-end acceptance. All
+flags remain off, with no actual CMS/paid/local-DB/deploy actions.

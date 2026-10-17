@@ -1393,6 +1393,17 @@ class WebsiteReviewRegressionTests(WebsiteDatabaseFixture, TestCase):
             self.assertEqual(captured.payload['inventory']['records'][0]['provider_id'], 1)
             self.assertNotIn('Original native post', json.dumps(captured.receipt))
             self.assertEqual(posts.call_args.kwargs['method'], 'GET')
+            from . import cms_goal_contract, cms_goal_evidence
+            native_scope, _policy = cms_goal_evidence.current_scope(context, self.config, user=user)
+            native_goal = cms_goal_contract.new_goal(str(uuid.uuid4()), native_scope, now=timezone.now())
+            native_proofs, native_source, references = cms_goal_evidence.collect(native_goal, context, self.config,
+                user=user, run=synced, artifact_operation_id=str(artifact_operation.pk), now=timezone.now())
+            self.assertEqual(set(native_proofs), set(cms_goal_contract.KINDS))
+            native_goal = cms_goal_contract.bind_source(native_goal, native_source, expected_scope=native_scope, now=timezone.now())
+            native_goal = cms_goal_contract.refresh(native_goal, native_proofs, expected_scope=native_scope, now=timezone.now())
+            self.assertTrue(cms_goal_contract.complete(native_goal, expected_scope=native_scope, now=timezone.now()))
+            self.assertEqual(references['first_article_live'], str(publication.pk))
+            self.assertNotIn('source_sha', json.dumps(native_goal))
             old_contract = contract_for(website)
             stale = cms_capture.start_capture(context, self.config, user=user,
                 data={**old_contract, 'client_request_id': str(uuid.uuid4())})

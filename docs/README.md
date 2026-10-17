@@ -23,6 +23,8 @@ subsystem-specific contracts and runbooks.
 
 ## Content Factory
 
+- [E5 native CMS goal proofs](articles-e5-cms-goal-proofs-2026-10-17.md) — separate provider ledger and original paid-source proof reader, with no invented Git facts
+
 - [E5 durable CMS publication](articles-e5-cms-publication-2026-10-17.md) — one-create journal, uncertain-outcome reconciliation and private native/public body proofs
 
 - [E5 exact CMS approval](articles-e5-cms-approval-2026-10-17.md) — original owner review/automatic consent, durable proof refresh and exact final native preview
