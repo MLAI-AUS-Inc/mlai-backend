@@ -18416,7 +18416,7 @@ def _project_setup_pr_creation_failure(run, config, remote_data):
 
 def control_article_run(*, user, context, run, action, data, run_id=None, goal_operation_id=None):
     """Route publication through the channel while retaining original run consent."""
-    if "publishing_channel_artifact" in (run.run_request or {}) and action not in {"cancel", "deny"}:
+    if action not in {"cancel", "deny"} and "publishing_channel_artifact" in (run.run_request or {}):
         from .channel_artifacts import artifact_run_control_allowed
         if goal_operation_id is not None or not artifact_run_control_allowed(run, action, data):
             return Response({"code": "publishing_adapter_required", "detail": "Use this CMS artifact's editorial recovery or separate publication review."}, status=409)
