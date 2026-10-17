@@ -1,0 +1,27 @@
+# E5 / v2 3.3: original billing and durable owned CMS media
+
+Media staging now consumes only a privately collected native CMS article. Its original company/owner/credential/policy, handoff digest and source generation must remain current. Before a provider effect, the backend resolves the original company's actual spend and payer through the existing tenant-scoped outbox/job/ledger lineage, checks the exact amount and original refund key, and refuses pending/refunded obligations. A free article needs the original explicit zero-cost free decision in the immutable outbox; today's price, a worker flag or the requesting actor cannot replace it. No new charge is made.
+
+## Exact public rasters
+
+Generated source images are fetched only from the bounded generated-storage identity already bound to the final CF artifact. The reader pins public HTTPS addresses, forwards no service/CMS key or cookies, follows no redirects and accepts only bounded, decoded static PNG/JPEG/WebP bytes. Source hash, dimensions and MIME must agree. A CMS acknowledgement separately needs a public fetch from the original confirmed site/admin storage origin with the same original raster bytes and dimensions. A returned URL alone is insufficient.
+
+The closed `cms_public_image_observation` binds original scope, handoff, slot, upload UUID, source URL hash, original/public pixel hashes, dimensions, MIME, provider ID and observation time. Final review requires observations within 15 minutes; the durable journal retains older historical observations without treating them as current approval. The caller must resolve its own private original operation. A checksum never establishes that origin or grants publication consent.
+
+## Durable staging and unknown effects
+
+One private `cms-media` operation reserves the complete bounded image set atomically for a handoff. Each slot has an immutable UUID/hash intent and a journal with one upload allowance. The allowance is committed before the POST. Current backend scope/billing and the exact current CF revision are checked outside database locks before provider access, and a lease plus fresh private scope fence every result. A refund or source change during upload discards its acknowledgement while preserving the uncertain journal for recovery. Completed collections do not consume the scheduler's reservation limit again. Empty image sets finish without network calls.
+
+For WordPress, recovery reads only the operation-unique media slug and accepts the exact owned UUID/hash marker and raster identity. Missing replies permit up to eight reads and never another upload. This uses the documented [media collection and slug filter](https://developer.wordpress.org/rest-api/reference/media/). The Ghost adapter uses the documented [image upload acknowledgement and echoed ref](https://docs.ghost.org/admin-api/images/uploading-an-image/); it has no implemented trusted ref lookup. A lost Ghost reply records that recovery limitation and selects the shared strategy failure instead of inventing a lookup or silently uploading again. Provider-post creation has not begun at this stage, so this is separate from the stricter unknown-post publication fence.
+
+Interrupted leases recover durably. Read failures use bounded backoff without restarting generation or charging it again. Unsupported media permissions/format/origin/recovery produce the shared strategy classification. Issuing an upload does not prove modification: an unknown response records `provider_modified: null` until an acknowledgement exists. Media receipts grant no approval, Git readiness or live-article proof.
+
+The scheduler has a dedicated media branch behind all existing default-off CMS/artifact gates. Private payloads stay out of owner operation detail, latest summaries and the Git journey. Frozen provider actions cannot fall into Git cleanup. Purge erases their payloads across generations.
+
+## Validation and remaining integration
+
+The no-database website group passes 1,025 checks, including 27 new original-billing, pinned-raster, upload-journal and durable-staging checks. Model validation and migration dry-run report no changes; the failure audit checks 770 production emissions and all 554 test modules are assigned. Targeted checks also cover a lost upload response, a crash after committing its upload allowance, a refund during HTTP, stale CF revision, duplicate-create denial, stale public proof and zero-image completion.
+
+The disposable remote-CI CMS regression seeds only synthetic spend/refund rows, resolves original billing, reserves/deduplicates an empty native media set, checks its private completion and verifies purge. No wallet service or local database is used. Its execution remains a remote CI gate. All provider, CF and raster reads/writes in local tests are fakes; no actual upload, model generation, merge, deployment or persistent account operation ran.
+
+Next, construct the final staged native fragment by changing only verified image destinations, bind its exact text/code/links and original editorial receipt, and expose that final preview through a separate backend CMS approval boundary. That approval must gate the durable post journal, public article proof and first-article goal milestones. The strategy failure also needs connection to the channel goal ladder. No rollout flag may be enabled before those paths and disposable provider end-to-end fixtures pass.

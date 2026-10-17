@@ -189,10 +189,11 @@ class CmsArtifactSurfaceTests(SimpleTestCase):
         context = SimpleNamespace(organization=SimpleNamespace(pk=7))
         with patch.object(website_views, "_context", return_value=(context, None, None)), \
                 patch.object(WebsiteConnectionOperation.objects, "filter") as rows:
-            rows.return_value.first.return_value = SimpleNamespace(action="cms-review", payload={"handoff": "private"})
-            response = website_views.WebsiteConnectionOperationView().get(SimpleNamespace(), "private-operation")
-        self.assertEqual(response.status_code, 404)
-        self.assertNotIn("private", json.dumps(response.data))
+            for action in ("cms-review", "cms-media"):
+                rows.return_value.first.return_value = SimpleNamespace(action=action, payload={"handoff": "private"})
+                response = website_views.WebsiteConnectionOperationView().get(SimpleNamespace(), "private-operation")
+                self.assertEqual(response.status_code, 404)
+                self.assertNotIn("private", json.dumps(response.data))
 
     def test_canonical_fixture_is_valid_and_post_intent_accepts_the_same_native_aside(self):
         value = fixture()
