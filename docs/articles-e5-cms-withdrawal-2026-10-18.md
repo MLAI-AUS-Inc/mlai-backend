@@ -142,4 +142,11 @@ the request stops. The original completed publication payload, receipt and past
 proof remain intact for history. This prevents an old still-fresh live proof or
 a later maintenance request from overriding the owner's recorded direction.
 The WordPress regression fails before the barrier; WordPress and Ghost cases
-pass after it. All 1,555 database-free journey cases pass on the final code.
+pass after it. All 1,555 database-free journey cases pass on that code.
+
+After inheriting the initial-acceptance SQL correction, all 1,557 database-free
+journey cases pass. The additional cases compile actual CMS review selectors
+for SQLite and PostgreSQL 15/16 without opening a database connection. Native
+JSON comparisons preserve JSON types for connection generations and source run
+IDs. Disposable database CI remains required; this compilation evidence does
+not replace the actual ORM round trip.
