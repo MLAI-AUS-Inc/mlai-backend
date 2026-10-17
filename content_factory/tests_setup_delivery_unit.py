@@ -729,3 +729,61 @@ class SetupDeliveryContractTests(SimpleTestCase):
         value = envelope()
         self.assertEqual(value["state_sha256"], digest({"scope": value["scope"],
             "state_projection": value["body"]["state_projection"]}))
+
+
+@override_settings(CONTENT_FACTORY_ARTICLE_DELIVERY_V1_APPLY_ENABLED=True)
+class ArticleDeliveryEnrollmentWorkflowTests(SimpleTestCase):
+    """Fresh server reservations must accept their actual worker's wire name."""
+
+    def setUp(self):
+        self.goal_id = "44444444-4444-4444-8444-444444444444"
+        self.website = SimpleNamespace(organization_id=7, organization=SimpleNamespace(domain="fixture.test"),
+            github_repo="fixture/site")
+        self.parent = SimpleNamespace(pk=self.goal_id, receipt={"goal": {"current_source_sha": "a" * 40}})
+        self.manager = Mock()
+        self.manager.select_related.return_value.filter.return_value.first.return_value = self.parent
+        self.stack = ExitStack()
+        self.addCleanup(self.stack.close)
+        self.stack.enter_context(patch("content_factory.website_models.WebsiteConnectionOperation.objects", self.manager))
+        self.stack.enter_context(patch("content_factory.website_article_recovery.enabled", return_value=True))
+
+    def request(self, *, source=False):
+        return {**envelope()["scope"], "first_article_goal_id": self.goal_id,
+            "first_article_goal_operation_id": self.goal_id, "expected_source_sha": "a" * 40,
+            **({"source_run_id": "original-paid-article"} if source else {})}
+
+    def test_new_reservations_map_backend_workflow_and_source_to_actual_worker(self):
+        from .setup_delivery_enrollment import enroll_article_delivery, delivery_workflow
+        for workflow, source, expected in (
+            ("article_publish", True, "direct_generate"), ("publish_article", True, "direct_generate"),
+            ("article_publish", False, "direct_generate"), ("publish_article", False, "direct_generate"),
+            ("article_generation", True, "confirmed_topic"), ("article_generation", False, "direct_generate"),
+            ("direct_generate", True, "direct_generate"), ("confirmed_topic", False, "confirmed_topic"),
+            ("confirmed_topic", True, "confirmed_topic")):
+            with self.subTest(workflow=workflow, source=source):
+                payload, operation = self.request(source=source), SimpleNamespace(payload={})
+                self.assertTrue(enroll_article_delivery(operation, payload, self.website, workflow))
+                self.assertEqual(operation.payload["article_delivery_workflow"], expected)
+                self.assertEqual(delivery_workflow(SimpleNamespace(workflow=workflow, run_request=payload)), expected)
+                self.assertEqual(operation.payload["article_delivery_request"]["source_run_id"] if source else None,
+                    "original-paid-article" if source else None)
+
+    def test_existing_stream_keeps_its_frozen_wire_even_when_new_enrollment_is_disabled(self):
+        from .setup_delivery_enrollment import enroll_article_delivery
+        payload, operation = self.request(source=True), SimpleNamespace(payload={})
+        self.assertTrue(enroll_article_delivery(operation, payload, self.website, "article_generation"))
+        with override_settings(CONTENT_FACTORY_ARTICLE_DELIVERY_V1_APPLY_ENABLED=False):
+            self.assertTrue(enroll_article_delivery(operation, payload, self.website, "article_generation"))
+        self.assertEqual(operation.payload["article_delivery_workflow"], "confirmed_topic")
+        changed = {**payload, "expected_source_sha": "b" * 40}
+        from .website_contract import WebsiteAuthorityError
+        with self.assertRaises(WebsiteAuthorityError):
+            enroll_article_delivery(operation, changed, self.website, "article_publish")
+        self.assertEqual(operation.payload["article_delivery_workflow"], "confirmed_topic")
+
+    def test_wrong_goal_or_source_cannot_create_a_new_publication_stream(self):
+        from .setup_delivery_enrollment import enroll_article_delivery
+        for changes in ({"first_article_goal_id": "foreign"}, {"expected_source_sha": "b" * 40}):
+            payload, operation = {**self.request(source=True), **changes}, SimpleNamespace(payload={})
+            self.assertFalse(enroll_article_delivery(operation, payload, self.website, "article_publish"))
+            self.assertNotIn("article_delivery_v1", operation.payload)
