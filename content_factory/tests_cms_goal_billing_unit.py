@@ -254,7 +254,7 @@ class CmsGoalBillingTests(SimpleTestCase):
         self.assertTrue(defer_child_refund({"client_request_id": self.key}, resolved_domain="fixture.test"))
         self.assertFalse(billing.defer_child_refund(packet, resolved_domain="foreign.test"))
         self.goal_operation.state = "cancelled"
-        self.assertFalse(billing.defer_child_refund(packet, resolved_domain="fixture.test"))
+        self.assertTrue(billing.defer_child_refund(packet, resolved_domain="fixture.test"))
         self.goal_operation.state = "running"
         self.outbox.payload["request"]["cms_goal_id"] = "other-goal"
         self.assertFalse(billing.defer_child_refund(packet, resolved_domain="fixture.test"))

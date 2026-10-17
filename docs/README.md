@@ -23,6 +23,8 @@ subsystem-specific contracts and runbooks.
 
 ## Content Factory
 
+- [E5 native stop-before-credit](articles-e5-cms-goal-stop-2026-10-17.md) — original-key CF cancellation proofs, financial leases and retained artifact recovery
+
 - [E5 native work guards](articles-e5-cms-goal-work-guards-2026-10-17.md) — original dispatch/goal/budget admission and GET-only proof recovery after stopping
 
 - [E5 native first-article payments](articles-e5-cms-goal-payments-2026-10-17.md) — original accepted holds, durable credits and financial proof through lifecycle erasure

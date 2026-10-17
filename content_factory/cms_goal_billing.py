@@ -246,7 +246,10 @@ def defer_child_refund(article_request, *, resolved_domain):
                 envelope["owner_user_id"] != binding["owner_user_id"] or envelope["scope_sha256"] != digest(binding) or
                 envelope["connection_id"] != binding["connection_id"] or envelope["connection_generation"] != binding["generation"]):
             return False
-        return operation.state in authority.ACTIVE or retains_after_draft(operation)
+        # Only the native financial outbox settles the original hold, after
+        # proving unused CF work stopped. Worker terminal callbacks cannot
+        # race that coordinator by crediting a still-unresolved dispatch.
+        return True
     except (WebsiteAuthorityError, ArtifactContractError, ValueError, TypeError, KeyError, AttributeError, RecursionError):
         return False
 
