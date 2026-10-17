@@ -84,6 +84,8 @@ def for_context(context, config, *, user, data, now=None):
         from .billing import get_content_factory_article_cost_points
         def current():
             for item in (context.organization, context.profile, context.company, user, config): item.refresh_from_db()
+            if getattr(config, "github_repo", "") != "":
+                raise _deny()
             scope = _scope(_owner(context, config, user))
             _require_current(context, config, data["channel_scope"], data["channel_revision"])
             record = saved_record(config.article_system)

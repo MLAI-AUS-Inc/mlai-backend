@@ -86,6 +86,11 @@ class CmsOnboardingOfferTests(SimpleTestCase):
             self.config.website_connection = SimpleNamespace(pk=uuid4(), generation=2, state=state, github_repo="", branch="", app_root="")
             with self.subTest(state=state), self.assertRaises(WebsiteAuthorityError): self.read()
 
+    def test_a_legacy_repository_without_a_connection_is_not_an_initial_cms_site(self):
+        self.config.github_repo = "fixture/original-paid-site"
+        with self.assertRaises(WebsiteAuthorityError): self.read()
+        self.price.assert_not_called()
+
     def test_public_host_alias_subdirectory_and_ghost_admin_destination_are_explicit(self):
         value = self.read(public_origin="https://www.native.example.com/blog", api_origin="https://www.native.example.com/wordpress")
         self.assertEqual(value["public_origin"], "https://www.native.example.com/blog/")

@@ -57,3 +57,18 @@ injected verification/worker/reply loss and one original spend/post.
 offer contract/reader is implemented in this slice; no initial owner route,
 credential queue, provisional capability, payment, controller or Chat form is
 enabled by it. Runtime acceptance, lifecycle/settlement, status and UI are next.
+
+The follow-on private planner now carries the server-allocated connection,
+original root and key identities into the existing closed native setup intent.
+It preserves the accepted review/cost choices, original acceptance time and
+stable native financial subject without fabricating an author, policy, hold,
+lease or milestone. Historical validation uses the offer at actual acceptance;
+it cannot refresh that time or the original 24-hour proposal deadline. A future
+worker still needs separate current ownership, private lease, pending key,
+original hold and budget checks. The initial offer also refuses legacy Git
+repositories whose configuration has no connection row; that is transfer work.
+
+Seven follow-on cases cover stable identity/time, review/free consent, expired
+offers, wrong scope/owner, resource aliases, coerced choices and the legacy Git
+boundary. All 1,451 website no-database tests pass; current worker, owner route,
+cancel/expiry settlement and combined Chat onboarding are still unimplemented.
