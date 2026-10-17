@@ -25,6 +25,7 @@ from .tests_cms_post_contract_unit import response as native_response, collectio
 from .website_connections import contract_for
 from .website_contract import WebsiteAuthorityError
 from .website_models import WebsiteConnectionOperation
+from .cms_goal_effects import CmsGoalWorkDenied
 
 PROSE = " This synthetic article preserves the original approved explanation, concrete examples, useful evidence, clear next steps and every reviewed image. It contains enough readable words to exercise public article verification against a native theme."
 
@@ -144,6 +145,61 @@ class CmsArticlePublicationTests(SimpleTestCase):
         self.advance(); self.advance()
         self.assertEqual(self.operation.state, "completed")
         self.assertEqual(sum(call.kwargs["method"] == "POST" for call in self.http.call_args_list), 1)
+
+    def test_stopped_goal_before_allowance_cannot_create_a_provider_post(self):
+        self.advance()
+        with patch.object(publishing, "require_work", side_effect=CmsGoalWorkDenied()): self.advance()
+        self.assertEqual((self.operation.state, self.operation.payload["post_state"]["create_count"]), ("blocked", 0))
+        self.assertEqual(self.operation.receipt["status"], "goal_work_stopped")
+        self.assertTrue(self.operation.receipt["fallback_safe"])
+        self.assertEqual(self.created_posts, [])
+
+    def test_stop_racing_reserved_allowance_keeps_unknown_journal_and_only_get_recovery(self):
+        self.advance()
+        with patch.object(publishing, "require_work", side_effect=[None, CmsGoalWorkDenied()]): self.advance()
+        self.assertEqual((self.operation.state, self.operation.payload["post_state"]["create_count"]), ("pending", 1))
+        self.assertTrue(self.operation.receipt["outcome_unknown"])
+        with patch.object(publishing, "require_work", side_effect=CmsGoalWorkDenied()) as work:
+            for _ in range(8): self.advance()
+        work.assert_not_called()
+        self.assertEqual(self.operation.state, "blocked")
+        self.assertFalse(self.operation.receipt["fallback_safe"])
+        self.assertTrue(all(call.kwargs["method"] == "GET" for call in self.http.call_args_list))
+
+    def test_stop_after_actual_create_keeps_exact_provider_and_public_readback(self):
+        self.advance(); self.advance()
+        with patch.object(publishing, "require_work", side_effect=CmsGoalWorkDenied()) as work: self.advance()
+        work.assert_not_called()
+        self.assertEqual((self.operation.state, len(self.created_posts)), ("completed", 1))
+
+    def test_stale_public_proof_rechecks_same_post_without_a_new_allowance_or_approval(self):
+        self.advance(); self.advance(); self.advance()
+        from datetime import datetime
+        proof = self.operation.payload["public_observation"]
+        proof["checked_at"] = (datetime.fromisoformat(proof["checked_at"]) - timedelta(hours=1)).isoformat()
+        proof["digest"] = digest({key: value for key, value in proof.items() if key != "digest"})
+        self.operation.receipt = publishing._receipt(self.operation, proof)
+        original = deepcopy(self.operation.payload["post_state"])
+        self.http.reset_mock()
+        publishing.request_public_recheck(self.operation)
+        self.assertEqual((self.operation.state, self.operation.payload["public_observation"]), ("pending", None))
+        publishing.request_public_recheck(self.operation)
+        self.assertEqual(self.operation.payload["post_state"], original)
+        with patch.object(publishing, "require_work", side_effect=CmsGoalWorkDenied()) as work: self.advance()
+        work.assert_not_called()
+        self.assertEqual((self.operation.state, len(self.created_posts)), ("completed", 1))
+        self.assertEqual(self.operation.payload["post_state"], original)
+        self.assertEqual([call.kwargs["method"] for call in self.http.call_args_list], ["GET"])
+        publishing.current_publication(self.operation)
+
+    def test_fresh_public_proof_recheck_is_inert_and_corrupt_receipt_cannot_be_requeued(self):
+        self.advance(); self.advance(); self.advance()
+        self.http.reset_mock(); self.public_get.reset_mock()
+        self.assertIs(publishing.request_public_recheck(self.operation), self.operation)
+        self.assertEqual(self.operation.state, "completed")
+        self.http.assert_not_called(); self.public_get.assert_not_called()
+        self.operation.receipt["publicProofDigest"] = "f" * 64
+        with self.assertRaises(WebsiteAuthorityError): publishing.request_public_recheck(self.operation)
 
     def test_malformed_success_reply_is_unknown_until_get_recovers_the_original_resource(self):
         self.advance()

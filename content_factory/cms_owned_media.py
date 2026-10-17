@@ -18,6 +18,7 @@ from .cms_connection_authority import current_credential
 from .cms_media_evidence import fetch_source_image, observe_owned_image
 from .cms_media_transport import upload_image
 from .website_contract import WebsiteAuthorityError
+from .cms_goal_effects import require_work, CmsGoalWorkDenied
 
 ACTION = "cms-media"
 LEASE_SECONDS = 180
@@ -215,7 +216,8 @@ def advance_media(identifier, *, now=None):
                         with transaction.atomic():
                             Organization.objects.select_for_update().get(pk=source.run.organization_id)
                             saved = WebsiteConnectionOperation.objects.select_for_update().filter(pk=identifier, action=ACTION).first()
-                            _current(saved, lease_id=lease)
+                            current = _current(saved, lease_id=lease)
+                            require_work(current.run.run_request, now=now)
                             if saved.payload["states"][index] != state:
                                 raise _deny()
                             saved.payload = deepcopy(saved.payload)
@@ -230,6 +232,7 @@ def advance_media(identifier, *, now=None):
                         raise _deny()
                     require_unlocked_remote_call()
                     if phase == "create_ready":
+                        require_work(source.run.run_request)
                         ack = upload_image(binding, credential, upload_id=intent["upload_id"], image=image,
                             title=intent["title"], alt_text=intent["asset"]["alt"])
                         updated = journal.record_ack(intent, state, ack)
@@ -276,6 +279,15 @@ def advance_media(identifier, *, now=None):
             saved.payload.pop("lease_id", None)
             saved.save(update_fields=["payload", "receipt", "state", "next_attempt_at", "updated_at"])
             return saved
+    except CmsGoalWorkDenied:
+        owned = {"state": "running", "payload__lease_id": lease} if claimed else {"state": candidate.state, "updated_at": candidate.updated_at}
+        saved = WebsiteConnectionOperation.objects.filter(pk=identifier, action=ACTION, **owned).first()
+        if saved is not None:
+            uncertain = any(state["phase"] == "upload_issued" for state in saved.payload["states"])
+            WebsiteConnectionOperation.objects.filter(pk=identifier, action=ACTION, **owned).update(
+                state="pending" if uncertain else "blocked", next_attempt_at=now + timedelta(seconds=15) if uncertain else None,
+                receipt={**_progress(saved), "status": "goal_write_reconciliation" if uncertain else "goal_work_stopped"}, updated_at=timezone.now())
+        return WebsiteConnectionOperation.objects.filter(pk=identifier, action=ACTION).first()
     except (WebsiteAuthorityError, CmsApiError, ValueError, TypeError, AttributeError, KeyError):
         owned = {"state": "running", "payload__lease_id": lease} if claimed else {"state": candidate.state, "updated_at": candidate.updated_at}
         WebsiteConnectionOperation.objects.filter(pk=identifier, action=ACTION, **owned).update(state="cancelled", next_attempt_at=None,

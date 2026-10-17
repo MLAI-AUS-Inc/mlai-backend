@@ -20,6 +20,7 @@ from .cms_api_transport import CmsApiError, request_json
 from .cms_connection_authority import current_credential
 from .cms_publication_policy import native_post_fields
 from .website_contract import WebsiteAuthorityError
+from .cms_goal_effects import require_work, CmsGoalWorkDenied
 
 ACTION = "cms-publish"
 LEASE_SECONDS = 180
@@ -136,6 +137,8 @@ def _request(operation, lease, effect, *, handoff_checked=False):
         raise _deny()
     from .website_connections import require_unlocked_remote_call
     require_unlocked_remote_call()
+    if effect.method == "POST":
+        require_work(scope.source.run.run_request)
     response, _pagination = request_json(binding, credential, method=effect.method, resource=effect.resource,
         identifier=effect.identifier, query=effect.query, payload=effect.payload)
     return response, False
@@ -157,6 +160,34 @@ def current_publication(operation, *, now=None, fresh=True):
         return scope.source, deepcopy(scope.intent), deepcopy(scope.post_state), deepcopy(observation)
     except (ValueError, TypeError, KeyError, AttributeError, RecursionError):
         raise _deny() from None
+
+
+def request_public_recheck(operation, *, now=None):
+    """Refresh the same published post on demand, with no new create allowance."""
+    from organizations.models import Organization
+    from .website_models import WebsiteConnectionOperation
+    now = now or timezone.now()
+    source = _current(operation).source
+    with transaction.atomic():
+        Organization.objects.select_for_update().get(pk=source.run.organization_id)
+        saved = WebsiteConnectionOperation.objects.select_for_update().filter(pk=operation.pk, action=ACTION).first()
+        scope = _current(saved)
+        if saved.state in {"pending", "running"}:
+            return saved
+        # Validate the exact saved receipt at its original observation time
+        # before clearing it. An invalid historical receipt is not repairable
+        # merely by recomputing its checksum or fetching a different URL.
+        current_publication(saved, fresh=False)
+        try:
+            public.validate_public_observation(saved.payload["public_observation"], intent=scope.intent, state=scope.post_state, now=now)
+            return saved
+        except CmsApiError:
+            pass
+        saved.payload = {**deepcopy(saved.payload), "public_observation": None, "failures": 0}
+        saved.state, saved.next_attempt_at = "pending", now
+        saved.receipt = _progress(saved)
+        saved.save(update_fields=["payload", "receipt", "state", "next_attempt_at", "updated_at"])
+        return saved
 
 
 def advance_publication(identifier, *, now=None):
@@ -218,7 +249,8 @@ def advance_publication(identifier, *, now=None):
                     with transaction.atomic():
                         Organization.objects.select_for_update().get(pk=scope.source.run.organization_id)
                         saved = WebsiteConnectionOperation.objects.select_for_update().filter(pk=identifier, action=ACTION).first()
-                        _current(saved, lease_id=lease)
+                        current = _current(saved, lease_id=lease)
+                        require_work(current.source.run.run_request, now=now)
                         if saved.payload["post_state"] != state:
                             raise _deny()
                         state, effect = journal.issue_create(scope.intent, state)
@@ -282,6 +314,15 @@ def advance_publication(identifier, *, now=None):
             saved.payload.pop("lease_id", None)
             saved.save(update_fields=["payload", "receipt", "state", "next_attempt_at", "updated_at"])
             return saved
+    except CmsGoalWorkDenied:
+        owned = {"state": "running", "payload__lease_id": lease} if claimed else {"state": candidate.state, "updated_at": candidate.updated_at}
+        saved = WebsiteConnectionOperation.objects.filter(pk=identifier, action=ACTION, **owned).first()
+        if saved is not None:
+            uncertain = saved.payload["post_state"]["outcome_unknown"]
+            WebsiteConnectionOperation.objects.filter(pk=identifier, action=ACTION, **owned).update(
+                state="pending" if uncertain else "blocked", next_attempt_at=now + timedelta(seconds=15) if uncertain else None,
+                receipt={**_progress(saved), "status": "goal_write_reconciliation" if uncertain else "goal_work_stopped"}, updated_at=timezone.now())
+        return WebsiteConnectionOperation.objects.filter(pk=identifier, action=ACTION).first()
     except (WebsiteAuthorityError, CmsApiError, ValueError, TypeError, KeyError, AttributeError, RecursionError):
         owned = {"state": "running", "payload__lease_id": lease} if claimed else {"state": candidate.state, "updated_at": candidate.updated_at}
         saved = WebsiteConnectionOperation.objects.filter(pk=identifier, action=ACTION, **owned).first()

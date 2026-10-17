@@ -191,6 +191,8 @@ def admission_receipt(query):
     if not isinstance(payload, dict):
         raise _deny()
     authorized = authorize_payload(payload)
+    from .cms_goal_effects import require_work
+    require_work(payload, action="first-article-generation")
     envelope = authorized.envelope
     if (query.get("artifact_operation_id") != envelope["artifact_operation_id"] or
             query.get("envelope_digest") != envelope["digest"] or query.get("domain") != payload.get("domain")):

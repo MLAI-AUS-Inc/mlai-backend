@@ -97,6 +97,10 @@ def for_generation(dispatch, *, context, user):
     latest = operation.connection.operations.filter(action=authority.ACTION, generation=operation.generation).order_by("-created_at", "-pk").first()
     if latest is None or latest.pk != operation.pk:
         raise _deny()
+    from .cms_goal_budget import exhaustion
+    from django.utils import timezone
+    if exhaustion(operation, now=timezone.now(), action="first-article-generation") is not None:
+        raise _deny()
     receipt = _reservation(operation, value)
     if receipt["status"] == "refunded" or Ledger.objects.filter(idempotency_key="content_factory:refund:" + receipt["client_request_id"]).exists():
         raise _deny()

@@ -13904,8 +13904,10 @@ def _queue_content_factory_run_authorized(*, endpoint, workflow, context, config
                     break
                 if "publishing_channel_artifact" in payload:
                     from .channel_artifacts import authorize_payload
+                    from .cms_goal_effects import require_work
                     try:
                         authorize_payload(payload)
+                        require_work(payload, action="first-article-generation")
                     except WebsiteAuthorityError as exc:
                         editorial_rejection = Response(exc.as_dict(), status=exc.status)
                         break

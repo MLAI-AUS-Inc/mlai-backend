@@ -149,6 +149,9 @@ def _deliver(row):
         requester = get_user_model().objects.get(pk=request["roo_points_requested_by_user_id"], is_active=True)
         require_article_activation(domain=row.organization.domain, actor_id=row.payload.get("actor_id") or "",
             user=requester, expected_repo=request.get("github_repo", ""), article_request=request)
+        if "publishing_channel_artifact" in request:
+            from .cms_goal_effects import require_work
+            require_work(request, action="first-article-generation")
     require_unlocked_remote_call()
     response = http_client.post(f"{remote['base_url']}/api/runs/{row.payload['endpoint']}",
         headers=_content_factory_headers(), json=request, timeout=(3, 30))
