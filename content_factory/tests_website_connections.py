@@ -1239,6 +1239,7 @@ class WebsiteReviewRegressionTests(WebsiteDatabaseFixture, TestCase):
             # disposable CI only. Only synthetic ledger rows are seeded; no
             # wallet service, CF job or CMS write occurs.
             with override_settings(ARTICLES_CHANNEL_ARTIFACTS_ENABLED=True, ARTICLES_CMS_GOALS_ENABLED=True,
+                    ARTICLES_CMS_SETUP_ENABLED=True, ARTICLES_CMS_STATUS_ENABLED=True,
                     ARTICLES_FIRST_ARTICLE_GOAL_ENABLED=True, ARTICLES_WEBSITE_GOAL_RUNNER_ENABLED=True,
                     ARTICLES_WEBSITE_GOAL_ENROLLED_ORGANIZATIONS=[str(self.org.pk)],
                     ARTICLES_FAILURE_TAXONOMY_POLICY_ENABLED=True, ARTICLES_FAILURE_TAXONOMY_ENROLLED_ORGANIZATIONS=[str(self.org.pk)]):
@@ -1250,28 +1251,40 @@ class WebsiteReviewRegressionTests(WebsiteDatabaseFixture, TestCase):
                 from .website_connections import owner_write_guard
                 from .service_views import _sync_content_factory_run_snapshot
                 from . import cms_publication_policy
-                native_data = {**contract_for(website), 'client_request_id': str(uuid.uuid4()),
-                    'review_policy': 'auto', 'publication_confirmed': True, 'native_defaults_confirmed': True,
-                    'expected_policy_id': None}
                 native_user = {'id': 7, 'name': 'Existing author', 'capabilities': {'edit_posts': True, 'publish_posts': True}}
-                with patch.object(cms_publication_policy, 'request_json', side_effect=[(native_user, {}),
-                        ([{'id': 39, 'taxonomy': 'category', 'name': 'Existing category'}], {})]):
-                    native = cms_publication_policy.configure(context, self.config, user=user, data=native_data)
-                self.assertEqual(cms_publication_policy.current_policy(context, self.config, user=user), native)
-                from . import cms_goal_start, cms_goal_billing, cms_goal_controller
+                from . import cms_goal_billing, cms_goal_controller, cms_setup_start, cms_setup_controller, cms_setup_quote
                 from roo.models import Ledger
-                native_start_data = {**contract_for(website), 'client_request_id': str(uuid.uuid4()),
-                    'expected_policy_id': native['operation_id'], 'review_policy': 'auto',
-                    'expected_cost_points': 6, 'billing_confirmed': True}
                 def synthetic_hold(**options):
                     return Ledger.objects.create(user=user, kind='SPEND', source='CONTENT_FACTORY', delta=-6,
                         delta_microroo=-6_000_000, reference_type='CONTENT_FACTORY', reference_id=options['reference_id'],
                         idempotency_key=options['idempotency_key']), True
-                with patch('content_factory.billing.get_content_factory_article_cost_points', return_value=6), \
+                with patch('content_factory.billing.get_content_factory_article_cost_points', return_value=6) as quoted_price, \
                         patch('content_factory.company_billing.billing_user_for_organization', return_value=user), \
                         patch('roo.services.PointsService.spend', side_effect=synthetic_hold) as held:
-                    managed_native = cms_goal_start.start(context, self.config, user=user, data=native_start_data)
-                    self.assertEqual(str(cms_goal_start.start(context, self.config, user=user, data=native_start_data).pk), str(managed_native.pk))
+                    quote = cms_setup_quote.for_context(context, self.config, user=user,
+                        expected_binding=website.capabilities['_cms_binding'])
+                    native_start_data = {**contract_for(website), 'company_id': str(company.pk), 'client_request_id': str(uuid.uuid4()),
+                        'setup_quote_digest': quote['digest'], 'review_policy': 'auto', 'publication_confirmed': True,
+                        'native_defaults_confirmed': True, 'expected_cost_points': 6, 'billing_confirmed': True}
+                    preparatory = cms_setup_start.start(context, self.config, user=user, data=native_start_data)
+                    self.assertEqual(preparatory.action, 'cms-setup')
+                    self.assertNotIn('goal', preparatory.receipt)
+                    original_hold = preparatory.receipt['first_article_billing']
+                    self.assertEqual(str(cms_setup_start.start(context, self.config, user=user, data=native_start_data).pk), str(preparatory.pk))
+                    quoted_price.return_value = 99
+                    with patch.object(cms_publication_policy, 'request_json', side_effect=[(native_user, {}),
+                            ([{'id': 39, 'taxonomy': 'category', 'name': 'Existing category'}], {})]) as defaults_get:
+                        managed_native = cms_setup_controller.advance_setup(preparatory.pk)
+                    self.assertEqual((managed_native.pk, managed_native.action), (preparatory.pk, 'cms-goal'))
+                    self.assertEqual(managed_native.receipt['first_article_billing'], original_hold)
+                    self.assertEqual(managed_native.receipt['native_budget']['setup_usage']['active_seconds'], 180)
+                    self.assertEqual(managed_native.receipt['native_budget']['setup_usage']['provider_seconds'], 360)
+                    self.assertEqual(str(cms_setup_start.start(context, self.config, user=user, data=native_start_data).pk), str(managed_native.pk))
+                    self.assertEqual(defaults_get.call_count, 2)
+                website.refresh_from_db()
+                self.config.refresh_from_db()
+                native = cms_publication_policy.current_policy(context, self.config, user=user)
+                self.assertEqual(native['operation_id'], managed_native.payload['policy_operation_id'])
                 held.assert_called_once()
                 from .cms_first_article_subject import from_goal as financial_subject
                 from .cms_goal_authority import historical as financial_authority
@@ -1287,7 +1300,8 @@ class WebsiteReviewRegressionTests(WebsiteDatabaseFixture, TestCase):
                     'cms_goal_operation_id': str(managed_native.pk), 'cms_goal_id': str(managed_native.pk),
                     'goal_budget': {'version': 1, 'goal_id': str(managed_native.pk),
                         'scope_digest': __import__('content_factory.channel_artifact_contract', fromlist=['digest']).digest(managed_native.receipt['goal']['scope']),
-                        'remaining_active_seconds': 7200, 'remaining_model_usd': 25},
+                        'remaining_active_seconds': 7200 - managed_native.receipt['native_budget']['budget_used']['active_seconds'],
+                        'remaining_model_usd': 25},
                     'delivery_mode': 'content_only', 'delivery_mode_confirmed': True, 'github_repo': '',
                     'topic': 'A synthetic CMS article', 'target_keyword': 'A synthetic CMS article',
                     'roo_points_ledger_id': 'synthetic-fixture-ledger', 'roo_points_cost': 6,

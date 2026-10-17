@@ -175,6 +175,9 @@ def configure(context, config, *, user, data, setup_scope=None):
             raise _deny()
         from .website_connections import require_unlocked_remote_call
         require_unlocked_remote_call()
+        if setup_scope is not None:
+            from .cms_setup_controller import reserve_provider_read
+            reserve_provider_read(setup_scope)
         result, _pagination = request_json(fresh, secret, method="GET", **options)
         return result
     try:

@@ -1215,6 +1215,18 @@
       "site_sha256": "fea4d22af255dfd4eac376d5b52fbd283c879613564885ace3c5ee601eefc184",
       "source": "Read-only native diagnostic projection after strict validate_failure; no dispatch, failure-policy or publication authority. Private receipts, credentials and provider bodies are omitted.",
       "test": "content_factory.tests_cms_goal_status_unit.CmsGoalStatusTests.test_doctor_projects_only_registered_valid_failure_causes"
+    },
+    {
+      "adapter": "validated_v1_projection",
+      "allowed_codes_ref": "contracts/failure-codes.json#/codes",
+      "expression": "safe_code(failure.get('code'))",
+      "field": "code",
+      "function": "project",
+      "owner": "backend.cms_setup_status",
+      "path": "content_factory/cms_setup_status.py",
+      "site_sha256": "51c25610fec17bdbe131920c80ad22f41268c031444d1364662f9e3795b8da01",
+      "source": "Read-only preparatory setup diagnostic after strict validate_failure. No fabricated native goal, provider permission or private payment data is projected.",
+      "test": "content_factory.tests_cms_setup_status_unit.CmsSetupStatusTests.test_doctor_projects_only_original_registered_failure_causes"
     }
   ],
   "entry_points": [

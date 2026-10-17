@@ -83,6 +83,7 @@ def current(operation, *, user=None, lease_id=None, states=ACTIVE):
     """Reload the actual owner/site and only an original or idempotent own policy."""
     intent = historical(operation)
     if (not enabled(operation.connection.organization_id) or operation.state not in states or
+            operation.state == "running" and ("lease_id" not in operation.payload or operation.next_attempt_at is None) or
             lease_id is not None and (operation.state != "running" or operation.payload.get("lease_id") != lease_id or
                 operation.next_attempt_at is None or operation.next_attempt_at <= timezone.now())):
         raise _deny()

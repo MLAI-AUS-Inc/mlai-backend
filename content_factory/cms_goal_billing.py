@@ -6,6 +6,7 @@ from django.db import transaction
 
 from . import cms_goal_authority as authority
 from . import website_first_article_billing as records
+from . import cms_financial_holds as holds
 from .channel_artifact_contract import canonical_bytes
 from .website_contract import WebsiteAuthorityError
 
@@ -36,18 +37,7 @@ def request_key(value):
 
 
 def _reservation(operation, value):
-    goal = _financial_context(value)
-    receipt = records._reservation(operation, goal)
-    if (canonical_bytes(receipt["binding"]) != canonical_bytes(records._binding(goal)) or
-            len(receipt["payer_user_id"]) > 19 or not 0 < int(receipt["payer_user_id"]) < 2**63):
-        raise _deny()
-    return receipt
-
-
-def _mark_financial_records(connection):
-    if connection.capabilities.get("_cms_financial_records") is not True:
-        connection.capabilities = {**connection.capabilities, "_cms_financial_records": True}
-        connection.save(update_fields=["capabilities", "updated_at"])
+    return holds.reservation(operation, _financial_context(value))
 
 
 def reserve(operation, *, user, now):
@@ -55,38 +45,9 @@ def reserve(operation, *, user, now):
     if not transaction.get_connection().in_atomic_block:
         raise _deny()
     value = authority.current(operation, user=user)
-    if operation.receipt.get("first_article_billing") is not None:
-        receipt = _reservation(operation, value)
-        _mark_financial_records(value.connection)
-        return receipt
-    if operation.state != "pending" or operation.payload["source_run_id"] is not None:
+    if operation.receipt.get("first_article_billing") is None and (operation.state != "pending" or operation.payload["source_run_id"] is not None):
         raise _deny()
-    from .billing import get_content_factory_article_cost_points
-    from .company_billing import billing_user_for_organization
-    from founder_tools.services import founder_actor_id_for_user
-    from roo.permissions import InsufficientBalanceError, IdempotencyConflictError
-    from roo.services import PointsService
-    cost = value.consent["answers"]["billing"]["expected_points"]
-    if cost != get_content_factory_article_cost_points(value.context.organization.domain):
-        raise WebsiteAuthorityError("roo_points_required", "Review the current first-article price before starting.", status=409)
-    payer = billing_user_for_organization(value.context.organization, user)
-    key, ledger = request_key(value), None
-    if cost:
-        try:
-            ledger, _created = PointsService.spend(user=payer, delta=cost, source="CONTENT_FACTORY",
-                description=f"Reserved first native CMS article for {value.context.organization.domain} (requested by account {user.pk})",
-                created_by_slack_id=founder_actor_id_for_user(user), idempotency_key="content_factory:charge:" + key,
-                reference_type="CONTENT_FACTORY", reference_id=key)
-        except InsufficientBalanceError:
-            raise WebsiteAuthorityError("roo_points_required", "Add Roo points to reserve the first article.", status=402) from None
-        except IdempotencyConflictError:
-            raise _deny() from None
-    receipt = records._save(operation, {"version": 1, "binding": records._binding(_financial_context(value)),
-        "client_request_id": key, "payer_user_id": str(payer.pk), "requester_user_id": str(user.pk),
-        "cost_points": cost, "spend_ledger_id": str(ledger.pk) if ledger else None,
-        "reserved_at": now.isoformat(), "status": "reserved"})
-    _mark_financial_records(value.connection)
-    return receipt
+    return holds.reserve(operation, _financial_context(value), context=value.context, connection=value.connection, user=user, now=now)
 
 
 def for_generation(dispatch, *, context, user):

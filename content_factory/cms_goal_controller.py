@@ -177,7 +177,7 @@ def _account(operation, run, *, now):
         if (report.get("generation") != run.result.get("generation") or
                 run.result.get("state_version") is not None and report.get("state_version") != run.result["state_version"]):
             raise ValueError("Native usage does not match its current original run snapshot")
-        selected = budget.account_usage(selected, report, run_id=run.run_id)
+        selected = native_budget.account_usage(selected, report, run_id=run.run_id)
         selected["missing_usage_run_ids"] = []
     except ValueError:
         selected["usage_invalid"] = True

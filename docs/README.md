@@ -23,6 +23,8 @@ subsystem-specific contracts and runbooks.
 
 ## Content Factory
 
+- [E5 durable native setup coordinator](articles-e5-cms-setup-coordinator-2026-10-17.md) — one accepted hold through discovery, original-policy recovery, same-operation native goal and private settlement
+
 - [E5 preparatory setup authority](articles-e5-cms-setup-authority-2026-10-17.md) — private original intent, expiring discovery lease and lost-acknowledgement policy replay
 - [E5 stable setup payment identity](articles-e5-cms-financial-subject-2026-10-17.md) — one original site/owner price through real policy discovery, preserving legacy holds
 

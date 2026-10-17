@@ -882,7 +882,7 @@ def transition_connection(config, *, action, expected, idempotency_key="", verif
         cancel_held_goals(connection)
         # Credit settlement remains independently durable after revocation.
         connection.operations.filter(generation=old_generation).exclude(
-            action__in=["disconnect", "revoke", "purge", "cancel-operation", "usage-refresh", "goal-refund", "cms-goal-refund"]
+            action__in=["disconnect", "revoke", "purge", "cancel-operation", "usage-refresh", "goal-refund", "cms-goal-refund", "cms-setup-refund"]
         ).exclude(action="prepare", receipt__has_key="first_article_billing"
         ).exclude(state__in=["completed", "failed", "blocked", "cancelled", "deleted", "denied"]).update(
             state="cancelled", receipt={"status": "authority_revoked", "repository_modified": False}, updated_at=timezone.now())
@@ -1025,7 +1025,7 @@ def offboard_website_connections(organization, *, user=None, purge=False):
             financial_pending=retain_financial_refunds_for_erasure(website)
             pending = list(website.operations.filter(state="pending"))
             for operation in pending:
-                if operation.action in {"goal-refund", "cms-goal-refund"}:
+                if operation.action in {"goal-refund", "cms-goal-refund", "cms-setup-refund"}:
                     continue
                 operation.payload = {key: operation.payload[key] for key in
                     ("previous_generation", "cancel_run_ids", "stop_preview_run_ids", "disable_auto_merge_prs") if key in operation.payload}

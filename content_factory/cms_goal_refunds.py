@@ -166,6 +166,8 @@ def advance_refund(identifier, *, now=None):
 
 def cancel_held_goals(connection, *, all_generations=False):
     """Retain useful-work proof and queue original credits before invalidating keys."""
+    from .cms_setup_refunds import cancel_held_setups
+    cancel_held_setups(connection, all_generations=all_generations)
     from .website_models import WebsiteConnectionOperation
     rows = WebsiteConnectionOperation.objects.select_for_update().filter(connection=connection, action=authority.ACTION,
         receipt__has_key="first_article_billing")
@@ -184,7 +186,12 @@ def cancel_held_goals(connection, *, all_generations=False):
 
 def retain_for_erasure(website):
     """Erase native planning data while retaining only pending financial proof."""
+    from .cms_setup_refunds import retain_for_erasure as retain_setups, erase_intent
+    setup_pending = retain_setups(website)
     for parent in website.operations.filter(action=authority.ACTION, receipt__has_key="first_article_billing"):
+        authority.historical(parent)
+        billing.records._original_spend(billing.historical_reservation(parent), allow_refunded=True)
+        erase_intent(parent)
         credit = website.operations.filter(action=ACTION, payload__goal_operation_id=str(parent.pk)).first()
         if credit is not None and credit.state == "completed":
             _validate(credit, parent)
@@ -197,4 +204,4 @@ def retain_for_erasure(website):
     for row in website.operations.filter(action=ACTION):
         row.payload = {**row.payload, "purge_after_reconciliation": True}
         row.save(update_fields=["payload", "updated_at"])
-    return website.operations.filter(action=ACTION).exclude(state="completed").exists()
+    return setup_pending or website.operations.filter(action=ACTION).exclude(state="completed").exists()
