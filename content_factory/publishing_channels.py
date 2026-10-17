@@ -54,7 +54,7 @@ def execute(name, request):
         from .portable_drafts import explicit_portable_request
         if explicit_portable_request(request.data.get("data") or {}):
             selected = "portable"
-    if name == "disconnect":
+    if name in {"capture_existing", "disconnect"}:
         # Existing repository authority belongs to the connected Git channel,
         # independently of a later preference for portable authoring.
         connection = request.config.website_connection

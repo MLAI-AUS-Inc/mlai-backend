@@ -1233,8 +1233,33 @@ class WebsiteReviewRegressionTests(WebsiteDatabaseFixture, TestCase):
             self.assertFalse(summary['capabilities']['publishingReady'])
             self.assertEqual(summary['githubRepo'], '')
             self.assertNotIn('sealed_credential', json.dumps(summary))
+            from . import cms_capture
+            from .tests_cms_inventory_contract_unit import wordpress_post
+            capture_data = {**contract_for(website), 'client_request_id': str(uuid.uuid4())}
+            capture = cms_capture.start_capture(context, self.config, user=user, data=capture_data)
+            with patch.object(cms_capture, 'request_json', return_value=([wordpress_post(
+                    link=f'https://{self.org.domain}/article-1/')], {'pages': 1})) as posts:
+                captured = cms_capture.advance_capture(capture.pk, now=timezone.now() + timedelta(seconds=1))
+            self.assertEqual((captured.state, captured.receipt['coverage'], captured.receipt['count']), ('completed', 'complete', 1))
+            self.assertEqual(captured.payload['inventory']['records'][0]['provider_id'], 1)
+            self.assertNotIn('Original native post', json.dumps(captured.receipt))
+            self.assertEqual(posts.call_args.kwargs['method'], 'GET')
             old_contract = contract_for(website)
-            operation = transition_connection(self.config, action='disconnect', expected=old_contract)
+            stale = cms_capture.start_capture(context, self.config, user=user,
+                data={**old_contract, 'client_request_id': str(uuid.uuid4())})
+            with override_settings(ARTICLES_CMS_CHANNEL_ENABLED=False):
+                frozen = process_website_connection_operations(limit=5, connection_id=website.pk, now=timezone.now() + timedelta(seconds=1))
+            stale.refresh_from_db()
+            self.assertEqual((frozen['processed'], stale.state), (0, 'pending'))
+            revocations = []
+            def revoke_during_capture(*args, **kwargs):
+                revocations.append(transition_connection(self.config, action='disconnect', expected=old_contract))
+                return [wordpress_post(2, link=f'https://{self.org.domain}/article-2/')], {'pages': 1}
+            with patch.object(cms_capture, 'request_json', side_effect=revoke_during_capture):
+                discarded = cms_capture.advance_capture(stale.pk, now=timezone.now() + timedelta(seconds=1))
+            self.assertEqual(discarded.state, 'cancelled')
+            self.assertEqual(discarded.payload['inventory']['records'], [])
+            operation = revocations[0]
             website.refresh_from_db(); private.refresh_from_db()
             self.assertEqual(private.state, 'deleted')
             self.assertEqual(private.payload, {})
@@ -1247,6 +1272,9 @@ class WebsiteReviewRegressionTests(WebsiteDatabaseFixture, TestCase):
                     with authority_guard(contract_for(website), action=action):
                         self.fail('Revoked CMS must not acquire Git authority')
             self.assertEqual(operation.payload['cancel_run_ids'], [])
+            transition_connection(self.config, action='purge', expected=contract_for(website))
+            captured.refresh_from_db()
+            self.assertEqual((captured.state, captured.payload), ('deleted', {}))
 
     @override_settings(ARTICLES_PUBLISHING_CHANNELS_ENABLED=True, ARTICLES_CMS_CHANNEL_ENABLED=True)
     def test_private_cms_credential_binding_is_scoped_and_git_read_denied(self):
