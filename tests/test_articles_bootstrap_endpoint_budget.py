@@ -59,6 +59,7 @@ class BootstrapEndpointBudgetTests(ContentIslandBootstrapTestCase):
         samples = []
         with ExitStack() as stack:
             forbidden = self.read_boundaries(stack)
+            progress = stack.enter_context(patch.object(views, "_workflow_progress", wraps=views._workflow_progress))
             for index in range(5):
                 started = perf_counter()
                 with CaptureQueriesContext(connection) as queries:
@@ -80,6 +81,7 @@ class BootstrapEndpointBudgetTests(ContentIslandBootstrapTestCase):
                     "sql_count": len(queries), "elapsed_ms": round(elapsed_ms, 2)})
             for boundary in forbidden:
                 boundary.assert_not_called()
+            self.assertEqual(progress.call_count, 25)  # one cold root + 24 runs; warm requests reuse presentation
         print(json.dumps({"fixture": "complete bootstrap / 24 persisted large runs", "samples": samples}))
         # With five samples the nearest-rank p95 is the maximum. This CI fixture
         # is regression evidence, not a production latency/support claim.
