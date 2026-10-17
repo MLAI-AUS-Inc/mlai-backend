@@ -150,3 +150,11 @@ for SQLite and PostgreSQL 15/16 without opening a database connection. Native
 JSON comparisons preserve JSON types for connection generations and source run
 IDs. Disposable database CI remains required; this compilation evidence does
 not replace the actual ORM round trip.
+
+Disposable SQLite CI correctly rejected a later fresh-goal proof request after
+the fixture had already withdrawn the article. The fixture now tests complete
+live proof collection before withdrawal, retains its independent historical
+checklist assertions afterwards, and explicitly requires fresh collection to
+fail after withdrawal. All three original ORM variants keep the existing guard;
+no publication or financial authorization is loosened. Fresh remote validation
+is required on this fixture correction.

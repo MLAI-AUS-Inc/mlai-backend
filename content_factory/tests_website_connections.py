@@ -1654,6 +1654,19 @@ class WebsiteReviewRegressionTests(WebsiteDatabaseFixture, TestCase):
                     self.assertEqual(historical_status['publicUrl'], current_status['publicUrl'])
                     self.assertEqual(historical_status['doctor']['checks'], current_status['doctor']['checks'])
                     read_get.assert_not_called(); read_post.assert_not_called()
+                # A fresh goal may collect the live source before the owner's
+                # withdrawal. The later historical checklist cannot grant this
+                # same fresh proof after the public article is removed.
+                native_scope, _policy = cms_goal_evidence.current_scope(context, self.config, user=user)
+                native_goal = cms_goal_contract.new_goal(str(uuid.uuid4()), native_scope, now=timezone.now())
+                native_proofs, native_source, references = cms_goal_evidence.collect(native_goal, context, self.config,
+                    user=user, run=synced, artifact_operation_id=str(artifact_operation.pk), now=timezone.now())
+                self.assertEqual(set(native_proofs), set(cms_goal_contract.KINDS))
+                native_goal = cms_goal_contract.bind_source(native_goal, native_source, expected_scope=native_scope, now=timezone.now())
+                native_goal = cms_goal_contract.refresh(native_goal, native_proofs, expected_scope=native_scope, now=timezone.now())
+                self.assertTrue(cms_goal_contract.complete(native_goal, expected_scope=native_scope, now=timezone.now()))
+                self.assertEqual(references['first_article_live'], str(publication.pk))
+                self.assertNotIn('source_sha', json.dumps(native_goal))
                 from . import cms_unpublish_start, cms_unpublish_controller, cms_unpublish_status
                 from .cms_api_transport import CmsApiError
                 withdrawal_data = {**contract_for(website), 'client_request_id': str(uuid.uuid4()), 'confirmed': True,
@@ -1700,16 +1713,12 @@ class WebsiteReviewRegressionTests(WebsiteDatabaseFixture, TestCase):
                 with override_settings(ARTICLES_CMS_GOALS_ENABLED=False):
                     self.assertTrue(channel_artifacts.artifact_read_receipt(original_query)['allowed'])
                     with self.assertRaises(WebsiteAuthorityError): channel_artifacts.admission_receipt(original_query)
-            native_scope, _policy = cms_goal_evidence.current_scope(context, self.config, user=user)
-            native_goal = cms_goal_contract.new_goal(str(uuid.uuid4()), native_scope, now=timezone.now())
-            native_proofs, native_source, references = cms_goal_evidence.collect(native_goal, context, self.config,
-                user=user, run=synced, artifact_operation_id=str(artifact_operation.pk), now=timezone.now())
-            self.assertEqual(set(native_proofs), set(cms_goal_contract.KINDS))
-            native_goal = cms_goal_contract.bind_source(native_goal, native_source, expected_scope=native_scope, now=timezone.now())
-            native_goal = cms_goal_contract.refresh(native_goal, native_proofs, expected_scope=native_scope, now=timezone.now())
-            self.assertTrue(cms_goal_contract.complete(native_goal, expected_scope=native_scope, now=timezone.now()))
-            self.assertEqual(references['first_article_live'], str(publication.pk))
-            self.assertNotIn('source_sha', json.dumps(native_goal))
+            # The accepted withdrawal must fence even a still-fresh old live
+            # receipt. Historical achievement was checked separately above.
+            fresh_after_withdrawal = cms_goal_contract.new_goal(str(uuid.uuid4()), native_scope, now=timezone.now())
+            with self.assertRaises(WebsiteAuthorityError):
+                cms_goal_evidence.collect(fresh_after_withdrawal, context, self.config, user=user,
+                    run=synced, artifact_operation_id=str(artifact_operation.pk), now=timezone.now())
             # Exercise native financial rows on disposable CI only. The ledger
             # is synthetic; no wallet debit, model job or actual refund service
             # runs. An unused held article must survive revocation and settle.
