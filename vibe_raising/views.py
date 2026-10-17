@@ -52,9 +52,13 @@ from startup_updates.metric_catalog import (
 )
 from integrations.services.external_connectors import (
     ConnectorOAuthError,
+    ConnectorReconnectRequired,
+    ConnectorTemporarilyUnavailable,
+    ConnectorRateLimitError,
     active_google_connection,
     active_organization_for_user,
     google_connection_for_org,
+    ensure_linear_connection_authorized,
     mark_sources_sync_requested,
     refresh_linear_activity_selections,
 )
@@ -203,6 +207,28 @@ def _connector_oauth_guarded(callback):
     def wrapped(*args, **kwargs):
         try:
             return callback(*args, **kwargs)
+        except ConnectorReconnectRequired as exc:
+            # Run creation rolled back; its credential error must survive that
+            # rollback. This never replaces a newer OAuth callback's credentials.
+            exc.persist()
+            return Response(
+                {"detail": str(exc), "code": "startup_update_sources_unavailable",
+                 "unavailableSources": [exc.provider]},
+                status=status.HTTP_409_CONFLICT,
+            )
+        except ConnectorTemporarilyUnavailable as exc:
+            return Response(
+                {"detail": str(exc), "code": "startup_update_source_unavailable",
+                 "unavailableSources": [exc.provider]},
+                status=status.HTTP_503_SERVICE_UNAVAILABLE,
+            )
+        except ConnectorRateLimitError as exc:
+            return Response(
+                {"detail": "A selected source is busy. Try again shortly, or remove it from this update.",
+                 "code": "startup_update_source_rate_limited"},
+                status=status.HTTP_503_SERVICE_UNAVAILABLE,
+                headers={"Retry-After": str(exc.retry_after_seconds)},
+            )
         except ConnectorOAuthError as exc:
             return Response(
                 {"detail": str(exc)},
@@ -245,9 +271,12 @@ def _sync_selected_connector_sources_for_draft(user, input_sources: list[str], *
         # connection to close before the run is even created.
         if provider == ExternalServiceProvider.LINEAR:
             if automatic_scope:
+                ensure_linear_connection_authorized(connection)
                 continue  # The run discovers its own catalog without changing manual selections.
             try:
                 refresh_linear_activity_selections(connection)
+            except (ConnectorReconnectRequired, ConnectorTemporarilyUnavailable, ConnectorRateLimitError):
+                raise
             except Exception as exc:
                 logger.exception(
                     "Unable to refresh Linear activity scope before monthly update draft",

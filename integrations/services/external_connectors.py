@@ -224,6 +224,50 @@ class ConnectorOAuthError(Exception):
     pass
 
 
+class ConnectorReconnectRequired(ConnectorOAuthError):
+    """A scoped credential rejection that can be recorded after run rollback."""
+
+    def __init__(self, connection, message):
+        super().__init__(message)
+        self.provider = connection.provider
+        self.connection = connection
+        self.connection_updated_at = connection.updated_at
+
+    def persist(self):
+        """Mark only the rejected credential version, preserving a concurrent reconnect."""
+        ExternalServiceConnection.objects.filter(
+            pk=self.connection.pk,
+            user_id=self.connection.user_id,
+            organization_id=self.connection.organization_id,
+            provider=self.provider,
+            updated_at=self.connection_updated_at,
+        ).update(
+            status=ExternalServiceConnectionStatus.ERROR,
+            last_error=str(self),
+            updated_at=timezone.now(),
+        )
+        self.connection.status = ExternalServiceConnectionStatus.ERROR
+        self.connection.last_error = str(self)
+
+
+class ConnectorTemporarilyUnavailable(ConnectorOAuthError):
+    """An upstream failure that does not establish that credentials were revoked."""
+
+    def __init__(self, provider, message):
+        super().__init__(message)
+        self.provider = provider
+
+
+LINEAR_RECONNECT_MESSAGE = (
+    "Linear needs to be reconnected. Reconnect Linear in Connections, or remove "
+    "Linear from this update to generate with your other sources."
+)
+LINEAR_UNAVAILABLE_MESSAGE = (
+    "Linear is temporarily unavailable. Try again shortly, or remove Linear "
+    "from this update to generate with your other sources."
+)
+
+
 class ConnectorRateLimitError(Exception):
     def __init__(self, retry_after_seconds: int):
         self.retry_after_seconds = max(int(retry_after_seconds or 1), 1)
@@ -1260,10 +1304,31 @@ def _exchange_linear_code(code: str) -> dict[str, Any]:
     return token_data
 
 
+def _linear_reconnect_required(connection):
+    error = ConnectorReconnectRequired(connection, LINEAR_RECONNECT_MESSAGE)
+    error.persist()
+    raise error from None
+
+
+def _linear_request(url, **kwargs):
+    """Keep provider outages and response contents out of the authentication contract."""
+    try:
+        response = requests.post(url, **kwargs)
+        if response.status_code == 429:
+            raise ConnectorRateLimitError(_linear_retry_after_seconds(response))
+        if response.status_code not in {400, 401, 403}:
+            response.raise_for_status()
+        return response
+    except requests.RequestException:
+        raise ConnectorTemporarilyUnavailable(
+            ExternalServiceProvider.LINEAR, LINEAR_UNAVAILABLE_MESSAGE,
+        ) from None
+
+
 def _refresh_linear_token(connection: ExternalServiceConnection) -> dict[str, Any]:
     if not connection.refresh_token:
-        raise ConnectorOAuthError("Linear connection needs to be reauthorised.")
-    response = requests.post(
+        _linear_reconnect_required(connection)
+    response = _linear_request(
         "https://api.linear.app/oauth/token",
         data={
             "client_id": settings.LINEAR_CLIENT_ID,
@@ -1273,11 +1338,18 @@ def _refresh_linear_token(connection: ExternalServiceConnection) -> dict[str, An
         },
         timeout=(3, 20),
     )
-    response.raise_for_status()
-    token_data = response.json()
-    if token_data.get("error"):
-        raise ConnectorOAuthError(token_data.get("error_description") or token_data.get("error"))
-    connection.access_token = str(token_data.get("access_token") or connection.access_token or "")
+    if response.status_code in {400, 401, 403}:
+        _linear_reconnect_required(connection)
+    try:
+        token_data = response.json()
+    except ValueError:
+        token_data = None
+    error_code = token_data.get("error") if isinstance(token_data, dict) else None
+    if isinstance(error_code, str) and error_code not in ("", "temporarily_unavailable", "server_error"):
+        _linear_reconnect_required(connection)
+    if not isinstance(token_data, dict) or token_data.get("error") or not token_data.get("access_token"):
+        raise ConnectorTemporarilyUnavailable(ExternalServiceProvider.LINEAR, LINEAR_UNAVAILABLE_MESSAGE)
+    connection.access_token = str(token_data["access_token"])
     connection.refresh_token = str(token_data.get("refresh_token") or connection.refresh_token or "")
     connection.token_type = str(token_data.get("token_type") or connection.token_type or "Bearer")
     connection.token_expires_at = _expires_at(token_data)
@@ -3598,11 +3670,18 @@ def _linear_token_expired(connection: ExternalServiceConnection) -> bool:
 
 
 def _linear_required_token(connection: ExternalServiceConnection, *, allow_refresh: bool = True) -> str:
+    if connection.status == ExternalServiceConnectionStatus.ERROR and connection.last_error == LINEAR_RECONNECT_MESSAGE:
+        _linear_reconnect_required(connection)
     if not getattr(connection, "access_token", ""):
-        raise ConnectorOAuthError("Linear connection needs to be reauthorised.")
+        _linear_reconnect_required(connection)
     if allow_refresh and _linear_token_expired(connection):
         _refresh_linear_token(connection)
     return str(connection.access_token or "")
+
+
+def ensure_linear_connection_authorized(connection: ExternalServiceConnection) -> None:
+    """Refresh expiring credentials before entering a draft-creation transaction."""
+    _linear_required_token(connection)
 
 
 def _linear_graphql_request(
@@ -3615,7 +3694,7 @@ def _linear_graphql_request(
     token = _linear_required_token(connection, allow_refresh=allow_refresh)
     connect_timeout = float(getattr(settings, "LINEAR_API_CONNECT_TIMEOUT_SECONDS", 3) or 3)
     read_timeout = float(getattr(settings, "LINEAR_API_READ_TIMEOUT_SECONDS", 20) or 20)
-    response = requests.post(
+    response = _linear_request(
         "https://api.linear.app/graphql",
         headers={
             "Authorization": f"Bearer {token}",
@@ -3625,11 +3704,11 @@ def _linear_graphql_request(
         json={"query": query, "variables": variables or {}},
         timeout=(connect_timeout, read_timeout),
     )
-    if response.status_code == 429:
-        raise ConnectorRateLimitError(_linear_retry_after_seconds(response))
     if response.status_code in {401, 403} and allow_refresh and getattr(connection, "refresh_token", ""):
         _refresh_linear_token(connection)
         return _linear_graphql_request(connection, query, variables, allow_refresh=False)
+    if response.status_code in {401, 403}:
+        _linear_reconnect_required(connection)
     response.raise_for_status()
     payload = response.json()
     if not isinstance(payload, dict):
@@ -3647,6 +3726,8 @@ def _linear_graphql_request(
         if code in {"unauthenticated", "authentication_error"} and allow_refresh and getattr(connection, "refresh_token", ""):
             _refresh_linear_token(connection)
             return _linear_graphql_request(connection, query, variables, allow_refresh=False)
+        if code in {"unauthenticated", "authentication_error"}:
+            _linear_reconnect_required(connection)
         raise ConnectorOAuthError(message)
     data = payload.get("data")
     return data if isinstance(data, dict) else {}
@@ -6169,6 +6250,8 @@ def _serialize_external_source(user, provider: str, organization=_ACTIVE_ORG) ->
     if connection:
         status_value = connection.status
         warning = connection.last_error or None
+        if provider == ExternalServiceProvider.LINEAR and status_value == ExternalServiceConnectionStatus.ERROR and warning == LINEAR_RECONNECT_MESSAGE:
+            status_value = "needs_reauth"
     elif configured:
         status_value = "not_connected"
         warning = None

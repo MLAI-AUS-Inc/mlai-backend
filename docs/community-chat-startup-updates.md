@@ -51,6 +51,25 @@ Bootstrap advertises `capabilities.draftReadyPush: false`. Completed runs record
 
 These additions create no schema changes. The local checks cover every signed OAuth provider, API-key delegation, cross-company disconnect isolation, exact-revision deletion, source selection and completion deduplication. They do not prove live provider consent, successful real-device OAuth, or push delivery. Live acceptance requires the founder's provider accounts and an approved environment.
 
+## Linear authentication failures
+
+Pulse refreshes an expired Linear access token before its draft-creation
+transaction. A rejected or missing refresh credential marks that exact connection
+version as `error`, with a safe reconnect warning; `sources/` exposes it as
+`needs_reauth`. The warning is recorded again after a failed draft transaction
+rolls back, without overwriting a newer OAuth reconnection. Saved credentials
+and imported evidence are retained. Successful refresh or reconnection clears
+the warning.
+
+`generate/` returns HTTP 409 with `code: startup_update_sources_unavailable`,
+`unavailableSources: ["linear"]`, and a message offering reconnection or removal
+of Linear from this update. It does not return a Chat-session authentication
+error. Removing Linear from `inputSources` permits generation with the remaining
+selected sources; the backend never silently removes a selected source or
+substitutes cached Linear evidence. Network failures and provider outages return
+HTTP 503 without marking the credentials as revoked; rate limits include
+`Retry-After`. These changes require no schema migration.
+
 ## Evidence, editing and disclosure
 
 - Generated content is private. Curation may include sensitive supported facts for founder assessment. Automated candidate selection is not human approval.
