@@ -13,6 +13,7 @@ from . import cms_goal_contract as goals
 from . import cms_goal_dispatch as dispatch
 from . import cms_goal_recovery as recovery
 from . import cms_goal_evidence as evidence
+from . import cms_goal_achievement as achievement
 from . import cms_goal_refunds as refunds
 from . import website_goal_budget as budget
 from . import cms_capture as capture
@@ -272,7 +273,8 @@ def _advance(operation, lease, *, now):
     changes = {"goal": goal, "native_budget": _account(operation, run, now=now), "references": references}
     if goals.complete(goal, expected_scope=value.scope, now=now):
         publication = chain[publications.ACTION]
-        changes["public_url"] = publications.current_publication(publication, now=now)[3]["public_url"]
+        recorded = achievement.capture(goal, publication, now=now)
+        changes.update(public_url=recorded["observation"]["public_url"], publication_achievement=recorded)
         return _save(operation, lease, now=now, state="completed", status="first_article_live", step="first_article_live",
             payload={"source_run_id": run.run_id}, receipt=changes)
     for child in chain.values():
