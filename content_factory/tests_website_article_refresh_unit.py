@@ -114,6 +114,8 @@ class ArticleRefreshCoordinatorTests(SimpleTestCase):
             return_value={"enabled": True, "base_url": "https://worker.test"}))
         stack.enter_context(patch("content_factory.vibe_marketing_views._content_factory_headers", return_value={"X-API-Key": "synthetic-service-key"}))
         self.post = stack.enter_context(patch.object(refresh, "read_limited", side_effect=self.worker))
+        self.publication_observer = stack.enter_context(patch(
+            "content_factory.website_article_publication_observation.advance", return_value=True))
         self.connection.operations.filter.side_effect = self.operation_rows
 
     @contextmanager
@@ -165,6 +167,7 @@ class ArticleRefreshCoordinatorTests(SimpleTestCase):
 
     def advance(self):
         self.parent.state = "running"
+        self.chain.now = self.now
         return self.chain.advance()
 
     def test_real_first_article_controller_journals_and_inspects_stale_paid_root_without_generation(self):
@@ -222,6 +225,7 @@ class ArticleRefreshCoordinatorTests(SimpleTestCase):
         self.assertEqual(self.post.call_count, 1, "An uncertain read keeps its pending lease")
         self.now += refresh.READ_LEASE + timedelta(seconds=1)
         self.advance()
+        self.assertEqual(self.post.call_count, 2, "The expired read lease must actually retry")
         self.assertEqual(len(self.operations), 1)
         self.assertEqual(self.parent.receipt["article_source_refresh"], original)
         self.assertEqual(self.chain.fixture.spend.call_count, 1)

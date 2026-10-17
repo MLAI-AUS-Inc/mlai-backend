@@ -27,6 +27,8 @@ subsystem-specific contracts and runbooks.
 
 ## Content Factory
 
+- [D2 old publication observation](articles-d2-publication-observation-2026-10-18.md) — current read token, union of old ledgers/references and provider identity checks; owned fencing and execution remain pending
+
 - [D2 stale article inspection](articles-d2-refresh-inspection-2026-10-18.md) — default-off real controller stage, private read-only reservation and bounded producer observations; execution remains pending
 
 - [E5 native CMS provider CI](articles-e5-native-provider-ci-2026-10-18.md) — digest-pinned disposable WordPress/Ghost API acceptance and remote-only fixture isolation

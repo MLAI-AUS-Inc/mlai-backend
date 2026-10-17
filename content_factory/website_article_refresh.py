@@ -169,7 +169,8 @@ def _claim_inspection(parent, operation, request, *, now):
 
 def advance(parent, context, config, *, user, now):
     """Continue a stale paid original into the separately admitted inspection stage."""
-    if not getattr(settings, "ARTICLES_ARTICLE_SOURCE_REFRESH_ENABLED", False):
+    from .website_article_recovery import enabled
+    if not getattr(settings, "ARTICLES_ARTICLE_SOURCE_REFRESH_ENABLED", False) or not enabled(parent):
         return False
     from .website_first_article import article_run, merged_source, _save_fields, _wait
     run = article_run(parent, config)
@@ -181,6 +182,12 @@ def advance(parent, context, config, *, user, now):
     owned = merged_source(parent, run, context)
     if owned is not None and owned["source_sha"] == current:
         return False
+    from .website_goal_budget import exhaustion
+    reason = exhaustion(parent.receipt["goal"], now=now, action="first-article-generation")
+    if reason:
+        from .website_goal_runner import stop_goal
+        stop_goal(parent, parent.receipt["goal"], reason=reason, now=now)
+        return True
     reserved = reserve_inspection(parent, context, config, user=user, now=now)
     if reserved is None:
         return True
@@ -192,8 +199,8 @@ def advance(parent, context, config, *, user, now):
             checked = goals.stamp(cached["observed_at"])
             if (checked is not None and now - timedelta(minutes=5) <= checked <= now + timedelta(minutes=5)
                     and cached["source_state_version"] >= goals.mapping(run.result).get("state_version", 0)):
-                _wait(parent, now, "Reconciling the original article publication before rebuilding on the changed source.")
-                return True
+                from .website_article_publication_observation import advance as observe_publication
+                return observe_publication(parent, context, config, user=user, now=now, request=request, inspection=cached)
         except RefreshContractError:
             _deny()
     lease, pending_until = _claim_inspection(parent, operation, request, now=now)

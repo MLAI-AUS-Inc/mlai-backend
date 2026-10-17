@@ -33,8 +33,10 @@ Content must still be fingerprinted again when a future durable seal is created.
 
 ## Current stopping point and remaining D2 work
 
-The durable stage is `inspected`. The controller currently waits for original
-publication reconciliation; this is not end-to-end source refresh. The worker
+The inspection draft's durable stage is `inspected`. The following
+[publication observation stage](articles-d2-publication-observation-2026-10-18.md)
+now reads provider facts and records `publication_observed`, then waits for owned
+source fencing; this is not end-to-end source refresh. The worker
 response exposes partial, pending-review and superseded states, old publication
 attempts and directly owned child references. Empty mutation history is not
 provider proof. The next stages must authenticate old mutations and GitHub facts,
