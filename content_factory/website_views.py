@@ -162,6 +162,26 @@ class WebsiteConnectionView(APIView):
 class WebsiteConnectionActionView(APIView):
     """Independent pause/disconnect/reconnect/reset/cleanup consent actions."""
 
+    def get(self, request, action):
+        """Read the original owner's CMS access destination without key export."""
+        headers = {"Cache-Control": "private, no-store"}
+        if action != "cms-access":
+            return Response({"detail": "Unknown website read."}, status=404, headers=headers)
+        context, config, error = _context(request)
+        if error:
+            return error
+        try:
+            from .cms_owner_access import for_operation, connection_receipt
+            payload = for_operation(context, config, user=request.user, operation_id=request.query_params.get("operation_id"))
+            from .cms_goal_status import for_context
+            current = for_context(context, config, user=request.user)
+            if current is not None: payload["websiteStatus"] = current
+            if connection_receipt(context, config, user=request.user) != payload["cmsConnectionReceipt"]:
+                raise WebsiteAuthorityError("website_connection_changed", "Refresh the current CMS access request.")
+            return Response(payload, headers=headers)
+        except WebsiteAuthorityError as exc:
+            return Response(exc.as_dict(), status=exc.status, headers=headers)
+
     def post(self, request, action):
         if action not in {"prepare", "pause", "disconnect", "reconnect", "reset", "cleanup", "purge", "cancel-operation", "reconcile", "verify-access", "verify", "custom-contract", "ci-attestation", "github-revoke", "verify-cleanup", "inspect-channel", "select-channel", "cms-connect", "cms-configure", "cms-start-articles", "cms-setup-articles", "cms-review-article", "cms-approve-article", "capture-existing"}:
             return Response({"code": "invalid_connection_action", "detail": "Unknown website action."}, status=400)
@@ -210,10 +230,12 @@ class WebsiteConnectionActionView(APIView):
             if action == "cms-connect":
                 from .cms_owner_connection import connect
                 from .website_publishing_channels import projection
+                from .cms_owner_access import connection_receipt
                 connect(context, config, user=request.user, data=dict(request.data))
                 config.refresh_from_db()
                 return Response({"websiteConnection": summary_for(config, company_id=context.company.pk),
-                    "publishingChannel": projection(context, config)}, headers={"Cache-Control": "private, no-store"})
+                    "publishingChannel": projection(context, config),
+                    "cmsConnectionReceipt": connection_receipt(context, config, user=request.user)}, headers={"Cache-Control": "private, no-store"})
             if action in {"inspect-channel", "select-channel"}:
                 from .website_publishing_channels import update_choice
                 selected = request.data.get("channel") if action == "select-channel" else None

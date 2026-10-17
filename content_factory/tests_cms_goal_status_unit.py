@@ -161,6 +161,15 @@ class CmsGoalStatusTests(SimpleTestCase):
             self.assertEqual(self.read()["state"], "stopped")
         stage.assert_not_called()
 
+    def test_original_access_wait_exposes_its_actual_recheck_schedule(self):
+        self.paid()
+        self.goal_operation.state = "needs_user"
+        self.goal_operation.receipt["user_action"] = {"id": "connect_cms"}
+        value = self.read()
+        self.assertEqual((value["state"], value["action"]["id"]), ("needs_you", "connect_cms"))
+        self.assertEqual(value["nextAttemptAt"], self.goal_operation.next_attempt_at.isoformat())
+        self.capture_http.assert_not_called()
+
     def test_owner_and_company_changes_are_denied_before_reading_private_evidence(self):
         self.user.is_active = False
         with patch.object(status.evidence, "collect") as collect: self.assertIsNone(self.read())

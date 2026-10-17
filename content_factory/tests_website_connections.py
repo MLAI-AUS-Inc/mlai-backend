@@ -1469,6 +1469,13 @@ class WebsiteReviewRegressionTests(WebsiteDatabaseFixture, TestCase):
                     if effect['method'] == 'POST':
                         issued = website.operations.get(pk=publication.pk)
                         self.assertEqual(issued.payload['post_state']['create_count'], 1)
+                        managed_native.state = 'needs_user'
+                        managed_native.next_attempt_at = timezone.now() + timedelta(minutes=5)
+                        managed_native.receipt = {**managed_native.receipt, 'user_action': {'id': 'connect_cms'}}
+                        managed_native.save(update_fields=['state', 'next_attempt_at', 'receipt', 'updated_at'])
+                        from .cms_owner_access import for_operation as access_form, connection_receipt
+                        access_wait = access_form(context, self.config, user=user, operation_id=str(managed_native.pk))
+                        self.assertEqual(access_wait['cmsAccess']['operationId'], str(managed_native.pk))
                         # A replacement key for the same actual principal must
                         # preserve the already-issued post and original source.
                         renewed_data = {**data, 'client_request_id': str(uuid.uuid4()),
@@ -1479,6 +1486,11 @@ class WebsiteReviewRegressionTests(WebsiteDatabaseFixture, TestCase):
                         self.assertEqual((str(renewed.pk), renewed.generation), (str(website.pk), website.generation))
                         self.assertEqual(renewed.capabilities['_cms_credential_operation_id'], str(private.pk))
                         self.assertEqual(current_credential(context, self.config, renewed, user=user)[1].secret, renewed_data['secret'])
+                        key_receipt = connection_receipt(context, self.config, user=user)
+                        self.assertEqual(key_receipt['requestId'], renewed_data['client_request_id'])
+                        self.assertNotIn(renewed_data['secret'], json.dumps(key_receipt))
+                        managed_native.refresh_from_db()
+                        self.assertLess(managed_native.next_attempt_at, timezone.now() + timedelta(seconds=1))
                         self.assertTrue(channel_artifacts.authorize_payload(artifact_payload))
                         replayed = website.operations.get(pk=publication.pk)
                         self.assertEqual(replayed.payload, issued.payload)

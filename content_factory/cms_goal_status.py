@@ -153,6 +153,8 @@ def project(operation, context, config, *, user, binding, now):
         except (WebsiteAuthorityError, ValueError, TypeError, KeyError, AttributeError): action = None
         if action is not None:
             result.update(state="needs_you", title="Your action is needed", message="Review your first article." if action["id"] == "review_draft" else "Restore access to your CMS.", action=action)
+            if action["id"] == "connect_cms" and operation.next_attempt_at is not None:
+                result["nextAttemptAt"] = operation.next_attempt_at.isoformat()
     elif operation.state in {"pending", "running"} and allowed and operation.next_attempt_at is not None:
         result.update(state="working", title="Setting up articles", message="Preparing your first article.", action=None,
             nextAttemptAt=operation.next_attempt_at.isoformat())

@@ -227,10 +227,12 @@ class CmsOwnerConnectionTests(SimpleTestCase):
         request = SimpleNamespace(data=self.data, user=self.user)
         with patch("content_factory.website_views._context", return_value=(self.context, self.config, None)), \
                 patch.object(owner, "connect") as connect, patch("content_factory.website_views.bind_website") as git, \
+                patch("content_factory.cms_owner_access.connection_receipt", return_value={"requestId": self.data["client_request_id"]}) as receipt, \
                 patch("content_factory.website_views.summary_for", return_value={"channel": "cms"}):
             response = WebsiteConnectionActionView().post(request, "cms-connect")
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response["Cache-Control"], "private, no-store")
+        self.assertEqual(response.data["cmsConnectionReceipt"], receipt.return_value)
         connect.assert_called_once()
         git.assert_not_called()
 
