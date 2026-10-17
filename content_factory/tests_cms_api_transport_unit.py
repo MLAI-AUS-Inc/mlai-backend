@@ -3,7 +3,7 @@
 import base64
 import json
 from unittest.mock import Mock, patch
-from urllib.parse import urlsplit
+from urllib.parse import parse_qs, urlsplit
 
 from django.test import SimpleTestCase
 import jwt
@@ -14,8 +14,25 @@ from . import tests_cms_connection_contract_unit as contract_fixtures
 
 
 class CmsApiTransportTests(SimpleTestCase):
+    def test_plain_permalink_server_is_usable_without_replaying_or_weakening_route_input(self):
+        # Default WordPress installations do not route /wp-json/. Model that
+        # real server boundary instead of treating every URI as JSON success.
+        def server():
+            target = urlsplit(self.client.request.call_args.args[1])
+            route = parse_qs(target.query).get('rest_route')
+            self.response.status = 200 if target.path == '/wordpress/index.php' and route == ['/wp/v2/posts'] else 404
+            return self.response
+        self.client.getresponse.side_effect = server
+        value, _ = self.request(query={'context': 'edit'})
+        self.assertEqual(value, [{'id': 4, 'slug': 'article'}])
+        self.client.request.assert_called_once()
+        self.pin.reset_mock()
+        with self.assertRaises(api.CmsApiError):
+            self.request(query={'rest_route': 'https://foreign.example.test/'})
+        self.pin.assert_not_called()
+
     def test_only_fixed_public_site_read_can_omit_credential(self):
-        for platform, origin, expected in (("wordpress", "https://fixture.test/wordpress/", "/wordpress/wp-json/"),
+        for platform, origin, expected in (("wordpress", "https://fixture.test/wordpress/", "/wordpress/index.php?rest_route=%2F"),
                                            ("ghost", "https://admin.fixture.test/", "/ghost/api/admin/site/")):
             binding = {**self.binding, "platform": platform, "api_origin": origin}
             self.response.read.return_value = b'{"site": {}}'
@@ -50,10 +67,10 @@ class CmsApiTransportTests(SimpleTestCase):
     def test_wordpress_resource_and_query_are_pinned_before_credentials_are_sent(self):
         value,pagination=self.request(query={'page':2,'per_page':100,'context':'edit'})
         self.assertEqual(value,[{'id':4,'slug':'article'}]);self.assertEqual(pagination,{'pages':3})
-        self.pin.assert_called_once_with('https://fixture.test/wordpress/wp-json/wp/v2/posts','fixture.test')
+        self.pin.assert_called_once_with('https://fixture.test/wordpress/index.php','fixture.test')
         self.connect.assert_called_once_with('fixture.test','8.8.8.8')
         method,target=self.client.request.call_args.args
-        self.assertEqual(method,'GET');self.assertEqual(target,'/wordpress/wp-json/wp/v2/posts?page=2&per_page=100&context=edit')
+        self.assertEqual(method,'GET');self.assertEqual(target,'/wordpress/index.php?rest_route=%2Fwp%2Fv2%2Fposts&page=2&per_page=100&context=edit')
         headers=self.client.request.call_args.kwargs['headers']
         encoded=base64.b64encode(b'fixture-owner:synthetic-application-password').decode()
         self.assertEqual(headers['Authorization'],'Basic '+encoded)

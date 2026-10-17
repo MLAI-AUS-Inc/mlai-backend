@@ -72,18 +72,27 @@ def request_json(binding, credential, *, method, resource, identifier=None, quer
         if (platform == "wordpress" and (type(identifier) is not int or not 1 <= identifier < 10**19) or
                 platform == "ghost" and (not isinstance(identifier, str) or len(identifier) != 24 or any(c not in "0123456789abcdef" for c in identifier))):
             raise CmsApiError("invalid_request")
-    prefix = "wp-json/wp/v2/" if platform == "wordpress" else "ghost/api/admin/"
-    base = binding["api_origin"] + ("wp-json/" if platform == "wordpress" and resource == "site" else prefix + resource)
-    if identifier is not None:
-        base += "/" + str(identifier)
-    if platform == "ghost":
+    if platform == "wordpress":
+        # WordPress accepts the fixed query route with both plain and pretty
+        # permalinks. index.php avoids a front-controller redirect on POST.
+        # Never discover a credential destination or retry an uncertain write.
+        route = "/" if resource == "site" else "/wp/v2/" + resource
+        if identifier is not None:
+            route += "/" + str(identifier)
+        base = binding["api_origin"] + "index.php"
+    else:
+        base = binding["api_origin"] + "ghost/api/admin/" + resource
+        if identifier is not None:
+            base += "/" + str(identifier)
         base += "/"
     if query is not None and (not isinstance(query, dict) or len(query) > 12 or any(
             not isinstance(key, str) or key not in {"page", "per_page", "limit", "context", "status", "slug", "search", "filter", "formats", "source", "include", "fields", "order", "orderby", "hide_empty"} or
             not isinstance(value, (str, int)) or type(value) is bool or len(str(value)) > 512 or
             any(ord(c) < 32 for c in str(value)) for key, value in query.items())):
         raise CmsApiError("invalid_request")
-    encoded_query = urlencode(query or {})
+    # rest_route is generated only after validating the caller's closed query;
+    # a caller cannot override it with another resource, origin or API version.
+    encoded_query = urlencode({"rest_route": route, **(query or {})} if platform == "wordpress" else query or {})
     if len(encoded_query) > 2048:
         raise CmsApiError("invalid_request")
     try:

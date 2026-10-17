@@ -60,7 +60,7 @@ class CmsMediaTransportTests(SimpleTestCase):
         result = self.upload()
         self.assertEqual((result.provider_id, result.source_sha256, result.public_bytes_verified), (42, self.image.sha256, False))
         method, target = self.client.request.call_args.args
-        self.assertEqual((method, target), ("POST", "/wordpress/wp-json/wp/v2/media?context=edit"))
+        self.assertEqual((method, target), ("POST", "/wordpress/index.php?rest_route=%2Fwp%2Fv2%2Fmedia&context=edit"))
         sent = self.client.request.call_args.kwargs
         self.assertTrue(sent["headers"]["Content-Type"].startswith("multipart/form-data; boundary=mlai-image-"))
         self.assertIn(self.image.raw, sent["body"])
