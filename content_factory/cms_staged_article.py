@@ -67,7 +67,7 @@ def replace_image_destinations(fragment, *, title, assets, destinations):
         raise CmsApiError("invalid_request") from None
 
 
-def build_staged_article(source, *, media_intents, media_states):
+def build_staged_article(source, *, media_intents, media_states, allow_rechecking=False):
     """Derive from an original private CurrentCmsArticle and owned media set.
 
     Historical public observations identify exact unchanged rasters. The final
@@ -83,7 +83,7 @@ def build_staged_article(source, *, media_intents, media_states):
         identities, destinations = [], []
         for intent, state, asset in zip(media_intents, media_states, handoff["images"]):
             validate_state(state, intent)
-            if (state["phase"] != "public_verified" or intent["binding"] != source.admitted.scope.binding or
+            if (state["phase"] not in ({"public_verified", "public_recheck"} if allow_rechecking else {"public_verified"}) or intent["binding"] != source.admitted.scope.binding or
                     intent["review_operation_id"] != source.review_operation_id or intent["title"] != handoff["article"]["title"] or
                     intent["handoff_digest"] != handoff["digest"] or intent["asset"] != asset or
                     intent["source_run_id"] != handoff["run_id"] or intent["source_generation"] != handoff["run_generation"]):
@@ -118,9 +118,9 @@ def build_staged_article(source, *, media_intents, media_states):
         raise CmsApiError("invalid_request") from None
 
 
-def validate_staged_article(value, source, *, media_intents, media_states):
+def validate_staged_article(value, source, *, media_intents, media_states, allow_rechecking=False):
     """Reconstruct exact expected bytes from private inputs, never sender claims."""
-    expected = build_staged_article(source, media_intents=media_intents, media_states=media_states)
+    expected = build_staged_article(source, media_intents=media_intents, media_states=media_states, allow_rechecking=allow_rechecking)
     try:
         if not isinstance(value, dict) or set(value) != FIELDS or canonical_bytes(value) != canonical_bytes(expected):
             raise CmsApiError("invalid_request")

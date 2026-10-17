@@ -67,6 +67,16 @@ bounded retries, rechecking ownership, generation, cancellation and the private
 credential reference around every provider read. Pagination/byte limits are
 explicitly partial. This read-only inventory grants no publication readiness.
 
+With `ARTICLES_CHANNEL_ARTIFACTS_ENABLED` additionally enabled, the independent
+private artifact/media/stage pipeline exposes `cms-review-article` and
+`cms-approve-article` through the same authenticated company action route. Final
+review reads require a current connection tuple and exact stage or original run;
+approval additionally requires the displayed stage/revision and explicit boolean
+confirmation. It is asynchronous and resumes the same choice after aged image
+checks, without another owner click. Original private setup consent alone enables
+automatic approval. See [the exact API, proof and recovery boundary](articles-e5-cms-approval-2026-10-17.md).
+These default-off approval primitives still grant no publication readiness.
+
 Every repository request, saved run, child run, token request, callback and repository-derived config update carries `website_connection_id` and `connection_generation`. `repository_id` verifies GitHub's immutable identity. `connection_target_id` identifies a verified target for publishing; when omitted the selected default must be verified. Worker retry `generation` is a separate counter.
 
 `GET /api/content-factory/connections/authorize` accepts that tuple, `domain`, `github_repo`, and `action=read|scan|config_write|preview|setup|publish|merge|cleanup`. It uses existing internal API-key authentication. Missing, stale, revoked, cross-company and mismatched repository authority returns a stable 409 error. No legacy OAuth fallback overrides denial. A successful check is not a lease: workers recheck immediately before each external mutation. The backend serializes its writes with lifecycle changes using organization/connection row locks.

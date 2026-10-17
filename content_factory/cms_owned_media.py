@@ -58,13 +58,17 @@ def _current(operation, *, lease_id=None, allow_completed=False):
     return source
 
 
-def completed_media(operation, *, now=None, fresh=True):
+def completed_media(operation, *, now=None, fresh=True, allow_rechecking=False):
     """Require current private ownership and fresh public bytes before final review."""
     source = _current(operation, allow_completed=True)
-    if operation.state != "completed" or operation.receipt != _progress(operation):
+    rechecking = allow_rechecking and not fresh and operation.state in {"pending", "running"}
+    receipt = operation.receipt
+    if rechecking and isinstance(receipt, dict) and set(receipt) == set(_progress(operation)) | {"failure", "failure_class"}:
+        receipt = {key: value for key, value in receipt.items() if key not in {"failure", "failure_class"}}
+    if (operation.state != "completed" and not rechecking or receipt != _progress(operation)):
         raise _deny()
     for intent, state in zip(operation.payload["intents"], operation.payload["states"]):
-        if state["phase"] != "public_verified":
+        if state["phase"] not in ({"public_verified", "public_recheck"} if rechecking else {"public_verified"}):
             raise _deny()
         journal.validate_state(state, intent, now=(now or timezone.now()) if fresh else None)
     return source
@@ -79,18 +83,20 @@ def request_public_recheck(operation, *, now=None):
     from organizations.models import Organization
     from .website_models import WebsiteConnectionOperation
     now = now or timezone.now()
-    source = completed_media(operation, fresh=False)
+    source = completed_media(operation, fresh=False, allow_rechecking=True)
     with transaction.atomic():
         Organization.objects.select_for_update().get(pk=source.run.organization_id)
         saved = WebsiteConnectionOperation.objects.select_for_update().filter(pk=operation.pk, action=ACTION).first()
-        completed_media(saved, fresh=False)
+        completed_media(saved, fresh=False, allow_rechecking=True)
+        if saved.state in {"pending", "running"}:
+            return saved
         try:
             completed_media(saved, now=now)
             return saved
         except CmsApiError:
             pass
         saved.payload = deepcopy(saved.payload)
-        saved.payload["states"] = [{**state, "phase": "provider_ack", "evidence": None}
+        saved.payload["states"] = [{**state, "phase": "public_recheck"}
             for state in saved.payload["states"]]
         saved.payload["failures"] = 0
         saved.state, saved.next_attempt_at = "pending", now
@@ -193,7 +199,7 @@ def advance_media(identifier, *, now=None):
                     updated = journal.ghost_unknown(intent, state)
                 elif phase == "reserved" and intent["binding"]["platform"] == "ghost":
                     updated = journal.ghost_ready(intent, state)
-                elif phase == "provider_ack":
+                elif phase in {"provider_ack", "public_recheck"}:
                     source = _fresh(operation, lease)
                     require_unlocked_remote_call()
                     observed = observe_owned_image(intent["binding"], handoff_digest=intent["handoff_digest"], asset=intent["asset"],

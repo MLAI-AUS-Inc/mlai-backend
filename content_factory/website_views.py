@@ -157,12 +157,20 @@ class WebsiteConnectionActionView(APIView):
     """Independent pause/disconnect/reconnect/reset/cleanup consent actions."""
 
     def post(self, request, action):
-        if action not in {"prepare", "pause", "disconnect", "reconnect", "reset", "cleanup", "purge", "cancel-operation", "reconcile", "verify-access", "verify", "custom-contract", "ci-attestation", "github-revoke", "verify-cleanup", "inspect-channel", "select-channel", "cms-connect", "cms-configure", "capture-existing"}:
+        if action not in {"prepare", "pause", "disconnect", "reconnect", "reset", "cleanup", "purge", "cancel-operation", "reconcile", "verify-access", "verify", "custom-contract", "ci-attestation", "github-revoke", "verify-cleanup", "inspect-channel", "select-channel", "cms-connect", "cms-configure", "cms-review-article", "cms-approve-article", "capture-existing"}:
             return Response({"code": "invalid_connection_action", "detail": "Unknown website action."}, status=400)
         context, config, error = _context(request)
         if error:
             return error
         try:
+            if action in {"cms-review-article", "cms-approve-article"}:
+                from .cms_article_approval import review, approve
+                if action == "cms-review-article":
+                    result = review(context, config, user=request.user, data=dict(request.data))
+                    return Response({"cmsArticleReview": result}, headers={"Cache-Control": "private, no-store"})
+                result = approve(context, config, user=request.user, data=dict(request.data))
+                return Response({"cmsArticleReview": result}, status=200 if result["approvalRecorded"] else 202,
+                    headers={"Cache-Control": "private, no-store"})
             if action == "cms-configure":
                 from .cms_publication_policy import configure, projection
                 saved = configure(context, config, user=request.user, data=dict(request.data))
@@ -307,7 +315,7 @@ class WebsiteConnectionOperationView(APIView):
         from .website_models import WebsiteConnectionOperation
         from .website_operations import operation_summary
         operation = WebsiteConnectionOperation.objects.filter(pk=operation_id, connection__organization=context.organization).first()
-        if operation is None or operation.action in {"goal-usage", "goal-alert", "usage-refresh", "channel-credential", "cms-artifact", "cms-review", "cms-media", "cms-stage", "cms-policy"}:
+        if operation is None or operation.action in {"goal-usage", "goal-alert", "usage-refresh", "channel-credential", "cms-artifact", "cms-review", "cms-media", "cms-stage", "cms-policy", "cms-approval"}:
             return Response({"detail": "Operation not found."}, status=404)
         return Response({"operation": operation_summary(operation)})
 
