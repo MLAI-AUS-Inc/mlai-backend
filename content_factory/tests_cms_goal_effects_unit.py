@@ -90,4 +90,3 @@ class CmsGoalEffectsTests(SimpleTestCase):
         with patch.object(authority, "current") as current:
             self.assertIsNone(effects.require_work({"client_request_id": "ordinary-cms-paid"}))
         current.assert_not_called()
-
