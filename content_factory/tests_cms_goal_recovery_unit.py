@@ -105,6 +105,26 @@ class CmsGoalRecoveryTests(SimpleTestCase):
         self.assertEqual(self.spend.call_count, 1)
         self.assertEqual(self.goal_operation.receipt["native_budget"]["budget_used"]["model_cost"], 1)
 
+    def test_recovery_preserves_original_backend_setup_usage_before_admitting_model_work(self):
+        from . import cms_goal_budget as native_budget
+        original = self.goal_operation.receipt["native_budget"]
+        self.goal_operation.receipt["native_budget"] = native_budget.reserve_setup_usage(
+            original, started_at=original["started_at"], operation_id=str(self.goal_operation.pk),
+            active_seconds=180, provider_seconds=360, now=self.now)
+        plan = self.prepare()
+        recorded = deepcopy(self.goal_operation.receipt["native_budget"])
+        self.assertEqual(recorded["budget_used"]["active_seconds"], 182)
+        self.assertEqual(recorded["budget_used"]["provider_seconds"], 362)
+        self.assertEqual(self.prepare(), plan)
+        self.assertEqual(self.goal_operation.receipt["native_budget"], recorded)
+        self.http_get.return_value = response(self.capable(plan))
+        self.http_post.return_value = response(self.receipt(plan))
+        self.assertEqual(self.deliver()["recovery_receipt"], self.receipt(plan))
+        self.assertIs(effects.require_work(self.run.run_request, now=self.now,
+            action="first-article-generation"), self.goal_operation)
+        self.assertEqual(self.goal_operation.receipt["native_budget"], recorded)
+        self.assertEqual(self.spend.call_count, 1)
+
     def test_lost_post_reply_discovers_exact_memo_before_any_retransmission(self):
         from integrations import http_client
         plan = self.prepare(); receipt = self.receipt(plan)

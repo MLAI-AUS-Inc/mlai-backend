@@ -7,6 +7,7 @@ from . import cms_publication_policy as policies
 from .channel_artifact_contract import digest
 from .cms_connection_authority import current_credential
 from .cms_setup_contract import validate_quote
+from .cms_setup_authority import enabled as setup_enabled
 from .website_contract import WebsiteAuthorityError
 
 
@@ -33,12 +34,12 @@ def for_context(context, config, *, user, expected_binding):
     the eventual setup coordinator must reload authority and validate acceptance.
     """
     if (not getattr(settings, "ARTICLES_CMS_STATUS_ENABLED", False) or user is None or
-            not goals.enabled(context.organization.pk)):
+            not setup_enabled(context.organization.pk)):
         return None
     try:
         from .billing import get_content_factory_article_cost_points
         binding, revision, policy = _current(context, config, user)
-        if binding != expected_binding or config.website_connection.operations.filter(action=goals.ACTION,
+        if binding != expected_binding or config.website_connection.operations.filter(action__in=[goals.ACTION, "cms-setup"],
                 generation=binding["generation"], payload__company_id=binding["company_id"]).exists():
             return None
         price = get_content_factory_article_cost_points(context.organization.domain)
@@ -55,7 +56,7 @@ def for_context(context, config, *, user, expected_binding):
         identity = lambda item: (item["operation_id"], item["policy"]["digest"]) if item is not None else None
         if (current[0] != binding or current[1] != revision or identity(current[2]) != identity(policy) or
                 get_content_factory_article_cost_points(context.organization.domain) != price or
-                config.website_connection.operations.filter(action=goals.ACTION, generation=binding["generation"],
+                config.website_connection.operations.filter(action__in=[goals.ACTION, "cms-setup"], generation=binding["generation"],
                     payload__company_id=binding["company_id"]).exists()):
             return None
         return validate_quote({**value, "digest": digest(value)})

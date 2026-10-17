@@ -749,6 +749,7 @@ def process_website_connection_operations(*, limit=20, now=None, connection_id=N
     from .website_notification_outbox import ACTION as notice_action
     from .website_first_article_refunds import ACTION as refund_action
     from .cms_goal_refunds import ACTION as native_refund_action, advance_refund as advance_native_refund
+    from .cms_setup_refunds import ACTION as setup_refund_action, advance_refund as advance_setup_refund
     from .website_cost_recovery import ACTION as usage_action, advance as advance_usage
     from .website_cost_ledger import enabled as accounting_enabled
     from .website_operational_alert_delivery import ACTION as alert_action, advance as advance_alert, channel as alert_channel
@@ -765,6 +766,8 @@ def process_website_connection_operations(*, limit=20, now=None, connection_id=N
     artifact_reviews_enabled = artifacts_enabled()
     native_goals_enabled = artifact_reviews_enabled and getattr(settings, "ARTICLES_CMS_GOALS_ENABLED", False)
     if native_goals_enabled: excluded.remove("cms-goal")
+    setup_enabled = native_goals_enabled and getattr(settings, "ARTICLES_CMS_SETUP_ENABLED", False)
+    if setup_enabled: excluded.remove("cms-setup")
     if artifact_reviews_enabled:
         ensure_reviews(limit=limit, connection_id=connection_id)
         ensure_media(limit=limit, connection_id=connection_id)
@@ -786,18 +789,20 @@ def process_website_connection_operations(*, limit=20, now=None, connection_id=N
         Q(action=usage_action, state="running") |
         Q(action=alert_action, state="running") |
         Q(action=native_refund_action, state="running") |
+        Q(action=setup_refund_action, state="running") |
         Q(action="cms-capture", state="running") |
         Q(action="cms-review", state="running") |
         Q(action="cms-media", state="running") |
         Q(action="cms-approval", state="running") |
         Q(action="cms-publish", state="running") |
         Q(action="cms-goal", state__in=["running", "needs_user"]) |
+        Q(action="cms-setup", state__in=["running", "needs_user"]) |
         unconfigured_alerts |
         Q(action="prepare", state="needs_user", receipt__user_action__id__in=["deploy_site","merge_pr","review_draft"])).exclude(action__in=excluded)
     if connection_id:
         due = due.filter(connection_id=connection_id)
     if native_goals_enabled:
-        due = due.exclude(Q(action="cms-goal") & ~Q(connection__organization_id__in=
+        due = due.exclude(Q(action__in=["cms-goal", "cms-setup"]) & ~Q(connection__organization_id__in=
             getattr(settings, "ARTICLES_WEBSITE_GOAL_ENROLLED_ORGANIZATIONS", [])))
     ids = list(due.order_by("next_attempt_at").values_list("id", flat=True)[:limit])
     result = {"status": "completed", "processed": 0, "completed": 0, "pending": 0, "operations": []}
@@ -806,6 +811,15 @@ def process_website_connection_operations(*, limit=20, now=None, connection_id=N
     monitor_cleanup_pull_requests(limit=limit, connection_id=connection_id)
     from .website_wakeups import enabled as event_wakes_enabled
     for identifier in ids:
+        if WebsiteConnectionOperation.objects.filter(pk=identifier, action="cms-setup").exists():
+            from .cms_setup_controller import advance_setup
+            operation = advance_setup(identifier, now=now) if setup_enabled else None
+            if operation is not None:
+                result["processed"] += 1
+                result["pending" if operation.state in {"pending", "running", "needs_user"} else "completed"] += 1
+                if len(result["operations"]) < 20:
+                    result["operations"].append({"id": str(identifier), "action": "cms-setup", "outcome": operation.state})
+            continue
         if WebsiteConnectionOperation.objects.filter(pk=identifier, action="cms-goal").exists():
             from .cms_goal_controller import advance_goal
             operation = advance_goal(identifier, now=now) if native_goals_enabled else None
@@ -814,6 +828,19 @@ def process_website_connection_operations(*, limit=20, now=None, connection_id=N
                 result["pending" if operation.state in {"pending", "running", "needs_user"} else "completed"] += 1
                 if len(result["operations"]) < 20:
                     result["operations"].append({"id": str(identifier), "action": "cms-goal", "outcome": operation.state})
+            continue
+        if WebsiteConnectionOperation.objects.filter(pk=identifier, action=setup_refund_action).exists():
+            # Original unused setup money settles even when execution is off.
+            outcome = advance_setup_refund(identifier, now=now)
+            if outcome is not None:
+                result["processed"] += 1
+                result["pending" if outcome in {"pending", "running"} else "completed"] += 1
+                if len(result["operations"]) < 20:
+                    result["operations"].append({"id": str(identifier), "action": setup_refund_action, "outcome": outcome})
+                row = WebsiteConnectionOperation.objects.filter(pk=identifier, action=setup_refund_action).first()
+                if row and outcome == "completed" and row.payload.get("purge_after_reconciliation"):
+                    from .website_first_article_refunds import finish_purged_connection
+                    finish_purged_connection(row.connection_id)
             continue
         if WebsiteConnectionOperation.objects.filter(pk=identifier, action=native_refund_action).exists():
             # Money already held must settle after CMS execution is disabled.

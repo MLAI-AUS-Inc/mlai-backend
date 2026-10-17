@@ -47,6 +47,9 @@ class CmsSetupAuthorityTests(SimpleTestCase):
                 "company_id": self.binding["company_id"], "requested_by_user_id": str(self.user.pk),
                 "intent_operation_id": str(self.child.pk), "intent_digest": self.intent["digest"], "lease_id": self.lease},
             "receipt": {"status": "discovering"}})
+        from .cms_goal_budget import initial_at, reserve_setup_usage
+        self.parent.receipt["native_budget"] = reserve_setup_usage(initial_at(self.intent["accepted_at"]),
+            started_at=self.intent["accepted_at"], operation_id=self.identifier, active_seconds=180, now=self.now)
         self.dispatch = authority.CmsSetupDispatch(self.identifier, self.lease)
         self.http.reset_mock()
 

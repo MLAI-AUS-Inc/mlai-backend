@@ -18,6 +18,14 @@ from .cms_owner_connection import _request_id
 from .website_contract import WebsiteAuthorityError
 
 
+def original_payload(context, *, binding, policy, user, choice):
+    """Construct private native execution references after actual policy authority."""
+    return {"schema_version": 1, "financial_subject_version": 2, "binding": deepcopy(binding),
+        "credential_operation_id": policy["policy"]["credential_operation_id"], "policy_operation_id": policy["operation_id"],
+        "policy_digest": policy["policy"]["digest"], "company_id": str(context.company.pk), "requested_by_user_id": str(user.pk),
+        "consent": deepcopy(choice), "capture_operation_id": None, "generation_data": None, "source_run_id": None, "failures": 0}
+
+
 def start(context, config, *, user, data, now=None):
     """Accept the current native policy/price once; replay never charges again."""
     if not authority.enabled(context.organization.pk):
@@ -34,6 +42,9 @@ def start(context, config, *, user, data, now=None):
         if (data.get("expected_policy_id") != policy["operation_id"] or data.get("review_policy") != policy["policy"]["review_policy"] or
                 data.get("billing_confirmed") is not True or type(data.get("expected_cost_points")) is not int):
             raise WebsiteAuthorityError("website_prepare_blocked", "Review the current native publication choice and first-article price.", status=422)
+        if config.website_connection.operations.filter(action="cms-setup", generation=binding["generation"],
+                payload__company_id=binding["company_id"]).exists():
+            raise WebsiteAuthorityError("website_prepare_dependency_transient", "The original native article setup is already recorded.", retryable=True)
         key = f"cms-goal:{binding['connection_id']}:{binding['generation']}:{request_id}"
         prior = WebsiteConnectionOperation.objects.filter(idempotency_key=key).first()
         latest = config.website_connection.operations.filter(action=authority.ACTION, generation=binding["generation"]).order_by("-created_at", "-pk").first()
@@ -56,10 +67,8 @@ def start(context, config, *, user, data, now=None):
             raise WebsiteAuthorityError("website_prepare_blocked", "Review the original native first-article price.", status=422) from None
         operation, _created = WebsiteConnectionOperation.objects.get_or_create(idempotency_key=key, defaults={
             "id": identifier, "connection": config.website_connection, "generation": binding["generation"], "action": authority.ACTION,
-            "state": "pending", "next_attempt_at": now, "payload": {"schema_version": 1, "financial_subject_version": 2, "binding": deepcopy(binding),
-                "credential_operation_id": policy["policy"]["credential_operation_id"], "policy_operation_id": policy["operation_id"],
-                "policy_digest": policy["policy"]["digest"], "company_id": str(context.company.pk), "requested_by_user_id": str(user.pk),
-                "consent": choice, "capture_operation_id": None, "generation_data": None, "source_run_id": None, "failures": 0},
+            "state": "pending", "next_attempt_at": now,
+            "payload": original_payload(context, binding=binding, policy=policy, user=user, choice=choice),
             "receipt": {"goal": goal, "native_budget": budget.initial(goal), "status": "starting", "current_step": "capture_existing"}})
         billing.reserve(operation, user=user, now=now)
         return operation

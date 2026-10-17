@@ -32,12 +32,22 @@ def _base(binding, connection):
         "action": {"id": "cms_configure", "label": "Set up articles"}, "milestones": [], "evidence": []}
 
 
+def _budget_projection(selected):
+    from .website_goal import CLASSES
+    used, attempts = (selected or {}).get("budget_used", {}), (selected or {}).get("attempts_by_class", {})
+    return {**{public: number(used.get(private), integer=public in {"modelCalls", "tokens", "builds", "previews"})
+        for public, private in (("activeSeconds", "active_seconds"), ("modelUsd", "model_cost"), ("modelCalls", "model_calls"),
+            ("tokens", "tokens"), ("providerSeconds", "provider_seconds"), ("builds", "builds"), ("previews", "previews"))},
+        "attemptsByClass": {name: number(attempts.get(name), integer=True) for name in CLASSES},
+        "limits": {"wallSeconds": number(settings.ARTICLES_GOAL_WALL_SECONDS), "activeSeconds": number(settings.ARTICLES_GOAL_ACTIVE_SECONDS),
+            "modelUsd": number(settings.ARTICLES_GOAL_MODEL_USD)}}
+
+
 def _doctor(operation, value, selected, milestones, *, original_source, child=None):
     """Export bounded native facts without private policy, request or money IDs."""
     from .website_goal import CLASSES
     try: failure = validate_failure(operation.receipt.get("failure"))
     except ValueError: failure = {}
-    used, attempts = (selected or {}).get("budget_used", {}), (selected or {}).get("attempts_by_class", {})
     checks = []
     for row in milestones:
         proof = row.get("proof")
@@ -59,12 +69,7 @@ def _doctor(operation, value, selected, milestones, *, original_source, child=No
         "checks": checks, "children": [{"runId": original_source["run_id"], "status": child.status}]
             if original_source is not None and child is not None and child.run_id == original_source["run_id"] and child.status in STATES else [],
         "receipts": [], "strategy": None,
-        "budget": {**{public: number(used.get(private), integer=public in {"modelCalls", "tokens", "builds", "previews"})
-            for public, private in (("activeSeconds", "active_seconds"), ("modelUsd", "model_cost"), ("modelCalls", "model_calls"),
-                ("tokens", "tokens"), ("providerSeconds", "provider_seconds"), ("builds", "builds"), ("previews", "previews"))},
-            "attemptsByClass": {name: number(attempts.get(name), integer=True) for name in CLASSES},
-            "limits": {"wallSeconds": number(settings.ARTICLES_GOAL_WALL_SECONDS), "activeSeconds": number(settings.ARTICLES_GOAL_ACTIVE_SECONDS),
-                "modelUsd": number(settings.ARTICLES_GOAL_MODEL_USD)}}}
+        "budget": _budget_projection(selected)}
 
 
 def _review_action(operation, context, config, *, user, publish_mode):
@@ -158,21 +163,25 @@ def for_context(context, config, *, user, now=None):
     try:
         for row in (context.organization, context.company, context.profile, user, config, config.website_connection): row.refresh_from_db()
         binding = validate_current(context, config, config.website_connection, user=user)
-        operation = config.website_connection.operations.filter(action=authority.ACTION, generation=binding["generation"],
+        operation = config.website_connection.operations.filter(action__in=[authority.ACTION, "cms-setup"], generation=binding["generation"],
             payload__company_id=binding["company_id"]).order_by("-created_at", "-pk").first()
         if operation is None:
             from .cms_setup_quote import for_context as setup_quote
             result = _base(binding, config.website_connection)
             quote = setup_quote(context, config, user=user, expected_binding=binding)
             if quote is not None: result["nativeSetup"] = quote
+            else: result.update(action=None, title="Article setup unavailable", message="Article setup is currently unavailable.")
             # A start may have committed while the quote was being read. Show
             # that actual operation instead of offering another setup action.
-            started = config.website_connection.operations.filter(action=authority.ACTION, generation=binding["generation"],
+            started = config.website_connection.operations.filter(action__in=[authority.ACTION, "cms-setup"], generation=binding["generation"],
                 payload__company_id=binding["company_id"]).order_by("-created_at", "-pk").first()
-            if started is not None: return project(started, context, config, user=user, binding=binding, now=now or timezone.now())
+            if started is not None:
+                from .cms_setup_status import project as setup_status
+                return (setup_status if started.action == "cms-setup" else project)(started, context, config, user=user, binding=binding, now=now or timezone.now())
             for row in (context.organization, context.company, context.profile, user, config, config.website_connection): row.refresh_from_db()
             if validate_current(context, config, config.website_connection, user=user) != binding: return None
             return result
-        return project(operation, context, config, user=user, binding=binding, now=now or timezone.now())
+        from .cms_setup_status import project as setup_status
+        return (setup_status if operation.action == "cms-setup" else project)(operation, context, config, user=user, binding=binding, now=now or timezone.now())
     except (WebsiteAuthorityError, ValueError, TypeError, KeyError, AttributeError, RecursionError):
         return None

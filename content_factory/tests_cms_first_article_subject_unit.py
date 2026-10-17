@@ -20,7 +20,7 @@ from .website_contract import WebsiteAuthorityError
 from .website_first_article_billing import request_key, _binding
 
 
-@override_settings(**{**fixtures.CmsGoalBillingTests._overridden_settings, "ARTICLES_CMS_STATUS_ENABLED": True})
+@override_settings(**{**fixtures.CmsGoalBillingTests._overridden_settings, "ARTICLES_CMS_STATUS_ENABLED": True, "ARTICLES_CMS_SETUP_ENABLED": True})
 class CmsFirstArticleSubjectTests(SimpleTestCase):
     configure = fixtures.CmsGoalBillingTests.configure
     reserve = fixtures.CmsGoalBillingTests.reserve

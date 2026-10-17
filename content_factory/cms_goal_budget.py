@@ -1,6 +1,7 @@
 """Native goal accounting uses the common bounded policy without Git proofs."""
 
 from copy import deepcopy
+from uuid import UUID
 
 from . import website_goal_budget as policy
 from . import cms_goal_contract as goals
@@ -8,20 +9,43 @@ from .website_goal import CLASSES
 from .website_contract import WebsiteAuthorityError
 
 FIELDS = {"version", "started_at", "revision", "attempts_by_class", "budget_used", "usage_reports", "owner_wait_completed_seconds"}
-OPTIONAL = {"owner_wait_started_at", "usage_high_water", "missing_usage_run_ids", "usage_invalid", "fingerprint_counts", "failure_policy_occurrences"}
+OPTIONAL = {"owner_wait_started_at", "usage_high_water", "missing_usage_run_ids", "usage_invalid", "fingerprint_counts", "failure_policy_occurrences", "setup_usage"}
 
 
 def initial(goal):
     """Start one independent native budget at the original accepted goal time."""
-    return {"version": 1, "started_at": goal["started_at"], "revision": 0, "attempts_by_class": {name: 0 for name in CLASSES},
+    return initial_at(goal["started_at"])
+
+
+def initial_at(started_at):
+    """Start real preparatory accounting before a native goal or policy exists."""
+    started_at = goals._time(started_at).isoformat()
+    return {"version": 1, "started_at": started_at, "revision": 0, "attempts_by_class": {name: 0 for name in CLASSES},
         "budget_used": {}, "usage_reports": {}, "owner_wait_completed_seconds": 0}
 
 
 def validate(value, goal, *, now):
     """A missing or malformed private budget never grants new model/provider work."""
+    return validate_at(value, started_at=goal["started_at"], operation_id=goal["goal_id"], now=now)
+
+
+def _setup_usage(value, operation_id):
+    usage = value.get("setup_usage")
+    if "setup_usage" in value and usage is None:
+        raise ValueError("Invalid setup usage")
+    if usage is not None and (not isinstance(usage, dict) or set(usage) != {"version", "operation_id", "counter_semantics", "active_seconds", "provider_seconds"} or
+            type(usage["version"]) is not int or usage["version"] != 1 or usage["operation_id"] != operation_id or
+            str(UUID(operation_id)) != operation_id or usage["counter_semantics"] != policy.BOUND_SEMANTICS or
+            any(not policy.numeric(usage[key]) for key in ("active_seconds", "provider_seconds"))):
+        raise ValueError("Invalid setup usage")
+    return usage
+
+
+def validate_at(value, *, started_at, operation_id, now):
+    """Validate the original accepted lifetime without inventing a native goal."""
     try:
         if (not isinstance(value, dict) or not FIELDS <= set(value) or set(value) - FIELDS - OPTIONAL or
-                type(value["version"]) is not int or value["version"] != 1 or value["started_at"] != goal["started_at"] or
+                type(value["version"]) is not int or value["version"] != 1 or value["started_at"] != started_at or
                 type(value["revision"]) is not int or value["revision"] < 0 or
                 not isinstance(value["attempts_by_class"], dict) or set(value["attempts_by_class"]) != set(CLASSES) or
                 any(type(count) is not int or not 0 <= count <= 10**6 for count in value["attempts_by_class"].values()) or
@@ -38,9 +62,54 @@ def validate(value, goal, *, now):
         goals._time(value["started_at"])
         policy.owner_wait_seconds(value, now=now)
         policy._usage_peaks(value, value["usage_reports"])
+        usage = _setup_usage(value, operation_id)
+        if usage is not None and any(value["budget_used"].get(key) is not None and value["budget_used"][key] < usage[key]
+                for key in ("active_seconds", "provider_seconds")):
+            raise ValueError("Setup usage was erased")
         return deepcopy(value)
     except (ValueError, TypeError, KeyError, AttributeError, RecursionError):
         raise WebsiteAuthorityError("website_operation_changed", "The original native articles budget could not be verified.") from None
+
+
+def account_usage(value, report, *, run_id):
+    """Keep real backend setup bounds separate from original CF usage snapshots."""
+    selected = deepcopy(value)
+    metadata = selected.get("setup_usage")
+    setup = _setup_usage(selected, metadata.get("operation_id") if isinstance(metadata, dict) else None)
+    if setup is not None:
+        # The shared meter sums only real CF reports. Remove and then add the
+        # separate backend source once, including on repeated/stale callbacks.
+        for key in ("active_seconds", "provider_seconds"):
+            if selected["budget_used"].get(key) is not None:
+                if selected["budget_used"][key] < setup[key]:
+                    raise ValueError("Setup usage was erased")
+                selected["budget_used"][key] -= setup[key]
+    selected = policy.account_usage(selected, report, run_id=run_id)
+    if setup is not None:
+        for key in ("active_seconds", "provider_seconds"):
+            if selected["budget_used"].get(key) is not None:
+                selected["budget_used"][key] += setup[key]
+    return selected
+
+
+def reserve_setup_usage(value, *, started_at, operation_id, active_seconds=0, provider_seconds=0, now):
+    """Record actual backend lease/read allowances, separately from any CF run.
+
+    These are conservative admission bounds, not claims of measured CPU or
+    network time. A crashed allowance remains spent; a callback cannot reset it.
+    The private setup worker owns the transaction/CAS for each reservation.
+    """
+    result = validate_at(value, started_at=started_at, operation_id=operation_id, now=now)
+    if result["usage_reports"] or any(not policy.numeric(item) for item in (active_seconds, provider_seconds)):
+        raise WebsiteAuthorityError("website_operation_changed", "The original native setup accounting changed.")
+    previous = result.get("setup_usage") or {"version": 1, "operation_id": operation_id, "counter_semantics": policy.BOUND_SEMANTICS,
+        "active_seconds": 0, "provider_seconds": 0}
+    usage = {**previous, "active_seconds": previous["active_seconds"] + active_seconds,
+        "provider_seconds": previous["provider_seconds"] + provider_seconds}
+    result["setup_usage"] = usage
+    result["budget_used"] = {**result["budget_used"], "active_seconds": usage["active_seconds"], "provider_seconds": usage["provider_seconds"]}
+    result["revision"] += 1
+    return validate_at(result, started_at=started_at, operation_id=operation_id, now=now)
 
 
 def exhaustion(operation, *, now, action=None):

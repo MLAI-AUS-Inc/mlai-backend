@@ -12,7 +12,7 @@ from . import tests_cms_goal_start_unit as fixtures
 from .channel_artifact_contract import digest
 
 
-@override_settings(**{**fixtures.CmsGoalStartTests._overridden_settings, "ARTICLES_CMS_STATUS_ENABLED": True})
+@override_settings(**{**fixtures.CmsGoalStartTests._overridden_settings, "ARTICLES_CMS_STATUS_ENABLED": True, "ARTICLES_CMS_SETUP_ENABLED": True})
 class CmsSetupQuoteTests(SimpleTestCase):
     configure = fixtures.CmsGoalStartTests.configure
     reserve = fixtures.CmsGoalStartTests.reserve
