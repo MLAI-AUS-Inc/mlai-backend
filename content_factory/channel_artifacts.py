@@ -163,7 +163,10 @@ def authorize_payload(payload, *, require_outbox=True):
             if (row is None or row.state in {"failed", "cancelled", "refund_pending"} or
                     not isinstance(saved, dict) or saved.get(ENVELOPE) != envelope or
                     _request_identity(saved) != private["request_sha256"] or
-                    any(saved.get(key) != payload.get(key) for key in set(saved) | set(payload) if key.startswith("roo_points_")) or
+                    any(saved.get(key) != payload.get(key) for key in set(saved) | set(payload)
+                        if key.startswith("roo_points_") and key != "roo_points_dispatch_actor_id") or
+                    payload.get("roo_points_dispatch_actor_id", saved.get("roo_points_dispatch_actor_id", row.payload.get("actor_id"))) !=
+                        saved.get("roo_points_dispatch_actor_id", row.payload.get("actor_id")) or
                     saved.get("roo_points_cost", 0) and not saved.get("roo_points_ledger_id")):
                 raise _deny()
         return SimpleNamespace(operation=operation, envelope=envelope, scope=scope)

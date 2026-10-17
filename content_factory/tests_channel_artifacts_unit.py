@@ -155,6 +155,22 @@ class ChannelArtifactTests(SimpleTestCase):
             runs.return_value.filter.return_value.exists.return_value = True
             with self.assertRaises(WebsiteAuthorityError): artifacts.admission_receipt(query)
 
+    def test_provisional_dispatch_actor_must_match_original_outbox_actor_without_changing_payment_identity(self):
+        self.reserve()
+        self.outbox.payload["actor_id"] = "cms-fixture-actor"
+        run = self.artifact_run()
+        run.run_request.update(roo_points_dispatch_actor_id="cms-fixture-actor",
+            portable_dispatch_intent_reserved=True, dispatch_pending_resolution=True)
+        callback = {"workflow": "article_generation", "domain": run.domain, "status": "completed",
+            "current_step": "render_article", "approval_state": "not_required", "run_request": {},
+            "result": {"content_package": {"article_html": "<article><p>Synthetic body</p></article>"}}}
+        self.assertTrue(artifacts.artifact_run_update_allowed(run, callback))
+        for changes in ({"roo_points_dispatch_actor_id": "other-actor"}, {"roo_points_ledger_id": "other-spend"},
+                {"roo_points_billing_user_id": 99}, {"roo_points_cost": 0}):
+            changed = SimpleNamespace(**{**run.__dict__, "run_request": {**run.run_request, **changes}})
+            with self.subTest(changes=changes):
+                self.assertFalse(artifacts.artifact_run_update_allowed(changed, callback))
+
     def test_artifact_callback_allows_content_but_never_worker_approval_or_provider_proof(self):
         self.reserve()
         run = self.artifact_run()
