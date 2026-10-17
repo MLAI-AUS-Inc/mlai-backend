@@ -323,6 +323,25 @@ class CmsArticlePublicationTests(SimpleTestCase):
         self.operation.payload["intent"]["approval_sha256"] = "f" * 64
         with self.assertRaises((WebsiteAuthorityError, CmsApiError)): publishing.current_publication(self.operation)
 
+    @override_settings(ARTICLES_CMS_UNPUBLISH_ENABLED=True)
+    def test_explicit_withdrawal_stops_fresh_live_proof_and_health_repairs_without_erasing_past_publication(self):
+        from .cms_unpublish_start import start
+        for _ in range(3): self.advance()
+        original = deepcopy((self.operation.payload, self.operation.receipt))
+        past = publishing.current_publication(self.operation, fresh=False)
+        self.http.reset_mock(); self.public_get.reset_mock()
+        self.connection.refresh_from_db = Mock()
+        start(self.context, self.config, user=self.user, data={**contract_for(self.connection),
+            "client_request_id": str(uuid4()), "confirmed": True, "publication_operation_id": str(self.operation.pk),
+            "publication_intent_digest": self.operation.payload["intent"]["digest"],
+            "public_url": self.operation.payload["post_state"]["public_url"]})
+        with self.assertRaises(WebsiteAuthorityError): publishing.current_publication(self.operation)
+        self.assertEqual(publishing.current_publication(self.operation, fresh=False)[1:], past[1:])
+        self.assertIs(publishing.request_public_recheck(self.operation, now=self.now + timedelta(minutes=10)), self.operation)
+        self.assertEqual((self.operation.state, self.operation.next_attempt_at), ("completed", None))
+        self.assertEqual((self.operation.payload, self.operation.receipt), original)
+        self.http.assert_not_called(); self.public_get.assert_not_called()
+
     def test_disabled_publication_does_not_read_private_rows_or_call_provider(self):
         with override_settings(ARTICLES_CHANNEL_ARTIFACTS_ENABLED=False), patch.object(WebsiteConnectionOperation.objects, "filter") as rows:
             self.assertIsNone(publishing.advance_publication(self.operation.pk))
@@ -340,6 +359,9 @@ class CmsGhostArticlePublicationTests(SimpleTestCase):
     advance = CmsArticlePublicationTests.advance
 
     def setUp(self): prepare(self)
+
+    def test_ghost_withdrawal_preserves_past_proof_and_fences_live_repairs(self):
+        CmsArticlePublicationTests.test_explicit_withdrawal_stops_fresh_live_proof_and_health_repairs_without_erasing_past_publication(self)
 
     def test_ghost_native_create_confirmation_and_public_proof(self):
         CmsArticlePublicationTests.test_one_create_then_exact_provider_read_and_public_body_proof_complete_the_same_operation(self)

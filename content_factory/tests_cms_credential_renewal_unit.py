@@ -62,6 +62,23 @@ class CmsCredentialRenewalTests(SimpleTestCase):
     def connect(self, **changes):
         return owner.connect(self.context, self.config, user=self.user, data={**self.data, **changes})
 
+    def test_verified_same_key_renewal_wakes_only_original_withdrawal_access_wait_without_resetting_issued_work(self):
+        rows = []
+        for state in ("needs_user", "running", "cancelled"):
+            row = WebsiteConnectionOperation(connection=self.connection, generation=self.connection.generation,
+                action="cms-unpublish", state=state, next_attempt_at=None,
+                payload={"binding": deepcopy(self.binding), "deadline": (self.now + timedelta(minutes=15)).isoformat(),
+                    "provider_reads": 4, "public_reads": 2, "journal": {"phase": "issued", "issue_count": 1, "outcome_unknown": True}},
+                receipt={"status": "withdrawal_access_required", "user_action": {"id": "connect_cms"}})
+            row.save = Mock(); self.saved.append(row); rows.append(row)
+        original = [deepcopy(row.payload) for row in rows]
+        self.connect()
+        self.assertEqual([row.state for row in rows], ["pending", "running", "cancelled"])
+        self.assertIsNotNone(rows[0].next_attempt_at)
+        self.assertEqual([row.payload for row in rows], original)
+        self.assertIsNone(rows[1].next_attempt_at); self.assertIsNone(rows[2].next_attempt_at)
+        self.spend.assert_called_once()
+
     def test_same_native_principal_renews_original_key_without_replacing_paid_source_or_choices(self):
         original = deepcopy((self.config.article_system, self.goal_operation.payload, self.goal_operation.receipt,
             self.run.run_request, self.outbox.payload, self.connection.configuration_version))

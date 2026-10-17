@@ -1654,21 +1654,71 @@ class WebsiteReviewRegressionTests(WebsiteDatabaseFixture, TestCase):
                     self.assertEqual(historical_status['publicUrl'], current_status['publicUrl'])
                     self.assertEqual(historical_status['doctor']['checks'], current_status['doctor']['checks'])
                     read_get.assert_not_called(); read_post.assert_not_called()
+                # A fresh goal may collect the live source before the owner's
+                # withdrawal. The later historical checklist cannot grant this
+                # same fresh proof after the public article is removed.
+                native_scope, _policy = cms_goal_evidence.current_scope(context, self.config, user=user)
+                native_goal = cms_goal_contract.new_goal(str(uuid.uuid4()), native_scope, now=timezone.now())
+                native_proofs, native_source, references = cms_goal_evidence.collect(native_goal, context, self.config,
+                    user=user, run=synced, artifact_operation_id=str(artifact_operation.pk), now=timezone.now())
+                self.assertEqual(set(native_proofs), set(cms_goal_contract.KINDS))
+                native_goal = cms_goal_contract.bind_source(native_goal, native_source, expected_scope=native_scope, now=timezone.now())
+                native_goal = cms_goal_contract.refresh(native_goal, native_proofs, expected_scope=native_scope, now=timezone.now())
+                self.assertTrue(cms_goal_contract.complete(native_goal, expected_scope=native_scope, now=timezone.now()))
+                self.assertEqual(references['first_article_live'], str(publication.pk))
+                self.assertNotIn('source_sha', json.dumps(native_goal))
+                from . import cms_unpublish_start, cms_unpublish_controller, cms_unpublish_status
+                from .cms_api_transport import CmsApiError
+                withdrawal_data = {**contract_for(website), 'client_request_id': str(uuid.uuid4()), 'confirmed': True,
+                    'publication_operation_id': str(publication.pk), 'publication_intent_digest': publication.payload['intent']['digest'],
+                    'public_url': publication.payload['post_state']['public_url']}
+                with override_settings(ARTICLES_CMS_UNPUBLISH_ENABLED=True):
+                    withdrawal = cms_unpublish_start.start(context, self.config, user=user, data=withdrawal_data)
+                    self.assertEqual(cms_unpublish_status.packet(context, self.config, user=user,
+                        request_id=withdrawal_data['client_request_id'])['cmsWithdrawal']['operationId'], str(withdrawal.pk))
+                    def status_only(binding, credential, **effect):
+                        self.assertTrue(all(getattr(block, '_from_testcase', False) for block in transaction.get_connection().atomic_blocks))
+                        self.assertEqual(effect['identifier'], publication.payload['post_state']['provider_id'])
+                        if effect['method'] == 'POST':
+                            self.assertEqual(effect['payload'], {'status': 'draft'})
+                            saved = website.operations.get(pk=withdrawal.pk)
+                            self.assertEqual((saved.payload['journal']['phase'], saved.payload['journal']['issue_count']), ('issued', 1))
+                            posted[0]['status'] = 'draft'
+                            raise CmsApiError('transient')  # write committed; reply lost
+                        self.assertEqual(effect['method'], 'GET')
+                        return posted[0], {}
+                    def absent(*args, **kwargs):
+                        self.assertTrue(all(getattr(block, '_from_testcase', False) for block in transaction.get_connection().atomic_blocks))
+                        return 404
+                    with patch.object(cms_unpublish_controller, 'request_json', side_effect=status_only) as status_io, \
+                            patch.object(cms_unpublish_controller.public, 'fetch_absence', side_effect=absent) as absent_io:
+                        withdrawal = cms_unpublish_controller.advance(withdrawal.pk)
+                        self.assertEqual((withdrawal.state, withdrawal.payload['journal']['phase']), ('pending', 'issued'))
+                        withdrawal = cms_unpublish_controller.advance(withdrawal.pk, now=withdrawal.next_attempt_at + timedelta(seconds=1))
+                    self.assertEqual((withdrawal.state, withdrawal.receipt['status']), ('completed', 'article_withdrawn'))
+                    self.assertEqual([call.kwargs['method'] for call in status_io.call_args_list], ['GET', 'POST', 'GET'])
+                    absent_io.assert_called_once()
+                    managed_native.refresh_from_db()
+                    self.assertEqual(managed_native.receipt['publication_achievement'], recorded)
+                    self.assertEqual(Ledger.objects.filter(idempotency_key='content_factory:charge:' + managed_key).count(), 1)
+                    self.assertFalse(Ledger.objects.filter(idempotency_key='content_factory:refund:' + managed_key).exists())
+                    with override_settings(ARTICLES_CMS_STATUS_ENABLED=True):
+                        withdrawn_status = cms_goal_status.project(managed_native, context, self.config, user=user,
+                            binding=managed_native.payload['binding'], now=timezone.now())
+                    self.assertEqual((withdrawn_status['state'], withdrawn_status['title']), ('done', 'Article unpublished'))
+                    self.assertNotIn('publicUrl', withdrawn_status)
+                    self.assertNotIn('cms-unpublish', json.dumps(summary_for(self.config, company_id=company.pk)))
                 original_query = {'billing_request_id': managed_key, 'artifact_operation_id': str(artifact_operation.pk),
                     'envelope_digest': artifact_payload['publishing_channel_artifact']['digest'], 'domain': self.org.domain}
                 with override_settings(ARTICLES_CMS_GOALS_ENABLED=False):
                     self.assertTrue(channel_artifacts.artifact_read_receipt(original_query)['allowed'])
                     with self.assertRaises(WebsiteAuthorityError): channel_artifacts.admission_receipt(original_query)
-            native_scope, _policy = cms_goal_evidence.current_scope(context, self.config, user=user)
-            native_goal = cms_goal_contract.new_goal(str(uuid.uuid4()), native_scope, now=timezone.now())
-            native_proofs, native_source, references = cms_goal_evidence.collect(native_goal, context, self.config,
-                user=user, run=synced, artifact_operation_id=str(artifact_operation.pk), now=timezone.now())
-            self.assertEqual(set(native_proofs), set(cms_goal_contract.KINDS))
-            native_goal = cms_goal_contract.bind_source(native_goal, native_source, expected_scope=native_scope, now=timezone.now())
-            native_goal = cms_goal_contract.refresh(native_goal, native_proofs, expected_scope=native_scope, now=timezone.now())
-            self.assertTrue(cms_goal_contract.complete(native_goal, expected_scope=native_scope, now=timezone.now()))
-            self.assertEqual(references['first_article_live'], str(publication.pk))
-            self.assertNotIn('source_sha', json.dumps(native_goal))
+            # The accepted withdrawal must fence even a still-fresh old live
+            # receipt. Historical achievement was checked separately above.
+            fresh_after_withdrawal = cms_goal_contract.new_goal(str(uuid.uuid4()), native_scope, now=timezone.now())
+            with self.assertRaises(WebsiteAuthorityError):
+                cms_goal_evidence.collect(fresh_after_withdrawal, context, self.config, user=user,
+                    run=synced, artifact_operation_id=str(artifact_operation.pk), now=timezone.now())
             # Exercise native financial rows on disposable CI only. The ledger
             # is synthetic; no wallet debit, model job or actual refund service
             # runs. An unused held article must survive revocation and settle.
@@ -1766,6 +1816,8 @@ class WebsiteReviewRegressionTests(WebsiteDatabaseFixture, TestCase):
             self.assertEqual((approval.state, approval.payload), ('deleted', {}))
             publication.refresh_from_db()
             self.assertEqual((publication.state, publication.payload), ('deleted', {}))
+            withdrawal.refresh_from_db()
+            self.assertEqual((withdrawal.state, withdrawal.payload), ('deleted', {}))
             verified = website.operations.get(action='cms-credential-renewal')
             self.assertEqual((verified.state, verified.payload), ('deleted', {}))
             if initial:

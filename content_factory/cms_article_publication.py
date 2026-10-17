@@ -149,6 +149,9 @@ def current_publication(operation, *, now=None, fresh=True):
     scope = _current(operation, fresh_media=fresh)
     if operation.state != "completed":
         raise _deny()
+    if fresh:
+        from .cms_unpublish_authority import requested
+        if requested(operation): raise _deny()
     try:
         observation = operation.payload["public_observation"]
         # Historical status may retain a once-verified result. Milestone consumers
@@ -172,6 +175,8 @@ def request_public_recheck(operation, *, now=None):
         Organization.objects.select_for_update().get(pk=source.run.organization_id)
         saved = WebsiteConnectionOperation.objects.select_for_update().filter(pk=operation.pk, action=ACTION).first()
         scope = _current(saved)
+        from .cms_unpublish_authority import requested
+        if requested(saved): return saved
         if saved.state in {"pending", "running"}:
             return saved
         # Validate the exact saved receipt at its original observation time

@@ -160,6 +160,8 @@ def project(operation, context, config, *, user, binding, now):
             nextAttemptAt=operation.next_attempt_at.isoformat())
     if result["state"] == "stopped":
         result.update(title="Article setup needs attention", message="Review the recorded articles goal details.")
+    from .cms_unpublish_status import apply as withdrawal_progress
+    withdrawal_progress(result, operation, context, config, user=user)
     from .cms_access_status import apply as access_progress
     access_progress(result, operation)
     if getattr(settings, "ARTICLES_WEBSITE_DOCTOR_ENABLED", False):

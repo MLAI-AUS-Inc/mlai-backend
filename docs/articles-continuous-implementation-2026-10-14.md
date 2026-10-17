@@ -808,3 +808,13 @@ key proposal. The 1,492 database-free journey cases, 846 failure emissions and
 [the intake notes](articles-e5-cms-initial-intake-2026-10-18.md). Real remote CI
 and the initial owner interface remain separate acceptance evidence; flags stay
 off and no live site success rate is claimed.
+
+
+18 October: the explicit CMS withdrawal backend now accepts one current-owner
+confirmation and recovers the actual nonce without replaying a provider write.
+Its fixed original post ID, status-only update, expiring private lease, durable
+read limits and separate exact-URL absence proof survive lost replies. Current
+status removes the live link while retaining the earlier publication checklist;
+no new charge, credit or model admission is made. The dedicated rollout flag
+remains false. See [the withdrawal notes](articles-e5-cms-withdrawal-2026-10-18.md)
+for validation and the remaining owner UI / real provider acceptance work.

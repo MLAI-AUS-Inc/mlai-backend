@@ -132,5 +132,12 @@ def current(job, *, lease_id=None, user=None, now=None):
             job.next_attempt_at is None or job.next_attempt_at <= now)):
         raise _deny()
     value = owner_scope(job, user=user, now=now)
+    # Original payment row locks may have waited longer than the private
+    # worker lease. Do not open a proposal admitted by the earlier clock.
+    checked = timezone.now()
+    if (contract.goals._time(value.intent["expires_at"]) <= checked or
+            lease_id is not None and (job.state != "running" or job.payload.get("lease_id") != lease_id or
+                job.next_attempt_at is None or job.next_attempt_at <= checked)):
+        raise _deny()
     credential = open_credential(job.payload["sealed_credential"], binding=value.intent["binding"])
     return SimpleNamespace(**value.__dict__, credential=credential)

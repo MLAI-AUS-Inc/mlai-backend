@@ -166,12 +166,16 @@ class WebsiteConnectionActionView(APIView):
     def get(self, request, action):
         """Read the original owner's CMS access destination without key export."""
         headers = {"Cache-Control": "private, no-store"}
-        if action not in {"cms-access", "cms-initial"}:
+        if action not in {"cms-access", "cms-initial", "cms-unpublish"}:
             return Response({"detail": "Unknown website read."}, status=404, headers=headers)
         context, config, error = _context(request)
         if error:
             return error
         try:
+            if action == "cms-unpublish":
+                from .cms_unpublish_status import packet
+                return Response(packet(context, config, user=request.user, publication_id=request.query_params.get("publication_operation_id"),
+                    request_id=request.query_params.get("client_request_id")), headers=headers)
             if action == "cms-initial":
                 from .cms_initial_status import packet
                 return Response(packet(context, config, user=request.user, operation_id=request.query_params.get("operation_id"),
@@ -188,7 +192,7 @@ class WebsiteConnectionActionView(APIView):
             return Response(exc.as_dict(), status=exc.status, headers=headers)
 
     def post(self, request, action):
-        if action not in {"prepare", "pause", "disconnect", "reconnect", "reset", "cleanup", "purge", "cancel-operation", "reconcile", "verify-access", "verify", "custom-contract", "ci-attestation", "github-revoke", "verify-cleanup", "inspect-channel", "select-channel", "cms-connect", "cms-restore-access", "cms-onboarding-quote", "cms-connect-and-setup", "cms-restore-initial", "cms-configure", "cms-start-articles", "cms-setup-articles", "cms-review-article", "cms-approve-article", "capture-existing"}:
+        if action not in {"prepare", "pause", "disconnect", "reconnect", "reset", "cleanup", "purge", "cancel-operation", "reconcile", "verify-access", "verify", "custom-contract", "ci-attestation", "github-revoke", "verify-cleanup", "inspect-channel", "select-channel", "cms-connect", "cms-restore-access", "cms-onboarding-quote", "cms-connect-and-setup", "cms-restore-initial", "cms-configure", "cms-start-articles", "cms-setup-articles", "cms-unpublish", "cms-review-article", "cms-approve-article", "capture-existing"}:
             return Response({"code": "invalid_connection_action", "detail": "Unknown website action."}, status=400)
         context, config, error = _context(request)
         if error:
@@ -205,6 +209,12 @@ class WebsiteConnectionActionView(APIView):
                 operation = (start if action == "cms-connect-and-setup" else restore)(context, config, user=request.user, data=dict(request.data))
                 return Response({"accepted": True, "operationId": str(operation.pk), **packet(context, config, user=request.user, operation_id=str(operation.pk))},
                     status=202, headers={"Cache-Control": "private, no-store"})
+            if action == "cms-unpublish":
+                from .cms_unpublish_start import start
+                from .cms_unpublish_status import packet
+                job = start(context, config, user=request.user, data=dict(request.data))
+                return Response({"accepted": True, **packet(context, config, user=request.user, request_id=job.payload["intent"]["request_id"])},
+                    status=202 if job.state in {"pending", "running"} else 200, headers={"Cache-Control": "private, no-store"})
             if action == "cms-restore-access":
                 from .cms_access_start import start
                 from .cms_access_status import projection
@@ -388,7 +398,7 @@ class WebsiteConnectionOperationView(APIView):
         from .website_models import WebsiteConnectionOperation
         from .website_operations import operation_summary
         operation = WebsiteConnectionOperation.objects.filter(pk=operation_id, connection__organization=context.organization).first()
-        if operation is None or operation.action in {"goal-usage", "goal-alert", "usage-refresh", "channel-credential", "cms-artifact", "cms-review", "cms-media", "cms-stage", "cms-policy", "cms-approval", "cms-publish", "cms-goal", "cms-goal-refund", "cms-setup", "cms-setup-intent", "cms-setup-refund", "cms-credential-renewal", "cms-initial-connect", "cms-initial-grant"}:
+        if operation is None or operation.action in {"goal-usage", "goal-alert", "usage-refresh", "channel-credential", "cms-artifact", "cms-review", "cms-media", "cms-stage", "cms-policy", "cms-approval", "cms-publish", "cms-unpublish", "cms-goal", "cms-goal-refund", "cms-setup", "cms-setup-intent", "cms-setup-refund", "cms-credential-renewal", "cms-initial-connect", "cms-initial-grant"}:
             return Response({"detail": "Operation not found."}, status=404)
         return Response({"operation": operation_summary(operation)})
 

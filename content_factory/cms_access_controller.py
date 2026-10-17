@@ -82,9 +82,14 @@ def _expire(job, *, now):
 def _guard(dispatch):
     from .website_models import WebsiteConnectionOperation
     if not isinstance(dispatch, authority.CmsAccessDispatch): raise authority._deny()
-    job = WebsiteConnectionOperation.objects.filter(pk=dispatch.operation_id, action=authority.ACTION).first()
-    if job is None: raise authority._deny()
-    return authority.current(job, lease_id=dispatch.lease_id)
+    candidate = WebsiteConnectionOperation.objects.filter(pk=dispatch.operation_id, action=authority.ACTION).first()
+    if candidate is None: raise authority._deny()
+    from organizations.models import Organization
+    with transaction.atomic():
+        Organization.objects.select_for_update().get(pk=candidate.connection.organization_id)
+        job = WebsiteConnectionOperation.objects.select_for_update().filter(pk=dispatch.operation_id, action=authority.ACTION).first()
+        if job is None: raise authority._deny()
+        return authority.current(job, lease_id=dispatch.lease_id)
 
 
 def _read(dispatch, binding, credential, **options):
