@@ -15,7 +15,7 @@ NEXT_ACTION_LABELS = {"verify-access": "Check GitHub access", "scan": "Scan repo
     "ci-attestation": "Recheck verification", "verify": "Verify website"}
 # Cleanup, re-verification and dispatch follow-ups run in the background and can
 # stay queued for days. None of them is the owner's current website operation.
-BACKGROUND_OPERATION_ACTIONS = ("cancel-operation", "source-reverify", "worker_followup", "superseded-setup-cleanup", "channel-credential", "cms-artifact", "cms-review", "cms-media", "cms-stage", "cms-policy", "cms-approval", "cms-publish", "cms-goal", "cms-goal-refund")
+BACKGROUND_OPERATION_ACTIONS = ("cancel-operation", "source-reverify", "worker_followup", "superseded-setup-cleanup", "channel-credential", "cms-artifact", "cms-review", "cms-media", "cms-stage", "cms-policy", "cms-approval", "cms-publish", "cms-goal", "cms-goal-refund", "cms-setup", "cms-setup-intent")
 
 
 def fact(complete=False, *, code="", reason="", status=None, verified_at=None, operation=None):
