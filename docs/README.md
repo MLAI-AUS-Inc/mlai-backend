@@ -12,6 +12,7 @@ subsystem-specific contracts and runbooks.
 
 - [Runtime and dependency contract](backend-runtime.md)
 - [G4 worker memory profile](articles-g4-worker-memory-profile-2026-10-18.md) — default-off process samples and disposable Gunicorn lifecycle acceptance; sustained application measurements and tuning pending
+- [F2/G4 bootstrap run lifetime](articles-f2-bootstrap-run-lifetime-2026-10-18.md) — release request-owned reverse-prefetch cycles after current projections; CI application peak fell from about 2.8 GiB to 339 MiB per worker
 - [Feature lifecycle register](feature-lifecycle.md)
 - [14 September refactor audit](backend-refactor-audit-2026-09-14.md)
 - [Refactor implementation status](backend-refactor-implementation-2026-09-14.md)

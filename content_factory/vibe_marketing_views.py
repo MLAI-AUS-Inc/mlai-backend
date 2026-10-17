@@ -1603,7 +1603,7 @@ def _latest_runs_for_org(organization, limit=24, *, config=None, prefetch_feedba
         rows = rows.filter(~Q(workflow__in=REPOSITORY_WORKFLOWS)
             | Q(run_request__website_connection_id=str(connection.pk), run_request__connection_generation=connection.generation)
             | Q(run_request__delivery_mode="content_only", run_request__website_connection_id__isnull=True))
-    rows = rows.prefetch_related("steps").order_by("-updated_at")
+    rows = rows.order_by("-updated_at")
     candidates = list(rows[:max(limit * 4, 48)])
     # Current setup and scan observations must survive a busy article history.
     # Select them before applying the ordinary recent-run display window.
@@ -1616,8 +1616,11 @@ def _latest_runs_for_org(organization, limit=24, *, config=None, prefetch_feedba
     retained_ids = {run.run_id for run in retained}
     ordinary = [run for run in candidates if run.run_id not in retained_ids and not article_setup_reset_ignores_run(config, run)]
     selected_runs = sorted(retained + ordinary[:max(limit - len(retained), 0)], key=lambda run: run.updated_at, reverse=True)
+    # Prefetch only the final display window. Discarded candidates must not
+    # acquire reverse-relation cycles that retain their large result JSON.
+    from django.db.models import Prefetch, prefetch_related_objects
+    prefetch_related_objects(selected_runs, "steps")
     if prefetch_feedback:
-        from django.db.models import Prefetch, prefetch_related_objects
         prefetch_related_objects(selected_runs, Prefetch("component_comments", to_attr="_bootstrap_component_comments"))
     return selected_runs
 
@@ -11613,22 +11616,26 @@ def _serialize_bootstrap(context, request=None, *, view="summary"):
             payload = None
 
     runs = _latest_runs_for_org(context.organization, config=config, prefetch_feedback=payload is None)
-    capabilities = None
-    if payload is None:
-        payload = _compute_bootstrap_payload(context, request=request, view=view, config=config, latest_runs=runs)
-        capabilities = payload.get("articleCapabilities")
-        if cache_key is not None:
-            try:
-                cache.set(cache_key, payload, ttl)
-            except Exception:
-                logger.exception(
-                    "vibe_bootstrap_cache_set_failed org_id=%s",
-                    getattr(context.organization, "id", None),
-                )
+    try:
+        capabilities = None
+        if payload is None:
+            payload = _compute_bootstrap_payload(context, request=request, view=view, config=config, latest_runs=runs)
+            capabilities = payload.get("articleCapabilities")
+            if cache_key is not None:
+                try:
+                    cache.set(cache_key, payload, ttl)
+                except Exception:
+                    logger.exception(
+                        "vibe_bootstrap_cache_set_failed org_id=%s",
+                        getattr(context.organization, "id", None),
+                    )
 
-    # Per-user / per-request fields are always recomputed; never served from cache.
-    return _overlay_live_bootstrap_fields(payload, context=context, request=request, config=config,
-        latest_runs=runs, capabilities=capabilities)
+        # Per-user / per-request fields are always recomputed; never served from cache.
+        return _overlay_live_bootstrap_fields(payload, context=context, request=request, config=config,
+            latest_runs=runs, capabilities=capabilities)
+    finally:
+        from .bootstrap_run_lifetime import release_projection_runs
+        release_projection_runs(runs)
 
 
 _BOOTSTRAP_WORKFLOW_RUN_FIELDS = (
