@@ -10,6 +10,7 @@ from . import cms_goal_budget as budget
 from . import cms_goal_contract as goals
 from . import cms_goal_dispatch as dispatch
 from . import cms_goal_evidence as evidence
+from . import cms_goal_achievement as achievement
 from .cms_connection_authority import validate_current
 from .website_contract import WebsiteAuthorityError
 from .website_doctor import safe_code, safe_identifier, number, STATES
@@ -106,21 +107,26 @@ def project(operation, context, config, *, user, binding, now):
         result.update(title="Article setup needs attention", message="The saved articles goal needs verification.")
         return result
     current, references, original_source, allowed, actual = value.goal, {}, None, False, None
+    achieved, proof_at = None, now
     try:
         authority.current(operation, user=user, states={operation.state})
         allowed = True
         original = dispatch.original_dispatch(operation)
         run = dispatch.original_run(operation, original) if original is not None else None
         actual = run if run is not None and isinstance(run.result, dict) and type(run.result.get("generation")) is int and run.run_id != original.client_request_id else None
-        proofs, original_source, references = evidence.collect(current, context, config, user=user, run=actual,
-            artifact_operation_id=original.payload["request"]["publishing_channel_artifact"]["artifact_operation_id"] if original is not None else None,
-            capture_operation_id=operation.payload["capture_operation_id"], now=now)
-        if original_source is not None: current = goals.bind_source(current, original_source, expected_scope=value.scope, now=now)
-        current = goals.refresh(current, proofs, expected_scope=value.scope, now=now)
+        if operation.state == "completed" and "publication_achievement" in operation.receipt:
+            achieved = achievement.read(operation, user=user, now=now)
+            current, proof_at, original_source = achieved["goal"], achieved["completed_at"], achieved["goal"]["source"]
+        else:
+            proofs, original_source, references = evidence.collect(current, context, config, user=user, run=actual,
+                artifact_operation_id=original.payload["request"]["publishing_channel_artifact"]["artifact_operation_id"] if original is not None else None,
+                capture_operation_id=operation.payload["capture_operation_id"], now=now)
+            if original_source is not None: current = goals.bind_source(current, original_source, expected_scope=value.scope, now=now)
+            current = goals.refresh(current, proofs, expected_scope=value.scope, now=now)
     except (WebsiteAuthorityError, ValueError, TypeError, KeyError, AttributeError, RecursionError):
         current = goals.refresh(current, {}, expected_scope=value.scope, now=now)
     milestones = [{"name": row["name"], "state": "passed" if goals.valid_proof(row["name"], row["proof"],
-        expected_scope=value.scope, original_source=current["source"], now=now) else "pending" if row["required"] else "not_required",
+        expected_scope=value.scope, original_source=current["source"], now=proof_at) else "pending" if row["required"] else "not_required",
         "required": row["required"], "proof": deepcopy(row["proof"])} for row in current["milestones"]]
     for row in milestones:
         if row["state"] != "passed": row["proof"] = None
@@ -128,7 +134,12 @@ def project(operation, context, config, *, user, binding, now):
         step=next((row["name"] for row in milestones if row["required"] and row["state"] != "passed"), None),
         evidence=[{"id": "milestone:" + row["name"], "result": "passed" if row["state"] in {"passed", "not_required"} else "pending",
             "at": row["proof"]["at"] if row["proof"] else None, "message": row["name"].replace("_", " ")} for row in milestones])
-    if operation.state == "completed" and allowed and goals.complete(current, expected_scope=value.scope, now=now):
+    if achieved is not None:
+        public_url = _public_url(achieved["public_url"], binding, achieved["provider_id"])
+        if public_url is not None:
+            result.update(state="done", title="First article published", message="Your first article was published. The checklist records the completed setup.",
+                action=None, publicUrl=public_url, publishedAt=achieved["published_at"])
+    elif operation.state == "completed" and allowed and goals.complete(current, expected_scope=value.scope, now=now):
         row = WebsiteConnectionOperation.objects.filter(pk=references.get("first_article_live"), action="cms-publish", state="completed",
             connection_id=operation.connection_id, generation=operation.generation).first()
         public_url = _public_url(row.receipt.get("publicUrl") if row is not None else None, binding,

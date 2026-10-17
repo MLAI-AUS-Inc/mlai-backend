@@ -23,6 +23,8 @@ subsystem-specific contracts and runbooks.
 
 ## Content Factory
 
+- [E5 recorded first publication](articles-e5-cms-publication-achievement-2026-10-17.md) — immutable original publication fact, separate from expiring live health and new-work permission
+
 - [E5 durable native setup coordinator](articles-e5-cms-setup-coordinator-2026-10-17.md) — one accepted hold through discovery, original-policy recovery, same-operation native goal and private settlement
 
 - [E5 preparatory setup authority](articles-e5-cms-setup-authority-2026-10-17.md) — private original intent, expiring discovery lease and lost-acknowledgement policy replay

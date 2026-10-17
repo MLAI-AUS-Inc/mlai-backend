@@ -1508,6 +1508,14 @@ class WebsiteReviewRegressionTests(WebsiteDatabaseFixture, TestCase):
                         {'name': 'merged', 'state': 'not_required', 'required': False})
                     self.assertIsNone(current_status['doctor']['observedSourceSha'])
                     self.assertEqual(current_status['doctor']['nativeSource']['generation'], 1)
+                    from . import cms_goal_status
+                    recorded = managed_native.receipt['publication_achievement']
+                    historical_status = cms_goal_status.project(managed_native, context, self.config, user=user,
+                        binding=managed_native.payload['binding'], now=timezone.now() + timedelta(days=30))
+                    self.assertEqual((historical_status['state'], historical_status['title']), ('done', 'First article published'))
+                    self.assertEqual(historical_status['publishedAt'], recorded['observation']['checked_at'])
+                    self.assertEqual(historical_status['publicUrl'], current_status['publicUrl'])
+                    self.assertEqual(historical_status['doctor']['checks'], current_status['doctor']['checks'])
                     read_get.assert_not_called(); read_post.assert_not_called()
                 original_query = {'billing_request_id': managed_key, 'artifact_operation_id': str(artifact_operation.pk),
                     'envelope_digest': artifact_payload['publishing_channel_artifact']['digest'], 'domain': self.org.domain}

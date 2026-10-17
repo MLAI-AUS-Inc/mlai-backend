@@ -153,11 +153,13 @@ class CmsGoalControllerTests(SimpleTestCase):
         publication = SimpleNamespace(pk=uuid4(), state="completed")
         with patch.object(controller, "_pipeline", return_value={controller.publications.ACTION: publication}), \
                 patch.object(controller.evidence, "collect", side_effect=read), \
-                patch.object(controller.publications, "current_publication", return_value=(None, None, None,
-                    {"public_url": "https://fixture.test/original-article/"})):
+                patch.object(controller.achievement, "capture", return_value={
+                    "observation": {"public_url": "https://fixture.test/original-article/"}}) as record:
             self.advance()
         self.assertEqual((self.goal_operation.state, self.goal_operation.receipt["status"]), ("completed", "first_article_live"))
         self.assertEqual(self.goal_operation.receipt["public_url"], "https://fixture.test/original-article/")
+        self.assertEqual(self.goal_operation.receipt["publication_achievement"], record.return_value)
+        self.assertIs(record.call_args.args[1], publication)
         self.spend.assert_called_once()
 
     def test_original_capture_is_required_even_when_another_capture_has_complete_inventory(self):
