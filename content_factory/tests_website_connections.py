@@ -1193,7 +1193,8 @@ class WebsiteSourceFenceTests(WebsiteDatabaseFixture, TestCase):
 
 
 class WebsiteReviewRegressionTests(WebsiteDatabaseFixture, TestCase):
-    @override_settings(ARTICLES_CHANNEL_DISCOVERY_ENABLED=True, ARTICLES_PUBLISHING_CHANNELS_ENABLED=True, ARTICLES_CMS_CHANNEL_ENABLED=True)
+    @override_settings(ARTICLES_CHANNEL_DISCOVERY_ENABLED=True, ARTICLES_PUBLISHING_CHANNELS_ENABLED=True,
+        ARTICLES_CMS_CHANNEL_ENABLED=True, ARTICLES_CHANNEL_ARTIFACTS_ENABLED=True)
     def test_cms_owner_connect_persists_private_key_and_disconnect_erases_every_generation(self):
         """Actual connect/replay/revoke persistence runs on disposable remote CI."""
         import json
