@@ -108,7 +108,19 @@ def _ghost_call(method, path, payload=None, cookie=None):
         for key, value in response.getheaders():
             if key.lower() == "set-cookie":
                 cookies.load(value)
-        return json.loads(raw) if raw else {}, "; ".join(f"{key}={value.value}" for key, value in cookies.items())
+        cookie_header = "; ".join(f"{key}={value.value}" for key, value in cookies.items())
+        # Ghost's session middleware can acknowledge with a plain "Created"
+        # body. Its cookie establishes this bootstrap session, not JSON content.
+        if path == "session/":
+            if not cookie_header:
+                raise FixtureFailure("Ghost fixture session did not return a cookie")
+            return {}, cookie_header
+        try:
+            value = json.loads(raw) if raw.strip() else {}
+        except (ValueError, UnicodeError):
+            stage = {"authentication/setup/": "setup", "integrations/?include=api_keys": "integration"}[path]
+            raise FixtureFailure(f"Ghost fixture {stage} did not return JSON") from None
+        return value, cookie_header
     finally:
         client.close()
 
@@ -119,7 +131,7 @@ def bootstrap(provider):
     password = secrets.token_urlsafe(40)
     if provider == "wordpress":
         base = ["docker", "compose", "-p", "mlai-cms-provider", "-f", str(ROOT / "ops/cms-provider-ci/compose.yml"),
-            "run", "--rm", "-T", "wpcli"]
+            "run", "--rm", "-T", "wpcli", "wp"]
 
         def wp(*args):
             result = subprocess.run([*base, *args], capture_output=True, timeout=120)

@@ -63,6 +63,14 @@ off access logs. It supplies no arbitrary forwarding destination. See Docker's
 and [port publishing](https://docs.docker.com/engine/network/port-publishing/).
 Actual acceptance still requires the repaired remote matrix to pass.
 
+The gateway repaired both readiness checks. The next remote run reached
+bootstrap and exposed two harness protocol errors: Compose replaced the CLI
+image's default command, so it needs an explicit `wp` executable; Ghost's
+successful session acknowledgement can contain plain `Created` rather than
+JSON. The bootstrap now invokes `wp` and accepts the session only from a
+successful response with an actual cookie, without parsing its acknowledgement
+body. Regressions cover both cases without Docker or a network request.
+
 Final local validation passes 109 database-free fixture/assignment/validation
 route and CMS contract cases. Python syntax and the workflow/Compose YAML parse;
 all 595 test modules are assigned. Isolation assertions check pinned images,

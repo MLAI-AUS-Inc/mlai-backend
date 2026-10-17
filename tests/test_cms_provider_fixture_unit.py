@@ -104,3 +104,28 @@ class CmsProviderFixtureTests(unittest.TestCase):
             self.assertTrue(secret not in output.getvalue())
             self.assertTrue("synthetic-session" not in output.getvalue())
             self.assertEqual(fixture.fixture_path("ghost").stat().st_mode & 0o777, 0o600)
+
+    @patch.object(fixture.http.client, "HTTPConnection")
+    def test_ghost_session_plain_created_body_uses_cookie_without_json_decoding(self, http):
+        response = http.return_value.getresponse.return_value
+        response.status = 201
+        response.read.return_value = b"Created"
+        response.getheaders.return_value = [("Set-Cookie", "ghost-admin-api-session=synthetic-fixture-session; Secure; HttpOnly")]
+        value, cookie = fixture._ghost_call("POST", "session/", {"username": "fixture@example.test", "password": "synthetic"})
+        self.assertEqual(value, {})
+        self.assertTrue(cookie.startswith("ghost-admin-api-session="))
+        http.return_value.close.assert_called_once()
+
+    def test_wordpress_bootstrap_explicitly_invokes_wp_in_the_cli_image(self):
+        from contextlib import redirect_stdout
+        from io import StringIO
+        from types import SimpleNamespace
+        with tempfile.TemporaryDirectory() as directory, patch.dict(os.environ,
+                {"GITHUB_ACTIONS": "true", "GITHUB_REPOSITORY": "MLAI-AUS-Inc/mlai-backend", "RUNNER_TEMP": directory}, clear=True):
+            replies = [SimpleNamespace(returncode=0, stdout=b""), SimpleNamespace(returncode=0, stdout=b""),
+                SimpleNamespace(returncode=0, stdout=b"synthetic-application-password")]
+            with patch.object(fixture.subprocess, "run", side_effect=replies) as run, redirect_stdout(StringIO()):
+                fixture.bootstrap("wordpress")
+            command = run.call_args_list[0].args[0]
+            self.assertEqual(command[command.index("wpcli") + 1:][:3], ["wp", "core", "install"])
+            self.assertEqual(fixture.fixture_path("wordpress").stat().st_mode & 0o777, 0o600)
