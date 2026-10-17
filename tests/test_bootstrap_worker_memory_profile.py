@@ -9,7 +9,7 @@ from django.core.cache import cache
 from django.test import TransactionTestCase
 
 from content_factory.website_models import WebsiteConnection
-from scripts.bootstrap_worker_profile import child_environment, profile_window, memory_ceiling_bytes
+from scripts.bootstrap_worker_profile import child_environment, profile_window, memory_ceiling_bytes, validate_application_memory
 from tests import test_articles_bootstrap_endpoint_budget as budget_fixture
 from tests import test_content_island_bootstrap as bootstrap_fixture
 
@@ -36,3 +36,6 @@ class BootstrapWorkerMemoryTests(TransactionTestCase):
         self.assertEqual([row["worker_count"] for row in results], [1, 1])
         print(json.dumps({"fixture": "actual compact bootstrap / 24 large runs / synthetic forced-auth owner",
             "release_sha": os.environ["GITHUB_SHA"], "memory_ceiling_bytes": memory_ceiling_bytes(), "windows": results}, sort_keys=True))
+        # Print closed numeric evidence before asserting, so failures retain
+        # measurements without exposing private logs or request objects.
+        validate_application_memory(results)
