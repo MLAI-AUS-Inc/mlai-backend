@@ -11,6 +11,7 @@ subsystem-specific contracts and runbooks.
 - [15 September release preparation](backend-refactor-release-2026-09-15.md) — historical integration and test scope
 
 - [Runtime and dependency contract](backend-runtime.md)
+- [G4 worker memory profile](articles-g4-worker-memory-profile-2026-10-18.md) — default-off process samples and disposable Gunicorn lifecycle acceptance; sustained application measurements and tuning pending
 - [Feature lifecycle register](feature-lifecycle.md)
 - [14 September refactor audit](backend-refactor-audit-2026-09-14.md)
 - [Refactor implementation status](backend-refactor-implementation-2026-09-14.md)

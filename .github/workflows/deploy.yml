@@ -84,6 +84,9 @@ jobs:
         python -m pip install --upgrade pip
         pip install --require-hashes -r requirements.lock
 
+    - name: Profile disposable Gunicorn worker lifecycle without Django or credentials
+      run: python scripts/check_worker_memory_smoke.py
+
     - name: Verify pinned Articles failure and delivery contracts
       env:
         # Dedicated read-only Contents access to the private canonical CF repo.
@@ -485,6 +488,7 @@ jobs:
           core.tests.test_auth_contract \
           core.tests.test_account_ban_guards \
           tests.test_runtime_hardening \
+          tests.test_worker_memory_profile_unit \
           tests.test_scheduled_discovery_operability \
           tests.test_ci_reuse_pr_checks \
           integrations.tests_fields \
