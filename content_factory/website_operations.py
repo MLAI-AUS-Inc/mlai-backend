@@ -109,6 +109,8 @@ def validate_operation(connection, payload, *, worker_cleanup=False, restoration
     op = connection.operations.filter(pk=identifier).first()
     if op is None:
         raise WebsiteAuthorityError("website_operation_changed", "The operation does not belong to this website.")
+    if "article_source_refresh_inspection_only" in op.payload or op.payload.get("workflow") == "article_source_refresh_inspect":
+        raise WebsiteAuthorityError("website_operation_changed", "The private article inspection cannot authorize a generic operation.")
     parent_id=op.payload.get("first_article_goal_operation_id")
     if parent_id and not (worker_cleanup or restoration or cancellation or cancellation_receipt):
         from . import website_goal as goals

@@ -11,7 +11,8 @@ The function runs under the existing authority transaction. Canonical
 absence of a refund; `article_run` selects the exact original paid run and
 operation. It reads a complete trusted source-only revision chain from backend
 rows and retains the original branch, app root and repository. The original
-article must have a terminal, uncancelled, typed generation/state version. A
+article must have an uncancelled typed generation/state version and be completed,
+failed, blocked or awaiting owner review. A
 cancelled article cannot be reinterpreted as permission to refresh.
 
 The prepare lease CAS journals a versioned `pending_reconciliation` intent with
@@ -31,7 +32,12 @@ intent. A proposed run UUID and the journal checksum grant no effect authority.
 
 ## Remaining integration
 
-This is a foundation with no runtime caller yet. The D2 coordinator must first
+The D2 inspection coordinator now calls this journal from the real first-article
+controller; see [the current inspection contract](articles-d2-refresh-inspection-2026-10-18.md).
+A later usage-only state version retains the original minimum observation and
+UUID; changed generation, operation, owner or payment is still refused. Before
+sealing, the coordinator must compare current content fingerprints.
+The D2 coordinator must next
 observe/reconcile the owned old PR, merge and live effects, then fence old write
 authority and reserve a new current operation/stream. It must pair the worker's
 immutable Git/article inputs with this intent and recheck owner/source/consent,

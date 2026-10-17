@@ -272,6 +272,8 @@ def _advance_git_first_article(op, context, config, *, user, now):
         return _wait(op,now,"Writing the first article and checking its preview.")
     if op.receipt.get("first_article_run_id")!=run.run_id:
         _save_fields(op,{"first_article_run_id":run.run_id,"child_run_id":run.run_id})
+    from .website_article_refresh import advance as refresh_stale_article
+    if refresh_stale_article(op,context,config,user=user,now=now):return op
     if run.status in {"failed","blocked","cancelled","denied"}:
         from .website_article_recovery import observe,resume
         if run.status in {"failed","blocked"}:

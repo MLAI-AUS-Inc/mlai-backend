@@ -388,6 +388,8 @@ class ArticleSourceRefreshIntentTests(SimpleTestCase):
             with self.subTest(key=key), self.assertRaises(WebsiteAuthorityError): self.reserve()
         self.op.receipt["article_source_refresh"] = original
         self.run.result["state_version"] += 1
+        self.assertEqual(self.reserve()["proposed_run_id"], original["proposed_run_id"])
+        self.run.result["generation"] += 1
         with self.assertRaises(WebsiteAuthorityError): self.reserve()
 
     def test_missing_or_boolean_original_revisions_are_not_refresh_evidence(self):

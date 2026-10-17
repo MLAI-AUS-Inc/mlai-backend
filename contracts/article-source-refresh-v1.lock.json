@@ -1,0 +1,27 @@
+{
+  "files": [
+    {
+      "local_path": "content_factory/article_source_refresh_contract.py",
+      "sha256": "4aa2ebc5f8544d42805af01a8c8d804c1f6d4539ca4e3d2d3c0601288988a4c5",
+      "source_path": "backend/article_source_refresh_contract.py"
+    },
+    {
+      "local_path": "content_factory/bounded_service_read.py",
+      "sha256": "40a91899a73bc9274693eca8aa9dd6c4c53680c656df683a247f2e3e3716607a",
+      "source_path": "backend/bounded_service_read.py"
+    },
+    {
+      "local_path": "contracts/article-source-refresh-v1-request.example.json",
+      "sha256": "fed3965bcc575d203fde2d5ea058f6499b6a3d43eba21de5844e29c4da3142e7",
+      "source_path": "backend/contracts/article-source-refresh-v1-request.example.json"
+    },
+    {
+      "local_path": "contracts/article-source-refresh-v1-inspection.example.json",
+      "sha256": "e1e996dc8f4370f3597ce5d27313001e9367abd233fe97742b69c5bb1f67d4bf",
+      "source_path": "backend/contracts/article-source-refresh-v1-inspection.example.json"
+    }
+  ],
+  "schema_version": 1,
+  "source_repository": "drsamdonegan/content-factory",
+  "source_revision": "5321fa22ba62602d35d536b35f9cf2e380c96362"
+}

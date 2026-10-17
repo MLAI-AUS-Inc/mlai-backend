@@ -27,6 +27,8 @@ subsystem-specific contracts and runbooks.
 
 ## Content Factory
 
+- [D2 stale article inspection](articles-d2-refresh-inspection-2026-10-18.md) — default-off real controller stage, private read-only reservation and bounded producer observations; execution remains pending
+
 - [E5 native CMS provider CI](articles-e5-native-provider-ci-2026-10-18.md) — digest-pinned disposable WordPress/Ghost API acceptance and remote-only fixture isolation
 - [E5 explicit CMS withdrawal](articles-e5-cms-withdrawal-2026-10-18.md) — owner-scoped status-only journal, leased execution and public-absence proof; UI/provider acceptance pending
 - [E5 initial CMS intake](articles-e5-cms-initial-intake-2026-10-18.md) — initial owner entry, explicit platform preference and original acceptance recovery

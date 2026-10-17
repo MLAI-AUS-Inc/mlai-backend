@@ -1,0 +1,50 @@
+{
+  "client_request_id": "articles-refresh-inspect:0b07507ba2b764a3ae3cfb84658a77dc643fe0340e1218ba67f8103d5b1cc8a9",
+  "digest": "2e5bbdf70b42f37aab5318ee7129ce6ba849fafb52c2c332c3fab2242ec1b3a9",
+  "domain": "fixture.test",
+  "github_repo": "fixture/site",
+  "intent": {
+    "binding": {
+      "billing": {
+        "client_request_id": "articles-first:290889414a40fcd3a491f7c644f7bce2924b99922e360f4c576d627e18b183d2",
+        "cost_points": 6,
+        "payer_user_id": "5",
+        "spend_ledger_id": "11"
+      },
+      "current_scope": {
+        "app_root": "",
+        "branch": "main",
+        "company_id": "9",
+        "configuration_revision": 2,
+        "connection_generation": 3,
+        "connection_id": "11111111-1111-4111-8111-111111111111",
+        "deletion_epoch": 0,
+        "organization_id": "7",
+        "repository_id": "12"
+      },
+      "goal": {
+        "answers_digest": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+        "authority_digest": "5f1bf7c37299e78c7a7d0eb942dd10768f7222f906ccacac440754c2ab2e4975",
+        "goal_id": "44444444-4444-4444-8444-444444444444"
+      },
+      "paid_root": {
+        "configuration_revision": 1,
+        "generation": 0,
+        "operation_attempt": 1,
+        "operation_id": "22222222-2222-4222-8222-222222222222",
+        "run_id": "original-article",
+        "source_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "state_version": 0
+      },
+      "source_sha": "cccccccccccccccccccccccccccccccccccccccc"
+    },
+    "created_at": "2026-10-17T19:00:00+00:00",
+    "id": "0b07507ba2b764a3ae3cfb84658a77dc643fe0340e1218ba67f8103d5b1cc8a9",
+    "proposed_run_id": "55555555-5555-4555-8555-555555555555",
+    "state": "pending_reconciliation",
+    "version": 1
+  },
+  "operation_attempt": 1,
+  "operation_id": "33333333-3333-4333-8333-333333333333",
+  "schema_version": 1
+}

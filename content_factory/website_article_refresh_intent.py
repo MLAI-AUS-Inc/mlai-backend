@@ -70,6 +70,61 @@ def valid_intent(value):
         return False
 
 
+def _current_binding(op, context, config, *, user, connection):
+    """Reload original article/payment authority without creating an intent."""
+    from .website_first_article import article_run, _immutable_binding
+    from .website_first_article_billing import for_generation
+    from .website_goal_scope import transition_chain
+    # for_generation locks the current parent and verifies the original
+    # spend/refund/payer. It never calls PointsService.spend.
+    parent, held, _, _ = for_generation(op.pk, context=context, user=user)
+    if parent.pk != op.pk or parent.receipt.get("goal") != op.receipt.get("goal"):
+        _deny()
+    run = article_run(op, config)
+    if run is None or run.status not in {"completed", "failed", "blocked", "awaiting_approval"}:
+        _deny()
+    request, result, goal = goals.mapping(run.run_request), goals.mapping(run.result), op.receipt["goal"]
+    source, current = request.get("expected_source_sha"), goal.get("current_source_sha")
+    revision = request.get("configuration_revision")
+    if (not isinstance(source, str) or not goals.SHA.fullmatch(source)
+            or not isinstance(current, str) or not goals.SHA.fullmatch(current)
+            or source == current or current != connection.verified_sha
+            or type(revision) is not int or revision < 1 or revision >= connection.configuration_version
+            or any(type(request.get(key)) is not type(value) or request.get(key) != value
+                for key, value in {"branch": connection.branch, "app_root": connection.app_root}.items())
+            or any(type(result.get(key)) is not int or result[key] < 0 for key in ("generation", "state_version"))):
+        _deny()
+    old_scope = {**goal["scope"], "configuration_revision": revision}
+    edges = connection.operations.filter(generation=connection.generation, action="goal-source-scope", state="completed",
+        payload__to_revision__gt=revision, payload__to_revision__lte=connection.configuration_version).order_by("created_at", "pk")[:16]
+    if transition_chain(old_scope, goal["scope"], [goals.mapping(row.payload) for row in edges], source_sha=current) is None:
+        _deny()
+    binding = {"goal": _immutable_binding(goal), "current_scope": deepcopy(goal["scope"]),
+        "source_sha": current, "paid_root": {"run_id": run.run_id, "source_sha": source,
+            "configuration_revision": revision, "operation_id": request.get("operation_id"),
+            "operation_attempt": request.get("operation_attempt"),
+            "generation": result["generation"], "state_version": result["state_version"]},
+        "billing": {key: held[key] for key in ("client_request_id", "payer_user_id", "spend_ledger_id", "cost_points")}}
+    return binding
+
+
+def _same_paid_root(previous, current):
+    """A later observation version is a fresh read, not another article identity."""
+    return (isinstance(previous, dict) and isinstance(current, dict)
+        and {key: value for key, value in previous.items() if key != "state_version"} ==
+            {key: value for key, value in current.items() if key != "state_version"}
+        and type(previous.get("state_version")) is int and type(current.get("state_version")) is int
+        and current["state_version"] >= previous["state_version"])
+
+
+def binding_matches(previous, current):
+    """Match current read authority, preserving the original minimum observation."""
+    return (isinstance(previous, dict) and isinstance(current, dict)
+        and {key: value for key, value in previous.items() if key != "paid_root"} ==
+            {key: value for key, value in current.items() if key != "paid_root"}
+        and _same_paid_root(previous.get("paid_root"), current.get("paid_root")))
+
+
 def reserve(op, context, config, *, user, now):
     """Persist one bounded source-keyed proposal identity, without external effects.
 
@@ -81,59 +136,30 @@ def reserve(op, context, config, *, user, now):
     if not getattr(settings, "ARTICLES_ARTICLE_SOURCE_REFRESH_ENABLED", False) or not enabled(op):
         return None
     from .website_connections import authority_guard, contract_for
-    from .website_first_article import article_run, _immutable_binding, _save_fields
-    from .website_first_article_billing import for_generation
-    from .website_goal_scope import transition_chain
+    from .website_first_article import _save_fields
     if op.state != "running" or config.website_connection.pk != op.connection.pk:
         _deny()
     with authority_guard(contract_for(op.connection), action="read") as connection:
-        # for_generation locks the current parent and verifies the original
-        # spend/refund/payer. It never calls PointsService.spend.
-        parent, held, _, _ = for_generation(op.pk, context=context, user=user)
-        if parent.pk != op.pk or parent.receipt.get("goal") != op.receipt.get("goal"):
-            _deny()
-        run = article_run(op, config)
-        if run is None or run.status not in {"completed", "failed", "blocked"}:
-            _deny()
-        request, result, goal = goals.mapping(run.run_request), goals.mapping(run.result), op.receipt["goal"]
-        source, current = request.get("expected_source_sha"), goal.get("current_source_sha")
-        revision = request.get("configuration_revision")
-        if (not isinstance(source, str) or not goals.SHA.fullmatch(source)
-                or not isinstance(current, str) or not goals.SHA.fullmatch(current)
-                or source == current or current != connection.verified_sha
-                or type(revision) is not int or revision < 1 or revision >= connection.configuration_version
-                or any(type(request.get(key)) is not type(value) or request.get(key) != value
-                    for key, value in {"branch": connection.branch, "app_root": connection.app_root}.items())
-                or any(type(result.get(key)) is not int or result[key] < 0 for key in ("generation", "state_version"))):
-            _deny()
-        old_scope = {**goal["scope"], "configuration_revision": revision}
-        edges = connection.operations.filter(generation=connection.generation, action="goal-source-scope", state="completed",
-            payload__to_revision__gt=revision, payload__to_revision__lte=connection.configuration_version).order_by("created_at", "pk")[:16]
-        if transition_chain(old_scope, goal["scope"], [goals.mapping(row.payload) for row in edges], source_sha=current) is None:
-            _deny()
-        binding = {"goal": _immutable_binding(goal), "current_scope": deepcopy(goal["scope"]),
-            "source_sha": current, "paid_root": {"run_id": run.run_id, "source_sha": source,
-                "configuration_revision": revision, "operation_id": request.get("operation_id"),
-                "operation_attempt": request.get("operation_attempt"),
-                "generation": result["generation"], "state_version": result["state_version"]},
-            "billing": {key: held[key] for key in ("client_request_id", "payer_user_id", "spend_ledger_id", "cost_points")}}
+        binding = _current_binding(op, context, config, user=user, connection=connection)
+        goal = op.receipt["goal"]
         previous, history = op.receipt.get(KEY), op.receipt.get(HISTORY, [])
         if not isinstance(history, list) or len(history) >= MAX_INTENTS or any(not valid_intent(item) for item in history):
             _deny()
         if (len({item["id"] for item in history}) != len(history)
                 or len({item["proposed_run_id"] for item in history}) != len(history)
-                or any(item["binding"][key] != binding[key] for item in history for key in ("goal", "paid_root", "billing"))):
+                or any(item["binding"][key] != binding[key] for item in history for key in ("goal", "billing"))
+                or any(not _same_paid_root(item["binding"].get("paid_root"), binding["paid_root"]) for item in history)):
             _deny()
         if previous is not None:
             if not valid_intent(previous):
                 _deny()
             if any(item["id"] == previous["id"] or item["proposed_run_id"] == previous["proposed_run_id"] for item in history):
                 _deny()
-            if previous["binding"] == binding:
+            if binding_matches(previous["binding"], binding):
                 return deepcopy(previous)
             # A changed original article/goal/payment must not mint a refresh.
             old = previous["binding"]
-            if any(old.get(key) != binding[key] for key in ("goal", "paid_root", "billing")):
+            if any(old.get(key) != binding[key] for key in ("goal", "billing")) or not _same_paid_root(old.get("paid_root"), binding["paid_root"]):
                 _deny()
             history = [*history, previous]
             if len(history) >= MAX_INTENTS:

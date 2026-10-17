@@ -1,0 +1,43 @@
+{
+  "content_state": "draft_available",
+  "digest": "494ae54f73a59b3797f70d30a22df50288f7e07574bf2f15de13dbcd065858d4",
+  "inputs_sha256": "8aa5100f786a7db1f2b2c68a84807a3838a060eef737d8a06e9dc6c1b2162df9",
+  "intent_id": "0b07507ba2b764a3ae3cfb84658a77dc643fe0340e1218ba67f8103d5b1cc8a9",
+  "kind": "article_source_refresh_inspection",
+  "observed_at": "2026-10-17T19:00:00+00:00",
+  "publication_children": [
+    {
+      "generation": 0,
+      "run_id": "original-publish",
+      "state_version": 7,
+      "status": "queued"
+    }
+  ],
+  "publication_refs": [
+    {
+      "number": 43,
+      "run_id": "original-publish",
+      "url": "https://github.com/fixture/site/pull/43"
+    }
+  ],
+  "publications": [
+    {
+      "base_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "branch": "content-factory/story",
+      "files_sha256": "c41b0577b37bae2cd8a3bccc04c77d76a18806f53d95865359346e4c14c3c445",
+      "head_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "mutation_id": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+      "pr_url": "",
+      "run_id": "original-publish",
+      "status": "applied"
+    }
+  ],
+  "request_digest": "2e5bbdf70b42f37aab5318ee7129ce6ba849fafb52c2c332c3fab2242ec1b3a9",
+  "review_inputs_sha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+  "schema_version": 1,
+  "source_generation": 0,
+  "source_run_id": "original-article",
+  "source_state_version": 7,
+  "source_status": "completed",
+  "superseded_by_run_id": null
+}
