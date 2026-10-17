@@ -23,6 +23,8 @@ subsystem-specific contracts and runbooks.
 
 ## Content Factory
 
+- [E5 owner CMS access form](articles-e5-cms-owner-access-2026-10-17.md) — scoped credential destination and actual accepted request nonce without key export or provider replay
+
 - [E5 original CMS credential renewal](articles-e5-cms-credential-renewal-2026-10-17.md) — same principal/site grant preserves original paid source, private key identity and single-create journal
 
 - [E5 old-policy access recheck](articles-e5-cms-policy-access-2026-10-17.md) — authenticated read-only access observation with original native choices and payment preserved
