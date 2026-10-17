@@ -317,7 +317,7 @@ def revoke_generation_tokens(connection_id, generation, *, maximum_calls=20):
     durable, overflow = inventory.discover(connection_id, generation)
     index = token_index_key(connection_id, generation)
     references = list(dict.fromkeys([*(cache.get(index) or []), *durable]))
-    pending, candidates = [], []
+    pending, candidates, retry = [], [], []
     revoked = 0
     for reference in references:
         tracked = durable.get(reference)
@@ -351,10 +351,11 @@ def revoke_generation_tokens(connection_id, generation, *, maximum_calls=20):
             accepted = False
         inventory.revocation(reservation, confirmed=confirmed)
         if not accepted:
-            pending.append(reference)
+            retry.append(reference)
             continue
         cache.delete(key)
         revoked += 1
+    pending.extend(retry)  # Unattempted known bearers precede uncertain retries.
     if pending:
         cache.set(index, pending, timeout=3600)
     else:

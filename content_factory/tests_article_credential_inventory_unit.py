@@ -27,11 +27,13 @@ class Rows:
             for key, expected in fields.items():
                 value = row
                 lookup = key.split("__")
-                membership = lookup[-1] == "in"
-                for part in lookup[:-1] if membership else lookup:
+                operator = lookup[-1] if lookup[-1] in {"in", "gt"} else None
+                for part in lookup[:-1] if operator else lookup:
                     value = value.get(part) if isinstance(value, dict) else getattr(value, part, None)
-                if membership:
+                if operator == "in":
                     if value not in expected: return False
+                elif operator == "gt":
+                    if str(value) <= str(expected): return False
                 elif str(value) != str(expected): return False
             return True
         return Rows(row for row in self.items if match(row))

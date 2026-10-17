@@ -11,7 +11,7 @@ from django.utils import timezone
 
 from . import tests_website_article_source_stop_unit as fixtures
 from . import website_article_source_stop as stop, website_article_credentials as inventory, website_tokens as broker
-from .website_contract import WebsiteAuthorityError
+from .website_contract import WebsiteAuthorityError, evidence_digest
 
 
 @override_settings(**fixtures.ArticleSourceStopTests._overridden_settings)
@@ -28,11 +28,23 @@ class ArticleSourceCredentialRetirementTests(SimpleTestCase):
         self.original.payload = {**self.original.payload, "attempt": 1, "deletion_epoch": 0,
             "first_article_goal_operation_id": str(self.parent.pk),
             "article_delivery_request": {**self.saved, "article_delivery_v1": {"schema_version": 1}}}
-        self.assertTrue(inventory.enroll(self.original, self.saved, self.connection, created=True))
-        self.channel = next(row for row in self.fixture.fixture.reservations.values() if row.action == inventory.INVENTORY_ACTION)
-        self.fixture.credential_rows.rows.append(self.channel)
+        self.channel = self.seed_legacy_channel()
         self.fixture.token_delete.side_effect = self.retire
         self.fixture.stack.enter_context(patch("content_factory.website_article_source_history.advance", return_value=None))
+
+    def seed_legacy_channel(self):
+        """Retained v1 history predates source fencing and cannot be retrofitted."""
+        scope = {"schema_version": 1, "channel": "website_token_broker", "workflow_operation_id": str(self.original.pk),
+            "goal_id": str(self.parent.pk), "connection_id": str(self.connection.pk),
+            "connection_generation": self.connection.generation, "repository_id": str(self.connection.repository_id),
+            "deletion_epoch": 0, "source_sha": self.saved["expected_source_sha"], "client_request_id": self.saved["client_request_id"]}
+        row, fresh = self.fixture.fixture.reserve(idempotency_key=f"{self.connection.pk}:credential-inventory:{self.original.pk}",
+            defaults={"action": inventory.INVENTORY_ACTION, "state": "recorded", "payload": scope,
+                "receipt": {"schema_version": 1, "from_operation_start": True, "token_count": 0}})
+        self.assertTrue(fresh)
+        self.original.payload[inventory.MARKER] = {"schema_version": 1, "inventory_operation_id": str(row.pk), "scope_digest": evidence_digest(scope)}
+        self.fixture.credential_rows.rows.append(row)
+        return row
 
     def seed_token(self, *, bearer=True):
         with inventory.operation_scope(self.original):
@@ -86,12 +98,10 @@ class ArticleSourceCredentialRetirementTests(SimpleTestCase):
     def test_bounded_passes_drain_original_references_without_replaying_worker_stop(self):
         tokens = [self.seed_token() for _ in range(5)]
         self.advance()
-        self.assertEqual(self.fixture.token_delete.call_count, 2)
-        self.assertEqual(self.receipt()["operations"][0]["pending"], 3)
-        self.advance(now=self.now + timedelta(seconds=121))
-        self.assertEqual(self.fixture.token_delete.call_count, 4)
-        self.assertEqual(self.receipt()["operations"][0]["pending"], 1)
-        self.advance(now=self.now + timedelta(seconds=242))
+        self.assertEqual(self.fixture.token_delete.call_count, 1)
+        self.assertEqual(self.receipt()["operations"][0]["pending"], 4)
+        for index in range(1, 5):
+            self.advance(now=self.now + timedelta(seconds=121 * index))
         self.assertEqual(self.fixture.token_delete.call_count, 5)
         self.assertTrue(all(row.receipt["revocation_state"] == "confirmed" for row in tokens))
         self.assertEqual(self.fixture.rpc.call_count, 1)
@@ -164,9 +174,7 @@ class ArticleSourceCredentialRetirementTests(SimpleTestCase):
         original = self.original
         self.original = SimpleNamespace(**{**vars(original), "pk": uuid4(), "payload": deepcopy(original.payload)})
         self.original.payload.pop(inventory.MARKER)
-        self.assertTrue(inventory.enroll(self.original, self.saved, self.connection, created=True))
-        channel_id = self.original.payload[inventory.MARKER]["inventory_operation_id"]
-        self.fixture.credential_rows.rows.extend(row for row in self.fixture.fixture.reservations.values() if str(row.pk) == channel_id)
+        self.seed_legacy_channel()
         separate = self.seed_token()
         self.original = original
         self.advance()

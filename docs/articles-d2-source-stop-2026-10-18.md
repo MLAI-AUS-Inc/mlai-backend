@@ -210,3 +210,61 @@ new cases cover actual prepare dispatch, cache-index/bearer loss, expiry,
 provider uncertainty, bounded passes without starvation, lease loss, ownership
 and refund changes, compute exhaustion, and distinct same-source executions.
 No local database, migration, service, paid model or provider operation was run.
+
+
+## Exact source-scope enrollment and deeper broker retirement
+
+New broker channels now use private metadata version 2. The canonical workflow
+reservation locks the original server goal and records its complete source scope
+and digest at birth, including company, organization, configuration revision,
+branch and app root. Copied request budgets or source-scope JSON cannot choose this
+identity. A source-fenced parent cannot enroll another generic child channel.
+The existing marker and wire formats remain unchanged; retained version 1 channels
+keep their original metadata and never gain inferred source coverage on replay.
+Version 2 token admission checks the original stored scope against current saved
+configuration. Revocation can still observe an original generation after reconnect.
+
+The real source-stop prepare path now reads two additional original version 2
+channels per pass. The query binds the freshly authenticated original goal, source
+hash and exact source-scope digest. Every selected record is independently checked
+against the complete original scope. A later configuration returning to the same
+commit hash is excluded. Legacy channels stay unknown except for the explicitly
+captured original operation IDs. A private UUID cursor advances bounded pages and
+wraps after the last page; a changed cursor or causal request refuses provider work.
+Existing version 1 control observations can advance to this version without
+retroactively enrolling their legacy channels.
+
+Each pass admits at most two captured and two deeper operations, one provider
+DELETE per operation. This preserves the total bound of four calls and keeps
+uncertainty in a captured operation from starving deeper channels. Within each
+operation, unattempted bearers precede failed provider retries. Missing bearers
+remain pending without consuming the provider-call allowance. The existing fresh
+owner/payment/source checks, nonce lease and prepare claim still surround unlocked
+provider HTTP and observation commits. Records keep quiet, inventory_complete and
+effect_authority false. These additions cover recorded broker channels; direct
+backend issuers, task/async-resource coverage and external publication outcomes
+remain separate prerequisites before any replacement execution.
+
+## Bootstrap duplicate progress work
+
+Remote CI at backend 18f8706 reported a cold complete bootstrap of 1,015.63 ms
+against its existing 1,000 ms limit (168 SQL observations); warm samples passed.
+The cold serializer built root/run progress before the live overlay calculated
+the same graph again. Bootstrap now defers this presentation to that final live
+overlay, preserving current authority checks, cache invalidation and standalone
+run/full-payload projections. The disposable database fixture additionally requires
+exactly one cold root plus 24 run progress projections across five cold/warm reads.
+The 1,000 ms and 300 KB limits are unchanged. This removes duplicate work; updated
+remote timing remains required before claiming that CI performance gate passes.
+
+
+Validation: 1,885 strict database/network-denying checks pass across 139 explicit
+labels, including original broker/stop/history cases, 12 new source-scope cases
+and bootstrap presentation/read/cache/lifetime regressions. Three source-scope
+cases fail with the preceding enrollment/controller: trusted scope at birth,
+post-fence enrollment refusal and actual retirement of an unlisted child. All
+611 modules are fully assigned; the offline audit checks 870 production emissions
+and the read-only model check reports no changes. The existing disposable DB
+suite now checks v2 birth/rollback and adds real JSON/UUID pagination coverage;
+it remains remote-only. No contract/transport/example bytes, models, migrations
+or rollout defaults change. Latest remote timing and full CI are pending.
