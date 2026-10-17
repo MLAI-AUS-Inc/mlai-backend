@@ -21,6 +21,7 @@ INVENTORY_ACTION = "article-credential-inventory"
 TOKEN_ACTION = "article-credential"
 PRIVATE_ACTIONS = ("article-source-fence", "article-source-stop", "article-source-history", INVENTORY_ACTION, TOKEN_ACTION)
 MAX_TOKENS = 512
+SOURCE_PAGE_SIZE = 2
 _current_operation = ContextVar("website_credential_operation", default=None)
 
 
@@ -45,6 +46,52 @@ def _uuid(value):
         return False
 
 
+def channel_scope(row):
+    """Validate retained v1/v2 broker metadata without inventing legacy scope."""
+    from . import website_goal as goals
+    from .website_article_source_fence import _scope as valid_source_scope
+    scope = getattr(row, "payload", None)
+    receipt = getattr(row, "receipt", None)
+    fields = {"schema_version", "channel", "workflow_operation_id", "goal_id", "connection_id",
+        "connection_generation", "repository_id", "deletion_epoch", "source_sha", "client_request_id"}
+    if (not isinstance(scope, dict) or type(scope.get("schema_version")) is not int or scope["schema_version"] not in {1, 2}
+            or set(scope) != fields | ({"source_scope", "source_scope_digest"} if scope["schema_version"] == 2 else set())
+            or getattr(row, "action", None) != INVENTORY_ACTION or not _uuid(str(row.pk))
+            or scope["channel"] != "website_token_broker" or not _uuid(scope["workflow_operation_id"])
+            or not _uuid(scope["goal_id"]) or not _uuid(scope["connection_id"])
+            or scope["connection_id"] != str(row.connection_id) or scope["connection_generation"] != row.generation
+            or type(scope["connection_generation"]) is not int or scope["connection_generation"] < 1
+            or type(scope["deletion_epoch"]) is not int or scope["deletion_epoch"] < 0
+            or not isinstance(scope["repository_id"], str) or re.fullmatch(r"[1-9][0-9]{0,19}", scope["repository_id"]) is None
+            or not isinstance(scope["source_sha"], str) or SHA_PATTERN.fullmatch(scope["source_sha"]) is None
+            or not isinstance(scope["client_request_id"], str) or re.fullmatch(r"articles-first:[a-f0-9]{64}", scope["client_request_id"]) is None
+            or not isinstance(receipt, dict) or set(receipt) != {"schema_version", "from_operation_start", "token_count"}
+            or type(receipt.get("schema_version")) is not int or receipt["schema_version"] != 1
+            or receipt["from_operation_start"] is not True or type(receipt.get("token_count")) is not int
+            or not 0 <= receipt["token_count"] <= MAX_TOKENS):
+        _deny()
+    if scope["schema_version"] == 2:
+        source = scope["source_scope"]
+        if (not valid_source_scope(source) or scope["source_scope_digest"] != goals.digest(source)
+                or any(type(source[key]) is not type(scope[key]) or source[key] != scope[key]
+                    for key in ("connection_id", "connection_generation", "repository_id", "deletion_epoch"))):
+            _deny()
+    return scope
+
+
+def _birth_source_scope(original, connection):
+    """Select the exact locked server goal; copied request budgets cannot enroll."""
+    from . import website_goal as goals
+    from .website_article_recovery import enabled
+    from .website_article_source_fence import KEY as SOURCE_FENCE_KEY
+    parent = connection.operations.select_for_update().filter(pk=original["first_article_goal_operation_id"],
+        action="prepare", generation=connection.generation).first()
+    if (parent is None or not enabled(parent) or SOURCE_FENCE_KEY in (parent.receipt or {})
+            or parent.receipt["goal"].get("current_source_sha") != original["expected_source_sha"]):
+        _deny()
+    return deepcopy(goals.scope_for(connection, parent.payload.get("company_id")))
+
+
 def enroll(operation, request, connection, *, created):
     """Record broker coverage only at a new server-enrolled article operation's birth."""
     from .setup_delivery_enrollment import article_stream
@@ -64,11 +111,14 @@ def enroll(operation, request, connection, *, created):
             or re.fullmatch(r"articles-first:[a-f0-9]{64}", original["client_request_id"]) is None
             or str(operation.connection_id) != str(connection.pk) or operation.generation != connection.generation):
         _deny()
-    scope = {"schema_version": 1, "channel": "website_token_broker", "workflow_operation_id": str(operation.pk),
+    from . import website_goal as goals
+    source_scope = _birth_source_scope(original, connection)
+    scope = {"schema_version": 2, "channel": "website_token_broker", "workflow_operation_id": str(operation.pk),
         "goal_id": original["first_article_goal_operation_id"], "connection_id": str(connection.pk),
         "connection_generation": connection.generation, "repository_id": str(connection.repository_id),
         "deletion_epoch": operation.payload["deletion_epoch"], "source_sha": original["expected_source_sha"],
-        "client_request_id": original["client_request_id"]}
+        "client_request_id": original["client_request_id"], "source_scope": source_scope,
+        "source_scope_digest": goals.digest(source_scope)}
     from .website_models import WebsiteConnectionOperation
     row, fresh = WebsiteConnectionOperation.objects.get_or_create(
         idempotency_key=f"{connection.pk}:credential-inventory:{operation.pk}",
@@ -77,6 +127,7 @@ def enroll(operation, request, connection, *, created):
             "receipt": {"schema_version": 1, "from_operation_start": True, "token_count": 0}})
     if not fresh or row.payload != scope:
         _deny()  # A reused row cannot invent zero work for a new enrollment.
+    channel_scope(row)
     operation.payload = {**operation.payload, MARKER: {"schema_version": 1,
         "inventory_operation_id": str(row.pk), "scope_digest": evidence_digest(scope)}}
     return True
@@ -92,24 +143,20 @@ def _inventory(operation, connection, *, lock=True):
     query = WebsiteConnectionOperation.objects.select_for_update() if lock else WebsiteConnectionOperation.objects
     row = query.filter(pk=marker["inventory_operation_id"], connection_id=connection.pk, action=INVENTORY_ACTION).first()
     original = operation.payload.get("article_delivery_request") or {}
-    scope = row.payload if row is not None else None
-    receipt = row.receipt if row is not None else None
-    if (not isinstance(scope, dict) or set(scope) != {"schema_version", "channel", "workflow_operation_id", "goal_id",
-            "connection_id", "connection_generation", "repository_id", "deletion_epoch", "source_sha", "client_request_id"}
-            or type(scope.get("schema_version")) is not int or scope["schema_version"] != 1 or scope["channel"] != "website_token_broker"
-            or evidence_digest(scope) != marker["scope_digest"] or scope["workflow_operation_id"] != str(operation.pk)
+    scope = channel_scope(row)
+    if (evidence_digest(scope) != marker["scope_digest"] or scope["workflow_operation_id"] != str(operation.pk)
             or scope["connection_id"] != str(connection.pk) or not _uuid(scope["workflow_operation_id"]) or not _uuid(scope["goal_id"])
             or type(scope["connection_generation"]) is not int or scope["connection_generation"] < 1
             or type(scope["deletion_epoch"]) is not int or scope["deletion_epoch"] < 0
             or scope["connection_generation"] != connection.generation
             or scope["repository_id"] != str(connection.repository_id) or scope["deletion_epoch"] != operation.payload.get("deletion_epoch")
             or scope["source_sha"] != original.get("expected_source_sha") or scope["goal_id"] != original.get("first_article_goal_operation_id")
-            or scope["client_request_id"] != original.get("client_request_id")
-            or not isinstance(receipt, dict) or set(receipt) != {"schema_version", "from_operation_start", "token_count"}
-            or type(receipt.get("schema_version")) is not int or receipt["schema_version"] != 1
-            or receipt["from_operation_start"] is not True or type(receipt.get("token_count")) is not int
-            or not 0 <= receipt["token_count"] <= MAX_TOKENS):
+            or scope["client_request_id"] != original.get("client_request_id")):
         _deny()
+    if scope["schema_version"] == 2:
+        from . import website_goal as goals
+        if not goals.scope_matches(scope["source_scope"], goals.scope_for(connection, scope["source_scope"]["company_id"])):
+            _deny()
     return row, marker
 
 
@@ -281,8 +328,8 @@ def discover(connection_id, generation):
             channels[channel_id] = WebsiteConnectionOperation.objects.filter(pk=channel_id,
                 connection_id=connection_id, action=INVENTORY_ACTION).first()
         channel = channels[channel_id]
-        scope = channel.payload if channel is not None else None
-        if (not isinstance(scope, dict) or evidence_digest(scope) != payload["scope_digest"]
+        scope = channel_scope(channel)
+        if (evidence_digest(scope) != payload["scope_digest"]
                 or scope.get("channel") != "website_token_broker" or scope.get("workflow_operation_id") != payload["workflow_operation_id"]
                 or scope.get("connection_id") != str(connection_id) or scope.get("connection_generation") != row.generation
                 or type(scope.get("connection_generation")) is not int or scope["connection_generation"] < 1
@@ -291,6 +338,42 @@ def discover(connection_id, generation):
         result[str(row.pk)] = ({"id": str(row.pk), "connection_id": str(connection_id), "generation": row.generation,
             "scope": deepcopy(payload)}, deepcopy(row.receipt))
     return result, overflow
+
+
+def source_page(connection_id, fence, *, after=None):
+    """Enumerate only freshly recorded exact original source scopes, two per pass.
+
+    Caller must supply its freshly authenticated private causal fence while
+    holding the site lock. Legacy channels cannot acquire an inferred scope.
+    This page grants effect removal only, never complete coverage or quiet.
+    """
+    from . import website_goal as goals
+    from .website_models import WebsiteConnectionOperation
+    from .website_article_source_fence import _scope as valid_source_scope
+    try:
+        binding = fence["binding"]
+        source = binding["source_scope"]
+        if (not valid_source_scope(source) or str(connection_id) != source["connection_id"]
+                or not _uuid(binding["goal"]["goal_id"]) or after is not None and not _uuid(after)):
+            _deny()
+        captured = list({node["operation_id"] for node in binding["runs"]})
+        query = WebsiteConnectionOperation.objects.filter(connection_id=connection_id, generation=source["connection_generation"],
+            action=INVENTORY_ACTION, payload__schema_version=2, payload__goal_id=binding["goal"]["goal_id"],
+            payload__source_sha=binding["source_sha"], payload__source_scope_digest=goals.digest(source)).exclude(
+                payload__workflow_operation_id__in=captured)
+        if after is not None:
+            query = query.filter(pk__gt=after)
+        rows = list(query.order_by("pk")[:SOURCE_PAGE_SIZE + 1])
+        for row in rows:
+            scope = channel_scope(row)
+            if (scope["schema_version"] != 2 or not goals.scope_matches(scope["source_scope"], source)
+                    or scope["goal_id"] != binding["goal"]["goal_id"] or scope["source_sha"] != binding["source_sha"]
+                    or scope["workflow_operation_id"] in captured):
+                _deny()
+        selected = rows[:SOURCE_PAGE_SIZE]
+        return [row.payload["workflow_operation_id"] for row in selected], str(selected[-1].pk) if len(rows) > SOURCE_PAGE_SIZE else None
+    except (ValueError, TypeError, KeyError, AttributeError, OverflowError):
+        _deny()
 
 
 def mark_expired(reservation):

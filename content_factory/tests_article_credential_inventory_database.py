@@ -61,3 +61,40 @@ class ArticleCredentialInventoryDatabaseTests(WebsiteDatabaseFixture, TestCase):
             restored = reserve_workflow_operation(self.website, workflow="direct_generate", payload=deepcopy(request))
         self.assertIn(MARKER, restored.payload)
         self.assertEqual(WebsiteConnectionOperation.objects.filter(connection=self.website, action=INVENTORY_ACTION).count(), 1)
+        inventory = WebsiteConnectionOperation.objects.get(connection=self.website, action=INVENTORY_ACTION)
+        self.assertEqual(inventory.payload["schema_version"], 2)
+        self.assertEqual(inventory.payload["source_scope"], goal["scope"])
+
+    def test_source_pages_use_real_json_scope_and_uuid_cursor_without_legacy_or_reverted_sha(self):
+        from copy import deepcopy
+        from uuid import uuid4
+        from . import website_goal as goals, website_article_credentials as credentials
+        scope = goals.scope_for(self.website, "9")
+        goal_id = str(uuid4())
+        captured = str(uuid4())
+        binding = {"goal": {"goal_id": goal_id}, "source_scope": scope, "source_sha": "a" * 40,
+            "runs": [{"operation_id": captured}]}
+        def channel(*, revision=None, version=2, operation=None):
+            original = {**scope, "configuration_revision": revision or scope["configuration_revision"]}
+            identifier = operation or str(uuid4())
+            payload = {"schema_version": version, "channel": "website_token_broker", "workflow_operation_id": identifier,
+                "goal_id": goal_id, "connection_id": str(self.website.pk), "connection_generation": self.website.generation,
+                "repository_id": str(self.website.repository_id), "deletion_epoch": 0, "source_sha": "a" * 40,
+                "client_request_id": "articles-first:" + "c" * 64}
+            if version == 2:
+                payload.update(source_scope=deepcopy(original), source_scope_digest=goals.digest(original))
+            return WebsiteConnectionOperation.objects.create(connection=self.website, generation=self.website.generation,
+                action=credentials.INVENTORY_ACTION, state="recorded", idempotency_key="source-scope-page:" + identifier,
+                payload=payload, receipt={"schema_version": 1, "from_operation_start": True, "token_count": 0})
+        rows = [channel() for _ in range(5)]
+        channel(operation=captured)
+        channel(version=1)
+        channel(revision=scope["configuration_revision"] + 2)
+        cursor = None
+        observed = []
+        for _ in range(3):
+            page, cursor = credentials.source_page(self.website.pk, {"binding": binding}, after=cursor)
+            self.assertLessEqual(len(page), 2)
+            observed.extend(page)
+        self.assertEqual(observed, [row.payload["workflow_operation_id"] for row in sorted(rows, key=lambda row: row.pk)])
+        self.assertIsNone(cursor)

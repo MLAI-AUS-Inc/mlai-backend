@@ -141,16 +141,17 @@ def _request_stop(request):
 
 
 def _retire_original_credentials(parent, config, request, *, now):
-    """Remove captured original broker credentials; never infer full coverage/quiet.
+    """Remove captured and precisely source-scoped broker credentials.
 
     The source fence owns these exact original operation IDs. A goal/source-only
     query would also match a later source-hash reversion and is not authority to
-    revoke that separate execution. Deeper channels need their own original
-    source-scope enrollment before they can join this inventory.
+    revoke that separate execution. Only original v2 enrollment can extend the
+    captured inventory to a deeper operation. Full coverage/quiet is separate.
     """
     from .website_connections import authority_guard, contract_for
     from .website_first_article import _save_fields
     from .website_tokens import revoke_generation_tokens
+    from . import website_article_credentials as credentials
     with authority_guard(contract_for(parent.connection), action="read"):
         if _fresh(parent, config) != request["source_fence"]:
             _deny()
@@ -162,6 +163,21 @@ def _retire_original_credentials(parent, config, request, *, now):
             _deny()
         if local_stop != parent.receipt.get("article_source_stop"):
             _deny()
+        previous = operation.receipt.get("broker_credential_retirement")
+        cursor = None
+        if previous is not None:
+            if (not isinstance(previous, dict) or type(previous.get("schema_version")) is not int
+                    or previous["schema_version"] not in {1, 2} or previous.get("request_digest") != request["digest"]
+                    or previous.get("source_fence_id") != request["source_fence_id"]
+                    or previous.get("channel") != "website_token_broker" or previous.get("quiet") is not False
+                    or previous.get("inventory_complete") is not False or previous.get("effect_authority") is not False):
+                _deny()
+            if previous["schema_version"] == 2:
+                cursor = previous.get("next_inventory_id")
+                if previous.get("scope") != "captured_and_source_scoped_operations" or "next_inventory_id" not in previous:
+                    _deny()
+            elif previous.get("scope") != "captured_original_operations":
+                _deny()
         prior = operation.receipt.get("credential_lease")
         if prior is not None:
             try:
@@ -174,19 +190,20 @@ def _retire_original_credentials(parent, config, request, *, now):
                 _deny()
             if goals.stamp(prior["expires_at"]) > now:
                 return None
+        deeper, next_cursor = credentials.source_page(parent.connection_id, request["source_fence"], after=cursor)
         _save_fields(parent, {})  # exact current prepare claim before provider work
         lease = {"nonce": str(uuid4()), "request_digest": request["digest"],
             "expires_at": (now + CREDENTIAL_LEASE).isoformat()}
         operation.receipt = {**operation.receipt, "credential_lease": deepcopy(lease)}
         operation.save(update_fields=["receipt", "updated_at"])
     observed = []
-    identifiers = dict.fromkeys(node["operation_id"] for node in request["source_fence"]["binding"]["runs"])
+    identifiers = dict.fromkeys([*(node["operation_id"] for node in request["source_fence"]["binding"]["runs"]), *deeper])
     for identifier in identifiers:
         # Both checks use the original owner/payment/cause. No site lock spans
-        # provider HTTP. At most two captured operations * two DELETEs per pass.
+        # provider HTTP. At most two captured + two scoped operations, one call each.
         if _fresh(parent, config) != request["source_fence"]:
             _deny()
-        result = revoke_generation_tokens(parent.connection_id, f"operation:{identifier}", maximum_calls=2)
+        result = revoke_generation_tokens(parent.connection_id, f"operation:{identifier}", maximum_calls=1)
         if (not isinstance(result, dict) or set(result) != {"revoked", "pending"}
                 or any(type(result[key]) is not int or result[key] < 0 for key in result)):
             _deny()
@@ -200,9 +217,9 @@ def _retire_original_credentials(parent, config, request, *, now):
         _validate(operation, parent, request)
         if operation.receipt.get("credential_lease") != lease:
             _deny()
-        receipt = {"schema_version": 1, "request_digest": request["digest"],
+        receipt = {"schema_version": 2, "request_digest": request["digest"],
             "source_fence_id": request["source_fence_id"], "channel": "website_token_broker",
-            "scope": "captured_original_operations", "operations": observed,
+            "scope": "captured_and_source_scoped_operations", "operations": observed, "next_inventory_id": next_cursor,
             "inventory_complete": False, "quiet": False, "effect_authority": False}
         operation.receipt = {**{key: value for key, value in operation.receipt.items() if key != "credential_lease"},
             "broker_credential_retirement": receipt}
