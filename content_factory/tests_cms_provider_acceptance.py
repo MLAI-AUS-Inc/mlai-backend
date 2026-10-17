@@ -23,9 +23,9 @@ from . import cms_api_transport as api, cms_capture, cms_live_evidence as live
 from . import cms_media_transport as media, cms_owner_connection as owner
 from . import cms_post_contract as posts, cms_unpublish_contract as unpublish
 from . import cms_unpublish_public as absence
+from . import website_channel_observation as homepage
 from .cms_connection_authority import current_credential
 from .models import OrganizationContentConfig
-from .website_channel_observation import classify_prefix
 from .website_connections import contract_for
 from .website_contract import WebsiteAuthorityError
 from .website_disconnect import start_disconnect
@@ -34,7 +34,7 @@ from .website_publishing_channels import scope_for, update_choice
 
 @unittest.skipUnless(os.environ.get("MLAI_CMS_FIXTURE"), "Dedicated remote provider fixture required")
 @override_settings(ARTICLES_CHANNEL_DISCOVERY_ENABLED=True, ARTICLES_PUBLISHING_CHANNELS_ENABLED=True,
-    ARTICLES_CMS_CHANNEL_ENABLED=True)
+    ARTICLES_CMS_CHANNEL_ENABLED=True, ARTICLES_CMS_ONBOARDING_ENABLED=True)
 class CmsProviderAcceptanceTests(TransactionTestCase):
     """Real connect/capture persistence, provider contracts, public rendering and revoke."""
 
@@ -52,16 +52,15 @@ class CmsProviderAcceptanceTests(TransactionTestCase):
         context = SimpleNamespace(profile=profile, company=company, organization=org)
         config = OrganizationContentConfig.objects.create(organization=org, github_repo="")
         with ExitStack() as stack:
-            for module in (api, live, absence):
+            for module in (api, live, absence, homepage):
                 stack.enter_context(patch.object(module, "public_addresses", new=addresses))
                 stack.enter_context(patch.object(module, "PinnedHTTPSConnection", new=FixtureConnection))
-            # Channel selection is not evidence of provider identity. The actual
-            # public-site and authenticated identity reads below are unmocked.
-            generator = b'WordPress' if platform == "wordpress" else b'Ghost'
-            with patch("content_factory.website_publishing_channels.observe_homepage",
-                    return_value=classify_prefix(b'<meta name="generator" content="' + generator + b'">')):
-                inspected = update_choice(context, config, expected_scope=scope_for(context, config), expected_revision=0)
-            selected = update_choice(context, config, expected_scope=inspected["scope"], expected_revision=1, selected="cms")
+            # Read the actual fixture homepage. The synthetic owner explicitly
+            # selects its CMS, as the real initial form permits when hints are
+            # unavailable. Neither a hint nor this choice authenticates the key.
+            inspected = update_choice(context, config, expected_scope=scope_for(context, config), expected_revision=0)
+            selected = update_choice(context, config, expected_scope=inspected["scope"], expected_revision=1,
+                selected="cms", platform=platform)
             data = {"client_request_id": str(uuid4()), "channel_scope": selected["scope"], "channel_revision": 2,
                 "platform": platform, "public_origin": origin, "api_origin": origin, "credential_origin_confirmed": True,
                 "username": fixture["username"], "secret": fixture["secret"]}
