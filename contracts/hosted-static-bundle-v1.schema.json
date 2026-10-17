@@ -102,7 +102,7 @@
       "type": "string"
     },
     "renderer_version": {
-      "const": 1,
+      "const": 2,
       "type": "integer"
     },
     "schema_version": {

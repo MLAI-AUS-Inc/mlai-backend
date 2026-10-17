@@ -48,12 +48,64 @@ _FONT = _FAMILY + r"(?:, *" + _FAMILY + r")*"
 _CSS_TEMPLATE = (
     ":root{color-scheme:light}*{box-sizing:border-box}body{margin:0;background:%s;color:%s;font:1rem/1.7 %s}"
     "header,main,footer{max-width:70rem;margin:auto;padding:1.5rem}a{color:%s}h1,h2,h3{color:%s;font-family:%s;line-height:1.2}"
-    ".cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%%,18rem),1fr));gap:1.5rem}.card{padding:1.5rem;border:1px solid #d6dce4;border-radius:1rem;background:%s}"
+    ".cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%%,18rem),1fr));gap:1.5rem}.card{padding:1.5rem;border:1px solid #d6dce4;border-radius:1rem;background:%s;color:%s}.card h2,.card a{color:inherit}"
     "article{overflow-wrap:anywhere}img{max-width:100%%;height:auto}pre,table{display:block;max-width:100%%;overflow:auto}pre{white-space:pre}nav{display:flex;gap:1rem;flex-wrap:wrap}time,footer{color:%s}@media(max-width:40rem){h1{font-size:2rem}header,main,footer{padding:1rem}}"
 )
 _CSS_PARTS = _CSS_TEMPLATE.replace("%%", "%").split("%s")
-_CSS_PATTERN = re.compile("".join(re.escape(part) + (pattern if index < 8 else "") for index, (part, pattern) in
-    enumerate(zip(_CSS_PARTS, [_COLOR, _COLOR, _FONT, _COLOR, _COLOR, _FONT, _COLOR, _COLOR, ""]))))
+_CSS_PATTERN = re.compile("".join(re.escape(part) + ("(" + pattern + ")" if pattern else "") for part, pattern in
+    zip(_CSS_PARTS, [_COLOR, _COLOR, _FONT, _COLOR, _COLOR, _FONT, _COLOR, _COLOR, _COLOR, ""])))
+
+
+def opaque_color(value):
+    """Resolve bounded opaque sRGB; unknown or translucent colors cannot style copy."""
+    if not isinstance(value, str) or not re.fullmatch(_COLOR, value):
+        return None
+    if value.startswith("#"):
+        raw = value[1:]
+        if len(raw) in {3, 4}:
+            raw = "".join(char * 2 for char in raw)
+        if len(raw) == 8 and raw[6:].lower() != "ff":
+            return None
+        return "#" + raw[:6].lower()
+    function, raw = value.split("(", 1)
+    values = [part.strip() for part in raw[:-1].split(",")]
+    if len(values) != (4 if function == "rgba" else 3):
+        return None
+    try:
+        if len(values) == 4 and (float(values[3][:-1]) / 100 if values[3].endswith("%") else float(values[3])) != 1:
+            return None
+        channels = []
+        for part in values[:3]:
+            number = float(part[:-1]) * 255 / 100 if part.endswith("%") else float(part)
+            if not 0 <= number <= 255:
+                return None
+            channels.append(int(number + 0.5))
+        return "#" + "".join(f"{channel:02x}" for channel in channels)
+    except (ValueError, OverflowError):
+        return None
+
+
+def color_contrast(first, second):
+    """Relative-luminance contrast for the resolved opaque shell palette."""
+    colors = [opaque_color(value) for value in (first, second)]
+    if any(value is None for value in colors):
+        return None
+    def luminance(value):
+        channels = [int(value[index:index + 2], 16) / 255 for index in (1, 3, 5)]
+        linear = [channel / 12.92 if channel <= 0.04045 else ((channel + 0.055) / 1.055) ** 2.4 for channel in channels]
+        return sum(channel * weight for channel, weight in zip(linear, (0.2126, 0.7152, 0.0722)))
+    high, low = sorted((luminance(value) for value in colors), reverse=True)
+    return (high + 0.05) / (low + 0.05)
+
+
+def readable_color(candidate, background):
+    """Keep a known brand foreground only when ordinary copy reaches 4.5:1."""
+    if opaque_color(background) is None:
+        _fail()
+    value = opaque_color(candidate)
+    if value is not None and color_contrast(value, background) >= 4.5:
+        return value
+    return max(("#000000", "#ffffff"), key=lambda value: color_contrast(value, background))
 
 
 class HostedBundleError(ValueError):
@@ -256,7 +308,7 @@ def validate_bundle(value):
         manifest = value.manifest
         if (set(manifest) != _MANIFEST_FIELDS or
                 type(manifest["schema_version"]) is not int or manifest["schema_version"] != 1 or manifest["kind"] != "hosted_static_bundle" or
-                type(manifest["renderer_version"]) is not int or manifest["renderer_version"] != 1 or
+                type(manifest["renderer_version"]) is not int or manifest["renderer_version"] != 2 or
                 not isinstance(manifest["scope_sha256"], str) or re.fullmatch(r"[a-f0-9]{64}", manifest["scope_sha256"]) is None or
                 not 1 <= len(value.files) <= 1024 or sum(len(item.content) for item in value.files) > MAX_BUNDLE_BYTES):
             _fail()
@@ -295,6 +347,10 @@ def validate_bundle(value):
         sheets = [item for item in value.files if item.path.endswith(".css")]
         if (len(sheets) != 1 or len(sheets[0].content) > 4096 or not _CSS_PATTERN.fullmatch(sheets[0].content.decode()) or
                 sum(item.media_type in {kind[1] for kind in _IMAGES.values()} for item in value.files) > MAX_ASSETS):
+            _fail()
+        background, text, _, link, heading, _, card, card_text, muted = _CSS_PATTERN.fullmatch(sheets[0].content.decode()).groups()
+        if any((color_contrast(foreground, backdrop) or 0) < 4.5 for foreground, backdrop in (
+                (text, background), (link, background), (heading, background), (muted, background), (card_text, card))):
             _fail()
         documents = {}
         brands = set()
