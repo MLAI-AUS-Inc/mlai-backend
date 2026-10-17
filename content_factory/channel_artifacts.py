@@ -34,16 +34,20 @@ def _deny():
     return WebsiteAuthorityError("website_connection_changed", "The original article owner, CMS, policy or paid reservation changed.")
 
 
-def _policy(context, config):
+def _policy(context, config, *, user):
     record = saved_record(config.article_system)
     if (record is None or record["scope"] != scope_for(context, config) or
             not record["selection"] or record["selection"]["channel"] != "cms"):
         raise _deny()
-    # CMS auto-publication consent is not implemented yet. Existing Git auto
-    # approval, worker booleans and a saved auto_publish preference cannot
-    # silently become CMS publication approval.
-    return {"schema_version": 1, "channel_choice": record, "review_policy": "review",
+    # Git preferences and worker booleans never grant CMS consent. Only an
+    # explicit current private owner policy can choose CMS auto publication.
+    from .cms_publication_policy import current_policy
+    native = current_policy(context, config, user=user)
+    value = {"schema_version": 1, "channel_choice": record, "review_policy": native["policy"]["review_policy"] if native else "review",
         "auto_publish_preference": config.auto_publish is True}
+    if native:
+        value["cms_publication_policy"] = {"operation_id": native["operation_id"], "digest": native["policy"]["digest"]}
+    return value
 
 
 @dataclass(frozen=True)
@@ -66,7 +70,7 @@ def prepare_generation(context, config, *, user):
             raise ValueError("Invalid private reference")
     except (ValueError, TypeError, AttributeError):
         raise _deny() from None
-    return GenerationScope(deepcopy(binding), reference, _policy(context, config))
+    return GenerationScope(deepcopy(binding), reference, _policy(context, config, user=user))
 
 
 def _request_identity(payload):
@@ -112,7 +116,7 @@ def reserve_generation(scope, *, context, config, user, payload):
         company_id=binding["company_id"], organization_id=binding["organization_id"], owner_user_id=binding["owner_user_id"],
         connection_id=binding["connection_id"], connection_generation=binding["generation"],
         public_origin=binding["public_origin"], scope_sha256=digest(binding), billing_request_id=payload["client_request_id"],
-        review_policy="review", policy_sha256=digest(scope.policy))
+        review_policy=scope.policy["review_policy"], policy_sha256=digest(scope.policy))
     if ENVELOPE in payload and payload[ENVELOPE] != envelope:
         raise _deny()
     payload[ENVELOPE] = envelope
@@ -151,7 +155,7 @@ def authorize_payload(payload, *, require_outbox=True):
         if private["request_sha256"] != _request_identity(payload):
             raise _deny()
         scope = current_scope(operation)
-        if scope.binding != private["binding"] or _policy(scope.context, scope.config) != private["policy"]:
+        if scope.binding != private["binding"] or _policy(scope.context, scope.config, user=scope.user) != private["policy"]:
             raise _deny()
         from .cms_connection_authority import current_credential
         current_credential(scope.context, scope.config, scope.connection, user=scope.user)

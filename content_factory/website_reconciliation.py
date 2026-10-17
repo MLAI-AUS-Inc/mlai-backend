@@ -752,7 +752,7 @@ def process_website_connection_operations(*, limit=20, now=None, connection_id=N
     from .website_cost_ledger import enabled as accounting_enabled
     from .website_operational_alert_delivery import ACTION as alert_action, advance as advance_alert, channel as alert_channel
     notices_enabled=getattr(settings,"ARTICLES_GOAL_NOTIFICATIONS_ENABLED",False)
-    excluded = ["workflow", "cms-artifact", "cms-stage"] if notices_enabled else ["workflow", "cms-artifact", "cms-stage", notice_action]
+    excluded = ["workflow", "cms-artifact", "cms-stage", "cms-policy"] if notices_enabled else ["workflow", "cms-artifact", "cms-stage", "cms-policy", notice_action]
     from .cms_connection_authority import enabled as cms_channel_enabled
     cms_enabled = cms_channel_enabled()
     from .channel_artifacts import enabled as artifacts_enabled

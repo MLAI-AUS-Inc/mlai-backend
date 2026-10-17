@@ -79,7 +79,7 @@ def request_json(binding, credential, *, method, resource, identifier=None, quer
     if platform == "ghost":
         base += "/"
     if query is not None and (not isinstance(query, dict) or len(query) > 12 or any(
-            not isinstance(key, str) or key not in {"page", "per_page", "limit", "context", "status", "slug", "search", "filter", "formats", "source", "include", "fields", "order", "orderby"} or
+            not isinstance(key, str) or key not in {"page", "per_page", "limit", "context", "status", "slug", "search", "filter", "formats", "source", "include", "fields", "order", "orderby", "hide_empty"} or
             not isinstance(value, (str, int)) or type(value) is bool or len(str(value)) > 512 or
             any(ord(c) < 32 for c in str(value)) for key, value in query.items())):
         raise CmsApiError("invalid_request")
