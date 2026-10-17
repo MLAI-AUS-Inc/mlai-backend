@@ -61,10 +61,14 @@ the independent setup rollout gate is off.
 
 ## Validation and rollout
 
-The 1,356-test website no-database suite passes. Focused tests cover original
+The 1,357-test website no-database suite passes. Focused tests cover original
 price/zero, retry and lost-response replay, same-identity promotion, owner/scope
 changes, worker loss, actual discovery reads, refunds after revocation/flag-off,
-privacy erasure, budget carry, secret-free status and the owner route. All 582
+privacy erasure, budget carry, secret-free status and the owner route. Recovery
+accounts through the native meter so a worker's cumulative report cannot erase
+the original backend setup allowance or invalidate subsequent work admission.
+The regression covers reservation, repeated reads and the actual recovery
+acknowledgement with that allowance intact. All 582
 test modules are assigned; 822 production failure emissions are audited; model
 dry-run reports no changes. Disposable CI extends the real ORM synthetic
 hold/outbox/publish/erasure flow to begin with durable setup and verifies that a

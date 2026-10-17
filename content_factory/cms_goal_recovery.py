@@ -140,7 +140,7 @@ def prepare(scope, *, now=None):
                 usage["state_version"] != observed["state_version"] or
                 not all(budget.numeric(usage.get(key)) for key in ("model_usd", "active_seconds"))): raise _deny()
         _no_issued_provider_effect(operation, run)
-        selected = budget.account_usage(native_budget.validate(operation.receipt.get("native_budget"), value.goal, now=now), usage, run_id=run.run_id)
+        selected = native_budget.account_usage(native_budget.validate(operation.receipt.get("native_budget"), value.goal, now=now), usage, run_id=run.run_id)
         if budget.exhaustion(selected, now=now, action="first-article-generation") is not None: raise _deny()
         plan = {"schema_version": 1, "state": "reserved", "locator": observed, "failure": validate_failure(run.result["failure"]),
             "started_at": now.isoformat(), "receipt": None}
