@@ -240,9 +240,14 @@ def issue_create(intent, state):
         native = {key: [{"id": item} for item in intent["native_fields"][key]] for key in ("authors", "tags")}
         if "feature_image" in intent["native_fields"]:
             native["feature_image"] = intent["native_fields"]["feature_image"]
+        # Ghost's HTML importer drops sibling comments and serializes element
+        # attributes. A native HTML card preserves the exact approved bytes and
+        # ownership markers instead of weakening recovery to a fuzzy match.
+        lexical = {"root": {"children": [{"type": "html", "version": 1, "html": marked_html(intent)}],
+            "direction": None, "format": "", "indent": 0, "type": "root", "version": 1}}
         payload = {"posts": [{"title": intent["title"], "slug": intent["slug"], "status": intent["status"], "visibility": "public",
-            "html": "<!--kg-card-begin: html-->" + marked_html(intent) + "<!--kg-card-end: html-->", **native}]}
-        effect = PostEffect("POST", query={"source": "html", "formats": "html"}, payload=payload)
+            "lexical": json.dumps(lexical, separators=(",", ":")), **native}]}
+        effect = PostEffect("POST", query={"formats": "html"}, payload=payload)
     updated = {**deepcopy(state), "phase": "create_issued", "create_count": 1, "outcome_unknown": True}
     return updated, effect
 
@@ -287,6 +292,7 @@ def _owned_record(row, intent):
     accepted = {marker}
     if platform == "ghost":
         accepted.update({"<!--kg-card-begin: html-->" + marker + "<!--kg-card-end: html-->",
+            "<!--kg-card-begin: html-->\n" + marker + "\n<!--kg-card-end: html-->",
             '<div class="kg-card kg-html-card">' + marker + '</div>'})
     if body.strip() not in accepted:
         raise CmsApiError("post_ownership_conflict")

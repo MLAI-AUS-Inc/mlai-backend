@@ -111,3 +111,22 @@ all 595 test modules are assigned. Isolation assertions check pinned images,
 internal networking, loopback ports, both providers, absence of workflow secrets
 and unconditional credential/volume cleanup. These checks do not start a CMS or
 a database.
+
+The next real run reached original post creation. WordPress correctly rejected
+the fixture's seven-word body as insufficient public article evidence; the
+fixture now supplies more than 30 words. Ghost's HTML importer drops sibling
+comments, including the two ownership boundaries, and normalizes element bytes.
+Create now sends one native Lexical HTML card containing the exact marked body.
+Recovery still requires those exact bytes, both markers and the original native
+metadata; it additionally accepts Ghost's exact newline-delimited card wrapper.
+There is no fuzzy content comparison or additional POST. Two regressions fail
+before this change; 116 focused contract/transport/fixture cases pass afterward.
+The actual provider matrix must still pass.
+
+Primary source inspected at Koenig commit
+`4da831801b9ca065e4b30abe96c8b33227133e6c`:
+[HTML importer](https://github.com/TryGhost/Koenig/blob/4da831801b9ca065e4b30abe96c8b33227133e6c/packages/kg-default-nodes/src/nodes/html/html-parser.ts),
+[native HTML card schema tests](https://github.com/TryGhost/Koenig/blob/4da831801b9ca065e4b30abe96c8b33227133e6c/packages/kg-default-nodes/test/nodes/html.test.ts),
+[card renderer](https://github.com/TryGhost/Koenig/blob/4da831801b9ca065e4b30abe96c8b33227133e6c/packages/kg-default-nodes/src/nodes/html/html-renderer.ts).
+The container remains pinned independently; its next actual run is required to
+validate that version's behavior.

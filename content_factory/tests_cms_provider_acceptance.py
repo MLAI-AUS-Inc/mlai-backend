@@ -114,7 +114,11 @@ class CmsProviderAcceptanceTests(TransactionTestCase):
             intent = posts.make_intent(binding=binding, operation_id=str(uuid4()), source_run_id="recorded-provider-fixture",
                 run_generation=1, artifact_sha256="a" * 64, editorial_sha256="b" * 64, approval_sha256="c" * 64,
                 title="Disposable native article", slug_seed="disposable-native-article", status="published", native_fields=native,
-                html='<article data-cf-article-body><h1>Disposable native article</h1><p>Recorded provider acceptance body.</p></article>')
+                html='<article data-cf-article-body><h1>Disposable native article</h1><p>'
+                    'This disposable article exercises the real provider rendering contract with sufficient visible prose. '
+                    'It records one original create, recovers its uncertain acknowledgement, verifies the approved body, '
+                    'and withdraws only that owned post while preserving all pre-existing native content.'
+                    '</p></article>')
 
             def effect(plan):
                 return request(method=plan.method, resource=plan.resource, identifier=plan.identifier,

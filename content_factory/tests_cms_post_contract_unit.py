@@ -121,7 +121,7 @@ class CmsPostContractTests(SimpleTestCase):
             self.assertIn(posts.marked_html(value), str(effect.payload))
             self.assertNotIn("The exact approved body", repr(effect))
             if platform == "ghost":
-                self.assertEqual(effect.query, {"source": "html", "formats": "html"})
+                self.assertEqual(effect.query, {"formats": "html"})
                 self.assertEqual(effect.payload["posts"][0]["authors"], [{"id": "a" * 24}])
             else:
                 self.assertEqual(effect.payload["status"], "publish")
@@ -191,6 +191,7 @@ class CmsPostContractTests(SimpleTestCase):
         state, _ = issued(value)
         marker = posts.marked_html(value)
         for body in (marker, '<div class="kg-card kg-html-card">' + marker + '</div>',
+                     '<!--kg-card-begin: html-->\n' + marker + '\n<!--kg-card-end: html-->',
                      '<!--kg-card-begin: html-->' + marker + '<!--kg-card-end: html-->'):
             result = posts.observe_posts(value, state, {"posts": [response(value, html=body)]})
             self.assertEqual(result["phase"], "provider_confirmed")
@@ -198,6 +199,18 @@ class CmsPostContractTests(SimpleTestCase):
                         {"tags": []}, {"status": "draft"}):
             with self.subTest(changes=tuple(changes)), self.assertRaises(CmsApiError):
                 posts.observe_posts(value, state, {"posts": [response(value, **changes)]})
+
+    def test_ghost_create_uses_one_raw_html_card_without_lossy_html_import(self):
+        import json
+        value = intent("ghost")
+        _, effect = issued(value)
+        record = effect.payload["posts"][0]
+        self.assertNotIn("source", effect.query)
+        self.assertNotIn("html", record)
+        document = json.loads(record["lexical"])
+        self.assertEqual(document["root"]["children"], [{"type": "html", "version": 1, "html": posts.marked_html(value)}])
+        self.assertEqual(document["root"]["type"], "root")
+        self.assertEqual(document["root"]["version"], 1)
 
     def test_draft_acknowledgement_never_claims_a_public_url_or_live_result(self):
         for platform in ("wordpress", "ghost"):
