@@ -162,6 +162,27 @@ def bind_source(goal, value, *, expected_scope, now):
     return result
 
 
+def milestone_passed(name, proof, *, proofs, expected_scope, original_source, now):
+    """Keep completed preparation at its real draft time after owner review.
+
+    Only a freshly verified publication of that exact source, with its original
+    draft and subsequent approval, can establish this past milestone. Ordinary
+    access freshness and every new-work admission remain unchanged.
+    """
+    clock = now
+    if name in {"access", "understood"} and isinstance(proofs, dict):
+        try:
+            draft, approval, live, first = (proofs[key] for key in ("first_draft", "approved", "live", "first_article_live"))
+            if (all(valid_proof(key, proofs[key], expected_scope=expected_scope, original_source=original_source, now=now)
+                    for key in ("first_draft", "approved", "live", "first_article_live")) and
+                    canonical_bytes(live) == canonical_bytes(first) and
+                    _time(draft["at"]) <= _time(approval["at"]) <= _time(first["at"])):
+                clock = _time(draft["at"])
+        except (ValueError, TypeError, KeyError, AttributeError, RecursionError):
+            pass
+    return valid_proof(name, proof, expected_scope=expected_scope, original_source=original_source, now=clock)
+
+
 def refresh(goal, proofs, *, expected_scope, now):
     """Rebuild milestones from current private facts, with bounded invalidations."""
     result = validate_goal(goal, expected_scope)
@@ -172,7 +193,7 @@ def refresh(goal, proofs, *, expected_scope, now):
         if name == "merged":
             continue
         candidate, old = proofs.get(name), row["proof"]
-        passed = valid_proof(name, candidate, expected_scope=expected_scope, original_source=result["source"], now=now)
+        passed = milestone_passed(name, candidate, proofs=proofs, expected_scope=expected_scope, original_source=result["source"], now=now)
         if old and (not passed or old["digest"] != candidate["digest"]):
             result["proof_history"].append({"name": name, "proof_digest": old["digest"], "invalidated_at": _time(now.isoformat()).isoformat()})
         row.update(state="passed" if passed else "invalidated" if old else "pending", proof=deepcopy(candidate) if passed else None)
@@ -185,7 +206,8 @@ def complete(goal, *, expected_scope, now):
     """A native goal cannot finish at consent, draft or provider acknowledgement."""
     try:
         value = validate_goal(goal, expected_scope)
-        return all(not row["required"] or row["state"] == "passed" and valid_proof(row["name"], row["proof"],
+        proofs = {row["name"]: row["proof"] for row in value["milestones"]}
+        return all(not row["required"] or row["state"] == "passed" and milestone_passed(row["name"], row["proof"], proofs=proofs,
             expected_scope=expected_scope, original_source=value["source"], now=now) for row in value["milestones"])
     except CmsGoalError:
         return False

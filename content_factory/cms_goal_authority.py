@@ -12,7 +12,6 @@ from . import cms_goal_contract as goals
 from . import cms_goal_consent as consent
 from .channel_artifacts import enabled as artifacts_enabled
 from .channel_artifact_contract import canonical_bytes
-from .cms_goal_evidence import current_scope as selected_scope
 from .cms_operation_scope import current_scope
 from .website_goal import enrolled
 from .website_contract import WebsiteAuthorityError
@@ -82,6 +81,7 @@ def historical(operation):
 
 def current(operation, *, user=None, lease_id=None, states=ACTIVE):
     """Recheck the selected native owner/policy and exact durable goal lease."""
+    from .cms_goal_evidence import current_scope as selected_scope
     value = historical(operation)
     if (not enabled(operation.connection.organization_id) or operation.state not in states or
             lease_id is not None and (operation.state != "running" or operation.payload.get("lease_id") != lease_id or

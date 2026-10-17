@@ -1,6 +1,7 @@
 """Only current private native pipeline facts can fill native goal milestones."""
 
 from copy import deepcopy
+from datetime import timedelta
 import json
 from unittest.mock import patch
 from uuid import uuid4
@@ -53,6 +54,27 @@ class CmsGoalEvidenceTests(SimpleTestCase):
         for forbidden in ("source_sha", "backend_merge", "repository_access", "synthetic-application-password"):
             self.assertNotIn(forbidden, json.dumps(value))
         self.fetch.assert_not_called(); self.http.assert_not_called(); self.public_get.assert_not_called()
+
+    def test_original_preparation_and_draft_can_precede_a_long_owner_review(self):
+        # These private rows represent work completed before the owner waited.
+        # Actual approval and public-body verification still happen now.
+        prepared_at = self.now - timedelta(days=30)
+        for row in self.saved:
+            if row.action in {evidence.policies.ACTION, capture.ACTION, evidence.reviews.ACTION}:
+                row.updated_at = prepared_at
+        self.goal = goals.new_goal(self.goal["goal_id"], self.scope, now=prepared_at - timedelta(minutes=1))
+        self.advance(); self.advance(); self.advance()
+        proofs, original, _references = self.collect()
+        self.assertEqual(proofs["access"]["at"], prepared_at.isoformat())
+        self.assertEqual(proofs["understood"]["at"], prepared_at.isoformat())
+        self.assertEqual(proofs["first_draft"]["at"], prepared_at.isoformat())
+        current = goals.bind_source(self.goal, original, expected_scope=self.scope, now=self.now)
+        current = goals.refresh(current, proofs, expected_scope=self.scope, now=self.now)
+        self.assertTrue(goals.complete(current, expected_scope=self.scope, now=self.now))
+        self.assertFalse(goals.valid_proof("access", proofs["access"], expected_scope=self.scope, original_source=original, now=self.now))
+        from .cms_goal_achievement import capture as record
+        completed_at = goals._time(self.operation.payload["public_observation"]["checked_at"]) + timedelta(seconds=1)
+        self.assertEqual(record(current, self.operation, now=completed_at)["observation"], self.operation.payload["public_observation"])
 
     def test_provider_ack_and_copied_live_boolean_do_not_fill_public_milestones(self):
         self.advance(); self.advance()
