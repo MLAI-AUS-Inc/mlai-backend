@@ -37,7 +37,7 @@ pass. They cover rejected local/foreign database admission, a closed synthetic
 child environment, exact sample/lifetime accounting, private temporary cleanup,
 owned-group teardown including early exit/timeouts, and the required deploy gate.
 All 599 test modules are fully assigned. Fixture/helper syntax and workflow YAML
-parse. The remote application comparison remains pending; no service or database
+parse. The remote comparison evidence is recorded below; no service or database
 was started locally and no recycle default has been changed.
 
 The first actual comparison passed its lifecycle checks, but its memory figures
@@ -48,3 +48,11 @@ now bypasses fixture throttling without collecting request references. Repeat
 the comparison before drawing memory/tuning conclusions. Export the bounded
 per-100-request numeric samples as well as lifetime totals to distinguish warm-up,
 retained growth and peaks without retaining or publishing raw requests.
+
+The corrected application lane passes in run 39055841107. Peak worker RSS is
+2,934,652 KiB at 300/50 and 3,051,384 KiB at 1,000/100, with 1,200 completed
+requests each. Keep the runtime limit unchanged. A separate real-Django,
+database-free regression reproduces large-run retention through reverse-prefetch
+cycles; the [request-lifetime change](articles-f2-bootstrap-run-lifetime-2026-10-18.md)
+will be measured in the same remote fixture. The initial Mock-contaminated
+figures remain excluded.
