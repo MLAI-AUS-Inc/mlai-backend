@@ -1313,6 +1313,12 @@ class WebsiteReviewRegressionTests(WebsiteDatabaseFixture, TestCase):
                 upload.assert_not_called()
                 self.assertEqual((media.state, media.receipt['verified']), ('completed', 0))
                 cms_owned_media.completed_media(media)
+                from . import cms_staged_review
+                self.assertEqual(cms_staged_review.ensure_stages(connection_id=website.pk), 1)
+                self.assertEqual(cms_staged_review.ensure_stages(connection_id=website.pk), 0)
+                stage = website.operations.get(action='cms-stage')
+                self.assertEqual(cms_staged_review.current_stage(stage)[1]['article']['html'], handoff['article']['html'])
+                self.assertIs(stage.receipt['approval_recorded'], False)
                 with transaction.atomic():
                     Ledger.objects.create(user=user, kind='REFUND', source='CONTENT_FACTORY', delta=6, delta_microroo=6_000_000,
                         refund_of=spend, idempotency_key='content_factory:refund:' + artifact_payload['client_request_id'])
@@ -1364,6 +1370,8 @@ class WebsiteReviewRegressionTests(WebsiteDatabaseFixture, TestCase):
             self.assertEqual((review.state, review.payload), ('deleted', {}))
             media.refresh_from_db()
             self.assertEqual((media.state, media.payload), ('deleted', {}))
+            stage.refresh_from_db()
+            self.assertEqual((stage.state, stage.payload), ('deleted', {}))
 
     @override_settings(ARTICLES_PUBLISHING_CHANNELS_ENABLED=True, ARTICLES_CMS_CHANNEL_ENABLED=True)
     def test_private_cms_credential_binding_is_scoped_and_git_read_denied(self):
