@@ -116,6 +116,23 @@ class HostedBundleContractTests(unittest.TestCase):
             with self.subTest(media_type=media_type), self.assertRaises(HostedBundleError):
                 self.changed_files(sorted(changed, key=lambda item: item.path)).export_zip()
 
+    def test_palette_revision_cannot_be_downgraded_after_manifest_rehashing(self):
+        self.assertEqual(self.value.manifest["renderer_version"], 2)
+        manifest = deepcopy(self.value.manifest)
+        manifest["renderer_version"] = 1
+        manifest["digest"] = digest({key: value for key, value in manifest.items() if key != "digest"})
+        with self.assertRaises(HostedBundleError): HostedBundle(manifest, self.value.files).export_zip()
+
+    def test_readdressed_white_on_white_copy_fails_the_actual_backend_decoder(self):
+        old = next(item for item in self.value.files if item.path.endswith(".css"))
+        content = old.content.replace(b"background:#ffffff;color:#172033;font:", b"background:#ffffff;color:#ffffff;font:")
+        self.assertNotEqual(content, old.content)
+        path = "assets/" + hashlib.sha256(content).hexdigest() + ".css"
+        files = sorted([BundleFile(path, item.media_type, content) if item == old else
+            replace(item, content=item.content.replace(old.path.encode(), path.encode())) if item.path.endswith(".html") else item
+            for item in self.value.files], key=lambda item: item.path)
+        with self.assertRaises(HostedBundleError): self.changed_files(files).export_zip()
+
     def test_immutable_producer_bytes_require_exact_source_revision_paths_and_read_access(self):
         lock = verify()
         producer = {row["source_path"]: (ROOT / row["local_path"]).read_bytes() for row in lock["files"]}

@@ -2,21 +2,21 @@
   "files": [
     {
       "local_path": "content_factory/hosted_bundle_contract.py",
-      "sha256": "005a98f24211dfe186ea52fcb083b067a1419a8daf3dcd1d4eccb2cd0b943050",
+      "sha256": "5c887ea983cddd4f02741532128227d4b8ebe286f9ce9ad973009fe0c18070e2",
       "source_path": "backend/hosted_bundle_contract.py"
     },
     {
       "local_path": "contracts/hosted-static-bundle-v1.schema.json",
-      "sha256": "b2e88b511a9887333e994de79384135de3d02b400b09d8e935cb90db75c10633",
+      "sha256": "2effe9a2b6032a4ee2648f50dd2e08c4e7b8a50b8924b7cd5bb86654afb7d393",
       "source_path": "backend/contracts/hosted-static-bundle-v1.schema.json"
     },
     {
       "local_path": "contracts/hosted-static-bundle-v1.example.json",
-      "sha256": "c429c620dde31421208d28f5098c3b16cda5f70ec79b42c365c4a3a3cb941318",
+      "sha256": "08e9217001f64d8ade07f044b68de5e8ee1715e6092dca3a0873c2bb7b55677d",
       "source_path": "backend/contracts/hosted-static-bundle-v1.example.json"
     }
   ],
   "schema_version": 1,
   "source_repository": "drsamdonegan/content-factory",
-  "source_revision": "00d06cdaaf3f69df20a08f380a570dd6a17f7e97"
+  "source_revision": "29d75bb58cc4025e2ea05cb10f4daedae334f70d"
 }
