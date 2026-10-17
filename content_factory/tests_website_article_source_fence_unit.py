@@ -311,3 +311,49 @@ class ArticleSourceFenceTests(SimpleTestCase):
 
     def test_original_draft_deny_control_revokes_fenced_goal_without_rewriting_history(self):
         self.assert_original_draft_control_stops_goal("deny")
+
+    def test_later_review_metadata_cannot_prevent_owner_stopping_original_fenced_goal(self):
+        from workflow_runs.models import ContentFactoryRun
+        from . import vibe_marketing_views as views
+        fence = self.record(); self.rebound_parent()
+        self.root.run_request["review_metadata"] = {"version": 2}
+        with patch.object(fences, "_fenced_operation_for_run", return_value=self.workflow), \
+                patch.object(ContentFactoryRun.objects, "filter", side_effect=self.run_rows), \
+                patch.object(views, "_get_config", return_value=self.config), \
+                patch.object(views, "_serialize_run", side_effect=lambda run, **kwargs: {"run_id": run.run_id, "status": run.status}):
+            response = views.control_article_run(user=self.fixture.chain.fixture.user, context=self.fixture.chain.context,
+                run=self.root, action="cancel", data={})
+        self.assertEqual(response.status_code, 202)
+        self.assertEqual(self.parent.state, "cancelled")
+        self.assertEqual(fence.state, "cancelled")
+
+    def test_owner_stop_wins_when_source_fence_is_recorded_during_legacy_worker_http(self):
+        from workflow_runs.models import ContentFactoryRun
+        from . import vibe_marketing_views as views
+        def worker(**kwargs):
+            self.assertEqual(self.fixture.depth, 0, "Worker HTTP is outside authority locks")
+            self.record(); self.rebound_parent()
+            return {"status": "cancelled", "content_factory_status_code": 200}
+        def local_cancel(**kwargs):
+            self.root.status = "cancelled"
+            self.root.result = {"status": "cancelled", "cancelled": True}
+            return self.root
+        fetched = rows(self.root); fetched.get.return_value = self.root
+        with patch.object(fences, "_fenced_operation_for_run", side_effect=lambda *args:
+                    self.workflow if fences.KEY in self.workflow.receipt else None), \
+                patch.object(ContentFactoryRun.objects, "filter", side_effect=self.run_rows), \
+                patch.object(ContentFactoryRun.objects, "prefetch_related", return_value=fetched), \
+                patch.object(views, "_get_config", return_value=self.config), \
+                patch.object(views, "_run_has_external_publish_evidence", return_value=False), \
+                patch.object(views, "_serialize_run", side_effect=lambda run, **kwargs: {"run_id": run.run_id, "status": run.status}), \
+                patch.object(views, "_cancel_local_article_run", side_effect=local_cancel), \
+                patch.object(views, "_call_content_factory_run_action", side_effect=worker) as remote:
+            response = views.control_article_run(user=self.fixture.chain.fixture.user, context=self.fixture.chain.context,
+                run=self.root, action="cancel", data={})
+        self.assertEqual(response.status_code, 202)
+        self.assertEqual(self.parent.state, "cancelled")
+        row = next(row for row in self.reservations.values() if row.action == fences.ACTION)
+        self.assertEqual(row.state, "cancelled")
+        self.assertEqual(row.payload["binding"]["runs"][0]["execution_version"], [1, 5])
+        self.assertEqual(self.fixture.chain.fixture.spend.call_count, 1)
+        remote.assert_called_once()

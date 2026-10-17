@@ -18475,8 +18475,20 @@ def control_article_run(*, user, context, run, action, data, run_id=None, goal_o
                     "run_id": run_id, "goal_operation_id": goal_operation_id}))
         except WebsiteAuthorityError as exc:
             return Response(exc.as_dict(), status=exc.status)
-    return _control_article_run_for_channel(user=user, context=context, run=run, action=action, data=data,
+    response = _control_article_run_for_channel(user=user, context=context, run=run, action=action, data=data,
         run_id=run_id, goal_operation_id=goal_operation_id)
+    if action in {"cancel", "deny"}:
+        # A source wake can record its stop while the legacy owner control is
+        # waiting on worker HTTP. Recheck after its local write; a later source
+        # wake will instead observe the owner-cancelled/denied state directly.
+        try:
+            stopped = owner_stop_for_run(context=context, run=run, action=action)
+        except WebsiteAuthorityError as exc:
+            return Response(exc.as_dict(), status=exc.status)
+        if stopped is not None:
+            run.refresh_from_db()
+            return Response(_serialize_run(run, context=context), status=status.HTTP_202_ACCEPTED)
+    return response
 
 
 def _control_article_run_for_channel(*, user, context, run, action, data, run_id=None, goal_operation_id=None, cms_goal_scope=None):

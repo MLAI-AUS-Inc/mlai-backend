@@ -352,7 +352,8 @@ def owner_stop_for_run(*, context, run, action):
             _deny()
         selected = cancellation_parent(connection, operation)
         node = next((item for item in selected[1].payload["binding"]["runs"] if item["run_id"] == run.run_id), None) if selected else None
-        if node is None or node["run_request_digest"] != goals.digest(request):
+        if (node is None or node["operation_id"] != str(operation.pk)
+                or node["operation_attempt"] != request["operation_attempt"]):
             _deny()
         return cancel_operation(config, data={**contract_for(connection), "operation_id": str(operation.pk),
             "operation_attempt": request["operation_attempt"], "deletion_epoch": deletion_epoch(connection)},
