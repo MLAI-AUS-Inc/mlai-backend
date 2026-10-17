@@ -874,10 +874,15 @@ def transition_connection(config, *, action, expected, idempotency_key="", verif
                 receipt={"status": "proposal_requested", "requires_review": True, "repository_modified": False})
         old_generation = connection.generation
         cms_marker = {"_cms_binding": connection.capabilities["_cms_binding"]} if "_cms_binding" in (connection.capabilities or {}) else None
+        if cms_marker is not None and connection.capabilities.get("_cms_financial_records") is True:
+            cms_marker["_cms_financial_records"] = True
+            from .cms_goal_refunds import cancel_held_goals as cancel_native_holds
+            cancel_native_holds(connection, all_generations=action == "purge")
         from .website_first_article_billing import cancel_held_goals
         cancel_held_goals(connection)
+        # Credit settlement remains independently durable after revocation.
         connection.operations.filter(generation=old_generation).exclude(
-            action__in=["disconnect", "revoke", "purge", "cancel-operation", "usage-refresh"]
+            action__in=["disconnect", "revoke", "purge", "cancel-operation", "usage-refresh", "goal-refund", "cms-goal-refund"]
         ).exclude(action="prepare", receipt__has_key="first_article_billing"
         ).exclude(state__in=["completed", "failed", "blocked", "cancelled", "deleted", "denied"]).update(
             state="cancelled", receipt={"status": "authority_revoked", "repository_modified": False}, updated_at=timezone.now())
@@ -915,6 +920,9 @@ def transition_connection(config, *, action, expected, idempotency_key="", verif
             invalidate_repository_config(config)
         if action == "purge":
             connection.operations.filter(action__in=["cms-capture", "cms-artifact", "cms-review", "cms-media", "cms-stage", "cms-policy", "cms-approval", "cms-publish"]).update(payload={}, state="deleted", receipt={"status": "erased"}, updated_at=timezone.now())
+            if cms_marker is not None and cms_marker.get("_cms_financial_records") is True:
+                from .cms_goal_refunds import retain_for_erasure
+                retain_for_erasure(connection)
             connection.operations.filter(action__in=["goal-usage", "usage-refresh", "goal-alert"]).delete()
             connection.scan_snapshots.all().delete()
             connection.template_revisions.all().delete()
@@ -978,6 +986,10 @@ def offboard_website_connections(organization, *, user=None, purge=False):
             websites = websites.filter(authorized_by=user)
         for website in list(websites):
             cms_marker = {"_cms_binding": website.capabilities["_cms_binding"]} if "_cms_binding" in (website.capabilities or {}) else None
+            if cms_marker is not None and website.capabilities.get("_cms_financial_records") is True:
+                cms_marker["_cms_financial_records"] = True
+                from .cms_goal_refunds import cancel_held_goals as cancel_native_holds
+                cancel_native_holds(website, all_generations=purge)
             if cms_marker is not None:
                 website.operations.filter(action="channel-credential").update(payload={}, state="deleted", updated_at=timezone.now())
             from .website_first_article_billing import cancel_held_goals
@@ -1013,7 +1025,7 @@ def offboard_website_connections(organization, *, user=None, purge=False):
             financial_pending=retain_financial_refunds_for_erasure(website)
             pending = list(website.operations.filter(state="pending"))
             for operation in pending:
-                if operation.action=="goal-refund":
+                if operation.action in {"goal-refund", "cms-goal-refund"}:
                     continue
                 operation.payload = {key: operation.payload[key] for key in
                     ("previous_generation", "cancel_run_ids", "stop_preview_run_ids", "disable_auto_merge_prs") if key in operation.payload}

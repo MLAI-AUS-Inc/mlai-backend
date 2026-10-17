@@ -23,7 +23,8 @@ def enabled(connection):
 
 def request_key(goal):
     """Keep the charge and worker request stable across source-only goal changes."""
-    return "articles-first:" + goals.digest({"goal_id": goal["goal_id"],
+    prefix = "cms-articles-first:" if goal.get("kind") == "cms_site_goal" else "articles-first:"
+    return prefix + goals.digest({"goal_id": goal["goal_id"],
         "scope": {key: value for key, value in goal["scope"].items() if key != "configuration_revision"}})
 
 
@@ -273,6 +274,12 @@ def generation_key(operation_id, *, context, user):
 
 def defer_child_refund(article_request, *, resolved_domain):
     """Keep an active goal's original spend available for its repair attempts."""
+    if (article_request.get("cms_goal_operation_id") or
+            goals.mapping(article_request.get("publishing_channel_artifact")).get("channel") == "cms" or
+            not article_request.get("first_article_goal_operation_id") and
+            str(article_request.get("client_request_id") or "").startswith("cms-articles-first:")):
+        from .cms_goal_billing import defer_child_refund as native_defer
+        return native_defer(article_request, resolved_domain=resolved_domain)
     identifier = article_request.get("first_article_goal_operation_id")
     if not identifier:
         return False

@@ -9,7 +9,7 @@ from .cms_connection_contract import validate_binding, CmsContractError
 from .website_contract import WebsiteAuthorityError
 
 
-def current_scope(operation, *, lease_id=None):
+def current_scope(operation, *, lease_id=None, allowed_states=frozenset({"pending", "running"})):
     """Reload the current company/owner/binding and this original reservation.
 
     Call immediately before each provider request and again before persisting
@@ -20,7 +20,7 @@ def current_scope(operation, *, lease_id=None):
     payload = operation.payload if isinstance(operation.payload, dict) else {}
     try:
         binding = validate_binding(payload.get("binding"))
-        if (operation.state not in {"pending", "running"} or operation.generation != binding["generation"] or
+        if (operation.state not in allowed_states or operation.generation != binding["generation"] or
                 str(operation.connection_id) != binding["connection_id"] or
                 lease_id is not None and (operation.state != "running" or payload.get("lease_id") != lease_id)):
             raise CmsContractError("CMS operation changed")

@@ -33,6 +33,14 @@ from .website_publishing_channels import recommend, scope_for
     ARTICLES_CMS_CHANNEL_ENABLED=True, ARTICLES_CHANNEL_ARTIFACTS_ENABLED=True,
     CONNECTOR_CREDENTIAL_KEYS=keys.json.dumps({"test": keys.TEST_KEY}), CONNECTOR_CREDENTIAL_ACTIVE_KEY_ID="test")
 class ChannelArtifactTests(SimpleTestCase):
+    def test_native_goal_support_preserves_the_recorded_pre_goal_request_digest(self):
+        # Captured from c98f9991 before native goal fields were introduced.
+        original = {"domain": "fixture.test", "topic": "Original paid CMS topic"}
+        self.assertEqual(artifacts._request_identity(original),
+            "5858d2ee0f1fe9411ddebd730c4d32806738e372404f9e2c0746fb1954cc77d1")
+        self.assertNotEqual(artifacts._request_identity({**original, "cms_goal_id": "backend-held-goal"}),
+            artifacts._request_identity(original))
+
     def setUp(self):
         authority_fixtures.CmsAuthorityTests.setUp(self)
         self.company.profile = self.profile

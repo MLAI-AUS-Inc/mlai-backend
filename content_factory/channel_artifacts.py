@@ -20,7 +20,7 @@ ACTION = "cms-artifact"
 ENVELOPE = "publishing_channel_artifact"
 _IDENTITY = ("domain", "topic", "target_keyword", "custom_title", "topic_candidate_id", "topic_selection", "source_run_id",
     "author_id", "default_author_name", "default_author_profile", "editorial_brief", "editorial_admission",
-    "analytics_article_id", "analytics_config", "request_source", ENVELOPE)
+    "analytics_article_id", "analytics_config", "request_source", "cms_goal_operation_id", "cms_goal_id", ENVELOPE)
 _GIT = (*CONNECTION_FIELDS, "github_token", "expected_source_sha", "source_sha", "repo_head_sha", "app_root", "branch")
 
 
@@ -74,7 +74,10 @@ def prepare_generation(context, config, *, user):
 
 
 def _request_identity(payload):
-    return digest({key: payload.get(key) for key in _IDENTITY})
+    # Preserve existing paid CMS reservations when native goal support arrives.
+    # New controller-owned fields participate only when originally present.
+    return digest({key: payload.get(key) for key in _IDENTITY
+        if key not in {"cms_goal_operation_id", "cms_goal_id"} or key in payload})
 
 
 def _artifact_request(payload, envelope):

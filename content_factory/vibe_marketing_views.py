@@ -782,10 +782,19 @@ def _validate_article_start_reservation(context, payload):
     validate_operation(website, payload)
 
 
-def _charge_roo_points_for_article(request, *, context, payload: dict, goal_operation_id=None, channel_artifact_scope=None):
+def _charge_roo_points_for_article(request, *, context, payload: dict, goal_operation_id=None, channel_artifact_scope=None, cms_goal_scope=None):
     # Only the internal goal dispatcher can supply this argument. HTTP/MCP body
     # fields cannot bypass the normal current-price and wallet checks.
-    if goal_operation_id is not None:
+    if cms_goal_scope is not None:
+        from .cms_goal_billing import generation_key
+        try:
+            if goal_operation_id is not None or channel_artifact_scope is None:
+                raise WebsiteAuthorityError("website_operation_changed", "A native first article requires its original private CMS reservation.")
+            payload["client_request_id"] = generation_key(cms_goal_scope, context=context, user=request.user)
+            payload.update(cms_goal_operation_id=cms_goal_scope.operation_id, cms_goal_id=cms_goal_scope.operation_id)
+        except WebsiteAuthorityError as exc:
+            return None, None, None, Response(exc.as_dict(), status=exc.status)
+    elif goal_operation_id is not None:
         from .website_first_article_billing import generation_key
         try:
             payload["client_request_id"] = generation_key(goal_operation_id, context=context, user=request.user)
@@ -793,7 +802,7 @@ def _charge_roo_points_for_article(request, *, context, payload: dict, goal_oper
         except WebsiteAuthorityError as exc:
             return None, None, None, Response(exc.as_dict(), status=exc.status)
     quote_error = (_quoted_price_response(request, cost_points=get_content_factory_article_cost_points(context.organization.domain))
-        if goal_operation_id is None else None)
+        if goal_operation_id is None and cms_goal_scope is None else None)
     if quote_error is not None:
         return None, None, None, quote_error
     editorial_error = _refresh_article_editorial_payload(organization=context.organization, payload=payload)
@@ -833,7 +842,11 @@ def _charge_roo_points_for_article(request, *, context, payload: dict, goal_oper
                 if "publishing_channel_artifact" in payload:
                     raise WebsiteAuthorityError("website_connection_changed", "An article artifact requires its private CMS controller.")
                 _validate_article_start_reservation(context, payload)
-            if goal_operation_id is not None:
+            if cms_goal_scope is not None:
+                from .cms_goal_billing import consume
+                charged_user, charge_ledger, charge_amount = consume(cms_goal_scope,
+                    context=context, user=request.user, payload=article_request)
+            elif goal_operation_id is not None:
                 from .website_first_article_billing import consume
                 charged_user, charge_ledger, charge_amount = consume(goal_operation_id,
                     context=context, user=request.user, payload=article_request)
@@ -16830,7 +16843,7 @@ def start_article_generation(*, user, context, data, request_hash=None, website_
         website_contract=website_contract, goal_operation_id=goal_operation_id)
 
 
-def _start_article_generation_for_channel(*, user, context, data, request_hash=None, website_contract=None, goal_operation_id=None, channel_artifact_scope=None):
+def _start_article_generation_for_channel(*, user, context, data, request_hash=None, website_contract=None, goal_operation_id=None, channel_artifact_scope=None, cms_goal_scope=None):
     """Execute the canonical owned operation for HTTP and MCP transports."""
     command = ContentCommand(user=user, data=data)
     config = _get_config(context.organization)
@@ -17093,6 +17106,8 @@ def _start_article_generation_for_channel(*, user, context, data, request_hash=N
         billing_kwargs["goal_operation_id"] = goal_operation_id
     if channel_artifact_scope is not None:
         billing_kwargs["channel_artifact_scope"] = channel_artifact_scope
+    if cms_goal_scope is not None:
+        billing_kwargs["cms_goal_scope"] = cms_goal_scope
     charged_user, _charge_ledger, article_request, billing_error = _charge_roo_points_for_article(command, **billing_kwargs)
     if billing_error is not None:
         return billing_error
