@@ -32,12 +32,13 @@ def matches(row, predicate):
         return not result if predicate.negated else result
     key, expected = predicate
     parts = key.split("__")
-    op = parts.pop() if parts[-1] in {"isnull", "in"} else "exact"
+    op = parts.pop() if parts[-1] in {"isnull", "in", "has_key"} else "exact"
     actual = row
     for part in parts:
         actual = actual.get(part) if isinstance(actual, dict) else getattr(actual, part, None)
     if op == "isnull": return (actual is None) == expected
     if op == "in": return actual in expected
+    if op == "has_key": return isinstance(actual, dict) and expected in actual
     return str(actual) == str(expected) if key == "pk" or isinstance(actual, UUID) else actual == expected
 
 
@@ -48,10 +49,23 @@ class Rows:
 
     def select_for_update(self, *args, **kwargs): return self
 
+    def select_related(self, *args, **kwargs): return self
+
+    def __iter__(self): return iter(self.selected)
+
+    def exists(self): return bool(self.selected)
+
     def filter(self, *predicates, **values):
         return Rows(self.rows, [row for row in self.selected if all(matches(row, item) for item in [*predicates, *values.items()])])
 
     def first(self): return self.selected[0] if self.selected else None
+
+    def exclude(self, *predicates, **values):
+        return Rows(self.rows, [row for row in self.selected if not all(matches(row, item) for item in [*predicates, *values.items()])])
+
+    def delete(self):
+        for row in list(self.selected):
+            if row in self.rows: self.rows.remove(row)
 
     def order_by(self, *fields):
         selected = list(self.selected)

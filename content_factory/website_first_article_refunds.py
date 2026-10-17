@@ -88,14 +88,14 @@ def finish_purged_connection(connection_id):
         candidate = WebsiteConnection.objects.select_for_update().filter(pk=connection_id,
             authorized_by__isnull=True, state="revoked").first()
         if (candidate and not candidate.operations.filter(state="pending").exists()
-            and not candidate.operations.filter(action=ACTION).exclude(state="completed").exists()):
+            and not candidate.operations.filter(action__in=[ACTION, "cms-goal-refund"]).exclude(state="completed").exists()):
             candidate.delete()
 
 
 def retain_financial_refunds_for_erasure(website):
     """Retain scoped ledger proof, erase general run data, and tag eventual cleanup."""
     from django.db.models import Q
-    financial = Q(action=ACTION) | Q(action="prepare", receipt__has_key="first_article_billing")
+    financial = Q(action__in=[ACTION, "cms-goal-refund"]) | Q(action__in=["prepare", "cms-goal"], receipt__has_key="first_article_billing")
     website.operations.filter(Q(action__in=["cleanup", "worker_followup", "superseded-setup-cleanup"]) | ~Q(state="pending")).exclude(financial).delete()
     for held in website.operations.filter(action="prepare", receipt__has_key="first_article_billing"):
         held.payload={key:held.payload[key] for key in ("company_id","requested_by_user_id") if key in held.payload}
@@ -104,4 +104,9 @@ def retain_financial_refunds_for_erasure(website):
     for credit in website.operations.filter(action=ACTION):
         credit.payload={**credit.payload,"purge_after_reconciliation":True}
         credit.save(update_fields=["payload","updated_at"])
-    return website.operations.filter(action=ACTION).exclude(state="completed").exists()
+    if (getattr(website, "capabilities", {}) or {}).get("_cms_financial_records") is True:
+        from .cms_goal_refunds import retain_for_erasure
+        native_pending = retain_for_erasure(website)
+    else:
+        native_pending = False
+    return native_pending or website.operations.filter(action=ACTION).exclude(state="completed").exists()

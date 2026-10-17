@@ -1405,6 +1405,41 @@ class WebsiteReviewRegressionTests(WebsiteDatabaseFixture, TestCase):
             self.assertTrue(cms_goal_contract.complete(native_goal, expected_scope=native_scope, now=timezone.now()))
             self.assertEqual(references['first_article_live'], str(publication.pk))
             self.assertNotIn('source_sha', json.dumps(native_goal))
+            # Exercise native financial rows on disposable CI only. The ledger
+            # is synthetic; no wallet debit, model job or actual refund service
+            # runs. An unused held article must survive revocation and settle.
+            from . import cms_goal_consent, cms_goal_authority, cms_goal_billing, cms_goal_refunds
+            from . import website_first_article_billing as financial_records
+            native_identifier = uuid.uuid4()
+            held_goal = cms_goal_contract.new_goal(str(native_identifier), native_scope, now=timezone.now())
+            held_consent = cms_goal_consent.seal(held_goal, user_id=user.pk, review_policy='auto',
+                expected_points=6, confirmed=True, now=timezone.now())
+            financial_parent = website.operations.create(id=native_identifier, generation=website.generation,
+                action='cms-goal', state='pending', idempotency_key='native-financial-ci:' + uuid.uuid4().hex,
+                payload={'schema_version': 1, 'binding': native_scope['binding'], 'credential_operation_id': str(private.pk),
+                    'policy_operation_id': native_scope['policy_operation_id'], 'policy_digest': native_scope['policy_digest'],
+                    'company_id': str(company.pk), 'requested_by_user_id': str(user.pk), 'consent': held_consent,
+                    'capture_operation_id': None, 'generation_data': None, 'source_run_id': None, 'failures': 0},
+                receipt={'goal': held_goal})
+            with override_settings(ARTICLES_CHANNEL_ARTIFACTS_ENABLED=True, ARTICLES_CMS_GOALS_ENABLED=True,
+                    ARTICLES_FIRST_ARTICLE_GOAL_ENABLED=True, ARTICLES_WEBSITE_GOAL_RUNNER_ENABLED=True,
+                    ARTICLES_WEBSITE_GOAL_ENROLLED_ORGANIZATIONS=[str(self.org.pk)],
+                    ARTICLES_FAILURE_TAXONOMY_POLICY_ENABLED=True, ARTICLES_FAILURE_TAXONOMY_ENROLLED_ORGANIZATIONS=[str(self.org.pk)]):
+                value = cms_goal_authority.current(financial_parent, user=user)
+                financial_key = cms_goal_billing.request_key(value)
+                held_spend = Ledger.objects.create(user=user, kind='SPEND', source='CONTENT_FACTORY', delta=-6,
+                    delta_microroo=-6_000_000, reference_type='CONTENT_FACTORY', reference_id=financial_key,
+                    idempotency_key='content_factory:charge:' + financial_key)
+                financial_records._save(financial_parent, {'version': 1,
+                    'binding': financial_records._binding(cms_goal_billing._financial_context(value)),
+                    'client_request_id': financial_key, 'payer_user_id': str(user.pk), 'requester_user_id': str(user.pk),
+                    'cost_points': 6, 'spend_ledger_id': str(held_spend.pk), 'reserved_at': timezone.now().isoformat(), 'status': 'reserved'})
+                with patch('roo.services.PointsService.spend') as debit:
+                    held = cms_goal_billing.reserve(financial_parent, user=user, now=timezone.now())
+                debit.assert_not_called()
+                self.assertEqual(held['spend_ledger_id'], str(held_spend.pk))
+            website.refresh_from_db()
+            self.assertTrue(website.capabilities['_cms_financial_records'])
             old_contract = contract_for(website)
             stale = cms_capture.start_capture(context, self.config, user=user,
                 data={**old_contract, 'client_request_id': str(uuid.uuid4())})
@@ -1426,6 +1461,20 @@ class WebsiteReviewRegressionTests(WebsiteDatabaseFixture, TestCase):
             self.assertEqual(private.payload, {})
             self.assertEqual(website.generation, 2)
             self.assertIn('_cms_binding', website.capabilities)
+            financial_parent.refresh_from_db()
+            self.assertEqual(financial_parent.state, 'cancelled')
+            native_credit = website.operations.get(action='cms-goal-refund')
+            self.assertEqual(native_credit.state, 'pending')
+            def synthetic_credit(**options):
+                self.assertEqual(options['article_request']['client_request_id'], financial_key)
+                return Ledger.objects.create(user=user, kind='REFUND', source='CONTENT_FACTORY', delta=6,
+                    delta_microroo=6_000_000, refund_of=held_spend, idempotency_key='content_factory:refund:' + financial_key)
+            with override_settings(ARTICLES_CMS_GOALS_ENABLED=False, ARTICLES_CMS_CHANNEL_ENABLED=False), \
+                    patch('integrations.services.article_generation._refund_content_factory_request', side_effect=synthetic_credit) as refund:
+                self.assertEqual(cms_goal_refunds.advance_refund(native_credit.pk, now=timezone.now() + timedelta(seconds=1)), 'completed')
+            refund.assert_called_once()
+            financial_parent.refresh_from_db()
+            self.assertEqual(financial_parent.receipt['first_article_billing']['status'], 'refunded')
             with self.assertRaises(WebsiteAuthorityError):
                 current_credential(context, self.config, website, user=user)
             for action in ('read', 'worker_cleanup', 'restoration', 'cancel_operation'):
@@ -1446,6 +1495,8 @@ class WebsiteReviewRegressionTests(WebsiteDatabaseFixture, TestCase):
             self.assertEqual((approval.state, approval.payload), ('deleted', {}))
             publication.refresh_from_db()
             self.assertEqual((publication.state, publication.payload), ('deleted', {}))
+            financial_parent.refresh_from_db()
+            self.assertEqual((financial_parent.state, financial_parent.payload), ('deleted', {}))
             native_row = website.operations.get(pk=native['operation_id'])
             self.assertEqual((native_row.state, native_row.payload), ('deleted', {}))
 

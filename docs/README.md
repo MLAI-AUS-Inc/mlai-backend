@@ -23,6 +23,8 @@ subsystem-specific contracts and runbooks.
 
 ## Content Factory
 
+- [E5 native first-article payments](articles-e5-cms-goal-payments-2026-10-17.md) — original accepted holds, durable credits and financial proof through lifecycle erasure
+
 - [E5 native CMS goal proofs](articles-e5-cms-goal-proofs-2026-10-17.md) — separate provider ledger and original paid-source proof reader, with no invented Git facts
 
 - [E5 durable CMS publication](articles-e5-cms-publication-2026-10-17.md) — one-create journal, uncertain-outcome reconciliation and private native/public body proofs

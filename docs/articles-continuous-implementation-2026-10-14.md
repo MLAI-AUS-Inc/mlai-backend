@@ -708,3 +708,22 @@ assigned to disposable CI. Native runtime reservation/billing/dispatch/recovery,
 budgets/strategy/status/doctor/Chat UI remain integration work. The ledger and
 reader do not enable a CMS goal or claim complete end-to-end acceptance. All
 flags remain off, with no actual CMS/paid/local-DB/deploy actions.
+
+## 17 October: native first-article financial foundation
+
+Native setup/price consent and a server-only lease now guard the original held
+payer/amount through the canonical CMS artifact/dispatch transaction. Native
+references survive sparse callbacks without changing older CMS request digests.
+The native credit outbox snapshots useful work before erasure, settles the
+original ledger after revocation/rollout-off, and records a minimal original-
+dispatch financial audit against late worker refunds. Generic lifecycle
+cancellation now preserves both native and repository credit outboxes.
+
+All 1,141 no-database website checks pass, including 44 new financial cases and
+one recorded-digest compatibility case. Models/dry-run show no changes; 788
+failure emissions are audited and all 564 test modules are assigned. Actual
+synthetic ORM hold/credit/lifecycle/purge and repository-disconnect regressions
+are assigned to disposable CI. No actual wallet/provider service, paid work,
+local database, merge or deployment ran. The native goal start/controller,
+write/admission guards, budgets/strategy/status/doctor/UI remain integration
+work; every rollout flag remains off. See `articles-e5-cms-goal-payments-2026-10-17.md`.

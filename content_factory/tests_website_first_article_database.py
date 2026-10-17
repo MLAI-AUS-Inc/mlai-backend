@@ -56,6 +56,16 @@ class FirstArticleProviderChainTests(OneClickBillingFixture,TransactionTestCase)
         return prepare.start_prepare(self.config,company_id=self.company.pk,user=self.requester,
             target="first_article_live",consent=choices or answers())
 
+    def test_disconnect_keeps_original_credit_outbox_pending_until_it_settles(self):
+        from .website_connections import contract_for,transition_connection
+        op=self.start()
+        transition_connection(self.config,action="disconnect",expected=contract_for(self.website))
+        op.refresh_from_db();self.assertEqual(op.state,"cancelled")
+        credit=WebsiteConnectionOperation.objects.get(action="goal-refund",payload__goal_operation_id=str(op.pk))
+        self.assertEqual(credit.state,"pending")
+        self.assertEqual(advance_refund(credit.pk,now=timezone.now()),"completed")
+        self.assertEqual(self.balance(self.payer),20_000_000)
+
     def ready(self,op):
         """Seed the already verified Ready precondition; exercise article effects below."""
         now=timezone.now();goal=op.receipt["goal"];scope=goal["scope"]

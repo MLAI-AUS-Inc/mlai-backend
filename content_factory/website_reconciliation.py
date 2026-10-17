@@ -748,11 +748,12 @@ def process_website_connection_operations(*, limit=20, now=None, connection_id=N
     from django.conf import settings
     from .website_notification_outbox import ACTION as notice_action
     from .website_first_article_refunds import ACTION as refund_action
+    from .cms_goal_refunds import ACTION as native_refund_action, advance_refund as advance_native_refund
     from .website_cost_recovery import ACTION as usage_action, advance as advance_usage
     from .website_cost_ledger import enabled as accounting_enabled
     from .website_operational_alert_delivery import ACTION as alert_action, advance as advance_alert, channel as alert_channel
     notices_enabled=getattr(settings,"ARTICLES_GOAL_NOTIFICATIONS_ENABLED",False)
-    excluded = ["workflow", "cms-artifact", "cms-stage", "cms-policy"] if notices_enabled else ["workflow", "cms-artifact", "cms-stage", "cms-policy", notice_action]
+    excluded = ["workflow", "cms-artifact", "cms-stage", "cms-policy", "cms-goal"] if notices_enabled else ["workflow", "cms-artifact", "cms-stage", "cms-policy", "cms-goal", notice_action]
     from .cms_connection_authority import enabled as cms_channel_enabled
     cms_enabled = cms_channel_enabled()
     from .channel_artifacts import enabled as artifacts_enabled
@@ -782,6 +783,7 @@ def process_website_connection_operations(*, limit=20, now=None, connection_id=N
         Q(state="pending") | Q(action="prepare", state="running") | Q(action=notice_action,state="running") | Q(action=refund_action,state="running") |
         Q(action=usage_action, state="running") |
         Q(action=alert_action, state="running") |
+        Q(action=native_refund_action, state="running") |
         Q(action="cms-capture", state="running") |
         Q(action="cms-review", state="running") |
         Q(action="cms-media", state="running") |
@@ -798,6 +800,19 @@ def process_website_connection_operations(*, limit=20, now=None, connection_id=N
     monitor_cleanup_pull_requests(limit=limit, connection_id=connection_id)
     from .website_wakeups import enabled as event_wakes_enabled
     for identifier in ids:
+        if WebsiteConnectionOperation.objects.filter(pk=identifier, action=native_refund_action).exists():
+            # Money already held must settle after CMS execution is disabled.
+            outcome = advance_native_refund(identifier, now=now)
+            if outcome is not None:
+                result["processed"] += 1
+                result["pending" if outcome in {"pending", "running"} else "completed"] += 1
+                if len(result["operations"]) < 20:
+                    result["operations"].append({"id": str(identifier), "action": native_refund_action, "outcome": outcome})
+                row = WebsiteConnectionOperation.objects.filter(pk=identifier, action=native_refund_action).first()
+                if row and outcome == "completed" and row.payload.get("purge_after_reconciliation"):
+                    from .website_first_article_refunds import finish_purged_connection
+                    finish_purged_connection(row.connection_id)
+            continue
         if WebsiteConnectionOperation.objects.filter(pk=identifier, action="cms-publish").exists():
             operation = advance_publication(identifier, now=now) if artifact_reviews_enabled else None
             if operation is not None:
