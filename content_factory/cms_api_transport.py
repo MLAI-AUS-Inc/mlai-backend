@@ -92,6 +92,17 @@ def request_json(binding, credential, *, method, resource, identifier=None, quer
         raise CmsApiError("invalid_request") from None
     if body is not None and (method not in {"POST", "PUT"} or len(body) > MAX_JSON_BYTES):
         raise CmsApiError("invalid_request")
+    return _send_json_response(binding, credential, method=method, base=base, encoded_query=encoded_query,
+        body=body, content_type="application/json")
+
+
+def _send_json_response(binding, credential, *, method, base, encoded_query="", body=None, content_type="application/json"):
+    """Internal pinned transport after a typed resource/body validation boundary.
+
+    Both JSON operations and image upload use the same response limits, TLS/DNS
+    pinning, credential/error handling and no-redirect rule. This grants no lease.
+    """
+    platform = binding["platform"]
     try:
         parsed, addresses = public_addresses(base, urlsplit(binding["api_origin"]).hostname)
     except CmsApiError:
@@ -108,7 +119,7 @@ def request_json(binding, credential, *, method, resource, identifier=None, quer
         if platform == "ghost":
             headers["Accept-Version"] = "v6.0"
         if body is not None:
-            headers["Content-Type"] = "application/json"
+            headers["Content-Type"] = content_type
         target = parsed.path + ("?" + encoded_query if encoded_query else "")
         client.request(method, target, body=body, headers=headers)
         response = client.getresponse()

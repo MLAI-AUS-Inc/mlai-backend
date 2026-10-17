@@ -179,3 +179,14 @@ distinct hostnames and missing environment/token remain separate live-zoo blocke
 - [Ghost Admin API](https://docs.ghost.org/admin-api/)
 - [WordPress root site identity](https://developer.wordpress.org/reference/classes/wp_rest_server/get_index/)
 - [Ghost site identity](https://docs.ghost.org/admin-api/site/overview/), [HTML creation](https://docs.ghost.org/admin-api/posts/creating-a-post/), [update collision detection](https://docs.ghost.org/admin-api/posts/updating-a-post/)
+
+
+## Bounded image transport (implementation continuation)
+
+The media transport accepts only verified, decodable, static PNG/JPEG/WebP bytes, at most 10 MiB and 4096 pixels per dimension (16 megapixels). The fixed ASCII filename carries an opaque upload operation and source digest; caller text cannot become a header. Source bytes and returned storage URLs are absent from object representations.
+
+WordPress uses a fixed multipart media-create request with native slug, title, alternative text, caption and an exact operation/source marker in its description. Ghost uses its fixed image-upload endpoint with `purpose=image` and an echoed `ref`. These shapes follow the [WordPress media reference](https://developer.wordpress.org/rest-api/reference/media/) and [Ghost image upload reference](https://docs.ghost.org/admin-api/images/uploading-an-image/).
+
+Both use the same bounded JSON response handling, public-DNS/TLS pinning, current binding/credential checks and no-redirect transport as CMS reads. A response must match the operation/source reference and, for WordPress, the native attachment identity/type/MIME. Only an explicitly bound public/admin HTTPS storage path is accepted; external storage requires separate confirmed-origin support. Acknowledgement never claims public image-byte verification, post approval or a live article.
+
+This is a low-level transport, not a wired upload endpoint or completed media stage. The next caller must reserve each immutable image intent durably before upload, validate original paid artifact consent before every effect and fence results afterward. Unknown upload outcomes require a bounded provider-specific recovery policy. The transport performs no automatic retry. Full media staging, native metadata selection, exact final HTML/preview approval, publication/live proof and disposable real-provider CI remain required. No actual image upload or provider effect was executed; all transport boundaries in tests use synthetic images and fake pinned HTTP connections. Rollout flags remain off.
