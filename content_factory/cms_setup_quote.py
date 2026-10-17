@@ -6,6 +6,7 @@ from . import cms_goal_authority as goals
 from . import cms_publication_policy as policies
 from .channel_artifact_contract import digest
 from .cms_connection_authority import current_credential
+from .cms_setup_contract import validate_quote
 from .website_contract import WebsiteAuthorityError
 
 
@@ -57,6 +58,6 @@ def for_context(context, config, *, user, expected_binding):
                 config.website_connection.operations.filter(action=goals.ACTION, generation=binding["generation"],
                     payload__company_id=binding["company_id"]).exists()):
             return None
-        return {**value, "digest": digest(value)}
+        return validate_quote({**value, "digest": digest(value)})
     except (WebsiteAuthorityError, ValueError, TypeError, KeyError, AttributeError, RecursionError):
         return None
