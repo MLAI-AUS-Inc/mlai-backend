@@ -23,6 +23,7 @@ subsystem-specific contracts and runbooks.
 
 ## Content Factory
 
+- [E5 initial CMS onboarding](articles-e5-cms-onboarding-2026-10-17.md) — initial owner offer and same-operation credential/payment/setup design; runtime integration remains next
 - [E5 durable CMS access recovery](articles-e5-cms-durable-access-2026-10-17.md) — encrypted acceptance before HTTP, original payment/post preservation and bounded independent expiry
 - [E5 owner CMS access form](articles-e5-cms-owner-access-2026-10-17.md) — scoped credential destination and actual accepted request nonce without key export or provider replay
 
