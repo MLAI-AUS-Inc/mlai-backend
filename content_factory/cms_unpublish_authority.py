@@ -33,6 +33,18 @@ def enabled():
     return cms_enabled() and getattr(settings, "ARTICLES_CMS_UNPUBLISH_ENABLED", False)
 
 
+def requested(publication):
+    """An accepted owner direction fences fresh readiness and future repairs.
+
+    Keep this barrier when rollout is paused or the request stops. It grants no
+    absence proof and leaves the original historical publication record intact.
+    """
+    from .website_models import WebsiteConnectionOperation
+    return WebsiteConnectionOperation.objects.filter(action=ACTION, connection_id=publication.connection_id,
+        generation=publication.generation, payload__binding=publication.payload["binding"],
+        payload__intent__publication_operation_id=str(publication.pk)).exclude(state="deleted").exists()
+
+
 def target(operation, *, binding):
     """Read a backend-owned confirmed journal without paid-work or freshness gates.
 

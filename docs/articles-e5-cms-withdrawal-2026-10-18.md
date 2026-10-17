@@ -116,7 +116,7 @@ verifies public absence only at the saved original published URL. Synthetic
 preview tokens never enter a receipt or a public request.
 
 
-Final backend checks: all 1,553 database-free journey cases pass, including the
+Final backend checks: all 1,555 database-free journey cases pass, including the
 original-key renewal wake regression. The assignment guard selects all 593 test
 modules, the failure audit covers 849 production emissions, and the model check
 reports no changes. The audit's vendored digests pass; remote pinned provenance
@@ -131,6 +131,15 @@ before the original hold checks, and rechecks lease/proposal expiry after those
 potentially waiting financial reads. Two new regressions reproduce the earlier
 stale lease and expiry-during-lock failures; both fail before the fix. The
 pending proposal is not opened after expiry. All 92 focused access/initial/setup
-cases and all 1,553 database-free journey cases pass; provider I/O stays outside
+cases and all 1,555 database-free journey cases pass; provider I/O stays outside
 owning transactions. This protects the existing key renewal that can wake a
 withdrawal without changing its original deadline or write allowance.
+
+
+An accepted withdrawal also fences fresh `current_publication` readiness and
+future public-health rechecks, including when the withdrawal rollout pauses or
+the request stops. The original completed publication payload, receipt and past
+proof remain intact for history. This prevents an old still-fresh live proof or
+a later maintenance request from overriding the owner's recorded direction.
+The WordPress regression fails before the barrier; WordPress and Ghost cases
+pass after it. All 1,555 database-free journey cases pass on the final code.
