@@ -89,11 +89,12 @@ source edges, changed owner/goal/request/attempt, an earlier owner cancellation,
 unknown versions, flag rollback, completed shared-operation publication children,
 exact root/child cancellation receipts, missing original payment/refund proof,
 and later owner whole-goal stop. No schema or migration is introduced.
-The combined related/control selection passes 440 tests before the final facade
-scope fix; the exact facade/profile/settings CI lane plus the expanded source-fence
-suite then passes 118 tests, including 20 source-fence
-cases and activation, approval, setup merge/failure, environment and hosted-build
-controls. CI fully selects all 603 test modules. The offline failure audit covers 860
+The final combined related/control and exact facade/profile/settings selection
+passes 539 tests, including 20 source-fence cases and activation, approval, setup
+merge/failure, environment and hosted-build controls. The sparse setup cancellation
+regression failed before the article-only scope fix, then passed with its original
+ownership/publication assertions intact. CI fully selects all 603 test modules.
+The offline failure audit covers 860
 production emissions, immutable inspection/transport parity passes, and model
 checks report no changes. Remote provenance and full disposable CI remain required.
 
