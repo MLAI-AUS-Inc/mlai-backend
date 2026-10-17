@@ -158,7 +158,14 @@ def discover_linear_projects(user, organization):
         return []
     cursor, seen, ids = None, set(), []
     for _ in range(CATALOG_PAGE_LIMIT):
-        payload = external_connectors._linear_graphql_request(connection, external_connectors.LINEAR_PROJECT_LIST_QUERY, {"first": external_connectors.LINEAR_PROJECT_CATALOG_PAGE_LIMIT, "after": cursor})
+        # Pulse refreshed credentials before entering the run transaction.
+        # Rotating a refresh token here could lose it when a later step rolls
+        # back. An authorization rejection must leave the transaction instead.
+        payload = external_connectors._linear_graphql_request(
+            connection, external_connectors.LINEAR_PROJECT_LIST_QUERY,
+            {"first": external_connectors.LINEAR_PROJECT_CATALOG_PAGE_LIMIT, "after": cursor},
+            allow_refresh=False,
+        )
         projects = payload.get("projects") or {}
         for project in projects.get("nodes") or []:
             if not isinstance(project, dict) or not project.get("id"):

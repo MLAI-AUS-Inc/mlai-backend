@@ -200,7 +200,8 @@ class GenerateView(ChatStartupAccess, founder.VibeRaisingEmailDraftStartView):
              or by_key.get(key, {}).get("usableForUpdates") is False
              or by_key.get(key, {}).get("available") is False)]
         if unavailable:
-            return Response({"detail": "Reconnect or remove unavailable sources before generating.",
+            labels = ", ".join(str(by_key.get(key, {}).get("label") or key) for key in unavailable)
+            return Response({"detail": f"Reconnect or remove unavailable sources ({labels}) to generate with your other sources.",
                 "code": "startup_update_sources_unavailable", "unavailableSources": unavailable}, status=409)
         try:
             return super().post(request)

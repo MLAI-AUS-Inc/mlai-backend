@@ -149,6 +149,7 @@ jobs:
           content_factory.tests_activation_unit \
           content_factory.tests_research_automation_billing_unit \
           community_chat.tests.test_startup_activity_defaults \
+          startup_updates.tests_linear_reconnect_unit \
           community_chat.tests.test_startup_lifecycle \
           community_chat.tests.test_startup_mcp \
           community_chat.tests.test_mlai_mcp \
