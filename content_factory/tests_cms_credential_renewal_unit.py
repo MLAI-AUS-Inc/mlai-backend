@@ -90,6 +90,22 @@ class CmsCredentialRenewalTests(SimpleTestCase):
         self.assertEqual(self.private.payload, encrypted)
         self.http.assert_called_once(); self.create.assert_called_once(); self.spend.assert_called_once()
 
+    def test_renewal_wakes_only_original_key_access_wait_without_bypassing_review_or_reviving_work(self):
+        self.goal_operation.state = "needs_user"
+        self.goal_operation.receipt["user_action"] = {"id": "connect_cms"}
+        self.goal_operation.next_attempt_at = self.now + timedelta(minutes=5)
+        waiting = self.goal_operation.next_attempt_at
+        others = []
+        for state, action in (("needs_user", "review_draft"), ("running", "connect_cms"), ("cancelled", "connect_cms")):
+            row = WebsiteConnectionOperation(connection=self.connection, generation=self.connection.generation, action="cms-goal", state=state,
+                payload={"binding": deepcopy(self.binding)}, receipt={"user_action": {"id": action}}, next_attempt_at=waiting)
+            self.saved.append(row); others.append(row)
+        original = deepcopy((self.goal_operation.payload, self.goal_operation.receipt))
+        self.connect()
+        self.assertLess(self.goal_operation.next_attempt_at, waiting)
+        self.assertEqual((self.goal_operation.state, self.goal_operation.payload, self.goal_operation.receipt), ("needs_user", *original))
+        self.assertTrue(all(row.next_attempt_at == waiting for row in others))
+
     def test_different_principal_or_reduced_publishing_permission_cannot_replace_original_article(self):
         original = deepcopy(self.private.payload)
         for identity in ({**self.identity, "principal_id": "999"}, {**self.identity, "can_publish_posts": False},

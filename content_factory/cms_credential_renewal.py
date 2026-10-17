@@ -4,6 +4,8 @@ from dataclasses import dataclass
 from copy import deepcopy
 import re
 
+from django.utils import timezone
+
 from .cms_connection_authority import current_credential, PRIVATE_CREDENTIAL_ACTION
 from .cms_connection_contract import seal_credential
 from .channel_artifact_contract import digest
@@ -87,6 +89,11 @@ def renew(selected, context, config, *, user, proposal, credential, identity, re
     WebsiteConnectionOperation.objects.create(connection=connection, generation=connection.generation, action="cms-connect", state="completed",
         idempotency_key=operation_key, payload={}, receipt={"status": "connected", "channel": "cms", "platform": selected.binding["platform"],
             "credential_stored": True, "publishing_verified": False})
+    # Wake only an actual original key-access wait. Never reset a running
+    # lease, revive cancelled work or bypass an owner's article review.
+    WebsiteConnectionOperation.objects.filter(connection_id=connection.pk, generation=connection.generation,
+        action__in={"cms-goal", "cms-setup"}, state="needs_user", payload__binding=selected.binding,
+        receipt__user_action__id="connect_cms").update(next_attempt_at=timezone.now())
     return connection
 
 

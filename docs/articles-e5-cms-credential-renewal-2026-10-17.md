@@ -17,8 +17,10 @@ private credential operation. Connection ID, generation, selection revision,
 publication policy, original hold, paid artifact/outbox, article approval and
 single-create provider journal stay intact. No old ciphertext is rebound to a
 new UUID. No model, publication, second charge or repository invalidation occurs.
-The next real controller wake can recover the original operation with the new
-key, subject to its unchanged authority, budget and financial checks.
+Only original `connect_cms` waits are made due after renewal; manual review,
+running leases and cancelled work are unchanged. The next controller wake can
+recover the original operation with the new key, subject to its unchanged
+authority, budget and financial checks.
 
 The latest identical acknowledged request returns without provider traffic.
 An older superseded nonce cannot roll the key back, and the same nonce with a
@@ -32,10 +34,10 @@ while original native goals/artifacts/publications still need preservation or
 settlement; it cannot silently reserve a duplicate paid first article. A future
 explicit transfer path and the owner's credential UI remain release work.
 
-Validation: seven new regressions cover original paid source/envelope/money,
+Validation: eight new regressions cover original paid source/envelope/money,
 nonce replay/rollback, different principals and reduced permission, concurrent
 revocation/rotation, an already-issued unknown post and closed provider identity.
-The full 1,385-test website no-database group passes, all 584 modules are assigned
+The full 1,386-test website no-database group passes, all 584 modules are assigned
 and 828 failure emissions are audited offline. Disposable ORM CI additionally
 renews while the original provider POST is issued, keeps one private key and
 post, validates the original envelope, replays the new request and refuses the
