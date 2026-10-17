@@ -178,6 +178,8 @@ def advance_setup(identifier, *, now=None):
         # Existing exact owner policy needs no additional configuration writes.
         if value.policy is None or value.policy["policy"]["review_policy"] != value.intent["answers"]["review_policy"]:
             policies.configure(value.context, value.config, user=value.user, data=authority.policy_data(value), setup_scope=dispatch)
+        from .cms_policy_access import recheck
+        recheck(dispatch)
         return starts.promote(dispatch, now=timezone.now())
     except SetupBudgetStop as exc:
         return _finish(candidate, lease=lease, attempt=attempt, claimed=claimed, now=max(now, timezone.now()), reason=exc.reason)

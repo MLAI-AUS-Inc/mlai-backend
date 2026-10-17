@@ -13,6 +13,7 @@ from . import cms_setup_authority as authority
 from . import cms_setup_refunds as refunds
 from . import cms_publication_policy as policies
 from . import cms_setup_quote as quotes
+from . import cms_policy_access as access
 from . import tests_cms_setup_start_unit as fixtures
 from .cms_api_transport import CmsApiError
 
@@ -60,6 +61,107 @@ class CmsSetupControllerTests(SimpleTestCase):
         self.assertEqual(result.action, "cms-goal")
         self.assertEqual(result.receipt["native_budget"]["setup_usage"]["provider_seconds"], 0)
         self.http.assert_not_called(); self.spend.assert_called_once()
+
+    def old_policy(self):
+        self.configure()
+        saved = policies.current_policy(self.context, self.config, user=self.user)
+        row = next(row for row in self.saved if str(row.pk) == saved["operation_id"])
+        row.created_at = self.now - timedelta(days=30)
+        # An unrelated receipt write cannot pretend the original GET was recent.
+        row.updated_at = self.now
+        self.quote = quotes.for_context(self.context, self.config, user=self.user, expected_binding=self.binding)
+        self.data["setup_quote_digest"] = self.quote["digest"]
+        self.accept(); self.http.reset_mock()
+        self.access_http = self.stack.enter_context(patch.object(access, "request_json", side_effect=self.http))
+        return saved, row
+
+    def test_old_policy_rechecks_real_publish_permissions_without_replacing_owner_defaults_or_price(self):
+        saved, row = self.old_policy()
+        before = deepcopy((row.payload, self.connection.configuration_version, self.parent.receipt["first_article_billing"]))
+        result = self.advance()
+        self.assertEqual(result.action, "cms-goal")
+        self.assertEqual(result.payload["policy_operation_id"], saved["operation_id"])
+        self.assertEqual(result.receipt["first_article_billing"], before[2])
+        self.assertEqual((row.payload, self.connection.configuration_version), before[:2])
+        at, proof = access.observation(row, saved)
+        self.assertEqual(at, self.now)
+        self.assertEqual(proof["policy_digest"], saved["policy"]["digest"])
+        from .cms_goal_evidence import collect
+        proofs, _source, _refs = collect(result.receipt["goal"], self.context, self.config, user=self.user, now=self.now)
+        self.assertEqual(proofs["access"]["at"], at.isoformat())
+        self.assertEqual(result.receipt["native_budget"]["setup_usage"]["provider_seconds"], 180)
+        self.assertEqual(self.access_http.call_args.kwargs, {"method": "GET", "resource": "users", "identifier": "me", "query": {"context": "edit"}})
+        self.http.assert_called_once(); self.spend.assert_called_once()
+
+    def test_lost_promotion_after_real_access_commit_reuses_that_observation_and_original_hold(self):
+        saved, row = self.old_policy()
+        from .website_contract import WebsiteAuthorityError
+        with patch.object(starts, "promote", side_effect=WebsiteAuthorityError("website_prepare_dependency_transient", "Synthetic lost reply", retryable=True)):
+            self.advance()
+        observed = deepcopy(row.receipt["access_observation"])
+        result = self.advance(30)
+        self.assertEqual(result.action, "cms-goal")
+        self.assertEqual(row.receipt["access_observation"], observed)
+        self.http.assert_called_once(); self.spend.assert_called_once()
+
+    def test_old_policy_transient_access_failure_retries_without_changing_native_choices(self):
+        _saved, row = self.old_policy()
+        original = self.http.side_effect
+        self.http.side_effect = CmsApiError("transient")
+        first = self.advance()
+        self.assertEqual((first.state, first.receipt["failure"]["failure_class"]), ("pending", "transient"))
+        self.assertNotIn("access_observation", row.receipt)
+        self.http.side_effect = original
+        self.assertEqual(self.advance(30).action, "cms-goal")
+        self.assertEqual(self.http.call_count, 2); self.spend.assert_called_once()
+
+    def test_changed_owner_during_access_get_cannot_commit_an_observation_or_promote(self):
+        _saved, row = self.old_policy()
+        original = self.http.side_effect
+        def revoke(*args, **kwargs):
+            result = original(*args, **kwargs)
+            self.user.is_active = False
+            return result
+        self.http.side_effect = revoke
+        self.advance()
+        self.assertNotIn("access_observation", row.receipt)
+        self.assertEqual(self.parent.action, "cms-setup")
+        self.http.assert_called_once(); self.spend.assert_called_once()
+
+    def test_access_observation_is_closed_policy_bound_and_not_a_receipt_update_time(self):
+        saved, row = self.old_policy()
+        self.assertEqual(access.observation(row, saved), (row.created_at, None))
+
+        self.advance()
+        original = deepcopy(row.receipt["access_observation"])
+        from .channel_artifact_contract import digest
+        from .website_contract import WebsiteAuthorityError
+        for changes in ({"schema_version": True}, {"policy_digest": "f" * 64}, {"credential_operation_id": str(uuid4())},
+                {"extra": True}, {"checked_at": (row.created_at - timedelta(seconds=1)).isoformat()}):
+            value = {**deepcopy(original), **changes}
+            value["digest"] = digest({key: item for key, item in value.items() if key != "digest"})
+            row.receipt["access_observation"] = value
+            with self.subTest(changes=changes), self.assertRaises(WebsiteAuthorityError): access.observation(row, saved)
+        row.receipt.pop("access_observation")
+        self.assertEqual(access.observation(row, saved), (row.created_at, None))
+
+    def test_readonly_access_check_requires_the_same_actual_wordpress_publishing_identity(self):
+        author = {"id": 7, "capabilities": {"edit_posts": True, "publish_posts": True}}
+        access._verify_author({"platform": "wordpress"}, {"author": 7}, lambda **_options: author)
+        for changes in ({"id": 8}, {"id": True}, {"capabilities": {"edit_posts": True, "publish_posts": 1}},
+                {"capabilities": {"edit_posts": False, "publish_posts": True}}, {"capabilities": {}}):
+            with self.subTest(changes=changes), self.assertRaises(CmsApiError):
+                access._verify_author({"platform": "wordpress"}, {"author": 7}, lambda **_options: {**author, **changes})
+
+    def test_ghost_access_observes_selected_existing_authors_without_selecting_a_replacement(self):
+        author = {"id": "a" * 24, "status": "active"}
+        template = {"authors": [author["id"]]}
+        access._verify_author({"platform": "ghost"}, template,
+            lambda **_options: {"users": [{"id": "b" * 24, "status": "active"}, author]})
+        for users in ([], [{**author, "status": "inactive"}], [{"id": "b" * 24, "status": "active"}],
+                [{**author, "id": True}], [author] * 101):
+            with self.subTest(users=users), self.assertRaises(CmsApiError):
+                access._verify_author({"platform": "ghost"}, template, lambda **_options: {"users": users})
 
     def test_transient_occurrences_repair_then_escalate_without_polling_burning_new_attempts(self):
         self.accept()

@@ -1272,15 +1272,30 @@ class WebsiteReviewRegressionTests(WebsiteDatabaseFixture, TestCase):
                     original_hold = preparatory.receipt['first_article_billing']
                     self.assertEqual(str(cms_setup_start.start(context, self.config, user=user, data=native_start_data).pk), str(preparatory.pk))
                     quoted_price.return_value = 99
+                    # Model a previously saved native choice without changing
+                    # its preferences. The actual recheck must use GET and the
+                    # original held price, not a replacement policy or debit.
+                    actual_configure = cms_publication_policy.configure
+                    def old_native_choice(*args, **kwargs):
+                        saved = actual_configure(*args, **kwargs)
+                        website.operations.filter(pk=saved['operation_id']).update(created_at=timezone.now() - timedelta(days=30))
+                        return saved
                     with patch.object(cms_publication_policy, 'request_json', side_effect=[(native_user, {}),
-                            ([{'id': 39, 'taxonomy': 'category', 'name': 'Existing category'}], {})]) as defaults_get:
+                            ([{'id': 39, 'taxonomy': 'category', 'name': 'Existing category'}], {})]) as defaults_get, \
+                            patch.object(cms_publication_policy, 'configure', side_effect=old_native_choice), \
+                            patch('content_factory.cms_policy_access.request_json', return_value=(native_user, {})) as access_get:
                         managed_native = cms_setup_controller.advance_setup(preparatory.pk)
                     self.assertEqual((str(managed_native.pk), managed_native.action), (str(preparatory.pk), 'cms-goal'))
                     self.assertEqual(managed_native.receipt['first_article_billing'], original_hold)
                     self.assertEqual(managed_native.receipt['native_budget']['setup_usage']['active_seconds'], 180)
-                    self.assertEqual(managed_native.receipt['native_budget']['setup_usage']['provider_seconds'], 360)
+                    self.assertEqual(managed_native.receipt['native_budget']['setup_usage']['provider_seconds'], 540)
                     self.assertEqual(str(cms_setup_start.start(context, self.config, user=user, data=native_start_data).pk), str(managed_native.pk))
                     self.assertEqual(defaults_get.call_count, 2)
+                    access_get.assert_called_once()
+                    self.assertEqual(access_get.call_args.kwargs['method'], 'GET')
+                    saved_policy = website.operations.get(pk=managed_native.payload['policy_operation_id'])
+                    self.assertIn('access_observation', saved_policy.receipt)
+                    self.assertEqual(website.operations.filter(action='cms-policy').count(), 1)
                 website.refresh_from_db()
                 self.config.refresh_from_db()
                 native = cms_publication_policy.current_policy(context, self.config, user=user)

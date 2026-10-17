@@ -86,6 +86,7 @@ class Rows:
         row.save = Mock(side_effect=lambda **kwargs: setattr(row, "updated_at", timezone.now()))
         row.refresh_from_db = Mock()
         row.updated_at = timezone.now()
+        row.created_at = row.updated_at
         self.rows.append(row)
         return row, True
 

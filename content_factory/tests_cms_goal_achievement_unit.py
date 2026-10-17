@@ -104,6 +104,7 @@ class CmsGoalAchievementTests(SimpleTestCase):
         for row in self.saved:
             if row.action in {evidence.policies.ACTION, evidence.CAPTURE_ACTION, evidence.reviews.ACTION}:
                 row.updated_at = prepared_at
+                row.created_at = prepared_at
         goal = goals.new_goal(str(self.root.pk), self.scope, now=prepared_at - timedelta(minutes=1))
         self.goal = goal
         proofs, original, references = self.collect()
