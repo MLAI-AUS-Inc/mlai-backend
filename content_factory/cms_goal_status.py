@@ -160,7 +160,19 @@ def for_context(context, config, *, user, now=None):
         binding = validate_current(context, config, config.website_connection, user=user)
         operation = config.website_connection.operations.filter(action=authority.ACTION, generation=binding["generation"],
             payload__company_id=binding["company_id"]).order_by("-created_at", "-pk").first()
-        if operation is None: return _base(binding, config.website_connection)
+        if operation is None:
+            from .cms_setup_quote import for_context as setup_quote
+            result = _base(binding, config.website_connection)
+            quote = setup_quote(context, config, user=user, expected_binding=binding)
+            if quote is not None: result["nativeSetup"] = quote
+            # A start may have committed while the quote was being read. Show
+            # that actual operation instead of offering another setup action.
+            started = config.website_connection.operations.filter(action=authority.ACTION, generation=binding["generation"],
+                payload__company_id=binding["company_id"]).order_by("-created_at", "-pk").first()
+            if started is not None: return project(started, context, config, user=user, binding=binding, now=now or timezone.now())
+            for row in (context.organization, context.company, context.profile, user, config, config.website_connection): row.refresh_from_db()
+            if validate_current(context, config, config.website_connection, user=user) != binding: return None
+            return result
         return project(operation, context, config, user=user, binding=binding, now=now or timezone.now())
     except (WebsiteAuthorityError, ValueError, TypeError, KeyError, AttributeError, RecursionError):
         return None
