@@ -121,6 +121,20 @@ class CmsInitialTests(SimpleTestCase):
         self.assertTrue(all(row.payload["sealed_credential"] is None for row in self.saved if row.action == authority.GRANT_ACTION))
         self.assertEqual(self.transport.call_count, 2); self.spend.assert_called_once()
 
+    def test_worker_financial_guards_hold_short_transactions_while_each_provider_get_is_unlocked(self):
+        from . import website_first_article_billing as records
+        self.start(); actual = records._original_spend
+        with patch("django.db.transaction.get_connection", return_value=SimpleNamespace(in_atomic_block=False)):
+            with self.assertRaises(WebsiteAuthorityError): authority.scope(self.job)
+        def held(*args, **kwargs):
+            self.assertGreater(self.depth, 0)
+            return actual(*args, **kwargs)
+        with patch.object(records, "_original_spend", side_effect=held) as checks:
+            self.assertEqual(self.advance().state, "completed")
+        self.assertGreater(checks.call_count, 2)
+        self.assertEqual(self.depth, 0)
+        self.transport.assert_called(); self.spend.assert_called_once()
+
     def test_transient_retry_uses_same_ciphertext_and_original_budget_without_browser_or_new_price(self):
         self.start()
         proposal = authority.proposal(authority.scope(self.job, now=self.now), now=self.now).row

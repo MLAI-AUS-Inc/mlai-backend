@@ -4,6 +4,7 @@ from dataclasses import dataclass, field
 from types import SimpleNamespace
 
 from django.conf import settings
+from django.db import transaction
 from django.utils import timezone
 
 from . import cms_onboarding_plan as plans
@@ -71,7 +72,7 @@ def historical(job):
 
 
 def scope(job, *, user=None, pending=True, read_only=False, now=None):
-    """Reload actual current ownership and original records before reading a key."""
+    """Reload current ownership; executable scope requires an owning transaction."""
     from .website_models import WebsiteConnectionOperation
     from .models import OrganizationContentConfig
     from founder_tools.models import VibeRaisingCompany
@@ -80,6 +81,7 @@ def scope(job, *, user=None, pending=True, read_only=False, now=None):
     from . import website_first_article_billing as records
     from roo.models import Ledger
     try:
+        if not read_only and not transaction.get_connection().in_atomic_block: raise _deny()
         now = now or timezone.now()
         plan = historical(job); binding = plan["binding"]
         config = OrganizationContentConfig.objects.select_related("website_connection__organization").filter(

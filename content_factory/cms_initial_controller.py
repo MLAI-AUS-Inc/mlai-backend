@@ -111,10 +111,17 @@ def _account(value, *, now, active_seconds=0, provider_seconds=0):
 
 def _guard(dispatch):
     from .website_models import WebsiteConnectionOperation
+    from organizations.models import Organization
     if not isinstance(dispatch, authority.CmsInitialDispatch): raise authority._deny()
     job = WebsiteConnectionOperation.objects.filter(pk=dispatch.operation_id, action=authority.ACTION).first()
     if job is None: raise authority._deny()
-    return authority.current(job, dispatch=dispatch)
+    # Original-spend verification locks the ledger. Keep that check inside a
+    # short owning transaction even when the caller is between provider GETs.
+    with transaction.atomic():
+        Organization.objects.select_for_update().get(pk=job.connection.organization_id)
+        job = WebsiteConnectionOperation.objects.select_for_update().filter(pk=dispatch.operation_id, action=authority.ACTION).first()
+        if job is None: raise authority._deny()
+        return authority.current(job, dispatch=dispatch)
 
 
 def _read(dispatch, binding, credential, **options):

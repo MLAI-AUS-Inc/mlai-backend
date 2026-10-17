@@ -1192,6 +1192,13 @@ class WebsiteSourceFenceTests(WebsiteDatabaseFixture, TestCase):
         self.assertFalse(any(item.get('code') == 'repository_source_changed' for item in self.website.blockers))
 
 
+class WebsiteInitialCmsTransactionTests(WebsiteDatabaseFixture, TransactionTestCase):
+    def test_initial_paid_publication_runs_without_an_outer_test_transaction(self):
+        """Use actual PostgreSQL row-lock rules between unlocked provider reads."""
+        self.assertFalse(connection.in_atomic_block)
+        WebsiteReviewRegressionTests._cms_native_round_trip(self, initial=True)
+
+
 class WebsiteReviewRegressionTests(WebsiteDatabaseFixture, TestCase):
     def test_cms_owner_connect_persists_private_key_and_disconnect_erases_every_generation(self):
         self._cms_native_round_trip()

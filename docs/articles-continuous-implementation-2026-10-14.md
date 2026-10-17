@@ -793,7 +793,7 @@ original consent, price, payment identity and cumulative budgets. Initial nonce
 recovery is read-only; independent expiry erases orphan ciphertext with rollout
 off, and lifecycle cleanup fences both private action types.
 
-Twenty-seven focused no-database cases pass. The disposable ORM round trip has
+Twenty-eight focused no-database cases pass. The disposable ORM round trip has
 an initial-acceptance variant with an injected worker exit and the same original
 payment/source through publication; remote CI is still required. The combined
 Chat initial form, real provider/browser acceptance, transfer, hosted fallback

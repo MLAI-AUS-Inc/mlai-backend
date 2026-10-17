@@ -52,7 +52,7 @@ setup settlement path; verification cannot dispatch a model or CMS write.
 Repeated failures and worker loss use B1 occurrences and the original bounded
 budget. A stale lease or replaced proposal cannot commit or cancel its successor.
 
-Twenty-seven no-database cases exercise actual encryption and business guards,
+Twenty-eight no-database cases exercise actual encryption and business guards,
 WordPress/Ghost identity, original held setup-to-goal promotion, bad key renewal,
 lost acceptance/restore replies, stale leases, expiry/orphan erasure, current
 owner changes, actual refund/outbox refusal and no-store API reads. The existing
@@ -60,10 +60,21 @@ disposable database round trip now has a second variant beginning with this
 single acceptance, injecting a worker exit, and retaining the original paid
 source through the existing one-create publication and lifecycle checks. That
 variant is assigned to remote CI; it has not run against a local database.
-All 1,478 website no-database tests pass, model checks report no changes,
+The original 1,478 website no-database tests pass, model checks report no changes,
 842 production failure emissions are audited and 590 test modules are assigned.
 Media fixtures now share one controller clock instead of relying on a
 one-second scheduling allowance under host contention.
+
+Follow-on transaction review found that the between-GET financial guard could
+request PostgreSQL's ledger row lock without an owning transaction. Every
+executable guard now enters a short organization transaction before reloading
+its lease, current owner and original spend; provider I/O stays outside those
+locks. Executable scope also refuses a missing transaction explicitly. A new
+no-database regression checks this boundary, and an actual TransactionTestCase
+variant runs the same paid round trip without a test-runner outer transaction.
+That variant is explicitly assigned to the disposable PostgreSQL lane as well
+as the ordinary database suite.
+All 1,479 website no-database tests pass after this transaction correction.
 
 `ARTICLES_CMS_ONBOARDING_ENABLED=false` and all related rollout flags remain
 off. The combined initial Chat form/decoder, real provider/browser acceptance,

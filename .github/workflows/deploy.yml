@@ -673,6 +673,7 @@ jobs:
           integrations.tests_slack_connector_authority.SlackConnectorAuthorityPostgresTests \
           integrations.tests_startup_updates.StartupUpdateSlackLineagePostgresTests \
           content_factory.tests_website_connections.WebsiteConcurrentDisconnectTests \
+          content_factory.tests_website_connections.WebsiteInitialCmsTransactionTests \
           content_factory.tests_one_click_database \
           content_factory.tests_website_reentry \
           --verbosity 2
