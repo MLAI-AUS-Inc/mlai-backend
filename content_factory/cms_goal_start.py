@@ -3,6 +3,7 @@
 from copy import deepcopy
 from uuid import uuid4
 
+from django.conf import settings
 from django.db import transaction
 from django.utils import timezone
 
@@ -76,6 +77,21 @@ def projection(operation, *, user=None):
     if isinstance(choice, dict) and choice.get("id") in {"review_draft", "connect_cms"}:
         result["userAction"] = {key: deepcopy(choice[key]) for key in ("id", "runId", "stageId", "reviewRevision") if key in choice}
     if isinstance(operation.receipt.get("public_url"), str): result["publicUrl"] = operation.receipt["public_url"]
+    if getattr(settings, "ARTICLES_CMS_STATUS_ENABLED", False):
+        from .cms_goal_status import project
+        from .website_doctor import safe_identifier
+        current = project(operation, value.context, value.config, user=value.user, binding=value.scope["binding"], now=timezone.now())
+        if current is None:
+            raise WebsiteAuthorityError("website_connection_changed", "The current native articles scope changed.")
+        result.update(milestones=current["milestones"], nextRetryAt=current["nextAttemptAt"],
+            state={"working": operation.state, "needs_you": "needs_user", "done": "completed", "stopped": "needs_attention"}[current["state"]],
+            status={"working": "working", "needs_you": "owner_action_required", "done": "first_article_live", "stopped": "verification_required"}[current["state"]])
+        result.pop("publicUrl", None)
+        result.pop("userAction", None)
+        result["sourceRunId"] = safe_identifier(result["sourceRunId"])
+        if current.get("publicUrl") is not None: result["publicUrl"] = current["publicUrl"]
+        if current["state"] == "needs_you":
+            result["userAction"] = {key: current["action"][key] for key in ("id", "runId", "stageId", "reviewRevision") if key in current["action"]}
     return result
 
 

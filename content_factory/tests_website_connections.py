@@ -1475,6 +1475,18 @@ class WebsiteReviewRegressionTests(WebsiteDatabaseFixture, TestCase):
                 self.assertEqual((managed_native.state, managed_native.receipt['status']), ('completed', 'first_article_live'))
                 self.assertEqual(managed_native.receipt['first_article_billing']['spend_ledger_id'], str(spend.pk))
                 self.assertEqual(managed_native.receipt['references']['first_article_live'], str(publication.pk))
+                with override_settings(ARTICLES_CMS_STATUS_ENABLED=True, ARTICLES_WEBSITE_STATUS_V1_ENABLED=True,
+                        ARTICLES_WEBSITE_DOCTOR_ENABLED=True), \
+                        patch('integrations.http_client.get') as read_get, patch('integrations.http_client.post') as read_post:
+                    from .website_status import status_for_context
+                    current_status = status_for_context(context, self.config, user=user, journey={})
+                    self.assertEqual((current_status['channel'], current_status['state']), ('cms', 'done'))
+                    self.assertEqual(current_status['publicUrl'], publication.receipt['publicUrl'])
+                    self.assertEqual(next(row for row in current_status['milestones'] if row['name'] == 'merged'),
+                        {'name': 'merged', 'state': 'not_required', 'required': False})
+                    self.assertIsNone(current_status['doctor']['observedSourceSha'])
+                    self.assertEqual(current_status['doctor']['nativeSource']['generation'], 1)
+                    read_get.assert_not_called(); read_post.assert_not_called()
                 original_query = {'billing_request_id': managed_key, 'artifact_operation_id': str(artifact_operation.pk),
                     'envelope_digest': artifact_payload['publishing_channel_artifact']['digest'], 'domain': self.org.domain}
                 with override_settings(ARTICLES_CMS_GOALS_ENABLED=False):

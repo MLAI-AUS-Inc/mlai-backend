@@ -130,7 +130,7 @@ class WebsiteConnectionView(APIView):
         except WebsiteAuthorityError:
             native_goal = None
         if native_goal is not None: payload["cmsGoal"] = native_goal
-        return Response(add_status(payload, context, config, journey=payload["websiteJourney"]))
+        return Response(add_status(payload, context, config, journey=payload["websiteJourney"], user=request.user))
 
     def post(self, request):
         context, config, error = _context(request)
@@ -311,7 +311,7 @@ class WebsiteConnectionActionView(APIView):
             from .website_status import add_status
             payload = {"websiteConnection": summary_for(config, company_id=context.company.pk), "websiteJourney": journey_for_context(context, config),
                 "operation": operation_summary(operation) if operation else None}
-            return Response(add_status(payload, context, config, journey=payload["websiteJourney"]))
+            return Response(add_status(payload, context, config, journey=payload["websiteJourney"], user=request.user))
         except WebsiteAuthorityError as exc:
             return Response(exc.as_dict(), status=exc.status)
 
