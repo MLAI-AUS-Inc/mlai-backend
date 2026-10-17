@@ -146,10 +146,37 @@ class PublishingChannelChoiceTests(SimpleTestCase):
         self.observe = values[3]
         for p in self.patches:self.addCleanup(p.stop)
 
-    def update(self, *, selected=None, revision=None, expected_scope=None):
+    def update(self, *, selected=None, revision=None, expected_scope=None, platform=None):
         revision = channels._revision(self.config) if revision is None else revision
         return channels.update_choice(self.context,self.config,expected_revision=revision,
-            expected_scope=expected_scope or channels.scope_for(self.context,self.config),selected=selected)
+            expected_scope=expected_scope or channels.scope_for(self.context,self.config),selected=selected, platform=platform)
+
+    @override_settings(ARTICLES_CMS_ONBOARDING_ENABLED=True)
+    def test_initial_owner_can_name_a_supported_cms_even_when_public_detection_is_unavailable(self):
+        self.observe.return_value = {'platform':'unknown','confidence':'unknown','signals':[], 'status':'unavailable',
+            'coverage':'none','prefix_sha256':None}
+        inspected = self.update()
+        self.assertNotIn('cms', inspected['recommendation']['options'])
+        self.observe.reset_mock()
+        chosen = self.update(selected='cms', platform='wordpress')
+        self.assertEqual(chosen['selection'], {'channel':'cms','platform':'wordpress'})
+        self.assertEqual(chosen['recommendation'], inspected['recommendation'])
+        self.assertEqual(channels.saved_record(self.config.article_system), chosen)
+        self.assertIsNone(self.config.website_connection)
+        self.assertFalse(self.config.articles_scaffolded)
+        self.observe.assert_not_called()
+
+    @override_settings(ARTICLES_CMS_ONBOARDING_ENABLED=True)
+    def test_manual_platform_is_only_an_initial_supported_cms_preference(self):
+        self.update()
+        for platform in (True, [], 'webflow', 'unknown'):
+            with self.subTest(platform=platform), self.assertRaises(WebsiteAuthorityError): self.update(selected='cms', platform=platform)
+        with self.assertRaises(WebsiteAuthorityError): self.update(selected='git', platform='wordpress')
+        self.config.github_repo = 'fixture/legacy'
+        with self.assertRaises(WebsiteAuthorityError): self.update(selected='cms', platform='wordpress')
+        self.config.github_repo = ''
+        with override_settings(ARTICLES_CMS_ONBOARDING_ENABLED=False), self.assertRaises(WebsiteAuthorityError):
+            self.update(selected='cms', platform='wordpress')
 
     def test_no_github_required_and_owner_selection_never_creates_readiness(self):
         inspected = self.update()

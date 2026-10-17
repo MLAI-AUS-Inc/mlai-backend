@@ -107,6 +107,19 @@ class CmsInitialTests(SimpleTestCase):
         self.assertEqual(setup.current(self.root).intent["operation_id"], str(self.root.pk))
         self.spend.assert_called_once()
 
+    def test_actual_free_initial_acceptance_verifies_without_a_spend_or_replacement_setup(self):
+        self.price.return_value = 0
+        original = self.data["offer"]
+        self.data["offer"] = offers.for_context(self.context, self.config, user=self.user, data={"platform": original["platform"],
+            "public_origin": original["public_origin"], "api_origin": original["api_origin"],
+            "channel_scope": original["scope"], "channel_revision": original["channel_revision"]}, now=self.now)
+        self.data["expected_cost_points"] = 0
+        root = self.start()
+        self.assertEqual(root.receipt["first_article_billing"]["cost_points"], 0)
+        self.assertIsNone(root.receipt["first_article_billing"]["spend_ledger_id"])
+        self.assertEqual(self.advance().state, "completed")
+        self.assertEqual(setup.current(root).intent["operation_id"], str(root.pk))
+        self.spend.assert_not_called(); self.assertEqual(self.transport.call_count, 2)
 
     def test_lost_acceptance_replays_original_grant_and_price_without_another_hold(self):
         original = self.start(); packet = deepcopy(self.job.payload)
@@ -236,6 +249,7 @@ class CmsInitialTests(SimpleTestCase):
         before = deepcopy([(row.payload, row.receipt, row.state) for row in self.saved])
         packet = status.packet(self.context, self.config, user=self.user, request_id=self.data["client_request_id"], now=self.now)
         self.assertEqual(packet["cmsInitial"]["requestId"], self.data["client_request_id"])
+        self.assertEqual(packet["cmsInitialRequestId"], self.data["client_request_id"])
         self.assertEqual(packet["websiteStatus"]["mode"], "connect")
         self.assertEqual(packet["websiteStatus"]["milestones"], [])
         self.assertIsNone(packet["websiteStatus"]["goalId"])
@@ -271,6 +285,7 @@ class CmsInitialTests(SimpleTestCase):
         with self.assertRaises(WebsiteAuthorityError): self.start()
         completed = status.packet(self.context, self.config, user=self.user, request_id=self.data["client_request_id"], now=self.now)
         self.assertEqual(completed["cmsInitial"]["requestId"], self.retry_data["client_request_id"])
+        self.assertEqual(completed["cmsInitialRequestId"], self.data["client_request_id"])
         self.assertEqual(completed["cmsInitial"]["state"], "completed")
         self.assertFalse(completed["cmsInitial"]["canRestore"])
         self.assertNotIn("websiteStatus", completed)
@@ -367,6 +382,31 @@ class CmsInitialTests(SimpleTestCase):
             self.assertEqual(recovered["Cache-Control"], "private, no-store")
             self.assertEqual(recovered.data["cmsInitial"], response.data["cmsInitial"])
         self.transport.assert_not_called(); self.spend.assert_called_once()
+
+    def test_initial_manual_platform_route_requires_current_owner_entry_and_passes_only_explicit_preference(self):
+        from .website_views import WebsiteConnectionActionView
+        data = {"channel_scope": self.data["offer"]["scope"], "channel_revision": 2, "channel": "cms", "cms_platform": "ghost"}
+        request = SimpleNamespace(user=self.user, data=data)
+        with patch("content_factory.website_views._context", return_value=(self.context, self.config, None)), \
+                patch.object(offers, "entry_for_context", return_value={"eligible": True}) as eligibility, \
+                patch("content_factory.website_publishing_channels.update_choice", return_value={"selection": {"channel": "cms", "platform": "ghost"}}) as update:
+            result = WebsiteConnectionActionView().post(request, "select-channel")
+            self.assertEqual(result.status_code, 200)
+            self.assertEqual(result["Cache-Control"], "private, no-store")
+            eligibility.assert_called_once_with(self.context, self.config, user=self.user)
+            update.assert_called_once_with(self.context, self.config, expected_scope=data["channel_scope"], expected_revision=2, selected="cms", platform="ghost")
+        self.transport.assert_not_called(); self.spend.assert_not_called()
+
+    def test_manual_platform_cannot_bypass_initial_owner_entry_or_select_another_channel(self):
+        from .website_views import WebsiteConnectionActionView
+        with patch("content_factory.website_views._context", return_value=(self.context, self.config, None)), \
+                patch.object(offers, "entry_for_context", return_value=None), \
+                patch("content_factory.website_publishing_channels.update_choice") as update:
+            for channel in ("cms", "git", "portable"):
+                response = WebsiteConnectionActionView().post(SimpleNamespace(user=self.user, data={"channel": channel, "cms_platform": "ghost"}), "select-channel")
+                self.assertEqual(response.status_code, 422)
+            update.assert_not_called()
+        self.transport.assert_not_called(); self.spend.assert_not_called()
 
     def test_owner_revocation_during_packet_read_cannot_export_a_previously_built_destination(self):
         self.start(); actual = status.find; reads = []

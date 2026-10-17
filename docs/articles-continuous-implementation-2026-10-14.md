@@ -798,3 +798,13 @@ an initial-acceptance variant with an injected worker exit and the same original
 payment/source through publication; remote CI is still required. The combined
 Chat initial form, real provider/browser acceptance, transfer, hosted fallback
 and actual nightly coverage remain unfinished. All rollout flags remain off.
+
+
+18 October: initial CMS intake now has a current-founder-only, read-only entry
+projection and an explicit WordPress/Ghost preference when public detection is
+unavailable. Original acceptance UUID recovery remains separate from the current
+key proposal. The 1,492 database-free journey cases, 846 failure emissions and
+590 assigned test modules pass; model checks report no changes. See
+[the intake notes](articles-e5-cms-initial-intake-2026-10-18.md). Real remote CI
+and the initial owner interface remain separate acceptance evidence; flags stay
+off and no live site success rate is claimed.

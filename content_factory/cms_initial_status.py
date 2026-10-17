@@ -44,7 +44,7 @@ def packet(context, config, *, user, operation_id=None, request_id=None, now=Non
         "requestId": selected.grant["request_id"], "accessEpoch": epoch, "state": job.state,
         "nextAttemptAt": job.next_attempt_at.isoformat() if active else None,
         "canRestore": bool(job.state == "needs_user" and epoch is not None and authority.enabled(value.connection.organization_id))}
-    result = {"cmsInitial": descriptor}
+    result = {"cmsInitial": descriptor, "cmsInitialRequestId": value.plan["native_intent"]["request_id"]}
     if job.state != "completed":
         working = active and authority.enabled(value.connection.organization_id)
         result["websiteStatus"] = {"version": 1, "channel": "cms", "mode": "connect", "companyId": binding["company_id"],
