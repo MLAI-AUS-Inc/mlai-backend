@@ -306,11 +306,13 @@ def mint_website_token(data, *, permission_mode="read", action="read"):
 
 
 
-def revoke_generation_tokens(connection_id, generation):
+def revoke_generation_tokens(connection_id, generation, *, maximum_calls=20):
     """Revoke bounded known references; cache loss never proves a tracked token gone."""
     from integrations import http_client
     from . import website_article_credentials as inventory
     from .website_connections import require_unlocked_remote_call
+    if type(maximum_calls) is not int or not 1 <= maximum_calls <= 20:
+        raise ValueError("A credential retirement pass requires one to twenty provider calls")
     require_unlocked_remote_call()
     durable, overflow = inventory.discover(connection_id, generation)
     index = token_index_key(connection_id, generation)
@@ -325,8 +327,8 @@ def revoke_generation_tokens(connection_id, generation):
         else:
             candidates.append(reference)
     # A cleanup pass cannot occupy a worker for hundreds of provider timeouts.
-    pending.extend(candidates[20:])
-    for reference in candidates[:20]:
+    attempted = 0
+    for reference in candidates:
         tracked = durable.get(reference)
         reservation = tracked[0] if tracked is not None else None
         key = f"website-issued-token:{reference}"
@@ -335,6 +337,10 @@ def revoke_generation_tokens(connection_id, generation):
             if tracked is not None:
                 pending.append(reference)
             continue
+        if attempted >= maximum_calls:
+            pending.append(reference)
+            continue
+        attempted += 1
         confirmed = False
         try:
             response = http_client.delete("https://api.github.com/installation/token", headers={"Authorization": f"Bearer {token}", "Accept": "application/vnd.github+json"}, timeout=(3, 10))

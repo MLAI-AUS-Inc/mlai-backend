@@ -12,6 +12,7 @@ from . import website_article_source_stop as stop, website_article_source_fence 
 from . import tests_website_article_source_fence_unit as fixtures
 from .article_source_stop_contract import digest, validate_request, validate_receipt, StopContractError
 from .website_contract import WebsiteAuthorityError
+from . import tests_article_credential_inventory_unit as credential_fixtures
 
 
 def worker_receipt(request):
@@ -48,6 +49,29 @@ class ArticleSourceStopTests(SimpleTestCase):
         self.rpc = self.stack.enter_context(patch.object(stop, "read_limited", side_effect=self.worker))
         self.responses = []
         self.requests = []
+        # ORM/cache/provider seams for the real broker retirement path. Empty
+        # legacy history is not a complete-coverage or quiet assertion.
+        from . import website_tokens as broker, website_article_credentials as inventory
+        from .website_models import WebsiteConnection, WebsiteConnectionOperation
+        from contextlib import nullcontext
+        self.credential_rows = credential_fixtures.Operations()
+        self.cached = {}
+        original_query = WebsiteConnectionOperation.objects.select_for_update()
+        def filtered(**fields):
+            if fields.get("action") in {inventory.TOKEN_ACTION, inventory.INVENTORY_ACTION}:
+                return self.credential_rows.filter(**fields)
+            return original_query.filter(**fields)
+        query = SimpleNamespace(filter=filtered)
+        query.select_related = lambda *a: query
+        self.stack.enter_context(patch.object(WebsiteConnectionOperation.objects, "filter", side_effect=filtered))
+        self.stack.enter_context(patch.object(WebsiteConnectionOperation.objects, "create", side_effect=self.credential_rows.create))
+        self.stack.enter_context(patch.object(WebsiteConnectionOperation.objects, "select_for_update", return_value=query))
+        self.stack.enter_context(patch.object(WebsiteConnection.objects, "select_for_update", return_value=credential_fixtures.Rows([self.parent.connection])))
+        self.stack.enter_context(patch("django.db.transaction.atomic", side_effect=lambda *a, **kw: nullcontext()))
+        self.stack.enter_context(patch.object(broker.cache, "get", side_effect=lambda key: self.cached.get(key)))
+        self.stack.enter_context(patch.object(broker.cache, "set", side_effect=lambda key, value, **kw: self.cached.__setitem__(key, value)))
+        self.stack.enter_context(patch.object(broker.cache, "delete", side_effect=lambda key: self.cached.pop(key, None)))
+        self.token_delete = self.stack.enter_context(patch("integrations.http_client.delete", side_effect=AssertionError("No unseeded provider token work")))
 
     def worker(self, method, url, *, body, **kwargs):
         self.assertEqual(self.fixture.fixture.depth, 0, "No site lock over worker HTTP")
