@@ -489,6 +489,7 @@ class ContentFactoryOrgConfigView(APIView):
                 article_component_library.append(_entry)
 
         from .incident_guards import safe_template_seed
+        from .portable_drafts import website_preview_delivery_mode
         response_data = {
             'org_id': org.id,
             'org_name': org.name,
@@ -506,7 +507,7 @@ class ContentFactoryOrgConfigView(APIView):
                 for field in ('article_template', 'design_guide', 'resource_prompt')} if config else {},
             'company_context': config.company_context if config else None,
             'github_repo': config.github_repo if config else None,
-            'article_delivery_mode': config.article_delivery_mode if config else None,
+            'article_delivery_mode': website_preview_delivery_mode(config, config.article_delivery_mode) if config else None,
             'brand_name': config.brand_name if config else None,
             'scan_summary': config.scan_summary if config else None,
             'tech_stack': config.tech_stack if config else {},
@@ -759,6 +760,11 @@ class ContentFactoryOrgConfigView(APIView):
             defaults['authors'] = normalize_authors(defaults['authors'])
         if 'default_author_id' in defaults:
             defaults['default_author_id'] = str(defaults['default_author_id'] or '').strip()
+        if 'article_delivery_mode' in defaults:
+            # A connected website always previews; never store content_only for it.
+            from .portable_drafts import website_preview_delivery_mode
+            defaults['article_delivery_mode'] = website_preview_delivery_mode(
+                existing_config, defaults['article_delivery_mode'])
 
         scan_head_sha = str(data.get('repo_head_sha') or data.get('commit_sha') or '').strip()
         scan_timestamp = timezone.now()

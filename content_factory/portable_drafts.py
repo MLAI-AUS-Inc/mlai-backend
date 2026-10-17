@@ -156,3 +156,51 @@ def original_portable_run(run):
     except WebsiteAuthorityError:
         # Malformed stored authority is never permission to bypass its fence.
         return False
+
+
+# Owner decision (17 Oct 2026): "Article delivery should always be website
+# preview so I can always view the article." A company with a connected website
+# never stores, reports or starts a ``content_only`` (portable) article. Paused
+# publishing still previews; a disconnected or revoked website has nothing to
+# preview on, so portable drafts remain its only (and permitted) delivery.
+WEBSITE_PREVIEW_CONNECTION_STATES = frozenset({"connected", "paused"})
+_REQUEST_TRUE_VALUES = frozenset({"1", "true", "yes", "on"})
+
+
+def has_connected_website(config):
+    """True when the company's selected website can host an article preview."""
+    if config is None or not getattr(config, "website_connection_id", None):
+        return False
+    connection = getattr(config, "website_connection", None)
+    return getattr(connection, "state", None) in WEBSITE_PREVIEW_CONNECTION_STATES
+
+
+def website_preview_delivery_mode(config, mode):
+    """Return the storable delivery mode: ``content_only`` becomes ``review_draft``
+    for a company with a connected website; every other value is unchanged."""
+    if str(mode or "").strip() == "content_only" and has_connected_website(config):
+        return "review_draft"
+    return mode
+
+
+def requests_content_only(payload):
+    """True for an explicit or confirmed ``content_only`` article start request.
+
+    Mirrors the start path's first-present alias reads, so no spelling of the
+    flags (older desktops send ``deliveryModeExplicit``) slips past the rule.
+    """
+    payload = payload if isinstance(payload, dict) else dict(payload or {})
+
+    def first(*keys):
+        for key in keys:
+            if key in payload:
+                return payload.get(key)
+        return None
+
+    def flag(value):
+        return value.strip().lower() in _REQUEST_TRUE_VALUES if isinstance(value, str) else bool(value)
+
+    if str(first("delivery_mode", "deliveryMode") or "").strip() != "content_only":
+        return False
+    return (flag(first("delivery_mode_explicit", "deliveryModeExplicit"))
+            or flag(first("delivery_mode_confirmed", "deliveryModeConfirmed")))

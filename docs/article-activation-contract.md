@@ -130,6 +130,17 @@ inventory/rescan verification path first. Blockers return 409 with
 `code: article_system_setup_blocked`, `reasonCode`, `articleCapabilities` and the
 next setup step. Saving/viewing existing drafts remains available.
 
+A company with a connected (or paused) website always gets a website preview
+(owner decision, 17 Oct 2026). Its saved and reported delivery mode is never
+`content_only`: settings saves store `review_draft` instead, and bootstrap
+reports `review_draft` with the existing readiness flags while setup is
+unfinished. An explicit `content_only` article start returns 409
+`code: website_preview_required` ("Finish website setup to generate an article
+you can preview on your site."), with `reasonCode`, `nextRequiredStep` and
+`articleCapabilities`, before any charge when the website cannot generate yet;
+when it can, the request runs as `review_draft` under the submitted reviewed
+connection identity. Companies without a connected website keep portable drafts.
+
 Integrated Content Factory workers fetch admission immediately before article
 producing steps, retries/resume, image generation and publication. The existing
 service-authenticated `GET /api/content-factory/org/config` accepts
