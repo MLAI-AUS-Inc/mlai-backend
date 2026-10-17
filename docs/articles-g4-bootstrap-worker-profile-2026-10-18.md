@@ -32,10 +32,19 @@ before choosing any new default. The runtime defaults remain 300 plus 50 and
 profiling remains off. All article rollout flags remain off; no merge/deployment
 or production measurement is part of this increment.
 
-Local evidence: 51 database/network-denying driver/profile/runtime/CI-reuse tests
+Local evidence: 52 database/network-denying driver/profile/runtime/CI-reuse tests
 pass. They cover rejected local/foreign database admission, a closed synthetic
 child environment, exact sample/lifetime accounting, private temporary cleanup,
 owned-group teardown including early exit/timeouts, and the required deploy gate.
 All 599 test modules are fully assigned. Fixture/helper syntax and workflow YAML
 parse. The remote application comparison remains pending; no service or database
 was started locally and no recycle default has been changed.
+
+The first actual comparison passed its lifecycle checks, but its memory figures
+are excluded: the throttle override used a Mock, whose call history retained
+every DRF request and response object graph. A weak-reference regression executes
+the actual fixture override and fails before the correction. A plain callback
+now bypasses fixture throttling without collecting request references. Repeat
+the comparison before drawing memory/tuning conclusions. Export the bounded
+per-100-request numeric samples as well as lifetime totals to distinguish warm-up,
+retained growth and peaks without retaining or publishing raw requests.

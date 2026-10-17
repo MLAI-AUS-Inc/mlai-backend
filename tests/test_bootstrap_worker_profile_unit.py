@@ -1,11 +1,15 @@
 """Fixture admission, closed metrics and teardown without workers or services."""
 
 from copy import deepcopy
+from contextlib import ExitStack
+import ast
+import gc
 from io import StringIO
 import json
 from pathlib import Path
 import runpy
 import subprocess
+import weakref
 from tempfile import TemporaryDirectory
 from unittest import TestCase
 from unittest.mock import Mock, patch
@@ -54,6 +58,9 @@ class BootstrapWorkerProfileTests(TestCase):
         self.assertEqual([row["requests"] for row in value["worker_lifetimes"]], [300, 300])
         self.assertNotIn("worker_pid", json.dumps(value))
         self.assertEqual(value["worker_lifetimes"][0]["growth_after_100_kib"], 200)
+        self.assertEqual([row["completed_requests"] for row in value["worker_lifetimes"][0]["samples"]], [100, 200, 300])
+        self.assertTrue(all(set(row) == {"completed_requests", "rss_kib", "peak_rss_kib"}
+            for life in value["worker_lifetimes"] for row in life["samples"]))
 
     def test_incomplete_or_duplicated_lifecycle_samples_and_changed_metrics_are_rejected(self):
         original = events()
@@ -135,3 +142,25 @@ class BootstrapWorkerProfileTests(TestCase):
         commands = [step.get("run", "") for step in fixture["steps"]]
         self.assertTrue(any("scripts/test_without_database.py tests.test_bootstrap_worker_profile_unit" in command for command in commands))
         self.assertTrue(any("manage.py test tests.test_bootstrap_worker_memory_profile" in command for command in commands))
+
+    def test_actual_fixture_throttle_override_does_not_retain_completed_requests(self):
+        source = profile.ROOT / "tests/fixtures/gunicorn_bootstrap_memory_app.py"
+        tree = ast.parse(source.read_text())
+        helpers = [node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "skip_fixture_throttles"]
+        overrides = [node for node in tree.body if isinstance(node, ast.Expr) and isinstance(node.value, ast.Call)
+            and any(isinstance(child, ast.Name) and child.id == "APIView" for child in ast.walk(node))]
+        self.assertEqual(len(overrides), 1)
+        class View:
+            def check_throttles(self, request): raise AssertionError("Fixture must bypass throttling")
+        class Request:
+            pass
+        with ExitStack() as boundaries:
+            namespace = {"_boundaries": boundaries, "patch": patch, "APIView": View}
+            exec(compile(ast.Module(body=[*helpers, *overrides], type_ignores=[]), str(source), "exec"), namespace)
+            view = View()
+            request = Request()
+            reference = weakref.ref(request)
+            self.assertIsNone(view.check_throttles(request))
+            del request
+            gc.collect()
+            self.assertIsNone(reference(), "Benchmark hooks must not retain request/response object graphs")

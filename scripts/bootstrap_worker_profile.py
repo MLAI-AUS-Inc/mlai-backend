@@ -89,7 +89,8 @@ def summarize(log, *, completed, attempted, limit, jitter):
             raise ValueError("Bootstrap worker profile sample accounting failed")
         lives.append({"requests": counts[-1], "start_rss_kib": rows[0]["rss_kib"], "exit_rss_kib": rows[-1]["rss_kib"],
             "peak_rss_kib": max(row["peak_rss_kib"] for row in rows), "retained_growth_kib": rows[-1]["rss_kib"] - rows[0]["rss_kib"],
-            "growth_after_100_kib": rows[-1]["rss_kib"] - samples[0]["rss_kib"] if samples else None})
+            "growth_after_100_kib": rows[-1]["rss_kib"] - samples[0]["rss_kib"] if samples else None,
+            "samples": [{name: row[name] for name in ("completed_requests", "rss_kib", "peak_rss_kib")} for row in samples]})
     if (len(lives) < 2 or not completed <= sum(life["requests"] for life in lives) <= attempted or
             not any(limit <= life["requests"] <= limit + jitter for life in lives)):
         raise ValueError("Bootstrap worker profile did not observe recycling")

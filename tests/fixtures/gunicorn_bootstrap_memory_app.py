@@ -31,6 +31,10 @@ def denied(*args, **kwargs):
     raise AssertionError("External effects forbidden in the bootstrap memory fixture")
 
 
+def skip_fixture_throttles(self, request):
+    """Bypass fixture throttling without retaining requests in a mock call log."""
+
+
 _boundaries = ExitStack()
 _boundaries.enter_context(patch.object(requests.sessions.Session, "request", denied))
 _boundaries.enter_context(patch.object(httpx.Client, "send", denied))
@@ -45,7 +49,7 @@ _boundaries.enter_context(patch.object(views, "_refresh_pending_article_system_s
 _boundaries.enter_context(patch.object(views, "refresh_publish_statuses", denied))
 # Measure the application path without substituting rate-limit responses for it.
 # This override exists only in this unreferenced test WSGI entry point.
-_boundaries.enter_context(patch.object(APIView, "check_throttles", return_value=None))
+_boundaries.enter_context(patch.object(APIView, "check_throttles", skip_fixture_throttles))
 
 _user_id = os.environ.get("BOOTSTRAP_MEMORY_USER_ID", "")
 if not _user_id.isdigit() or int(_user_id) <= 0:
