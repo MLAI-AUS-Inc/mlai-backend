@@ -1275,7 +1275,7 @@ class WebsiteReviewRegressionTests(WebsiteDatabaseFixture, TestCase):
                     with patch.object(cms_publication_policy, 'request_json', side_effect=[(native_user, {}),
                             ([{'id': 39, 'taxonomy': 'category', 'name': 'Existing category'}], {})]) as defaults_get:
                         managed_native = cms_setup_controller.advance_setup(preparatory.pk)
-                    self.assertEqual((managed_native.pk, managed_native.action), (preparatory.pk, 'cms-goal'))
+                    self.assertEqual((str(managed_native.pk), managed_native.action), (str(preparatory.pk), 'cms-goal'))
                     self.assertEqual(managed_native.receipt['first_article_billing'], original_hold)
                     self.assertEqual(managed_native.receipt['native_budget']['setup_usage']['active_seconds'], 180)
                     self.assertEqual(managed_native.receipt['native_budget']['setup_usage']['provider_seconds'], 360)
