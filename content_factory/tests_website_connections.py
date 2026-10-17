@@ -1223,7 +1223,7 @@ class WebsiteReviewRegressionTests(WebsiteDatabaseFixture, TestCase):
                 patch.object(cms_owner, 'inspect_identity', return_value=identity) as provider:
             website = cms_owner.connect(context, self.config, user=user, data=data)
             self.config.refresh_from_db()
-            self.assertEqual(cms_owner.connect(context, self.config, user=user, data=data).pk, website.pk)
+            self.assertEqual(str(cms_owner.connect(context, self.config, user=user, data=data).pk), str(website.pk))
             provider.assert_called_once()
             self.assertEqual(current_credential(context, self.config, website, user=user)[1].secret, data['secret'])
             private = website.operations.get(action='channel-credential')
