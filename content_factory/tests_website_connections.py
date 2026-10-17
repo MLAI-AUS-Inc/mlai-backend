@@ -1234,7 +1234,8 @@ class WebsiteReviewRegressionTests(WebsiteDatabaseFixture, TestCase):
             self.assertEqual(summary['githubRepo'], '')
             self.assertNotIn('sealed_credential', json.dumps(summary))
             # Exercise real reservation/outbox rollback and callback binding on
-            # disposable CI only. No wallet charge, CF job or CMS write occurs.
+            # disposable CI only. Only synthetic ledger rows are seeded; no
+            # wallet service, CF job or CMS write occurs.
             with override_settings(ARTICLES_CHANNEL_ARTIFACTS_ENABLED=True):
                 from django.db import transaction
                 from . import channel_artifacts
@@ -1247,9 +1248,17 @@ class WebsiteReviewRegressionTests(WebsiteDatabaseFixture, TestCase):
                     'delivery_mode': 'content_only', 'delivery_mode_confirmed': True, 'github_repo': '',
                     'topic': 'A synthetic CMS article', 'target_keyword': 'A synthetic CMS article',
                     'roo_points_ledger_id': 'synthetic-fixture-ledger', 'roo_points_cost': 6,
+                    'roo_points_authorized': True, 'roo_points_action': 'article_generation', 'roo_points_billing_status': 'charged',
                     'roo_points_requested_by_user_id': user.pk, 'roo_points_billing_user_id': user.pk}
                 artifact_scope = channel_artifacts.prepare_generation(context, self.config, user=user)
                 with transaction.atomic():
+                    from roo.models import Ledger
+                    from integrations.services.article_generation import _ledger_reference_id
+                    spend = Ledger.objects.create(user=user, kind='SPEND', source='CONTENT_FACTORY', delta=-6,
+                        delta_microroo=-6_000_000, reference_type='CONTENT_FACTORY',
+                        reference_id=_ledger_reference_id(artifact_payload['client_request_id']),
+                        idempotency_key='content_factory:charge:' + artifact_payload['client_request_id'])
+                    artifact_payload['roo_points_ledger_id'] = str(spend.pk)
                     artifact_operation = channel_artifacts.reserve_generation(artifact_scope, context=context,
                         config=self.config, user=user, payload=artifact_payload)
                     reserve_dispatch(organization=self.org, payload=artifact_payload, billing_user_id=user.pk, actor_id='cms-fixture')
@@ -1294,6 +1303,21 @@ class WebsiteReviewRegressionTests(WebsiteDatabaseFixture, TestCase):
                 self.assertEqual((review.state, review.payload['handoff']), ('completed', handoff))
                 self.assertIs(review.receipt['approval_recorded'], False)
                 self.assertNotIn('Fixture guide', json.dumps(summary_for(self.config, company_id=company.pk)))
+                from . import cms_owned_media, cms_article_source
+                self.assertEqual(cms_article_source.current_article(review).billing['spend_ledger_id'], str(spend.pk))
+                self.assertEqual(cms_owned_media.ensure_media(connection_id=website.pk), 1)
+                self.assertEqual(cms_owned_media.ensure_media(connection_id=website.pk), 0)
+                media = website.operations.get(action='cms-media')
+                with patch.object(cms_owned_media, 'upload_image') as upload:
+                    media = cms_owned_media.advance_media(media.pk, now=timezone.now() + timedelta(seconds=1))
+                upload.assert_not_called()
+                self.assertEqual((media.state, media.receipt['verified']), ('completed', 0))
+                cms_owned_media.completed_media(media)
+                with transaction.atomic():
+                    Ledger.objects.create(user=user, kind='REFUND', source='CONTENT_FACTORY', delta=6, delta_microroo=6_000_000,
+                        refund_of=spend, idempotency_key='content_factory:refund:' + artifact_payload['client_request_id'])
+                    with self.assertRaises(WebsiteAuthorityError): cms_article_source.current_article(review)
+                    transaction.set_rollback(True)
             from . import cms_capture
             from .tests_cms_inventory_contract_unit import wordpress_post
             capture_data = {**contract_for(website), 'client_request_id': str(uuid.uuid4())}
@@ -1338,6 +1362,8 @@ class WebsiteReviewRegressionTests(WebsiteDatabaseFixture, TestCase):
             self.assertEqual((captured.state, captured.payload), ('deleted', {}))
             review.refresh_from_db()
             self.assertEqual((review.state, review.payload), ('deleted', {}))
+            media.refresh_from_db()
+            self.assertEqual((media.state, media.payload), ('deleted', {}))
 
     @override_settings(ARTICLES_PUBLISHING_CHANNELS_ENABLED=True, ARTICLES_CMS_CHANNEL_ENABLED=True)
     def test_private_cms_credential_binding_is_scoped_and_git_read_denied(self):
