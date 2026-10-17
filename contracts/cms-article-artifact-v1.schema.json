@@ -1,0 +1,205 @@
+{
+  "$id": "https://contracts.mlai.au/cms-article-artifact-v1.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "article": {
+      "additionalProperties": false,
+      "properties": {
+        "html": {
+          "maxLength": 262144,
+          "minLength": 1,
+          "type": "string"
+        },
+        "meta_description": {
+          "maxLength": 2000,
+          "type": "string"
+        },
+        "meta_title": {
+          "maxLength": 200,
+          "type": "string"
+        },
+        "profile": {
+          "$ref": "cms-native-html-v1.schema.json"
+        },
+        "slug": {
+          "maxLength": 150,
+          "minLength": 1,
+          "pattern": "^[a-z0-9]+(?:-[a-z0-9]+)*$",
+          "type": "string"
+        },
+        "title": {
+          "maxLength": 200,
+          "minLength": 1,
+          "type": "string"
+        }
+      },
+      "required": [
+        "title",
+        "slug",
+        "html",
+        "profile",
+        "meta_title",
+        "meta_description"
+      ],
+      "type": "object"
+    },
+    "digest": {
+      "pattern": "^[a-f0-9]{64}$",
+      "type": "string"
+    },
+    "editorial_acceptance": {
+      "additionalProperties": false,
+      "properties": {
+        "canonical_article_sha256": {
+          "pattern": "^[a-f0-9]{64}$",
+          "type": "string"
+        },
+        "fingerprint": {
+          "pattern": "^[a-f0-9]{64}$",
+          "type": "string"
+        },
+        "passed": {
+          "const": true
+        },
+        "review_version": {
+          "maxLength": 64,
+          "minLength": 1,
+          "type": "string"
+        },
+        "reviewed_at": {
+          "format": "date-time",
+          "maxLength": 64,
+          "type": "string"
+        },
+        "transport_sha256": {
+          "pattern": "^[a-f0-9]{64}$",
+          "type": "string"
+        },
+        "valid_until": {
+          "format": "date-time",
+          "maxLength": 64,
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "canonical_article_sha256",
+        "fingerprint",
+        "passed",
+        "review_version",
+        "reviewed_at",
+        "transport_sha256",
+        "valid_until"
+      ],
+      "type": "object"
+    },
+    "envelope": {
+      "allOf": [
+        {
+          "$ref": "publishing-channel-artifact-v1.schema.json"
+        },
+        {
+          "properties": {
+            "channel": {
+              "const": "cms"
+            }
+          }
+        }
+      ]
+    },
+    "images": {
+      "items": {
+        "additionalProperties": false,
+        "properties": {
+          "alt": {
+            "maxLength": 4000,
+            "type": "string"
+          },
+          "component_id": {
+            "maxLength": 200,
+            "minLength": 1,
+            "type": "string"
+          },
+          "height": {
+            "maximum": 16384,
+            "minimum": 24,
+            "type": "integer"
+          },
+          "sha256": {
+            "pattern": "^[a-f0-9]{64}$",
+            "type": "string"
+          },
+          "src": {
+            "maxLength": 8192,
+            "minLength": 1,
+            "type": "string"
+          },
+          "width": {
+            "maximum": 16384,
+            "minimum": 24,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "component_id",
+          "src",
+          "alt",
+          "sha256",
+          "width",
+          "height"
+        ],
+        "type": "object"
+      },
+      "maxItems": 8,
+      "type": "array"
+    },
+    "kind": {
+      "const": "cms_article_artifact"
+    },
+    "preview_html": {
+      "maxLength": 524288,
+      "minLength": 1,
+      "type": "string"
+    },
+    "preview_sha256": {
+      "pattern": "^[a-f0-9]{64}$",
+      "type": "string"
+    },
+    "review_revision": {
+      "pattern": "^[a-f0-9]{64}$",
+      "type": "string"
+    },
+    "run_generation": {
+      "maximum": 999999999999,
+      "minimum": 0,
+      "type": "integer"
+    },
+    "run_id": {
+      "pattern": "^[A-Za-z0-9_-]{1,100}$",
+      "type": "string"
+    },
+    "schema_version": {
+      "const": 1,
+      "type": "integer"
+    }
+  },
+  "required": [
+    "article",
+    "digest",
+    "editorial_acceptance",
+    "envelope",
+    "images",
+    "kind",
+    "preview_html",
+    "preview_sha256",
+    "review_revision",
+    "run_generation",
+    "run_id",
+    "schema_version"
+  ],
+  "title": "Native CMS article artifact: observations, never publication authority",
+  "type": "object"
+}

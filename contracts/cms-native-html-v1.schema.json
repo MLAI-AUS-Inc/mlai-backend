@@ -1,0 +1,37 @@
+{
+  "$comment": "Render metadata and checksums do not grant approval or provider authority. The private original paid artifact, current CMS consent and exact final review remain mandatory.",
+  "$id": "urn:mlai:cms-native-html:v1",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "html_sha256": {
+      "pattern": "^[a-f0-9]{64}$",
+      "type": "string"
+    },
+    "profile": {
+      "const": "cms_native_html_v1",
+      "type": "string"
+    },
+    "schema_version": {
+      "const": 1,
+      "type": "integer"
+    },
+    "title_location": {
+      "const": "cms_theme",
+      "type": "string"
+    },
+    "title_sha256": {
+      "pattern": "^[a-f0-9]{64}$",
+      "type": "string"
+    }
+  },
+  "required": [
+    "html_sha256",
+    "profile",
+    "schema_version",
+    "title_location",
+    "title_sha256"
+  ],
+  "title": "Native CMS HTML profile receipt v1",
+  "type": "object"
+}

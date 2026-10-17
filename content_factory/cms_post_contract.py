@@ -43,7 +43,7 @@ def _digest(value):
 
 
 class _PostHtml(HTMLParser):
-    allowed = frozenset("article section div span p h1 h2 h3 h4 h5 h6 a img figure figcaption strong em b i u s del ins br hr ul ol li blockquote pre code table thead tbody tfoot tr th td caption sup sub small details summary time dl dt dd".split())
+    allowed = frozenset("article aside section div span p h1 h2 h3 h4 h5 h6 a img figure figcaption strong em b i u s del ins br hr ul ol li blockquote pre code table thead tbody tfoot tr th td caption sup sub small details summary time dl dt dd".split())
 
     def handle_starttag(self, tag, attrs):
         if tag not in self.allowed:

@@ -755,6 +755,13 @@ def process_website_connection_operations(*, limit=20, now=None, connection_id=N
     excluded = ["workflow", "cms-artifact"] if notices_enabled else ["workflow", "cms-artifact", notice_action]
     from .cms_connection_authority import enabled as cms_channel_enabled
     cms_enabled = cms_channel_enabled()
+    from .channel_artifacts import enabled as artifacts_enabled
+    from .cms_artifact_review import ensure_reviews, advance_review
+    artifact_reviews_enabled = artifacts_enabled()
+    if artifact_reviews_enabled:
+        ensure_reviews(limit=limit, connection_id=connection_id)
+    else:
+        excluded.append("cms-review")
     if not cms_enabled:
         # Frozen provider jobs must never fall through to Git token cleanup.
         excluded.extend(["cms-capture", "cms-publish", "cms-unpublish"])
@@ -768,6 +775,7 @@ def process_website_connection_operations(*, limit=20, now=None, connection_id=N
         Q(action=usage_action, state="running") |
         Q(action=alert_action, state="running") |
         Q(action="cms-capture", state="running") |
+        Q(action="cms-review", state="running") |
         unconfigured_alerts |
         Q(action="prepare", state="needs_user", receipt__user_action__id__in=["deploy_site","merge_pr","review_draft"])).exclude(action__in=excluded)
     if connection_id:
@@ -779,6 +787,15 @@ def process_website_connection_operations(*, limit=20, now=None, connection_id=N
     monitor_cleanup_pull_requests(limit=limit, connection_id=connection_id)
     from .website_wakeups import enabled as event_wakes_enabled
     for identifier in ids:
+        if WebsiteConnectionOperation.objects.filter(pk=identifier, action="cms-review").exists():
+            # A frozen/changed CMS action must never fall through to Git cleanup.
+            operation = advance_review(identifier, now=now) if artifact_reviews_enabled else None
+            if operation is not None:
+                result["processed"] += 1
+                result["pending" if operation.state in {"pending", "running"} else "completed"] += 1
+                if len(result["operations"]) < 20:
+                    result["operations"].append({"id": str(identifier), "action": "cms-review", "outcome": operation.state})
+            continue
         if cms_enabled and WebsiteConnectionOperation.objects.filter(pk=identifier, action="cms-capture").exists():
             from .cms_capture import advance_capture
             operation = advance_capture(identifier, now=now)

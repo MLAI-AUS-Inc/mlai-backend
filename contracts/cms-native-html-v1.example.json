@@ -1,0 +1,29 @@
+{
+  "cases": [
+    {
+      "native_html": "<article data-cf-article-body=\"\"><section data-cf-component-id=\"section:start\" id=\"start\"><h2>Start</h2><p>Exact copy.</p></section></article>\n",
+      "profile": {
+        "html_sha256": "a5f52dfef17877cb0313d1bfa8790a33ad3a386d1f924e7ef4210c093ef0f9f5",
+        "profile": "cms_native_html_v1",
+        "schema_version": 1,
+        "title_location": "cms_theme",
+        "title_sha256": "49c9bce04b2c066b4cb255abffc0a2f4d98faae5af804316b726c600781588c3"
+      },
+      "source_html": "<article><h1>Approved native article</h1><section id=\"start\" data-cf-component-id=\"section:start\"><h2>Start</h2><p>Exact copy.</p></section></article>",
+      "title": "Approved native article"
+    },
+    {
+      "native_html": "<article data-cf-article-body=\"\"><aside><p>Important copy.</p></aside><table><tbody><tr><td>A &amp; B</td></tr></tbody></table><pre><code>A\tB\n1\t2\n</code></pre></article>\n",
+      "profile": {
+        "html_sha256": "164f7f22eb9baf1e10c4d4ae1d6dbd5a907af76dd353917f5324df7d427ec586",
+        "profile": "cms_native_html_v1",
+        "schema_version": 1,
+        "title_location": "cms_theme",
+        "title_sha256": "535c1b08d309d3c2de838b75b1b4fb4a6e619bdc8e177bb189ba210c77315c8d"
+      },
+      "source_html": "<article><h1>A table and callout</h1><aside><p>Important copy.</p></aside><table style=\"min-width:40rem\"><tbody><tr><td>A &amp; B</td></tr></tbody></table><pre style=\"overflow:auto\"><code>A\tB\n1\t2\n</code></pre></article>",
+      "title": "A table and callout"
+    }
+  ],
+  "schema_version": 1
+}

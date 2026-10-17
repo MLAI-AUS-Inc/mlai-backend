@@ -1,0 +1,52 @@
+{
+  "article": {
+    "html": "<article data-cf-article-body=\"\"><section><h2>Start here</h2><p>A concrete next step.</p></section></article>\n",
+    "meta_description": "A useful next step.",
+    "meta_title": "Fixture guide",
+    "profile": {
+      "html_sha256": "f17594ce08aa69efa2ee2c435c076aca96d0c1fa128e90774fdf6caa98b3bddf",
+      "profile": "cms_native_html_v1",
+      "schema_version": 1,
+      "title_location": "cms_theme",
+      "title_sha256": "bc1962a28f740190054271b98902cd3c19da3697c2feb113707e56c499ecd193"
+    },
+    "slug": "fixture-guide",
+    "title": "Fixture guide"
+  },
+  "digest": "3f0674dc653504fc7eb134f805face49a3c36507169742855df8aab72d40eb01",
+  "editorial_acceptance": {
+    "canonical_article_sha256": "7323757df10122a25aa2069d688517dc116b87bfd2765579a364b0becaabb5d1",
+    "fingerprint": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+    "passed": true,
+    "review_version": "2026-10-10.1",
+    "reviewed_at": "2026-01-01T00:00:00+00:00",
+    "transport_sha256": "f17594ce08aa69efa2ee2c435c076aca96d0c1fa128e90774fdf6caa98b3bddf",
+    "valid_until": null
+  },
+  "envelope": {
+    "artifact_operation_id": "11111111-1111-4111-8111-111111111111",
+    "billing_request_id": "vibe-article:7:original-request",
+    "channel": "cms",
+    "company_id": "22222222-2222-4222-8222-222222222222",
+    "connection_generation": 1,
+    "connection_id": "33333333-3333-4333-8333-333333333333",
+    "digest": "5ab8deb94be825cc2e343b7aa5c06a5d39cfdad916753bd3d5801949c9e1b560",
+    "kind": "publishing_channel_artifact",
+    "organization_id": "7",
+    "owner_user_id": "4",
+    "platform": "wordpress",
+    "policy_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "public_origin": "https://fixture.test/blog/",
+    "review_policy": "review",
+    "schema_version": 1,
+    "scope_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+  },
+  "images": [],
+  "kind": "cms_article_artifact",
+  "preview_html": "<header data-cf-cms-preview-title><h1>Fixture guide</h1></header>\n<article data-cf-article-body=\"\"><section><h2>Start here</h2><p>A concrete next step.</p></section></article>\n",
+  "preview_sha256": "5de4c3e9f759ce6c3ee56201f49d7e2dac5f80cebd1a25619e6aa295f3dbecc0",
+  "review_revision": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+  "run_generation": 0,
+  "run_id": "cms-fixture-run",
+  "schema_version": 1
+}
