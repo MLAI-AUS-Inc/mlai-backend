@@ -177,6 +177,27 @@ class ChannelArtifactTests(SimpleTestCase):
         self.assertEqual(_merge_django_owned_run_request({}, original), {})
         with self.assertRaises(EditorialRunConflict): _merge_django_owned_run_request(original, {artifacts.ENVELOPE: None})
 
+    def test_legacy_editor_cannot_start_cms_revision_or_image_billing_without_channel_lineage(self):
+        self.reserve()
+        run = self.artifact_run()
+        from . import article_review_views as review
+        from . import article_review_billing
+        with patch.object(review, "_claim_comments") as comments, \
+                patch.object(review.views, "_reuse_roo_points_authorization_for_article_job") as reuse, \
+                patch.object(article_review_billing, "reserve_image_charge") as image_charge, \
+                patch.object(review.views.http_client, "request") as remote:
+            self.assertEqual(review.remote_review(run, payload={"action": "editText"}).status_code, 409)
+            self.assertEqual(review.apply_article_review_update(user=self.user, context=self.context, run=run, data={}).status_code, 409)
+            view = review.VibeMarketingArticleReviewView()
+            with patch.object(view, "_resolve_run", return_value=(self.context, run, None)):
+                result = view.post(SimpleNamespace(user=self.user, data={"action": "regenerateImage"}), run_id=run.run_id)
+                self.assertEqual(result.status_code, 409)
+            for effect in (comments, reuse, image_charge, remote): effect.assert_not_called()
+        run.run_request[artifacts.ENVELOPE] = None
+        self.assertEqual(review._cms_mutation_blocked(run).status_code, 409)
+        run.run_request.pop(artifacts.ENVELOPE)
+        self.assertIsNone(review._cms_mutation_blocked(run))
+
     def test_service_callback_guard_rechecks_current_private_scope_before_any_write(self):
         self.reserve()
         run = self.artifact_run()
