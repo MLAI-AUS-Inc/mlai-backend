@@ -56,7 +56,7 @@ def start(context, config, *, user, data, now=None):
             raise WebsiteAuthorityError("website_prepare_blocked", "Review the original native first-article price.", status=422) from None
         operation, _created = WebsiteConnectionOperation.objects.get_or_create(idempotency_key=key, defaults={
             "id": identifier, "connection": config.website_connection, "generation": binding["generation"], "action": authority.ACTION,
-            "state": "pending", "next_attempt_at": now, "payload": {"schema_version": 1, "binding": deepcopy(binding),
+            "state": "pending", "next_attempt_at": now, "payload": {"schema_version": 1, "financial_subject_version": 2, "binding": deepcopy(binding),
                 "credential_operation_id": policy["policy"]["credential_operation_id"], "policy_operation_id": policy["operation_id"],
                 "policy_digest": policy["policy"]["digest"], "company_id": str(context.company.pk), "requested_by_user_id": str(user.pk),
                 "consent": choice, "capture_operation_id": None, "generation_data": None, "source_run_id": None, "failures": 0},
