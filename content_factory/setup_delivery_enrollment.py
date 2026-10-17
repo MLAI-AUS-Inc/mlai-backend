@@ -61,7 +61,7 @@ def enroll_article_delivery(operation,payload,website,workflow):
         return False
     scope={key:deepcopy(payload[key]) for key in SCOPE_FIELDS if key in payload and payload[key] not in (None,"")}
     scope.setdefault("domain",website.organization.domain);scope.setdefault("github_repo",website.github_repo)
-    wire=saved.get("article_delivery_workflow") or ("confirmed_topic" if payload.get("source_run_id") else "direct_generate")
+    wire=saved.get("article_delivery_workflow") or _wire_workflow(workflow,payload)
     original={key:deepcopy(payload[key]) for key in (*ORIGINAL_REQUEST_FIELDS,"first_article_goal_id","first_article_goal_operation_id") if key in payload}
     original.update(scope);original["article_delivery_v1"]=dict(MARKER)
     operation.payload={**saved,"article_delivery_v1":dict(MARKER),"article_delivery_scope":scope,
@@ -70,13 +70,18 @@ def enroll_article_delivery(operation,payload,website,workflow):
     return True
 
 
+def _wire_workflow(workflow, payload):
+    """Keep new enrollment and receipt validation on one execution-name mapping."""
+    if workflow in {"article_publish", "publish_article"}:
+        return "direct_generate"
+    if workflow == "article_generation":
+        return "confirmed_topic" if payload.get("source_run_id") else "direct_generate"
+    return workflow
+
+
 def delivery_workflow(run):
     """Map the backend's reserved article names to the worker's execution name."""
-    if run.workflow in {"article_publish","publish_article"}:
-        return "direct_generate"
-    if run.workflow=="article_generation":
-        return "confirmed_topic" if (run.run_request or {}).get("source_run_id") else "direct_generate"
-    return run.workflow
+    return _wire_workflow(run.workflow, run.run_request or {})
 
 
 def enroll_setup_delivery(operation, payload, website, workflow):
