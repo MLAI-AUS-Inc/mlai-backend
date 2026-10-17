@@ -125,7 +125,8 @@ def project(operation, context, config, *, user, binding, now):
             current = goals.refresh(current, proofs, expected_scope=value.scope, now=now)
     except (WebsiteAuthorityError, ValueError, TypeError, KeyError, AttributeError, RecursionError):
         current = goals.refresh(current, {}, expected_scope=value.scope, now=now)
-    milestones = [{"name": row["name"], "state": "passed" if goals.valid_proof(row["name"], row["proof"],
+    candidate_proofs = {row["name"]: row["proof"] for row in current["milestones"]}
+    milestones = [{"name": row["name"], "state": "passed" if goals.milestone_passed(row["name"], row["proof"], proofs=candidate_proofs,
         expected_scope=value.scope, original_source=current["source"], now=proof_at) else "pending" if row["required"] else "not_required",
         "required": row["required"], "proof": deepcopy(row["proof"])} for row in current["milestones"]]
     for row in milestones:

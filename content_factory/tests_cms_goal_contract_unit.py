@@ -34,6 +34,44 @@ class CmsGoalContractTests(SimpleTestCase):
                 partial = self.refresh(proofs={key: proof for key, proof in self.proofs.items() if key != name})
                 self.assertFalse(goals.complete(partial, expected_scope=self.scope, now=self.now))
 
+    def reviewed_proofs(self):
+        public_at = self.now + timedelta(days=30)
+        proofs = deepcopy(self.proofs)
+        for name in ("approved", "live", "first_article_live"):
+            proofs[name] = goals.make_proof(name, expected_scope=self.scope, original_source=self.source,
+                subject_digest="c" * 64, at=public_at)
+        return proofs, public_at
+
+    def test_owner_review_can_finish_after_preparation_expires_without_freshening_access(self):
+        proofs, now = self.reviewed_proofs()
+        waiting = self.refresh(proofs={key: item for key, item in proofs.items() if key not in {"live", "first_article_live"}}, now=now)
+        self.assertEqual(waiting["milestones"][0]["state"], "pending")
+        final = goals.refresh(waiting, proofs, expected_scope=self.scope, now=now)
+        self.assertTrue(goals.complete(final, expected_scope=self.scope, now=now))
+        self.assertEqual(final["milestones"][0]["proof"], self.proofs["access"])
+        self.assertEqual(final["milestones"][1]["proof"], self.proofs["understood"])
+        self.assertFalse(goals.valid_proof("access", proofs["access"], expected_scope=self.scope, original_source=self.source, now=now))
+        self.assertFalse(goals.complete(final, expected_scope=self.scope, now=now + timedelta(hours=1)))
+
+    def test_old_preparation_before_the_actual_draft_is_still_expired(self):
+        proofs, now = self.reviewed_proofs()
+        proofs["first_draft"] = goals.make_proof("first_draft", expected_scope=self.scope, original_source=self.source,
+            subject_digest="c" * 64, at=self.now + timedelta(days=8))
+        self.assertFalse(goals.complete(self.refresh(proofs=proofs, now=now), expected_scope=self.scope, now=now))
+
+    def test_missing_stale_foreign_or_misordered_source_proof_cannot_preserve_preparation(self):
+        proofs, now = self.reviewed_proofs()
+        for name in ("first_draft", "approved", "live", "first_article_live"):
+            for changed in (None, goals.make_proof(name, expected_scope=self.scope, original_source={**self.source, "run_generation": 3},
+                    subject_digest="c" * 64, at=now)):
+                with self.subTest(name=name, changed=changed):
+                    self.assertFalse(goals.complete(self.refresh(proofs={**proofs, name: changed}, now=now), expected_scope=self.scope, now=now))
+        for changes in ({"approved": self.proofs["approved"], "first_draft": goals.make_proof("first_draft", expected_scope=self.scope,
+                    original_source=self.source, subject_digest="c" * 64, at=self.now + timedelta(hours=1))},
+                {"first_article_live": goals.make_proof("first_article_live", expected_scope=self.scope,
+                    original_source=self.source, subject_digest="f" * 64, at=now)}):
+            self.assertFalse(goals.complete(self.refresh(proofs={**proofs, **changes}, now=now), expected_scope=self.scope, now=now))
+
     def test_receipts_booleans_and_rechecksummed_git_or_worker_proof_cannot_complete_a_native_milestone(self):
         for changed in (True, {"approved": True}, {**self.proofs["approved"], "sha": "d" * 40},
                 {**self.proofs["approved"], "kind": "backend_approval"}, {**self.proofs["approved"], "source": None}):

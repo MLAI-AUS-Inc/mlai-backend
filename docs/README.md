@@ -23,6 +23,8 @@ subsystem-specific contracts and runbooks.
 
 ## Content Factory
 
+- [E5 completion after owner review](articles-e5-cms-review-completion-2026-10-17.md) — original preparation dates remain past milestones only with exact fresh publication proof
+
 - [E5 recorded first publication](articles-e5-cms-publication-achievement-2026-10-17.md) — immutable original publication fact, separate from expiring live health and new-work permission
 
 - [E5 durable native setup coordinator](articles-e5-cms-setup-coordinator-2026-10-17.md) — one accepted hold through discovery, original-policy recovery, same-operation native goal and private settlement

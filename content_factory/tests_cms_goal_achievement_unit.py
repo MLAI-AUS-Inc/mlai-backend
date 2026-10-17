@@ -99,6 +99,28 @@ class CmsGoalAchievementTests(SimpleTestCase):
         self.assertEqual(self.read(), original)
         self.http.assert_not_called(); self.public_get.assert_not_called()
 
+    def test_long_review_completion_and_later_status_retain_actual_original_preparation_dates(self):
+        prepared_at = self.now - timedelta(days=30)
+        for row in self.saved:
+            if row.action in {evidence.policies.ACTION, evidence.CAPTURE_ACTION, evidence.reviews.ACTION}:
+                row.updated_at = prepared_at
+        goal = goals.new_goal(str(self.root.pk), self.scope, now=prepared_at - timedelta(minutes=1))
+        self.goal = goal
+        proofs, original, references = self.collect()
+        goal = goals.bind_source(goal, original, expected_scope=self.scope, now=self.completed_at)
+        goal = goals.refresh(goal, proofs, expected_scope=self.scope, now=self.completed_at)
+        self.root.payload["consent"] = consent.seal(goal, user_id=self.user.pk, review_policy="auto", expected_points=6,
+            confirmed=True, now=goals._time(goal["started_at"]))
+        self.root.receipt.update(goal=goal, native_budget=budget.initial(goal), references=references,
+            publication_achievement=achievement.capture(goal, self.operation, now=self.completed_at))
+        with patch.object(status.dispatch, "original_dispatch", return_value=None):
+            value = status.project(self.root, self.context, self.config, user=self.user, binding=self.binding,
+                now=self.completed_at + timedelta(days=60))
+        self.assertEqual(value["state"], "done")
+        self.assertEqual(value["doctor"]["checks"][0]["proof"]["at"], prepared_at.isoformat())
+        self.assertEqual(value["doctor"]["checks"][1]["proof"]["at"], prepared_at.isoformat())
+        self.http.assert_not_called(); self.public_get.assert_not_called()
+
     def test_current_owner_key_and_original_paid_approval_are_still_required(self):
         self.user.is_active = False
         with self.assertRaises(WebsiteAuthorityError): self.read()
