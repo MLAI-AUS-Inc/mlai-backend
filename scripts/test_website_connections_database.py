@@ -158,8 +158,15 @@ def main():
     parser.add_argument("--engine", choices=("postgres", "sqlite"), default="postgres")
     parser.add_argument("--replay", action="store_true")
     parser.add_argument("--exclude-tag", action="append", default=[])
+    parser.add_argument("--cms-provider", choices=("wordpress", "ghost"))
     parser.add_argument("labels", nargs="*")
     args = parser.parse_args()
+    fixture = None
+    if args.cms_provider:
+        if args.engine != "sqlite" or args.replay or args.labels != ["content_factory.tests_cms_provider_acceptance"]:
+            parser.error("CMS acceptance requires its dedicated SQLite test module.")
+        from cms_provider_fixture import load_fixture
+        fixture = load_fixture(args.cms_provider)
     if not args.labels and not args.replay:
         parser.error("Select test labels or --replay.")
     programs = {}
@@ -178,6 +185,8 @@ def main():
         "CONNECTOR_CREDENTIAL_KEYS": KEYS,
         "CONNECTOR_CREDENTIAL_ACTIVE_KEY_ID": "test",
     }
+    if fixture is not None:
+        safe_environment["MLAI_CMS_FIXTURE"] = json.dumps(fixture)
     with tempfile.TemporaryDirectory(prefix="mlai-website-db-", dir="/tmp") as temporary:
         directory = Path(temporary)
         started = False

@@ -1,0 +1,60 @@
+# Native CMS provider acceptance design
+
+V2 section 3.3 requires disposable WordPress connect → capture → publish →
+disconnect acceptance and WordPress/Ghost zoo coverage. Existing journey tests
+exercise durable ORM, billing, leases and callbacks with synthetic provider
+replies. This lane adds actual provider API/rendering evidence; it does not
+replace those journey tests or certify a public customer site.
+
+The remote GitHub runner creates digest-pinned WordPress, MySQL and Ghost
+containers. Fixed loopback ports and synthetic `.test` origins are the only
+destinations. Temporary provider accounts and keys exist only inside that job;
+keys stay in a mode-0600 runner-temporary file and are never printed, uploaded
+or obtained from repository/environment secrets. Teardown removes the containers
+and volumes even after failure. No local Docker/database command is part of
+agent validation.
+
+The ordinary disposable database runner remains responsible for the fresh
+backend database, excluded dotenv, bounded environment and loopback-only socket
+guard. Its explicit provider option is permitted only in GitHub Actions for
+this repository and reads only the fixed runner-temporary credential file.
+The acceptance test uses a real transaction boundary, production owner connect,
+encrypted key persistence, paginated capture and disconnect. Production post,
+media, public-body and withdrawal contracts process actual provider responses.
+Recorded source content replaces paid generation. No production authority flag,
+credential, transport rule or model is changed.
+
+A test-only connection maps the exact synthetic host to its fixed loopback HTTP
+port and supplies the proxy HTTPS header needed by each fixture. Production
+request construction, authentication, body parsing and no-redirect checks stay
+in use. This lane does **not** exercise public DNS, TLS, external hosting, the
+complete first-article goal or nightly 90% certification. The existing original
+goal ORM fixture covers the durable flow independently; a public zoo run still
+requires the separately approved sandbox resources.
+
+Each provider must capture more than one page, retain original posts and native
+fields, upload one inert raster, create one operation-marked article, verify
+the real rendered body, reconcile a deliberately discarded create reply with
+GET only, return the same post to draft, observe 404/410 separately and erase
+local key authority on disconnect. Output reports only closed stage names,
+counts and the pinned image versions. Provider bodies, cookies, keys and
+personal records are excluded from artifacts.
+
+Primary references checked on 18 October 2026:
+
+- [WordPress application-password authentication](https://developer.wordpress.org/rest-api/using-the-rest-api/authentication/)
+- [WP-CLI application-password creation](https://developer.wordpress.org/cli/commands/user/application-password/create/)
+- [WordPress official image definitions](https://github.com/docker-library/official-images/blob/master/library/wordpress)
+- [Ghost Admin API](https://docs.ghost.org/admin-api/)
+- [Ghost HTML post creation](https://docs.ghost.org/admin-api/posts/creating-a-post/)
+- [Ghost official image definitions](https://github.com/docker-library/official-images/blob/master/library/ghost)
+
+All article rollout flags remain off. This is draft implementation; actual CI
+results must be recorded after the new lane executes.
+
+Final local validation passes 109 database-free fixture/assignment/validation
+route and CMS contract cases. Python syntax and the workflow/Compose YAML parse;
+all 595 test modules are assigned. Isolation assertions check pinned images,
+internal networking, loopback ports, both providers, absence of workflow secrets
+and unconditional credential/volume cleanup. These checks do not start a CMS or
+a database.

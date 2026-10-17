@@ -40,7 +40,7 @@ def test_modules(root=ROOT):
 
 def selected_labels(workflow):
     logical = workflow.replace("\\\n", " ")
-    pattern = r"python(?:3)? (?:manage\.py test|-m unittest|scripts/test_without_database\.py) ([^\n]+)"
+    pattern = r"python(?:3)? (?:manage\.py test|-m unittest|scripts/test_without_database\.py|scripts/test_website_connections_database\.py) ([^\n]+)"
     labels = set()
     for command in re.findall(pattern, logical):
         for token in shlex.split(command):

@@ -216,6 +216,10 @@ class TestAssignmentTests(unittest.TestCase):
         workflow = "python manage.py test app.tests \\\n other.tests --verbosity 2\npython scripts/test_without_database.py pure.tests\n"
         self.assertEqual(selected_labels(workflow), {"app.tests", "other.tests", "pure.tests"})
 
+    def test_disposable_database_labels_are_assigned_with_runner_options(self):
+        self.assertIn("content_factory.tests_cms_provider_acceptance", selected_labels(
+            "python scripts/test_website_connections_database.py --engine sqlite --cms-provider wordpress content_factory.tests_cms_provider_acceptance\n"))
+
     def test_partial_selections_are_not_reported_as_complete_modules(self):
         complete, partial, absent = classify(
             {"app.tests.one", "app.tests.two", "other.tests"},
