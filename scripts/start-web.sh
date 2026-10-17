@@ -14,6 +14,6 @@ exec gunicorn \
   --keep-alive "${GUNICORN_KEEP_ALIVE:-2}" \
   --timeout "${GUNICORN_TIMEOUT:-90}" \
   --graceful-timeout "${GUNICORN_GRACEFUL_TIMEOUT:-30}" \
-  --max-requests "${GUNICORN_MAX_REQUESTS:-300}" \
-  --max-requests-jitter "${GUNICORN_MAX_REQUESTS_JITTER:-50}" \
+  --max-requests "${GUNICORN_MAX_REQUESTS:-1000}" \
+  --max-requests-jitter "${GUNICORN_MAX_REQUESTS_JITTER:-100}" \
   mlai.wsgi:application

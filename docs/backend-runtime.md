@@ -36,6 +36,15 @@ application writer.
 
 ## Shared images and retired features
 
+The web start script defaults to 1,000 requests plus a random 0–100-request
+jitter before recycling a worker. Explicit `GUNICORN_MAX_REQUESTS` and
+`GUNICORN_MAX_REQUESTS_JITTER` environment values override those defaults. The
+larger default depends on the bootstrap run-lifetime fix; see the
+[application comparison and rollback](articles-g4-recycle-limit-2026-10-18.md).
+Worker count/timeouts remain independently configured. Process memory profiling
+is off unless explicitly enabled. These are checkout defaults, not evidence that
+a production host was changed or has sufficient RAM for every workload.
+
 Deployment builds two images: `web` targets the common `runtime` stage and all
 non-browser workers reuse `mlai-backend-web`; `jobs-worker` targets `jobs`, adding
 Chromium. Compiler tools stay in the dependency builder. Rollback generates

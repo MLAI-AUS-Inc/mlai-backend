@@ -35,6 +35,35 @@ def log(rows):
 
 
 class BootstrapWorkerProfileTests(TestCase):
+    def test_fixture_memory_guard_accepts_measured_post_fix_and_rejects_pre_fix_windows(self):
+        def measured(peaks, growth):
+            return [{"max_requests": limit, "jitter": jitter, "max_peak_rss_kib": peak,
+                "worker_lifetimes": [{"requests": requests, "growth_after_100_kib": delta}]}
+                for (limit, jitter, requests), peak, delta in zip(((300, 50, 304), (1000, 100, 1054)), peaks, growth)]
+        post = measured((347216, 347248), (5188, 5260))
+        self.assertIsNone(profile.validate_application_memory(post))
+        with self.assertRaises(ValueError):
+            profile.validate_application_memory(measured((2934652, 3051384), (685236, 803208)))
+        changed = deepcopy(post)
+        changed[1]["max_peak_rss_kib"] = post[0]["max_peak_rss_kib"] + profile.MAX_WARM_GROWTH_KIB + 1
+        with self.assertRaises(ValueError): profile.validate_application_memory(changed)
+        changed = deepcopy(post)
+        changed[1]["worker_lifetimes"][0]["growth_after_100_kib"] = profile.MAX_WARM_GROWTH_KIB + 1
+        with self.assertRaises(ValueError): profile.validate_application_memory(changed)
+
+    def test_fixture_memory_guard_never_treats_missing_or_boolean_metrics_as_zero(self):
+        valid = [{"max_requests": limit, "jitter": jitter, "max_peak_rss_kib": 350000,
+            "worker_lifetimes": [{"requests": 100, "growth_after_100_kib": 1000}]}
+            for limit, jitter in ((300, 50), (1000, 100))]
+        for field, value in (("max_peak_rss_kib", None), ("max_peak_rss_kib", True),
+                ("worker_lifetimes", []), ("worker_lifetimes", [{"requests": 100, "growth_after_100_kib": None}]),
+                ("worker_lifetimes", [{"requests": 100, "growth_after_100_kib": True}])):
+            changed = deepcopy(valid)
+            changed[0][field] = value
+            with self.subTest(field=field), self.assertRaises(ValueError): profile.validate_application_memory(changed)
+        for changed in (None, [], valid[:1], list(reversed(valid))):
+            with self.assertRaises(ValueError): profile.validate_application_memory(changed)
+
     def test_local_or_unowned_runs_fail_before_starting_any_process(self):
         with patch.object(profile, "require_ci", side_effect=ValueError("CI only")), patch.object(profile.subprocess, "Popen") as process:
             with self.assertRaises(ValueError): profile.profile_window(database=DATABASE, user_id=1, limit=300, jitter=50)

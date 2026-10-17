@@ -60,12 +60,17 @@ available. No source/permission authority is cached or skipped.
 The seven bootstrap/incident suites pass 81 database/network-denying tests,
 including the real-prefetch lifetime regression. Another 61 driver/profile,
 runtime, deploy and CI-reuse checks pass. All 600 test modules are fully
-assigned. The same remote disposable PostgreSQL memory lane will measure this
-change; no after-change memory, speed or capacity improvement is claimed yet.
+assigned. The remote disposable PostgreSQL application lane passes in run
+39056996063: peaks are 347,216 KiB at 300/50 and 347,248 KiB at 1,000/100,
+about 339 MiB. The longest 1,054-request lifetime grows by 5,260 KiB after
+request 100. See the [measured recycle-limit follow-up](articles-g4-recycle-limit-2026-10-18.md)
+for numeric before/after evidence and regression budgets. No production
+capacity or general speed improvement is claimed.
 Existing remote endpoint tests continue to require 24 runs, a complete compact
 response below 300 KB, no provider effects/writes and current revocation checks.
 
-Production recycling remains 300/50 and process profiling remains off. Every
-Articles rollout flag remains off. No migration, database, service, Gunicorn
+At the lifetime-fix commit, recycling defaults remain 300/50; the measured G4
+follow-up changes them to 1,000/100. Process profiling and every Articles rollout
+flag remain off. No migration, database, service, Gunicorn
 worker, model call or framework build was run locally. This draft does not
 merge, deploy or change customer/production resources.

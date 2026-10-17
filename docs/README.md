@@ -13,7 +13,8 @@ subsystem-specific contracts and runbooks.
 - [Runtime and dependency contract](backend-runtime.md)
 - [G4 worker memory profile](articles-g4-worker-memory-profile-2026-10-18.md) — default-off process samples and disposable Gunicorn lifecycle acceptance; sustained application measurements and tuning pending
 - [G4 bootstrap application memory](articles-g4-bootstrap-worker-profile-2026-10-18.md) — equal synthetic application windows across baseline/candidate limits in disposable PostgreSQL CI
-- [F2/G4 bootstrap run lifetime](articles-f2-bootstrap-run-lifetime-2026-10-18.md) — release request-owned reverse-prefetch cycles after current projections; remote memory comparison pending
+- [F2/G4 bootstrap run lifetime](articles-f2-bootstrap-run-lifetime-2026-10-18.md) — release request-owned reverse-prefetch cycles after current projections; application memory comparison passes
+- [G4 measured recycle limit](articles-g4-recycle-limit-2026-10-18.md) — 1,000/100 defaults after the 339 MiB application comparison, with CI fixture memory guards and rollback
 - [Feature lifecycle register](feature-lifecycle.md)
 - [14 September refactor audit](backend-refactor-audit-2026-09-14.md)
 - [Refactor implementation status](backend-refactor-implementation-2026-09-14.md)

@@ -17,6 +17,8 @@ from scripts.check_worker_memory_smoke import require_ci, FIELDS, CANARY
 ROOT = Path(__file__).resolve().parents[1]
 REQUESTS = 1200
 MAX_LOG_BYTES = 2 * 1024 * 1024
+MAX_APPLICATION_PEAK_KIB = 1024 * 1024
+MAX_WARM_GROWTH_KIB = 128 * 1024
 
 
 def memory_ceiling_bytes():
@@ -96,6 +98,30 @@ def summarize(log, *, completed, attempted, limit, jitter):
         raise ValueError("Bootstrap worker profile did not observe recycling")
     return {"max_requests": limit, "jitter": jitter, "completed_requests": completed, "attempted_requests": attempted,
         "worker_count": 1, "worker_lifetimes": lives, "max_peak_rss_kib": max(life["peak_rss_kib"] for life in lives)}
+
+
+def validate_application_memory(windows):
+    """Guard this fixed synthetic workload, not production capacity or admission.
+
+    The measured post-fix peak is about 340 MiB and post-100-request growth about
+    6 MiB. Keep generous 1 GiB / 128 MiB regression budgets while refusing the
+    earlier multi-GiB prefetch retention and a materially worse longer lifetime.
+    """
+    if not isinstance(windows, list) or len(windows) != 2:
+        raise ValueError("Bootstrap memory comparison is incomplete")
+    for window, expected in zip(windows, ((300, 50), (1000, 100))):
+        if (not isinstance(window, dict) or (window.get("max_requests"), window.get("jitter")) != expected
+                or type(window.get("max_peak_rss_kib")) is not int or not 0 < window["max_peak_rss_kib"] <= MAX_APPLICATION_PEAK_KIB
+                or not isinstance(window.get("worker_lifetimes"), list) or not window["worker_lifetimes"]):
+            raise ValueError("Bootstrap memory peak is missing or exceeds its fixture budget")
+        for life in window["worker_lifetimes"]:
+            if not isinstance(life, dict) or type(life.get("requests")) is not int or life["requests"] < 0:
+                raise ValueError("Bootstrap memory lifetime is incomplete")
+            growth = life.get("growth_after_100_kib")
+            if life["requests"] >= 100 and (type(growth) is not int or growth > MAX_WARM_GROWTH_KIB):
+                raise ValueError("Bootstrap warm memory growth is missing or exceeds its fixture budget")
+    if windows[1]["max_peak_rss_kib"] > windows[0]["max_peak_rss_kib"] + MAX_WARM_GROWTH_KIB:
+        raise ValueError("Bootstrap candidate peak exceeds its baseline allowance")
 
 
 def stop_group(process):

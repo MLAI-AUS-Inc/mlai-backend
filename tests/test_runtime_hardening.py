@@ -1,5 +1,6 @@
 from pathlib import Path
 import importlib.util
+import json
 import os
 import re
 import shlex
@@ -16,6 +17,29 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class RuntimeHardeningConfigTests(SimpleTestCase):
+    def test_web_start_uses_measured_recycle_defaults_and_explicit_overrides(self):
+        # Execute the real shell argv construction with a non-worker stub. The
+        # closed child environment cannot run migrations or inherit credentials.
+        for overrides, expected in (({}, ("1000", "100")),
+            ({"GUNICORN_MAX_REQUESTS": "1500", "GUNICORN_MAX_REQUESTS_JITTER": "175"}, ("1500", "175"))):
+            with self.subTest(overrides=bool(overrides)), tempfile.TemporaryDirectory() as scratch:
+                directory = Path(scratch)
+                output = directory / "arguments.json"
+                stub = directory / "gunicorn"
+                stub.write_text("#!" + sys.executable + "\nimport json, os, sys\n"
+                    "with open(os.environ['RUNTIME_ARGS_OUTPUT'], 'w') as output:\n"
+                    "    json.dump(sys.argv[1:], output)\n")
+                stub.chmod(0o700)
+                subprocess.run(["/bin/sh", str(ROOT / "scripts/start-web.sh")], check=True, timeout=10,
+                    capture_output=True, env={"PATH": str(directory) + os.pathsep + os.defpath,
+                        "RUN_MIGRATIONS_ON_START": "0", "RUNTIME_ARGS_OUTPUT": str(output),
+                        "PYTHON_DOTENV_DISABLED": "1", **overrides})
+                arguments = json.loads(output.read_text())
+                self.assertEqual(arguments[arguments.index("--max-requests") + 1], expected[0])
+                self.assertEqual(arguments[arguments.index("--max-requests-jitter") + 1], expected[1])
+                self.assertEqual(arguments[arguments.index("--workers") + 1], "3")
+                self.assertEqual(arguments[-1], "mlai.wsgi:application")
+
     def _web_command(self, compose_filename):
         lines = (ROOT / compose_filename).read_text().splitlines()
         web_index = lines.index("  web:")
@@ -73,7 +97,8 @@ class RuntimeHardeningConfigTests(SimpleTestCase):
         self.assertIn('upsert_env_value GUNICORN_WORKERS "4"', deploy)
         self.assertIn('upsert_env_value GUNICORN_TIMEOUT "90"', deploy)
         self.assertIn("${GUNICORN_GRACEFUL_TIMEOUT:-30}", start_script)
-        self.assertIn("${GUNICORN_MAX_REQUESTS:-300}", start_script)
+        self.assertIn("${GUNICORN_MAX_REQUESTS:-1000}", start_script)
+        self.assertIn("${GUNICORN_MAX_REQUESTS_JITTER:-100}", start_script)
         self.assertIn('RUN_MIGRATIONS_ON_START: "0"', compose)
 
         spec = importlib.util.spec_from_file_location(
