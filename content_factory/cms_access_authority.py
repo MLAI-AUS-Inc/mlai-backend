@@ -4,6 +4,7 @@ from dataclasses import dataclass, field
 from types import SimpleNamespace
 
 from django.conf import settings
+from django.db import transaction
 from django.utils import timezone
 
 from . import cms_access_contract as contract
@@ -63,6 +64,22 @@ def historical(job):
 
 def root_current(root, *, user=None, waiting=True):
     """Reload the real selected native root and its original unrefunded payment."""
+    from organizations.models import Organization
+    from .website_models import WebsiteConnectionOperation
+    if root is None or root.action not in {"cms-goal", "cms-setup"}:
+        raise _deny()
+    # Status and unlocked provider guards also read this financial identity.
+    # Lock the actual root and original spend in a short transaction that ends
+    # before the caller can send a credential-bearing request.
+    with transaction.atomic():
+        Organization.objects.select_for_update().get(pk=root.connection.organization_id)
+        actual = WebsiteConnectionOperation.objects.select_for_update().filter(pk=root.pk, action=root.action).first()
+        if actual is None:
+            raise _deny()
+        return _root_current(actual, user=user, waiting=waiting)
+
+
+def _root_current(root, *, user, waiting):
     from . import cms_goal_authority as native
     from . import cms_setup_authority as setup
     from . import cms_goal_billing, cms_setup_billing

@@ -330,7 +330,7 @@ class CmsAccessControllerTests(SimpleTestCase):
         self.assertEqual(self.advance().state, "cancelled")
         self.transport.assert_not_called()
 
-    def test_every_identity_get_runs_outside_owning_transactions(self):
+    def test_identity_gets_are_unlocked_and_original_spend_reads_own_short_transactions(self):
         from contextlib import contextmanager
         self.accept(); depth = []
         @contextmanager
@@ -342,5 +342,13 @@ class CmsAccessControllerTests(SimpleTestCase):
             self.assertEqual(depth, [])
             return self.read(*args, **kwargs)
         self.transport.side_effect = read
-        with patch("django.db.transaction.atomic", side_effect=atomic): self.assertEqual(self.advance().state, "completed")
+        def locked_spend(*_args, **_kwargs):
+            self.assertTrue(depth, "The original spend read requires an owning transaction")
+            return self.ledger_rows.return_value
+        from .cms_access_status import for_root
+        with patch("django.db.transaction.atomic", side_effect=atomic), \
+                patch.object(self.ledger_rows, "side_effect", locked_spend):
+            self.assertEqual(for_root(self.goal_operation)["state"], "pending")
+            self.assertEqual(self.advance().state, "completed")
+        self.assertEqual(depth, [])
         self.assertEqual(self.transport.call_count, 2)

@@ -77,24 +77,33 @@ def recheck(dispatch):
         raise _deny()
 
     def guard(expected=None):
-        parent = WebsiteConnectionOperation.objects.select_related("connection__organization").filter(
+        candidate = WebsiteConnectionOperation.objects.select_related("connection__organization").filter(
             pk=dispatch.operation_id, action=authority.ACTION).first()
-        if parent is None:
+        if candidate is None:
             raise _deny()
-        value = authority.current(parent, lease_id=dispatch.lease_id)
-        billing.require_held(parent)
-        saved = value.policy
-        if saved is None or expected is not None and saved != expected:
-            raise _deny()
-        binding, credential = current_credential(value.context, value.config, value.connection, user=value.user)
-        if binding != saved["policy"]["binding"]:
-            raise _deny()
-        row = WebsiteConnectionOperation.objects.filter(pk=saved["operation_id"], action=policies.ACTION,
-            connection_id=parent.connection_id, generation=parent.generation, state="completed").first()
-        at, _observed = observation(row, saved)
-        if at > timezone.now() + timedelta(seconds=30):
-            raise _deny()
-        return parent, value, saved, row, at, binding, credential
+        # The original spend is row-locked by require_held. Its owner, lease
+        # and policy must be checked in the same short owning transaction.
+        # Each guard returns before the credential-bearing GET is made.
+        with transaction.atomic():
+            Organization.objects.select_for_update().get(pk=candidate.connection.organization_id)
+            parent = WebsiteConnectionOperation.objects.select_for_update().filter(
+                pk=dispatch.operation_id, action=authority.ACTION).first()
+            if parent is None:
+                raise _deny()
+            value = authority.current(parent, lease_id=dispatch.lease_id)
+            billing.require_held(parent)
+            saved = value.policy
+            if saved is None or expected is not None and saved != expected:
+                raise _deny()
+            binding, credential = current_credential(value.context, value.config, value.connection, user=value.user)
+            if binding != saved["policy"]["binding"]:
+                raise _deny()
+            row = WebsiteConnectionOperation.objects.filter(pk=saved["operation_id"], action=policies.ACTION,
+                connection_id=parent.connection_id, generation=parent.generation, state="completed").first()
+            at, _observed = observation(row, saved)
+            if at > timezone.now() + timedelta(seconds=30):
+                raise _deny()
+            return parent, value, saved, row, at, binding, credential
 
     parent, _value, saved, _row, at, binding, _secret = guard()
     if at >= timezone.now() - MAX_SETUP_AGE:

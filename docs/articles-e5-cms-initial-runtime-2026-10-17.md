@@ -90,3 +90,15 @@ provisional configuration to an empty repository. Two database-free regressions
 cover that fresh configuration through quoting and identity verification. The
 full database-free journey selection passes 1,481 cases. The next PostgreSQL
 run remains the authority for the transaction round trip.
+
+
+18 October transaction audit: a real `TransactionTestCase` in disposable CI
+exposed the saved-policy hold check running outside an owning transaction.
+Regular `TestCase` transactions and mocked connection state masked the stop
+before setup promotion. Saved-policy guards now lock the organisation, current
+setup lease and original spend in short transactions around the unlocked
+provider GET. The same audit reproduced a paid credential-recovery/status read
+locking its ledger outside a transaction; its actual root and original spend
+now share a short owning transaction as well. HTTP remains outside those locks.
+Regressions assert actual financial lock depth and unlocked provider traffic;
+87 focused initial/setup/access cases and all 1,482 database-free journey cases pass. The real transaction regression remains in both disposable SQLite and PostgreSQL CI lanes.
