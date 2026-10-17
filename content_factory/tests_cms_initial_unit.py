@@ -99,6 +99,15 @@ class CmsInitialTests(SimpleTestCase):
         self.assertEqual(len([row for row in self.saved if row.action == "channel-credential"]), 1)
         self.spend.assert_called_once(); self.transport.assert_not_called(); self.http.assert_not_called()
 
+    def test_new_nullable_repository_config_verifies_and_is_saved_as_canonical_non_git(self):
+        self.config.github_repo = None
+        self.start()
+        self.assertEqual(self.config.github_repo, "")
+        self.assertEqual(self.advance().state, "completed")
+        self.assertEqual(setup.current(self.root).intent["operation_id"], str(self.root.pk))
+        self.spend.assert_called_once()
+
+
     def test_lost_acceptance_replays_original_grant_and_price_without_another_hold(self):
         original = self.start(); packet = deepcopy(self.job.payload)
         self.price.return_value = 99

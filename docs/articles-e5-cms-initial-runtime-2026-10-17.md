@@ -81,3 +81,12 @@ off. The combined initial Chat form/decoder, real provider/browser acceptance,
 explicit paid-source transfer, hosted fallback, additional connectors,
 revisions/unpublish and the actual nightly test zoo remain unfinished. This
 runtime slice does not certify a live website or the 90% nightly target.
+
+The PostgreSQL transaction variant now explicitly enrols its actual synthetic
+organisation in both runner and failure-policy gates; sequence IDs cannot rely
+on the default fixture allowlist. Initial quotes accept a fresh configuration
+with its database-default nullable repository and canonicalise the accepted
+provisional configuration to an empty repository. Two database-free regressions
+cover that fresh configuration through quoting and identity verification. The
+full database-free journey selection passes 1,481 cases. The next PostgreSQL
+run remains the authority for the transaction round trip.

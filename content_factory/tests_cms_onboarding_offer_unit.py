@@ -21,6 +21,11 @@ from .website_contract import WebsiteAuthorityError
     ARTICLES_WEBSITE_GOAL_RUNNER_ENABLED=True, ARTICLES_WEBSITE_GOAL_ENROLLED_ORGANIZATIONS=["7"],
     ARTICLES_FAILURE_TAXONOMY_POLICY_ENABLED=True, ARTICLES_FAILURE_TAXONOMY_ENROLLED_ORGANIZATIONS=["7"])
 class CmsOnboardingOfferTests(SimpleTestCase):
+    def test_nullable_new_config_repository_is_still_an_initial_site(self):
+        self.config.github_repo = None
+        self.assertEqual(self.read()["scope"], self.scope)
+
+
     def setUp(self):
         self.now = timezone.now()
         self.org = SimpleNamespace(pk=7, domain="native.example.com")

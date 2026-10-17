@@ -96,7 +96,7 @@ def scope(job, *, user=None, pending=True, read_only=False, now=None):
         if (conn.generation != binding["generation"] or str(conn.pk) != binding["connection_id"] or str(conn.authorized_by_id) != binding["owner_user_id"] or
                 actual != expected_scope or
                 conn.site_url != binding["public_origin"] or any(getattr(conn, name) != "" for name in ("github_repo", "installation_id", "branch", "app_root")) or
-                conn.repository_id is not None or config.github_repo != "" or conn.capabilities.get("_cms_binding") != binding or
+                conn.repository_id is not None or getattr(config, "github_repo", None) not in (None, "") or conn.capabilities.get("_cms_binding") != binding or
                 conn.capabilities.get("_cms_initial_operation_id") != str(job.pk) or
                 conn.capabilities.get("_cms_credential_operation_id") != plan["credential_operation_id"]): raise _deny()
         child = WebsiteConnectionOperation.objects.filter(idempotency_key="cms-setup-intent:" + plan["root_operation_id"],

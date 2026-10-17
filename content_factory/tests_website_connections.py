@@ -1223,7 +1223,7 @@ class WebsiteReviewRegressionTests(WebsiteDatabaseFixture, TestCase):
         profile = VibeRaisingProfile.objects.create(user=user, role='founder')
         company = VibeRaisingCompany.objects.create(profile=profile, organization=self.org, name='Synthetic CMS', domain=self.org.domain)
         context = SimpleNamespace(profile=profile, company=company, organization=self.org)
-        self.config.website_connection, self.config.github_repo = None, ''
+        self.config.website_connection, self.config.github_repo = None, None if initial else ''
         self.config.save(update_fields=['website_connection', 'github_repo'])
         with patch('content_factory.website_publishing_channels.observe_homepage', return_value=classify_prefix(b'<head><meta name="generator" content="WordPress"></head>')):
             inspected = update_choice(context, self.config, expected_scope=scope_for(context, self.config), expected_revision=0)
@@ -1247,7 +1247,8 @@ class WebsiteReviewRegressionTests(WebsiteDatabaseFixture, TestCase):
                 with override_settings(ARTICLES_CMS_ONBOARDING_ENABLED=True, ARTICLES_CMS_GOALS_ENABLED=True,
                         ARTICLES_CMS_SETUP_ENABLED=True, ARTICLES_CMS_STATUS_ENABLED=True,
                         ARTICLES_FIRST_ARTICLE_GOAL_ENABLED=True, ARTICLES_WEBSITE_GOAL_RUNNER_ENABLED=True,
-                        ARTICLES_WEBSITE_GOAL_ENROLLED_ORGANIZATIONS=[str(self.org.pk)]), \
+                        ARTICLES_WEBSITE_GOAL_ENROLLED_ORGANIZATIONS=[str(self.org.pk)],
+                        ARTICLES_FAILURE_TAXONOMY_POLICY_ENABLED=True, ARTICLES_FAILURE_TAXONOMY_ENROLLED_ORGANIZATIONS=[str(self.org.pk)]), \
                         patch('content_factory.billing.get_content_factory_article_cost_points', return_value=6), \
                         patch('content_factory.company_billing.billing_user_for_organization', return_value=user), \
                         patch('roo.services.PointsService.spend', side_effect=synthetic_hold) as initial_spend:

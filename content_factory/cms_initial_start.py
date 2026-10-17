@@ -118,12 +118,13 @@ def start(context, config, *, user, data, now=None):
         proposed = _grant(job, plan=plan, packet=packet, request_id=request_id, epoch=None, now=now)
         job.payload["grant_operation_id"] = str(proposed.pk); job.save(update_fields=["payload", "updated_at"])
         record = saved_record(config.article_system)
+        config.github_repo = ""
         config.website_connection = connection
         config.github_installation_id, config.github_token_encrypted, config.github_refresh_token_encrypted = "", "", ""
         config.publish_targets, config.default_publish_target_id = [], None
         config.auto_publish, config.daily_discovery_enabled = False, False
         config.article_system = {**config.article_system, "publishing_channel": {**deepcopy(record), "scope": scope_for(context, config), "revision": record["revision"] + 1}}
-        config.save(update_fields=["website_connection", "github_installation_id", "github_token_encrypted", "github_refresh_token_encrypted",
+        config.save(update_fields=["github_repo", "website_connection", "github_installation_id", "github_token_encrypted", "github_refresh_token_encrypted",
             "publish_targets", "default_publish_target_id", "auto_publish", "daily_discovery_enabled", "article_system", "updated_at"])
         if not authority.enabled(context.organization.pk): raise authority._deny()
         holds.reserve(root, subjects.from_setup_intent(intent, expected_binding=binding), context=context, connection=connection, user=user, now=now)
