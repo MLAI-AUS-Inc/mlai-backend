@@ -1237,7 +1237,10 @@ class WebsiteReviewRegressionTests(WebsiteDatabaseFixture, TestCase):
             # Exercise real reservation/outbox rollback and callback binding on
             # disposable CI only. Only synthetic ledger rows are seeded; no
             # wallet service, CF job or CMS write occurs.
-            with override_settings(ARTICLES_CHANNEL_ARTIFACTS_ENABLED=True):
+            with override_settings(ARTICLES_CHANNEL_ARTIFACTS_ENABLED=True, ARTICLES_CMS_GOALS_ENABLED=True,
+                    ARTICLES_FIRST_ARTICLE_GOAL_ENABLED=True, ARTICLES_WEBSITE_GOAL_RUNNER_ENABLED=True,
+                    ARTICLES_WEBSITE_GOAL_ENROLLED_ORGANIZATIONS=[str(self.org.pk)],
+                    ARTICLES_FAILURE_TAXONOMY_POLICY_ENABLED=True, ARTICLES_FAILURE_TAXONOMY_ENROLLED_ORGANIZATIONS=[str(self.org.pk)]):
                 from django.db import transaction
                 from . import channel_artifacts
                 from .dispatch_binding import reserve_portable_dispatch_intent
@@ -1254,7 +1257,25 @@ class WebsiteReviewRegressionTests(WebsiteDatabaseFixture, TestCase):
                         ([{'id': 39, 'taxonomy': 'category', 'name': 'Existing category'}], {})]):
                     native = cms_publication_policy.configure(context, self.config, user=user, data=native_data)
                 self.assertEqual(cms_publication_policy.current_policy(context, self.config, user=user), native)
-                artifact_payload = {'domain': self.org.domain, 'client_request_id': 'cms-artifact:' + uuid.uuid4().hex,
+                from . import cms_goal_start, cms_goal_billing, cms_goal_controller
+                from roo.models import Ledger
+                native_start_data = {**contract_for(website), 'client_request_id': str(uuid.uuid4()),
+                    'expected_policy_id': native['operation_id'], 'review_policy': 'auto',
+                    'expected_cost_points': 6, 'billing_confirmed': True}
+                def synthetic_hold(**options):
+                    return Ledger.objects.create(user=user, kind='SPEND', source='CONTENT_FACTORY', delta=-6,
+                        delta_microroo=-6_000_000, reference_type='CONTENT_FACTORY', reference_id=options['reference_id'],
+                        idempotency_key=options['idempotency_key']), True
+                with patch('content_factory.billing.get_content_factory_article_cost_points', return_value=6), \
+                        patch('content_factory.company_billing.billing_user_for_organization', return_value=user), \
+                        patch('roo.services.PointsService.spend', side_effect=synthetic_hold) as held:
+                    managed_native = cms_goal_start.start(context, self.config, user=user, data=native_start_data)
+                    self.assertEqual(cms_goal_start.start(context, self.config, user=user, data=native_start_data).pk, managed_native.pk)
+                held.assert_called_once()
+                managed_key = managed_native.receipt['first_article_billing']['client_request_id']
+                managed_spend = Ledger.objects.get(pk=managed_native.receipt['first_article_billing']['spend_ledger_id'])
+                artifact_payload = {'domain': self.org.domain, 'client_request_id': managed_key,
+                    'cms_goal_operation_id': str(managed_native.pk), 'cms_goal_id': str(managed_native.pk),
                     'delivery_mode': 'content_only', 'delivery_mode_confirmed': True, 'github_repo': '',
                     'topic': 'A synthetic CMS article', 'target_keyword': 'A synthetic CMS article',
                     'roo_points_ledger_id': 'synthetic-fixture-ledger', 'roo_points_cost': 6,
@@ -1263,11 +1284,7 @@ class WebsiteReviewRegressionTests(WebsiteDatabaseFixture, TestCase):
                 artifact_scope = channel_artifacts.prepare_generation(context, self.config, user=user)
                 with transaction.atomic():
                     from roo.models import Ledger
-                    from integrations.services.article_generation import _ledger_reference_id
-                    spend = Ledger.objects.create(user=user, kind='SPEND', source='CONTENT_FACTORY', delta=-6,
-                        delta_microroo=-6_000_000, reference_type='CONTENT_FACTORY',
-                        reference_id=_ledger_reference_id(artifact_payload['client_request_id']),
-                        idempotency_key='content_factory:charge:' + artifact_payload['client_request_id'])
+                    spend = managed_spend
                     artifact_payload['roo_points_ledger_id'] = str(spend.pk)
                     artifact_operation = channel_artifacts.reserve_generation(artifact_scope, context=context,
                         config=self.config, user=user, payload=artifact_payload)
@@ -1395,6 +1412,16 @@ class WebsiteReviewRegressionTests(WebsiteDatabaseFixture, TestCase):
             self.assertNotIn('Original native post', json.dumps(captured.receipt))
             self.assertEqual(posts.call_args.kwargs['method'], 'GET')
             from . import cms_goal_contract, cms_goal_evidence
+            managed_native.payload = {**managed_native.payload, 'capture_operation_id': str(captured.pk),
+                'generation_data': {'topic': artifact_payload['topic'], 'target_keyword': artifact_payload['target_keyword']}}
+            managed_native.save(update_fields=['payload', 'updated_at'])
+            with override_settings(ARTICLES_CMS_GOALS_ENABLED=True, ARTICLES_FIRST_ARTICLE_GOAL_ENABLED=True,
+                    ARTICLES_WEBSITE_GOAL_RUNNER_ENABLED=True, ARTICLES_WEBSITE_GOAL_ENROLLED_ORGANIZATIONS=[str(self.org.pk)],
+                    ARTICLES_FAILURE_TAXONOMY_POLICY_ENABLED=True, ARTICLES_FAILURE_TAXONOMY_ENROLLED_ORGANIZATIONS=[str(self.org.pk)]):
+                managed_native = cms_goal_controller.advance_goal(managed_native.pk, now=timezone.now() + timedelta(seconds=1))
+                self.assertEqual((managed_native.state, managed_native.receipt['status']), ('completed', 'first_article_live'))
+                self.assertEqual(managed_native.receipt['first_article_billing']['spend_ledger_id'], str(spend.pk))
+                self.assertEqual(managed_native.receipt['references']['first_article_live'], str(publication.pk))
             native_scope, _policy = cms_goal_evidence.current_scope(context, self.config, user=user)
             native_goal = cms_goal_contract.new_goal(str(uuid.uuid4()), native_scope, now=timezone.now())
             native_proofs, native_source, references = cms_goal_evidence.collect(native_goal, context, self.config,
@@ -1463,7 +1490,12 @@ class WebsiteReviewRegressionTests(WebsiteDatabaseFixture, TestCase):
             self.assertIn('_cms_binding', website.capabilities)
             financial_parent.refresh_from_db()
             self.assertEqual(financial_parent.state, 'cancelled')
-            native_credit = website.operations.get(action='cms-goal-refund')
+            native_credit = website.operations.get(action='cms-goal-refund', payload__goal_operation_id=str(financial_parent.pk))
+            earned_credit = website.operations.get(action='cms-goal-refund', payload__goal_operation_id=str(managed_native.pk))
+            with override_settings(ARTICLES_CMS_GOALS_ENABLED=False, ARTICLES_CMS_CHANNEL_ENABLED=False):
+                self.assertEqual(cms_goal_refunds.advance_refund(earned_credit.pk, now=timezone.now() + timedelta(seconds=1)), 'completed')
+            earned_credit.refresh_from_db()
+            self.assertEqual(earned_credit.receipt['status'], 'retained_after_draft')
             self.assertEqual(native_credit.state, 'pending')
             def synthetic_credit(**options):
                 self.assertEqual(options['article_request']['client_request_id'], financial_key)

@@ -124,6 +124,12 @@ class WebsiteConnectionView(APIView):
         from .website_journey import journey_for_context
         from .website_status import add_status
         payload = {"websiteConnection": summary_for(config, company_id=context.company.pk), "websiteJourney": journey_for_context(context, config)}
+        from .cms_goal_start import current_projection
+        try:
+            native_goal = current_projection(context, config, user=request.user)
+        except WebsiteAuthorityError:
+            native_goal = None
+        if native_goal is not None: payload["cmsGoal"] = native_goal
         return Response(add_status(payload, context, config, journey=payload["websiteJourney"]))
 
     def post(self, request):
@@ -157,12 +163,17 @@ class WebsiteConnectionActionView(APIView):
     """Independent pause/disconnect/reconnect/reset/cleanup consent actions."""
 
     def post(self, request, action):
-        if action not in {"prepare", "pause", "disconnect", "reconnect", "reset", "cleanup", "purge", "cancel-operation", "reconcile", "verify-access", "verify", "custom-contract", "ci-attestation", "github-revoke", "verify-cleanup", "inspect-channel", "select-channel", "cms-connect", "cms-configure", "cms-review-article", "cms-approve-article", "capture-existing"}:
+        if action not in {"prepare", "pause", "disconnect", "reconnect", "reset", "cleanup", "purge", "cancel-operation", "reconcile", "verify-access", "verify", "custom-contract", "ci-attestation", "github-revoke", "verify-cleanup", "inspect-channel", "select-channel", "cms-connect", "cms-configure", "cms-start-articles", "cms-review-article", "cms-approve-article", "capture-existing"}:
             return Response({"code": "invalid_connection_action", "detail": "Unknown website action."}, status=400)
         context, config, error = _context(request)
         if error:
             return error
         try:
+            if action == "cms-start-articles":
+                from .cms_goal_start import start, projection
+                operation = start(context, config, user=request.user, data=dict(request.data))
+                return Response({"cmsGoal": projection(operation, user=request.user)}, status=200 if operation.state == "completed" else 202,
+                    headers={"Cache-Control": "private, no-store"})
             if action in {"cms-review-article", "cms-approve-article"}:
                 from .cms_article_approval import review, approve
                 if action == "cms-review-article":

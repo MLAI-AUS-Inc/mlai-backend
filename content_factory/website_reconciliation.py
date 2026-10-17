@@ -763,6 +763,8 @@ def process_website_connection_operations(*, limit=20, now=None, connection_id=N
     from .cms_article_approval import ensure_approvals, advance_approval
     from .cms_article_publication import ensure_publications, advance_publication
     artifact_reviews_enabled = artifacts_enabled()
+    native_goals_enabled = artifact_reviews_enabled and getattr(settings, "ARTICLES_CMS_GOALS_ENABLED", False)
+    if native_goals_enabled: excluded.remove("cms-goal")
     if artifact_reviews_enabled:
         ensure_reviews(limit=limit, connection_id=connection_id)
         ensure_media(limit=limit, connection_id=connection_id)
@@ -789,10 +791,14 @@ def process_website_connection_operations(*, limit=20, now=None, connection_id=N
         Q(action="cms-media", state="running") |
         Q(action="cms-approval", state="running") |
         Q(action="cms-publish", state="running") |
+        Q(action="cms-goal", state__in=["running", "needs_user"]) |
         unconfigured_alerts |
         Q(action="prepare", state="needs_user", receipt__user_action__id__in=["deploy_site","merge_pr","review_draft"])).exclude(action__in=excluded)
     if connection_id:
         due = due.filter(connection_id=connection_id)
+    if native_goals_enabled:
+        due = due.exclude(Q(action="cms-goal") & ~Q(connection__organization_id__in=
+            getattr(settings, "ARTICLES_WEBSITE_GOAL_ENROLLED_ORGANIZATIONS", [])))
     ids = list(due.order_by("next_attempt_at").values_list("id", flat=True)[:limit])
     result = {"status": "completed", "processed": 0, "completed": 0, "pending": 0, "operations": []}
     from .website_support import reconcile_support_verifications
@@ -800,6 +806,15 @@ def process_website_connection_operations(*, limit=20, now=None, connection_id=N
     monitor_cleanup_pull_requests(limit=limit, connection_id=connection_id)
     from .website_wakeups import enabled as event_wakes_enabled
     for identifier in ids:
+        if WebsiteConnectionOperation.objects.filter(pk=identifier, action="cms-goal").exists():
+            from .cms_goal_controller import advance_goal
+            operation = advance_goal(identifier, now=now) if native_goals_enabled else None
+            if operation is not None:
+                result["processed"] += 1
+                result["pending" if operation.state in {"pending", "running", "needs_user"} else "completed"] += 1
+                if len(result["operations"]) < 20:
+                    result["operations"].append({"id": str(identifier), "action": "cms-goal", "outcome": operation.state})
+            continue
         if WebsiteConnectionOperation.objects.filter(pk=identifier, action=native_refund_action).exists():
             # Money already held must settle after CMS execution is disabled.
             outcome = advance_native_refund(identifier, now=now)

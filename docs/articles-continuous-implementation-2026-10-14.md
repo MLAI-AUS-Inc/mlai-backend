@@ -753,3 +753,21 @@ releasing money; late replies cannot overwrite a newer worker. Useful accepted
 drafts retain their charge and source for uncertain provider reconciliation.
 All 1,166 website checks pass; full disposable CI is pending. Native start/
 controller and UI integration remain unfinished, with all rollout flags off.
+
+
+## 17 October: native per-site start/controller
+
+The selected owner start reserves one current native goal/hold. Durable leases
+carry its exact capture and canonical approved topic through original-outbox
+dispatch recovery and the private CMS journal chain. Usage/source-generation,
+owner/rollout changes, stale leases and exact manual-review wake races are fenced.
+The goal completes only on current native proof from owning validators, with no
+Git merge fiction or worker ready-flag authority. All 1,194 no-database website
+tests pass; the actual synthetic hold-to-publication/controller/lifecycle fixture
+is prepared for disposable remote CI. All rollout flags remain off.
+
+Native CF automatic resume and full repair/strategy/fallback, terminal successor
+handling, shared status/doctor/Chat, paid revisions, unpublish, hosted fallback
+and real provider/browser acceptance remain unfinished. The current recovery
+status never authorizes a different paid run. No local DB, actual wallet/CMS/CF
+service, paid model work, merge or deployment ran.
