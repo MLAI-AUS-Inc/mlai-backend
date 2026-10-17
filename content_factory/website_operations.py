@@ -117,6 +117,14 @@ def validate_operation(connection, payload, *, worker_cleanup=False, restoration
     if SOURCE_FENCE_KEY in (getattr(op, "receipt", None) or {}) and getattr(op, "action", None) != "prepare" and not (cancellation or cancellation_receipt):
         raise WebsiteAuthorityError("website_operation_cancelled", "The original article was fenced after its source changed.")
     parent_id=op.payload.get("first_article_goal_operation_id")
+    if parent_id and getattr(op, "action", None) == "workflow" and not (cancellation or cancellation_receipt):
+        original_parent = connection.operations.filter(pk=parent_id, action="prepare",
+            generation=getattr(op, "generation", connection.generation)).first()
+        if SOURCE_FENCE_KEY in ((getattr(original_parent, "receipt", None) or {})):
+            # A causal goal stop covers unlisted distinct workflow operations too.
+            # A future current-source execution requires its separate server purpose;
+            # cleanup/restoration flags cannot turn this old role into a new one.
+            raise WebsiteAuthorityError("website_operation_cancelled", "The original article goal was fenced after its source changed.")
     if parent_id and not (worker_cleanup or restoration or cancellation or cancellation_receipt):
         from . import website_goal as goals
         from .website_setup_consent import valid as valid_consent

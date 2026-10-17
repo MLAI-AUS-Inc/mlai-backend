@@ -21,6 +21,7 @@ from .website_contract import WebsiteAuthorityError
 ACTION = "article-source-stop"
 KEY = "article_source_stop_operation_id"
 LEASE = timedelta(seconds=60)
+CREDENTIAL_LEASE = timedelta(seconds=120)
 
 
 def _deny():
@@ -139,6 +140,77 @@ def _request_stop(request):
             response.close()
 
 
+def _retire_original_credentials(parent, config, request, *, now):
+    """Remove captured original broker credentials; never infer full coverage/quiet.
+
+    The source fence owns these exact original operation IDs. A goal/source-only
+    query would also match a later source-hash reversion and is not authority to
+    revoke that separate execution. Deeper channels need their own original
+    source-scope enrollment before they can join this inventory.
+    """
+    from .website_connections import authority_guard, contract_for
+    from .website_first_article import _save_fields
+    from .website_tokens import revoke_generation_tokens
+    with authority_guard(contract_for(parent.connection), action="read"):
+        if _fresh(parent, config) != request["source_fence"]:
+            _deny()
+        operation = _operation(request["operation_id"], lock=True)
+        _validate(operation, parent, request)
+        try:
+            local_stop = validate_receipt(operation.receipt.get("local_stop"), request)
+        except StopContractError:
+            _deny()
+        if local_stop != parent.receipt.get("article_source_stop"):
+            _deny()
+        prior = operation.receipt.get("credential_lease")
+        if prior is not None:
+            try:
+                valid = (isinstance(prior, dict) and set(prior) == {"nonce", "request_digest", "expires_at"}
+                    and str(UUID(prior["nonce"])) == prior["nonce"] and prior["request_digest"] == request["digest"]
+                    and goals.stamp(prior["expires_at"]) is not None)
+            except (ValueError, TypeError, AttributeError, KeyError):
+                valid = False
+            if not valid:
+                _deny()
+            if goals.stamp(prior["expires_at"]) > now:
+                return None
+        _save_fields(parent, {})  # exact current prepare claim before provider work
+        lease = {"nonce": str(uuid4()), "request_digest": request["digest"],
+            "expires_at": (now + CREDENTIAL_LEASE).isoformat()}
+        operation.receipt = {**operation.receipt, "credential_lease": deepcopy(lease)}
+        operation.save(update_fields=["receipt", "updated_at"])
+    observed = []
+    identifiers = dict.fromkeys(node["operation_id"] for node in request["source_fence"]["binding"]["runs"])
+    for identifier in identifiers:
+        # Both checks use the original owner/payment/cause. No site lock spans
+        # provider HTTP. At most two captured operations * two DELETEs per pass.
+        if _fresh(parent, config) != request["source_fence"]:
+            _deny()
+        result = revoke_generation_tokens(parent.connection_id, f"operation:{identifier}", maximum_calls=2)
+        if (not isinstance(result, dict) or set(result) != {"revoked", "pending"}
+                or any(type(result[key]) is not int or result[key] < 0 for key in result)):
+            _deny()
+        observed.append({"operation_id": identifier, **result})
+        if _fresh(parent, config) != request["source_fence"]:
+            _deny()
+    with authority_guard(contract_for(parent.connection), action="read"):
+        if _fresh(parent, config) != request["source_fence"]:
+            _deny()
+        operation = _operation(request["operation_id"], lock=True)
+        _validate(operation, parent, request)
+        if operation.receipt.get("credential_lease") != lease:
+            _deny()
+        receipt = {"schema_version": 1, "request_digest": request["digest"],
+            "source_fence_id": request["source_fence_id"], "channel": "website_token_broker",
+            "scope": "captured_original_operations", "operations": observed,
+            "inventory_complete": False, "quiet": False, "effect_authority": False}
+        operation.receipt = {**{key: value for key, value in operation.receipt.items() if key != "credential_lease"},
+            "broker_credential_retirement": receipt}
+        _save_fields(parent, {})
+        operation.save(update_fields=["receipt", "updated_at"])
+        return receipt
+
+
 def advance(parent, config, *, now):
     """Drain the durable stop before source verification, models, or inspection.
 
@@ -152,6 +224,7 @@ def advance(parent, config, *, now):
     from .website_first_article import _save_fields, _wait
     operation, request = reserve(parent, config)
     if parent.receipt.get("article_source_stop") is not None:
+        _retire_original_credentials(parent, config, request, now=now)
         from . import website_goal_budget as budget
         reason = budget.exhaustion(parent.receipt["goal"], now=now) if budget.enabled() else None
         if reason:
@@ -197,6 +270,7 @@ def advance(parent, config, *, now):
             "local_stop": receipt, "remote_confirmed": False, "effect_authority": False}
         operation.save(update_fields=["receipt", "updated_at"])
         _save_fields(parent, {"article_source_stop": receipt})
+    _retire_original_credentials(parent, config, request, now=now)
     # Removing old effects must get its first pass even after a compute budget
     # was spent. The reconciliation wait still inherits the original wall and
     # class limits; it cannot become an unbounded pre-journey polling loop.

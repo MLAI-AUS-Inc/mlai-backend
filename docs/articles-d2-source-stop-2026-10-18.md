@@ -153,3 +153,60 @@ backend verification, deployment and merge token issuers, historical/unregistere
 work, deeper operation/task/async-resource inventory and automatic source-stop
 reconciliation still need integration. No token state alone proves outstanding
 Git/provider mutations have finished. All rollout flags remain off; draft only.
+
+
+## Goal/source guard and automatic original credential retirement
+
+The trusted local stop also writes a bounded goal/source barrier. It binds the
+original connection/generation/repository/deletion epoch, goal and source hash,
+with separate original source-scope digests. It covers saved original children
+with distinct operation IDs, as well as the captured shared operation. Model
+scopes retain detached original goal/source/role metadata; an already entered
+scope cannot adopt a later request or operation. Connection rebinding preserves
+the goal budget, queue proofs retain a closed goal/source/scope descriptor, and
+both eager and queued follow-ups check the fence before entering their body.
+Missing original scope proof remains conservative. Barriers survive rollout
+rollback, and an exact trusted stop replay restores its durable barrier without
+incrementing the original execution generation again.
+
+A different independent goal or later configuration at the same source hash is
+not blocked solely by the original source-scope key. Passing this local guard
+never grants execution: backend generic validation still denies every workflow
+belonging to the fenced goal, including unlisted operations and cleanup or
+restoration variants. Current-source work will need a separately admitted role;
+changing a hash, operation ID or request is insufficient. Unrelated legacy work
+keeps its existing guards. Bounded no-follow reads refuse corrupt, oversized or
+symlinked original metadata and barrier files without remote hydration.
+
+After a validated local stop, the actual prepare controller now retires broker
+credentials for the exact original operation IDs captured in its source fence.
+The first effect-removal pass runs even when the goal compute budget was spent.
+Every provider pass rechecks original ownership, payment/refund and stop cause,
+uses a private nonce lease and exact prepare claim, and rechecks before saving
+control observations. No site lock spans provider HTTP. A pass makes at most two
+provider DELETEs per captured operation, four in total. Missing bearers remain
+pending but do not starve other known credentials of this call allowance. Lost
+replies retry the same original identities; confirmed token observations survive
+later owner revocation without granting a new controller receipt or execution.
+
+The retirement record is explicitly scoped to captured_original_operations and
+website_token_broker. quiet, inventory_complete and effect_authority remain false.
+Goal/source-only credential enumeration would also match later source-hash
+reversions, so it cannot authorize retiring a separate execution. Deeper channels
+need original source-scope enrollment. Direct backend issuers, complete task and
+async-resource coverage, uncertain Git/provider outcomes and owned publication
+reconciliation remain outstanding before separately admitted current-source
+execution. Original billing and distinct execution idempotency, fresh builds,
+policy review, merge and live proofs remain required. All rollout flags stay off.
+
+
+Validation for this integration: 1,843 combined strict database/network-denying
+checks pass across 133 explicit labels. CI assigns all 610 test modules with no
+partial or omitted selections. The offline audit checks 870 production emissions;
+the read-only model check reports no changes. All ten vendored contract, transport
+and example files match immutable CF producer d2cc94a8f755b7deed59a35ce76520aeac2fb5f0.
+Two controller regression checks fail when automatic retirement is removed. The
+new cases cover actual prepare dispatch, cache-index/bearer loss, expiry,
+provider uncertainty, bounded passes without starvation, lease loss, ownership
+and refund changes, compute exhaustion, and distinct same-source executions.
+No local database, migration, service, paid model or provider operation was run.
