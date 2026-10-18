@@ -96,10 +96,13 @@ class ArticleCredentialInventoryTests(SimpleTestCase):
         self.parent = self.operations.create(pk=goal_id, connection=self.connection, generation=3, action="prepare",
             state="running", idempotency_key="prepare", payload={"company_id": "9"}, receipt={"goal": goal})
         @contextmanager
-        def atomic():
+        def atomic_scope():
             self.depth += 1
             try: yield
             finally: self.depth -= 1
+        def atomic(func=None, *args, **kwargs):
+            scope = atomic_scope()
+            return scope(func) if callable(func) else scope
         self.start(patch("django.db.transaction.atomic", side_effect=atomic))
         self.start(patch.object(WebsiteConnection.objects, "select_related", side_effect=lambda *a: Rows([self.connection])))
         self.start(patch.object(WebsiteConnection.objects, "select_for_update", side_effect=lambda: Rows([self.connection])))

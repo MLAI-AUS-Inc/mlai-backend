@@ -393,17 +393,23 @@ def verify_repository_head(connection, expected_sha):
 
 
 @contextmanager
-def authority_guard(data, *, action="read", domain="", github_repo="", require_selected=True):
+def authority_guard(data, *, action="read", domain="", github_repo="", require_selected=True, stored_source_only=False):
     """Verify provider evidence outside locks, then conditionally fence persistence.
 
     The second phase repeats consent and operation checks. A concurrent revoke,
     source observation or rebind invalidates the provider snapshot before any
     local write. A provider read never grants a transferable mutation lease.
+
+    Server read callers may require stored_source_only: refuse a mismatch or
+    unknown source without acquiring another credential for a head probe. The
+    newest branch observation takes precedence over the saved verified source.
     """
     from .website_operations import validate_operation
     from .website_rollout import require_repository_write_policy
     from .website_contract import SHA_PATTERN
     payload = _payload_with_context(data)
+    if stored_source_only and action != "read":
+        raise WebsiteAuthorityError("website_operation_changed", "This observation is limited to repository reads.")
     inventory = payload.get("repository_inventory") if isinstance(payload.get("repository_inventory"), dict) else {}
     if inventory:
         for key in ("source_sha", "repo_head_sha"):
@@ -440,6 +446,10 @@ def authority_guard(data, *, action="read", domain="", github_repo="", require_s
         if expected and not SHA_PATTERN.fullmatch(expected):
             raise WebsiteAuthorityError("invalid_source_sha", "An exact source commit is required.", status=422)
         observed = observed_source_sha(candidate)
+        if stored_source_only and not observed:
+            observed = str(candidate.verified_sha or "")
+        if stored_source_only and (not expected or not observed or expected != observed):
+            raise WebsiteAuthorityError("website_source_changed", "The article source changed before its observation.")
         if action in {"publish", "merge"} and observed and not expected:
             raise WebsiteAuthorityError("website_source_required", "Current source identity is required.")
         if action == "portable" and expected and observed and expected != observed:
@@ -465,7 +475,10 @@ def authority_guard(data, *, action="read", domain="", github_repo="", require_s
         with transaction.atomic():
             Organization.objects.select_for_update().get(pk=candidate.organization_id)
             connection = WebsiteConnection.objects.select_for_update().select_related("organization").get(pk=candidate.pk)
-            current = (connection.generation, connection.configuration_version, connection.state, connection.installation_id, connection.authorized_by_id, observed_source_sha(connection))
+            current_source = observed_source_sha(connection)
+            if stored_source_only and not current_source:
+                current_source = str(connection.verified_sha or "")
+            current = (connection.generation, connection.configuration_version, connection.state, connection.installation_id, connection.authorized_by_id, current_source)
             if current != snapshot:
                 from .website_github_failure import taxonomy_active
                 raise WebsiteAuthorityError("website_authority_raced" if taxonomy_active() else "website_connection_changed", "Website authority changed during verification. Refresh and retry.", retryable=True)

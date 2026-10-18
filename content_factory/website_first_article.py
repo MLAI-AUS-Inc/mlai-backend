@@ -135,44 +135,45 @@ def merged_source(op, run, context):
 
 def observe_manual_merge(op, child, *, now):
     """Read the exact owned PR after an external reviewer merges it; never issue a merge."""
-    from .website_connections import authority_guard,contract_for,require_unlocked_remote_call
-    from integrations.services.github_app import create_installation_access_token
+    from copy import deepcopy
+    from .website_connections import require_unlocked_remote_call
+    from .website_article_merge_read import current_observation
+    from .website_tokens import repository_read_credential
+    from .website_github_failure import github_failure
     from integrations import http_client
-    from workflow_runs.models import ContentFactoryRun
-    intent=goals.mapping(goals.mapping(child.result).get("publish_merge_intent"))
+    intent=deepcopy(goals.mapping(goals.mapping(child.result).get("publish_merge_intent")))
     number=intent.get("pr_number")
     if type(number) is not int or number<=0:return False
-    connection=op.connection;credential=None;headers={}
-    binding=contract_for(connection)
-    try:
-        with authority_guard(binding,action="read"):pass
+    with current_observation(op,child,intent) as (binding,_,original):pass
+    with repository_read_credential(binding) as credential:
+        with current_observation(op,child,intent,expected=original):pass
         require_unlocked_remote_call()
-        credential=create_installation_access_token(installation_id=connection.installation_id,repository=connection.github_repo,
-            repository_id=connection.repository_id,permission_mode="read",use_cache=False)
-        headers={"Authorization":f"Bearer {credential.token}","Accept":"application/vnd.github+json"}
-        response=http_client.get(f"https://api.github.com/repos/{connection.github_repo}/pulls/{number}",headers=headers,timeout=(3,10))
-        response.raise_for_status();pull=response.json()
-        head=goals.mapping(pull.get("head"));base=goals.mapping(pull.get("base"));sha=pull.get("merge_commit_sha")
-        if (pull.get("merged") is not True or pull.get("number")!=number or not isinstance(sha,str) or not goals.SHA.fullmatch(sha)
-            or intent.get("website_connection_id")!=str(connection.pk) or intent.get("connection_generation")!=connection.generation
-            or intent.get("repository_id")!=connection.repository_id or intent.get("run_id")!=child.run_id
-            or head.get("sha")!=intent.get("head_sha") or head.get("ref")!=intent.get("head_branch")
-            or base.get("ref")!=connection.branch or intent.get("base_branch")!=connection.branch
-            or any(goals.mapping(side.get("repo")).get("id")!=connection.repository_id
-                or str(goals.mapping(side.get("repo")).get("full_name") or "").casefold()!=connection.github_repo.casefold()
-                for side in (head,base))):return False
-        with authority_guard(binding,action="read"):
-            saved=ContentFactoryRun.objects.select_for_update().get(pk=child.pk)
-            if goals.mapping(saved.result).get("publish_merge_intent")!=intent:return False
+        connection=op.connection
+        headers={"Authorization":f"Bearer {credential['github_token']}","Accept":"application/vnd.github+json"}
+        response=None
+        try:
+            response=http_client.get(f"https://api.github.com/repos/{connection.github_repo}/pulls/{number}",headers=headers,timeout=(3,10))
+            response.raise_for_status();pull=response.json()
+            if not isinstance(pull,dict):raise ValueError("Invalid owned pull request observation")
+        except (http_client.RequestException,ValueError,TypeError) as exc:
+            raise github_failure(exc,legacy_code="github_source_unavailable",
+                legacy_message="GitHub could not verify the article merge. Retry shortly.",legacy_retryable=True,source=True) from None
+        finally:
+            if response is not None:response.close()
+        with current_observation(op,child,intent,expected=original) as (_,saved,_):
+            head=goals.mapping(pull.get("head"));base=goals.mapping(pull.get("base"));sha=pull.get("merge_commit_sha")
+            if (pull.get("merged") is not True or type(pull.get("number")) is not int or pull["number"]!=number
+                or not isinstance(sha,str) or not goals.SHA.fullmatch(sha)
+                or head.get("sha")!=intent["head_sha"] or head.get("ref")!=intent["head_branch"]
+                or base.get("ref")!=connection.branch
+                or any(goals.mapping(side.get("repo")).get("id")!=connection.repository_id
+                    or str(goals.mapping(side.get("repo")).get("full_name") or "").casefold()!=connection.github_repo.casefold()
+                    for side in (head,base))):return False
             saved.result={**saved.result,"merge_status":"merged","merge_response":{"merged":True,"sha":sha},
                 "merge_sha":sha,"merged_at":now.isoformat()}
             saved.status="completed";saved.save(update_fields=["result","status","updated_at"])
             child.result,child.status=saved.result,saved.status
         return True
-    finally:
-        if credential is not None:
-            try:http_client.delete("https://api.github.com/installation/token",headers=headers,timeout=(3,10))
-            except Exception:pass
 
 
 def proofs(op, context, config, *, source, now):
@@ -318,8 +319,7 @@ def _advance_git_first_article(op, context, config, *, user, now):
     views._maybe_auto_merge_publish_child(child=child,viewed_run=run,context=context)
     child.refresh_from_db()
     if goals.mapping(child.result).get("merge_status")=="manual_merge_required":
-        try:observed=observe_manual_merge(op,child,now=now)
-        except Exception:observed=False
+        observed=observe_manual_merge(op,child,now=now)
         if not observed:
             op.state,op.next_attempt_at="needs_user",now+timedelta(minutes=5)
             op.receipt.update(status="needs_you",current_step="first-article",message="Merge the first article pull request.",

@@ -1,6 +1,7 @@
 """Short-lived GitHub credentials scoped to current website consent."""
 
 import uuid
+from contextlib import contextmanager
 
 from django.core.cache import cache
 from rest_framework.response import Response
@@ -192,7 +193,7 @@ def issue_website_token(request):
         return Response({"allowed": False, "error": "github_repository_unavailable", "detail": "GitHub access could not be verified. Reconnect the selected repository.", "retryable": False}, status=409)
 
 
-def mint_website_token(data, *, permission_mode="read", action="read"):
+def mint_website_token(data, *, permission_mode="read", action="read", stored_source_only=False):
     """Issue and track one ephemeral token under the same lock as revocation."""
     from integrations.services.github_app import (create_installation_access_token, GitHubAppTokenError,
         GitHubWorkflowPermissionRequired, GitHubCIEvidencePermissionRequired, CI_EVIDENCE_PERMISSION_DETAIL,
@@ -221,7 +222,8 @@ def mint_website_token(data, *, permission_mode="read", action="read"):
         raise WebsiteAuthorityError("invalid_permission_preflight", "Permission preflight requires the workflow-files profile.", status=400)
     from . import website_article_credentials as credential_inventory
     reservation = None
-    with authority_guard(data, action=action) as connection:
+    read_options = {"stored_source_only": True} if stored_source_only else {}
+    with authority_guard(data, action=action, **read_options) as connection:
         if not connection.repository_id or not connection.installation_id:
             raise WebsiteAuthorityError("github_verification_required", "Reconnect GitHub to verify repository identity.")
         if profile == "workflow_files":
@@ -237,7 +239,7 @@ def mint_website_token(data, *, permission_mode="read", action="read"):
     try:
         if preflight:
             permissions = require_installation_workflow_permissions(installation_id)
-            with authority_guard(binding, action=action) as connection:
+            with authority_guard(binding, action=action, **read_options) as connection:
                 _workflow_operation(connection, binding, action)
                 return {"allowed": True, "permission_profile": profile, "permission_mode": permission_mode,
                         "preflight": True, "required_permission": "workflows:write",
@@ -269,7 +271,7 @@ def mint_website_token(data, *, permission_mode="read", action="read"):
         raise github_failure(exc, legacy_code="github_repository_unavailable", legacy_message="GitHub access could not be verified. Reconnect the selected repository.") from exc
     try:
         credential_inventory.issued(reservation, token)
-        with authority_guard(binding, action=action) as connection:
+        with authority_guard(binding, action=action, **read_options) as connection:
             if profile == "workflow_files":
                 _workflow_operation(connection, binding, action)
             elif profile == "ci_evidence":
@@ -304,6 +306,64 @@ def mint_website_token(data, *, permission_mode="read", action="read"):
             pass
         raise
 
+
+
+def _retire_borrowed_credential(binding, issued):
+    """Retire only this locally held broker result, even after cache/owner loss."""
+    from integrations import http_client
+    from . import website_article_credentials as inventory
+    from .website_connections import require_unlocked_remote_call
+    require_unlocked_remote_call()
+    reference = issued["credential_reference"]
+    reservation = None
+    try:
+        known, _ = inventory.discover(binding["website_connection_id"], f"operation:{binding['operation_id']}")
+        tracked = known.get(reference)
+        if tracked is not None:
+            reservation = tracked[0]
+    except Exception:
+        # Corrupt/unavailable metadata cannot authorize settlement, but the
+        # actual bearer returned by our mint must still be retired if possible.
+        pass
+    confirmed = False
+    try:
+        response = http_client.delete("https://api.github.com/installation/token",
+            headers={"Authorization": f"Bearer {issued['github_token']}", "Accept": "application/vnd.github+json"}, timeout=(3, 10))
+        confirmed = response.status_code == 204
+    except Exception:
+        pass
+    try:
+        inventory.revocation(reservation, confirmed=confirmed)
+    except Exception:
+        pass  # Preserve unknown metadata instead of inventing confirmation.
+    if confirmed:
+        try:
+            cache.delete(f"website-issued-token:{reference}")
+        except Exception:
+            pass
+
+
+@contextmanager
+def repository_read_credential(data):
+    """Borrow an original operation's broker read token and retire that result only.
+
+    This carries the broker's actual expiry/pre-mint history for enrolled work.
+    Legacy work stays legacy. It never revokes other activities' credentials or
+    turns a successful read/revocation into complete coverage or execution proof.
+    """
+    binding = dict(data)
+    try:
+        for key in ("website_connection_id", "operation_id"):
+            if str(uuid.UUID(binding[key])) != binding[key]:
+                raise ValueError
+    except (ValueError, TypeError, KeyError, AttributeError):
+        raise WebsiteAuthorityError("website_operation_required", "A repository read requires its original website operation.") from None
+    issued = mint_website_token(binding, permission_mode="read", action="read", stored_source_only=True)
+    original = dict(issued)
+    try:
+        yield dict(issued)
+    finally:
+        _retire_borrowed_credential(binding, original)
 
 
 def revoke_generation_tokens(connection_id, generation, *, maximum_calls=20):
