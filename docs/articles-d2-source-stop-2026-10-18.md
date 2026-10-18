@@ -268,3 +268,65 @@ and the read-only model check reports no changes. The existing disposable DB
 suite now checks v2 birth/rollback and adds real JSON/UUID pagination coverage;
 it remains remote-only. No contract/transport/example bytes, models, migrations
 or rollout defaults change. Latest remote timing and full CI are pending.
+
+
+## Current manual-merge observation uses the original paid role
+
+The normal first-article manual-merge reader now retains the child's original
+operation/attempt/deletion/source and paired goal identity. Before minting,
+before the owned PR read, and before committing its observation, it rechecks the
+selected company/owner, original spend/payer/refund, current exact approval,
+root-to-publication lineage, unchanged owned merge intent and original prepare
+claim. A source-fenced parent cannot enter this current-purpose read. A late
+reply cannot reopen a cancelled child, carry a changed approval, or save under a
+replacement prepare claim. Provider timeouts propagate to the existing failure
+policy rather than becoming an owner merge instruction.
+
+The reader borrows a read credential through the existing broker. Enrolled work
+therefore reserves durable metadata before provider mint and records actual
+expiry before use. It retires only that returned credential, retaining its own
+unmodified bearer/reference through the context. Cache eviction cannot prevent
+retirement while the backend still holds that bearer; nested activities retain
+their separate tokens. Confirmed HTTP 204 settles the corresponding durable row.
+Unknown provider/metadata outcomes remain conservative, and observations can
+settle after owner revocation without reopening authority. Legacy history never
+gains inferred coverage.
+
+An internal stored-source-only read mode refuses unknown/mismatched source without
+minting an additional credential to probe the branch head. It uses the newest
+saved GitHub branch observation, falling back to the saved verified SHA only when
+no such observation exists, and repeats that snapshot under lock. This mode
+cannot authorize writes and is not selected by an incoming token query field.
+Default generic guard/token behavior remains unchanged. No site lock spans mint,
+PR HTTP or token retirement. The former fake-context manual-merge test moves to a
+canonical guard/paid-ledger/broker fixture, preserving its exact owned-PR, foreign
+head, read-only and revoke assertions while adding race/unknown-outcome checks.
+
+This is current execution observation, not the separate historical publication
+reconciliation required after a source fence. Other direct GitHub issuers and
+legacy/unregistered task/resource coverage remain outstanding. No complete quiet,
+old approval carry, replacement execution, merge or deployment authority follows
+from these read or revocation observations.
+
+## Bootstrap reuses identical request-owned draft rows
+
+The next remote run at d5b08c3 reduced cold SQL observations from 168 to 143 and
+passed the single progress-projection assertion, but cold elapsed time was still
+1,044.89 ms. The draft-card scan fetched the same large result JSON a second time.
+It now reads the complete original draft window's IDs/versions, reuses only matching
+request-owned objects, and loads missing/changed rows through the existing scoped
+query. Older generations or runs outside the displayed window remain represented;
+a foreign cached domain cannot supply a row. Full result/request/acceptance fields
+are retained for all existing card logic. No incomplete JSON allowlist is used.
+Only newly owned prefetch graphs are released after card serialization; shared
+bootstrap rows retain their steps for the live overlay and are released at its
+existing request boundary. The 1,000 ms and 300 KB endpoint limits remain unchanged.
+
+Validation passes 1,905 combined strict no-database/no-network checks across 141
+explicit labels, followed by all 23 focused merge-read and draft-reuse checks
+(including the two subsequent source-mode cases). Three paid/read race regressions
+fail with the preceding observer. CI assigns all 613 modules; the offline audit
+checks 874 production emissions and the read-only model check reports no changes.
+The real DB fixture additionally checks version-aware draft-row reuse; database
+and updated cold endpoint timing remain remote-only. All rollout defaults and
+contract/transport/example bytes remain unchanged; the work stays draft-only.

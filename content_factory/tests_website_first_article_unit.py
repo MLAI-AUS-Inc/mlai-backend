@@ -228,34 +228,6 @@ class FirstArticleControllerTests(SimpleTestCase):
         self.assertEqual(error.exception.failure["code"],"UNREGISTERED_FAILURE_CODE")
         self.assertNotIn("private worker detail",str(error.exception))
 
-    def test_manual_merge_observer_accepts_only_exact_owned_pr_and_revokes_read_token(self):
-        self.approve();self.publish_child()
-        intent={"pr_number":42,"run_id":"publish","website_connection_id":"website","connection_generation":3,
-            "repository_id":"12","base_branch":"main","source_sha":"a"*40,"head_sha":"d"*40,"head_branch":"cf/article"}
-        self.child.result.update(merge_status="manual_merge_required",publish_merge_intent=intent)
-        repo={"id":"12","full_name":"fixture/site"}
-        pull={"number":42,"merged":True,"merge_commit_sha":"e"*40,"head":{"sha":"d"*40,"ref":"cf/article","repo":repo},
-            "base":{"ref":"main","repo":repo}}
-        response=Mock();response.json.return_value=pull
-        from workflow_runs.models import ContentFactoryRun
-        with patch("integrations.services.github_app.create_installation_access_token",return_value=SimpleNamespace(token="synthetic")) as token, \
-            patch("integrations.http_client.get",return_value=response) as read,patch("integrations.http_client.delete") as revoke, \
-            patch.object(ContentFactoryRun.objects,"select_for_update") as locked:
-            locked.return_value.get.return_value=self.child
-            self.assertTrue(article.observe_manual_merge(self.op,self.child,now=self.now))
-        self.assertEqual(self.child.result["merge_response"],{"merged":True,"sha":"e"*40})
-        self.assertEqual(token.call_args.kwargs["permission_mode"],"read")
-        read.assert_called_once();revoke.assert_called_once()
-        # A later foreign head cannot promote even when GitHub says merged.
-        self.child.result.update(merge_status="manual_merge_required",publish_merge_intent=intent)
-        pull["head"]["sha"]="f"*40
-        with patch("integrations.services.github_app.create_installation_access_token",return_value=SimpleNamespace(token="synthetic")), \
-            patch("integrations.http_client.get",return_value=response),patch("integrations.http_client.delete"), \
-            patch.object(ContentFactoryRun.objects,"select_for_update") as locked:
-            self.assertFalse(article.observe_manual_merge(self.op,self.child,now=self.now))
-        locked.assert_not_called()
-
-
 @override_settings(ARTICLES_FIRST_ARTICLE_GOAL_ENABLED=True, ARTICLES_SETUP_CONSENT_ENABLED=True,
     ARTICLES_WEBSITE_GOAL_RUNNER_ENABLED=True, ARTICLES_WEBSITE_GOAL_ENROLLED_ORGANIZATIONS=["7"],
     ARTICLES_FAILURE_TAXONOMY_POLICY_ENABLED=True, ARTICLES_FAILURE_TAXONOMY_ENROLLED_ORGANIZATIONS=["7"],
