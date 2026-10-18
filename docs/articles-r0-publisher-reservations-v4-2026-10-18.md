@@ -28,7 +28,10 @@ Another server-side source observation supplies the current setup commit/tree/
 inventory. It allocates one stable child operation and queued run, retaining
 the original parent and saving the exact identity, request, profile and both
 source bindings before dispatch. Retries reuse the child and saved inputs;
-they do not renew the goal budget or create another points charge. An enrolled
+they do not renew the goal budget or create another points charge. The child
+is retained in the parent's bounded usage history, carries original-goal cost
+attribution and receives a frozen remaining-budget projection. Unknown usage
+and full history remain held; provider usage is retained on proof acceptance. An enrolled
 target's stronger proof requirement is persisted and publishing is withheld.
 
 The existing attestation entry routes typed schema4 receipts to the new writer.
@@ -56,10 +59,10 @@ producer transport/configuration, wire setup/adoption and the actual original
 publisher through preview/CI/article/repeat publication, then qualify an exact
 compatible release and activate Ready only after all those consumers support it.
 
-Validation: 1,142 lifecycle/journey/domain tests pass with database, network,
-listeners and subprocesses denied, including 11 new pure tests with nested
+Validation: 1,144 lifecycle/journey/domain tests pass with database, network,
+listeners and subprocesses denied, including 13 new pure tests with nested
 profile/source/proposal/binding mutations. All 557 test modules are fully
-assigned, and 753 production failure emissions pass the offline audit. New
+assigned, and 754 production failure emissions pass the offline audit. New
 PostgreSQL tests run only in disposable CI and cover the real writer, durable
 retries, missing history, source-observation races, cancellation/consent/target/
 selection/profile/run races, interleaved duplicate completions, saved scan

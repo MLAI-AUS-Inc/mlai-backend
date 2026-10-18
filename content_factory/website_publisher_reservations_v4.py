@@ -39,7 +39,8 @@ def _changed():
 def enabled(connection):
     """Require separate rollout, hosted execution, and original-goal enrollment."""
     from .website_hosted_verification import enabled as hosted_enabled
-    return getattr(settings, "ARTICLES_PUBLISHING_INPUTS_V4_ENABLED", False) is True and hosted_enabled(connection)
+    return (getattr(settings, "ARTICLES_PUBLISHING_INPUTS_V4_ENABLED", False) is True
+        and getattr(connection, "state", None) == "connected" and hosted_enabled(connection))
 
 
 def _unique(pairs):
@@ -128,6 +129,7 @@ def _context(parent, connection, config, target, source):
             raise ValueError
         from .website_connections import contract_for
         result = {"snapshot": snapshot, "scope": scope, "connection": contract_for(connection), "target": deepcopy(target.contract),
+            "goal_target": parent.receipt["goal"]["target"],
             "current_source_sha": connection.verified_sha, "configuration_revision": connection.configuration_version}
         if len(protocol.canonical(result)) > 192 * 1024:
             raise ValueError
@@ -247,6 +249,26 @@ def _proposal(original, candidate, records):
         raise _invalid() from None
 
 
+def _goal_budget(goal):
+    from . import website_goal_budget as budget
+    if not budget.enabled():
+        return None
+    used = goals.mapping(goal.get("budget_used"))
+    if (budget.exhaustion(goal, now=timezone.now(), action="ci-attestation")
+            or goal.get("usage_reports") and any(used.get(key) is None for key in ("active_seconds", "model_cost"))):
+        raise WebsiteAuthorityError("website_prepare_blocked", "The original goal has no remaining measured verification budget.")
+    return {"version": 1, "goal_id": goal["goal_id"], "scope_digest": goals.digest(goal["scope"]),
+        "remaining_active_seconds": settings.ARTICLES_GOAL_ACTIVE_SECONDS - (used.get("active_seconds") or 0),
+        "remaining_model_usd": settings.ARTICLES_GOAL_MODEL_USD - (used.get("model_cost") or 0)}
+
+
+def _new_child_history(goal):
+    history = goal.get("child_run_history", [])
+    if type(history) is not list or len(history) >= 64 or any(type(item) is not str for item in history):
+        raise _invalid()
+    return deepcopy(history)
+
+
 def reserve_execution(original_id, *, candidate, records, observe_source):
     """Freeze one proposal and current Git tuple, then allocate its durable child.
 
@@ -258,7 +280,7 @@ def reserve_execution(original_id, *, candidate, records, observe_source):
     original = WebsiteConnectionOperation.objects.get(pk=original_id, action="publisher-original")
     parent = _parent(original.payload["context"]["snapshot"]["parent_operation_id"])
     binding, profile = _binding(parent), supported_profile()
-    with _locked(parent.pk, binding) as (_, connection, config, target, source, context):
+    with _locked(parent.pk, binding) as (locked_parent, connection, config, target, source, context):
         original.refresh_from_db()
         if original.state == "completed":
             _proposal(original, candidate, records)
@@ -271,22 +293,34 @@ def reserve_execution(original_id, *, candidate, records, observe_source):
         if existing is not None:
             _pending(existing, original, context, profile)
             return existing
+        _new_child_history(locked_parent.receipt["goal"])
+        budget = _goal_budget(locked_parent.receipt["goal"])
         request = {"source_run_id": source.run_id, "scope": deepcopy(context["scope"]), "expected_source_sha": context["current_source_sha"]}
     facts = _observe(observe_source, request)
     if facts["source_sha"] == original.payload["facts"]["source_sha"]:
         raise _invalid()
-    with _locked(parent.pk, binding) as (_, connection, _, target, source, current):
+    with _locked(parent.pk, binding) as (locked_parent, connection, _, target, source, current):
         original.refresh_from_db()
         _fence(original, current, supported_profile())
         if current != context or original.payload["profile"] != profile or _proposal(original, candidate, records) != proposal:
             raise _changed()
+        history = _new_child_history(locked_parent.receipt["goal"])
+        remaining = _goal_budget(locked_parent.receipt["goal"])
+        if type(remaining) is not type(budget):
+            raise _changed()
+        if budget is not None:
+            budget = {**budget, **{key: min(budget[key], remaining[key]) for key in ("remaining_active_seconds", "remaining_model_usd")}}
         child, created = WebsiteConnectionOperation.objects.get_or_create(idempotency_key=key, defaults={
             "connection": connection, "generation": connection.generation, "action": "workflow", "state": "pending",
             "payload": {"workflow": "hosted_native_verification", "attempt": 1, "publisher_original_operation_id": str(original.pk)}})
         if not created:
-            _pending(child, original, context, profile)
+            if _pending(child, original, context, profile)["current_binding"] != facts:
+                raise _changed()
             return child
         native_identity = protocol.identity_for(candidate, str(child.pk), 1)
+        child.payload["goal_budget"] = budget
+        if context["goal_target"] == "first_article_live":
+            child.payload["first_article_goal_operation_id"] = str(locked_parent.pk)
         execution_binding = _execution_binding(child, context, proposal)
         pending = {"version": 1, "original_id": str(original.pk), "context": context, "profile": profile,
             **proposal, "current_binding": facts, "identity": native_identity}
@@ -295,6 +329,12 @@ def reserve_execution(original_id, *, candidate, records, observe_source):
         child.save(update_fields=["payload", "updated_at"])
         ContentFactoryRun.objects.create(run_id=str(child.pk), organization=connection.organization, domain=connection.organization.domain,
             github_repo=connection.github_repo, workflow="hosted_native_verification", status="queued", run_request=execution_binding)
+        goal = deepcopy(locked_parent.receipt["goal"])
+        if str(child.pk) not in history:
+            goal["child_run_history"] = [*history, str(child.pk)]
+            goal["revision"] += 1
+            locked_parent.receipt = {**locked_parent.receipt, "goal": goal}
+            locked_parent.save(update_fields=["receipt", "updated_at"])
         original.payload = {**original.payload, "proposal": proposal}
         original.state = "running"
         original.save(update_fields=["payload", "state", "updated_at"])
@@ -310,7 +350,9 @@ def _execution_binding(child, context, proposal):
         "deletion_epoch": context["scope"]["deletion_epoch"], "expected_source_sha": context["current_source_sha"],
         "target_id": context["snapshot"]["target_id"], "contract_digest": context["target"].get("contract_digest"),
         "run_id": str(child.pk), "source_run_id": context["snapshot"]["source_run_id"], "client_request_id": child.idempotency_key,
-        "publishing_inputs_digest": proposal["candidate"]["digest"], "original_publisher_binding_v2": deepcopy(proposal["original_binding"])}
+        "publishing_inputs_digest": proposal["candidate"]["digest"], "original_publisher_binding_v2": deepcopy(proposal["original_binding"]),
+        **({"goal_budget": deepcopy(child.payload["goal_budget"])} if child.payload.get("goal_budget") is not None else {}),
+        **({"first_article_goal_operation_id": context["snapshot"]["parent_operation_id"]} if context.get("goal_target") == "first_article_live" else {})}
 
 
 def _pending(child, original, context, profile):
@@ -329,6 +371,7 @@ def _pending(child, original, context, profile):
                 or protocol.canonical(pending["identity"]) != protocol.canonical(protocol.identity_for(pending["candidate"], str(child.pk), 1))
                 or child.payload.get("run_id") != str(child.pk)
                 or child.payload.get("source_run_id") != context["snapshot"]["source_run_id"]
+                or context.get("goal_target") == "first_article_live" and child.payload.get("first_article_goal_operation_id") != context["snapshot"]["parent_operation_id"]
                 or child.idempotency_key != "publisher-v4:" + protocol.digest({"original": str(original.pk), "source": context["current_source_sha"], "proposal": original.payload["proposal"]})
                 or protocol.canonical(child.payload.get("binding")) != protocol.canonical(_execution_binding(child, context, original.payload["proposal"]))):
             raise ValueError
@@ -407,7 +450,8 @@ def record_native_setup(data, *, origin):
         config.save(update_fields=["publish_targets", "updated_at"])
         child.state, child.receipt = "completed", deepcopy(receipt)
         child.save(update_fields=["state", "receipt", "updated_at"])
-        run.status, run.result = "completed", {"verification": deepcopy(proof)}
+        run.status, run.result = "completed", {**goals.mapping(run.result), "verification": deepcopy(proof),
+            **{key: deepcopy(result[key]) for key in ("usage", "generation", "state_version") if key in result}}
         run.save(update_fields=["status", "result", "updated_at"])
         original.state, original.receipt = "completed", {"status": "setup_verified", "child_id": str(child.pk),
             "evidence_digest": proof["evidence_digest"], "target_digest": protocol.digest(contract), "checked_at": checked_at}

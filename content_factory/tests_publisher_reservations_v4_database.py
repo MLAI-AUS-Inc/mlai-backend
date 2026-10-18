@@ -134,11 +134,64 @@ class PublisherV4ReservationDatabaseTests(TransactionTestCase):
         self.assertEqual(replay.payload, child.payload)
         observer.assert_called_once()
         self.parent.refresh_from_db()
-        self.assertEqual(self.parent.receipt, self.initial_goal)
+        self.assert_original_goal_preserved()
+        self.assertEqual(self.parent.receipt["goal"]["child_run_history"], [str(child.pk)])
         self.assertEqual(ContentFactoryRun.objects.filter(run_id=str(child.pk)).count(), 1)
         self.target.refresh_from_db(); self.website.refresh_from_db()
         self.assertFalse(self.target.capabilities["publishingReady"])
         self.assertFalse(self.website.capabilities["publishingReady"])
+
+    @override_settings(ARTICLES_WEBSITE_GOAL_BUDGETS_ENABLED=True, ARTICLES_GOAL_ACTIVE_SECONDS=1000, ARTICLES_GOAL_MODEL_USD=20)
+    def test_child_budget_and_attribution_stay_frozen_after_parent_usage_advances(self):
+        self.parent.receipt["goal"]["budget_used"] = {"active_seconds": 120, "model_cost": 4}
+        self.parent.save(update_fields=["receipt"])
+        self.reserve()
+        saved = deepcopy(self.child.payload["binding"])
+        self.assertEqual(saved["goal_budget"]["remaining_active_seconds"], 880)
+        self.assertEqual(saved["goal_budget"]["remaining_model_usd"], 16)
+        self.assertEqual(saved["first_article_goal_operation_id"], str(self.parent.pk))
+        self.parent.refresh_from_db()
+        self.parent.receipt["goal"]["budget_used"] = {"active_seconds": 300, "model_cost": 8}
+        self.parent.save(update_fields=["receipt"])
+        observer = Mock(side_effect=AssertionError("An already reserved child cannot observe or reset its budget"))
+        repeated = reservations.reserve_execution(self.original.pk, candidate=self.value["candidate"], records=self.value["records"], observe_source=observer)
+        self.assertEqual(repeated.payload["binding"], saved)
+        observer.assert_not_called()
+        from .website_cost_usage import attribution
+        self.assertIsNotNone(attribution(self.parent, ContentFactoryRun.objects.get(run_id=str(self.child.pk))))
+
+    @override_settings(ARTICLES_WEBSITE_GOAL_BUDGETS_ENABLED=True, ARTICLES_GOAL_ACTIVE_SECONDS=1000, ARTICLES_GOAL_MODEL_USD=20)
+    def test_exhausted_goal_cannot_observe_current_source_or_allocate_another_child(self):
+        original = reservations.reserve_original(self.parent.pk, observe_source=self.observer)
+        self.parent.receipt["goal"]["budget_used"] = {"active_seconds": 1000, "model_cost": 4}
+        self.parent.save(update_fields=["receipt"])
+        observer = Mock(side_effect=AssertionError("No work after the original goal budget is exhausted"))
+        with self.assertRaises(WebsiteAuthorityError):
+            reservations.reserve_execution(original.pk, candidate=self.value["candidate"], records=self.value["records"], observe_source=observer)
+        observer.assert_not_called()
+        self.assertFalse(ContentFactoryRun.objects.filter(workflow="hosted_native_verification").exists())
+
+    def test_full_owned_child_history_is_held_instead_of_dropping_an_old_obligation(self):
+        original = reservations.reserve_original(self.parent.pk, observe_source=self.observer)
+        self.parent.receipt["goal"]["child_run_history"] = ["owned-original-" + str(index) for index in range(64)]
+        self.parent.save(update_fields=["receipt"])
+        observer = Mock(side_effect=AssertionError("Do not discard older child history to allocate more work"))
+        with self.assertRaises(WebsiteAuthorityError):
+            reservations.reserve_execution(original.pk, candidate=self.value["candidate"], records=self.value["records"], observe_source=observer)
+        observer.assert_not_called()
+        self.parent.refresh_from_db()
+        self.assertEqual(len(self.parent.receipt["goal"]["child_run_history"]), 64)
+
+    def test_authenticated_usage_is_retained_when_the_proof_is_committed(self):
+        self.reserve()
+        from .website_goal_budget import COUNTERS
+        usage = {"version": 1, "run_id": str(self.child.pk), "generation": 0, "state_version": 1, **{key: 0 for key in COUNTERS}}
+        def metered(*args, **kwargs):
+            return {**self.provider(*args, **kwargs), "usage": usage, "generation": 0, "state_version": 1}
+        self.accept(provider=metered)
+        run = ContentFactoryRun.objects.get(run_id=str(self.child.pk))
+        self.assertEqual(run.result["usage"], usage)
+        self.assertEqual(run.result["state_version"], 1)
 
     def test_real_attestation_entry_commits_target_config_original_child_and_run_atomically(self):
         self.reserve()
@@ -161,7 +214,13 @@ class PublisherV4ReservationDatabaseTests(TransactionTestCase):
         self.assertFalse(state["child_receipt"]["allowed"])
         self.assertIsNone(current_ci_attestation(self.website, self.target))
         self.parent.refresh_from_db()
-        self.assertEqual(self.parent.receipt, self.initial_goal)
+        self.assert_original_goal_preserved()
+
+    def assert_original_goal_preserved(self):
+        before = self.initial_goal["goal"]
+        after = self.parent.receipt["goal"]
+        for key in ("goal_id", "scope", "consent", "started_at", "budget_used", "attempts_by_class"):
+            self.assertEqual(after[key], before[key])
 
     def test_identical_result_and_reservation_replays_do_not_refetch_or_renew_any_stamp(self):
         self.reserve(); self.accept()
@@ -266,6 +325,9 @@ class PublisherV4ReservationDatabaseTests(TransactionTestCase):
     def test_disconnect_during_provider_read_refuses_acceptance(self):
         self.race_case(lambda: WebsiteConnection.objects.filter(pk=self.website.pk).update(state="disconnected"))
 
+    def test_pause_during_provider_read_refuses_acceptance(self):
+        self.race_case(lambda: WebsiteConnection.objects.filter(pk=self.website.pk).update(state="paused"))
+
     def test_cancelled_run_during_provider_read_refuses_acceptance(self):
         self.race_case(lambda: ContentFactoryRun.objects.filter(run_id=str(self.child.pk)).update(status="cancelled"))
 
@@ -306,6 +368,18 @@ class PublisherV4ReservationDatabaseTests(TransactionTestCase):
         self.assertEqual(WebsiteConnectionOperation.objects.filter(action="publisher-original").count(), 1)
         self.assertEqual(ContentFactoryRun.objects.filter(run_id=str(self.child.pk)).count(), 1)
         self.assertEqual(self.stored()["original_state"], "completed")
+
+    def test_interleaved_current_observations_cannot_disagree_about_an_immutable_commit(self):
+        original = reservations.reserve_original(self.parent.pk, observe_source=self.observer)
+        def interleaved(request):
+            facts = self.observer(request)
+            reservations.reserve_execution(original.pk, candidate=self.value["candidate"], records=self.value["records"], observe_source=self.observer)
+            return {**facts, "source_tree_sha": "e" * 40}
+        with self.assertRaises(WebsiteAuthorityError):
+            reservations.reserve_execution(original.pk, candidate=self.value["candidate"], records=self.value["records"], observe_source=interleaved)
+        children = WebsiteConnectionOperation.objects.filter(payload__workflow="hosted_native_verification")
+        self.assertEqual(children.count(), 1)
+        self.assertEqual(children.first().payload[reservations.PENDING]["current_binding"], self.value["current_binding"])
 
     def test_committed_replay_cannot_ignore_new_consent_or_config_target_changes(self):
         self.reserve(); self.accept()

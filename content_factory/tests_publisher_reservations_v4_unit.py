@@ -8,6 +8,7 @@ from unittest.mock import Mock, patch
 from uuid import UUID
 
 from django.test import SimpleTestCase, override_settings
+from django.utils import timezone
 
 from . import native_publisher_contract_v4 as protocol
 from . import website_publisher_reservations_v4 as reservations
@@ -98,8 +99,32 @@ class PublisherV4ProfileTests(SimpleTestCase):
         with patch("content_factory.website_hosted_verification.enabled", return_value=True):
             self.assertFalse(reservations.enabled(SimpleNamespace()))
 
+    @override_settings(ARTICLES_PUBLISHING_INPUTS_V4_ENABLED=True)
+    def test_paused_disconnected_and_unknown_connections_cannot_start_or_accept_work(self):
+        with patch("content_factory.website_hosted_verification.enabled", return_value=True):
+            self.assertTrue(reservations.enabled(SimpleNamespace(state="connected")))
+            for state in ("paused", "disconnected", "revoked", None, True):
+                with self.subTest(state=state):
+                    self.assertFalse(reservations.enabled(SimpleNamespace(state=state)))
+
 
 class PublisherV4FrozenInputsTests(SimpleTestCase):
+    @override_settings(ARTICLES_WEBSITE_GOAL_BUDGETS_ENABLED=True, ARTICLES_GOAL_ACTIVE_SECONDS=1000, ARTICLES_GOAL_MODEL_USD=20)
+    def test_budget_projection_retains_original_goal_identity_and_never_turns_unknown_into_zero(self):
+        from . import website_goal as goals
+        goal = goals.new_goal("original-goal", {"connection": "original"}, now=timezone.now())
+        goal["budget_used"] = {"active_seconds": 120, "model_cost": 4}
+        projected = reservations._goal_budget(goal)
+        self.assertEqual(projected, {"version": 1, "goal_id": "original-goal", "scope_digest": goals.digest(goal["scope"]),
+            "remaining_active_seconds": 880, "remaining_model_usd": 16})
+        for field, value in (("active_seconds", 1000), ("model_cost", 20), ("model_cost", True)):
+            changed = deepcopy(goal); changed["budget_used"][field] = value
+            with self.subTest(field=field, value=value), self.assertRaises(WebsiteAuthorityError):
+                reservations._goal_budget(changed)
+        goal["usage_reports"] = {"original-child": {}}
+        goal["budget_used"]["model_cost"] = None
+        with self.assertRaises(WebsiteAuthorityError): reservations._goal_budget(goal)
+
     def test_source_observation_is_exact_closed_and_independent(self):
         value = example()[0]["current_binding"]
         self.assertEqual(reservations.source_facts(value, value["source_sha"]), value)
