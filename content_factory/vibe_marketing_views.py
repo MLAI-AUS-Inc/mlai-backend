@@ -10826,7 +10826,25 @@ def _log_terminal_repo_scan_status(run, payload):
 
 def _serialize_run_steps(run, *, compact=False):
     step_states = []
+    from .workflow_order import admitted
+    delivery = _run_mapping(_run_mapping(run.result).get("delivery_v1"))
+    order = _run_mapping(delivery.get("workflow_order"))
+    execution = order.get("execution")
+    current_keys = None
+    if (admitted(run.run_request) and set(order) == {"version", "available", "execution", "step_keys"}
+            and type(order.get("version")) is int and order["version"] == 1 and type(order.get("available")) is bool
+            and isinstance(execution, list) and len(execution) == 2
+            and all(type(value) is int and value >= 0 for value in execution)
+            and execution == _run_mapping(delivery.get("latest")).get("execution")
+            and isinstance(order.get("step_keys"), list) and len(order["step_keys"]) <= 512
+            and all(isinstance(key, str) and 1 <= len(key) <= 120 for key in order["step_keys"])
+            and len(set(order["step_keys"])) == len(order["step_keys"])):
+        # Keep prior step records as history, but only serialize this accepted
+        # execution's current map after explicit formatting admission.
+        current_keys = set(order["step_keys"])
     for step in run.steps.order_by("display_order", "id"):
+        if current_keys is not None and step.step_key not in current_keys:
+            continue
         step_states.append(
             {
                 "key": step.step_key,
