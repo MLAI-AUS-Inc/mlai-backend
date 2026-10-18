@@ -108,6 +108,17 @@ class ArticleCancellationSettlementTests(SimpleTestCase):
     def test_setup_pr_is_not_article_publication(self):
         self.assertFalse(views._run_has_external_publish_evidence(self.run))
 
+    def test_source_stop_cannot_refund_an_unresolved_publication_handoff(self):
+        from .article_publication_evidence import refund_reconciliation_reason
+        self.cancel()
+        for fields in ({"publish_handoff_pending": True}, {"publish_handoff_status": "stale"},
+                       {"publish_child_run_id": "publisher-child"}, {"promoted_publish_job_id": "publisher-child"}):
+            with self.subTest(fields=fields):
+                original = deepcopy(self.run.result)
+                self.run.result.update(fields)
+                self.assertEqual(refund_reconciliation_reason(self.run), "needs_reconciliation")
+                self.run.result = original
+
     def test_cancellation_keeps_original_proof_and_reserves_no_value_refund(self):
         original = deepcopy(self.run.run_request)
         self.cancel()

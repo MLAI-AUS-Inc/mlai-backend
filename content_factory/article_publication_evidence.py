@@ -15,6 +15,7 @@ SCOPE_FIELDS = ("website_connection_id", "connection_generation", "connection_ta
 URL_FIELDS = ("pr_url", "pull_request_url", "draft_pr_url", "draftPrUrl", "pullRequestUrl", "publish_url", "live_url")
 NUMBER_FIELDS = ("pr_number", "pull_request_number", "draft_pr_number")
 BRANCH_FIELDS = ("publish_branch", "draft_branch", "pr_branch", "branch_name")
+HANDOFF_FIELDS = ("publish_handoff_pending", "publish_handoff_status", "publish_child_run_id", "promoted_publish_job_id")
 
 
 def mapping(value):
@@ -52,6 +53,11 @@ def publication_state(run, *, result=None):
     setup_urls, setup_numbers, setup_branches = set(), set(), set()
     seen_setup = False
     for surface in _surfaces(result):
+        # The source-to-publisher POST can already have created a different run
+        # before its reply/local child arrives. Stopping this source alone says
+        # nothing about that child; only parent settlement resolves the graph.
+        if any(surface.get(key) for key in HANDOFF_FIELDS):
+            return "unknown"
         raw = surface.get("publication_evidence_v1")
         if raw is None:
             continue
