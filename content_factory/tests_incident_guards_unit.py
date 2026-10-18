@@ -519,11 +519,13 @@ class IncidentIntegratedReplays(SimpleTestCase):
         rows.extend([scan, setup])
         with patch.object(views.ContentFactoryRun.objects, "filter", return_value=rows), \
                 patch.object(views, "_get_config", return_value=SimpleNamespace(website_connection=None)), \
-                patch.object(views, "article_setup_reset_ignores_run", return_value=False):
+                patch.object(views, "article_setup_reset_ignores_run", return_value=False), \
+                patch("django.db.models.prefetch_related_objects") as prefetch:
             result = views._latest_runs_for_org(SimpleNamespace(domain="synthetic.test"), limit=6)
         self.assertEqual(len(result), 6)
         self.assertIn(scan, result)
         self.assertIn(setup, result)
+        prefetch.assert_called_once_with(result, "steps")
 
     def test_scan_write_preserves_exact_accepted_proof_and_verification_time(self):
         from . import website_connections as authority

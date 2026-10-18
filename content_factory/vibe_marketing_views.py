@@ -1603,7 +1603,7 @@ def _latest_runs_for_org(organization, limit=24, *, config=None, prefetch_feedba
         rows = rows.filter(~Q(workflow__in=REPOSITORY_WORKFLOWS)
             | Q(run_request__website_connection_id=str(connection.pk), run_request__connection_generation=connection.generation)
             | Q(run_request__delivery_mode="content_only", run_request__website_connection_id__isnull=True))
-    rows = rows.prefetch_related("steps").order_by("-updated_at")
+    rows = rows.order_by("-updated_at")
     candidates = list(rows[:max(limit * 4, 48)])
     # Current setup and scan observations must survive a busy article history.
     # Select them before applying the ordinary recent-run display window.
@@ -1616,8 +1616,11 @@ def _latest_runs_for_org(organization, limit=24, *, config=None, prefetch_feedba
     retained_ids = {run.run_id for run in retained}
     ordinary = [run for run in candidates if run.run_id not in retained_ids and not article_setup_reset_ignores_run(config, run)]
     selected_runs = sorted(retained + ordinary[:max(limit - len(retained), 0)], key=lambda run: run.updated_at, reverse=True)
+    # Prefetch only the final display window. Discarded candidates must not
+    # acquire reverse-relation cycles that retain their large result JSON.
+    from django.db.models import Prefetch, prefetch_related_objects
+    prefetch_related_objects(selected_runs, "steps")
     if prefetch_feedback:
-        from django.db.models import Prefetch, prefetch_related_objects
         prefetch_related_objects(selected_runs, Prefetch("component_comments", to_attr="_bootstrap_component_comments"))
     return selected_runs
 
@@ -3237,22 +3240,41 @@ def _serialize_article_draft(run, *, written_keys):
     }
 
 
-def _recent_article_drafts(organization, *, limit=8, scan_limit=50):
+def _article_draft_run_window(organization, *, scan_limit, loaded_runs=None):
+    """Reuse only identical request-owned versions, preserving the whole draft window."""
+    rows = ContentFactoryRun.objects.filter(domain=organization.domain, workflow__in=ARTICLE_WORKFLOWS).exclude(
+        status=ContentFactoryRunStatus.CANCELLED).order_by("-updated_at")
+    def full(query):
+        # These cards need result/request/acceptance fields, including legacy
+        # nested packages; do not replace them with an incomplete JSON allowlist.
+        return list(query.defer("verification_summary", "step_order").prefetch_related("steps"))
+    if loaded_runs is None:
+        owned = full(rows[:scan_limit])
+        return owned, owned
+    identities = list(rows.values_list("pk", "updated_at")[:scan_limit])
+    versions = dict(identities)
+    available = {run.pk: run for run in loaded_runs if getattr(run, "pk", None) in versions
+        and run.updated_at == versions[run.pk] and run.domain == organization.domain
+        and run.workflow in ARTICLE_WORKFLOWS and run.status != ContentFactoryRunStatus.CANCELLED}
+    missing = [identifier for identifier, _ in identities if identifier not in available]
+    owned = full(rows.filter(pk__in=missing)) if missing else []
+    available.update({run.pk: run for run in owned})
+    return [available[identifier] for identifier, _ in identities if identifier in available], owned
+
+
+def _recent_article_drafts(organization, *, limit=8, scan_limit=50, loaded_runs=None):
     written_keys = _written_article_identity_keys(organization)
+    runs, owned = _article_draft_run_window(organization, scan_limit=scan_limit, loaded_runs=loaded_runs)
+    try:
+        return _article_draft_cards(runs, written_keys=written_keys, limit=limit)
+    finally:
+        from .bootstrap_run_lifetime import release_projection_runs
+        release_projection_runs(owned)
+
+
+def _article_draft_cards(runs, *, written_keys, limit):
     drafts = []
     seen = set()
-    runs = list(
-        ContentFactoryRun.objects.filter(domain=organization.domain, workflow__in=ARTICLE_WORKFLOWS)
-        .exclude(status=ContentFactoryRunStatus.CANCELLED)
-        # verification_summary (can be ~tens of KB/run) and step_order are not read
-        # by _serialize_article_draft or its helpers; defer them so the draft scan
-        # (up to scan_limit rows) doesn't haul those blobs out of Postgres.
-        # NOTE: result / run_request / acceptance_summary ARE read here, so they
-        # must stay loaded to avoid a per-row deferred-field query (N+1).
-        .defer("verification_summary", "step_order")
-        .prefetch_related("steps")
-        .order_by("-updated_at")[:scan_limit]
-    )
     # Collapse every attempt at a topic into one card. Edits, failed publishes,
     # restarts (which deliberately start a fresh run with no source_run_id) and
     # independent regenerations of the same keyword are one job, keyed by the topic
@@ -11016,7 +11038,7 @@ def _nested_run_result_value(result, *keys):
 
 def _serialize_run(
     run, *, context=None, latest_runs=None, checks=None, mode="full",
-    topic_candidates=None, precomputed_article_setup_state=None, config=None,
+    topic_candidates=None, precomputed_article_setup_state=None, config=None, include_workflow_progress=True,
 ):
     from .setup_status_projection import terminal_setup_projection
     run = terminal_setup_projection(_setup_pr_creation_failure_view(run))
@@ -11137,7 +11159,7 @@ def _serialize_run(
             **({"contentIsland": content_island, "content_island": content_island} if content_island else {}),
             "workflowProgress": _workflow_progress(
                 context=context, run=run, latest_runs=latest_runs, checks=checks, topic_candidates=topic_candidates, config=config
-            ),
+            ) if include_workflow_progress else None,
             "result": _strip_missing_setup_run_refs(_compact_result_for_run(run)),
             **reliability_presentation(result, status=run.status, workflow=run.workflow,
                                        current_step=run.current_step, resume_available=run.resume_available,
@@ -11216,7 +11238,7 @@ def _serialize_run(
         "componentFeedback": _component_feedback_from_run(run),
         "workflowProgress": _workflow_progress(
             context=context, run=run, latest_runs=latest_runs, checks=checks, topic_candidates=topic_candidates, config=config
-        ),
+        ) if include_workflow_progress else None,
         "result": _strip_missing_setup_run_refs(response_result),
         **reliability_presentation(result, status=run.status, workflow=run.workflow,
                                    current_step=run.current_step, resume_available=run.resume_available,
@@ -11613,22 +11635,29 @@ def _serialize_bootstrap(context, request=None, *, view="summary"):
             payload = None
 
     runs = _latest_runs_for_org(context.organization, config=config, prefetch_feedback=payload is None)
-    capabilities = None
-    if payload is None:
-        payload = _compute_bootstrap_payload(context, request=request, view=view, config=config, latest_runs=runs)
-        capabilities = payload.get("articleCapabilities")
-        if cache_key is not None:
-            try:
-                cache.set(cache_key, payload, ttl)
-            except Exception:
-                logger.exception(
-                    "vibe_bootstrap_cache_set_failed org_id=%s",
-                    getattr(context.organization, "id", None),
-                )
+    try:
+        capabilities = None
+        if payload is None:
+            # The live overlay projects progress once for root + displayed runs,
+            # after current capabilities. Do not compute the same graph here too.
+            payload = _compute_bootstrap_payload(context, request=request, view=view, config=config,
+                latest_runs=runs, defer_workflow_progress=True)
+            capabilities = payload.get("articleCapabilities")
+            if cache_key is not None:
+                try:
+                    cache.set(cache_key, payload, ttl)
+                except Exception:
+                    logger.exception(
+                        "vibe_bootstrap_cache_set_failed org_id=%s",
+                        getattr(context.organization, "id", None),
+                    )
 
-    # Per-user / per-request fields are always recomputed; never served from cache.
-    return _overlay_live_bootstrap_fields(payload, context=context, request=request, config=config,
-        latest_runs=runs, capabilities=capabilities)
+        # Per-user / per-request fields are always recomputed; never served from cache.
+        return _overlay_live_bootstrap_fields(payload, context=context, request=request, config=config,
+            latest_runs=runs, capabilities=capabilities)
+    finally:
+        from .bootstrap_run_lifetime import release_projection_runs
+        release_projection_runs(runs)
 
 
 _BOOTSTRAP_WORKFLOW_RUN_FIELDS = (
@@ -11645,7 +11674,7 @@ def _bootstrap_workflow_run_ref(serialized_run):
     return {key: serialized_run.get(key) for key in _BOOTSTRAP_WORKFLOW_RUN_FIELDS}
 
 
-def _compute_bootstrap_payload(context, request=None, *, view="summary", config=None, latest_runs=None):
+def _compute_bootstrap_payload(context, request=None, *, view="summary", config=None, latest_runs=None, defer_workflow_progress=False):
     compact = view == "summary"
     if config is None:
         config = _get_config(context.organization)
@@ -11708,6 +11737,7 @@ def _compute_bootstrap_payload(context, request=None, *, view="summary", config=
         _serialize_run(
             run, context=context, latest_runs=latest_runs, checks=checks,
             mode=run_mode, topic_candidates=topic_candidates, config=config,
+            include_workflow_progress=not defer_workflow_progress,
             # Only scan/setup runs can change which scan or setup is projected.
             # Other runs are already in latest_runs and share this computed state.
             precomputed_article_setup_state=(
@@ -11784,7 +11814,7 @@ def _compute_bootstrap_payload(context, request=None, *, view="summary", config=
         **({"islandGraph": island_graph} if island_graph is not None else {}),
         "hiddenTopicCandidates": hidden_topic_candidates,
         "declinedTopicFeedback": [serialize_topic_feedback(item) for item in declined_topic_feedback],
-        "draftArticles": _recent_article_drafts(context.organization, scan_limit=20 if compact else 50),
+        "draftArticles": _recent_article_drafts(context.organization, scan_limit=20 if compact else 50, loaded_runs=latest_runs),
         "writtenTopics": _recent_written_topics(context.organization),
         "publishEvidence": _publish_evidence_from_run(latest_article_run, compact=compact),
         "guidedSteps": guided_steps,
@@ -11796,7 +11826,7 @@ def _compute_bootstrap_payload(context, request=None, *, view="summary", config=
             checks=checks,
             topic_candidates=topic_candidates,
             config=config,
-        ),
+        ) if not defer_workflow_progress else None,
         "hasCompletedArticleFlow": has_completed_article_flow,
         "startPageMode": "topic_picker" if topic_picker_ready else "first_article_setup",
     }

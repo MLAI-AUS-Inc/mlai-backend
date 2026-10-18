@@ -121,6 +121,7 @@ class BootstrapReadPathTests(SimpleTestCase):
         latest.assert_called_once()
         self.assertIs(compute.call_args.kwargs["config"], self.config)
         self.assertIs(compute.call_args.kwargs["latest_runs"], runs)
+        self.assertTrue(compute.call_args.kwargs["defer_workflow_progress"])
         self.assertIs(overlay.call_args.kwargs["config"], self.config)
         self.assertIs(overlay.call_args.kwargs["latest_runs"], runs)
         self.assertIs(overlay.call_args.kwargs["capabilities"], capabilities)
