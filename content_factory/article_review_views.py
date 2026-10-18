@@ -423,6 +423,8 @@ class VibeMarketingArticleReviewView(views.VibeMarketingRunCommentsMixin, APIVie
         if not isinstance(data, dict):
             return Response({"detail": "Use a JSON review update."}, status=400)
         if data.get("action") in {"applyUpdate", "applyReview"}:
+            from .website_review_action_audit import observe_review
+            observe_review(request, context, run, data)
             return self._apply_update(request, context, run, data)
         latest = views._latest_review_ready_component_revision(run, context)
         if latest is not None:
@@ -431,6 +433,8 @@ class VibeMarketingArticleReviewView(views.VibeMarketingRunCommentsMixin, APIVie
         payload = dict(request.data)
         if payload.get("action") not in {"editText", "editTextBatch", "regenerateImage", "chooseImage", "refresh", "undo", "discardImage", "allowAI"}:
             return Response({"detail": "Unknown article operation."}, status=400)
+        from .website_review_action_audit import observe_review
+        observe_review(request, context, run, payload)
         if payload.get("action") == "regenerateImage":
             billing_error = views._reuse_roo_points_authorization_for_article_job(
                 run=run, payload={}, domain=context.organization.domain,

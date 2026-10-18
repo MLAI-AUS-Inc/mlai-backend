@@ -349,6 +349,9 @@ def operation_summary(op):
         if run and run.status in {"completed", "failed", "cancelled", "denied", "blocked"}:
             state = workflow_operation_state(run)
     receipt = prepare_receipt(op) if op.action == "prepare" else op.receipt
+    if op.action == "prepare":
+        from .website_goal_audit import public_receipt
+        receipt = public_receipt(op, receipt)
     next_attempt = getattr(op, "next_attempt_at", None)
     if op.action == "prepare" and state not in {"pending", "running"}:
         next_attempt = None

@@ -64,6 +64,8 @@ def start_goal(current, *, company_id, user, retry, target, now, force_successor
         if selected is not None:
             enrolled_goal["consent"] = setup_consent.seal(enrolled_goal, selected, user_id=user.pk, now=now)
         latest.receipt = {**latest.receipt, "goal": enrolled_goal}
+        from .website_goal_audit import seed
+        seed(latest, from_start=False, now=now)
         if latest.next_attempt_at is None and latest.state in {"pending", "running"}:
             latest.next_attempt_at = now
         latest.save(update_fields=["receipt", "next_attempt_at", "updated_at"])
@@ -92,6 +94,8 @@ def start_goal(current, *, company_id, user, retry, target, now, force_successor
         goal["predecessor_goal_id"] = predecessor
         goal["current_source_sha"] = source
         op.receipt = {**op.receipt, "goal": goal}
+        from .website_goal_audit import seed
+        seed(op, from_start=True, now=now)
         op.save(update_fields=["receipt", "updated_at"])
     elif not goals.valid_goal(goals.mapping(op.receipt).get("goal"), scope):
         raise WebsiteAuthorityError("website_operation_changed", "The saved website goal has changed. Refresh its current status.")

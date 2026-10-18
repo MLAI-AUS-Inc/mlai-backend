@@ -25,7 +25,7 @@ subsystem-specific contracts and runbooks.
 
 - [Interrupted article publication observation](articles-publication-observation.md) — bounded positive GitHub evidence, exact original intent and preserved settlement obligations
 - [Original queued article admission](articles-dispatch-admission.md) — original target/source checks before retrying paid work and held legacy identities
-
+- [R3 original goal audit](articles-r3-original-goal-audit-2026-10-18.md) — persisted partial owner observations, public unknown counts and remaining external coverage
 - [F2 bootstrap summary and rendering](articles-f2-bootstrap-summary-2026-10-16.md) — default compact reads, explicit full details, and remaining latency/overlay validation
 - [F3 recorded usage and operational alerts](articles-f3-cost-accounting-2026-10-16.md) — original-run accounting, company coverage and durable budget/stall/repair notices
 - [G6 preview cleanup deadline](articles-g6-preview-cleanup-2026-10-16.md) — durable 24-hour lifecycle limit and one scoped operational incident
