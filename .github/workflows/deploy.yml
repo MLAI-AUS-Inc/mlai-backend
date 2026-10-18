@@ -351,6 +351,9 @@ jobs:
           tests.test_vibe_marketing_component_comments.VibeMarketingComponentCommentTests.test_merge_setup_pr_marks_setup_merged_and_daily_ready \
           --noinput --verbosity=2 --failfast
 
+    - name: Run Pulse sync persistence and response tests
+      run: python manage.py test content_factory.tests_pulse_sync --verbosity 2
+
     - name: Run targeted Django tests
       run: |
         python manage.py test \
@@ -416,7 +419,7 @@ jobs:
           tests.test_new_endpoints.EndpointTests \
           tests.test_new_endpoints.ContentFactoryCallbackTests \
           tests.test_content_factory_callback_idempotency \
-          content_factory.tests_pulse_sync \
+          \
           tests.test_content_factory_reconciliation \
           tests.test_content_factory_status_contract \
           content_factory.tests_section_issues_unit \
