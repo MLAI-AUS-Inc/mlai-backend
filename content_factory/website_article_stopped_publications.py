@@ -120,7 +120,8 @@ def _row(connection, identifier, *, lock=False, scope=None):
         generation=scope["connection_generation"] if scope else connection.generation, action=ACTION).first()
 
 
-def _valid_row(row, snapshot):
+def validate_snapshot(snapshot):
+    """Validate the closed read snapshot without granting any operation purpose."""
     from .website_article_source_fence import _scope
     fields = {"stop_request_digest", "source_fence_id", "goal_operation_id", "read_scope", "current_source_sha",
         "stop_receipt_digest", "inventory", "provider"}
@@ -148,6 +149,8 @@ def _valid_row(row, snapshot):
         valid = False
     if not valid:
         _deny()
+def _valid_row(row, snapshot):
+    validate_snapshot(snapshot)
     if (row is None or row.action != ACTION or row.payload != snapshot or row.state not in {"running", "completed"}
             or str(row.connection_id) != snapshot["read_scope"]["connection_id"]
             or row.generation != snapshot["read_scope"]["connection_generation"]
