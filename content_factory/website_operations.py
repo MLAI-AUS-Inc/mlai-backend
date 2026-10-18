@@ -109,7 +109,8 @@ def validate_operation(connection, payload, *, worker_cleanup=False, restoration
     op = connection.operations.filter(pk=identifier).first()
     if op is None:
         raise WebsiteAuthorityError("website_operation_changed", "The operation does not belong to this website.")
-    if getattr(op, "action", None) in {"article-source-fence", "article-source-stop", "article-source-history", "article-credential-inventory", "article-credential"}:
+    from .website_article_credentials import PRIVATE_ACTIONS
+    if getattr(op, "action", None) in PRIVATE_ACTIONS:
         raise WebsiteAuthorityError("website_operation_changed", "A private article stop cannot authorize a generic operation.")
     if "article_source_refresh_inspection_only" in op.payload or op.payload.get("workflow") == "article_source_refresh_inspect":
         raise WebsiteAuthorityError("website_operation_changed", "The private article inspection cannot authorize a generic operation.")

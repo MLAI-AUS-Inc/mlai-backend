@@ -302,8 +302,8 @@ PR HTTP or token retirement. The former fake-context manual-merge test moves to 
 canonical guard/paid-ledger/broker fixture, preserving its exact owned-PR, foreign
 head, read-only and revoke assertions while adding race/unknown-outcome checks.
 
-This is current execution observation, not the separate historical publication
-reconciliation required after a source fence. Other direct GitHub issuers and
+This is current execution observation. The separate stopped-publication purpose
+below adds historical observations after a source fence. Other direct GitHub issuers and
 legacy/unregistered task/resource coverage remain outstanding. No complete quiet,
 old approval carry, replacement execution, merge or deployment authority follows
 from these read or revocation observations.
@@ -330,3 +330,50 @@ checks 874 production emissions and the read-only model check reports no changes
 The real DB fixture additionally checks version-aware draft-row reuse; database
 and updated cold endpoint timing remain remote-only. All rollout defaults and
 contract/transport/example bytes remain unchanged; the work stays draft-only.
+
+## Known publication reads after source stopping
+
+The actual prepare controller now follows a completed editorial history seal
+with `website_article_stopped_publications.advance`. This separate private
+`article-source-publication-read` purpose retains the original paid stop cause,
+current read scope/source/provider identity, exact original run requests and a
+bounded snapshot of captured backend mutation/result references. It rechecks
+the original owner/company/spend/refund, cause, snapshot, private lease and exact
+prepare claim before mint, before each provider GET and before receipt commit.
+The generic old workflow remains denied. Stopped children stay stopped, and no
+old approval or source/execution role is rebound.
+
+Each attempt records a durable credential reservation before provider HTTP.
+The returned actual expiry and possible use are recorded before any GET. The
+bearer stays local and its exact credential is retired in `finally`. Retirement
+metadata targets the originally recorded connection generation, including after
+owner/flag/generation revocation. A lost mint reply retains an unknown outcome;
+uncertain DELETEs retain the actual expiry. No cache/lease loss invents a revoke.
+Process death before retirement can therefore leave a known credential until
+its actual expiry, or an unresolved unknown mint. Those facts block any future
+claim of complete quiet; this reader alone cannot close that inventory.
+
+At most 32 mutations and 16 PR references are read per snapshot, with at most
+32 private attempts per original cause, a 120-second lease, a 60-second provider
+read deadline and five-minute observation reuse. Changed references can get a
+distinct fresh attempt after lease expiry; the previous observation cannot save
+under its replaced claim. An empty known-reference set mints no token and still
+does not prove absence. Metadata names its scope `captured_backend_references`
+and always fixes `quiet`, `inventory_complete`, `effect_authority` and
+`approval_carried` to false. Closed cached validation excludes private provider
+fields and forged ownership/grant facts. Unknown worker references, concurrent
+effects, external jobs, auto-merge cancellation and complete task/model/token
+coverage remain outstanding. A merged PR observation is not a live article or
+permission for a new execution.
+
+Validation passes 1,933 combined strict no-database/no-network checks over 142
+explicit labels, followed by 113 focused checks including two subsequent cache
+validation cases. The controller regression fails against the preceding actual
+stop implementation and passes after restoration. The audit checks 875 production
+emissions, all 614 test modules are fully assigned, and the read-only model check
+reports no changes. Existing disposable database CI additionally covers private
+scheduler exclusion and a new original-generation settlement/changed-snapshot
+case; no local database or migration is run. At b45177e the remote complete
+bootstrap budget step passes; full CI and the exact timing log remain pending.
+No rollout defaults, contract/transport/example bytes or immutable producer pin
+change. This remains draft-only and cannot make the full one-shot goal complete.

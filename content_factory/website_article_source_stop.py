@@ -1,8 +1,9 @@
 """Durable private source-stop outbox, advanced before any new goal effects.
 
 This purpose only removes old effects and records bounded worker observations.
-Inventory, external-resource/token reconciliation and historical reads remain
-separate prerequisites. A local stop acknowledgement never means worker quiet.
+Editorial history and known-publication reads use separate private purposes.
+Full inventory and external-resource/task/model reconciliation remain separate
+prerequisites. A local stop acknowledgement never means worker quiet.
 """
 from copy import deepcopy
 from datetime import timedelta
@@ -249,7 +250,10 @@ def advance(parent, config, *, now):
             stop_goal(parent, parent.receipt["goal"], reason=reason, now=now)
             return True
         from .website_article_source_history import advance as seal_original_history
-        seal_original_history(parent, config, now=now)
+        sealed = seal_original_history(parent, config, now=now)
+        if sealed is not None:
+            from .website_article_stopped_publications import advance as observe_stopped_publications
+            observe_stopped_publications(parent, config, now=now)
         _wait(parent, now, "Reconciling outstanding article work after preserving the original editorial content.")
         return True
 

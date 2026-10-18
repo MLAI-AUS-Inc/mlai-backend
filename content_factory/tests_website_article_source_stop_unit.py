@@ -40,6 +40,7 @@ class ArticleSourceStopTests(SimpleTestCase):
         self.fixture = fixtures.ArticleSourceFenceTests("runTest")
         self.addCleanup(self.fixture.doCleanups)
         self.fixture.setUp()
+        self.fixture.connection.repository_id = int(self.fixture.connection.repository_id)
         self.fence = self.fixture.record()
         self.fixture.rebound_parent()
         self.parent, self.config, self.now = self.fixture.parent, self.fixture.config, self.fixture.now
@@ -58,7 +59,7 @@ class ArticleSourceStopTests(SimpleTestCase):
         self.cached = {}
         original_query = WebsiteConnectionOperation.objects.select_for_update()
         def filtered(**fields):
-            if fields.get("action") in {inventory.TOKEN_ACTION, inventory.INVENTORY_ACTION}:
+            if fields.get("action") in {inventory.TOKEN_ACTION, inventory.INVENTORY_ACTION, "article-source-publication-read"}:
                 return self.credential_rows.filter(**fields)
             return original_query.filter(**fields)
         query = SimpleNamespace(filter=filtered)
@@ -72,6 +73,8 @@ class ArticleSourceStopTests(SimpleTestCase):
         self.stack.enter_context(patch.object(broker.cache, "set", side_effect=lambda key, value, **kw: self.cached.__setitem__(key, value)))
         self.stack.enter_context(patch.object(broker.cache, "delete", side_effect=lambda key: self.cached.pop(key, None)))
         self.token_delete = self.stack.enter_context(patch("integrations.http_client.delete", side_effect=AssertionError("No unseeded provider token work")))
+        # Empty original mutation inventory is an ORM seam, never a quiet proof.
+        self.stack.enter_context(patch("content_factory.website_article_stopped_publications._mutation_rows", return_value=[]))
 
     def worker(self, method, url, *, body, **kwargs):
         self.assertEqual(self.fixture.fixture.depth, 0, "No site lock over worker HTTP")
