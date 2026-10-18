@@ -362,8 +362,8 @@ does not prove absence. Metadata names its scope `captured_backend_references`
 and always fixes `quiet`, `inventory_complete`, `effect_authority` and
 `approval_carried` to false. Closed cached validation excludes private provider
 fields and forged ownership/grant facts. Unknown worker references, concurrent
-effects, external jobs, auto-merge cancellation and complete task/model/token
-coverage remain outstanding. A merged PR observation is not a live article or
+effects, external jobs, merge-queue effects and complete task/model/token
+coverage remain outstanding. Owned PR auto-merge withdrawal is implemented below. A merged PR observation is not a live article or
 permission for a new execution.
 
 Validation passes 1,933 combined strict no-database/no-network checks over 142
@@ -373,7 +373,25 @@ stop implementation and passes after restoration. The audit checks 875 productio
 emissions, all 614 test modules are fully assigned, and the read-only model check
 reports no changes. Existing disposable database CI additionally covers private
 scheduler exclusion and a new original-generation settlement/changed-snapshot
-case; no local database or migration is run. At b45177e the remote complete
-bootstrap budget step passes; full CI and the exact timing log remain pending.
+case; no local database or migration is run. The baseline at 258fc77 passed full remote CI 39081905268: the complete bootstrap measured 499.91 ms cold and 245,558 bytes under unchanged 1,000 ms/300 KB limits. The new merge-stop changes require their own full CI result.
 No rollout defaults, contract/transport/example bytes or immutable producer pin
 change. This remains draft-only and cannot make the full one-shot goal complete.
+
+### Original PR auto-merge withdrawal under a separate stop purpose
+
+The existing stopped-publication reader preserves read-only authority. A separate `article-source-merge-stop` operation now removes queued auto-merge only from an original PR with an applied backend mutation matching its current immutable repository, head SHA and branch. Mirrored URLs alone remain unowned. The original paid root, owner/company, spend/refund, causal source fence, current read/provider scope and prepare claim are rechecked before mint, every provider request and committing a result. Generic fenced workflows remain permanently denied.
+
+Reserve a durable, separately leased attempt before token mint. Its payload freezes the original snapshot and exact target; its credential and possible mutation outcomes remain separate. A private installation-token profile requests Contents read and Pull requests write for one immutable repository, checks existing App/installation grants and rechecks the purpose immediately before mint. It is uncached and unavailable through generic website-token endpoints. Retire the local bearer in `finally`, recording actual expiry or uncertainty against the original generation even after owner/flag revocation. One PR is handled per pass, with a bounded attempt count and no site lock across HTTP.
+
+Fresh REST repository/PR identity is checked before the hard-coded GraphQL disable operation; record possible delivery before POST. A fresh PR GET afterward establishes the observed result. A lost reply is reconciled by a later attempt, never by replaying article generation or treating clientMutationId as server deduplication. Closed/merged/changed heads are observations, not approval or rollback. Concurrent provider edits can race the final read: GraphQL's disable input has no head-SHA compare-and-swap. This operation only removes the old PR's merge permission and retains the PR; it never enables, merges or closes a PR, changes a branch, or authorizes replacement work. Results keep quiet/inventory/effect/approval grants false.
+
+Provider references: [GraphQL disable mutation and input](https://docs.github.com/en/graphql/reference/pulls#disablepullrequestautomerge), [installation token repository and permission scopes](https://docs.github.com/en/rest/apps/apps#create-an-installation-access-token-for-an-app). No provider/customer action is part of this implementation validation. Tests use strict no-database/no-network seams; any PostgreSQL acceptance remains remote disposable CI only. Rollout flags remain off.
+
+
+Implementation evidence: the real source-stop controller now advances the private reader and then this distinct stop purpose after the editorial seal. A pass handles one eligible original PR, with at most 32 attempts per cause and a 180-second private lease. The token issuer rechecks the purpose after its App/installation grant GETs, immediately before token POST. It refuses cached/private-profile requests without that callback, and refuses/revokes returned credentials outside the exact requested permissions. Generic broker access to this profile stays denied. Private metadata remains excluded from generic scheduling and the owner's latest-operation projection.
+
+A completed attempt invalidates the latest publication-read cache pointer, preserving the immutable original read operation. The next pass obtains current provider state rather than displaying the cached pre-stop pending flag. A lost mutation reply retains its possible-delivery record; a subsequent attempt reads the original PR before deciding whether another disable is necessary. Confirmed subjects are not disabled again under the same stop cause. Actual expiry and retirement metadata target the recorded original generation after revocation, including response-close failure; they do not manufacture an observation or reopen the workflow.
+
+Validation: 1,992 strict no-database/no-network checks across 146 explicit labels pass in 65.397 seconds. Earlier focused validation passed 84 checks before the final cache-refresh case. The offline audit reports 876 production emissions and valid vendored digests; all 616 test modules are assigned, with no omissions. Read-only model checks report no changes. The preceding real source-stop controller fails the new controller-chain regression with `AssertionError: 0 != 1`; exact source was restored atomically. Evidence: `/tmp/articles-d2-stopped-automerge-before.log`, `/tmp/articles-d2-stopped-automerge-combined-final.log`, `/tmp/articles-d2-stopped-automerge-final-focused.log`, `/tmp/articles-d2-stopped-automerge-audit.log`, `/tmp/articles-d2-stopped-automerge-assignment.log`, `/tmp/articles-d2-stopped-automerge-models.log`. Remote-only PostgreSQL coverage includes original-generation settlement and the shared private-scheduler exclusion loop. No local database, migration, service, real provider mutation or customer action was run. Live provider acceptance and the new full CI remain unproven at this source checkpoint.
+
+The full D2 execution flow and full one-shot plan are not complete. Unattributed worker PR references, merge-queue effects, uncertain creation/provider outcomes, comprehensive channel birth/runtime coverage, other direct token issuers and aggregate goal budgeting still need reconciliation or implementation. Replacement requires a separately admitted execution and dispatch idempotency under the original billing identity, plus fresh source/build/preview/review/merge/live proofs. Quiet/inventory/effect/approval grants remain false; rollout defaults and immutable producer pins are unchanged.

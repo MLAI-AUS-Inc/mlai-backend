@@ -253,7 +253,9 @@ def advance(parent, config, *, now):
         sealed = seal_original_history(parent, config, now=now)
         if sealed is not None:
             from .website_article_stopped_publications import advance as observe_stopped_publications
-            observe_stopped_publications(parent, config, now=now)
+            observation = observe_stopped_publications(parent, config, now=now)
+            from .website_article_stopped_automerge import advance as stop_original_auto_merge
+            stop_original_auto_merge(parent, config, observation, now=now)
         _wait(parent, now, "Reconciling outstanding article work after preserving the original editorial content.")
         return True
 

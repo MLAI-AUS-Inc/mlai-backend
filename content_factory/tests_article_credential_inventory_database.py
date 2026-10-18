@@ -46,6 +46,38 @@ class ArticleCredentialInventoryDatabaseTests(WebsiteDatabaseFixture, TestCase):
         self.assertIsNone(row.receipt["observation"])
         self.assertEqual(row.state, "running")  # retirement never fabricates a publication observation
 
+    def test_stopped_merge_credential_settles_original_generation_without_fabricating_mutation(self):
+        from copy import deepcopy
+        from datetime import timedelta
+        from uuid import uuid4
+        from django.utils import timezone
+        from . import website_goal as goals, website_article_stopped_automerge as merges
+        from .website_contract import WebsiteAuthorityError
+        original_generation = self.website.generation
+        snapshot = {"stop_request_digest": "b" * 64, "source_fence_id": str(uuid4()), "goal_operation_id": str(uuid4()),
+            "read_scope": goals.scope_for(self.website, "9"), "current_source_sha": "a" * 40, "stop_receipt_digest": "c" * 64,
+            "inventory": {"mutations": {"d" * 64: {"run_id": "original-run", "status": "applied", "pr_number": 42,
+                "branch": "cf/article-old", "head_sha": "d" * 40, "base_sha": "a" * 40, "files_sha256": "e" * 64}}, "pulls": [42]},
+            "provider": {"repository": self.website.github_repo, "repository_id": self.website.repository_id,
+                "installation_id": str(self.website.installation_id), "branch": self.website.branch}}
+        payload = {"snapshot": snapshot, "target": {"number": 42, "head_branch": "cf/article-old", "head_sha": "d" * 40, "mutations": ["d" * 64]}}
+        row = WebsiteConnectionOperation.objects.create(connection=self.website, generation=original_generation,
+            action=merges.ACTION, state="running", idempotency_key="stopped-merge-settlement", payload=payload,
+            receipt={"schema_version": 1, "result": None, "mutation": {"state": "not_attempted", "node_id": None, "request_id": None},
+                "credential": {"schema_version": 1, "mint_state": "issued", "expires_at": (timezone.now()+timedelta(minutes=20)).isoformat(),
+                    "delivery_possible": True, "revocation_state": "not_attempted", "revocation_attempts": 0}})
+        self.website.generation += 1; self.website.state = "revoked"
+        self.website.save(update_fields=["generation", "state"])
+        changed = deepcopy(payload); changed["target"]["head_sha"] = "f" * 40
+        with self.assertRaises(WebsiteAuthorityError): merges._credential(str(row.pk), changed, revocation_state="confirmed")
+        with self.settings(ARTICLES_ARTICLE_SOURCE_REFRESH_ENABLED=False):
+            merges._credential(str(row.pk), payload, revocation_state="confirmed", revocation_attempts=1)
+        row.refresh_from_db()
+        self.assertEqual(row.generation, original_generation); self.assertEqual(row.payload, payload)
+        self.assertEqual(row.receipt["credential"]["revocation_state"], "confirmed")
+        self.assertEqual(row.receipt["mutation"]["state"], "not_attempted"); self.assertIsNone(row.receipt["result"])
+        self.assertEqual(row.state, "running")
+
     def test_pending_private_metadata_never_falls_into_legacy_cleanup_scheduler(self):
         original = []
         for action in PRIVATE_ACTIONS:

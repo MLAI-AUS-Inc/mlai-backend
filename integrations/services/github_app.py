@@ -1,7 +1,7 @@
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone as datetime_timezone
-from typing import Optional
+from typing import Callable, Optional
 
 import jwt
 from django.conf import settings
@@ -171,6 +171,8 @@ def _profile_grant_permissions(payload, *, profile) -> dict[str, str]:
     repository_modes = {"write"} if profile == "workflow_files" else {"read", "write"}
     if any(permissions.get(key) not in repository_modes for key in ("contents", "pull_requests")):
         raise GitHubInstallationAccessRequired("The selected GitHub installation lacks the required repository permissions.")
+    if profile == "pull_request_control" and permissions.get("pull_requests") != "write":
+        raise GitHubInstallationAccessRequired("The selected installation cannot withdraw pull-request auto-merge.")
     if profile == "workflow_files" and permissions.get("workflows") != "write":
         raise GitHubWorkflowPermissionRequired(WORKFLOW_PERMISSION_DETAIL)
     if profile == "ci_evidence" and any(permissions.get(key) not in {"read", "write"} for key in ("checks", "statuses")):
@@ -179,7 +181,7 @@ def _profile_grant_permissions(payload, *, profile) -> dict[str, str]:
 
 
 def _credential_permissions_match(permissions, *, mode, profile) -> bool:
-    required = {"contents": mode, "pull_requests": mode}
+    required = {"contents": "read" if profile == "pull_request_control" else mode, "pull_requests": mode}
     if profile == "workflow_files":
         required["workflows"] = "write"
     elif profile == "ci_evidence":
@@ -239,8 +241,13 @@ def create_installation_access_token(
     use_cache: bool = True,
     repository_id: Optional[int] = None,
     permission_profile: str = "repository",
+    before_issue: Optional[Callable[[], None]] = None,
 ) -> GitHubInstallationToken:
-    """Mint a repository token, preferring immutable identity when supplied."""
+    """Mint one repository token, preferring immutable identity.
+
+    Private PR control calls before_issue after grant lookup; the caller must
+    raise there if its original stopping purpose no longer permits issuance.
+    """
     normalized_installation_id = str(installation_id or "").strip()
     normalized_repository = str(repository or "").strip()
     if not normalized_installation_id:
@@ -248,12 +255,15 @@ def create_installation_access_token(
     if not normalized_repository or "/" not in normalized_repository:
         raise GitHubAppTokenError("GitHub repository must be owner/repo.")
 
-    if not isinstance(permission_profile, str) or permission_profile not in {"repository", "workflow_files", "ci_evidence"}:
+    if not isinstance(permission_profile, str) or permission_profile not in {"repository", "workflow_files", "ci_evidence", "pull_request_control"}:
         raise GitHubAppTokenError("Unknown repository permission profile.")
     if permission_profile == "workflow_files" and (permission_mode != "write" or repository_id is None):
         raise GitHubAppTokenError("Workflow credentials require an immutable repository and explicit write mode.")
     if permission_profile == "ci_evidence" and (permission_mode != "read" or repository_id is None):
         raise GitHubAppTokenError("CI evidence credentials require an immutable repository and explicit read mode.")
+    if permission_profile == "pull_request_control" and (permission_mode != "write" or repository_id is None
+            or use_cache is not False or not callable(before_issue)):
+        raise GitHubAppTokenError("Pull-request control requires an immutable repository, uncached write mode and a current-purpose check.")
     mode = "read" if str(permission_mode or "").strip().lower() == "read" else "write"
     key = _cache_key(installation_id=normalized_installation_id, repository=normalized_repository,
                      permission_mode=mode, permission_profile=permission_profile)
@@ -265,6 +275,8 @@ def create_installation_access_token(
         require_installation_workflow_permissions(normalized_installation_id)
     elif permission_profile == "ci_evidence":
         require_installation_ci_evidence_permissions(normalized_installation_id)
+    if permission_profile == "pull_request_control":
+        _require_installation_profile_permissions(normalized_installation_id, profile=permission_profile)
     if use_cache:
         cached = cache.get(key)
         if isinstance(cached, dict) and cached.get("github_token"):
@@ -303,6 +315,9 @@ def create_installation_access_token(
         body["permissions"]["workflows"] = "write"
     elif permission_profile == "ci_evidence":
         body["permissions"].update(checks="read", statuses="read")
+    if permission_profile == "pull_request_control":
+        body["permissions"]["contents"] = "read"
+        before_issue()
     response = http_requests.post(
         f"https://api.github.com/app/installations/{normalized_installation_id}/access_tokens",
         headers={
@@ -314,9 +329,9 @@ def create_installation_access_token(
         timeout=(3, 20),
     )
     if response.status_code not in {200, 201}:
-        if (permission_profile in {"workflow_files", "ci_evidence"} or _failure_taxonomy_active()) and _temporary_permission_failure(response):
+        if (permission_profile in {"workflow_files", "ci_evidence", "pull_request_control"} or _failure_taxonomy_active()) and _temporary_permission_failure(response):
             raise GitHubPermissionLookupUnavailable("GitHub credential service is temporarily unavailable.")
-        if permission_profile in {"workflow_files", "ci_evidence"}:
+        if permission_profile in {"workflow_files", "ci_evidence", "pull_request_control"}:
             if _temporary_permission_failure(response):
                 raise GitHubPermissionLookupUnavailable("GitHub permission evidence is temporarily unavailable.")
             # A 403 alone cannot prove a missing workflow grant. Re-read the
@@ -351,7 +366,7 @@ def create_installation_access_token(
         raise GitHubAppTokenError("GitHub App installation token response did not include a token.")
     expires_at = _parse_expires_at(payload.get("expires_at"))
     permissions = _normalize_permissions(payload.get("permissions"))
-    if permission_profile in {"workflow_files", "ci_evidence"} and not _credential_permissions_match(permissions, mode=mode, profile=permission_profile):
+    if permission_profile in {"workflow_files", "ci_evidence", "pull_request_control"} and not _credential_permissions_match(permissions, mode=mode, profile=permission_profile):
         # A narrowed or raced provider grant must never escape as a usable token.
         try:
             http_requests.delete("https://api.github.com/installation/token",

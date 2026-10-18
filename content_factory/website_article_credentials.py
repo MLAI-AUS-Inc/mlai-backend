@@ -19,7 +19,7 @@ from .website_contract import WebsiteAuthorityError, evidence_digest, SHA_PATTER
 MARKER = "article_credential_inventory_v1"
 INVENTORY_ACTION = "article-credential-inventory"
 TOKEN_ACTION = "article-credential"
-PRIVATE_ACTIONS = ("article-source-fence", "article-source-stop", "article-source-history", "article-source-publication-read", INVENTORY_ACTION, TOKEN_ACTION)
+PRIVATE_ACTIONS = ("article-source-fence", "article-source-stop", "article-source-history", "article-source-publication-read", "article-source-merge-stop", INVENTORY_ACTION, TOKEN_ACTION)
 MAX_TOKENS = 512
 SOURCE_PAGE_SIZE = 2
 _current_operation = ContextVar("website_credential_operation", default=None)
