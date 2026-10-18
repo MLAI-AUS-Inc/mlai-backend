@@ -195,6 +195,21 @@ class ReportingCohortCanaries(TestCase):
         self.assertEqual(run.result["update_candidates"][0]["founder_status"], "approved")
         self.assertEqual(run.result["pending_drafts"][0]["month"], "2026-08-01")
 
+    def test_worker_omitting_backend_owned_keys_keeps_saved_receipts_and_founder_choices(self):
+        from content_factory.service_views import _sync_content_factory_run_snapshot
+        _, _, run = self.startup("omitted-keys", ["manual_documents"])
+        owned = {"source_evidence": {"gmail:one": {"fingerprint": "frozen", "output": {"events": []}}},
+            "update_candidates": [{"event_id": 7, "founder_status": "approved"}],
+            "_cancel_backups": {"receipt": "retained"}}
+        run.result = owned
+        run.save()
+        _sync_content_factory_run_snapshot(run_id=run.run_id, data={"workflow": run.workflow,
+            "domain": run.domain, "status": "running", "result": {"ingest": {"cursor": "page-2"}}}, step_states={})
+        run.refresh_from_db()
+        for key, value in owned.items():
+            self.assertEqual(run.result[key], value)
+        self.assertEqual(run.result["ingest"], {"cursor": "page-2"})
+
     def test_currency_mismatch_stays_unknown_and_failed_review_survives_edit(self):
         from rest_framework.exceptions import ValidationError
         org, _, run = self.startup("mismatch", ["xero"])
