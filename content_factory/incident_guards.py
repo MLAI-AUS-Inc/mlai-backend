@@ -33,6 +33,10 @@ def target_update_allowed(previous, incoming, *, generation, sha):
         raise WebsiteAuthorityError("website_target_generation_migration_required",
             "This target belongs to an older generation. The reviewed target-key migration is required.")
     from .website_publishing_inputs import has_candidate
+    if "requiredProofVersion" in (getattr(previous, "capabilities", None) or {}):
+        # Protocol enrollment is backend-owned. Even an identical worker echo
+        # must not replace capabilities and erase this durable requirement.
+        return False
     if has_candidate(previous.contract) and not has_candidate(incoming):
         # An unverified proposal still requires its stronger protocol. Dropping
         # the candidate must not let a scan restore a legacy ready flag.
@@ -56,7 +60,8 @@ def protect_certified_config(config, defaults, *, sha=""):
     by_key = {str(item.get("target_id") or item.get("id")): item for item in incoming if isinstance(item, dict)}
     protected = list(connection.targets.filter(
         Q(source_sha=connection.verified_sha, verified_at__isnull=False)
-        | Q(contract__contract__has_key="publishing_inputs_v1"), generation=connection.generation))
+        | Q(contract__contract__has_key="publishing_inputs_v1")
+        | Q(capabilities__has_key="requiredProofVersion"), generation=connection.generation))
     for row in protected:
         candidate = by_key.get(row.target_key)
         if candidate is None or not target_update_allowed(row, candidate, generation=connection.generation, sha=connection.verified_sha):

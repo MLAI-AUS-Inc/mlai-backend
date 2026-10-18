@@ -91,6 +91,11 @@ def record_ci_attestation(data, *, owner_review=False, origin="authenticated_ci"
     attestation_origin = origin
     if attestation_origin not in {"authenticated_ci", "authenticated_hosted"}:
         raise ValueError("Unknown native attestation origin")
+    sealed_v3 = type(data.get("schema_version")) is int and data["schema_version"] == 3
+    sealed_pending = None
+    sealed_replay = None
+    if sealed_v3 and attestation_origin != "authenticated_hosted":
+        raise WebsiteAuthorityError("ci_attestation_contract_mismatch", "This execution proof requires authenticated hosted verification.")
     if attestation_origin == "authenticated_hosted":
         from .website_hosted_verification import enabled
         from .website_models import WebsiteConnection
@@ -99,7 +104,22 @@ def record_ci_attestation(data, *, owner_review=False, origin="authenticated_ci"
     data = {**data, "expected_source_sha": data.get("source_sha")}
     with authority_guard(data, action="read") as website:
         target = website.targets.filter(generation=website.generation, target_key=data.get("target_id")).first()
-        require_legacy_proof_inputs(target=target.contract if target else None, proof=data)
+        if sealed_v3:
+            from . import website_sealed_workflow as sealed
+            if target is None or not sealed.enabled(website):
+                raise WebsiteAuthorityError("ci_attestation_required", "Compatible hosted execution verification is disabled.")
+            sealed_replay = sealed.replay_operation(website, target, data)
+            if sealed_replay is None:
+                _, _, sealed_pending = sealed.child_inputs(website, data)
+                sealed.fence_pending(website, target, sealed_pending)
+            else:
+                replay_target_digest = sealed.digest(target.contract)
+                replay_receipt_digest = sealed.digest(sealed_replay.receipt)
+        else:
+            require_legacy_proof_inputs(target=target.contract if target else None, proof=data)
+            from .website_sealed_workflow import required
+            if required(website, target):
+                raise WebsiteAuthorityError("ci_attestation_contract_mismatch", "This target now requires execution proof version three.")
         origin = website.operations.filter(pk=data.get("operation_id"), generation=website.generation).first()
         custom = origin.payload.get("contract") or origin.payload.get("custom_contract") if origin else None
         custom_verified = bool(custom and data.get("adapter_id") == "custom_contract_v1" and evidence_digest(custom) == data.get("contract_digest"))
@@ -120,6 +140,14 @@ def record_ci_attestation(data, *, owner_review=False, origin="authenticated_ci"
                 raise WebsiteAuthorityError("website_source_review_required", "Review the changed source and its CI evidence before activating articles.")
     from .website_connections import verify_repository_head
     verify_repository_head(website, data["source_sha"])
+    if sealed_replay is not None:
+        with authority_guard(binding, action="read") as current:
+            target.refresh_from_db()
+            replay = sealed.replay_operation(current, target, data)
+            if (replay is None or sealed.digest(target.contract) != replay_target_digest
+                    or sealed.digest(replay.receipt) != replay_receipt_digest):
+                raise WebsiteAuthorityError("website_configuration_changed", "The accepted execution proof changed during replay.")
+            return replay
     if changed_source and not owner_review and not owned_merge:
         try:
             verify_reviewed_source_lineage(website, reviewed_heads, data["source_sha"])
@@ -128,7 +156,13 @@ def record_ci_attestation(data, *, owner_review=False, origin="authenticated_ci"
                 raise
     if attestation_origin == "authenticated_hosted":
         from .website_hosted_verification import read_completed_proof
-        proof = validated_ci_identity(binding, read_completed_proof(website, binding))
+        proof = read_completed_proof(website, binding)
+        if sealed_v3:
+            from .website_sealed_verification import PROOF_FIELDS
+            if any(type(data.get(key)) is not type(proof[key]) or data.get(key) != proof[key] for key in PROOF_FIELDS):
+                raise WebsiteAuthorityError("ci_attestation_scope_mismatch", "The submitted proof differs from its authenticated service result.")
+        else:
+            proof = validated_ci_identity(binding, proof)
     else:
         proof = read_ci_proof(website, binding)
     receipt = {**proof, "allowed": True, "attestation_origin": attestation_origin, "checked_at": timezone.now().isoformat()}
@@ -142,12 +176,25 @@ def record_ci_attestation(data, *, owner_review=False, origin="authenticated_ci"
             promote_custom_target(website, contract=custom, proof=proof)
         else:
             target.refresh_from_db()
-            require_legacy_proof_inputs(target=target.contract, proof=proof)
+            if sealed_v3:
+                # Repeat the original parent, selection, source and consent
+                # fence after every provider read and before atomic promotion.
+                _, _, current_pending = sealed.child_inputs(website, data)
+                if current_pending != sealed_pending:
+                    raise WebsiteAuthorityError("website_configuration_changed", "The original execution proposal changed.")
+                promoted = sealed.fence_pending(website, target, current_pending)
+            else:
+                require_legacy_proof_inputs(target=target.contract, proof=proof)
+                if required(website, target):
+                    raise WebsiteAuthorityError("ci_attestation_contract_mismatch", "This target now requires execution proof version three.")
             if target.contract.get("contract_digest") != data["contract_digest"]:
                 raise WebsiteAuthorityError("website_configuration_changed", "The reviewed target contract changed while CI was being verified.")
             target.source_sha, target.verified_at = proof["source_sha"], timezone.now()
-            target.contract = {**target.contract, "verification": {**proof, "status": "verified"}}
+            target.contract = {**(promoted if sealed_v3 else target.contract),
+                "verification": {**(receipt if sealed_v3 else proof), "status": "verified"}}
             target.capabilities = {**target.capabilities, "publishingReady": True, "previewSupported": True}
+            if sealed_v3:
+                target.capabilities[sealed.REQUIRED_VERSION] = 3
             target.save(update_fields=["source_sha", "verified_at", "contract", "capabilities", "updated_at"])
             from .models import OrganizationContentConfig
             config = OrganizationContentConfig.objects.get(website_connection=website)
@@ -215,13 +262,23 @@ def verify_reviewed_source_lineage(website, reviewed_heads, source_sha):
 
 def ci_attestation_for(connection, data, *, query=False):
     """Return a previously provider-validated receipt, never reflected input."""
-    require_legacy_proof_inputs(proof=data, query=query)
     target = connection.targets.filter(generation=connection.generation, target_key=data.get("target_id")).first()
-    require_legacy_proof_inputs(target=target.contract if target else None)
+    from . import website_sealed_workflow as sealed
+    needs_sealed = sealed.required(connection, target)
+    if not needs_sealed:
+        require_legacy_proof_inputs(proof=data, query=query)
+        require_legacy_proof_inputs(target=target.contract if target else None)
     op = connection.operations.filter(generation=connection.generation, action="ci-verify", state="completed",
         payload__operation_id=data.get("operation_id"), payload__evidence_digest=data.get("evidence_digest")).order_by("-created_at").first()
     if op is None or any(str(op.receipt.get(key)) != str(data.get(key)) for key in IDENTITY_FIELDS):
         raise WebsiteAuthorityError("ci_attestation_required", "Authenticate and verify the exact CI evidence first.")
+    if needs_sealed:
+        # Query strings are selectors only. The original typed saved receipt
+        # and child binding supply authority; the caller cannot choose origin.
+        for key in ("publishing_inputs_digest", "baseline_source_sha", "verifier_sha256"):
+            if data.get(key) != op.receipt.get(key):
+                raise WebsiteAuthorityError("ci_attestation_scope_mismatch", "The execution proof identity changed.")
+        return sealed.saved_receipt(connection, target, op.receipt)
     require_legacy_proof_inputs(proof=op.receipt)
     return dict(op.receipt)
 
@@ -232,7 +289,7 @@ def current_ci_attestation(connection, target, *, capabilities=None):
     from .incident_guards import proof_stamp
     from .website_journey import build_proof_fresh
     from .website_operations import deletion_epoch, validate_operation
-    if (target is None or has_candidate(target.contract) or getattr(target, "connection_id", None) != connection.pk or getattr(target, "generation", None) != connection.generation
+    if (target is None or getattr(target, "connection_id", None) != connection.pk or getattr(target, "generation", None) != connection.generation
             or not target.verified_at or not build_proof_fresh(connection, target, capabilities or {})):
         return None
     proof = mapping(mapping(target.contract).get("verification"))
@@ -308,7 +365,6 @@ def verify_live_deployment(config, *, data):
         target = website.targets.filter(generation=website.generation, target_key=data.get("target_id"), source_sha=data.get("source_sha"), verified_at__isnull=False).first()
         if not target:
             raise WebsiteAuthorityError("verified_target_required", "Verify the articles target before live deployment.")
-        require_legacy_proof_inputs(target=target.contract, proof=data)
         ci_proof = ci_attestation_for(website, data)
         route = str(target.contract.get("route_path") or target.contract.get("public_path") or "")
         if not route.startswith("/"):
@@ -350,7 +406,9 @@ def verify_live_deployment(config, *, data):
         "artifact_digest": artifact_digest, "contract_digest": data["contract_digest"], "verified_routes": observations, "provider_verified": True}
     with authority_guard(binding, action="read") as website:
         current_target = website.targets.filter(generation=website.generation, target_key=data.get("target_id")).first()
-        require_legacy_proof_inputs(target=current_target.contract if current_target else None, proof=ci_proof)
+        current_ci = ci_attestation_for(website, data)
+        if current_target is None or current_target.contract != target.contract or current_ci != ci_proof:
+            raise WebsiteAuthorityError("website_configuration_changed", "The verified target changed during the live check.")
         op, _ = WebsiteConnectionOperation.objects.update_or_create(idempotency_key=f"{website.pk}:deployment:{evidence_digest(binding)}", defaults={
             "connection": website, "generation": website.generation, "action": "deployment-verify", "state": "completed", "payload": binding, "receipt": receipt})
         from .website_prepare import wake_prepare_after_commit
