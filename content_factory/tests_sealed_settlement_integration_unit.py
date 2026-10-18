@@ -227,6 +227,260 @@ class SealedAdmissionBillingTests(SimpleTestCase):
             self.outbox.assert_not_called()
 
 
+@override_settings(ARTICLES_PUBLISHING_INPUTS_V3_ENABLED=False, ARTICLES_FIRST_ARTICLE_GOAL_ENABLED=True,
+    ARTICLES_SETUP_CONSENT_ENABLED=True, ARTICLES_WEBSITE_GOAL_RUNNER_ENABLED=True,
+    ARTICLES_WEBSITE_GOAL_ENROLLED_ORGANIZATIONS=["7"], ARTICLES_FAILURE_TAXONOMY_POLICY_ENABLED=True,
+    ARTICLES_FAILURE_TAXONOMY_ENROLLED_ORGANIZATIONS=["7"])
+class ChargedOutboxAdmissionTests(SimpleTestCase):
+    boundaries = SealedAdmissionBillingTests.boundaries
+    charge = SealedAdmissionBillingTests.charge
+    pending = SealedAdmissionBillingTests.pending
+    promote = SealedAdmissionBillingTests.promote
+
+    def setUp(self):
+        from .website_operations import reserve_workflow_operation
+        SealedAdmissionBillingTests.setUp(self)
+        self.reserve_operation = reserve_workflow_operation
+        self.dispatch_operation = None
+
+    @contextmanager
+    def charge_boundaries(self):
+        from . import website_operations
+        from .website_models import WebsiteConnectionOperation
+        with SealedAdmissionBillingTests.charge_boundaries(self):
+            lookup = self.value.website.operations.filter.side_effect
+            def operation_rows(**query):
+                if self.dispatch_operation and str(query.get("pk")) == str(self.dispatch_operation.pk):
+                    return self.value.rows(first=self.dispatch_operation)
+                return lookup(**query)
+            self.value.website.operations.filter.side_effect = operation_rows
+            def create(*, defaults, **query):
+                self.dispatch_operation = WebsiteConnectionOperation(**defaults, **query)
+                self.dispatch_operation.save = Mock()
+                return self.dispatch_operation, True
+            with patch.object(website_operations, "reserve_workflow_operation", new=self.reserve_operation), \
+                    patch.object(WebsiteConnectionOperation.objects, "get_or_create", side_effect=create):
+                yield
+
+    def charged_row(self, *, parent=False, portable=False):
+        from .dispatch_models import ContentFactoryDispatchOutbox
+        if parent:
+            billing.reserve(self.value.prepare, user=self.user, now=self.value.now)
+        if portable:
+            payload = {"delivery_mode": "content_only", "delivery_mode_confirmed": True, "client_request_id": "portable-original"}
+            result = views._charge_roo_points_for_article(SimpleNamespace(user=self.user, data={"expectedCostPoints": 6}),
+                context=self.value.context, payload=payload)
+        else:
+            result, payload = self.charge(parent=parent)
+        self.assertIsNone(result[3])
+        reserved = self.outbox.call_args.kwargs
+        return ContentFactoryDispatchOutbox(organization=self.value.org, client_request_id=payload["client_request_id"],
+            state="delivering", attempts=1, payload={"request": deepcopy(reserved["payload"]),
+                "actor_id": reserved["actor_id"], "billing_user_id": str(reserved["billing_user_id"]),
+                "endpoint": "article", "workflow": "article_generation"})
+
+    @contextmanager
+    def delivery_boundaries(self, *, known="not_received"):
+        from integrations import http_client
+        response = SimpleNamespace(status_code=202, json=lambda: {"run_id": "original-key-child"})
+        with patch.object(views, "_content_factory_remote_config", return_value={"enabled": True, "base_url": "https://worker.test"}), \
+                patch.object(views, "_content_factory_headers", return_value={}), \
+                patch.object(views, "_lookup_content_factory_dispatch_by_key", return_value=(known, {"run_id": "original-key-child"})), \
+                patch("content_factory.dispatch_binding.bind_dispatch_token_run") as bind, \
+                patch.object(views, "_create_local_run", return_value=SimpleNamespace(status="queued")) as create, \
+                patch.object(http_client, "post", return_value=response) as post:
+            yield post, create, bind
+
+    def test_missing_original_snapshot_never_inherits_today_configuration(self):
+        from .dispatch_outbox import _deliver
+        for missing in ("connection_target_id", "expected_source_sha"):
+            with self.subTest(missing=missing), self.charge_boundaries():
+                row = self.charged_row()
+                row.payload["request"].pop(missing)
+                original = deepcopy(row.payload)
+                with self.delivery_boundaries() as (post, create, _):
+                    with self.assertRaises(WebsiteAuthorityError):
+                        _deliver(row)
+                    post.assert_not_called(); create.assert_not_called()
+                self.assertEqual(row.payload, original)
+                self.ordinary_charge.assert_called_once()
+
+    def test_original_operation_tuple_cannot_be_invented_for_legacy_outbox(self):
+        from .dispatch_outbox import _deliver
+        for missing in ("operation_id", "operation_attempt", "deletion_epoch"):
+            with self.subTest(missing=missing), self.charge_boundaries():
+                row = self.charged_row()
+                row.payload["request"].pop(missing)
+                original = deepcopy(row.payload)
+                with self.delivery_boundaries() as (post, _, _):
+                    with self.assertRaises(WebsiteAuthorityError):
+                        _deliver(row)
+                    post.assert_not_called()
+                self.assertEqual(row.payload, original)
+                self.ordinary_charge.assert_called_once()
+
+    def test_operation_read_access_cannot_authorize_unrelated_or_finished_work(self):
+        from integrations.services import article_generation as generation
+        from .dispatch_outbox import _deliver
+        for change in ("completed", "failed", "blocked", "workflow", "client_request_id", "action"):
+            with self.subTest(change=change), self.charge_boundaries():
+                row = self.charged_row()
+                original = deepcopy(row.payload)
+                actual_admission = generation.require_article_activation
+                def admitted_then_changed(*args, **kwargs):
+                    actual_admission(*args, **kwargs)
+                    if change in {"workflow", "client_request_id"}:
+                        self.dispatch_operation.payload[change] = "another-operation"
+                    elif change == "action":
+                        self.dispatch_operation.action = "prepare"
+                    else:
+                        self.dispatch_operation.state = change
+                with self.delivery_boundaries() as (post, _, _), \
+                        patch.object(generation, "require_article_activation", side_effect=admitted_then_changed):
+                    with self.assertRaises(WebsiteAuthorityError):
+                        _deliver(row)
+                    post.assert_not_called()
+                self.assertEqual(row.payload, original)
+
+    def test_another_valid_default_does_not_authorize_original_target_post(self):
+        from .dispatch_outbox import _deliver
+        with self.charge_boundaries():
+            row = self.charged_row()
+            original = deepcopy(row.payload)
+            self.value.config.default_publish_target_id = "another-valid-target"
+            self.value.target.target_key = "another-valid-target"
+            self.assertTrue(durable_integration_evidence(self.value.config, self.value.website)["verified"])
+            with self.delivery_boundaries() as (post, create, _):
+                with self.assertRaises(WebsiteAuthorityError):
+                    _deliver(row)
+                post.assert_not_called(); create.assert_not_called()
+            self.assertEqual(row.payload, original)
+            self.ordinary_charge.assert_called_once()
+
+    def test_changed_source_does_not_authorize_original_source_post(self):
+        from integrations.services import article_generation as generation
+        from .dispatch_outbox import _deliver
+        with self.charge_boundaries():
+            row = self.charged_row()
+            original = deepcopy(row.payload)
+            actual_admission = generation.require_article_activation
+            def admitted_then_changed(*args, **kwargs):
+                actual_admission(*args, **kwargs)
+                self.value.website.verified_sha = self.value.target.source_sha = "f" * 40
+                self.assertTrue(durable_integration_evidence(self.value.config, self.value.website)["verified"])
+            with self.delivery_boundaries() as (post, create, _), \
+                    patch.object(generation, "require_article_activation", side_effect=admitted_then_changed):
+                with self.assertRaises(WebsiteAuthorityError):
+                    _deliver(row)
+                post.assert_not_called(); create.assert_not_called()
+            self.assertEqual(row.payload, original)
+
+    def test_pending_proof_after_provider_admission_preserves_original_parent_hold(self):
+        from integrations.services import article_generation as generation
+        from .dispatch_outbox import _deliver
+        with self.charge_boundaries():
+            row = self.charged_row(parent=True)
+            original = deepcopy(row.payload)
+            held = deepcopy(self.value.prepare.receipt)
+            actual_admission = generation.require_article_activation
+            def admitted_then_changed(*args, **kwargs):
+                actual_admission(*args, **kwargs)
+                sealed.mark_required(self.value.target)
+            with self.delivery_boundaries() as (post, create, _), \
+                    patch.object(generation, "require_article_activation", side_effect=admitted_then_changed):
+                with self.assertRaises(WebsiteAuthorityError):
+                    _deliver(row)
+                post.assert_not_called(); create.assert_not_called()
+            self.assertEqual(row.payload, original)
+            self.assertEqual(self.value.prepare.receipt, held)
+            self.spend.assert_called_once(); self.ordinary_charge.assert_not_called()
+
+    def test_current_exact_snapshot_delivers_without_another_spend(self):
+        from .dispatch_outbox import _deliver
+        with self.charge_boundaries():
+            row = self.charged_row()
+            original = deepcopy(row.payload)
+            with self.delivery_boundaries() as (post, create, bind):
+                self.assertEqual(_deliver(row), ("delivered", "", "original-key-child"))
+                self.assertEqual(post.call_args.kwargs["json"], original["request"])
+                self.assertEqual(create.call_args.kwargs["payload"], original["request"])
+                bind.assert_called_once_with(client_request_id=row.client_request_id, remote_run_id="original-key-child")
+            self.assertEqual(row.payload, original)
+            self.ordinary_charge.assert_called_once(); self.spend.assert_not_called()
+
+    def test_known_existing_child_is_recovered_without_new_admission_or_post(self):
+        from .dispatch_outbox import _deliver
+        with self.charge_boundaries():
+            row = self.charged_row()
+            row.payload["request"].pop("expected_source_sha")
+            self.dispatch_operation.state = "completed"
+            sealed.mark_required(self.value.target)
+            original = deepcopy(row.payload)
+            with self.delivery_boundaries(known="started") as (post, create, bind), \
+                    patch("integrations.services.article_generation.require_article_activation") as admission:
+                self.assertEqual(_deliver(row), ("delivered", "", "original-key-child"))
+                post.assert_not_called(); admission.assert_not_called()
+                self.assertEqual(create.call_args.kwargs["payload"], original["request"])
+                self.assertTrue(create.call_args.kwargs["remote_data"]["dispatch_recovered_by_key"])
+                bind.assert_called_once_with(client_request_id=row.client_request_id, remote_run_id="original-key-child")
+            self.assertEqual(row.payload, original)
+            self.ordinary_charge.assert_called_once()
+
+    def test_unconfirmed_content_only_cannot_bypass_missing_website_snapshot(self):
+        from .dispatch_outbox import _deliver
+        with self.charge_boundaries():
+            row = self.charged_row()
+            row.payload["request"].update(delivery_mode="content_only", delivery_mode_confirmed=False)
+            row.payload["request"].pop("connection_target_id")
+            with self.delivery_boundaries() as (post, _, _):
+                with self.assertRaises(WebsiteAuthorityError):
+                    _deliver(row)
+                post.assert_not_called()
+
+    def test_explicit_portable_request_keeps_its_existing_admission(self):
+        from .dispatch_outbox import _deliver
+        with self.charge_boundaries():
+            row = self.charged_row(portable=True)
+            sealed.mark_required(self.value.target)
+            with self.delivery_boundaries() as (post, _, _):
+                self.assertEqual(_deliver(row), ("delivered", "", "original-key-child"))
+                post.assert_called_once()
+            self.ordinary_charge.assert_called_once()
+
+    def test_confirmed_content_only_cannot_erase_original_website_authority(self):
+        from .dispatch_outbox import _deliver
+        for change in ("missing_target", "pending_proof", "operation_only"):
+            with self.subTest(change=change), self.charge_boundaries():
+                row = self.charged_row(portable=change == "operation_only")
+                row.payload["request"].update(delivery_mode="content_only", delivery_mode_confirmed=True)
+                if change == "missing_target":
+                    row.payload["request"].pop("connection_target_id")
+                elif change == "pending_proof":
+                    sealed.mark_required(self.value.target)
+                else:
+                    row.payload["request"].update(operation_id=str(self.value.origin.pk), operation_attempt=1)
+                with self.delivery_boundaries() as (post, _, _):
+                    with self.assertRaises(WebsiteAuthorityError):
+                        _deliver(row)
+                    post.assert_not_called()
+
+    def test_schema3_promotion_allows_original_outbox_without_renewing_parent_budget(self):
+        from .dispatch_outbox import _deliver
+        with self.charge_boundaries():
+            row = self.charged_row(parent=True)
+            held = deepcopy(self.value.prepare.receipt)
+            original = deepcopy(row.payload)
+            with override_settings(ARTICLES_PUBLISHING_INPUTS_V3_ENABLED=True,
+                    ARTICLES_HOSTED_ATTESTATION_ENABLED=True, ARTICLES_HOSTED_VERIFICATION_ENABLED=True):
+                self.pending(); sealed.mark_required(self.value.target)
+                self.promote()
+                with self.delivery_boundaries() as (post, _, _):
+                    self.assertEqual(_deliver(row), ("delivered", "", "original-key-child"))
+                    self.assertEqual(post.call_args.kwargs["json"], original["request"])
+            self.assertEqual(self.value.prepare.receipt, held)
+            self.spend.assert_called_once(); self.ordinary_charge.assert_not_called()
+
+
 @override_settings(ARTICLES_FIRST_ARTICLE_GOAL_ENABLED=True, ARTICLES_SETUP_CONSENT_ENABLED=True,
     ARTICLES_WEBSITE_GOAL_RUNNER_ENABLED=True, ARTICLES_WEBSITE_GOAL_ENROLLED_ORGANIZATIONS=["7"],
     ARTICLES_FAILURE_TAXONOMY_POLICY_ENABLED=True, ARTICLES_FAILURE_TAXONOMY_ENROLLED_ORGANIZATIONS=["7"])

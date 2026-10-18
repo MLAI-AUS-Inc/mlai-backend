@@ -1,5 +1,6 @@
 """Retry charged content starts with the same request identity, then refund."""
 from datetime import timedelta
+from types import SimpleNamespace
 
 from django.db import transaction
 from django.db.models import Q
@@ -121,7 +122,8 @@ def _deliver(row):
     from integrations import http_client
     from .vibe_marketing_views import _content_factory_remote_config, _content_factory_headers, _lookup_content_factory_dispatch_by_key, _refresh_article_editorial_payload
     from .website_connections import authority_guard, require_unlocked_remote_call
-    from .portable_drafts import explicit_portable_request
+    from .portable_drafts import original_portable_run
+    from .website_operations import OPERATION_FIELDS
     request = dict(row.payload["request"])
     remote = _content_factory_remote_config()
     if not remote["enabled"]:
@@ -133,6 +135,8 @@ def _deliver(row):
         return _accept_delivery(row, request, existing, recovered=True)
     if known == "rejected":
         return "failed", "dispatch_rejected", ""
+    portable = (original_portable_run(SimpleNamespace(run_request=row.payload["request"]))
+        and not any(key in request for key in OPERATION_FIELDS))
     from django.contrib.auth import get_user_model
     if _research_dispatch(row):
         # Discovery needs only the current owning founder/domain, plus the
@@ -153,7 +157,7 @@ def _deliver(row):
         if audience != request.get("research_audience"):
             raise WebsiteAuthorityError("research_audience_changed", "The approved research audience changed.")
     else:
-        if not explicit_portable_request(request):
+        if not portable:
             with authority_guard(request, action="read"):
                 pass
         policy_error = _refresh_article_editorial_payload(organization=row.organization, payload=request)
@@ -163,6 +167,14 @@ def _deliver(row):
         requester = get_user_model().objects.get(pk=request["roo_points_requested_by_user_id"], is_active=True)
         require_article_activation(domain=row.organization.domain, actor_id=row.payload.get("actor_id") or "",
             user=requester, expected_repo=request.get("github_repo", ""), article_request=request)
+        if not portable:
+            from .vibe_marketing_views import _validate_article_start_reservation
+            # Provider admission examines today's configuration outside SQL.
+            # Retry only the original target/source, with current stored proof;
+            # do not upgrade a historical paid request to today's selection.
+            with transaction.atomic():
+                _validate_article_start_reservation(SimpleNamespace(organization=row.organization),
+                    request, require_website=True)
     require_unlocked_remote_call()
     response = http_client.post(f"{remote['base_url']}/api/runs/{row.payload['endpoint']}",
         headers=_content_factory_headers(), json=request, timeout=(3, 30))

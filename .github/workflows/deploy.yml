@@ -722,7 +722,7 @@ jobs:
     # so a controller/billing failure has a short, separately named CI result.
     # This uses the same disposable PostgreSQL schema and never deploys.
     - name: Run first-article and bootstrap-budget PostgreSQL tests
-      run: python manage.py test content_factory.tests_website_first_article_database content_factory.tests_website_sealed_database content_factory.tests_article_publication_observation_database content_factory.tests_website_cost_database content_factory.tests_website_cost_recovery_database content_factory.tests_website_operational_alerts_database content_factory.tests_website_repair_alerts_database content_factory.tests_website_stage_stalls_database content_factory.tests_website_preview_cleanup_budget_database tests.test_articles_bootstrap_endpoint_budget --verbosity 2
+      run: python manage.py test content_factory.tests_website_first_article_database content_factory.tests_website_sealed_database content_factory.tests_article_publication_observation_database content_factory.tests_dispatch_admission_database content_factory.tests_website_cost_database content_factory.tests_website_cost_recovery_database content_factory.tests_website_operational_alerts_database content_factory.tests_website_repair_alerts_database content_factory.tests_website_stage_stalls_database content_factory.tests_website_preview_cleanup_budget_database tests.test_articles_bootstrap_endpoint_budget --verbosity 2
 
     - name: Run formerly unassigned and partially selected Django suites
       run: |

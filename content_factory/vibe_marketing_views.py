@@ -788,10 +788,20 @@ def _validate_article_start_admission(context, user, actor_id, article_request):
     require_article_activation(domain=context.organization.domain, actor_id=actor_id, user=user, article_request=article_request)
 
 
-def _validate_article_start_reservation(context, payload):
-    """Recheck the persisted consent and operation under billing transaction locks."""
-    if payload.get("delivery_mode") == "content_only":
+def _validate_article_start_reservation(context, payload, *, require_website=False):
+    """Recheck original consent and proof under billing/dispatch transaction locks."""
+    if not require_website and payload.get("delivery_mode") == "content_only":
         return
+    if require_website and (not payload.get("operation_id")
+            or any(key not in payload for key in ("operation_attempt", "deletion_epoch"))):
+        raise WebsiteAuthorityError("website_operation_required",
+            "The original website operation for this article request is unavailable.")
+    if any(not isinstance(payload.get(key), str) or not payload[key] for key in (
+            "website_connection_id", "connection_target_id", "expected_source_sha")):
+        # Old outboxes cannot reconstruct what was selected from today's config.
+        # Their original dispatch key can still recover an already owned child.
+        raise WebsiteAuthorityError("website_publish_verification_required",
+            "The original website verification for this article request is unavailable.")
     from organizations.models import Organization
     from .website_models import WebsiteConnection
     from .website_contract import validate_authority
@@ -802,7 +812,14 @@ def _validate_article_start_reservation(context, payload):
     if config is None or config.website_connection_id != website.pk:
         raise WebsiteAuthorityError("website_connection_changed", "The selected website changed before billing.")
     validate_authority(website, payload, action="read", domain=context.organization.domain, github_repo=payload.get("github_repo", ""))
-    validate_operation(website, payload)
+    operation = validate_operation(website, payload)
+    if require_website and (operation is None or operation.action != "workflow"
+            or operation.state not in {"pending", "running"}
+            or operation.payload.get("workflow") != "article_generation"
+            or not payload.get("client_request_id")
+            or operation.payload.get("client_request_id") != payload["client_request_id"]):
+        raise WebsiteAuthorityError("website_operation_changed",
+            "The original article operation no longer authorizes a new dispatch.")
     if payload.get("connection_target_id") != str(config.default_publish_target_id or ""):
         raise WebsiteAuthorityError("website_target_changed", "The selected articles target changed during admission.")
     if payload.get("expected_source_sha") != website.verified_sha:
