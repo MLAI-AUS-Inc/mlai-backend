@@ -12072,7 +12072,8 @@ def _verify_github_repository_access(context, config, *, force=False, allow_prob
                     http_client.delete("https://api.github.com/installation/token", headers={"Authorization": f"Bearer {probe.token}"}, timeout=(3, 8))
                 except http_client.RequestException:
                     pass
-    cache.set(key, result, 60 if result.get("verified") else 15)
+    from .website_github_access import access_observation_seconds
+    cache.set(key, result, access_observation_seconds(result.get("verified")))
     request_cache[key] = {"result": dict(result), "fresh": True}
     return result
 
@@ -12148,7 +12149,8 @@ def _verify_github_repository_access_b1(context, config, *, force=False, allow_p
                     http_client.delete("https://api.github.com/installation/token", headers={"Authorization": f"Bearer {credential.token}"}, timeout=(3, 8))
                 except http_client.RequestException:
                     pass
-    cache.set(key, result, 60 if result.get("verified") else 15)
+    from .website_github_access import access_observation_seconds
+    cache.set(key, result, access_observation_seconds(result.get("verified")))
     request_cache[key] = {"result": dict(result), "fresh": True}
     return result
 

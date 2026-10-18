@@ -109,6 +109,38 @@ class BootstrapReadPathTests(SimpleTestCase):
                 self.assertEqual(get.call_count, 2)
                 mint.assert_called_once()
 
+    def test_verified_access_outlives_the_article_form_and_failures_stay_short(self):
+        # 18 Oct (Vyavos): a 60 s positive window expired while the owner filled in
+        # the brief, so the journey read "Checking your saved GitHub access" and the
+        # app refused Generate with "Finish setting up your website".
+        from content_factory.website_github_access import (
+            FAILED_ACCESS_OBSERVATION_SECONDS, VERIFIED_ACCESS_OBSERVATION_SECONDS)
+        self.assertGreaterEqual(VERIFIED_ACCESS_OBSERVATION_SECONDS, 10 * 60)
+        self.assertLessEqual(FAILED_ACCESS_OBSERVATION_SECONDS, 15)
+        for live, expected in (("live", VERIFIED_ACCESS_OBSERVATION_SECONDS), ("revoked", FAILED_ACCESS_OBSERVATION_SECONDS)):
+            cache.clear()
+            with self.subTest(account=live), patch("integrations.services.github_app.probe_installation_liveness",
+                    return_value=live), patch.object(cache, "set", wraps=cache.set) as write:
+                verify_account_access(self.user, connection=self.website, force=True)
+            self.assertEqual(write.call_args.args[2], expected)
+        for typed in (False, True):
+            cache.clear()
+            with self.subTest(typed=typed), ExitStack() as stack:
+                stack.enter_context(patch("content_factory.website_failure_scope.taxonomy_enabled", return_value=typed))
+                stack.enter_context(patch.object(views, "_github_account_for_context", return_value={"owned": True}))
+                stack.enter_context(patch("integrations.services.github_app.create_installation_access_token",
+                    return_value=SimpleNamespace(token="test-ephemeral-observation")))
+                stack.enter_context(patch("integrations.services.github_app.require_installation_repository_permissions",
+                    return_value={"contents": "write", "pull_requests": "write"}))
+                stack.enter_context(patch.object(views.http_client, "get", side_effect=[
+                    Mock(status_code=200, json=lambda: {"id": 42, "full_name": "owner/site", "default_branch": "main"}),
+                    Mock(status_code=200, json=lambda: {"sha": "a" * 40}),
+                ]))
+                stack.enter_context(patch.object(views.http_client, "delete"))
+                write = stack.enter_context(patch.object(cache, "set", wraps=cache.set))
+                self.assertTrue(views._verify_github_repository_access(self.context(), self.config, force=True)["verified"])
+            self.assertEqual(write.call_args.args[2], VERIFIED_ACCESS_OBSERVATION_SECONDS)
+
     def test_bootstrap_loads_config_and_runs_once_and_reuses_cold_capabilities(self):
         runs, capabilities = [], {"canGenerateArticle": False}
         with patch.object(views, "_get_config", return_value=self.config) as config, patch.object(
