@@ -212,7 +212,7 @@ def cancellation_result(run, payload):
             "paid_obligation": paid_article_request(mapping(run.run_request)) or previous.get("paid_obligation") is True,
             "billing_resolution_required": bool(request.get("client_request_id"))
                 and request.get("roo_points_billing_status") not in {"free", "gated", "refunded"},
-            "error_code": "ARTICLE_CANCELLED_NO_VALUE", "cancellation_receipt_id": receipt["receipt_id"]}
+            "settlement_reason": "cancelled_without_delivery", "cancellation_receipt_id": receipt["receipt_id"]}
         result["reconciliation_refund_pending"] = True
     return result
 

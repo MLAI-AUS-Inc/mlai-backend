@@ -9097,7 +9097,7 @@ def _apply_cancellation_receipt(run_id, payload):
         try:
             preserved = cancellation_result(run, incoming)
         except (ValueError, TypeError):
-            return Response({"code": "article_cancellation_receipt_invalid", "run_id": run_id}, status=409)
+            return Response({"code": "cancellation_scope_mismatch", "run_id": run_id}, status=409)
         run.status, run.current_step, run.resume_available = "cancelled", "cancelled", False
         run.error = str(payload.get("error") or run.error or "Cancelled.")[:2000]
         run.result = {**preserved, **metadata, "status": "cancelled", "cancelled": True,
