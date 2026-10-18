@@ -1255,3 +1255,24 @@ class StartupDataDeletionRequest(models.Model):
 
     def __str__(self):
         return f"{self.organization_id}:{self.provider}:{self.status}"
+
+
+class SourceExtractionReceipt(models.Model):
+    """Indexed reuse of an exact source fingerprint with retained run provenance."""
+
+    organization = models.ForeignKey("organizations.Organization", on_delete=models.CASCADE,
+        related_name="source_extraction_receipts")
+    provider = models.CharField(max_length=64)
+    source_id = models.TextField()
+    fingerprint = models.CharField(max_length=64, db_index=True)
+    output = models.JSONField(null=True)
+    extraction_version = models.CharField(max_length=128)
+    run = models.ForeignKey("workflow_runs.ContentFactoryRun", on_delete=models.CASCADE,
+        related_name="source_extraction_receipts")
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        constraints = [models.UniqueConstraint(
+            fields=["organization", "provider", "source_id", "fingerprint"],
+            name="source_receipt_identity_uniq",
+        )]

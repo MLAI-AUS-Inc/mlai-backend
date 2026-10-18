@@ -90,6 +90,55 @@ def hoist_startup_context(receipts, *, fallback=None):
     return normalized, hoisted
 
 
+def _legacy_cached_receipt(run, key, fingerprint, *, after_id=None):
+    """Keep the original lookup, optionally checking only newer origin runs."""
+    from workflow_runs.models import ContentFactoryRun
+    from django.db.models.fields.json import KeyTransform
+    candidates = ContentFactoryRun.objects.filter(organization_id=run.organization_id, workflow=run.workflow).exclude(pk=run.pk).exclude(status="cancelled")
+    if after_id is not None:
+        candidates = candidates.filter(id__gt=after_id)
+    return candidates.annotate(
+        reporting_receipt=KeyTransform(key, KeyTransform("source_evidence", "result")),
+    ).filter(reporting_receipt__fingerprint=fingerprint).exclude(
+        reporting_receipt__output__isnull=True,
+    ).order_by("-id").values_list("id", "reporting_receipt").first()
+
+
+def _indexed_cached_receipt(run, provider, source_id, key, fingerprint):
+    """Use the fingerprint index, verifying the origin still retains this output."""
+    from startup_updates.models import SourceExtractionReceipt
+    from django.db.models.fields.json import KeyTransform
+    retained = KeyTransform(key, KeyTransform("source_evidence", "run__result"))
+    candidate = SourceExtractionReceipt.objects.filter(
+        organization_id=run.organization_id, provider=provider, source_id=source_id,
+        fingerprint=fingerprint, run__organization_id=run.organization_id, run__workflow=run.workflow,
+    ).exclude(run_id=run.pk).exclude(run__status="cancelled").exclude(output__isnull=True).annotate(
+        retained_receipt=retained, retained_output=KeyTransform("output", retained),
+    ).filter(retained_receipt__fingerprint=fingerprint).exclude(
+        retained_receipt__output__isnull=True,
+    ).order_by("-run_id", "-id").values("run_id", "output", "retained_output").first()
+    if candidate is not None and candidate["output"] == candidate["retained_output"]:
+        return candidate
+    return None
+
+
+def _index_completed_receipt(run, provider, source_id, receipt):
+    """Keep the newest run ID, even when older runs finish after newer ones."""
+    from startup_updates.models import SourceExtractionReceipt
+    from django.db import transaction
+    if run.pk is None or run.organization_id is None:
+        return
+    identity = dict(organization_id=run.organization_id, provider=provider,
+        source_id=source_id, fingerprint=receipt["fingerprint"])
+    defaults = dict(output=receipt["output"], extraction_version=receipt["version"], run=run)
+    with transaction.atomic():
+        entry, created = SourceExtractionReceipt.objects.get_or_create(**identity, defaults=defaults)
+        if not created:
+            # Conditional UPDATE preserves the old newest-origin selection across
+            # concurrent completions without copying a full ContentFactoryRun.
+            SourceExtractionReceipt.objects.filter(pk=entry.pk, run_id__lte=run.pk).update(**defaults)
+
+
 def stage_source(run, provider, source_id, bundle):
     """Pin a batch before dispatch; completed receipts can be replayed after retries."""
     receipt = source_receipt(run, provider, source_id, bundle)
@@ -102,16 +151,13 @@ def stage_source(run, provider, source_id, bundle):
     evidence[key] = receipt
     result["source_evidence"] = evidence
     run.result = result
-    # ContentFactoryRun is locked by the caller. Copy prior receipts only within
-    # this organization, and only from runs which retained their source evidence.
-    from workflow_runs.models import ContentFactoryRun
-    from django.db.models.fields.json import KeyTransform
-    candidate = ContentFactoryRun.objects.filter(organization_id=run.organization_id, workflow=run.workflow).exclude(pk=run.pk).exclude(status="cancelled").annotate(
-        reporting_receipt=KeyTransform(key, KeyTransform("source_evidence", "result")),
-    ).filter(reporting_receipt__fingerprint=receipt["fingerprint"]).exclude(
-        reporting_receipt__output__isnull=True,
-    ).order_by("-id").values_list("reporting_receipt", flat=True).first()
-    cached = candidate.get("output") if candidate else None
+    # An indexed hit supplies an origin ID as a lower bound. Newer legacy runs
+    # must still win (for example when an old run resumes after this migration).
+    indexed = _indexed_cached_receipt(run, provider, source_id, key, receipt["fingerprint"])
+    candidate = _legacy_cached_receipt(run, key, receipt["fingerprint"],
+        after_id=indexed["run_id"] if indexed is not None else None)
+    cached = (candidate[1].get("output") if candidate is not None
+        else indexed["output"] if indexed is not None else None)
     return {**bundle, "source_fingerprint": receipt["fingerprint"], "extraction_version": EXTRACTION_VERSION, "cached_extraction": cached}
 
 
@@ -134,6 +180,7 @@ def complete_source(run, provider, source_id, output):
     evidence[key] = receipt
     result["source_evidence"] = evidence
     run.result = result
+    _index_completed_receipt(run, provider, source_id, receipt)
 
 
 def frozen_manual_sources(organization, run):

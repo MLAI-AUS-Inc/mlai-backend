@@ -168,3 +168,29 @@ incomplete first pages are requeued rather than mistaken for completion.
 Incremental history pages retain the previous five-result cap because they do not
 yet implement the resumable deadline protocol. The larger cap applies to timed
 backfill pages.
+
+
+## B3 source throughput and extraction index
+
+The Linear backfill endpoint processes at most ten project-detail pages or twenty
+seconds of work per request, stopping sooner when complete. Counts and project
+receipts are aggregated in the response. A rate limit after progress returns that
+progress with has_more and the existing retry hint. Each project's saved cursor
+retains its original meaning. The run's external_context.linear.last_sync remains
+the final individual project response, preserving the curation prompt input.
+
+SourceExtractionReceipt indexes exact extraction fingerprints within an organization
+and provider/source identity, with origin run provenance. complete_source writes the
+same output alongside the existing run receipt. Lookup excludes cancelled/current/
+wrong-workflow origins and verifies that the origin still retains that exact receipt
+and output. Missing/stale entries use the original JSON scan; indexed hits bound
+that scan to newer runs so an older resumed run cannot displace a newer legacy
+receipt. Out-of-order completions retain the newest origin run ID. Fingerprints,
+classification versions and extraction contracts are unchanged. No historical data
+migration is included. Startup/Gmail source deletion scrubs indexed copies after
+locking/scrubbing their origin run, including already completed runs.
+
+The owner approved creation of startup_updates.0025_sourceextractionreceipt for B3
+review and execution in disposable CI tests. Local migration execution and
+production application/rollout remain excluded. The migration creates only the receipt table, fingerprint index,
+foreign keys and unique organization/provider/source/fingerprint constraint.
