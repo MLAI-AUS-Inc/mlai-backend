@@ -269,7 +269,7 @@ class WebsiteConnectionAuthorizeView(APIView):
             with authority_guard(dict(request.query_params.items()), action="read" if action == "ci_attestation" else action) as connection:
                 if action == "ci_attestation":
                     from .website_verification import ci_attestation_for
-                    return Response(ci_attestation_for(connection, dict(request.query_params.items())))
+                    return Response(ci_attestation_for(connection, dict(request.query_params.items()), query=True))
                 portable = request.query_params.get("action") == "portable"
                 from .website_operations import deletion_epoch
                 return Response({"allowed": True, **contract_for(connection), "state": connection.state,

@@ -1,6 +1,7 @@
 """Pure guards for immutable certified website and backend-owned run evidence."""
 from datetime import timedelta
 
+from django.db.models import Q
 from django.utils import timezone
 from django.utils.dateparse import parse_datetime
 
@@ -31,6 +32,11 @@ def target_update_allowed(previous, incoming, *, generation, sha):
     if previous.generation != generation:
         raise WebsiteAuthorityError("website_target_generation_migration_required",
             "This target belongs to an older generation. The reviewed target-key migration is required.")
+    from .website_publishing_inputs import has_candidate
+    if has_candidate(previous.contract) and not has_candidate(incoming):
+        # An unverified proposal still requires its stronger protocol. Dropping
+        # the candidate must not let a scan restore a legacy ready flag.
+        return False
     if not previous.verified_at or previous.source_sha != sha:
         return True
     # A copied or refreshed timestamp does not attest changed routes, commands,
@@ -48,14 +54,15 @@ def protect_certified_config(config, defaults, *, sha=""):
     if not isinstance(incoming, list):
         incoming = list(getattr(config, "publish_targets", None) or [])
     by_key = {str(item.get("target_id") or item.get("id")): item for item in incoming if isinstance(item, dict)}
-    certified = list(connection.targets.filter(generation=connection.generation,
-        source_sha=connection.verified_sha, verified_at__isnull=False))
-    for row in certified:
+    protected = list(connection.targets.filter(
+        Q(source_sha=connection.verified_sha, verified_at__isnull=False)
+        | Q(contract__contract__has_key="publishing_inputs_v1"), generation=connection.generation))
+    for row in protected:
         candidate = by_key.get(row.target_key)
         if candidate is None or not target_update_allowed(row, candidate, generation=connection.generation, sha=connection.verified_sha):
             by_key[row.target_key] = row.contract
     selected = str(getattr(config, "default_publish_target_id", "") or "")
-    if any(row.target_key == selected for row in certified):
+    if any(row.target_key == selected for row in protected):
         # This helper is used by worker config/scan writes, not owner target
         # selection. Even another certified target is not a new selection.
         defaults["default_publish_target_id"] = selected

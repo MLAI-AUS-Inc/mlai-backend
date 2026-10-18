@@ -15,6 +15,7 @@ from core.permissions import HasRooApiKey
 from .website_connections import authority_guard, contract_for, require_unlocked_remote_call
 from .website_contract import WebsiteAuthorityError, evidence_digest
 from .website_models import WebsiteConnectionOperation
+from .website_publishing_inputs import has_candidate
 
 
 IDENTITY_FIELDS = ("website_connection_id", "connection_generation", "repository_id", "operation_id", "operation_attempt", "deletion_epoch",
@@ -24,8 +25,23 @@ CHECK_NAME = "MLAI articles native adapter verification"
 MARKER = re.compile(r"MLAI_ARTICLES_ATTESTATION:([A-Za-z0-9+/=]+)")
 
 
+def require_legacy_proof_inputs(*, target=None, proof=None, query=False):
+    """Candidate checksums require the future executing-verifier proof protocol."""
+    version = proof.get("schema_version", 2) if isinstance(proof, dict) else 2
+    legacy_version = type(version) is int and version == 2
+    if query and type(version) is str and version == "2":
+        legacy_version = True
+    if has_candidate(target) or (isinstance(proof, dict) and (
+            not legacy_version
+            or any(key in proof for key in ("publishing_inputs_version", "publishing_inputs_digest", "baseline_source_sha", "verifier_sha256")))):
+        raise WebsiteAuthorityError("ci_attestation_contract_mismatch",
+            "Publishing input candidates require compatible execution verification before activation.")
+
+
 def validated_ci_identity(data, provider):
     """Require provider-sealed exact scope and full build/browser evidence."""
+    require_legacy_proof_inputs(proof=data)
+    require_legacy_proof_inputs(proof=provider)
     for field in IDENTITY_FIELDS:
         if field not in data or field not in provider or str(data[field]) != str(provider[field]):
             raise WebsiteAuthorityError("ci_attestation_scope_mismatch", "CI proof does not match this exact repository operation.")
@@ -83,6 +99,7 @@ def record_ci_attestation(data, *, owner_review=False, origin="authenticated_ci"
     data = {**data, "expected_source_sha": data.get("source_sha")}
     with authority_guard(data, action="read") as website:
         target = website.targets.filter(generation=website.generation, target_key=data.get("target_id")).first()
+        require_legacy_proof_inputs(target=target.contract if target else None, proof=data)
         origin = website.operations.filter(pk=data.get("operation_id"), generation=website.generation).first()
         custom = origin.payload.get("contract") or origin.payload.get("custom_contract") if origin else None
         custom_verified = bool(custom and data.get("adapter_id") == "custom_contract_v1" and evidence_digest(custom) == data.get("contract_digest"))
@@ -125,6 +142,7 @@ def record_ci_attestation(data, *, owner_review=False, origin="authenticated_ci"
             promote_custom_target(website, contract=custom, proof=proof)
         else:
             target.refresh_from_db()
+            require_legacy_proof_inputs(target=target.contract, proof=proof)
             if target.contract.get("contract_digest") != data["contract_digest"]:
                 raise WebsiteAuthorityError("website_configuration_changed", "The reviewed target contract changed while CI was being verified.")
             target.source_sha, target.verified_at = proof["source_sha"], timezone.now()
@@ -195,12 +213,16 @@ def verify_reviewed_source_lineage(website, reviewed_heads, source_sha):
             pass
 
 
-def ci_attestation_for(connection, data):
+def ci_attestation_for(connection, data, *, query=False):
     """Return a previously provider-validated receipt, never reflected input."""
+    require_legacy_proof_inputs(proof=data, query=query)
+    target = connection.targets.filter(generation=connection.generation, target_key=data.get("target_id")).first()
+    require_legacy_proof_inputs(target=target.contract if target else None)
     op = connection.operations.filter(generation=connection.generation, action="ci-verify", state="completed",
         payload__operation_id=data.get("operation_id"), payload__evidence_digest=data.get("evidence_digest")).order_by("-created_at").first()
     if op is None or any(str(op.receipt.get(key)) != str(data.get(key)) for key in IDENTITY_FIELDS):
         raise WebsiteAuthorityError("ci_attestation_required", "Authenticate and verify the exact CI evidence first.")
+    require_legacy_proof_inputs(proof=op.receipt)
     return dict(op.receipt)
 
 
@@ -210,7 +232,7 @@ def current_ci_attestation(connection, target, *, capabilities=None):
     from .incident_guards import proof_stamp
     from .website_journey import build_proof_fresh
     from .website_operations import deletion_epoch, validate_operation
-    if (target is None or getattr(target, "connection_id", None) != connection.pk or getattr(target, "generation", None) != connection.generation
+    if (target is None or has_candidate(target.contract) or getattr(target, "connection_id", None) != connection.pk or getattr(target, "generation", None) != connection.generation
             or not target.verified_at or not build_proof_fresh(connection, target, capabilities or {})):
         return None
     proof = mapping(mapping(target.contract).get("verification"))
@@ -286,6 +308,7 @@ def verify_live_deployment(config, *, data):
         target = website.targets.filter(generation=website.generation, target_key=data.get("target_id"), source_sha=data.get("source_sha"), verified_at__isnull=False).first()
         if not target:
             raise WebsiteAuthorityError("verified_target_required", "Verify the articles target before live deployment.")
+        require_legacy_proof_inputs(target=target.contract, proof=data)
         ci_proof = ci_attestation_for(website, data)
         route = str(target.contract.get("route_path") or target.contract.get("public_path") or "")
         if not route.startswith("/"):
@@ -326,6 +349,8 @@ def verify_live_deployment(config, *, data):
         "target_id": data["target_id"], "public_url": url, "checked_at": timezone.now().isoformat(), "ci_evidence_digest": data["evidence_digest"],
         "artifact_digest": artifact_digest, "contract_digest": data["contract_digest"], "verified_routes": observations, "provider_verified": True}
     with authority_guard(binding, action="read") as website:
+        current_target = website.targets.filter(generation=website.generation, target_key=data.get("target_id")).first()
+        require_legacy_proof_inputs(target=current_target.contract if current_target else None, proof=ci_proof)
         op, _ = WebsiteConnectionOperation.objects.update_or_create(idempotency_key=f"{website.pk}:deployment:{evidence_digest(binding)}", defaults={
             "connection": website, "generation": website.generation, "action": "deployment-verify", "state": "completed", "payload": binding, "receipt": receipt})
         from .website_prepare import wake_prepare_after_commit
@@ -349,6 +374,7 @@ class WebsiteCiAttestationView(APIView):
 
 def discover_source_attestation(website, target, source_sha):
     """Read a sealed provider proof for an automatically observed source change."""
+    require_legacy_proof_inputs(target=target.contract)
     from integrations import http_client
     from .website_tokens import mint_ci_evidence_token, read_ci_provider_checks
     from .website_operations import deletion_epoch
