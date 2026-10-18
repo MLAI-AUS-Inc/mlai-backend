@@ -148,4 +148,3 @@ def _sync_content_factory_run_snapshot(*, run_id: str, data: dict, step_states: 
     from .island_research import refund_empty_or_failed_research
     refund_empty_or_failed_research(run)
     return run, created
-
