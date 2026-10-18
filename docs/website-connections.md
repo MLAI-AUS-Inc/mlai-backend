@@ -440,3 +440,31 @@ The paired worker fixtures cover setup-only cancellation, a trusted resumed
 attempt and a publisher exception with pending effects. Local tests deny database
 and network access; disposable database tests exercise original-ledger settlement.
 These source checks do not claim deployment or resolution of historical balances.
+
+First-article goals settle that shared payment through their existing `goal-refund`
+outbox. A terminal parent, failed child or missing child row does not authorize a
+credit. Settlement locks organization, connection, parent, dispatch and child
+records, and requires each original-payment-owned article child to have a valid
+stop receipt proving no article effect and no delivered value. A verified draft
+retains its payment; pending publication and uncertain dispatch remain unresolved.
+Children and rejected-dispatch handlers defer to this parent even after it stops.
+
+Admission writes the generation dispatch in the same transaction that validates
+the active parent. Its absent row can prove pre-dispatch cancellation only while
+that parent lock excludes new admission and no prior child/dispatch evidence
+exists. A dispatch with zero attempts can already have a synchronous POST in
+flight; it remains unknown. Stops run outside the billing transaction, at most
+three times, before the outbox requires reconciliation. No timeout credits money.
+
+Erasure retains a bounded `first_article_settlement_v1` financial record: original
+payment binding, child identifiers, worker stop receipt digests and versions, and
+the unresolved or proven outcome. It contains no article body, provider response
+or credential. An unexplained missing child, corrupted summary or unknown effect
+keeps the obligation. Positive recorded stop proof survives removal of content;
+the same original ledger idempotency key still ensures one credit.
+
+A fresh, scoped no-effect child stop receipt or confirmed dispatch resolution wakes
+an existing quarantined parent refund after its source transaction commits. This
+preserves lock order and the existing cancellation-attempt count; duplicate proof
+cannot restart the budget. The awakened worker repeats the complete original-ledger
+and all-child evidence checks before crediting. Unknown effects remain retained.

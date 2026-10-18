@@ -51,6 +51,18 @@ class FirstArticleBillingTests(SimpleTestCase):
         self.ledger_rows.return_value.select_related.return_value.filter.return_value.first.return_value = self.ledger
         self.refunds = self.stack.enter_context(patch("roo.models.Ledger.objects.filter"))
         self.refunds.return_value.exists.return_value = False
+        # No article has been admitted in these reservation fixtures. Admission
+        # persists its dispatch under the same organization/connection/parent
+        # locks before any remote POST (covered separately by settlement tests).
+        children = self.stack.enter_context(patch("workflow_runs.models.ContentFactoryRun.objects.select_for_update"))
+        children.return_value.filter.return_value.order_by.return_value = []
+        dispatch = self.stack.enter_context(patch("content_factory.dispatch_models.ContentFactoryDispatchOutbox.objects.select_for_update"))
+        dispatch.return_value.filter.return_value.first.return_value = None
+        candidates = self.stack.enter_context(patch("content_factory.website_models.WebsiteConnectionOperation.objects.filter"))
+        candidates.return_value.values.return_value.first.return_value = {
+            "connection_id": self.connection.pk, "connection__organization_id": self.organization.pk}
+        self.stack.enter_context(patch("organizations.models.Organization.objects.select_for_update"))
+        self.stack.enter_context(patch("content_factory.website_models.WebsiteConnection.objects.select_for_update"))
 
     def reserve(self):
         return billing.reserve(self.op, user=self.user, now=self.now)
@@ -421,7 +433,7 @@ class FirstArticleBillingTests(SimpleTestCase):
         self.connection.operations.filter.side_effect=selected
         self.assertTrue(refunds.retain_financial_refunds_for_erasure(self.connection))
         self.assertEqual(set(self.op.payload),{"company_id","requested_by_user_id"})
-        self.assertEqual(set(self.op.receipt),{"goal","first_article_billing"})
+        self.assertEqual(set(self.op.receipt),{"goal","first_article_billing","first_article_settlement_v1"})
         self.assertTrue(row.payload["purge_after_reconciliation"])
         self.assertEqual(row.payload["goal_operation_id"],"prepare")
         deletion.exclude.return_value.delete.assert_called_once()

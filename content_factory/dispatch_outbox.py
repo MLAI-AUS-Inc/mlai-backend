@@ -74,8 +74,19 @@ def reserve_dispatch(*, organization, payload, endpoint="article", workflow="art
 
 def mark_dispatch_delivered(client_request_id, run_id):
     """Record a synchronous delivery without creating a duplicate scheduler run."""
-    return ContentFactoryDispatchOutbox.objects.filter(client_request_id=client_request_id,
+    changed = ContentFactoryDispatchOutbox.objects.filter(client_request_id=client_request_id,
         state__in=["pending", "delivering"]).update(state="delivered", run_id=run_id, last_error="", updated_at=timezone.now())
+    if changed:
+        transaction.on_commit(lambda: wake_dispatch_settlement_by_key(client_request_id), robust=True)
+    return changed
+
+
+def wake_dispatch_settlement_by_key(client_request_id):
+    """Resolve the committed synchronous dispatch before waking its parent."""
+    from .website_first_article_refunds import wake_dispatch_settlement
+    row = ContentFactoryDispatchOutbox.objects.filter(client_request_id=client_request_id).first()
+    if row and row.payload.get("request", {}).get("first_article_goal_operation_id"):
+        wake_dispatch_settlement(row.pk)
 
 
 def _research_dispatch(row):
@@ -85,6 +96,14 @@ def _research_dispatch(row):
 
 def refund_dispatch(row, *, reason):
     """The original spend identity makes retries of refund safe."""
+    request = row.payload.get("request", {})
+    if request.get("first_article_goal_operation_id"):
+        # The parent allocation can fund more than one repair child. Even a
+        # proven rejected dispatch cannot credit it around another child's
+        # publication or delivery obligation. Its terminal outbox owns credit.
+        from .website_first_article_billing import defer_goal_settlement
+        defer_goal_settlement(request, resolved_domain=row.organization.domain)
+        return
     from django.contrib.auth import get_user_model
     from integrations.services.article_generation import (
         refund_content_factory_request_for_user, refund_content_factory_topic_generation_for_user,
@@ -243,5 +262,8 @@ def process_dispatch_outbox(*, limit=20, now=None):
         applied = ContentFactoryDispatchOutbox.objects.filter(pk=row.pk, updated_at=claimed_at,
             state__in=["delivering", "refund_pending"]).update(state=state, run_id=run_id or row.run_id,
                 last_error=code, next_attempt_at=now + timedelta(seconds=900 if state == "awaiting_resolution" else retry_delay(row.attempts)), updated_at=timezone.now())
+        if applied and state in {"delivered", "failed"} and row.payload.get("request", {}).get("first_article_goal_operation_id"):
+            from .website_first_article_refunds import wake_dispatch_settlement
+            transaction.on_commit(lambda identifier=row.pk: wake_dispatch_settlement(identifier), robust=True)
         result[state if applied and state in result else "pending"] += 1
     return result

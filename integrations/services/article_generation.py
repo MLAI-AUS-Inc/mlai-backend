@@ -952,8 +952,8 @@ def _refund_content_factory_request(
     from roo.services import PointsService
     from roo.models import Ledger
 
-    from content_factory.website_first_article_billing import defer_child_refund
-    if defer_child_refund(article_request, resolved_domain=resolved_domain):
+    from content_factory.website_first_article_billing import defer_goal_settlement
+    if defer_goal_settlement(article_request, resolved_domain=resolved_domain):
         return None
 
     client_request_id = _get_client_request_id(article_request)

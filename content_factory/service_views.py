@@ -9104,6 +9104,11 @@ def _apply_cancellation_receipt(run_id, payload):
             "cancellation_receipt": {"status": "recorded", "received_at": timezone.now().isoformat(), "repository_authority": False}}
         run.save(update_fields=["status", "current_step", "resume_available", "error", "result", "updated_at"])
         observe_workflow_status(run, {"status": "cancelled"})
+        parent_id = (run.run_request or {}).get("first_article_goal_operation_id")
+        if parent_id:
+            from .website_first_article_refunds import wake_settlement
+            transaction.on_commit(lambda: wake_settlement(parent_id=parent_id,
+                organization_id=run.organization_id, child_run_id=run.run_id), robust=True)
         response = _serialize_content_factory_run(run)
         response["sync_status"] = "cancellation_recorded"
         return Response(response, status=200)
