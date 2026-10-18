@@ -160,9 +160,12 @@ def capture_snapshot(organization, month, *, run=None, manual_metrics=None, base
     for event in payload["events"]:
         if event["event_date"]:
             event["event_date"] = event["event_date"].isoformat()
-    from startup_updates.source_evidence import frozen_manual_sources, EXTRACTION_VERSION
+    from startup_updates.source_evidence import frozen_manual_sources, hoist_startup_context, EXTRACTION_VERSION
     payload["extraction_version"] = EXTRACTION_VERSION
-    payload["source_evidence"] = copy.deepcopy((run.result or {}).get("source_evidence", {})) if run else {}
+    receipts = copy.deepcopy((run.result or {}).get("source_evidence", {})) if run else {}
+    payload["source_evidence"], payload["startup_context"] = hoist_startup_context(
+        receipts, fallback=(run.run_request or {}).get("startup_context") if run else None,
+    )
     payload["manual_sources"] = copy.deepcopy(base_snapshot.payload.get("manual_sources") or {}) if base_snapshot else (frozen_manual_sources(organization, run) if run else {"summary": "", "documents": []})
     external = (run.run_request or {}).get("external_context", {}) if run else {}
     payload["source_coverage"] = {key: {field: copy.deepcopy(value[field]) for field in ("warnings", "index_partial", "needs_review", "pages_indexed") if field in value}
@@ -209,7 +212,7 @@ def capture_snapshot(organization, month, *, run=None, manual_metrics=None, base
     payload["metric_history"] = build_metric_history([*pairs, (month, current_memo)])
     if base_snapshot is not None:
         payload["amended_at"] = timezone.now().isoformat()
-        for field in ("events", "startup", "period", "definitions", "config_version", "source_providers", "manual_sources", "source_evidence", "source_coverage", "extraction_version", "editorial_event_ids", "narrative_period"):
+        for field in ("events", "startup", "period", "definitions", "config_version", "source_providers", "manual_sources", "source_evidence", "startup_context", "source_coverage", "extraction_version", "editorial_event_ids", "narrative_period"):
             payload[field] = copy.deepcopy(base_snapshot.payload.get(field))
     payload["hash"] = content_hash(payload)
     snapshot, _ = MonthlyEvidenceSnapshot.objects.get_or_create(

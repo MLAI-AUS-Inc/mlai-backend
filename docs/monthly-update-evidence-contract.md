@@ -125,3 +125,23 @@ the projected history in the run checkpoint, budgets the complete request, and
 does not automatically replay a context-limit failure. This change requires no
 database schema migration. The new serializer and endpoint-composition tests
 run through `scripts/test_without_database.py` and are assigned to CI.
+
+
+## Frozen startup context storage
+
+New source receipts retain `startup_context_hash` and the unchanged extraction
+fingerprint instead of repeating the full founder profile. Snapshot capture stores
+the run's context once at top level. Identical legacy receipt copies are normalized;
+distinct legacy values stay in their receipts so no evidence is dropped. Amendments
+retain the base snapshot's context. Classification/extraction still use the original
+`run_request.startup_context` and their cache identities are unchanged.
+
+Deploy Valley V1 before this backend change: synthesis must remove top-level
+`startup_context` before prompting. The snapshot content hash changes with its
+storage shape; the owner approved this hash-only writer-input difference. All other
+writer input must remain identical. Groundedness review still visits every frozen
+value, and founder approval remains tied to the exact saved revision.
+
+Before merging B1, the owner must run Appendix B of the 18 October Pulse speed-up
+plan against the latest completed sharded runs and confirm
+`only_in_startup_context = 0`. A nonzero result stops rollout for owner review.

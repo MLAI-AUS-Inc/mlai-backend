@@ -61,7 +61,33 @@ def source_receipt(run, provider, source_id, bundle):
     for attachment in fingerprint_payload["bundle"].get("attachments", []):
         for field in ("extracted_text", "extraction_status", "parse_notes", "last_error", "metadata"):
             attachment.pop(field, None)
-    return {**payload, "fingerprint": content_hash(fingerprint_payload)}
+    receipt = {key: value for key, value in payload.items() if key != "startup_context"}
+    receipt["startup_context_hash"] = content_hash(json_value(payload["startup_context"]))
+    receipt["fingerprint"] = content_hash(fingerprint_payload)
+    return receipt
+
+
+def hoist_startup_context(receipts, *, fallback=None):
+    """Keep identical receipt contexts once, without dropping distinct values.
+
+    Legacy receipts may still contain the full context. Only normalize them
+    when every retained copy agrees; extraction fingerprints are untouched.
+    """
+    contexts = {
+        json.dumps(receipt["startup_context"], sort_keys=True)
+        for receipt in receipts.values() if "startup_context" in receipt
+    }
+    if len(contexts) > 1:
+        return receipts, None
+    hoisted = json.loads(next(iter(contexts))) if contexts else copy.deepcopy(fallback)
+    normalized = {}
+    for key, receipt in receipts.items():
+        receipt = copy.deepcopy(receipt)
+        if "startup_context" in receipt:
+            context = receipt.pop("startup_context")
+            receipt.setdefault("startup_context_hash", content_hash(context))
+        normalized[key] = receipt
+    return normalized, hoisted
 
 
 def stage_source(run, provider, source_id, bundle):
