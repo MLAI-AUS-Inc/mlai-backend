@@ -1,7 +1,9 @@
 """Real registration/claim/commit transactions in disposable PostgreSQL CI only."""
 from copy import deepcopy
+from datetime import timedelta
 import json
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from django.db import connection
@@ -148,3 +150,75 @@ class PublicationObservationDatabaseTests(TransactionTestCase):
             self.assertEqual(observer.advance(row.pk), "pending")
         self.run.refresh_from_db()
         self.assertEqual(self.run.result["publication_evidence_v1"], current)
+
+    def test_overlapping_stop_claims_share_one_durable_attempt(self):
+        from . import reconciliation
+        heartbeat = self.run.updated_at
+        duplicate = []
+
+        def stop(*args, **kwargs):
+            self.assertFalse(connection.in_atomic_block)
+            if not duplicate:
+                duplicate.append("in_flight")
+                duplicate[0] = reconciliation._stop_stalled_article(self.run,
+                    base_url="https://worker.fixture.test", headers={}, now=timezone.now())
+            return SimpleNamespace(status_code=202, json=lambda: {})
+
+        with patch.object(reconciliation.requests, "post", side_effect=stop) as remote:
+            self.assertEqual(reconciliation._stop_stalled_article(self.run,
+                base_url="https://worker.fixture.test", headers={}, now=timezone.now()), "recovery_unconfirmed")
+        self.run.refresh_from_db()
+        self.assertEqual(duplicate, ["callback_won"])
+        remote.assert_called_once()
+        self.assertEqual(self.run.result["article_stop_attempts"], 1)
+        self.assertEqual(self.run.updated_at, heartbeat)
+
+    def test_exhausted_stop_cannot_replace_new_publication_evidence(self):
+        from . import reconciliation
+        self.run.result["article_stop_attempts"] = 2
+        self.run.save(update_fields=["result"])
+        heartbeat = self.run.updated_at
+        observed = deepcopy(self.fixture["acknowledged"]["publication_evidence_v1"])
+
+        def stop(*args, **kwargs):
+            self.assertFalse(connection.in_atomic_block)
+            current = ContentFactoryRun.objects.get(pk=self.run.pk)
+            current.result["publication_evidence_v1"] = observed
+            current.save(update_fields=["result"])
+            return SimpleNamespace(status_code=202, json=lambda: {})
+
+        with patch.object(reconciliation.requests, "post", side_effect=stop):
+            self.assertEqual(reconciliation._stop_stalled_article(self.run,
+                base_url="https://worker.fixture.test", headers={}, now=timezone.now()), "callback_won")
+        self.run.refresh_from_db()
+        self.assertEqual(self.run.result["publication_evidence_v1"], observed)
+        self.assertEqual(self.run.result["article_stop_attempts"], 3)
+        self.assertEqual(self.run.status, "running")
+        self.assertEqual(self.run.updated_at, heartbeat)
+
+    def test_stale_settlement_candidate_preserves_a_later_refund_receipt(self):
+        from . import article_publication_evidence, reconciliation, vibe_marketing_views
+        now = timezone.now()
+        ContentFactoryRun.objects.filter(pk=self.run.pk).update(status="cancelled",
+            updated_at=now - timedelta(days=1), reconciled_at=None,
+            result={"reconciliation_refund_pending": True, "article_terminal_refund": {"status": "stop_required"}})
+        self.run.refresh_from_db()
+        heartbeat = self.run.updated_at
+        refunded = {"status": "refunded", "refund_ledger_id": "222"}
+        original_candidate = article_publication_evidence.exhausted_article_candidate
+
+        def record_refund(run):
+            ContentFactoryRun.objects.filter(pk=run.pk).update(result={**run.result,
+                "reconciliation_refund_pending": False, "article_terminal_refund": refunded})
+            return original_candidate(run)
+
+        with patch.object(article_publication_evidence, "exhausted_article_candidate", side_effect=record_refund), \
+                patch.object(vibe_marketing_views, "_call_content_factory_run_action", return_value={}) as remote:
+            self.assertEqual(reconciliation._settle_exhausted_article_runs(limit=10, now=now), 0)
+        self.run.refresh_from_db()
+        self.assertEqual(self.run.result["article_terminal_refund"], refunded)
+        self.assertFalse(self.run.result["reconciliation_refund_pending"])
+        self.assertNotIn("article_settlement_attempts", self.run.result)
+        self.assertEqual(self.run.updated_at, heartbeat)
+        self.assertIsNone(self.run.reconciled_at)
+        remote.assert_not_called()

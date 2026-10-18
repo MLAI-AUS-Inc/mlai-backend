@@ -303,6 +303,41 @@ class ArticleCancellationSettlementTests(SimpleTestCase):
         self.assertNotIn("reconciliation_refund_pending", self.run.result)
         self.assertEqual(self.run.result["article_settlement_status"], "needs_reconciliation")
 
+    def test_exhausted_sweep_cannot_replace_a_later_refund_receipt(self):
+        from . import reconciliation
+        self.run.status = "cancelled"
+        self.run.updated_at, self.run.reconciled_at = timezone.now(), None
+        self.run.result.update(reconciliation_refund_pending=True,
+            article_terminal_refund={"status": "stop_required"})
+        saved = deepcopy({key: getattr(self.run, key) for key in ("pk", "status", "updated_at", "reconciled_at", "result")})
+        refunded = {"status": "refunded", "refund_ledger_id": "222"}
+        candidates = Mock()
+        candidates.filter.return_value = candidates
+        candidates.order_by.return_value = candidates
+        candidates.__getitem__ = Mock(return_value=[self.run])
+
+        def select(**conditions):
+            if "pk" not in conditions:
+                return candidates
+            saved["result"]["article_terminal_refund"] = deepcopy(refunded)
+            saved["result"]["reconciliation_refund_pending"] = False
+
+            def update(**changes):
+                if any(saved.get(key) != value for key, value in conditions.items()):
+                    return 0
+                saved.update(deepcopy(changes))
+                return 1
+
+            return SimpleNamespace(update=update)
+
+        with patch.object(reconciliation.ContentFactoryRun.objects, "filter", side_effect=select), \
+                patch.object(views, "_call_content_factory_run_action", return_value={}) as remote:
+            self.assertEqual(reconciliation._settle_exhausted_article_runs(limit=10, now=timezone.now()), 0)
+        self.assertEqual(saved["result"]["article_terminal_refund"], refunded)
+        self.assertFalse(saved["result"]["reconciliation_refund_pending"])
+        self.assertNotIn("article_settlement_attempts", saved["result"])
+        remote.assert_not_called()
+
     def test_worker_can_explain_legacy_setup_link_but_cannot_replace_article_effect(self):
         from .article_publication_evidence import cancellation_result
         self.run.result.pop("publication_evidence_v1")
@@ -449,6 +484,66 @@ class ArticleCancellationSettlementTests(SimpleTestCase):
         self.assertEqual(self.run.status, "cancelled")
         self.assertTrue(self.run.result["reconciliation_required"])
         self.assertNotIn("reconciliation_refund_pending", self.run.result)
+
+    def stalled_stop_store(self, attempts=0):
+        self.run.status = "running"
+        self.run.updated_at = timezone.now()
+        self.run.result["article_stop_attempts"] = attempts
+        saved = deepcopy({key: getattr(self.run, key) for key in ("pk", "status", "updated_at", "result")})
+
+        def select(**conditions):
+            expected = deepcopy(conditions)
+
+            def update(**changes):
+                if any(saved.get(key) != value for key, value in expected.items()):
+                    return 0
+                saved.update(deepcopy(changes))
+                return 1
+
+            return SimpleNamespace(update=update)
+
+        return saved, select
+
+    def test_overlapping_stalled_stops_claim_only_one_attempt_without_renewing_heartbeat(self):
+        from . import reconciliation
+        saved, select = self.stalled_stop_store()
+        duplicate = []
+
+        def stop(*args, **kwargs):
+            if not duplicate:
+                duplicate.append("in_flight")
+                duplicate[0] = reconciliation._stop_stalled_article(self.run,
+                    base_url="https://worker.fixture.test", headers={}, now=timezone.now())
+            return SimpleNamespace(status_code=202, json=lambda: {})
+
+        with patch.object(reconciliation.ContentFactoryRun.objects, "filter", side_effect=select), \
+                patch.object(reconciliation.requests, "post", side_effect=stop) as remote:
+            outcome = reconciliation._stop_stalled_article(self.run,
+                base_url="https://worker.fixture.test", headers={}, now=timezone.now())
+        self.assertEqual(outcome, "recovery_unconfirmed")
+        self.assertEqual(duplicate, ["callback_won"])
+        remote.assert_called_once()
+        self.assertEqual(saved["result"]["article_stop_attempts"], 1)
+        self.assertEqual(saved["updated_at"], self.run.updated_at)
+
+    def test_final_stalled_stop_does_not_overwrite_evidence_recorded_during_cancel(self):
+        from . import reconciliation
+        saved, select = self.stalled_stop_store(attempts=2)
+        observed = {"purpose": "article", "state": "observed", "head_sha": "d" * 40}
+
+        def stop(*args, **kwargs):
+            saved["result"]["publication_evidence_v1"] = observed
+            return SimpleNamespace(status_code=202, json=lambda: {})
+
+        with patch.object(reconciliation.ContentFactoryRun.objects, "filter", side_effect=select), \
+                patch.object(reconciliation.requests, "post", side_effect=stop):
+            outcome = reconciliation._stop_stalled_article(self.run,
+                base_url="https://worker.fixture.test", headers={}, now=timezone.now())
+        self.assertEqual(saved["result"]["publication_evidence_v1"], observed)
+        self.assertEqual(saved["status"], "running")
+        self.assertEqual(saved["result"]["article_stop_attempts"], 3)
+        self.assertEqual(saved["updated_at"], self.run.updated_at)
+        self.assertEqual(outcome, "callback_won")
 
     def test_later_unknown_receipt_quarantines_pending_credit_without_losing_obligation(self):
         from . import reconciliation

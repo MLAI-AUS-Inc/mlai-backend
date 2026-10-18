@@ -37,6 +37,7 @@ indexed query per tick and nothing else.
 """
 
 import logging
+from copy import deepcopy
 from datetime import timedelta
 from typing import Optional
 
@@ -593,12 +594,16 @@ def _stop_stalled_article(run, *, base_url, headers, now):
     from .article_publication_evidence import cancellation_receipt
     from .website_cancellation_retirement import expected_article_cancellation
     from .service_views import _apply_cancellation_receipt
-    result = dict(run.result or {})
+    original_result = deepcopy(run.result)
+    result = dict(original_result or {})
     attempts = result.get("article_stop_attempts", 0)
     if type(attempts) is not int or attempts >= 3:
         return "recovery_unconfirmed"
-    claimed = ContentFactoryRun.objects.filter(pk=run.pk, status=run.status, updated_at=run.updated_at).update(
-        result={**result, "article_stop_attempts": attempts + 1})
+    claimed_result = {**result, "article_stop_attempts": attempts + 1}
+    # Sweeps can hold the same stale snapshot. Claim against its result as well
+    # as its heartbeat, without making our own HTTP attempt look like progress.
+    claimed = ContentFactoryRun.objects.filter(pk=run.pk, status=run.status,
+        updated_at=run.updated_at, result=original_result).update(result=claimed_result)
     if not claimed:
         return "callback_won"
     try:
@@ -617,10 +622,13 @@ def _stop_stalled_article(run, *, base_url, headers, now):
     except Exception:
         logger.warning("article_stall_stop_unconfirmed run_id=%s", run.run_id)
     if attempts == 2:
-        ContentFactoryRun.objects.filter(pk=run.pk, status=run.status, updated_at=run.updated_at).update(
+        finalized = ContentFactoryRun.objects.filter(pk=run.pk, status=run.status,
+            updated_at=run.updated_at, result=claimed_result).update(
             status="blocked", resume_available=False,
             error="Worker cancellation could not be verified. Publication and payment need reconciliation.",
-            result={**result, "article_stop_attempts": 3, "article_settlement_status": "needs_reconciliation"})
+            result={**claimed_result, "article_settlement_status": "needs_reconciliation"})
+        if not finalized:
+            return "callback_won"
     return "recovery_unconfirmed"
 
 
@@ -694,7 +702,8 @@ def _settle_exhausted_article_runs(*, limit, now):
     for run in candidates:
         if not exhausted_article_candidate(run):
             continue
-        result = dict(run.result or {})
+        original_result = deepcopy(run.result)
+        result = dict(original_result or {})
         attempts = result.get("article_settlement_attempts", 0)
         if type(attempts) is not int or attempts >= 3:
             continue
@@ -703,9 +712,10 @@ def _settle_exhausted_article_runs(*, limit, now):
         if attempts == 2 and run.status in {"failed", "cancelled"}:
             claimed_result["article_terminal_refund"] = {**dict(result.get("article_terminal_refund") or {}),
                 "status": "needs_reconciliation"}
-        # Claim before remote I/O; duplicate sweeps cannot spend the same attempt.
+        # Claim before remote I/O. Preserve evidence-only writes as well as
+        # preventing duplicate sweeps from spending the same attempt.
         claimed = ContentFactoryRun.objects.filter(pk=run.pk, status=run.status, updated_at=run.updated_at,
-            reconciled_at=run.reconciled_at).update(reconciled_at=now, result=claimed_result)
+            reconciled_at=run.reconciled_at, result=original_result).update(reconciled_at=now, result=claimed_result)
         if not claimed:
             continue
         try:
