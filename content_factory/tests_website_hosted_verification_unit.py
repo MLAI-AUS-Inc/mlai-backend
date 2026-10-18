@@ -32,6 +32,7 @@ class HostedPromotionTests(SimpleTestCase):
         self.assertEqual(op.receipt["attestation_origin"],"authenticated_hosted")
         self.assertEqual(value.target.contract["verification"]["source_sha"],value.website.verified_sha)
         self.assertTrue(value.target.capabilities["publishingReady"])
+        self.assertTrue(value.target.capabilities["previewSupported"])
         self.assertFalse(any(call.kwargs.get("permission_profile")=="ci_evidence" for call in value.tokens.call_args_list))
         value.target.contract["verification"]=dict(op.receipt,status="verified")
         with value.boundaries(),patch("content_factory.website_operations.validate_operation",return_value=value.origin):

@@ -7,7 +7,6 @@ from django.utils.dateparse import parse_datetime
 from .website_contract import WebsiteAuthorityError, evidence_digest, template_validation
 
 
-PROOF_STATUSES = frozenset({"passed", "verified", "preview_verified"})
 NO_DELIVERY_REFUND_CODES = frozenset({
     "INTERNAL_ERROR", "UNCLASSIFIED", "RUN_BUDGET_EXHAUSTED", "ONBOARDING_MODEL_BUDGET_EXHAUSTED",
     "EDITORIAL_REJECTED", "EXPORT_EDITORIAL_REJECTED", "DELIVERY_REVIEW_DRIFT", "SOURCE_CHANGED",
@@ -26,7 +25,7 @@ def proof_stamp(proof, *, now=None):
 
 
 def target_update_allowed(previous, incoming, *, generation, sha):
-    """A weaker scan cannot overwrite an exact-generation certified target."""
+    """Scans cannot rewrite an accepted certificate at its exact source."""
     if previous is None:
         return True
     if previous.generation != generation:
@@ -34,22 +33,14 @@ def target_update_allowed(previous, incoming, *, generation, sha):
             "This target belongs to an older generation. The reviewed target-key migration is required.")
     if not previous.verified_at or previous.source_sha != sha:
         return True
-    proof = incoming.get("verification") if isinstance(incoming.get("verification"), dict) else {}
-    accepted = (previous.contract or {}).get("verification") or {}
-    preview_only = accepted.get("status") == "preview_verified" and not previous.capabilities.get("publishingReady")
-    statuses = PROOF_STATUSES if preview_only else {"passed", "verified"}
-    if proof.get("status") not in statuses or proof.get("source_sha") != sha:
-        return False
-    if evidence_digest(incoming) == evidence_digest(previous.contract):
-        return True
-    stamp = proof_stamp(proof)
-    return bool(stamp and stamp >= previous.verified_at
-        and incoming.get("delivery_adapter") == previous.adapter
-        and (preview_only or incoming.get("publish_capability") in {"direct", "hook"}))
+    # A copied or refreshed timestamp does not attest changed routes, commands,
+    # stores or publisher inputs. Provider attestation has its own guarded write
+    # path; scan proposals remain in WebsiteScanSnapshot until reverified there.
+    return evidence_digest(incoming) == evidence_digest(previous.contract)
 
 
 def protect_certified_config(config, defaults, *, sha=""):
-    """Keep selected certified contracts until an equal or newer proof replaces them."""
+    """Keep selected certified contracts separate from worker scan proposals."""
     connection = getattr(config, "website_connection", None) if config else None
     if connection is None:
         return defaults
@@ -65,15 +56,9 @@ def protect_certified_config(config, defaults, *, sha=""):
             by_key[row.target_key] = row.contract
     selected = str(getattr(config, "default_publish_target_id", "") or "")
     if any(row.target_key == selected for row in certified):
-        proposed = str(defaults.get("default_publish_target_id") or selected)
-        replacement = by_key.get(proposed) or {}
-        proof = replacement.get("verification") or {}
-        replacement_stamp = proof_stamp(proof)
-        selected_stamp = next(row.verified_at for row in certified if row.target_key == selected)
-        if proposed != selected and not (proof.get("status") in {"passed", "verified"}
-                and proof.get("source_sha") == connection.verified_sha
-                and replacement_stamp and replacement_stamp >= selected_stamp):
-            defaults["default_publish_target_id"] = selected
+        # This helper is used by worker config/scan writes, not owner target
+        # selection. Even another certified target is not a new selection.
+        defaults["default_publish_target_id"] = selected
     if "publish_targets" in defaults:
         defaults["publish_targets"] = list(by_key.values())
     return defaults

@@ -1029,26 +1029,32 @@ def record_scan_evidence(connection, data):
                 continue
             proof = target.get("verification") if isinstance(target.get("verification"), dict) else {}
             ready = native_allowed and proof.get("status") in {"passed", "verified"} and proof.get("source_sha") == sha
-            verified |= bool(ready and target.get("publish_capability") in {"direct", "hook"})
             preview_ready = native_allowed and proof.get("status") == "preview_verified" and proof.get("base_sha") == sha and bool(SHA_PATTERN.fullmatch(str(proof.get("source_sha") or "")))
-            preview |= bool((ready or preview_ready) and proof.get("preview_capable"))
             previous = connection.targets.filter(target_key=str(target["target_id"]), generation=connection.generation).first()
             from .incident_guards import target_update_allowed, proof_stamp
             if not target_update_allowed(previous, target, generation=connection.generation, sha=sha):
-                verified |= bool(previous.capabilities.get("publishingReady"))
-                preview |= bool((previous.contract.get("verification") or {}).get("preview_capable"))
+                verified |= bool(native_allowed and previous.capabilities.get("publishingReady"))
+                preview |= bool(native_allowed and (previous.contract.get("verification") or {}).get("preview_capable"))
                 continue
+            verified |= bool(ready and target.get("publish_capability") in {"direct", "hook"})
+            preview |= bool((ready or preview_ready) and proof.get("preview_capable"))
             custom_certified = bool(previous and previous.adapter == "custom_contract_v1" and previous.capabilities.get("adapterCertified")
                 and previous.contract.get("contract_digest") == target.get("contract_digest"))
             WebsiteConnectionTarget.objects.update_or_create(connection=connection, target_key=str(target["target_id"]), generation=connection.generation, defaults={
                 "adapter": str(target.get("delivery_adapter") or ""),
                 "adapter_version": str(target.get("adapter_version") or ""), "source_sha": sha, "contract": target,
-                "capabilities": {"publishingReady": bool(ready), "adapterCertified": custom_certified}, "verified_at": (previous.verified_at if previous and previous.source_sha == sha and evidence_digest(previous.contract) == evidence_digest(target) else proof_stamp(proof) or timezone.now()) if ready or preview_ready else None})
+                "capabilities": {"publishingReady": bool(ready), "adapterCertified": custom_certified,
+                    "previewSupported": bool(native_allowed and previous and previous.source_sha == sha
+                        and previous.capabilities.get("previewSupported"))},
+                "verified_at": (previous.verified_at if previous and previous.source_sha == sha and evidence_digest(previous.contract) == evidence_digest(target) else proof_stamp(proof) or timezone.now()) if ready or preview_ready else None})
         # Absence from a scan is not revocation of an accepted proof.
         accepted_targets = connection.targets.filter(generation=connection.generation, source_sha=sha, verified_at__isnull=False)
         for accepted in accepted_targets:
-            verified |= bool(accepted.capabilities.get("publishingReady"))
-            preview |= bool((accepted.contract.get("verification") or {}).get("preview_capable"))
+            verified |= bool(native_allowed and accepted.capabilities.get("publishingReady"))
+            preview |= bool(native_allowed and ((accepted.contract.get("verification") or {}).get("preview_capable")
+                or accepted.capabilities.get("previewSupported")
+                or (sha == connection.verified_sha and caps.get("previewSupported")
+                    and accepted.capabilities.get("publishingReady"))))
         if verified or preview:
             check_source_identity(connection, {"source_sha": sha}, required=True)
             if (str(connection.pk), connection.generation, sha) not in _verified_heads.get():

@@ -129,7 +129,7 @@ def record_ci_attestation(data, *, owner_review=False, origin="authenticated_ci"
                 raise WebsiteAuthorityError("website_configuration_changed", "The reviewed target contract changed while CI was being verified.")
             target.source_sha, target.verified_at = proof["source_sha"], timezone.now()
             target.contract = {**target.contract, "verification": {**proof, "status": "verified"}}
-            target.capabilities = {**target.capabilities, "publishingReady": True}
+            target.capabilities = {**target.capabilities, "publishingReady": True, "previewSupported": True}
             target.save(update_fields=["source_sha", "verified_at", "contract", "capabilities", "updated_at"])
             from .models import OrganizationContentConfig
             config = OrganizationContentConfig.objects.get(website_connection=website)

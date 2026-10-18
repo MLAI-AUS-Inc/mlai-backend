@@ -243,11 +243,23 @@ class IncidentAuthorityReplays(SimpleTestCase):
             self.assertFalse(target_update_allowed(self.previous, candidate, generation=3, sha=self.sha))
         self.assertTrue(target_update_allowed(self.previous, deepcopy(self.target), generation=3, sha=self.sha))
 
-    def test_changed_contract_requires_equal_or_newer_actual_proof(self):
-        candidate = {**self.target, "content_path": "content/stories"}
-        self.assertTrue(target_update_allowed(self.previous, candidate, generation=3, sha=self.sha))
-        candidate["verification"] = {**self.target["verification"], "checked_at": (self.now - timedelta(days=1)).isoformat()}
+    def test_scan_cannot_reuse_or_refresh_a_proof_for_changed_publishing_inputs(self):
+        for field, value in (("content_path", "content/stories"), ("route_path", "/other"),
+                ("route_template", "/other/{slug}"), ("target_config", {"build_command": ["other-build"]})):
+            for stamp in (self.now, self.now + timedelta(seconds=1)):
+                with self.subTest(field=field, stamp=stamp):
+                    candidate = {**self.target, field: value,
+                        "verification": {**self.target["verification"], "checked_at": stamp.isoformat()}}
+                    self.assertFalse(target_update_allowed(self.previous, candidate, generation=3, sha=self.sha))
+
+    def test_scan_cannot_replace_proof_metadata_even_when_inputs_are_unchanged(self):
+        candidate = deepcopy(self.target)
+        candidate["verification"]["checked_at"] = (self.now + timedelta(seconds=1)).isoformat()
         self.assertFalse(target_update_allowed(self.previous, candidate, generation=3, sha=self.sha))
+
+    def test_changed_source_remains_an_unverified_proposal_until_reverified(self):
+        candidate = {**self.target, "route_path": "/other", "verification": {}}
+        self.assertTrue(target_update_allowed(self.previous, candidate, generation=3, sha="b" * 40))
 
     def test_generation_collision_fails_closed_until_specific_migration_approved(self):
         with self.assertRaises(WebsiteAuthorityError) as error:
@@ -272,6 +284,26 @@ class IncidentAuthorityReplays(SimpleTestCase):
         result = protect_certified_config(config, {"publish_targets": [generic], "default_publish_target_id": "category"})
         self.assertEqual(result["default_publish_target_id"], "featured")
         self.assertIn(self.target, result["publish_targets"])
+
+    def test_new_default_needs_its_own_persisted_current_source_certificate(self):
+        connection = SimpleNamespace(generation=3, verified_sha=self.sha, targets=Mock())
+        connection.targets.filter.return_value = [self.previous]
+        config = SimpleNamespace(website_connection=connection, default_publish_target_id="featured", publish_targets=[self.target])
+        proposed = {**self.target, "target_id": "category", "route_template": "/other/{slug}"}
+        result = protect_certified_config(config, {"publish_targets": [proposed], "default_publish_target_id": "category"})
+        self.assertEqual(result["default_publish_target_id"], "featured")
+
+    def test_scan_cannot_select_or_rewrite_another_certified_target(self):
+        other = deepcopy(self.target)
+        other["target_id"] = "category"
+        row = SimpleNamespace(**{**vars(self.previous), "target_key": "category", "contract": other})
+        connection = SimpleNamespace(generation=3, verified_sha=self.sha, targets=Mock())
+        connection.targets.filter.return_value = [self.previous, row]
+        config = SimpleNamespace(website_connection=connection, default_publish_target_id="featured", publish_targets=[self.target])
+        proposed = {**other, "route_path": "/wrong"}
+        result = protect_certified_config(config, {"publish_targets": [proposed], "default_publish_target_id": "category"})
+        self.assertEqual(result["default_publish_target_id"], "featured")
+        self.assertIn(other, result["publish_targets"])
 
     def test_cleanup_never_deletes_original_file_or_later_customer_edits(self):
         original = {"path": "src/Stories.tsx", "kind": "setup_route", "ownership": "edited", "after_sha256": "owned"}
@@ -550,6 +582,44 @@ class IncidentIntegratedReplays(SimpleTestCase):
         self.assertTrue(connection.capabilities["templatesValid"])
         self.assertEqual(connection.last_verified_at, accepted_at)
         self.assertEqual(connection.verified_sha, sha)
+
+    def test_ci_preview_capability_survives_a_same_source_scan_without_preview_flag(self):
+        from . import website_connections as authority
+        sha, accepted_at = "a" * 40, timezone.now() - timedelta(days=2)
+        for scanned_sha in (sha, "b" * 40):
+            for rows in ([], [{"target_id": "featured", "delivery_adapter": "bundle_only"}]):
+                with self.subTest(source=scanned_sha, rows=rows):
+                    previous = SimpleNamespace(generation=3, source_sha=sha, verified_at=accepted_at,
+                        target_key="featured", adapter="react_component", capabilities={"publishingReady": True},
+                        contract={"verification": {"status": "verified", "source_sha": sha}})
+                    targets = Mock()
+                    targets.filter.side_effect = lambda **kw: (SimpleNamespace(first=lambda: previous)
+                        if "target_key" in kw else [previous] if kw.get("source_sha") == sha else [])
+                    connection = SimpleNamespace(pk=uuid.uuid4(), generation=3, verified_sha=sha,
+                        last_verified_at=accepted_at, targets=targets, configuration_version=1,
+                        capabilities={"publishingReady": True, "previewSupported": True}, blockers=[],
+                        state="connected", save=Mock(), repository_id=42, github_repo="fixture/site",
+                        app_root="", branch="main", site_url="https://fixture.test",
+                        organization=SimpleNamespace(domain="fixture.test"), repository_mutations=Mock(),
+                        operations=Mock(), scan_snapshots=Mock())
+                    connection.repository_mutations.exists.return_value = False
+                    connection.operations.exclude.return_value.order_by.return_value.first.return_value = None
+                    connection.scan_snapshots.filter.return_value.order_by.return_value.first.return_value = None
+                    config = SimpleNamespace(article_template="<article>Template</article>", design_guide="Native classes",
+                        website_connection=connection, default_publish_target_id="featured")
+                    with patch.object(authority, "_authority_depth") as depth, \
+                            patch.object(authority, "_verified_heads") as heads, \
+                            patch.object(authority.WebsiteScanSnapshot.objects, "get_or_create"), \
+                            patch.object(authority.WebsiteConnectionTarget.objects, "update_or_create"), \
+                            patch.object(authority.OrganizationContentConfig.objects, "get", return_value=config), \
+                            patch.object(authority, "check_source_identity"):
+                        depth.get.return_value = 1
+                        heads.get.return_value = {(str(connection.pk), 3, scanned_sha)}
+                        authority.record_scan_evidence(connection, {"source_sha": scanned_sha, "publish_targets": rows})
+                    self.assertEqual(connection.capabilities["previewSupported"], scanned_sha == sha)
+                    public = authority.summary_for(config, company_id="company")
+                    self.assertEqual(public["capabilities"]["previewSupported"], scanned_sha == sha)
+                    self.assertEqual("preview" in public["allowedActions"], scanned_sha == sha)
 
     def push(self, *, owned):
         from . import website_reconciliation as reconciliation
