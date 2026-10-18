@@ -468,3 +468,18 @@ an existing quarantined parent refund after its source transaction commits. This
 preserves lock order and the existing cancellation-attempt count; duplicate proof
 cannot restart the budget. The awakened worker repeats the complete original-ledger
 and all-child evidence checks before crediting. Unknown effects remain retained.
+
+Cancellation follow-ups also have their own persisted three-attempt, 24-hour
+budget, including operations with no preview IDs. A typed article cancellation
+receipt retires repeated stop requests while preserving uncertain publication,
+refund and cleanup obligations. Generic HTTP success, 202 or 404 is not article
+absence evidence. A known non-article acknowledgement must match its original
+job or fenced operation/attempt. Unknown or exhausted cancellation is retained
+for reconciliation; preview teardown and token revocation continue independently.
+No cancellation deadline authorizes a credit or remote resource deletion.
+
+New cancellation intents freeze a digest of each run's original organization,
+repository, domain, workflow, goal and exact execution scope before remote work.
+A resumed attempt, changed deletion epoch or newly added run ID cannot reuse the
+old cancellation. Historical follow-ups without that binding retain an unknown
+obligation and retire repeated requests; the consumer never guesses their scope.

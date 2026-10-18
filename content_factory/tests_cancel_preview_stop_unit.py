@@ -36,7 +36,7 @@ class CancelPreviewStopDeadlineTests(SimpleTestCase):
                 "disable_auto_merge_prs": [], "cancelled_child_operation_ids": [], **payload},
             receipt={"status": "cancelled_by_user", "message": "Website preparation stopped.", "tokens": {"pending": 0, "revoked": 0}})
 
-    def _process(self, op, *, stop=PENDING_STOP, stop_status=202, cancel_status=200, tokens=None, remote_enabled=True):
+    def _process(self, op, *, stop=PENDING_STOP, stop_status=202, cancel_status=200, cancel_body=None, tokens=None, remote_enabled=True):
         from integrations import http_client
         from . import vibe_marketing_views as views
         from . import website_connections as authority
@@ -55,7 +55,7 @@ class CancelPreviewStopDeadlineTests(SimpleTestCase):
         def post(url, **kwargs):
             if url.endswith("/preview/stop"):
                 return SimpleNamespace(status_code=stop_status, json=lambda: stop)
-            return SimpleNamespace(status_code=cancel_status, json=lambda: {"status": "cancelled"})
+            return SimpleNamespace(status_code=cancel_status, json=lambda: cancel_body if cancel_body is not None else {"status": "cancelled"})
 
         with patch.object(reconciliation.transaction, "atomic", side_effect=lambda: nullcontext()), \
                 patch.object(reconciliation.WebsiteConnectionOperation, "objects", manager), \

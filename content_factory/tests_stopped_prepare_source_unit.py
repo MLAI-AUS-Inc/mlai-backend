@@ -140,8 +140,10 @@ class StoppedPreparationReceiptTests(SimpleTestCase):
         fixture.config.github_repo = connection.github_repo
         with patch("content_factory.website_connections.authority_guard", return_value=nullcontext(connection)), \
                 patch("workflow_runs.models.ContentFactoryRun.objects.filter") as rows, \
+                patch("workflow_runs.models.ContentFactoryRun.objects.select_for_update") as locked, \
                 patch.object(operations.WebsiteConnectionOperation.objects, "get_or_create", return_value=(Mock(), True)) as followup:
             rows.return_value.first.return_value = None
+            locked.return_value.filter.return_value.order_by.return_value = []
             rows.return_value.values_list.return_value = []
             operations.cancel_operation(fixture.config, data={"website_connection_id": str(uuid4()), "connection_generation": 3,
                 "operation_id": str(op.pk)}, idempotency_key="stop")
