@@ -205,7 +205,7 @@ def reserve_workflow_operation(connection, *, workflow, payload):
     # Like the Roo authorization fields, it is separately validated billing
     # metadata and must not change the original execution identity at dispatch.
     digest = evidence_digest({key: value for key, value in payload.items() if not key.startswith("roo_points_") and key not in {
-        "client_request_id", "idempotency_key", "roo_points_gate", "roo_points_authorized", "free_domain", "article_delivery_v1", "operation_id", "operation_attempt", "deletion_epoch", "dispatch_outbox_reserved"}})
+        "client_request_id", "idempotency_key", "roo_points_gate", "roo_points_authorized", "free_domain", "article_delivery_v1", "workflow_order_v1", "operation_id", "operation_attempt", "deletion_epoch", "dispatch_outbox_reserved"}})
     key = f"{connection.pk}:workflow:{payload['client_request_id']}"
     with authority_guard(payload, action="read"):
         active = None
@@ -249,7 +249,7 @@ def reserve_workflow_operation(connection, *, workflow, payload):
         payload.update(operation_id=str(op.pk), operation_attempt=op.payload.get("attempt", 1), deletion_epoch=deletion_epoch(connection))
         from .setup_delivery_enrollment import enroll_setup_delivery
         fields = ["receipt", "updated_at"]
-        if enroll_setup_delivery(op, payload, connection, workflow):
+        if enroll_setup_delivery(op, payload, connection, workflow, new_run=created):
             fields.insert(0, "payload")
         op.receipt = {**(getattr(op, "receipt", None) or {}), "dispatch_outcome": "new_attempt" if created else "replayed"}
         op.save(update_fields=fields)
