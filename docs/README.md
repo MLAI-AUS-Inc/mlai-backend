@@ -23,6 +23,8 @@ subsystem-specific contracts and runbooks.
 
 ## Content Factory
 
+- [19 October backend consolidation audit](articles-backend-rollup-audit-2026-10-19.md) — retained reliability fixes, deferred prototypes, exact component heads and release boundaries
+
 - [Interrupted article publication observation](articles-publication-observation.md) — bounded positive GitHub evidence, exact original intent and preserved settlement obligations
 - [Original queued article admission](articles-dispatch-admission.md) — original target/source checks before retrying paid work and held legacy identities
 - [R3 original goal audit](articles-r3-original-goal-audit-2026-10-18.md) — persisted partial owner observations, public unknown counts and remaining external coverage

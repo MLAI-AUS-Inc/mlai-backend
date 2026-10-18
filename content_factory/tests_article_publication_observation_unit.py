@@ -45,6 +45,24 @@ class PublicationObservationTests(SimpleTestCase):
             result = observer.advance("observer", now=self.now)
             return result, read, send
 
+    def test_legacy_worker_mutation_without_intent_keeps_existing_callback_contract(self):
+        from workflow_runs.models import ContentFactoryRun
+        from .website_models import WebsiteConnectionOperation
+        with patch.object(ContentFactoryRun.objects, "select_for_update") as lookup, \
+                patch.object(WebsiteConnectionOperation.objects, "get_or_create") as reserve:
+            self.assertIsNone(observer.register_intent(self.website, object(), {"kind": "published_article"}))
+        lookup.assert_not_called()
+        reserve.assert_not_called()
+
+    def test_legacy_worker_stop_does_not_invent_proof_or_erase_saved_results(self):
+        from .article_publication_evidence import cancellation_receipt
+        self.run.result = {"preview_url": "https://preview.fixture.test", "reconciliation_required": True}
+        before = deepcopy(self.run.result)
+        old_response = {"status": "cancelled", "run_id": self.run.run_id}
+        self.assertIsNone(cancellation_receipt(self.run, old_response))
+        self.assertEqual(cancellation_result(self.run, old_response), before)
+        self.assertEqual(self.run.result, before)
+
     def test_actual_writer_fixture_registers_exact_article_files_and_original_payment_scope(self):
         from workflow_runs.models import ContentFactoryRun
         from .website_models import WebsiteConnectionOperation
