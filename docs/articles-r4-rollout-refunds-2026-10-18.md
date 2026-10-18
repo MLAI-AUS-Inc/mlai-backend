@@ -103,6 +103,7 @@ pass, including invalid or empty primary revisions and the absent-only fallback.
 
 ```sh
 python scripts/test_without_database.py \
+  content_factory.tests_website_zoo_scope_unit \
   content_factory.tests_website_rollout_inspection_unit \
   content_factory.tests_website_first_article_billing_unit \
   content_factory.tests_website_goal_unit \
@@ -115,10 +116,34 @@ python scripts/check_test_assignment.py
 python scripts/test_without_database.py --check-models
 ```
 
-The final explicit test list passed 141 tests in 0.570 seconds. The existing
-assignment and read-only model checks passed; no test module or model was added
-by these final review corrections.
+The combined explicit test list passed 160 tests in 0.743 seconds. All 536 test
+modules are fully assigned, and the read-only model check found no changes.
+The new scope module has nineteen tests, including actual goal/dispatch/request
+lineage and compilation of the exact PostgreSQL queries without a connection.
 
 No local database, migrations, services, production operations or customer
 repositories are used. Database coverage belongs to the already authorized
 disposable CI; no new migration is introduced.
+
+## Original-goal scope observations
+
+The separate `inspect_articles_zoo_scope --observation <recorded-night.json>`
+command resolves a bounded Ready/full observation to its actual company,
+selected connection, original prepare goal and saved owned worker runs. It
+starts a fresh PostgreSQL REPEATABLE READ, READ ONLY transaction before model
+lookups; an existing transaction or failed read-only setup is refused. It does
+not create config, refresh status, reconcile work or call a provider.
+
+Saved scope and original-goal lineage must match. Missing or contradictory
+child evidence remains incomplete, without a latest-run fallback. Only safe
+identifiers, closed field names and digests leave the command; encrypted config,
+raw request/results, paths and credentials do not. The input reader opens every
+path component without following symlinks and rejects non-regular, oversized or
+changing files.
+
+This is attribution evidence, not observed runtime eligibility. Collect it
+before post-live adoption/disconnect changes the selected connection. Actual CF
+saved requests and executing worker roles still need to be bound through the
+protected sandbox collector, with runtime observations at admission/completion.
+That transport, fleet coverage and runner wiring remain unfinished; this
+command cannot qualify a zoo night or close the partial action audit.
