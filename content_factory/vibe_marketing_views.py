@@ -5393,6 +5393,54 @@ def _run_has_external_publish_evidence(run):
     )
 
 
+# Where articles-setup and scan runs record the setup PR they opened.
+_SETUP_PULL_REQUEST_RESULT_PATHS = (
+    "pr_url",
+    "verification_kit_pr_url",
+    "article_system_setup__pr_url",
+    "article_system_setup__prUrl",
+    "article_system_setup__verification_kit_pr_url",
+    "result__article_system_setup__pr_url",
+)
+
+
+def _article_setup_pull_request_urls(domain, urls):
+    """Return the subset of ``urls`` that are this website's articles-setup PRs."""
+    from django.db.models import Q
+    setup_runs = ContentFactoryRun.objects.filter(
+        domain=domain,
+        workflow__in=ARTICLE_SYSTEM_SETUP_WORKFLOWS | SCAN_WORKFLOWS,
+    )
+    found = set()
+    for url in urls:
+        match = Q()
+        for path in _SETUP_PULL_REQUEST_RESULT_PATHS:
+            match |= Q(**{f"result__{path}": url})
+        if setup_runs.filter(match).exists():
+            found.add(url)
+    return found
+
+
+def _draft_pull_request_urls(run):
+    """PR links an article run recorded for itself, excluding its setup PR.
+
+    An article blocked on articles setup copies the setup run's ``pr_url`` (and
+    branch) into its own result. That PR belongs to the website's setup, so it
+    is not evidence that this article was published, and it must never be
+    closed on the article's behalf.
+    """
+    result = _run_mapping(run.result)
+    urls = {
+        str(result.get(key) or "").strip()
+        for key in ("pr_url", "pull_request_url", "pullRequestUrl", "draft_pr_url", "draftPrUrl")
+    }
+    number = str(result.get("draft_pr_number") or "").strip()
+    if number.isdigit() and run.github_repo:
+        urls.add(f"https://github.com/{run.github_repo}/pull/{number}")
+    urls.discard("")
+    return sorted(urls - _article_setup_pull_request_urls(run.domain, urls))
+
+
 def _run_has_publish_pr_or_preview_evidence(run):
     result = _run_mapping(run.result)
     evidence = _publish_evidence_from_run(run)
@@ -7198,6 +7246,18 @@ def _cancel_local_article_run(*, run, organization, remote_data=None):
             ]
         )
         return locked_run
+
+
+def _cancel_refused_for_resolved_pr_link(run):
+    """Finish a cancel Content Factory refused only because of a PR link.
+
+    Content Factory refuses any article run that carries a PR link, including
+    a PR already confirmed closed and a setup PR copied onto a setup-blocked
+    draft. The backend has resolved that link, so the local cancel is the
+    record; stop the run's preview so it does not outlive the cancelled draft.
+    """
+    _call_content_factory_live_preview(run_id=run.run_id, method="DELETE")
+    return {}
 
 
 def _cancel_local_scan_run(*, run, remote_data=None):
@@ -12072,7 +12132,8 @@ def _verify_github_repository_access(context, config, *, force=False, allow_prob
                     http_client.delete("https://api.github.com/installation/token", headers={"Authorization": f"Bearer {probe.token}"}, timeout=(3, 8))
                 except http_client.RequestException:
                     pass
-    cache.set(key, result, 60 if result.get("verified") else 15)
+    from .website_github_access import access_observation_seconds
+    cache.set(key, result, access_observation_seconds(result.get("verified")))
     request_cache[key] = {"result": dict(result), "fresh": True}
     return result
 
@@ -12148,7 +12209,8 @@ def _verify_github_repository_access_b1(context, config, *, force=False, allow_p
                     http_client.delete("https://api.github.com/installation/token", headers={"Authorization": f"Bearer {credential.token}"}, timeout=(3, 8))
                 except http_client.RequestException:
                     pass
-    cache.set(key, result, 60 if result.get("verified") else 15)
+    from .website_github_access import access_observation_seconds
+    cache.set(key, result, access_observation_seconds(result.get("verified")))
     request_cache[key] = {"result": dict(result), "fresh": True}
     return result
 
@@ -18548,13 +18610,27 @@ def control_article_run(*, user, context, run, action, data, run_id=None, goal_o
             return Response({"detail": "Only article runs can be cancelled from this action."}, status=status.HTTP_400_BAD_REQUEST)
 
         if bool(payload.get("cancel_group") or payload.get("cancelGroup")):
+            from .draft_pull_request_cleanup import blocked_detail, close_draft_pull_request
             members = _article_draft_group_members(run, context.organization)
+            config = _get_config(context.organization)
             cancelled_ids = []
             protected_ids = []
+            blocked_reasons = set()
             for member in members:
-                if _run_has_external_publish_evidence(member):
-                    protected_ids.append(member.run_id)
-                    continue
+                has_pr_link = _run_has_external_publish_evidence(member)
+                pull_requests = []
+                if has_pr_link:
+                    # Deleting the draft must not orphan a PR it opened: close
+                    # it (or confirm it is closed) first. A setup PR copied onto
+                    # a setup-blocked draft is not the draft's to close.
+                    pull_requests = [
+                        close_draft_pull_request(config, url) for url in _draft_pull_request_urls(member)
+                    ]
+                    kept = [item for item in pull_requests if not item["ok"]]
+                    if kept:
+                        protected_ids.append(member.run_id)
+                        blocked_reasons.update(item["reason"] for item in kept)
+                        continue
                 member_remote = _call_content_factory_run_action(
                     run_id=member.run_id,
                     action="cancel",
@@ -18562,16 +18638,23 @@ def control_article_run(*, user, context, run, action, data, run_id=None, goal_o
                     workflow=member.workflow,
                 )
                 if int(member_remote.get("content_factory_status_code") or 0) == 409:
-                    protected_ids.append(member.run_id)
-                    continue
+                    if not has_pr_link:
+                        protected_ids.append(member.run_id)
+                        continue
+                    member_remote = _cancel_refused_for_resolved_pr_link(member)
+                if pull_requests:
+                    cleanup = member_remote.get("cleanup") if isinstance(member_remote.get("cleanup"), dict) else {}
+                    member_remote = {**member_remote, "cleanup": {**cleanup, "pull_requests": pull_requests}}
                 _cancel_local_article_run(run=member, organization=context.organization, remote_data=member_remote)
                 cancelled_ids.append(member.run_id)
 
             if not cancelled_ids and protected_ids:
-                return Response(
-                    {"detail": "This article already has external publish evidence. Close or clean up the external PR manually before cancelling."},
-                    status=status.HTTP_409_CONFLICT,
+                detail = (
+                    blocked_detail(blocked_reasons)
+                    if blocked_reasons
+                    else "Content Factory is still finishing this draft. Try deleting it again in a moment."
                 )
+                return Response({"detail": detail}, status=status.HTTP_409_CONFLICT)
 
             run = ContentFactoryRun.objects.prefetch_related("steps").get(pk=run.pk)
             body = _serialize_run(run, context=context)
@@ -18579,7 +18662,8 @@ def control_article_run(*, user, context, run, action, data, run_id=None, goal_o
             body["protectedRunIds"] = protected_ids
             return Response(body, status=status.HTTP_202_ACCEPTED)
 
-        if _run_has_external_publish_evidence(run):
+        has_pr_link = _run_has_external_publish_evidence(run)
+        if has_pr_link and _draft_pull_request_urls(run):
             return Response(
                 {"detail": "This article already has external publish evidence. Close or clean up the external PR manually before cancelling."},
                 status=status.HTTP_409_CONFLICT,
@@ -18587,8 +18671,10 @@ def control_article_run(*, user, context, run, action, data, run_id=None, goal_o
 
         remote_data = _call_content_factory_run_action(run_id=run_id, action=action, payload=payload, workflow=run.workflow)
         if int(remote_data.get("content_factory_status_code") or 0) == 409:
-            detail = remote_data.get("error") or "Content Factory rejected cancellation for this run."
-            return Response({"detail": detail}, status=status.HTTP_409_CONFLICT)
+            if not has_pr_link:
+                detail = remote_data.get("error") or "Content Factory rejected cancellation for this run."
+                return Response({"detail": detail}, status=status.HTTP_409_CONFLICT)
+            remote_data = _cancel_refused_for_resolved_pr_link(run)
 
         run = _cancel_local_article_run(run=run, organization=context.organization, remote_data=remote_data)
         run = ContentFactoryRun.objects.prefetch_related("steps").get(pk=run.pk)
