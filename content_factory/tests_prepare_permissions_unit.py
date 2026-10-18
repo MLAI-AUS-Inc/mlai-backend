@@ -96,6 +96,7 @@ class PrepareVerificationRuntimeTests(SimpleTestCase):
         from .models import OrganizationContentConfig
         from .website_models import WebsiteConnection, WebsiteConnectionOperation
         stack = self.ExitStack()
+        stack.enter_context(patch("startup_updates.benefits.has_monthly_update_discount", return_value=False))
         stack.enter_context(patch.object(prepare.transaction, "atomic", side_effect=lambda *a, **kw: self.nullcontext()))
         stack.enter_context(patch.object(get_user_model().objects, "get", return_value=self.user))
         stack.enter_context(patch.object(views, "get_founder_company_context", return_value=self.context))

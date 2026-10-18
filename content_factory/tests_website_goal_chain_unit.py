@@ -15,6 +15,9 @@ from . import tests_prepare_journey_unit as journey_fixtures
                    ARTICLES_FAILURE_TAXONOMY_ENROLLED_ORGANIZATIONS=["7"],
                    CONTENT_FACTORY_URL="https://synthetic-worker.test", CONTENT_FACTORY_API_KEY="synthetic")
 class RealGoalChainTests(SimpleTestCase):
+    def setUp(self):
+        self.enterContext(patch("startup_updates.benefits.has_monthly_update_discount", return_value=False))
+
     rows = staticmethod(journey_fixtures.FrozenPrepareContextTests.rows)
 
     def test_enrolled_goal_executes_real_context_journey_dispatch_and_remote_queue(self):

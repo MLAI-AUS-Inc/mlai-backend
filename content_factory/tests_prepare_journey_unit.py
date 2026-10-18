@@ -14,6 +14,9 @@ from . import tests_one_click_operations_unit as fixtures
 
 
 class FrozenPrepareContextTests(SimpleTestCase):
+    def setUp(self):
+        self.enterContext(patch("startup_updates.benefits.has_monthly_update_discount", return_value=False))
+
     @staticmethod
     def rows(*, first=None, exists=False):
         """Replace persistence access while leaving preparation/projection real."""
