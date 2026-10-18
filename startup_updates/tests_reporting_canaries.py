@@ -179,6 +179,27 @@ class ReportingCohortCanaries(TestCase):
         self.assertEqual(frozen_memo(draft, published=True)["highlights"], ["Revision A."])
 
 
+    def test_legacy_receipt_extraction_is_reused_after_context_hoist(self):
+        from startup_updates.source_evidence import source_receipt
+        import copy
+        org, _, run = self.startup("legacy-reuse", ["manual_documents"])
+        run.run_request["startup_context"] = {"notes": "Pinned founder context."}
+        bundle = {"cleaned_text": "The February pilot signed."}
+        # Reconstruct a staged pre-change receipt; its fingerprint has the same
+        # contract as the independently pinned main-branch golden fixture.
+        legacy = source_receipt(run, "notion", "page", bundle)
+        legacy.pop("startup_context_hash")
+        legacy["startup_context"] = copy.deepcopy(run.run_request["startup_context"])
+        legacy["output"] = {"events": [{"title": "Pilot signed"}], "source_fingerprint": legacy["fingerprint"]}
+        run.result = {"source_evidence": {"notion:page": legacy}}
+        run.save()
+        later = ContentFactoryRun.objects.create(run_id="legacy-reuse-later", organization=org,
+            workflow=run.workflow, domain=org.domain, run_request=copy.deepcopy(run.run_request))
+        cached = stage_source(later, "notion", "page", bundle)
+        self.assertEqual(cached["source_fingerprint"], legacy["fingerprint"])
+        self.assertEqual(cached["cached_extraction"], legacy["output"])
+        self.assertNotIn("startup_context", later.result["source_evidence"]["notion:page"])
+
     def test_worker_checkpoint_cannot_erase_evidence_or_change_founder_inputs(self):
         from content_factory.service_views import _sync_content_factory_run_snapshot
         _, _, run = self.startup("checkpoint", ["manual_documents"])

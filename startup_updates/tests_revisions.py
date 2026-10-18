@@ -118,6 +118,42 @@ class MonthlyEvidencePipelineTests(StartupUpdateApiTestCase):
         with self._with_key():
             return self.client.post(reverse("startup_updates_draft_results", args=[self.run.run_id]), {"drafts": [item]}, format="json", **self.headers)
 
+    def test_snapshot_hoists_context_once_from_modern_receipts(self):
+        from startup_updates.source_evidence import source_receipt
+        from startup_updates.revisions import capture_snapshot
+        self.run.run_request["startup_context"] = {"notes": "Frozen founder notes."}
+        receipt = source_receipt(self.run, "gmail", "thread", {"cleaned_text": "Original evidence."})
+        self.run.result = {"source_evidence": {"gmail:thread": receipt, "gmail:other": dict(receipt)}}
+        snapshot = capture_snapshot(self.organization, date(2026, 3, 1), run=self.run)
+        self.assertEqual(snapshot.payload["startup_context"], self.run.run_request["startup_context"])
+        self.assertTrue(all("startup_context" not in r for r in snapshot.payload["source_evidence"].values()))
+        self.assertEqual(snapshot.payload["source_evidence"]["gmail:thread"]["fingerprint"], receipt["fingerprint"])
+
+    def test_snapshot_normalizes_legacy_receipts_but_keeps_distinct_contexts(self):
+        from startup_updates.revisions import capture_snapshot
+        from startup_updates.evidence_contract import content_hash
+        context = {"notes": "Frozen legacy notes."}
+        self.run.run_request["startup_context"] = {"notes": "Changed profile."}
+        self.run.result = {"source_evidence": {"gmail:1": {"startup_context": context, "bundle": {}},
+            "gmail:2": {"startup_context": dict(context), "bundle": {}}}}
+        snapshot = capture_snapshot(self.organization, date(2026, 3, 1), run=self.run)
+        self.assertEqual(snapshot.payload["startup_context"], context)
+        for receipt in snapshot.payload["source_evidence"].values():
+            self.assertNotIn("startup_context", receipt)
+            self.assertEqual(receipt["startup_context_hash"], content_hash(context))
+        self.run.result["source_evidence"]["gmail:2"]["startup_context"] = {"notes": "Distinct context."}
+        mixed = capture_snapshot(self.organization, date(2026, 3, 1), run=self.run)
+        self.assertIsNone(mixed.payload["startup_context"])
+        self.assertEqual(mixed.payload["source_evidence"], self.run.result["source_evidence"])
+
+    def test_amendment_keeps_base_snapshot_startup_context(self):
+        from startup_updates.revisions import capture_snapshot
+        self.run.run_request["startup_context"] = {"notes": "Frozen notes."}
+        base = capture_snapshot(self.organization, date(2026, 3, 1), run=self.run)
+        self.run.run_request["startup_context"] = {"notes": "Later live profile."}
+        amended = capture_snapshot(self.organization, date(2026, 3, 1), run=self.run, base_snapshot=base)
+        self.assertEqual(amended.payload["startup_context"], {"notes": "Frozen notes."})
+
     def test_generation_retry_and_review_use_pinned_values(self):
         self.run.run_request["input_sources"].append("google_analytics")
         self.run.save(update_fields=["run_request"])
