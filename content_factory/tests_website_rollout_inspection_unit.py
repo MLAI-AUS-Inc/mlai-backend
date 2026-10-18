@@ -132,6 +132,14 @@ class RolloutInspectionTests(SimpleTestCase):
         self.assertEqual(report["steps"]["F3"]["state"], "disabled")
         self.assertFalse(report["steps"]["F3"]["backend_eligible"])
 
+    def test_f3_requires_observation_of_the_actual_cf_cost_accounting_flag(self):
+        self.snapshot["flags"]["CONTENT_FACTORY_ARTICLES_COST_ACCOUNTING_ENABLED"] = False
+        with override_settings(**self.flags):
+            report = self.report(cf_snapshot=self.snapshot, run_id="fixture-run")
+        self.assertEqual(report["steps"]["F3"]["state"], "disabled")
+        with override_settings(**self.flags):
+            self.assertEqual(self.report()["steps"]["F3"]["state"], "unknown")
+
     def test_actual_deploy_app_release_is_full_revision_and_conflicting_fallback_cannot_replace_it(self):
         with patch.dict("os.environ", {"APP_RELEASE": "b" * 40, "APP_COMMIT_SHA": "a" * 40}):
             self.assertEqual(self.report()["backend_revision"], "b" * 40)

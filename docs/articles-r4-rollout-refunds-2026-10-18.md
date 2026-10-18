@@ -43,6 +43,8 @@ Every B through F rollout row lists its backend switches and prerequisites and
 the required CF counterparts. Goal eligibility uses the actual `goals.enrolled`
 predicate, including taxonomy policy and both organization lists. The combined
 F3 group also needs goal enrollment because its operational-alert path does.
+Its CF counterpart is `CONTENT_FACTORY_ARTICLES_COST_ACCOUNTING_ENABLED`; an
+unobserved counterpart remains unknown even when backend switches are on.
 Setup delivery has a separate enrollment list.
 
 Rows are `disabled`, `unknown` or `configured`. Configured means the inspected
@@ -113,7 +115,7 @@ python scripts/check_test_assignment.py
 python scripts/test_without_database.py --check-models
 ```
 
-The final explicit test list passed 140 tests in 0.855 seconds. The existing
+The final explicit test list passed 141 tests in 0.570 seconds. The existing
 assignment and read-only model checks passed; no test module or model was added
 by these final review corrections.
 
