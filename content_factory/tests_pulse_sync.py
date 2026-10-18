@@ -45,6 +45,23 @@ class PulseSyncPersistenceTests(TestCase):
         self.assertEqual(cancelled.status_code, 409)
         self.assertEqual(cancelled.data["error"], "run_cancelled")
 
+    def test_full_response_includes_new_steps_and_attempts_and_omits_deleted_steps(self):
+        self.assertEqual(self.put("pulse-full-relations", self.sequence[0]).status_code, 201)
+        payload = copy.deepcopy(self.sequence[1])
+        payload["step_order"].remove("relevance_classification")
+        payload["step_states"].pop("relevance_classification")
+        payload["step_order"].append("temporary_step")
+        payload["step_states"]["temporary_step"] = {"status": "pending", "attempts": 0}
+        response = self.put("pulse-full-relations", payload)
+        self.assertEqual(response.status_code, 200, response.data)
+        self.assertEqual(set(response.data["step_states"]), {"gmail_backfill", "temporary_step"})
+        self.assertEqual(
+            [row["attempt"] for row in response.data["step_states"]["gmail_backfill"]["attempt_history"]],
+            [1, 2],
+        )
+        saved = self.client.get("/api/content-factory/runs/pulse-full-relations/")
+        self.assertEqual(response.data["step_states"], saved.data["step_states"])
+
     def test_identical_puts_with_truncated_attempt_history_write_no_step_or_attempt_rows(self):
         payload = copy.deepcopy(self.sequence[-1])
         payload["step_states"]["gmail_backfill"]["attempt_history"] = [

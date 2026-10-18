@@ -9035,6 +9035,10 @@ def _sync_content_factory_run_snapshot(*, run_id: str, data: dict, step_states: 
 
         if seen_steps:
             ContentFactoryRunStep.objects.filter(run=run).exclude(step_key__in=seen_steps).delete()
+        # The locked instance was prefetched before these writes. Full legacy
+        # replies must reload newly created/deleted steps and attempt histories;
+        # ack replies never traverse this relation and pay no extra query cost.
+        getattr(run, "_prefetched_objects_cache", {}).pop("steps", None)
 
     from .island_research import refund_empty_or_failed_research
     refund_empty_or_failed_research(run)
