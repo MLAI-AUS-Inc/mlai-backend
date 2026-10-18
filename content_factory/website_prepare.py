@@ -643,6 +643,8 @@ def _selected_setup_child(op, config, *, run=None):
 
 
 def _correlate_setup_child(op, run):
+    from .website_hosted_setup_lineage import discard_for_new_setup
+    discard_for_new_setup(op)
     op.receipt = {**op.receipt, "child_run_id": run.run_id, "setup_run_id": run.run_id, "current_step": "setup",
         "status": "working", "message": "Preparing your selected articles page.", "user_action": None,
         "reason_code": "", "blocked_step": None, "step_failures": {}, "last_completed": None, "retryable": False}
@@ -925,6 +927,9 @@ def _advance_claimed_prepare(op, *, now, handlers):
             outcome = handler(op, context, config, user=user) if handler else _dispatch_prepare_step(op, context, config, step, user=user, journey=journey)
             run_id = (outcome or {}).get("run_id") or (outcome or {}).get("runId")
             if run_id:
+                if step == "setup":
+                    from .website_hosted_setup_lineage import discard_for_new_setup
+                    discard_for_new_setup(op)
                 op.receipt.update(child_run_id=run_id, **{f"{step}_run_id": run_id})
                 op.payload = {**op.payload, "run_id": run_id}
                 break
@@ -1049,6 +1054,10 @@ def _begin_post_merge_attempt(op, child):
     The merge's push webhook cannot reopen an operation this worker still holds,
     so a rescan or check reusing the pre-merge keys would conflict.
     """
+    if op.receipt.get("merged_setup_run_id") == child.run_id:
+        return  # A replay after the local transition cannot rotate its identity again.
+    from .website_hosted_setup_lineage import retain_post_merge_inputs
+    retain_post_merge_inputs(op, child)
     op.payload = {**{key: value for key, value in op.payload.items() if key not in {"run_id", "repair_setup"}},
         "attempt": op.payload.get("attempt", 1) + 1, "retry_epoch": uuid4().hex, "source_reverify": True}
     for key in ("scan_run_id", "setup_run_id", "completed_steps", "last_completed"):
@@ -1070,6 +1079,8 @@ def _return_to_open_setup_pr(op, config, journey):
         # The owner cannot fix MLAI's own verification job on this pull request;
         # their Try again builds a new setup and kit instead of re-reading it.
         return None
+    from .website_hosted_setup_lineage import discard_for_new_setup
+    discard_for_new_setup(op)
     op.receipt = {**op.receipt, "child_run_id": run.run_id, "setup_run_id": run.run_id, "current_step": "merge",
         "status": "working", "message": "Returning to your articles setup pull request.", "user_action": None,
         "reason_code": "", "blocked_step": None, "step_failures": {}, "last_completed": None, "retryable": False}

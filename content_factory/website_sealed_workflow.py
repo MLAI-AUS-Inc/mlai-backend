@@ -60,10 +60,11 @@ def parent_binding(op, connection, source):
         "configuration_revision": connection.configuration_version, "expected_source_sha": source}
 
 
-def parent_snapshot(op, connection, config, target, source_run):
+def parent_snapshot(op, connection, config, target, source_run, *, source=None):
     """Validate the original goal, selection and setup ownership under authority."""
     from .website_setup_consent import valid as valid_consent
     from .website_operations import deletion_epoch
+    from .website_hosted_setup_lineage import KEY as RECOVERED_SOURCE, source_reference, validate_recovered_source
     goal = goals.mapping(op.receipt).get("goal")
     scope = goals.scope_for(connection, op.payload.get("company_id"))
     latest = connection.operations.filter(generation=connection.generation, action="prepare").order_by("-created_at").first()
@@ -82,11 +83,14 @@ def parent_snapshot(op, connection, config, target, source_run):
     if (source_run is None or source_run.workflow != "article_system_setup"
             or source_run.organization_id != connection.organization_id
             or source_run.domain != connection.organization.domain or source_run.github_repo != connection.github_repo
-            or source_run.run_id != op.receipt.get("setup_run_id")
+            or source_run.run_id != source_reference(op)
             or any(type(request.get(key)) is not type(value) or request.get(key) != value for key, value in expected.items())
             or not isinstance(request.get("expected_source_sha"), str) or not goals.SHA.fullmatch(request["expected_source_sha"])):
         raise WebsiteAuthorityError("ci_attestation_scope_mismatch", "The original setup inputs do not belong to this website.")
-    return {"parent_operation_id": str(op.pk), "parent_attempt": op.payload.get("attempt", 1),
+    validate_recovered_source(op, connection, source_run, source=source)
+    return {**({"recovered_setup_digest": digest(op.receipt[RECOVERED_SOURCE]),
+        "parent_retry_epoch": op.payload.get("retry_epoch")} if RECOVERED_SOURCE in op.receipt else {}),
+        "parent_operation_id": str(op.pk), "parent_attempt": op.payload.get("attempt", 1),
         "consent_digest": digest(goal["consent"]), "goal_scope_digest": digest(goal["scope"]),
         "accepted_target_digest": digest(target.contract), "source_request_digest": digest(request),
         "baseline_source_sha": request["expected_source_sha"], "target_id": target.target_key,
@@ -115,14 +119,15 @@ def prepare_candidate(op, context, config, target, source):
     from workflow_runs.models import ContentFactoryRun
     from .website_connections import authority_guard
     from .website_sealed_candidate import fetch_candidate, validate_proposal
+    from .website_hosted_setup_lineage import source_reference
     connection = config.website_connection
     if not enabled(connection):
         raise WebsiteAuthorityError("ci_attestation_required", "Compatible hosted execution verification is disabled.")
     binding = parent_binding(op, connection, source)
     with authority_guard(binding, action="read") as current:
         op.refresh_from_db(); config.refresh_from_db(); target.refresh_from_db()
-        source_run = ContentFactoryRun.objects.filter(run_id=op.receipt.get("setup_run_id"), organization_id=current.organization_id).first()
-        snapshot = parent_snapshot(op, current, config, target, source_run)
+        source_run = ContentFactoryRun.objects.filter(run_id=source_reference(op), organization_id=current.organization_id).first()
+        snapshot = parent_snapshot(op, current, config, target, source_run, source=source)
         accepted = deepcopy(target.contract)
         mark_required(target)
     request = {key: value for key, value in binding.items() if key != "configuration_revision"}
@@ -132,7 +137,7 @@ def prepare_candidate(op, context, config, target, source):
         baseline_source_sha=snapshot["baseline_source_sha"], supported_verifier=supported_verifier())
     with authority_guard(binding, action="read") as current:
         op.refresh_from_db(); config.refresh_from_db(); target.refresh_from_db(); source_run.refresh_from_db()
-        if parent_snapshot(op, current, config, target, source_run) != snapshot:
+        if parent_snapshot(op, current, config, target, source_run, source=source) != snapshot:
             raise WebsiteAuthorityError("website_configuration_changed", "The hosted verification inputs changed during the service read.")
     return candidate, {**snapshot, "parent_binding": binding, "accepted_target": accepted}
 
@@ -150,7 +155,7 @@ def fence_pending(connection, target, pending):
     source_run = ContentFactoryRun.objects.filter(run_id=snapshot["source_run_id"], organization_id=connection.organization_id).first()
     if parent is None:
         raise WebsiteAuthorityError("website_operation_changed", "The original verification goal is unavailable.")
-    actual = parent_snapshot(parent, connection, config, target, source_run)
+    actual = parent_snapshot(parent, connection, config, target, source_run, source=snapshot["parent_binding"].get("expected_source_sha"))
     if any(actual.get(key) != value for key, value in snapshot.items() if key not in {"parent_binding", "accepted_target"}):
         raise WebsiteAuthorityError("website_configuration_changed", "The original verification inputs changed.")
     if digest(snapshot["accepted_target"]) != actual["accepted_target_digest"]:

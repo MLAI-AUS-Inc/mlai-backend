@@ -51,3 +51,40 @@ Seven transaction tests are registered in the disposable PostgreSQL lane and
 must pass there before this draft is eligible for integration. Live hosting,
 native CI provenance, legacy-candidate migration and production deployment
 remain separate, unproved requirements. The rollout flag defaults to false.
+
+## Owned post-merge input recovery
+
+The prepare transition used to clear `setup_run_id` before the hosted reader
+requested that same reference. A merged setup could therefore wait indefinitely
+for verifier inputs that still existed. The transition now retains a separate,
+bounded `hosted_merged_setup_source_v1` reference. This identifies private inputs;
+it does not restore setup approval or accepted source proof.
+
+Recovery is limited to this active goal's original backend dispatch key, its
+captured attempt and retry epoch, unchanged consent and immutable request, and
+the backend-owned merge intent/response for the currently observed source.
+All present optional goal claims must agree. The sealed reader checks scope,
+ownership and source under its existing locks before and after the private
+candidate read, then again at reservation and final promotion. The original
+candidate and baseline remain unchanged; execution uses a fresh child bound to
+the current prepare attempt. Repeating the same post-merge transition leaves
+its identity unchanged. A fresh selected/dispatched setup retires the input
+reference, while explicit repair or a required new strategy candidate cannot
+borrow it.
+
+Missing historical references, conflicting current/merged references, source
+movement, changed consent or malformed merge facts remain pending. Worker
+callbacks cannot introduce the protected backend merge facts. This slice covers
+the worker-owned post-merge transition only: webhook-first recovery and the
+independent CF marker-only re-adoption PR churn remain open. No rollout defaults,
+customer files, production data or deployment are changed.
+
+Validation: the actual post-merge transition to sealed child reservation failed
+before the repair. A separate repeated-transition regression also failed before
+its idempotence guard. Strict tests deny database, socket, listener and process
+access. They cover parent/client identity, attempt/epoch, all optional goal
+claims, merge/source tampering, changed input during the private read, final
+fences, callback forgery and fresh setup selection. Disposable transaction and
+provider/build/browser qualification remain remote or separately approved work.
+The complete article-journey selection passed 987 tests, with 546 test modules
+fully assigned to CI and the offline 746-emission failure-contract audit passing.
