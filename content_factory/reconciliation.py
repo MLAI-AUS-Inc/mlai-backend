@@ -638,6 +638,17 @@ def _refund_failed_run(run, *, reason):
         result = dict(current.result or {})
         terminal_receipt = result.get("article_terminal_refund")
         receipt = dict(terminal_receipt) if isinstance(terminal_receipt, dict) else {}
+        if receipt.get("status") in {"refunded", "not_required"}:
+            return
+        if (current.run_request or {}).get("first_article_goal_operation_id"):
+            # A legacy child outbox cannot credit the parent's shared spend after
+            # a different repair child delivers. Preserve the obligation under
+            # its original goal owner; the goal's own refund outbox settles it.
+            current.result = {**result, "article_settlement_owner": "first_article_goal",
+                "article_terminal_refund": {**receipt, "status": "deferred_to_goal"},
+                "reconciliation_refund_pending": True}
+            current.save(update_fields=["result"])
+            return
         stop_reason = refund_reconciliation_reason(current)
         if stop_reason:
             if stop_reason == "stop_required" and receipt.get("status") == "needs_reconciliation":
@@ -718,7 +729,7 @@ def _settle_sweep_refunds(*, limit):
     for run in ContentFactoryRun.objects.filter(status__in=["failed", "cancelled"], result__reconciliation_refund_pending=True).filter(_legacy_delivery_rows("run_request") |
             Q(result__article_cancellation_v1__purpose="article_cancellation")).filter(
             Q(result__article_terminal_refund__status__isnull=True) |
-            ~Q(result__article_terminal_refund__status="needs_reconciliation"))[:limit]:
+            ~Q(result__article_terminal_refund__status__in=["needs_reconciliation", "deferred_to_goal"]))[:limit]:
         try:
             if (run.run_request or {}).get("pending_billing_refund"):
                 from .vibe_marketing_views import _process_pending_dispatch_refund

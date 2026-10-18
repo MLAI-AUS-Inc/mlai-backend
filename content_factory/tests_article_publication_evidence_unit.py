@@ -601,7 +601,7 @@ class ArticleCancellationSettlementTests(SimpleTestCase):
     def test_repeat_terminal_failure_cannot_reopen_settled_or_quarantined_credit(self):
         from integrations.services.article_generation import _record_terminal_article_refund
         job = SimpleNamespace(job_id=self.run.run_id, domain=self.run.domain)
-        for status in ("refunded", "not_required", "needs_reconciliation", "stop_required"):
+        for status in ("refunded", "not_required", "needs_reconciliation", "stop_required", "deferred_to_goal"):
             self.run.result = {"article_terminal_refund": {"status": status, "paid_obligation": True}}
             with patch.object(views.transaction, "atomic", return_value=nullcontext()), \
                     patch.object(views.ContentFactoryRun.objects, "select_for_update") as rows:
@@ -624,3 +624,21 @@ class ArticleCancellationSettlementTests(SimpleTestCase):
         resolve.assert_not_called()
         self.assertEqual(self.run.result["article_terminal_refund"]["status"], "needs_reconciliation")
         self.assertEqual(self.run.result["article_settlement_attempts"], 3)
+
+    def test_old_child_refund_obligation_cannot_credit_the_goal_owned_spend(self):
+        from . import reconciliation
+        self.run.run_request["first_article_goal_operation_id"] = "prepare-7"
+        self.run.result.update(article_terminal_refund={"status": "pending", "paid_obligation": True},
+            reconciliation_refund_pending=True)
+        self.cancel()
+        with patch.object(reconciliation.transaction, "atomic", return_value=nullcontext()), \
+                patch("organizations.models.Organization.objects.select_for_update"), \
+                patch.object(views.ContentFactoryRun.objects, "select_for_update") as locked, \
+                patch("content_factory.billing_lineage.original_article_spend_for_run") as resolve:
+            locked.return_value.filter.return_value.first.return_value = self.run
+            reconciliation._refund_failed_run(self.run, reason="late child settlement")
+        resolve.assert_not_called()
+        self.assertEqual(self.run.result["article_terminal_refund"]["status"], "deferred_to_goal")
+        self.assertTrue(self.run.result["article_terminal_refund"]["paid_obligation"])
+        self.assertTrue(self.run.result["reconciliation_refund_pending"])
+        self.assertEqual(self.run.result["article_settlement_owner"], "first_article_goal")

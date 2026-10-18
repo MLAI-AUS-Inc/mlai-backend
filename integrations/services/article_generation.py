@@ -1302,13 +1302,13 @@ def _record_terminal_article_refund(job, *, status, error_code, ledger=None):
         receipt = dict(saved) if isinstance(saved, dict) else {}
         if receipt.get('status') in {'refunded', 'not_required'}:
             return
-        if status == 'pending' and receipt.get('status') in {'stop_required', 'needs_reconciliation'}:
+        if status == 'pending' and receipt.get('status') in {'stop_required', 'needs_reconciliation', 'deferred_to_goal'}:
             status = receipt['status']
         receipt.update(status=status, paid_obligation=True, job_id=job_id, error_code=str(error_code or '')[:100])
         if ledger is not None:
             receipt['refund_ledger_id'] = str(ledger.pk)
         current.result = {**result, 'article_terminal_refund': receipt,
-            'reconciliation_refund_pending': status in {'pending', 'stop_required', 'needs_reconciliation'}}
+            'reconciliation_refund_pending': status in {'pending', 'stop_required', 'needs_reconciliation', 'deferred_to_goal'}}
         current.save(update_fields=['result', 'updated_at'])
 
 

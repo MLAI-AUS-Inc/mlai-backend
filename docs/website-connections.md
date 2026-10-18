@@ -429,7 +429,9 @@ holds those locks through database-only credit against the original spend, payer
 amount and idempotency key. Missing ledger identity, transport uncertainty and
 credit errors retain the obligation. Duplicate cancellation cannot erase a pending
 or completed credit; contradictory later evidence quarantines an uncredited
-obligation. Confirmed dispatch rejection retains its separate existing refund path.
+obligation. A pre-existing child refund obligation is marked `deferred_to_goal`
+and retained for its original first-article goal owner; the child cannot refund
+the shared spend after another repair child delivers. Confirmed dispatch rejection retains its separate existing refund path.
 Disconnect preserves queued goal-refund operations. An ordinary source wake,
 including the first article's own merge push, cannot create another paid successor
 after a terminal first-article goal, even when the goal-runner flag is rolled back.
