@@ -2139,12 +2139,12 @@ class VibeMarketingComponentCommentTests(_PublishRetryApprovalFixture, TestCase)
             cancelled_urls.append(url)
             return _Response(status_code=202, payload={"status": "cancelled", "cleanup": {}})
 
-        def team_changed_pull_request(config, pr_url):
+        def already_closed_pull_request(config, pr_url):
             checked_pull_requests.append(pr_url)
-            return {"prUrl": pr_url, "ok": False, "action": "", "reason": "team_changes"}
+            return {"prUrl": pr_url, "ok": True, "action": "already_closed", "reason": ""}
 
         with patch("content_factory.vibe_marketing_views.http_client.post", side_effect=fake_post), \
-                patch("content_factory.draft_pull_request_cleanup.close_draft_pull_request", side_effect=team_changed_pull_request):
+                patch("content_factory.draft_pull_request_cleanup.close_draft_pull_request", side_effect=already_closed_pull_request):
             response = self.client.post(
                 f"/api/v1/vibe-marketing/runs/{cancellable_one.run_id}/cancel",
                 {"cancel_group": True},
@@ -2160,8 +2160,8 @@ class VibeMarketingComponentCommentTests(_PublishRetryApprovalFixture, TestCase)
         self.assertEqual(checked_pull_requests, ["https://github.com/MLAI-AUS-Inc/mlai-au/pull/77"])
         self.assertTrue(any(cancellable_one.run_id in url for url in cancelled_urls))
         self.assertTrue(any(cancellable_two.run_id in url for url in cancelled_urls))
-        # The stop request is allowed, but its untyped reply cannot establish
-        # the published attempt's cancellation or erase its external evidence.
+        # Closing the PR permits a stop request, but its untyped reply cannot
+        # establish cancellation or erase the attempt's external evidence.
         self.assertTrue(any(protected.run_id in url for url in cancelled_urls))
 
         cancellable_one.refresh_from_db()
