@@ -372,8 +372,9 @@ source SHA and the exact saved slug/route contract. Older repository-bound draft
 remain reviewable but return `website_repository_changed`,
 `website_source_changed` or `capture_target_mismatch` before a publishing child
 is bound. A refunded original draft payment also denies regeneration/restart;
-no-delivery internal, budget, editorial or source-drift failures refund the
-recorded charge without refunding a saved deliverable.
+no-delivery internal, budget, editorial or source-drift failures queue settlement
+of the recorded charge after the worker has proved it stopped without an article
+effect or a delivered review/package.
 
 `github-revoke` has an account-wide reviewed flow. `phase=plan` returns `githubRevocation.planDigest`, affected owned companies and provider instructions. `phase=apply` requires that exact `plan_digest`, `approved=true` and an idempotency key. It fences all reviewed owned bindings, cancels their work/schedules and clears only this user's saved installation/OAuth credentials. Other users sharing an installation ID are preserved. Local completion does not claim provider uninstall; the receipt retains `provider_cleanup_pending` and GitHub installation/OAuth settings links. Website disconnect remains company-scoped and preserves global account access.
 
@@ -390,3 +391,50 @@ configuration, proof, credentials or billing. Unknown runs return 404 and scope
 mismatches return 409. Terminal setup revisions project their recorded failure over
 stale preview-building labels in browser and worker responses; the read projection
 does not rewrite historical run evidence.
+
+
+### Article cancellation and original-charge settlement
+
+An article's setup PR does not constitute article publication. The worker emits
+`publication_evidence_v1` with `purpose=setup|article`, run/goal identity and the
+original present-only scope: connection/generation/target, repository, source SHA,
+operation/attempt/deletion epoch, client request ID and optional branch/app root.
+A setup receipt explains only its matching PR/branch. Unexplained legacy links,
+pending publication or an article effect retain their evidence and require
+reconciliation. Later sparse snapshots cannot erase that publication evidence or
+change the original scope, billing key, goal or initial delivery consent. Explicit
+backend resume changes the execution attempt; it preserves omitted scope fields.
+
+The worker's `article_cancellation_v1` binds that scope to a nonnegative execution
+generation, monotonically checked state version, cancellation watermark,
+`outcome=no_article_effect|article_effect|unknown` and nullable `delivered_value`.
+Its `receipt_id` is SHA-256 over canonical JSON of every other field. Status-only
+cancellation keeps existing artifact/review/proof and payment records. An article
+with possible external effects can stop locally and remain pending reconciliation;
+HTTP success, elapsed time and a legacy `refundable` flag are never no-value proof.
+
+Credit requires a validated `no_article_effect`/`delivered_value=false` stop and
+no contradictory saved publication or delivered value. A completed package counts
+as portable delivery only for an originally confirmed `content_only` request;
+the internal package created before repository rendering is not that consent.
+Verified review previews retain their charge. A terminal no-value candidate with
+no stop proof records `stop_required`; reconciliation obtains the worker receipt
+outside database locks, with at most three attempts before `needs_reconciliation`.
+Explicitly exhausted blocked runs use the same path. Owner review/merge/deploy
+waits and children whose active first-article goal owns the spend are excluded.
+
+`article_terminal_refund` and `reconciliation_refund_pending` are backend-owned
+outbox fields. Settlement locks the organization and fresh run, rechecks proof and
+holds those locks through database-only credit against the original spend, payer,
+amount and idempotency key. Missing ledger identity, transport uncertainty and
+credit errors retain the obligation. Duplicate cancellation cannot erase a pending
+or completed credit; contradictory later evidence quarantines an uncredited
+obligation. Confirmed dispatch rejection retains its separate existing refund path.
+Disconnect preserves queued goal-refund operations. An ordinary source wake,
+including the first article's own merge push, cannot create another paid successor
+after a terminal first-article goal, even when the goal-runner flag is rolled back.
+
+The paired worker fixtures cover setup-only cancellation, a trusted resumed
+attempt and a publisher exception with pending effects. Local tests deny database
+and network access; disposable database tests exercise original-ledger settlement.
+These source checks do not claim deployment or resolution of historical balances.

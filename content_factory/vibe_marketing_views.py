@@ -5381,6 +5381,9 @@ def _run_has_article_review_preview_marker(run):
 
 
 def _run_has_external_publish_evidence(run):
+    if run.workflow in ARTICLE_WORKFLOWS:
+        from .article_publication_evidence import publication_state
+        return publication_state(run) in {"article", "unknown"}
     result = _run_mapping(run.result)
     evidence = _publish_evidence_from_run(run)
     return bool(
@@ -7151,6 +7154,16 @@ def _cancel_local_article_system_setup_run(*, run, organization, remote_data=Non
         return locked_run
 
 
+def _article_cancel_receipt_conflict(run, remote_data):
+    """Known external work may stop locally only with a valid worker tombstone."""
+    from .article_publication_evidence import cancellation_receipt
+    try:
+        receipt = cancellation_receipt(run, remote_data)
+    except (ValueError, TypeError):
+        return True
+    return receipt is None and _run_has_external_publish_evidence(run)
+
+
 def _cancel_local_article_run(*, run, organization, remote_data=None):
     remote_data = remote_data if isinstance(remote_data, dict) else {}
     now = timezone.now()
@@ -7159,25 +7172,23 @@ def _cancel_local_article_run(*, run, organization, remote_data=None):
         warnings.append(str(remote_data.get("error")))
     cleanup = remote_data.get("cleanup") if isinstance(remote_data.get("cleanup"), dict) else {}
 
-    _release_cancelled_article_keyword(organization, run)
-
     with transaction.atomic():
         locked_run = ContentFactoryRun.objects.select_for_update().get(pk=run.pk)
-        VibeMarketingComponentComment.objects.filter(run=locked_run).delete()
-        locked_run.steps.update(
+        from .article_publication_evidence import cancellation_result
+        preserved = cancellation_result(locked_run, remote_data)
+        _release_cancelled_article_keyword(organization, locked_run)
+        locked_run.steps.exclude(status=ContentFactoryStepStatus.COMPLETED).update(
             status=ContentFactoryStepStatus.CANCELLED,
             message="Cancelled by user.",
             error="",
-            artifacts=[],
         )
         locked_run.status = ContentFactoryRunStatus.CANCELLED
         locked_run.current_step = "cancelled"
         locked_run.approval_state = ContentFactoryApprovalState.NOT_REQUIRED
         locked_run.resume_available = False
-        locked_run.acceptance_summary = {}
-        locked_run.verification_summary = {}
         locked_run.error = ""
         locked_run.result = {
+            **preserved,
             "status": ContentFactoryRunStatus.CANCELLED,
             "cancelled": True,
             "cancelled_at": now.isoformat(),
@@ -18552,19 +18563,20 @@ def control_article_run(*, user, context, run, action, data, run_id=None, goal_o
             cancelled_ids = []
             protected_ids = []
             for member in members:
-                if _run_has_external_publish_evidence(member):
-                    protected_ids.append(member.run_id)
-                    continue
                 member_remote = _call_content_factory_run_action(
                     run_id=member.run_id,
                     action="cancel",
                     payload=payload,
                     workflow=member.workflow,
                 )
-                if int(member_remote.get("content_factory_status_code") or 0) == 409:
+                if int(member_remote.get("content_factory_status_code") or 0) == 409 or _article_cancel_receipt_conflict(member, member_remote):
                     protected_ids.append(member.run_id)
                     continue
-                _cancel_local_article_run(run=member, organization=context.organization, remote_data=member_remote)
+                try:
+                    _cancel_local_article_run(run=member, organization=context.organization, remote_data=member_remote)
+                except (ValueError, TypeError):
+                    protected_ids.append(member.run_id)
+                    continue
                 cancelled_ids.append(member.run_id)
 
             if not cancelled_ids and protected_ids:
@@ -18579,18 +18591,15 @@ def control_article_run(*, user, context, run, action, data, run_id=None, goal_o
             body["protectedRunIds"] = protected_ids
             return Response(body, status=status.HTTP_202_ACCEPTED)
 
-        if _run_has_external_publish_evidence(run):
-            return Response(
-                {"detail": "This article already has external publish evidence. Close or clean up the external PR manually before cancelling."},
-                status=status.HTTP_409_CONFLICT,
-            )
-
         remote_data = _call_content_factory_run_action(run_id=run_id, action=action, payload=payload, workflow=run.workflow)
-        if int(remote_data.get("content_factory_status_code") or 0) == 409:
+        if int(remote_data.get("content_factory_status_code") or 0) == 409 or _article_cancel_receipt_conflict(run, remote_data):
             detail = remote_data.get("error") or "Content Factory rejected cancellation for this run."
             return Response({"detail": detail}, status=status.HTTP_409_CONFLICT)
 
-        run = _cancel_local_article_run(run=run, organization=context.organization, remote_data=remote_data)
+        try:
+            run = _cancel_local_article_run(run=run, organization=context.organization, remote_data=remote_data)
+        except (ValueError, TypeError):
+            return Response({"detail": "The cancellation receipt no longer matches this article."}, status=409)
         run = ContentFactoryRun.objects.prefetch_related("steps").get(pk=run.pk)
         return Response(_serialize_run(run, context=context), status=status.HTTP_202_ACCEPTED)
 

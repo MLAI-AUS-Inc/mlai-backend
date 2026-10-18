@@ -11,6 +11,12 @@ def owns_goal(op):
     return "goal" in goals.mapping(op.receipt)
 
 
+def terminal_first_article_goal(op):
+    """A source event cannot renew a finished first-article payment or consent."""
+    return (op.state in TERMINAL
+        and goals.mapping(goals.mapping(op.receipt).get("goal")).get("target") == "first_article_live")
+
+
 def start_goal(current, *, company_id, user, retry, target, now, force_successor=False, consent=None):
     """Select/create one current goal while the caller holds the connection lock."""
     from .website_models import WebsiteConnectionOperation
@@ -256,7 +262,7 @@ def wake_goal_for_source(config, *, company_id, user, now):
     with authority_guard(contract_for(config.website_connection), action="read") as connection:
         latest = connection.operations.select_for_update().filter(generation=connection.generation,
             action="prepare").order_by("-created_at", "-pk").first()
-        if latest is None or not owns_goal(latest):
+        if latest is None or not owns_goal(latest) or terminal_first_article_goal(latest):
             return None
         goal = goals.mapping(latest.receipt.get("goal"))
         if not goals.enrolled(connection.organization_id) or latest.state in {"cancelled", "denied", "deleted"}:

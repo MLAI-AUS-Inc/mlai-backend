@@ -152,8 +152,10 @@ class SplitRunRecoveryTests(SimpleTestCase):
         run = self.fake_run()
         run.pk, run.domain = 1, "fixture.test"
         run.result = {"reconciliation_refund_pending": True}
-        latest = SimpleNamespace(result={"reconciliation_refund_pending": True, "worker_receipt": "later"}, save=Mock())
+        latest = SimpleNamespace(result={"reconciliation_refund_pending": True, "worker_receipt": "later"},
+            run_request={}, save=Mock())
         with patch.object(reconciliation.transaction, "atomic", side_effect=lambda: nullcontext()), \
+                patch("organizations.models.Organization.objects.select_for_update"), \
                 patch("content_factory.billing_lineage.original_article_spend_for_run", return_value=None), \
                 patch.object(reconciliation.ContentFactoryRun.objects, "select_for_update") as runs:
             runs.return_value.filter.return_value.first.return_value = latest

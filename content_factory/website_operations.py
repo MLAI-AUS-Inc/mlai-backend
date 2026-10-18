@@ -491,7 +491,9 @@ def advance_workflow_attempt(run):
         op.state = "running"
         op.save(update_fields=["payload", "state", "updated_at"])
         fields = {"operation_id": str(op.pk), "operation_attempt": op.payload["attempt"], "deletion_epoch": deletion_epoch(website)}
-        run.run_request = {**(run.run_request or {}), **contract_for(website), **fields}
+        # The consent guard verified the saved scope. Advancing an execution
+        # must not add absent target/root fields or change its original payment.
+        run.run_request = {**(run.run_request or {}), **fields}
         from .setup_delivery_enrollment import enroll_setup_delivery
         if enroll_setup_delivery(op, run.run_request, website, getattr(run, "workflow", "")):
             op.save(update_fields=["payload", "updated_at"])

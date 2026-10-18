@@ -314,6 +314,99 @@ class FirstArticleBillingTests(SimpleTestCase):
         self.assertEqual(reserve.call_args.kwargs["defaults"]["action"],"goal-refund")
         credit.assert_not_called()
 
+    def test_actual_disconnect_preserves_existing_and_new_refund_rows_for_settlement(self):
+        from . import website_connections as lifecycle
+        from . import website_first_article_refunds as refunds
+        from .website_models import WebsiteConnection, WebsiteConnectionOperation
+        from .models import ContentFactoryJob, ResearchAutomation
+        from workflow_runs.models import ContentFactoryRun
+        from organizations.models import Organization
+
+        class Rows:
+            """Replace only the lifecycle's database selection and bulk write."""
+            def __init__(self, values): self.values = values
+            def filter(self, **where):
+                return Rows([row for row in self.values if all(
+                    getattr(row, key) == value for key, value in where.items())])
+            def exclude(self, **where):
+                def matches(row):
+                    for key, value in where.items():
+                        if key.endswith("__in"):
+                            if getattr(row, key[:-4]) not in value: return False
+                        elif key == "receipt__has_key":
+                            if value not in row.receipt: return False
+                        elif getattr(row, key) != value: return False
+                    return True
+                return Rows([row for row in self.values if not matches(row)])
+            def update(self, **changes):
+                for row in self.values:
+                    for key, value in changes.items(): setattr(row, key, value)
+                return len(self.values)
+
+        self.connection.pk = "00000000-0000-0000-0000-000000000007"
+        goal = self.op.receipt["goal"]
+        goal["scope"]["connection_id"] = self.connection.pk
+        goal["consent"] = consent.seal(goal, answers(), user_id=4, now=self.now)
+        self.ledger.reference_id = billing.request_key(goal)
+        self.ledger.idempotency_key = "content_factory:charge:" + billing.request_key(goal)
+        self.reserve()
+        original = deepcopy(self.op.receipt["first_article_billing"])
+        for already_queued in (False, True):
+            with self.subTest(already_queued=already_queued):
+                self.connection.generation = 3
+                self.connection.configuration_version = 1
+                self.connection.state = "connected"
+                self.connection.save = Mock()
+                self.connection.github_repo = "fixture/articles"
+                self.connection.capabilities = {}
+                self.connection.verified_sha = "a" * 40
+                self.op.state = "running"
+                self.op.receipt["first_article_billing"] = deepcopy(original)
+                row = self.refund_row()
+                row.connection_id = self.connection.pk
+                row.receipt = {"status": "credit_pending"}
+                scan = SimpleNamespace(action="scan", generation=3, state="pending", receipt={})
+                saved_rows = [self.op, scan] + ([row] if already_queued else [])
+                self.connection.operations = Rows(saved_rows)
+                def reserve_credit(*args, **kwargs):
+                    if not already_queued: saved_rows.append(row)
+                    return row, not already_queued
+                config = SimpleNamespace(organization_id=7, website_connection_id=self.connection.pk,
+                    article_system={}, save=Mock(), refresh_from_db=Mock())
+                self.rows.return_value.filter.return_value.exclude.return_value = [self.op]
+                with patch.object(lifecycle.transaction, "atomic", side_effect=lambda: nullcontext()), \
+                    patch.object(Organization.objects, "select_for_update"), \
+                    patch.object(WebsiteConnection.objects, "select_for_update") as connections, \
+                    patch.object(WebsiteConnectionOperation.objects, "filter") as selected, \
+                    patch.object(WebsiteConnectionOperation.objects, "create"), \
+                    patch.object(WebsiteConnectionOperation.objects, "get_or_create", side_effect=reserve_credit) as reserved, \
+                    patch.object(ResearchAutomation.objects, "filter"), \
+                    patch.object(ContentFactoryRun.objects, "filter") as runs, \
+                    patch("roo.services.PointsService.refund", return_value=(SimpleNamespace(id=22, pk=22), True)) as credit:
+                    connections.return_value.get.return_value = self.connection
+                    selected.return_value.first.return_value = None
+                    runs.return_value.filter.return_value.values_list.return_value = []
+                    lifecycle.transition_connection(config, action="disconnect", expected={
+                        "website_connection_id": self.connection.pk, "connection_generation": 3,
+                        "configuration_revision": 1, "repository_id": "12"})
+                    reserved.assert_called_once()
+                    self.assertEqual(self.connection.generation, 4)
+                    self.assertEqual(self.op.state, "cancelled")
+                    self.assertEqual(scan.state, "cancelled")
+                    self.assertEqual(row.state, "pending")
+                    self.assertEqual(row.receipt, {"status": "credit_pending"})
+                    credit.assert_not_called()
+                    self.rows.return_value.filter.return_value.first.return_value = row
+                    self.refunds.return_value.first.return_value = self.ledger
+                    with override_settings(ARTICLES_FIRST_ARTICLE_GOAL_ENABLED=False), \
+                        patch.object(ContentFactoryJob.objects, "filter"):
+                        runs.return_value.filter.return_value = []
+                        self.assertEqual(refunds.advance_refund(row.pk, now=self.now), "completed")
+                        self.assertIsNone(refunds.advance_refund(row.pk, now=self.now))
+                    credit.assert_called_once()
+                    self.assertEqual(row.receipt["status"], "credited")
+                    self.assertEqual(self.spend.call_count, 1)
+
     def test_erasure_retains_only_scoped_payment_proof_until_credit_settles(self):
         from . import website_first_article_refunds as refunds
         self.reserve(); row=self.refund_row()

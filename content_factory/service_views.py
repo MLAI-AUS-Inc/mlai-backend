@@ -8727,19 +8727,37 @@ def _merge_django_owned_run_result(existing_result, incoming_result):
 
     existing = existing_result if isinstance(existing_result, dict) else {}
     incoming = incoming_result if isinstance(incoming_result, dict) else {}
-    backend_merge_keys = {"publish_merge_intent", "merge_response", "merge_status", "merged_at", "article_review_updates", "delivery_v1"}
+    backend_merge_keys = {"publish_merge_intent", "merge_response", "merge_status", "merged_at", "article_review_updates", "delivery_v1",
+        "article_terminal_refund", "reconciliation_refund_pending", "article_settlement_attempts",
+        "article_settlement_status", "article_settlement_owner", "article_cancellation_v1", "article_stop_attempts"}
     merged = {key: value for key, value in incoming.items() if key not in backend_merge_keys or key in existing}
     for key, value in existing.items():
         if key == "delivery_v1":
             merged[key] = value
             continue
-        django_owned = key in _DJANGO_OWNED_RUN_RESULT_KEYS or key.startswith(
+        django_owned = key in backend_merge_keys or key in _DJANGO_OWNED_RUN_RESULT_KEYS or key.startswith(
             _DJANGO_OWNED_RUN_RESULT_PREFIXES
         )
         if not django_owned:
             continue
         if key in backend_merge_keys | {"article_review_approval", "approval_blocker", "article_image_billing"} or (merged.get(key) in (None, "", {}, []) and value not in (None, "", {}, [])):
             merged[key] = value
+    # Older/untyped worker snapshots cannot erase a recorded publishing intent.
+    # A setup receipt may explain a legacy setup link, but cannot downgrade an
+    # article effect or an uncertain publication attempt into refund authority.
+    def protected_publication(value):
+        receipts = value if isinstance(value, list) else [value]
+        return value is not None and any(not isinstance(item, dict) or item.get("purpose") != "setup"
+            or item.get("state") != "observed" for item in receipts)
+    incoming_publication = merged.get("publication_evidence_v1")
+    for surface in (existing, existing.get("result"), existing.get("latest_control_response")):
+        if not isinstance(surface, dict):
+            continue
+        saved = surface.get("publication_evidence_v1")
+        if saved is not None and (incoming_publication is None or
+                (protected_publication(saved) and not protected_publication(incoming_publication))):
+            merged["publication_evidence_v1"] = saved
+            incoming_publication = saved
     # A worker's initialized zero cannot erase a recorded manual intervention.
     counts = [value for value in (existing.get("user_action_count"), incoming.get("user_action_count"))
               if type(value) is int and value >= 0]
@@ -8770,17 +8788,20 @@ def _merge_django_owned_run_request(existing_request, incoming_request):
     """
     from copy import deepcopy
     from .editorial_run_state import EditorialRunConflict
-    from .website_contract import CONNECTION_FIELDS
+    from .article_publication_evidence import SCOPE_FIELDS
+    from .website_failure_contract import canonical_bytes
+    immutable = set(SCOPE_FIELDS) | {"strategy_goal_id", "goal_budget", "delivery_mode", "requested_delivery_mode", "delivery_mode_confirmed"}
     existing = existing_request if isinstance(existing_request, dict) else {}
     incoming = incoming_request if isinstance(incoming_request, dict) else {}
     merged = {key: deepcopy(value) for key, value in incoming.items()
-              if key not in {"setup_delivery_v1","article_delivery_v1"} or key in existing}
+              if (not existing or key not in immutable or key in existing)
+              and (key not in {"setup_delivery_v1","article_delivery_v1"} or key in existing)}
     merged = {key: value for key, value in merged.items()
               if not (key.startswith("roo_points_") or key in {"article_publish_approval_receipt", "article_publish_approval_revoked", "website_access_lost", "first_article_goal_operation_id", "first_article_goal_id"}) or key in existing}
     for key, value in existing.items():
-        if key in CONNECTION_FIELDS:
-            if key in incoming and incoming[key] != value:
-                raise EditorialRunConflict("Worker snapshots cannot change the original website connection identity")
+        if key in immutable:
+            if key in incoming and canonical_bytes(incoming[key]) != canonical_bytes(value):
+                raise EditorialRunConflict("Worker snapshots cannot change original article identity or delivery consent")
             merged[key] = deepcopy(value)
             continue
         if key in {"setup_delivery_v1","article_delivery_v1"}:
@@ -9072,9 +9093,14 @@ def _apply_cancellation_receipt(run_id, payload):
         metadata = _observations({key: incoming[key] for key in (
             "cancelled_at", "cancellation", "cleanup", "cleanup_pending", "remote_cleanup_pending", "mirror_rejection",
         ) if key in incoming})
+        from .article_publication_evidence import cancellation_result
+        try:
+            preserved = cancellation_result(run, incoming)
+        except (ValueError, TypeError):
+            return Response({"code": "article_cancellation_receipt_invalid", "run_id": run_id}, status=409)
         run.status, run.current_step, run.resume_available = "cancelled", "cancelled", False
         run.error = str(payload.get("error") or run.error or "Cancelled.")[:2000]
-        run.result = {**(run.result or {}), **metadata, "status": "cancelled", "cancelled": True,
+        run.result = {**preserved, **metadata, "status": "cancelled", "cancelled": True,
             "cancellation_receipt": {"status": "recorded", "received_at": timezone.now().isoformat(), "repository_authority": False}}
         run.save(update_fields=["status", "current_step", "resume_available", "error", "result", "updated_at"])
         observe_workflow_status(run, {"status": "cancelled"})
