@@ -99,7 +99,7 @@ def reserve(op, *, user, now, accepted_quote=False):
     from roo.services import PointsService
 
     cost = goal["consent"]["answers"]["billing"]["expected_points"]
-    if not accepted_quote and cost != get_content_factory_article_cost_points(op.connection.organization.domain):
+    if not accepted_quote and cost != get_content_factory_article_cost_points(op.connection.organization.domain, user=user):
         raise WebsiteAuthorityError("roo_points_required", "Review the current first-article price before starting.", status=409)
     payer = billing_user_for_organization(op.connection.organization, user)
     key = request_key(goal)

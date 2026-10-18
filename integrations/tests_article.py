@@ -142,10 +142,10 @@ class ArticleGenerationServiceTest(TestCase):
         job = ContentFactoryJob.objects.get(job_id="job_123")
         self.assertEqual(job.client_request_id, "content-factory-service-request")
         self.assertEqual(job.billing_status, "charged")
-        self.assertEqual(job.billing_amount, 0)
+        self.assertEqual(job.billing_amount, 12)
         self.assertEqual(job.billing_source_job_id, "job_123")
         self.user.points_account.refresh_from_db()
-        self.assertEqual(self.user.points_account.balance, 20)
+        self.assertEqual(self.user.points_account.balance, 8)
         self.assertEqual(mock_post.call_args.kwargs["timeout"], (3, 8))
 
     @patch("integrations.services.article_generation.http_requests.post")
@@ -216,17 +216,17 @@ class ArticleGenerationServiceTest(TestCase):
         self.assertEqual(payload["author_id"], "priya-nair")
         self.assertEqual(payload["default_author_name"], "Priya Nair")
 
-    def test_paid_article_cost_is_six_points(self):
-        self.assertEqual(get_content_factory_article_cost_points("example.com"), 6)
-        self.assertEqual(get_content_factory_article_cost_points("mlai.au"), 0)
+    def test_article_cost_is_twelve_points_for_every_domain(self):
+        self.assertEqual(get_content_factory_article_cost_points("example.com"), 12)
+        self.assertEqual(get_content_factory_article_cost_points("mlai.au"), 12)
 
-    def test_paid_article_refund_instruction_uses_six_points(self):
+    def test_paid_article_refund_instruction_uses_twelve_points(self):
         message = _append_refund_instruction("The article run failed.", "example.com")
 
-        self.assertIn("6 Roo points", message)
+        self.assertIn("12 Roo points", message)
 
     @patch("integrations.services.article_generation.http_requests.post")
-    def test_trigger_generation_paid_domain_charges_six_points(self, mock_post):
+    def test_trigger_generation_paid_domain_charges_twelve_points(self, mock_post):
         paid_org = Organization.objects.create(domain="example.com", name="Paid Org")
         paid_config = OrganizationContentConfig.objects.create(
             organization=paid_org,
@@ -260,10 +260,10 @@ class ArticleGenerationServiceTest(TestCase):
         self.assertEqual(result["job_id"], "job_paid_123")
         job = ContentFactoryJob.objects.get(job_id="job_paid_123")
         self.assertEqual(job.billing_status, "charged")
-        self.assertEqual(job.billing_amount, 6)
-        self.assertEqual(job.billing_ledger.delta, -6)
+        self.assertEqual(job.billing_amount, 12)
+        self.assertEqual(job.billing_ledger.delta, -12)
         self.user.points_account.refresh_from_db()
-        self.assertEqual(self.user.points_account.balance, 14)
+        self.assertEqual(self.user.points_account.balance, 8)
 
     @patch("integrations.services.article_generation.http_requests.post")
     def test_trigger_discovery_charges_for_four_requested_topics(self, mock_post):

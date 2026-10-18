@@ -810,7 +810,7 @@ def _charge_roo_points_for_article(request, *, context, payload: dict, goal_oper
             payload.update(first_article_goal_operation_id=str(goal_operation_id),first_article_goal_id=str(goal_operation_id))
         except WebsiteAuthorityError as exc:
             return None, None, None, Response(exc.as_dict(), status=exc.status)
-    quote_error = (_quoted_price_response(request, cost_points=get_content_factory_article_cost_points(context.organization.domain))
+    quote_error = (_quoted_price_response(request, cost_points=get_content_factory_article_cost_points(context.organization.domain, user=request.user))
         if goal_operation_id is None else None)
     if quote_error is not None:
         return None, None, None, quote_error
@@ -827,6 +827,7 @@ def _charge_roo_points_for_article(request, *, context, payload: dict, goal_oper
     actor_id = founder_actor_id_for_user(request.user)
     article_request = {
         **payload,
+        "expected_cost_points": request.data.get("expected_cost_points", request.data.get("expectedCostPoints")) if goal_operation_id is None else None,
         "user_email": getattr(request.user, "email", ""),
         "user_first_name": getattr(request.user, "first_name", ""),
         "user_last_name": getattr(request.user, "last_name", ""),
@@ -862,8 +863,8 @@ def _charge_roo_points_for_article(request, *, context, payload: dict, goal_oper
                     domain=domain,
                     action="article_generation",
                     current_balance=_roo_points_balance_for_user(request.user),
-                    required_points=CONTENT_FACTORY_MINIMUM_AI_AGENT_POINTS,
-                    cost_points=get_content_factory_article_cost_points(domain),
+                    required_points=get_content_factory_article_cost_points(domain, user=request.user),
+                    cost_points=get_content_factory_article_cost_points(domain, user=request.user),
                 ),
                 status=status.HTTP_402_PAYMENT_REQUIRED,
             )
@@ -876,7 +877,7 @@ def _charge_roo_points_for_article(request, *, context, payload: dict, goal_oper
                 domain=domain,
                 action=CONTENT_FACTORY_ACTION_ARTICLE_GENERATION,
                 cost_points=charge_amount,
-                required_points=get_content_factory_ai_agent_required_points(domain),
+                required_points=charge_amount,
                 current_balance=_roo_points_balance_for_user(charged_user),
                 billing_status="charged" if charge_amount > 0 else "free",
                 ledger_id=getattr(charge_ledger, "id", None),
@@ -1075,19 +1076,6 @@ def _reusable_content_factory_charge_for_run(run) -> Optional[int]:
 
 
 def _reuse_roo_points_authorization_for_article_job(*, run, payload: dict, domain: str, failure_detail: str) -> Response | None:
-    if is_free_content_factory_domain(domain):
-        payload.update(
-            build_roo_points_authorization_payload(
-                domain=domain,
-                action=CONTENT_FACTORY_ACTION_ARTICLE_GENERATION,
-                cost_points=0,
-                required_points=get_content_factory_ai_agent_required_points(domain),
-                current_balance=None,
-                billing_status="free",
-            )
-        )
-        return None
-
     run_request = run.run_request if isinstance(run.run_request, dict) else {}
     try:
         authorized = bool(run_request.get("roo_points_authorized"))
@@ -1112,7 +1100,7 @@ def _reuse_roo_points_authorization_for_article_job(*, run, payload: dict, domai
     web_authorized = (
         authorized
         and action == CONTENT_FACTORY_ACTION_ARTICLE_GENERATION
-        and cost_points >= get_content_factory_article_cost_points(domain)
+        and cost_points >= CONTENT_FACTORY_MINIMUM_AI_AGENT_POINTS
         and billing_status in {"charged", "reused", "free"}
         and ledger_id and stamp_charge is not None
     )
@@ -1131,7 +1119,9 @@ def _reuse_roo_points_authorization_for_article_job(*, run, payload: dict, domai
                 },
                 status=status.HTTP_409_CONFLICT,
             )
-        cost_points = max(cost_points, get_content_factory_article_cost_points(domain))
+        charge = Ledger.objects.get(pk=lineage_ledger_id)
+        cost_points = -int(charge.delta_microroo or 0) // 1_000_000
+        required_points = cost_points
         ledger_id = str(lineage_ledger_id)
 
     payload.update(
@@ -12231,7 +12221,7 @@ def _article_capabilities_for_context(context, config, *, latest_runs=None, forc
     access = _verify_github_repository_access(context, config, force=force, allow_probe=allow_probe) if account.get("saved") and getattr(config, "github_repo", "") else {}
     if evidence.get("verified") and access.get("verified") and (access.get("branch") != evidence.get("branch") or access.get("sha") != evidence.get("sha")):
         evidence = {**evidence, "verified": False, "reasonCode": "verification_stale"}
-    return article_capabilities(config, domain=context.organization.domain, account=account,
+    return article_capabilities(config, domain=context.organization.domain, user=getattr(getattr(context, "profile", None), "user", None), account=account,
                                 evidence=evidence, repository_access=access)
 
 

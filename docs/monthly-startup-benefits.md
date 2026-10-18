@@ -32,6 +32,12 @@ and the founder binding's `coworking_discount_eligible` override.
 Existing revision approval records and the first publication timestamp take
 precedence over older generation-time `ready_at` stamps; no database backfill is required.
 
+Article generation reuses this same founder eligibility check. Every domain,
+including `mlai.au`, has a 12 Roo point article price; an active monthly-update
+benefit halves it to 6. Bootstrap, company billing and first-article setup
+consent quote the requesting founder's eligibility. Topic research retains its
+existing pricing. Retries and refunds retain the original article debit.
+
 Runtime pricing remains governed by the existing catalogue and settings.
 Before rollout, confirm the active `COWORKING_DAY` catalogue item is 8,
 `COWORKING_DAY_COST_POINTS=8`, `COWORKING_DAY_DISCOUNT_COST_POINTS=4`, and

@@ -2,6 +2,17 @@
 from django.db.models import Min, Q
 
 
+def has_monthly_update_discount(user):
+    """Reuse the founder's existing 30-day monthly-update benefit today."""
+    from zoneinfo import ZoneInfo
+    from django.utils import timezone
+    from roo.services import CoworkingService
+
+    return CoworkingService._has_ready_monthly_update(
+        user, timezone.localdate(timezone.now(), ZoneInfo("Australia/Melbourne")),
+    )
+
+
 def monthly_reward_key(organization_id, month):
     """Return a key retained when a draft or company wrapper is recreated."""
     return f"monthly_update_reward:organization:{organization_id}:{month:%Y-%m}"

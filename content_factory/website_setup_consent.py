@@ -88,6 +88,6 @@ def setup_plan(context, config, journey):
     except ValueError:url=None
     return {"version":1,"companyId":str(context.company.pk),"connectionId":str(connection.pk),"connectionGeneration":connection.generation,
         "configurationRevision":connection.configuration_version,"goalTarget":"first_article_live" if getattr(settings,"ARTICLES_FIRST_ARTICLE_GOAL_ENABLED",False) else "ready",
-        "articlePoints":get_content_factory_article_cost_points(context.organization.domain),"page":selection,
+        "articlePoints":get_content_factory_article_cost_points(context.organization.domain, user=getattr(getattr(context,"profile",None),"user",None)),"page":selection,
         "github":{"approvalUrl":url,"required":required,"missing":[name for name in required if grants.get(name) is not True],"lookupUnavailable":grants.get("retryable") is True},
         "ciMode":ci_mode,"requiresReview":getattr(config,"requires_review",False) is True}

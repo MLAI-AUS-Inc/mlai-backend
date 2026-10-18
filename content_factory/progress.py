@@ -46,7 +46,7 @@ def build_content_factory_live_cost_text(job_or_domain) -> str:
         job = None
         domain = job_or_domain
 
-    cost_points = get_content_factory_article_cost_points(domain)
+    cost_points = int(job.billing_amount) if job is not None else get_content_factory_article_cost_points(domain)
     if cost_points == 0:
         normalized_domain = normalize_content_factory_domain(domain) or "this domain"
         return f"💳 Articles for {normalized_domain} are free. No Roo points will be deducted for this run."

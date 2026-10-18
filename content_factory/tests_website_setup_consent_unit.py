@@ -73,7 +73,7 @@ class ConsentTests(SimpleTestCase):
         self.assertTrue(consent.valid(changed));self.assertEqual(changed["consent"]["answers"],answers())
 
     def test_plan_is_scoped_and_price_and_optional_permissions_are_shown_once(self):
-        op=self.operation();context=SimpleNamespace(company=SimpleNamespace(pk=9),organization=op.connection.organization)
+        op=self.operation();context=SimpleNamespace(company=SimpleNamespace(pk=9),organization=op.connection.organization,profile=SimpleNamespace(user=SimpleNamespace(pk=4)))
         with patch("content_factory.billing.get_content_factory_article_cost_points",return_value=6):
             plan=consent.setup_plan(context,SimpleNamespace(website_connection=op.connection),{"githubPermissions":{"contents":True,"pull_requests":False,"workflows":True,"checks":True,"statuses":True,"settingsUrl":"https://github.com/settings/installations/4"}})
         self.assertEqual((plan["companyId"],plan["connectionId"],plan["connectionGeneration"]),("9","website",3))
