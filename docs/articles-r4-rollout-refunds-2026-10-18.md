@@ -116,7 +116,7 @@ python scripts/check_test_assignment.py
 python scripts/test_without_database.py --check-models
 ```
 
-The combined explicit test list passed 160 tests in 0.743 seconds. All 536 test
+The combined explicit test list passed 161 tests in 0.718 seconds. All 536 test
 modules are fully assigned, and the read-only model check found no changes.
 The new scope module has nineteen tests, including actual goal/dispatch/request
 lineage and compilation of the exact PostgreSQL queries without a connection.
@@ -147,3 +147,8 @@ saved requests and executing worker roles still need to be bound through the
 protected sandbox collector, with runtime observations at admission/completion.
 That transport, fleet coverage and runner wiring remain unfinished; this
 command cannot qualify a zoo night or close the partial action audit.
+
+The backend flag snapshot also observes the optional
+`CONTENT_FACTORY_WORKFLOW_ORDER_FORMATTING_ADMISSION_ENABLED` switch. A toggle
+then changes the saved rollout identity, without making cosmetic formatting a
+prerequisite for B5 business delivery. This command changes no admission value.

@@ -75,6 +75,17 @@ class RolloutInspectionTests(SimpleTestCase):
         self.assertIn("not_permission_or_outcome", report["semantics"])
         self.assertEqual(self.snapshot, before)
 
+    def test_formatting_admission_is_observed_without_becoming_a_delivery_prerequisite(self):
+        name = "CONTENT_FACTORY_WORKFLOW_ORDER_FORMATTING_ADMISSION_ENABLED"
+        observations = []
+        for value in (False, True, "true"):
+            with self.subTest(value=value), override_settings(**{**self.flags, name: value}):
+                report = self.report(cf_snapshot=self.snapshot, run_id="fixture-run")
+                observations.append(report["backend_flags"])
+                self.assertIs(report["backend_flags"].get(name), value if type(value) is bool else None)
+                self.assertEqual(report["steps"]["B5_setup"]["state"], "configured")
+        self.assertNotEqual(observations[0], observations[1])
+
     def test_wrong_or_absent_run_scope_does_not_borrow_another_runs_predicates(self):
         with override_settings(**self.flags):
             for run_id in (None, "different-run"):

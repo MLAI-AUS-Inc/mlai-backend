@@ -34,7 +34,11 @@ RULES = (
     ("article_delivery", ("CONTENT_FACTORY_ARTICLE_DELIVERY_V1_APPLY_ENABLED", "ARTICLES_ARTICLE_RECOVERY_ENABLED", "ARTICLES_FIRST_ARTICLE_GOAL_ENABLED", "ARTICLES_WEBSITE_GOAL_BUDGETS_ENABLED"), "goals", ("CONTENT_FACTORY_ARTICLE_DELIVERY_V1_ENABLED", "CONTENT_FACTORY_SETUP_DELIVERY_V1_SEND_ENABLED"), None),
     ("F3", ("ARTICLES_COST_ACCOUNTING_ENABLED", "ARTICLES_OPERATIONAL_ALERTS_ENABLED"), "goals", ("CONTENT_FACTORY_ARTICLES_COST_ACCOUNTING_ENABLED",), None),
 )
-BACKEND_FLAGS = tuple(sorted({name for _, names, _, _, _ in RULES for name in names}))
+# Cosmetic admission is observed for configuration-window identity, while the
+# delivery rules remain independent of its optional formatting behavior.
+OBSERVATION_ONLY_FLAGS = ("CONTENT_FACTORY_WORKFLOW_ORDER_FORMATTING_ADMISSION_ENABLED",)
+BACKEND_FLAGS = tuple(sorted({name for _, names, _, _, _ in RULES for name in names}
+    | set(OBSERVATION_ONLY_FLAGS)))
 CF_FLAGS = tuple(sorted({name for _, _, _, names, _ in RULES for name in names}))
 SCOPED_PREDICATES = ("taxonomy_enabled", "setup_delivery_enrolled", "goal_usage_enabled")
 
