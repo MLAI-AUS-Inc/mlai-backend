@@ -23,6 +23,7 @@ subsystem-specific contracts and runbooks.
 
 ## Content Factory
 
+- [R4 fixture rollout inspection and refund retention](articles-r4-rollout-refunds-2026-10-18.md) — read-only flags and enrollment diagnostics, unknown CF observations, and credits retained through disconnect
 - [F2 bootstrap summary and rendering](articles-f2-bootstrap-summary-2026-10-16.md) — default compact reads, explicit full details, and remaining latency/overlay validation
 - [F3 recorded usage and operational alerts](articles-f3-cost-accounting-2026-10-16.md) — original-run accounting, company coverage and durable budget/stall/repair notices
 - [G6 preview cleanup deadline](articles-g6-preview-cleanup-2026-10-16.md) — durable 24-hour lifecycle limit and one scoped operational incident

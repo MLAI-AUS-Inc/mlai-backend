@@ -839,7 +839,9 @@ def transition_connection(config, *, action, expected, idempotency_key="", verif
         from .website_first_article_billing import cancel_held_goals
         cancel_held_goals(connection)
         connection.operations.filter(generation=old_generation).exclude(
-            action__in=["disconnect", "revoke", "purge", "cancel-operation", "usage-refresh"]
+            # Settlement belongs to the original paid goal and must survive
+            # revocation, including a refund queued by cancel_held_goals above.
+            action__in=["disconnect", "revoke", "purge", "cancel-operation", "usage-refresh", "goal-refund"]
         ).exclude(action="prepare", receipt__has_key="first_article_billing"
         ).exclude(state__in=["completed", "failed", "blocked", "cancelled", "deleted", "denied"]).update(
             state="cancelled", receipt={"status": "authority_revoked", "repository_modified": False}, updated_at=timezone.now())
