@@ -16,6 +16,7 @@ from . import website_goal as goals, website_goal_audit as audit
 logger = logging.getLogger(__name__)
 REPLAY_ACTIONS = {"editText", "editTextBatch", "regenerateImage", "chooseImage", "undo", "allowAI"}
 REFERENCE_FIELDS = ("setup_run_id", "child_run_id", "first_article_run_id", "first_article_publish_run_id")
+GOAL_ALIASES = ("first_article_goal_id", "strategy_goal_id")
 MAX_INTENT_BYTES = 1024 * 1024
 
 
@@ -78,8 +79,10 @@ def original_goal(context, run):
     explicit = [saved[key] for key in ("first_article_goal_operation_id",) if key in saved]
     if "goal_id" in budget:
         explicit.append(budget["goal_id"])
-    if (any(not isinstance(value, str) or not 1 <= len(value) <= 100 for value in explicit)
-            or len(set(explicit)) > 1):
+    # Other producer goal IDs must agree, but cannot supply a new fallback path.
+    claimed = [*explicit, *(saved[key] for key in GOAL_ALIASES if key in saved)]
+    if (any(not isinstance(value, str) or not 1 <= len(value) <= 100 for value in claimed)
+            or len(set(claimed)) > 1):
         return None, "lineage"
     rows = WebsiteConnectionOperation.objects.select_for_update().filter(connection=connection,
         generation=connection.generation, action="prepare", payload__company_id=str(context.company.pk))
@@ -96,7 +99,7 @@ def original_goal(context, run):
     op = candidates[0]
     if (op.connection_id != connection.pk or op.generation != connection.generation or op.action != "prepare"
             or goals.mapping(op.payload).get("company_id") != str(context.company.pk)
-            or (explicit and str(op.pk) != explicit[0])
+            or any(str(op.pk) != value for value in claimed)
             or (not explicit and not any(goals.mapping(op.receipt).get(field) == run.run_id for field in REFERENCE_FIELDS))):
         return None, "lineage"
     goal = goals.mapping(op.receipt).get("goal")
@@ -121,21 +124,44 @@ def observe_review(request, context, run, data):
     origin or exhaustive coverage. Unattributable/late attempts retain fixed
     diagnostics and the existing incomplete coverage gaps; no goal is invented.
     """
-    if (not audit.enabled(getattr(getattr(context, "organization", None), "pk", None))
-            or not isinstance(request, Request) or not isinstance(getattr(request, "_request", None), HttpRequest)
-            or request.method != "POST" or getattr(request, "_website_prepare_dispatch", False)
-            or not request.user.is_authenticated or request.user.pk is None):
+    if not eligible(request, context, methods={"POST"}):
         return
     try:
         observed = intent(data)
-        if observed is None:
+        if observed is not None:
+            record_intent(request, context, run, observed, kind="review_http_intent", methods={"POST"})
+    except (ValueError, TypeError):
+        logger.info("articles_review_action_audit_unavailable reason=invalid_intent")
+    except Exception:
+        logger.warning("articles_review_action_audit_observation_unavailable")
+
+
+def eligible(request, context, *, methods):
+    """Check the existing server-owned HTTP and enrollment boundaries."""
+    return not (not audit.enabled(getattr(getattr(context, "organization", None), "pk", None))
+            or not isinstance(request, Request) or not isinstance(getattr(request, "_request", None), HttpRequest)
+            or request.method not in methods or getattr(request, "_website_prepare_dispatch", False)
+            or not request.user.is_authenticated or request.user.pk is None)
+
+
+def record_intent(request, context, run, observed, *, kind, methods):
+    """Append one server-validated intent using the shared exact original parent."""
+    if not eligible(request, context, methods=methods):
+        return
+    try:
+        if (kind not in {"review_http_intent", "comment_http_intent"}
+                or not isinstance(observed, dict) or set(observed) != {"action", "operation", "fingerprint"}
+                or any(not isinstance(observed.get(key), str) or not 1 <= len(observed[key]) <= 100
+                    for key in ("action", "operation"))
+                or not isinstance(observed.get("fingerprint"), str)
+                or not goals.DIGEST.fullmatch(observed["fingerprint"])):
             return
         with transaction.atomic():
             op, reason = original_goal(context, run)
             if op is None:
                 logger.info("articles_review_action_audit_unavailable reason=%s", reason)
                 return
-            event = goals.digest({"kind": "review_http_intent", "goal_id": str(op.pk),
+            event = goals.digest({"kind": kind, "goal_id": str(op.pk),
                 "run_id": run.run_id, "actor_id": str(request.user.pk), **observed})
             audit.append_observation(op, event, now=timezone.now())
     except (ValueError, TypeError):

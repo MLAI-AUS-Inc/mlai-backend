@@ -136,7 +136,8 @@ are separate attempted interventions. Batch aliases share their actual normalize
 `applyUpdate` identity. `discardImage` has no operation replay contract, so each
 request counts even when a caller repeats an idempotency header. GET and `refresh`
 do not count: refresh may be automatic polling or recovery. Those ambiguous paths,
-comment CRUD, MCP controls and external actions remain coverage gaps.
+MCP controls and external actions remain coverage gaps. Comment mutations now
+provide the additional partial observations described below; no gap is cleared.
 
 For direct mutations, this observer validates the action, replay-identity syntax
 and revision shape; the service still owns field/content validation. A later
@@ -163,3 +164,45 @@ new intent count. A paired local check then feeds these actual public receipts
 through CF #1089's telemetry and shared zero-action predicate: observed zero,
 one and two intents all remain incomplete and nonqualifying. Synthetic test
 records are never installed as production or nightly evidence.
+
+## Comment mutation intent observation
+
+Authenticated comment create/edit/delete/resolve/reopen routes capture a bounded
+intent at their actual mutation boundary. Create uses the existing normalized
+comment payload and optional validated `operationId`; only that real create
+protocol supports deduplication. Changed feedback under one ID is a separate
+attempt even if rejected. Creates without that identity, edits, deletions and
+resolve/reopen requests get distinct identities, including identical repeated
+requests. Generic headers do not invent replay guarantees. Detail attempts are
+observed after owned-run authorization; later missing-comment/status/content
+refusals still represent attempted interventions, not successful human edits.
+
+The existing atomic dispatch remains intact. A wrapper stages only hashed intent
+and scope plus references to the already-owned request/context and exact run IDs;
+it does not copy comment text into the staged state. After dispatch's transaction
+exits, including exception/rollback paths, it rereads that exact owned run and
+requires its frozen attribution fields to match. It then uses the shared original
+goal resolver and bounded journal in a separate transaction. This preserves
+failed-attempt observations while avoiding connection/goal locks under the view's
+run/comment transaction. The endpoint response or original exception is unchanged.
+Capture is server-only, removed in `finally`, and cannot be supplied by HTTP JSON.
+Producer `first_article_goal_id` and `strategy_goal_id` values, when present,
+must agree with the original parent and are frozen too. They cannot independently
+select a parent or introduce a latest-goal fallback.
+
+An unexpected outer transaction, changed/missing run, moved connection scope,
+or late/terminal parent produces fixed unavailable diagnostics. Optional capture
+or observation errors do not alter comment handling or log private exception
+text. This is best-effort observation, not a durable outbox: process death between
+mutation and observation is still uncovered. GET is read-only, disabled defaults
+add no observation lookup, and the original full gap list, `complete:false` and
+`human_actions:null` remain. Exhaustive coverage and nightly qualification are
+still unproved.
+
+Strict isolated tests exercise the actual authenticated create/edit/delete routes
+and public receipt, replacing only ORM and transaction boundaries. Three route
+assertions fail without the hooks. Tests cover real protocol replay, changed
+intents, distinct edits, rejected/exception paths, transaction ordering, scope
+rechecks, privacy, defaults and preservation of responses/exceptions. These are
+offline regression checks; they do not establish actual SQL rollback or a live
+provider action history.

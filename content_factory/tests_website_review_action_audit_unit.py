@@ -145,6 +145,20 @@ class ReviewActionAuditTests(SimpleTestCase):
         self.assertIn('reason=lineage', logs.output[0])
         self.assertEqual(self.public()['observed_owner_actions'], 0)
 
+    def test_other_producer_goal_ids_must_agree_and_cannot_select_a_parent_alone(self):
+        for alias in ('first_article_goal_id', 'strategy_goal_id'):
+            with self.subTest(alias=alias):
+                self.run.run_request[alias] = 'another-goal'
+                with self.assertLogs('content_factory.website_review_action_audit', level='INFO'):
+                    self.assertEqual(self.post().status_code, 200)
+                self.run.run_request.pop(alias)
+        self.run.run_request.pop('first_article_goal_operation_id')
+        self.run.run_request.pop('goal_budget')
+        self.run.run_request['first_article_goal_id'] = str(self.op.pk)
+        with self.assertLogs('content_factory.website_review_action_audit', level='INFO'):
+            self.assertEqual(self.post().status_code, 200)
+        self.assertEqual(self.public()['observed_owner_actions'], 0)
+
     def test_saved_setup_reference_is_used_only_when_exactly_one_parent_matches(self):
         self.run.run_request.pop('first_article_goal_operation_id')
         self.run.run_request.pop('goal_budget')

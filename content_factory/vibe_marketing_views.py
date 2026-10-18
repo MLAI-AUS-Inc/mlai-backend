@@ -30,6 +30,7 @@ from .website_connections import (
     guarded_setup_merge_observation,
 )
 from .website_views import guarded_owner_operation
+from .website_comment_action_audit import capture as observe_comment_intent, after_transaction as observe_comment_dispatch
 from .portable_drafts import has_connected_website, original_portable_run, website_preview_delivery_mode
 from io import BytesIO
 from datetime import timedelta, timezone as datetime_timezone
@@ -17720,6 +17721,7 @@ class VibeMarketingRunCommentsMixin:
             return None, None, Response({"detail": "A newer draft is ready. Open that revision before adding feedback."}, status=409)
         return context, run, None
 
+@method_decorator(observe_comment_dispatch, name="dispatch")
 @method_decorator(transaction.atomic, name="dispatch")
 class VibeMarketingRunCommentsView(VibeMarketingRunCommentsMixin, APIView):
     allows_setup_review_updates = True
@@ -17746,6 +17748,7 @@ class VibeMarketingRunCommentsView(VibeMarketingRunCommentsMixin, APIView):
             if not isinstance(operation_id, str) or not re.fullmatch(r"[\w-]{8,100}", operation_id):
                 return Response({"detail": "A valid comment operation identity is required."}, status=status.HTTP_400_BAD_REQUEST)
             payload["context"] = {**payload.get("context", {}), "operationId": operation_id}
+            observe_comment_intent(request, _context, run, action="create", payload=payload, operation_id=operation_id)
             # The unique primary key closes the concurrent retry race without a
             # new column or migration. Include run and actor in its namespace.
             identity = uuid.uuid5(uuid.NAMESPACE_URL, f"review-comment:{run.run_id}:{request.user.pk}:{operation_id}")
@@ -17756,6 +17759,7 @@ class VibeMarketingRunCommentsView(VibeMarketingRunCommentsMixin, APIView):
                 return Response({"detail": "This comment request identity was used for different feedback."}, status=status.HTTP_409_CONFLICT)
             return Response(_serialize_component_comment(comment),
                             status=status.HTTP_201_CREATED if created else status.HTTP_200_OK)
+        observe_comment_intent(request, _context, run, action="create", payload=payload)
         if run.workflow != "article_system_setup" and ((run.result or {}).get("article_review_approval") or _run_has_external_publish_evidence(run)):
             return Response({"detail": "This article is already approved. Start a new revision to comment."}, status=409)
         comment = VibeMarketingComponentComment.objects.create(
@@ -17765,6 +17769,7 @@ class VibeMarketingRunCommentsView(VibeMarketingRunCommentsMixin, APIView):
         )
         return Response(_serialize_component_comment(comment), status=status.HTTP_201_CREATED)
 
+@method_decorator(observe_comment_dispatch, name="dispatch")
 @method_decorator(transaction.atomic, name="dispatch")
 class VibeMarketingRunCommentDetailView(VibeMarketingRunCommentsMixin, APIView):
     allows_setup_review_updates = True
@@ -17772,6 +17777,11 @@ class VibeMarketingRunCommentDetailView(VibeMarketingRunCommentsMixin, APIView):
         _context, run, error_response = self._resolve_run(request, run_id)
         if error_response is not None:
             return error_response
+        data = request.data if isinstance(request.data, dict) else {}
+        observed_action = data.get("action")
+        observe_comment_intent(request, _context, run,
+            action=observed_action if isinstance(observed_action, str) and observed_action in {"resolve", "reopen"} else "edit",
+            payload=data, comment_id=comment_id)
         comment = VibeMarketingComponentComment.objects.select_for_update().filter(id=comment_id, run=run).first()
         if comment is None:
             comment = VibeMarketingComponentComment.objects.filter(run=run, context__sourceCommentId=str(comment_id)).first()
@@ -17832,6 +17842,7 @@ class VibeMarketingRunCommentDetailView(VibeMarketingRunCommentsMixin, APIView):
         _context, run, error_response = self._resolve_run(request, run_id)
         if error_response is not None:
             return error_response
+        observe_comment_intent(request, _context, run, action="delete", payload={}, comment_id=comment_id)
         comment = VibeMarketingComponentComment.objects.select_for_update().filter(id=comment_id, run=run).first()
         if comment is None:
             comment = VibeMarketingComponentComment.objects.filter(run=run, context__sourceCommentId=str(comment_id)).first()
