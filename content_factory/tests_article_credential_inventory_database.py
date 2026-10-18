@@ -10,6 +10,42 @@ from .website_reconciliation import process_website_connection_operations
 
 
 class ArticleCredentialInventoryDatabaseTests(WebsiteDatabaseFixture, TestCase):
+    def test_stopped_read_settles_its_recorded_generation_after_owner_revocation(self):
+        from copy import deepcopy
+        from datetime import timedelta
+        from uuid import uuid4
+        from django.utils import timezone
+        from . import website_goal as goals, website_article_stopped_publications as reads
+        from .website_contract import WebsiteAuthorityError
+        original_generation = self.website.generation
+        snapshot = {"stop_request_digest": "b" * 64, "source_fence_id": str(uuid4()), "goal_operation_id": str(uuid4()),
+            "read_scope": goals.scope_for(self.website, "9"), "current_source_sha": "a" * 40,
+            "stop_receipt_digest": "c" * 64, "inventory": {"mutations": {}, "pulls": [42]},
+            "provider": {"repository": self.website.github_repo, "repository_id": self.website.repository_id,
+                "installation_id": str(self.website.installation_id), "branch": self.website.branch}}
+        row = WebsiteConnectionOperation.objects.create(connection=self.website, generation=original_generation,
+            action=reads.ACTION, state="running", idempotency_key="stopped-read-settlement", payload=snapshot,
+            receipt={"schema_version": 1, "observation": None, "credential": {"schema_version": 1,
+                "mint_state": "issued", "expires_at": (timezone.now() + timedelta(minutes=20)).isoformat(),
+                "delivery_possible": True, "revocation_state": "not_attempted", "revocation_attempts": 0}})
+        self.website.generation += 1
+        self.website.state = "revoked"
+        self.website.save(update_fields=["generation", "state"])
+        changed = deepcopy(snapshot)
+        changed["inventory"]["pulls"] = [43]
+        with self.assertRaises(WebsiteAuthorityError):
+            reads._settle(self.website, str(row.pk), changed, revocation_state="confirmed", revocation_attempts=1)
+        row.refresh_from_db()
+        self.assertEqual(row.receipt["credential"]["revocation_state"], "not_attempted")
+        with self.settings(ARTICLES_ARTICLE_SOURCE_REFRESH_ENABLED=False):
+            reads._settle(self.website, str(row.pk), snapshot, revocation_state="confirmed", revocation_attempts=1)
+        row.refresh_from_db()
+        self.assertEqual(row.generation, original_generation)
+        self.assertEqual(row.payload, snapshot)
+        self.assertEqual(row.receipt["credential"]["revocation_state"], "confirmed")
+        self.assertIsNone(row.receipt["observation"])
+        self.assertEqual(row.state, "running")  # retirement never fabricates a publication observation
+
     def test_pending_private_metadata_never_falls_into_legacy_cleanup_scheduler(self):
         original = []
         for action in PRIVATE_ACTIONS:
