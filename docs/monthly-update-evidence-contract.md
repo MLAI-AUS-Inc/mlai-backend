@@ -190,7 +190,8 @@ classification versions and extraction contracts are unchanged. No historical da
 migration is included. Startup/Gmail source deletion scrubs indexed copies after
 locking/scrubbing their origin run, including already completed runs.
 
-The owner approved creation of startup_updates.0025_sourceextractionreceipt for B3
-review and execution in disposable CI tests. Local migration execution and
-production application/rollout remain excluded. The migration creates only the receipt table, fingerprint index,
+The owner initially approved creation of startup_updates.0025_sourceextractionreceipt
+for B3 review and execution in disposable CI tests. Production application requires
+specific approval for the exact pending migration plan and its matching deployment
+SHA256 gate. The migration creates only the receipt table, fingerprint index,
 foreign keys and unique organization/provider/source/fingerprint constraint.
