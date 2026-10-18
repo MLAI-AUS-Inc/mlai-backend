@@ -276,7 +276,11 @@ def _review_dispatch_contract(run, payload):
                 "textEdits": payload["textEdits"], "comments": payload["comments"]}
             reserve_workflow_operation(website, workflow="article_system_setup" if run.workflow == "article_system_setup"
                                        else "article_revision", payload=reservation)
-            return {**binding, "client_request_id": reservation["client_request_id"],
+            # Content Factory admits an article revision child only under its
+            # source's exact reviewed commit; setup children pin current source.
+            source = ({"expected_source_sha": original["expected_source_sha"]}
+                      if run.workflow != "article_system_setup" and original.get("expected_source_sha") else {})
+            return {**binding, **source, "client_request_id": reservation["client_request_id"],
                     **{key: reservation[key] for key in OPERATION_FIELDS}}
     except views.WebsiteAuthorityError as exc:
         return Response(exc.as_dict(), status=exc.status)

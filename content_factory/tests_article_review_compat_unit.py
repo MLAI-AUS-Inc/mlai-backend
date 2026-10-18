@@ -148,10 +148,12 @@ class CompatibilityGuardTests(SimpleTestCase):
 
     def test_article_comments_reserve_separate_revision_fence(self):
         original={'website_connection_id':str(uuid4()),'connection_generation':2,'repository_id':3,
-                  'operation_id':str(uuid4()),'operation_attempt':2,'deletion_epoch':0}
+                  'operation_id':str(uuid4()),'operation_attempt':2,'deletion_epoch':0,
+                  'expected_source_sha':'e204852ef08820e0ce760bdcd406ab8542cd8572'}
         self.run.workflow='article_generation'
         def reserve(website,*,workflow,payload):
             self.assertEqual(workflow,'article_revision')
+            self.assertNotIn('expected_source_sha',payload)
             payload.update(operation_id='new-article-revision',operation_attempt=1,deletion_epoch=0)
         with patch.object(review.views,'scoped_run_contract',return_value=original), \
              patch.object(review.views,'authority_guard',return_value=nullcontext(SimpleNamespace())), \
@@ -159,6 +161,16 @@ class CompatibilityGuardTests(SimpleTestCase):
             result=review._review_dispatch_contract(self.run,{'operationId':'operation-1',
                 'commentIds':[str(uuid4())],'comments':[{'body':'Saved'}],'textEdits':[]})
         self.assertEqual(result['operation_id'],'new-article-revision')
+        # Content Factory admits the child only under the source's reviewed commit.
+        self.assertEqual(result['expected_source_sha'],original['expected_source_sha'])
+        self.run.workflow='article_system_setup'
+        with patch.object(review.views,'scoped_run_contract',return_value=original), \
+             patch.object(review.views,'authority_guard',return_value=nullcontext(SimpleNamespace())), \
+             patch('content_factory.website_operations.reserve_workflow_operation',side_effect=lambda website,*,workflow,payload:
+                   payload.update(operation_id='new-setup-revision',operation_attempt=1,deletion_epoch=0)):
+            setup=review._review_dispatch_contract(self.run,{'operationId':'operation-2',
+                'commentIds':[str(uuid4())],'comments':[{'body':'Saved'}],'textEdits':[]})
+        self.assertNotIn('expected_source_sha',setup)
 
 
 class CompatibilityDispatchReplayTests(SimpleTestCase):
