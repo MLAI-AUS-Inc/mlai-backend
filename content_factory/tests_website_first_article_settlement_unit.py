@@ -407,6 +407,27 @@ class ParentSettlementTests(SimpleTestCase):
         self.assertEqual((row.state, row.attempts), ("needs_attention", 4))
         self.credit.assert_not_called()
 
+    def test_positive_observation_wakes_existing_parent_without_resetting_budget_or_refunding(self):
+        child = self.child("article-goal-pending-publication-v1.json")
+        settlement.capture(self.op, self.held)
+        row = self.refund_row()
+        row.state, row.attempts = "needs_attention", 4
+        child.result["publication_evidence_v1"].update(state="observed", kind="branch",
+            branch_name="content/original", head_sha="b" * 40)
+        child.result["publication_observation_intent_id"] = "d" * 64
+        with patch("workflow_runs.models.ContentFactoryRun.objects.select_for_update") as selected:
+            selected.return_value.filter.return_value.first.return_value = child
+            refunds.wake_settlement(parent_id=self.op.pk, organization_id=7, child_run_id=child.run_id,
+                publication_intent_id="d" * 64, now=self.now)
+            self.assertEqual((row.state, row.attempts), ("pending", 4))
+            row.state = "needs_attention"
+            refunds.wake_settlement(parent_id=self.op.pk, organization_id=7, child_run_id=child.run_id,
+                publication_intent_id="d" * 64, now=self.now)
+            self.assertEqual((row.state, row.attempts), ("needs_attention", 4))
+        row.state = "pending"
+        self.assertEqual(refunds.advance_refund(row.pk, now=self.now), "needs_attention")
+        self.credit.assert_not_called()
+
     def test_late_dispatch_resolution_wakes_without_new_cancel_budget(self):
         child = self.child()
         dispatch = self.dispatch_rows.return_value.filter.return_value.first.return_value

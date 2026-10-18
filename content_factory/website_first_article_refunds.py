@@ -27,7 +27,7 @@ def reserve_refund(op, *, now=None):
     return row
 
 
-def wake_settlement(*, parent_id, organization_id, child_run_id=None, dispatch_id=None, now=None):
+def wake_settlement(*, parent_id, organization_id, child_run_id=None, dispatch_id=None, publication_intent_id=None, now=None):
     """Requeue an existing obligation for new bound evidence without buying retries.
 
     Call only after the child/dispatch transaction commits: settlement locks the
@@ -76,12 +76,22 @@ def wake_settlement(*, parent_id, organization_id, child_run_id=None, dispatch_i
                     source = goals.mapping(ancestor.run_request).get("source_run_id")
                 if not _owned(child, parent, billing, lineage):
                     return
-                proof = cancellation_receipt(child, goals.mapping(child.result))
-                if (proof is None or child.status != "cancelled" or proof["outcome"] != "no_article_effect"
-                    or proof["delivered_value"] is None or any(item["run_id"] == child.run_id
-                        and item.get("stop_receipt_id") == proof["receipt_id"] for item in previous["children"])):
-                    return
-                event = proof["receipt_id"]
+                if publication_intent_id:
+                    from .article_publication_evidence import _checked_publication, publication_state
+                    from .article_publication_intent import HASH
+                    if (not isinstance(publication_intent_id, str) or not HASH.fullmatch(publication_intent_id)
+                            or child.result.get("publication_observation_intent_id") != publication_intent_id
+                            or publication_state(child) != "article"):
+                        return
+                    proof = _checked_publication(child, child.result.get("publication_evidence_v1"))
+                    event = goals.digest({"intent_id": publication_intent_id, "publication": proof})
+                else:
+                    proof = cancellation_receipt(child, goals.mapping(child.result))
+                    if (proof is None or child.status != "cancelled" or proof["outcome"] != "no_article_effect"
+                        or proof["delivered_value"] is None or any(item["run_id"] == child.run_id
+                            and item.get("stop_receipt_id") == proof["receipt_id"] for item in previous["children"])):
+                        return
+                    event = proof["receipt_id"]
             elif dispatch_id:
                 dispatch = ContentFactoryDispatchOutbox.objects.select_for_update().filter(pk=dispatch_id,
                     organization_id=organization_id, client_request_id=billing["client_request_id"]).first()

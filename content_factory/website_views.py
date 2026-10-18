@@ -341,6 +341,9 @@ class WebsiteMutationView(APIView):
                         if data.get(key) and not (key == "status" and row.status == "applied" and data[key] != "applied"):
                             setattr(row, key, data[key])
                     row.save(update_fields=["head_sha", "pr_url", "branch", "status", "updated_at"])
-                return Response({"id": str(row.pk), "created": created, "patch_digest": row.patch_digest}, status=201 if created else 200)
+                from .article_publication_observation import register_intent
+                intent_id = register_intent(connection, row, data)
+                return Response({"id": str(row.pk), "created": created, "patch_digest": row.patch_digest,
+                    **({"article_publication_intent_id": intent_id} if intent_id else {})}, status=201 if created else 200)
         except WebsiteAuthorityError as exc:
             return Response(exc.as_dict(), status=exc.status)
