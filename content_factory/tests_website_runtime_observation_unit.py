@@ -50,10 +50,13 @@ class RuntimeObservationTests(SimpleTestCase):
     def setUp(self):
         self.scope = scope_fixtures.ZooScopeTests(); self.scope.setUp()
         self.factory = APIRequestFactory()
+        # Resolve imports before transaction.atomic is substituted; decorators in
+        # unrelated view modules must retain the real transaction boundary.
+        self.url = reverse("articles_runtime_observation")
         self.remote, self.now = cf_fixture()
 
     def request(self, selection=None, *, key="synthetic-internal-observer-key"):
-        request = self.factory.get(reverse("articles_runtime_observation"), data=selection or query(),
+        request = self.factory.get(self.url, data=selection or query(),
             HTTP_X_API_KEY=key)
         return runtime.WebsiteRuntimeObservationView.as_view()(request)
 
@@ -68,7 +71,7 @@ class RuntimeObservationTests(SimpleTestCase):
                 self.assertEqual(self.request(key=key).status_code, 403)
             with override_settings(INTERNAL_API_KEY="", DEBUG=True):
                 self.assertEqual(self.request().status_code, 403)
-            owner = self.factory.get(reverse("articles_runtime_observation"), data=query())
+            owner = self.factory.get(self.url, data=query())
             force_authenticate(owner, user=SimpleNamespace(is_authenticated=True, is_superuser=True))
             self.assertEqual(runtime.WebsiteRuntimeObservationView.as_view()(owner).status_code, 403)
         read.assert_not_called(); fetch.assert_not_called()
@@ -83,7 +86,17 @@ class RuntimeObservationTests(SimpleTestCase):
             for selected in invalid:
                 with self.subTest(query=selected), self.assertRaises(runtime.ObservationUnavailable):
                     runtime.select_original(selected)
+                self.assertEqual(self.request(selected).data, {"code": "invalid_original_goal_selection"})
         read.assert_not_called()
+
+    def test_unexpected_database_error_exposes_only_static_diagnostic(self):
+        with patch.object(runtime, "read_original", side_effect=RuntimeError(SECRET)), \
+                patch.object(runtime, "fetch_cf_processes") as fetch:
+            result = self.request()
+        self.assertEqual(result.status_code, 503)
+        self.assertEqual(result.data, {"code": "runtime_observation_unavailable"})
+        self.assertNotIn(SECRET, json.dumps(result.data))
+        fetch.assert_not_called()
 
     def test_actual_scope_and_route_are_readonly_and_cf_stays_unbound(self):
         before = deepcopy((self.scope.goal, self.scope.run.run_request))
