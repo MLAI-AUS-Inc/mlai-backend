@@ -569,8 +569,7 @@ def recover_stalled_run(run, *, base_url, headers, now):
             return _stop_stalled_article(run, base_url=base_url, headers=headers, now=now)
         try:
             requests.post(f"{base_url}/api/runs/{run.run_id}/cancel", headers=headers,
-                json={"reason": "worker_heartbeat_lost",
-                "expected_cancellation_v1": expected_article_cancellation(run)}, timeout=(3, 15))
+                json={"reason": "worker_heartbeat_lost"}, timeout=(3, 15))
         except requests.RequestException:
             pass
         return "failed_stalled" if _finalize_run_failure(run.run_id,

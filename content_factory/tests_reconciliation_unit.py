@@ -143,6 +143,15 @@ class SplitRunRecoveryTests(SimpleTestCase):
         self.assertTrue(post.call_args.args[0].endswith("/recover"))
         self.assertTrue(record.call_args.kwargs["accepted"])
 
+    def test_nonarticle_recovery_keeps_its_existing_cancel_contract(self):
+        run, now = self.fake_run(), timezone.now()
+        run.workflow = "discovery"
+        run.result["reconciliation_recovery"] = {"requested_at": (now - timedelta(minutes=10)).isoformat()}
+        with patch.object(reconciliation.requests, "post") as post, \
+                patch.object(reconciliation, "_finalize_run_failure", return_value=True):
+            self.assertEqual(reconciliation.recover_stalled_run(run, base_url="https://fixture.test", headers={}, now=now), "failed_stalled")
+        self.assertEqual(post.call_args.kwargs["json"], {"reason": "worker_heartbeat_lost"})
+
     def test_blocked_code_requires_confirmed_fixed_version(self):
         self.assertFalse(reconciliation.fixed_failure_can_redrive("website_configuration_changed", "2.0.0"))
         self.assertTrue(reconciliation.fixed_failure_can_redrive("website_configuration_changed", "2.1.0"))
