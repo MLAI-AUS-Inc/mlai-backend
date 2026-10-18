@@ -2133,12 +2133,18 @@ class VibeMarketingComponentCommentTests(_PublishRetryApprovalFixture, TestCase)
         )
 
         cancelled_urls = []
+        checked_pull_requests = []
 
         def fake_post(url, json=None, headers=None, timeout=None):
             cancelled_urls.append(url)
             return _Response(status_code=202, payload={"status": "cancelled", "cleanup": {}})
 
-        with patch("content_factory.vibe_marketing_views.http_client.post", side_effect=fake_post):
+        def team_changed_pull_request(config, pr_url):
+            checked_pull_requests.append(pr_url)
+            return {"prUrl": pr_url, "ok": False, "action": "", "reason": "team_changes"}
+
+        with patch("content_factory.vibe_marketing_views.http_client.post", side_effect=fake_post), \
+                patch("content_factory.draft_pull_request_cleanup.close_draft_pull_request", side_effect=team_changed_pull_request):
             response = self.client.post(
                 f"/api/v1/vibe-marketing/runs/{cancellable_one.run_id}/cancel",
                 {"cancel_group": True},
@@ -2151,6 +2157,7 @@ class VibeMarketingComponentCommentTests(_PublishRetryApprovalFixture, TestCase)
             sorted([cancellable_one.run_id, cancellable_two.run_id]),
         )
         self.assertEqual(response.data["protectedRunIds"], [protected.run_id])
+        self.assertEqual(checked_pull_requests, ["https://github.com/MLAI-AUS-Inc/mlai-au/pull/77"])
         self.assertTrue(any(cancellable_one.run_id in url for url in cancelled_urls))
         self.assertTrue(any(cancellable_two.run_id in url for url in cancelled_urls))
         # The stop request is allowed, but its untyped reply cannot establish
@@ -2174,6 +2181,164 @@ class VibeMarketingComponentCommentTests(_PublishRetryApprovalFixture, TestCase)
         self.assertIn(source_run_id, draft_source_run_ids)
         self.assertNotIn(cancellable_one.run_id, draft_run_ids)
         self.assertNotIn(cancellable_two.run_id, draft_run_ids)
+
+    def _setup_blocked_draft_with_copied_setup_pr(self, run_id):
+        """TalaThrive (18 Oct): drafts blocked on setup carried the merged setup PR #42."""
+        setup_pr_url = "https://github.com/MLAI-AUS-Inc/mlai-au/pull/42"
+        setup_run_id = "setup-run-verification-kit"
+        ContentFactoryRun.objects.get_or_create(
+            run_id=setup_run_id,
+            defaults={
+                "workflow": "article_system_setup",
+                "domain": "mlai.au",
+                "github_repo": "MLAI-AUS-Inc/mlai-au",
+                "status": ContentFactoryRunStatus.COMPLETED,
+                "organization": self.organization,
+                "result": {
+                    "pr_url": setup_pr_url,
+                    "verification_kit_pr_url": setup_pr_url,
+                    "article_system_setup": {"pr_url": setup_pr_url, "prUrl": setup_pr_url},
+                },
+            },
+        )
+        return self._create_bound_run(
+            run_id=run_id,
+            workflow="confirmed_topic",
+            domain="mlai.au",
+            github_repo="MLAI-AUS-Inc/mlai-au",
+            status=ContentFactoryRunStatus.BLOCKED,
+            run_request={"target_keyword": "founder wellbeing"},
+            result={
+                "target_keyword": "founder wellbeing",
+                "error_code": "ARTICLE_SYSTEM_SETUP_REQUIRED",
+                "setup_required": True,
+                "setup_run_id": setup_run_id,
+                "pending_setup_run_id": setup_run_id,
+                "branch_name": "feature/stories-publish-route-setup",
+                "pr_url": setup_pr_url,
+            },
+        )
+
+    def _content_factory_refuses_pr_links(self):
+        """Content Factory still refuses cancel for any run carrying a PR link."""
+        calls = []
+
+        def fake_post(url, json=None, headers=None, timeout=None):
+            calls.append(("POST", url))
+            return _Response(
+                status_code=409,
+                payload={"detail": "This article already has external publish evidence. Close or clean up the external PR manually before cancelling."},
+                text="",
+            )
+
+        def fake_delete(url, headers=None, timeout=None):
+            calls.append(("DELETE", url))
+            return _Response(status_code=200, payload={"status": "stopped"})
+
+        def no_github_reads(url, **kwargs):
+            raise AssertionError(f"Unexpected GitHub read {url}")
+
+        return calls, (
+            patch("content_factory.vibe_marketing_views.http_client.post", side_effect=fake_post),
+            patch("content_factory.vibe_marketing_views.http_client.delete", side_effect=fake_delete),
+            patch("content_factory.vibe_marketing_views.http_client.get", side_effect=no_github_reads),
+        )
+
+    @override_settings(CONTENT_FACTORY_URL="https://content-factory.test", CONTENT_FACTORY_API_KEY="secret-key", IS_LOCAL_ENV=False)
+    def test_cancel_group_keeps_setup_blocked_draft_when_worker_refuses_stop(self):
+        draft = self._setup_blocked_draft_with_copied_setup_pr("talathrive-setup-blocked-draft")
+        calls, transport = self._content_factory_refuses_pr_links()
+        closed = []
+
+        with transport[0], transport[1], transport[2], \
+                patch("content_factory.draft_pull_request_cleanup.close_draft_pull_request",
+                    side_effect=lambda config, url: closed.append(url)):
+            response = self.client.post(
+                f"/api/v1/vibe-marketing/runs/{draft.run_id}/cancel",
+                {"cancel_group": True},
+                format="json",
+            )
+
+        self.assertEqual(response.status_code, 409, response.data)
+        self.assertEqual(closed, [])
+        self.assertFalse(any(method == "DELETE" for method, _ in calls))
+        draft.refresh_from_db()
+        self.assertEqual(draft.status, ContentFactoryRunStatus.BLOCKED)
+        self.assertEqual(draft.result["pr_url"], "https://github.com/MLAI-AUS-Inc/mlai-au/pull/42")
+        self.assertNotIn("reconciliation_refund_pending", draft.result)
+
+    @override_settings(CONTENT_FACTORY_URL="https://content-factory.test", CONTENT_FACTORY_API_KEY="secret-key", IS_LOCAL_ENV=False)
+    def test_cancel_article_run_requires_worker_stop_even_for_setup_link(self):
+        draft = self._setup_blocked_draft_with_copied_setup_pr("talathrive-setup-blocked-run-page")
+        _calls, transport = self._content_factory_refuses_pr_links()
+
+        with transport[0], transport[1], transport[2]:
+            response = self.client.post(f"/api/v1/vibe-marketing/runs/{draft.run_id}/cancel", {"cleanup": True}, format="json")
+
+        self.assertEqual(response.status_code, 409, response.data)
+        draft.refresh_from_db()
+        self.assertEqual(draft.status, ContentFactoryRunStatus.BLOCKED)
+
+    @override_settings(CONTENT_FACTORY_URL="https://content-factory.test", CONTENT_FACTORY_API_KEY="secret-key", IS_LOCAL_ENV=False)
+    def test_cancel_group_closes_own_pr_but_keeps_unconfirmed_worker_obligation(self):
+        own_pr_url = "https://github.com/MLAI-AUS-Inc/mlai-au/pull/88"
+        draft = self._create_bound_run(
+            run_id="draft-with-own-open-pr",
+            workflow="article_generation",
+            domain="mlai.au",
+            github_repo="MLAI-AUS-Inc/mlai-au",
+            status=ContentFactoryRunStatus.AWAITING_APPROVAL,
+            run_request={"target_keyword": "draft with a pr"},
+            result={"target_keyword": "draft with a pr", "draft_pr_url": own_pr_url},
+        )
+        _calls, transport = self._content_factory_refuses_pr_links()
+        closed = []
+
+        def close(config, pr_url):
+            closed.append(pr_url)
+            return {"prUrl": pr_url, "ok": True, "action": "closed", "reason": ""}
+
+        with transport[0], transport[1], transport[2], \
+                patch("content_factory.draft_pull_request_cleanup.close_draft_pull_request", side_effect=close):
+            response = self.client.post(
+                f"/api/v1/vibe-marketing/runs/{draft.run_id}/cancel",
+                {"cancel_group": True},
+                format="json",
+            )
+
+        self.assertEqual(response.status_code, 409, response.data)
+        self.assertEqual(closed, [own_pr_url])
+        draft.refresh_from_db()
+        self.assertEqual(draft.status, ContentFactoryRunStatus.AWAITING_APPROVAL)
+        self.assertEqual(draft.result["draft_pr_url"], own_pr_url)
+        self.assertNotIn("reconciliation_refund_pending", draft.result)
+
+    @override_settings(CONTENT_FACTORY_URL="https://content-factory.test", CONTENT_FACTORY_API_KEY="secret-key", IS_LOCAL_ENV=False)
+    def test_cancel_group_explains_why_a_draft_with_merged_pr_is_kept(self):
+        draft = self._create_bound_run(
+            run_id="draft-with-merged-pr",
+            workflow="article_generation",
+            domain="mlai.au",
+            github_repo="MLAI-AUS-Inc/mlai-au",
+            status=ContentFactoryRunStatus.FAILED,
+            run_request={"target_keyword": "merged draft"},
+            result={"target_keyword": "merged draft", "pr_url": "https://github.com/MLAI-AUS-Inc/mlai-au/pull/89"},
+        )
+        _calls, transport = self._content_factory_refuses_pr_links()
+
+        with transport[0], transport[1], transport[2], \
+                patch("content_factory.draft_pull_request_cleanup.close_draft_pull_request",
+                    side_effect=lambda config, url: {"prUrl": url, "ok": False, "action": "", "reason": "merged"}):
+            response = self.client.post(
+                f"/api/v1/vibe-marketing/runs/{draft.run_id}/cancel",
+                {"cancel_group": True},
+                format="json",
+            )
+
+        self.assertEqual(response.status_code, 409)
+        self.assertIn("already been merged", response.data["detail"])
+        draft.refresh_from_db()
+        self.assertEqual(draft.status, ContentFactoryRunStatus.FAILED)
 
     @override_settings(CONTENT_FACTORY_URL="https://content-factory.test", CONTENT_FACTORY_API_KEY="secret-key", IS_LOCAL_ENV=False)
     def test_submit_from_completed_revision_uses_revision_draft_comments(self):

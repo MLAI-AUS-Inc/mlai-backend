@@ -260,3 +260,90 @@ class PendingProofSettlementTests(SimpleTestCase):
         billing.release(self.op, reason="Goal stopped during re-verification")
         self.credit.assert_not_called()
         self.assertEqual(self.op.receipt["first_article_billing"], self.held)
+
+
+class DraftCleanupSettlementTests(SimpleTestCase):
+    """Merged draft cleanup cannot turn a closed PR into a worker stop proof."""
+    def setUp(self):
+        from . import tests_article_publication_evidence_unit as publication_fixtures
+        publication_fixtures.ArticleCancellationSettlementTests.setUp(self)
+
+    @contextmanager
+    def control_boundaries(self, response):
+        from contextlib import ExitStack, nullcontext
+        with ExitStack() as stack:
+            stack.enter_context(patch.object(views.transaction, "atomic", return_value=nullcontext()))
+            locked = stack.enter_context(patch.object(views.ContentFactoryRun.objects, "select_for_update"))
+            locked.return_value.get.return_value = self.run
+            selected = stack.enter_context(patch.object(views.ContentFactoryRun.objects, "prefetch_related"))
+            selected.return_value.get.return_value = self.run
+            stack.enter_context(patch.object(views, "founder_actor_id_for_user", return_value="founder:4"))
+            stack.enter_context(patch.object(views, "_release_cancelled_article_keyword"))
+            stack.enter_context(patch.object(views, "_serialize_run", side_effect=lambda run, **kw: {"status": run.status}))
+            stack.enter_context(patch.object(views, "_get_config", return_value=SimpleNamespace()))
+            stack.enter_context(patch.object(views, "_article_draft_group_members", return_value=[self.run]))
+            stack.enter_context(patch.object(views, "_article_setup_pull_request_urls", return_value=set()))
+            self.remote = stack.enter_context(patch.object(views, "_call_content_factory_run_action", return_value=response))
+            self.close = stack.enter_context(patch("content_factory.draft_pull_request_cleanup.close_draft_pull_request",
+                side_effect=lambda config, url: {"prUrl": url, "ok": True, "action": "already_closed", "reason": ""}))
+            self.refund = stack.enter_context(patch("roo.services.PointsService.refund"))
+            yield
+
+    def control(self, group=False):
+        return views.control_article_run(user=SimpleNamespace(pk=4),
+            context=SimpleNamespace(organization=SimpleNamespace(pk=7)), run=self.run,
+            action="cancel", data={"cancel_group": True} if group else {})
+
+    def producer(self, filename):
+        import json
+        from pathlib import Path
+        fixture = json.loads((Path(__file__).parent / "test_fixtures" / filename).read_text())
+        self.run.run_id = fixture["original_request"]["run_id"]
+        self.run.run_request = deepcopy(fixture["original_request"])
+        self.run.run_request.setdefault("roo_points_cost", 6)
+        self.run.run_request.setdefault("roo_points_ledger_id", "123")
+        self.run.result = {"generation": 0, "state_version": 1,
+            "pr_url": "https://github.com/fixture/site/pull/40", "saved_proof": {"sha": "a" * 40}}
+        return fixture["cancellation_response"]
+
+    def test_actual_setup_only_producer_receipt_cancels_control_and_keeps_one_refund_obligation(self):
+        response = self.producer("article-cancellation-no-value-v1.json")
+        original = deepcopy(self.run.run_request)
+        with self.control_boundaries(response):
+            self.assertEqual(self.control().status_code, 202)
+            first = deepcopy(self.run.result["article_terminal_refund"])
+            self.assertEqual(self.control().status_code, 202)
+            self.assertEqual(self.run.result["article_terminal_refund"], first)
+            self.close.assert_not_called()
+            self.refund.assert_not_called()
+        self.assertEqual(self.run.status, "cancelled")
+        self.assertEqual(self.run.run_request, original)
+        self.assertTrue(self.run.result["reconciliation_refund_pending"])
+
+    def test_closed_pr_with_refused_or_untyped_stop_preserves_original_obligation(self):
+        self.run.result.pop("publication_evidence_v1")
+        original = deepcopy(self.run.result)
+        for response in ({"content_factory_status_code": 409}, {"status": "cancelled"}):
+            with self.subTest(response=response), self.control_boundaries(response):
+                self.assertEqual(self.control(group=True).status_code, 409)
+                self.close.assert_called_once()
+                self.refund.assert_not_called()
+                self.assertEqual(self.run.status, "blocked")
+                self.assertEqual(self.run.result, original)
+
+    def test_actual_unknown_producer_stop_keeps_parent_payment_after_pr_cleanup(self):
+        response = self.producer("article-goal-pending-publication-v1.json")
+        original = deepcopy(self.run.run_request)
+        with self.control_boundaries(response):
+            self.assertEqual(self.control(group=True).status_code, 202)
+            self.close.assert_called_once()
+            self.refund.assert_not_called()
+        self.assertEqual(self.run.status, "cancelled")
+        self.assertEqual(self.run.run_request, original)
+        self.assertTrue(self.run.result["reconciliation_required"])
+        self.assertEqual(self.run.run_request["first_article_goal_operation_id"],
+            "aade3210-6b5b-4e6e-9519-abcd22334455")
+        from .article_publication_evidence import refund_reconciliation_reason
+        self.assertEqual(refund_reconciliation_reason(self.run), "needs_reconciliation")
+        self.assertNotIn("reconciliation_refund_pending", self.run.result)
+        self.assertEqual(self.run.result["cleanup"]["pull_requests"][0]["action"], "already_closed")

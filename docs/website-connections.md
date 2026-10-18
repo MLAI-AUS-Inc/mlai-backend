@@ -522,3 +522,10 @@ that resumed after the backend read. A scoped 409 retains the original obligatio
 it does not borrow the new attempt's identity. Deploy the companion scoped-cancel
 endpoint before these senders, since older endpoints ignore the JSON envelope.
 Explicit owner cancellation remains compatible with the legacy empty-body route.
+
+Draft group deletion retains its own PR close-or-observe cleanup. A closed or
+inaccessible PR, preview deletion, or refused worker cancellation does not prove
+that article work stopped or delivered no value. The existing worker receipt
+guard still protects run state and original payment evidence; typed unknown
+stops retain reconciliation obligations after PR cleanup. Setup-only typed stops
+can finish cancellation without closing the website's setup PR.
