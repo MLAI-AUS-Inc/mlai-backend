@@ -145,3 +145,26 @@ value, and founder approval remains tied to the exact saved revision.
 Before merging B1, the owner must run Appendix B of the 18 October Pulse speed-up
 plan against the latest completed sharded runs and confirm
 `only_in_startup_context = 0`. A nonzero result stops rollout for owner review.
+
+
+## Pulse synchronization and metadata page bounds
+
+Run PUTs with `X-Run-Sync-Response: ack` return control fields and `sync_status`
+without the result, step states or attempts. Requests without the header retain
+the full response; cancellation and conflict bodies retain their existing shape.
+Stored Pulse source_evidence, update_candidates and _cancel_backups survive worker
+snapshots that omit them. Sync persistence updates only changed step/attempt fields;
+attempt history remains append-only and stale steps are still removed.
+
+Gmail backfill pages now default to 25 metadata IDs and a 40-second work deadline
+(`GMAIL_METADATA_PAGE_MAX_RESULTS`, `GMAIL_METADATA_PAGE_DEADLINE_SECONDS`). After
+at least one new message, a page may stop fetching metadata at the deadline while
+including all reusable artifacts. An incomplete page returns `page_complete: false`
+and the same input token, including null for the first page. Re-listing uses the
+same run-pinned query; persisted messages are reused until every ID is consumed.
+Only a complete final page sets backfill_completed_at. Deploy Valley V2 first so
+incomplete first pages are requeued rather than mistaken for completion.
+
+Incremental history pages retain the previous five-result cap because they do not
+yet implement the resumable deadline protocol. The larger cap applies to timed
+backfill pages.

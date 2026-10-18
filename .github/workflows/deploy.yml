@@ -101,7 +101,7 @@ jobs:
       run: python scripts/check_test_assignment.py
 
     - name: Run isolated refactor checks without database access
-      run: python scripts/test_without_database.py content_factory.tests_run_sync_authority_unit content_factory.tests_current_connection_unit tests.test_refactor_unit tests.test_refactor_django_unit tests.test_refactor_migration_inventory roo.test_event_ticket_price
+      run: python scripts/test_without_database.py content_factory.tests_run_sync_authority_unit content_factory.tests_pulse_sync_unit content_factory.tests_current_connection_unit tests.test_refactor_unit tests.test_refactor_django_unit tests.test_refactor_migration_inventory roo.test_event_ticket_price
 
     - name: Check Roo Points GST and Xero capture contracts without database access
       run: python scripts/test_without_database.py roo.tests_purchase_tax_unit roo.tests_startup_update_benefits_unit tests.test_xero_capture_backoff_unit
@@ -357,6 +357,9 @@ jobs:
           tests.test_vibe_marketing_component_comments.VibeMarketingComponentCommentTests.test_merge_setup_pr_marks_setup_merged_and_daily_ready \
           --noinput --verbosity=2 --failfast
 
+    - name: Run Pulse sync persistence and response tests
+      run: python manage.py test content_factory.tests_pulse_sync --verbosity 2
+
     - name: Run targeted Django tests
       run: |
         python manage.py test \
@@ -422,6 +425,7 @@ jobs:
           tests.test_new_endpoints.EndpointTests \
           tests.test_new_endpoints.ContentFactoryCallbackTests \
           tests.test_content_factory_callback_idempotency \
+          \
           tests.test_content_factory_reconciliation \
           tests.test_content_factory_status_contract \
           content_factory.tests_section_issues_unit \

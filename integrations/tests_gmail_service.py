@@ -117,7 +117,7 @@ class GmailMetadataReuseTests(TestCase):
         self.assertEqual([item.gmail_message_id for item in result["artifacts"]], ["msg-1"])
         mock_get_message_metadata.assert_not_called()
 
-    @override_settings(GMAIL_METADATA_PAGE_MAX_RESULTS=5)
+    @override_settings(GMAIL_METADATA_PAGE_MAX_RESULTS=25)
     @patch("integrations.services.gmail.build_gmail_service")
     @patch("integrations.services.gmail.get_message_metadata")
     @patch("integrations.services.gmail.list_message_page")
@@ -169,12 +169,107 @@ class GmailMetadataReuseTests(TestCase):
             max_results=250,
         )
 
-        self.assertEqual(result["effective_max_results"], 5)
+        self.assertEqual(result["effective_max_results"], 25)
         self.assertEqual(result["requested_max_results"], 250)
         self.assertEqual([item.gmail_message_id for item in result["artifacts"]], ["msg-1", "msg-2"])
         mock_build_gmail_service.assert_called_once_with(connection, cache_discovery=False)
-        self.assertEqual(mock_list_message_page.call_args.kwargs["max_results"], 5)
+        self.assertEqual(mock_list_message_page.call_args.kwargs["max_results"], 25)
         self.assertIs(mock_list_message_page.call_args.kwargs["service"], service)
         self.assertEqual(mock_get_message_metadata.call_count, 2)
         for call in mock_get_message_metadata.call_args_list:
             self.assertIs(call.kwargs["service"], service)
+
+
+    @override_settings(GMAIL_METADATA_PAGE_DEADLINE_SECONDS=40)
+    def test_slow_metadata_is_durable_and_reused_on_first_page_resume(self):
+        organization = Organization.objects.create(name="Deadline", domain="deadline.invalid")
+        user = User.objects.create_user(email="deadline@example.invalid", password="test-only")
+        connection = GoogleConnection.objects.create(user=user, google_email="deadline@example.invalid",
+            refresh_token="synthetic", scope="https://www.googleapis.com/auth/gmail.readonly")
+        now = [0.0]
+        stamp = timezone.now()
+        def metadata(connection, message_id, **kwargs):
+            now[0] += 50
+            return {"id": message_id, "threadId": message_id, "internalDate": str(int(stamp.timestamp() * 1000)),
+                "payload": {"headers": []}}
+        with patch("integrations.services.gmail.time.monotonic", side_effect=lambda: now[0]), \
+                patch("integrations.services.gmail.build_gmail_service"), \
+                patch("integrations.services.gmail.list_message_page", return_value={"messages": [{"id": "one"}, {"id": "two"}]}), \
+                patch("integrations.services.gmail.get_message_metadata", side_effect=metadata) as fetch:
+            kwargs = dict(organization=organization, connection=connection, after_dt=stamp, before_dt=stamp)
+            first = sync_message_metadata_page(**kwargs)
+            self.assertFalse(first["page_complete"])
+            self.assertIsNone(first["next_page_token"])
+            self.assertEqual(GmailMessageArtifact.objects.filter(organization=organization).count(), 1)
+            second = sync_message_metadata_page(**kwargs)
+        self.assertTrue(second["page_complete"])
+        self.assertEqual(second["reused_existing_count"], 1)
+        self.assertEqual(GmailMessageArtifact.objects.filter(organization=organization).count(), 2)
+        self.assertEqual(fetch.call_count, 2)
+
+
+class GmailMetadataDeadlineTests(SimpleTestCase):
+    @override_settings(GMAIL_METADATA_PAGE_MAX_RESULTS=25, GMAIL_METADATA_PAGE_DEADLINE_SECONDS=40)
+    def test_incomplete_pages_keep_token_and_resume_using_persisted_metadata(self):
+        for token in (None, "same-page"):
+            with self.subTest(token=token):
+                now = [0.0]
+                stored = {"reused-tail": SimpleNamespace(gmail_message_id="reused-tail")}
+                fetched = []
+                def metadata(connection, message_id, **kwargs):
+                    fetched.append(message_id)
+                    now[0] += 25
+                    return {"id": message_id}
+                def persist(**kwargs):
+                    row = SimpleNamespace(gmail_message_id=kwargs["message_data"]["id"])
+                    stored[row.gmail_message_id] = row
+                    return row
+                def existing(**kwargs):
+                    return {key: stored[key] for key in kwargs["message_ids"] if key in stored}
+                with patch("integrations.services.gmail.time.monotonic", side_effect=lambda: now[0]), \
+                        patch("integrations.services.gmail.build_gmail_service"), \
+                        patch("integrations.services.gmail.list_message_page", return_value={
+                            "messages": [{"id": key} for key in ("one", "two", "three", "reused-tail")],
+                            "nextPageToken": "next-page", "resultSizeEstimate": 4}) as listing, \
+                        patch("integrations.services.gmail._existing_metadata_artifact_map", side_effect=existing), \
+                        patch("integrations.services.gmail.get_message_metadata", side_effect=metadata), \
+                        patch("integrations.services.gmail.upsert_message_artifact_from_message_data", side_effect=persist):
+                    kwargs = dict(organization=SimpleNamespace(), connection=SimpleNamespace(),
+                        after_dt=timezone.now(), before_dt=timezone.now(), max_results=50, page_token=token)
+                    first = sync_message_metadata_page(**kwargs)
+                    self.assertFalse(first["page_complete"])
+                    self.assertEqual(first["next_page_token"], token)
+                    self.assertEqual([a.gmail_message_id for a in first["artifacts"]], ["one", "two", "reused-tail"])
+                    self.assertEqual(set(stored), {"one", "two", "reused-tail"})
+                    self.assertEqual(first["reused_existing_count"], 1)
+                    second = sync_message_metadata_page(**kwargs)
+                self.assertTrue(second["page_complete"])
+                self.assertEqual(second["next_page_token"], "next-page")
+                self.assertEqual([a.gmail_message_id for a in second["artifacts"]], ["one", "two", "three", "reused-tail"])
+                self.assertEqual(second["reused_existing_count"], 3)
+                self.assertEqual(fetched, ["one", "two", "three"])
+                self.assertEqual(listing.call_args_list[0].kwargs["query"], listing.call_args_list[1].kwargs["query"])
+                self.assertEqual(listing.call_args.kwargs["max_results"], 25)
+
+    def test_expired_deadline_still_fetches_one_new_message(self):
+        with patch("integrations.services.gmail.build_gmail_service"), \
+                patch("integrations.services.gmail.list_message_page", return_value={"messages": [{"id": "one"}, {"id": "two"}]}), \
+                patch("integrations.services.gmail._existing_metadata_artifact_map", return_value={}), \
+                patch("integrations.services.gmail.get_message_metadata", return_value={"id": "one"}) as fetch, \
+                patch("integrations.services.gmail.upsert_message_artifact_from_message_data", return_value=SimpleNamespace(gmail_message_id="one")):
+            result = sync_message_metadata_page(organization=SimpleNamespace(), connection=SimpleNamespace(),
+                after_dt=timezone.now(), before_dt=timezone.now(), deadline_seconds=0)
+        fetch.assert_called_once()
+        self.assertFalse(result["page_complete"])
+        self.assertIsNone(result["next_page_token"])
+
+    @override_settings(GMAIL_METADATA_PAGE_MAX_RESULTS=25)
+    def test_untimed_history_pages_keep_the_previous_safety_cap(self):
+        from integrations.services.gmail import sync_history_metadata_page
+        with patch("integrations.services.gmail.build_gmail_service"), \
+                patch("integrations.services.gmail.list_history_page", return_value={}) as listing, \
+                patch("integrations.services.gmail._existing_metadata_artifact_map", return_value={}):
+            result = sync_history_metadata_page(organization=SimpleNamespace(), connection=SimpleNamespace(),
+                start_history_id="1", max_results=50)
+        self.assertEqual(result["effective_max_results"], 5)
+        self.assertEqual(listing.call_args.kwargs["max_results"], 5)

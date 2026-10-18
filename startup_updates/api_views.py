@@ -1329,7 +1329,7 @@ class StartupUpdateIngestNextPageView(APIView):
                 cursor.last_history_id = str(max(artifact_history_ids))
         if sync_result.get("history_id"):
             cursor.last_history_id = sync_result["history_id"]
-        if not sync_result.get("next_page_token"):
+        if not sync_result.get("next_page_token") and sync_result.get("page_complete", True):
             cursor.backfill_completed_at = timezone.now()
         cursor.save()
 
@@ -1351,6 +1351,7 @@ class StartupUpdateIngestNextPageView(APIView):
                 "ingested_count": len(sync_result["artifacts"]),
                 "result_size_estimate": sync_result["result_size_estimate"],
                 "next_page_token": sync_result["next_page_token"],
+                "page_complete": sync_result.get("page_complete", True),
                 "history_id": sync_result.get("history_id", ""),
                 "cursor_reset": bool(sync_result.get("cursor_reset", False)),
                 "reused_existing_count": int(sync_result.get("reused_existing_count") or 0),
