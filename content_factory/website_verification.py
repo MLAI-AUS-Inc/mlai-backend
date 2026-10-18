@@ -235,6 +235,49 @@ def current_ci_attestation(connection, target, *, capabilities=None):
     return receipt
 
 
+KIT_CONFIG_PATH = ".mlai/articles-verification.json"
+
+
+def kit_marker_routes(website, source_sha, artifact_digest):
+    """Return the public routes the merged verification kit sealed with the live marker.
+
+    The CI proof seals the listing, detail and unknown-slug routes it tested. An
+    adopted integration marks only the listing it reviewed, because the article
+    detail is the site's own renderer (``artifact_marker_routes`` in the committed
+    kit config). Vyavos, 17 Oct: its listing served the reviewed marker, but its
+    detail served the original setup's marker, so the live check never passed.
+    Returns ``None`` when the exact commit's config is unreadable or names
+    another marker, so every rendered route keeps requiring the marker.
+    """
+    from integrations import http_client
+    from integrations.services.github_app import create_installation_access_token
+    # The same read-only repository token as verify_repository_head: live checks
+    # never need the optional CI evidence grants.
+    try:
+        credential = create_installation_access_token(installation_id=website.installation_id,
+            repository=website.github_repo, repository_id=website.repository_id, permission_mode="read")
+        response = http_client.get(f"https://api.github.com/repos/{website.github_repo}/contents/{KIT_CONFIG_PATH}?ref={quote(str(source_sha), safe='')}",
+            headers={"Authorization": f"Bearer {credential.token}", "Accept": "application/vnd.github+json"}, timeout=(3, 15))
+        if response.status_code != 200:
+            return None
+        config = json.loads(base64.b64decode(response.json()["content"], validate=False))
+    except Exception:
+        # Reading the kit only narrows the check; without it every route stays marked.
+        return None
+    if not isinstance(config, dict):
+        return None
+    routes = config.get("artifact_marker_routes")
+    if (config.get("artifact_digest") != artifact_digest or not isinstance(routes, list) or not routes
+            or not all(isinstance(path, str) and path.startswith("/") for path in routes)):
+        return None
+    return {path.rstrip("/") or "/" for path in routes}
+
+
+def route_requires_marker(kind, path, marker_routes):
+    """The listing always carries the reviewed marker; other routes only when the kit sealed them."""
+    return kind == "listing" or marker_routes is None or (str(path).rstrip("/") or "/") in marker_routes
+
+
 def verify_live_deployment(config, *, data):
     """Check selected source, provider CI receipt and same-site source marker."""
     from .website_live_fetch import fetch_live_route
@@ -267,6 +310,7 @@ def verify_live_deployment(config, *, data):
     verify_repository_head(website, data["source_sha"])
     from .website_deployment import ensure_fingerprint, observe_headers
     ensure_fingerprint(website, binding)
+    marker_routes = kit_marker_routes(website, data["source_sha"], artifact_digest)
     observations = []
     for kind in ("listing", "detail", "unknown_slug"):
         public_url = f"https://{website.organization.domain}{routes[kind]}"
@@ -274,7 +318,8 @@ def verify_live_deployment(config, *, data):
         body, headers = fetch_live_route(public_url, website.organization.domain, expected_status=expected_status)
         if kind == "listing":observe_headers(website, binding, headers)
         marker = headers.get("x-mlai-artifact-digest") or ""
-        if expected_status == 200 and marker != artifact_digest and not re.search(rb'<meta\s+name=["\x27]mlai-artifact-digest["\x27]\s+content=["\x27]' + artifact_digest.encode() + rb'["\x27]', body):
+        if (expected_status == 200 and route_requires_marker(kind, routes[kind], marker_routes)
+                and marker != artifact_digest and not re.search(rb'<meta\s+name=["\x27]mlai-artifact-digest["\x27]\s+content=["\x27]' + artifact_digest.encode() + rb'["\x27]', body)):
             raise WebsiteAuthorityError("live_route_unavailable", "The public listing or article detail has not deployed this reviewed integration artifact yet.")
         observations.append({"kind": kind, "path": routes[kind], "status": expected_status})
     receipt = {"status": "passed", "source_sha": data["source_sha"], "connection_generation": website.generation,

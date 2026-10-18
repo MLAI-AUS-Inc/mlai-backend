@@ -10,6 +10,11 @@ from integrations import http_client as requests
 
 logger = logging.getLogger(__name__)
 
+VALLEY_WORKER_UNAVAILABLE_MESSAGE = (
+    "Valley has no worker ready to start your update. Your update is saved; "
+    "please try again shortly."
+)
+
 
 @dataclass(frozen=True)
 class ValleyHarnessResult:
@@ -102,6 +107,15 @@ def _post_to_valley_harness(path: str, *, payload: dict | None = None) -> Valley
         response_excerpt = response_text[:200] if response_text else ""
         failure_kind = _failure_kind_for_exception(exc)
         detail = _sanitize_detail(response_excerpt or exc)
+        if status_code == 503:
+            try:
+                body = response.json()
+            except ValueError:
+                body = None
+            problem = body.get("detail") if isinstance(body, dict) else None
+            if isinstance(problem, dict) and problem.get("code") == "valley_worker_unavailable":
+                failure_kind = "worker_unavailable"
+                detail = VALLEY_WORKER_UNAVAILABLE_MESSAGE
         logger.warning(
             "Failed Valley harness request (path=%s, url=%s, api_key_source=%s, status=%s, failure_kind=%s, detail=%r)",
             path,

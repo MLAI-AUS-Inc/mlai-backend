@@ -459,7 +459,9 @@ def _resolve_delivery_mode_confirmation(article_request: Optional[dict], *, requ
 def _resolve_saved_article_delivery_mode(config: Optional[OrganizationContentConfig]) -> Optional[str]:
     if not config:
         return None
-    return _normalize_requested_delivery_mode(getattr(config, "article_delivery_mode", None))
+    from content_factory.portable_drafts import website_preview_delivery_mode
+    # A saved content_only never applies to a connected website (owner rule, 17 Oct 2026).
+    return website_preview_delivery_mode(config, _normalize_requested_delivery_mode(getattr(config, "article_delivery_mode", None)))
 
 
 def resolve_article_delivery_mode(

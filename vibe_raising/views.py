@@ -52,9 +52,13 @@ from startup_updates.metric_catalog import (
 )
 from integrations.services.external_connectors import (
     ConnectorOAuthError,
+    ConnectorReconnectRequired,
+    ConnectorTemporarilyUnavailable,
+    ConnectorRateLimitError,
     active_google_connection,
     active_organization_for_user,
     google_connection_for_org,
+    ensure_linear_connection_authorized,
     mark_sources_sync_requested,
     refresh_linear_activity_selections,
 )
@@ -203,6 +207,28 @@ def _connector_oauth_guarded(callback):
     def wrapped(*args, **kwargs):
         try:
             return callback(*args, **kwargs)
+        except ConnectorReconnectRequired as exc:
+            # Run creation rolled back; its credential error must survive that
+            # rollback. This never replaces a newer OAuth callback's credentials.
+            exc.persist()
+            return Response(
+                {"detail": str(exc), "code": "startup_update_sources_unavailable",
+                 "unavailableSources": [exc.provider]},
+                status=status.HTTP_409_CONFLICT,
+            )
+        except ConnectorTemporarilyUnavailable as exc:
+            return Response(
+                {"detail": str(exc), "code": "startup_update_source_unavailable",
+                 "unavailableSources": [exc.provider]},
+                status=status.HTTP_503_SERVICE_UNAVAILABLE,
+            )
+        except ConnectorRateLimitError as exc:
+            return Response(
+                {"detail": "A selected source is busy. Try again shortly, or remove it from this update.",
+                 "code": "startup_update_source_rate_limited"},
+                status=status.HTTP_503_SERVICE_UNAVAILABLE,
+                headers={"Retry-After": str(exc.retry_after_seconds)},
+            )
         except ConnectorOAuthError as exc:
             return Response(
                 {"detail": str(exc)},
@@ -245,9 +271,12 @@ def _sync_selected_connector_sources_for_draft(user, input_sources: list[str], *
         # connection to close before the run is even created.
         if provider == ExternalServiceProvider.LINEAR:
             if automatic_scope:
+                ensure_linear_connection_authorized(connection)
                 continue  # The run discovers its own catalog without changing manual selections.
             try:
                 refresh_linear_activity_selections(connection)
+            except (ConnectorReconnectRequired, ConnectorTemporarilyUnavailable, ConnectorRateLimitError):
+                raise
             except Exception as exc:
                 logger.exception(
                     "Unable to refresh Linear activity scope before monthly update draft",
@@ -519,12 +548,14 @@ def _should_dispatch_existing_run(run) -> bool:
 
 
 def _valley_dispatch_failure_payload(run, dispatch_result) -> dict:
+    from integrations.services.valley_harness import VALLEY_WORKER_UNAVAILABLE_MESSAGE
+    worker_unavailable = getattr(dispatch_result, "failure_kind", "") == "worker_unavailable"
     return {
         "run_id": run.run_id,
         "runId": run.run_id,
         "error": "valley_dispatch_failed",
         "retryable": True,
-        "message": "The update run was saved, but Valley could not be reached. Check Valley connectivity and retry.",
+        "message": VALLEY_WORKER_UNAVAILABLE_MESSAGE if worker_unavailable else "The update run was saved, but Valley could not be reached. Check Valley connectivity and retry.",
         "valleyDispatch": {
             "status": "failed",
             "failureKind": str(getattr(dispatch_result, "failure_kind", "") or "unknown"),
@@ -538,6 +569,21 @@ def _dispatch_run_to_valley(run):
     dispatch_result = notify_valley_run_created(run.run_id)
     record_valley_dispatch_result(run, dispatch_result)
     return dispatch_result
+
+
+def _queued_valley_warning(run):
+    """Distinguish a waiting job from source processing without changing run state."""
+    if run is None or run.status != ContentFactoryRunStatus.QUEUED:
+        return None
+    meta = _get_run_meta(run)
+    if meta.get("dispatch_status") == "failed":
+        if meta.get("last_dispatch_error_kind") == "worker_unavailable":
+            from integrations.services.valley_harness import VALLEY_WORKER_UNAVAILABLE_MESSAGE
+            return VALLEY_WORKER_UNAVAILABLE_MESSAGE
+        return "Your update is saved, but Valley could not start it. Please try again shortly."
+    if run.updated_at and run.updated_at <= timezone.now() - QUEUED_REDISPATCH_AFTER:
+        return "Your update is still queued. Valley has not started reading your sources yet. Your update is saved."
+    return None
 
 
 def _requested_target_month_from_request(request) -> date:
@@ -1856,6 +1902,7 @@ def _build_status_payload(*, user, company, domain):
         state = "needs_google_auth"
     elif open_run is not None:
         state = "processing"
+        error = _queued_valley_warning(open_run)
     elif latest_run and latest_run.status == ContentFactoryRunStatus.CANCELLED:
         state = "cancelled"
     elif latest_run and latest_run.status in {
@@ -1979,6 +2026,7 @@ def _build_email_draft_payload(
         state = "auth_required"
     elif latest_run is not None and latest_run.status == ContentFactoryRunStatus.QUEUED:
         state = "queued"
+        error = _queued_valley_warning(latest_run)
     elif latest_run is not None and latest_run.status in {
         ContentFactoryRunStatus.RUNNING,
         ContentFactoryRunStatus.BLOCKED,

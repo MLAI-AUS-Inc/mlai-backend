@@ -175,7 +175,9 @@ class PrepareVerificationRuntimeTests(SimpleTestCase):
             result = prepare._dispatch_prepare_step(self.prepare, self.context, self.config, "verify", journey=journey, **self.dispatch_user())
         self.assertEqual(result["status"], "completed")
         self.assertEqual(self.fetch.call_count, 3)
-        self.assertEqual(self.http.call_count, 1)
+        # The branch head, then the merged kit's marker routes at the exact source.
+        self.assertEqual(self.http.call_count, 2)
+        self.assertIn("/contents/.mlai/articles-verification.json?ref=", self.http.call_args_list[1].args[0])
         self.assertFalse(any(call.kwargs.get("permission_profile") == "ci_evidence" for call in self.tokens.call_args_list))
 
     def test_missing_or_stale_proof_still_requires_ci_read_grants(self):

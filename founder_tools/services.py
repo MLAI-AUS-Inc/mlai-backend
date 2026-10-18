@@ -599,9 +599,12 @@ def apply_shared_startup_details(*, user, company: VibeRaisingCompany, data: dic
     if github_repo and config.github_repo != github_repo:
         config.github_repo = github_repo
         config_update_fields.append("github_repo")
-    article_delivery_mode = str(
+    from content_factory.portable_drafts import website_preview_delivery_mode
+
+    # A connected website always previews: content_only is stored as review_draft.
+    article_delivery_mode = website_preview_delivery_mode(config, str(
         _first_value(data, "articleDeliveryMode", "article_delivery_mode", default="") or ""
-    ).strip()
+    ).strip())
     if article_delivery_mode and config.article_delivery_mode != article_delivery_mode:
         config.article_delivery_mode = article_delivery_mode
         config_update_fields.append("article_delivery_mode")

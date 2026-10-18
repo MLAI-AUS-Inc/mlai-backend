@@ -325,11 +325,12 @@ def _serialize_marketing_settings(organization):
         config = organization.content_config
     except Exception:
         return None
+    from content_factory.portable_drafts import website_preview_delivery_mode
     return {
         "brandName": config.brand_name,
         "companyContext": config.company_context,
         "githubRepo": config.github_repo,
-        "articleDeliveryMode": config.article_delivery_mode,
+        "articleDeliveryMode": website_preview_delivery_mode(config, config.article_delivery_mode),
         "dailyDiscoveryEnabled": config.daily_discovery_enabled,
         "defaultTimezone": config.default_timezone,
         "githubConnectionState": config.github_connection_state,

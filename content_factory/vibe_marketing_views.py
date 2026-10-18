@@ -30,7 +30,7 @@ from .website_connections import (
     guarded_setup_merge_observation,
 )
 from .website_views import guarded_owner_operation
-from .portable_drafts import original_portable_run
+from .portable_drafts import has_connected_website, original_portable_run, website_preview_delivery_mode
 from io import BytesIO
 from datetime import timedelta, timezone as datetime_timezone
 from urllib.parse import parse_qsl, quote, urlencode, urlsplit
@@ -494,7 +494,16 @@ def _stored_article_delivery_mode(config) -> str:
         or getattr(settings, "CONTENT_FACTORY_DEFAULT_ARTICLE_DELIVERY_MODE", "")
         or ""
     ).strip()
-    return mode if mode in ARTICLE_DELIVERY_MODES else ""
+    if mode not in ARTICLE_DELIVERY_MODES:
+        return ""
+    # A connected website always previews: a legacy stored content_only reads as
+    # review_draft (migration 0046 rewrites those stored rows).
+    return website_preview_delivery_mode(config, mode)
+
+
+def _reported_article_delivery_mode(config) -> str:
+    """Saved mode for settings payloads; never content_only for a connected website."""
+    return _stored_article_delivery_mode(config) or ("review_draft" if has_connected_website(config) else "content_only")
 
 
 def _github_repo_operable(config) -> bool:
@@ -542,6 +551,12 @@ def _article_repo_is_review_capable(config, *, github_ready=None, article_ready=
 
 
 def _effective_article_delivery_mode(config, *, requested_mode=None, explicit=False, github_ready=None, article_ready=None) -> str:
+    """Resolve the delivery mode an article run (or the settings payload) uses.
+
+    An explicit request is returned as-is: ``start_article_generation`` refuses
+    or upgrades an explicit content_only for a connected website before calling
+    this, and a restart of an original portable draft keeps its own consent.
+    """
     requested = str(requested_mode or "").strip()
     if explicit and requested in ARTICLE_DELIVERY_MODES:
         return requested
@@ -550,7 +565,10 @@ def _effective_article_delivery_mode(config, *, requested_mode=None, explicit=Fa
     if _article_repo_is_review_capable(config, github_ready=github_ready, article_ready=article_ready):
         if stored in LEGACY_REVIEW_BLOCKING_DELIVERY_MODES or not stored:
             return "review_draft"
-    return stored or "content_only"
+    # A connected website reports review_draft even before it can generate; the
+    # existing readiness flags (articleCapabilities, websiteConnection) tell the
+    # client to finish website setup rather than downgrade to a portable draft.
+    return stored or _reported_article_delivery_mode(config)
 
 
 def _company_id_from_request(request):
@@ -11740,7 +11758,7 @@ def _compute_bootstrap_payload(context, request=None, *, view="summary", config=
         "settings": {
             "brandName": config.brand_name,
             "companyContext": config.company_context,
-            "articleDeliveryMode": _stored_article_delivery_mode(config) or "content_only",
+            "articleDeliveryMode": _reported_article_delivery_mode(config),
             "articleDeliveryModeEffective": _effective_article_delivery_mode(config),
             "githubRepo": config.github_repo,
             "pendingArticleSystemSetup": _pending_article_system_setup_from_config(config),
@@ -15389,10 +15407,13 @@ class VibeMarketingSettingsView(APIView):
             except WebsiteAuthorityError as exc:
                 transaction.set_rollback(True)
                 return Response(exc.as_dict(), status=exc.status)
-        config.article_delivery_mode = request.data.get(
+        # A connected website always previews: a submitted content_only (older
+        # desktops send the whole settings form) is stored as review_draft rather
+        # than rejected, so unrelated settings in the same save still persist.
+        config.article_delivery_mode = website_preview_delivery_mode(config, request.data.get(
             "article_delivery_mode",
             request.data.get("articleDeliveryMode", config.article_delivery_mode),
-        )
+        ))
         daily_enabled_submitted = "daily_discovery_enabled" in request.data or "dailyDiscoveryEnabled" in request.data
         if daily_enabled_submitted:
             config.daily_discovery_enabled = _bool_from_request(
@@ -16762,10 +16783,70 @@ def _article_selection_conflicts(*, submitted, resolved):
     return conflicts
 
 
+ARTICLE_DELIVERY_REQUEST_KEYS = frozenset({
+    "delivery_mode", "deliveryMode", "delivery_mode_explicit", "deliveryModeExplicit",
+    "delivery_mode_confirmed", "deliveryModeConfirmed", "resolved_delivery_mode", "resolvedDeliveryMode",
+})
+
+
+def _start_website_preview_article(*, user, context, config, data, request_hash=None, website_contract=None, goal_operation_id=None):
+    """Admit an explicit content_only start for a connected website as a preview.
+
+    Owner rule (17 Oct 2026): a connected website never produces a portable
+    draft. Older desktops send a hidden explicit content_only whenever their own
+    website check is unverified. Before any charge, an unready website is
+    refused with ``website_preview_required`` so the client can send the founder
+    to website setup; a ready one runs as ``review_draft`` under the same
+    reviewed connection identity the repository path already requires (the
+    portable branch of ``guarded_owner_operation`` never checked one).
+    """
+    from .website_connections import owner_operation_scope
+    capabilities = _article_capabilities_for_context(context, config, force=True)
+    if not capabilities["canGenerateArticle"]:
+        logger.info("vibe_marketing_article_website_preview_required org_id=%s reason_code=%s",
+                    context.organization.pk, capabilities["reasonCode"])
+        # Owner request precondition (no run exists yet), audited as a
+        # nonfailure site in contracts/failure-emitter-scopes.json.
+        return Response({
+            "detail": "Finish website setup to generate an article you can preview on your site.",
+            "code": "website_preview_required",
+            "field": "deliveryMode",
+            "reasonCode": capabilities["reasonCode"],
+            "nextRequiredStep": capabilities["nextStep"],
+            "articleCapabilities": capabilities,
+        }, status=status.HTTP_409_CONFLICT)
+    preview_data = {key: value for key, value in data.items() if key not in ARTICLE_DELIVERY_REQUEST_KEYS}
+    preview_data.update(delivery_mode="review_draft", delivery_mode_explicit=True, delivery_mode_confirmed=True)
+    logger.info("vibe_marketing_article_content_only_upgraded org_id=%s delivery_mode=review_draft", context.organization.pk)
+
+    def start_preview(contract):
+        return start_article_generation(user=user, context=context, data=preview_data, request_hash=request_hash,
+                                        website_contract=contract, goal_operation_id=goal_operation_id)
+
+    if website_contract is not None or owner_operation_contract():
+        # MCP, goal and guarded repository callers already hold a reviewed identity.
+        return start_preview(website_contract)
+    try:
+        expected = connection_contract(data)
+        if not expected:
+            raise WebsiteAuthorityError("website_connection_required", "Reload the web app or update MLAI, then reconnect this website.")
+        scope = {**expected, "domain": context.organization.domain, "github_repo": config.github_repo or ""}
+        with authority_guard(scope, action="read"):
+            pass
+    except WebsiteAuthorityError as exc:
+        return Response(exc.as_dict(), status=exc.status)
+    with owner_operation_scope(scope):
+        return start_preview(expected)
+
+
 def start_article_generation(*, user, context, data, request_hash=None, website_contract=None, goal_operation_id=None):
     """Execute the canonical owned operation for HTTP and MCP transports."""
     command = ContentCommand(user=user, data=data)
     config = _get_config(context.organization)
+    from .portable_drafts import has_connected_website, requests_content_only
+    if requests_content_only(command.data) and has_connected_website(config):
+        return _start_website_preview_article(user=user, context=context, config=config, data=command.data,
+            request_hash=request_hash, website_contract=website_contract, goal_operation_id=goal_operation_id)
     blocked_response = _setup_blocked_response_for_generation(context, config, request_data=command.data)
     if blocked_response is not None:
         return blocked_response

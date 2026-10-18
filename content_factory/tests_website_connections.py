@@ -643,6 +643,22 @@ class WebsiteLifecycleTests(WebsiteDatabaseFixture, TestCase):
         self.assertEqual(result['retained'], ['content/0.md', 'content/1.md'])
         self.assertEqual(get.call_count, 2)
 
+    def test_completed_scan_clears_the_reset_scan_prompt(self):
+        transition_connection(self.config, action='reset', expected=self.binding)
+        self.website.refresh_from_db()
+        self.assertIn('scan_required', [item['code'] for item in self.website.blockers])
+        record_scan_evidence(self.website, {'repository_inventory': {'source_sha': SHA, 'discovery_complete': True}})
+        self.website.refresh_from_db()
+        self.assertNotIn('scan_required', [item['code'] for item in self.website.blockers])
+        self.assertTrue(self.website.capabilities['inventoryReady'])
+
+    def test_partial_scan_keeps_the_reset_scan_prompt(self):
+        transition_connection(self.config, action='reset', expected=self.binding)
+        self.website.refresh_from_db()
+        record_scan_evidence(self.website, {'repository_inventory': {'source_sha': SHA, 'discovery_complete': False}})
+        self.website.refresh_from_db()
+        self.assertIn('scan_required', [item['code'] for item in self.website.blockers])
+
     def test_reset_archives_invalid_templates_and_preserves_run_history(self):
         self.config.article_template = '# EXISTING ARTIFACT\ncontaminated'
         self.config.save()

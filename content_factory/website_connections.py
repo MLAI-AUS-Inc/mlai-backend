@@ -1004,6 +1004,9 @@ def record_scan_evidence(connection, data):
             caps.update(publishingReady=False, previewSupported=False)
         if inventory.get("discovery_complete") is True or any(key in data for key in ("tech_stack", "article_system")):
             caps["inventoryReady"] = True
+            # Reset/reconnect asks for a scan; this scan of the current
+            # generation answers it, so the prompt must not outlive it.
+            connection.blockers = [item for item in connection.blockers if item.get("code") != "scan_required"]
         # Direct publishing needs an adapter's verification evidence at this SHA;
         # a detected file/legacy scaffold cache alone is not verification.
         targets = data.get("publish_targets") if isinstance(data.get("publish_targets"), list) else []

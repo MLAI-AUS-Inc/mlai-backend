@@ -31,6 +31,7 @@ from core.models import (
     OrganizationContentConfig,
     WebsiteDesignSnapshot,
 )
+from content_factory.portable_drafts import website_preview_delivery_mode
 from content_factory.service_views import _serialize_content_factory_run, _sync_content_factory_run_snapshot
 from content_factory.website_contract import WebsiteAuthorityError, connection_contract
 from content_factory.website_connections import (
@@ -114,7 +115,7 @@ def _serialize_config(config: OrganizationContentConfig | None) -> dict | None:
         "resource_prompt": config.resource_prompt,
         "company_context": config.company_context,
         "github_repo": config.github_repo,
-        "article_delivery_mode": config.article_delivery_mode,
+        "article_delivery_mode": website_preview_delivery_mode(config, config.article_delivery_mode),
         "brand_name": config.brand_name,
         "scan_summary": config.scan_summary,
         "tech_stack": config.tech_stack or {},
@@ -476,6 +477,9 @@ class ContentFactoryAppSettingsView(APIView):
                 except WebsiteAuthorityError as exc:
                     transaction.set_rollback(True)
                     return Response(exc.as_dict(), status=exc.status)
+            # Apply after any bind above: a connected website always previews,
+            # so content_only is stored as review_draft.
+            config.article_delivery_mode = website_preview_delivery_mode(config, config.article_delivery_mode)
             config.save()
 
         return Response(
