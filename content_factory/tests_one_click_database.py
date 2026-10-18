@@ -23,7 +23,7 @@ from .tests_website_connections import WebsiteDatabaseFixture
 from .website_connections import transition_connection
 from .website_contract import WebsiteAuthorityError
 from .website_disconnect import refund_cancelled_runs, start_disconnect
-from .website_models import WebsiteConnectionOperation
+from .website_models import WebsiteConnectionOperation, WebsiteConnectionTarget
 
 
 class OneClickBillingFixture(WebsiteDatabaseFixture):
@@ -45,14 +45,29 @@ class OneClickBillingFixture(WebsiteDatabaseFixture):
         self.actor = preferred_actor_id_for_user(self.requester)
         self.context = SimpleNamespace(organization=self.org, company=self.company)
         self.request = SimpleNamespace(user=self.requester, data={})
+        # Billing starts from a real persisted Ready integration. Provider
+        # observations alone cannot satisfy the final, locked admission check.
+        verified_at = timezone.now()
+        self.website.verified_sha = 'a' * 40
+        self.website.last_verified_at = verified_at
+        self.website.save(update_fields=['verified_sha', 'last_verified_at'])
+        contract = {'target_id': 'native', 'route_path': '/articles',
+            'route_template': '/articles/{slug}'}
+        WebsiteConnectionTarget.objects.create(connection=self.website,
+            generation=self.website.generation, target_key='native',
+            adapter='react_article_system', source_sha=self.website.verified_sha,
+            verified_at=verified_at, contract=contract, capabilities={'publishingReady': True})
+        self.config.default_publish_target_id = 'native'
+        self.config.publish_targets = [contract]
+        self.config.save(update_fields=['default_publish_target_id', 'publish_targets'])
 
     def payload(self, key='synthetic-article'):
         return {**self.binding, 'domain': self.org.domain, 'github_repo': self.website.github_repo,
             'client_request_id': key, 'topic': 'Synthetic article', 'expected_cost_points': 6}
 
     def charge(self, payload):
-        # Only the provider-backed readiness read is mocked. Wallet choice,
-        # local consent locks, spend, operation and outbox all use the database.
+        # Only provider-backed admission is replaced. Stored readiness, wallet
+        # choice, local consent, spend, operation and outbox use real records.
         with patch.object(views, '_validate_article_start_admission'):
             return views._charge_roo_points_for_article(self.request, context=self.context, payload=payload)
 
