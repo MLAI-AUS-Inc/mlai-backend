@@ -152,3 +152,58 @@ The backend flag snapshot also observes the optional
 `CONTENT_FACTORY_WORKFLOW_ORDER_FORMATTING_ADMISSION_ENABLED` switch. A toggle
 then changes the saved rollout identity, without making cosmetic formatting a
 prerequisite for B5 business delivery. This command changes no admission value.
+
+## Authenticated original-goal process diagnostics
+
+`GET /api/content-factory/articles/runtime-observation/` is a private service
+read. It requires `X-API-Key` matching the configured `INTERNAL_API_KEY`; owner,
+superuser and local-development access do not bypass that check. Its five exact
+query selectors are `company_id`, `connection_id`, `connection_generation`,
+`goal_id` and `target` (`ready` or `first_article_live`). Extra or repeated fields,
+malformed IDs and a different goal target are rejected before observation.
+
+The endpoint reuses the original-goal scope resolver against existing saved
+company, connection and operation records, inside PostgreSQL REPEATABLE READ,
+READ ONLY transactions. It does not call `_get_config`/`get_or_create`, create a
+goal, hydrate a run, refresh state or dispatch work. Scope is read again after
+the remote observation; changed company/connection/goal/child evidence or web
+configuration is rejected. Existing/nested transactions are refused rather than
+silently weakening the read-only boundary.
+
+The responding backend web process reports an opaque process instance, exact
+runtime revision when available, the named rollout flags and their explicitly
+limited digest, and the actual selected organization's new-work membership
+predicates. The named flag digest is deliberately partial: the publishing-input
+candidate producer switch introduced separately is outside this v1 vocabulary.
+It must never be treated as the complete effective configuration. This describes
+the current responding process. It does not prove
+the settings used when the original goal was admitted or advanced. Forked
+processes cannot reuse the parent identity. Missing or invalid full release
+metadata remains unknown; no Git checkout or short display SHA is substituted.
+
+CF diagnostics come from the separate private endpoint introduced in CF #1090.
+Transport requires both an explicitly configured `CONTENT_FACTORY_API_KEY` and
+an HTTPS `CONTENT_FACTORY_URL` without credentials, query or fragment. It uses
+the server configuration only, follows no redirects, verifies TLS and ignores
+ambient proxy/netrc credentials. A bounded streaming read caps the body at
+2 MiB and checks an elapsed ten-second budget between chunks, with connect/read
+timeouts of three/eight seconds. Missing authentication, transport failure,
+stale/future data, invalid schema or inconsistent flag digests remain unknown;
+neither credentials nor remote error text enters the response. The shared HTTP
+helper eagerly buffers responses, so this bounded path uses a fresh Requests
+session instead.
+
+The closed CF projection deliberately remains `goal_binding=unbound`, even when
+the request's original backend goal resolves. It cannot prove which CF process
+executed that goal. Every response has `coverage=partial`,
+`original_execution_eligibility=null` and `effective_rollout=null`, and names the
+missing execution/scheduler observations, CF association and owner-action audit.
+There is no fleet-completeness claim and no nightly collector wiring. The
+endpoint is `Cache-Control: no-store`; it changes no rollout or enrollment flag.
+
+Tests exercise the actual service view, original-scope resolver, read-only SQL
+fence and streaming HTTPS client. Their CF fixture comes from the actual #1090
+producer under network denial, with provenance beside the fixture. Database,
+remote HTTP and process boundaries are substituted locally; full database and
+deployment checks remain CI/rollout responsibilities. No live observation was
+performed during implementation.

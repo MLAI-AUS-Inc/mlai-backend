@@ -4,8 +4,10 @@ from . import service_views as views
 from .website_views import WebsiteConnectionAuthorizeView, WebsiteMutationView
 from .website_current import WebsiteCurrentConnectionView
 from .website_verification import WebsiteCiAttestationView
+from .website_runtime_observation import WebsiteRuntimeObservationView
 
 urlpatterns = [
+    path('articles/runtime-observation/', WebsiteRuntimeObservationView.as_view(), name='articles_runtime_observation'),
     path('connections/current', WebsiteCurrentConnectionView.as_view()),
     path('connections/current/', WebsiteCurrentConnectionView.as_view()),
     path('connections/ci-attestation', WebsiteCiAttestationView.as_view()),
