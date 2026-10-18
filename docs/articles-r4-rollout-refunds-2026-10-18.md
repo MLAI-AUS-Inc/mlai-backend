@@ -35,13 +35,15 @@ The command requires PostgreSQL and executes `SET TRANSACTION READ ONLY` before
 the company lookup. It never calls providers, prepares goals, edits configuration
 or enrolls organizations. It reports only the selected company's membership
 booleans, not the enrollment lists of other organizations or raw environment
-values. `APP_COMMIT_SHA`, if present and a full lowercase Git SHA, is reported as
-the backend revision; absence remains null.
+values. The deploy's raw `APP_RELEASE`, if it is a full lowercase Git SHA, is
+reported as the backend revision. `APP_COMMIT_SHA` is a compatibility fallback
+only when `APP_RELEASE` is absent; an invalid primary value remains unknown.
 
 Every B through F rollout row lists its backend switches and prerequisites and
 the required CF counterparts. Goal eligibility uses the actual `goals.enrolled`
-predicate, including taxonomy policy and both organization lists. Setup delivery
-has a separate enrollment list.
+predicate, including taxonomy policy and both organization lists. The combined
+F3 group also needs goal enrollment because its operational-alert path does.
+Setup delivery has a separate enrollment list.
 
 Rows are `disabled`, `unknown` or `configured`. Configured means the inspected
 configuration is eligible for new work; it does not prove an active goal,
@@ -93,6 +95,9 @@ The inspector tests run the actual management command and report logic with the
 database boundary replaced, prove the read-only query ordering, and cover both
 organization lists, separate setup enrollment, stale/foreign/run-mismatched CF
 snapshots, strict Boolean values, secret omission and unknown worker state.
+Two review regressions first failed against the initial inspector: deployment
+uses the raw full `APP_RELEASE`, and F3 alerts require goal enrollment. Both now
+pass, including invalid or empty primary revisions and the absent-only fallback.
 
 ```sh
 python scripts/test_without_database.py \
@@ -107,6 +112,10 @@ python scripts/test_without_database.py \
 python scripts/check_test_assignment.py
 python scripts/test_without_database.py --check-models
 ```
+
+The final explicit test list passed 140 tests in 0.855 seconds. The existing
+assignment and read-only model checks passed; no test module or model was added
+by these final review corrections.
 
 No local database, migrations, services, production operations or customer
 repositories are used. Database coverage belongs to the already authorized

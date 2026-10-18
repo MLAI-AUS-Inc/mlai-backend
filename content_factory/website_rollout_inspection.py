@@ -32,7 +32,7 @@ RULES = (
     ("D1", ("ARTICLES_FIRST_ARTICLE_GOAL_ENABLED", "ARTICLES_SETUP_CONSENT_ENABLED"), "goals", (), None),
     ("D2_recovery", ("ARTICLES_ARTICLE_RECOVERY_ENABLED", "ARTICLES_FIRST_ARTICLE_GOAL_ENABLED", "ARTICLES_SETUP_CONSENT_ENABLED", "ARTICLES_WEBSITE_GOAL_BUDGETS_ENABLED"), "goals", (), None),
     ("article_delivery", ("CONTENT_FACTORY_ARTICLE_DELIVERY_V1_APPLY_ENABLED", "ARTICLES_ARTICLE_RECOVERY_ENABLED", "ARTICLES_FIRST_ARTICLE_GOAL_ENABLED", "ARTICLES_WEBSITE_GOAL_BUDGETS_ENABLED"), "goals", ("CONTENT_FACTORY_ARTICLE_DELIVERY_V1_ENABLED", "CONTENT_FACTORY_SETUP_DELIVERY_V1_SEND_ENABLED"), None),
-    ("F3", ("ARTICLES_COST_ACCOUNTING_ENABLED", "ARTICLES_OPERATIONAL_ALERTS_ENABLED"), None, (), None),
+    ("F3", ("ARTICLES_COST_ACCOUNTING_ENABLED", "ARTICLES_OPERATIONAL_ALERTS_ENABLED"), "goals", (), None),
 )
 BACKEND_FLAGS = tuple(sorted({name for _, names, _, _, _ in RULES for name in names}))
 CF_FLAGS = tuple(sorted({name for _, _, _, names, _ in RULES for name in names}))
@@ -111,7 +111,10 @@ def rollout_report(organization_id, *, cf_snapshot=None, run_id=None, now=None):
         state = "disabled" if False in values else "unknown" if None in values else "configured"
         rows[step] = {"state": state, "backend_eligible": False if False in backend else None if None in backend else True,
             "backend_flags": list(names), "enrollment": scope, "cf_flags": list(counterparts), "cf_run_predicate": predicate}
-    revision = os.environ.get("APP_COMMIT_SHA", "")
+    # Deploy exports the full SHA as APP_RELEASE; settings.APP_RELEASE shortens
+    # it for display, so inspect the raw runtime value. Do not conceal an invalid
+    # primary revision by substituting a conflicting compatibility fallback.
+    revision = os.environ.get("APP_RELEASE", os.environ.get("APP_COMMIT_SHA", ""))
     return {"schema_version": 1, "observed_at": now.isoformat(), "organization_id": str(organization_id),
         "backend_revision": revision if re.fullmatch(r"[0-9a-f]{40}", revision) else None,
         "backend_flags": flags, "enrollment": enrollment, "goal_enrolled": goal_enrolled,

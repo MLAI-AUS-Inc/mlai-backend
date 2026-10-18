@@ -1,6 +1,7 @@
 """Real rollout inspection and command chain with only DB/file boundaries faked."""
 
 import json
+import os
 from contextlib import nullcontext
 from copy import deepcopy
 from datetime import timedelta
@@ -121,6 +122,26 @@ class RolloutInspectionTests(SimpleTestCase):
             report = self.report(cf_snapshot=self.snapshot, run_id="fixture-run")
         self.assertTrue(report["goal_enrolled"])
         self.assertEqual(report["steps"]["B5_setup"]["state"], "disabled")
+
+    def test_f3_reports_the_actual_alert_goal_enrollment_requirement(self):
+        from .website_operational_alerts import enabled as alerts_enabled
+        flags = {**self.flags, "ARTICLES_WEBSITE_GOAL_ENROLLED_ORGANIZATIONS": []}
+        with override_settings(**flags):
+            self.assertFalse(alerts_enabled(SimpleNamespace(organization_id=7)))
+            report = self.report()
+        self.assertEqual(report["steps"]["F3"]["state"], "disabled")
+        self.assertFalse(report["steps"]["F3"]["backend_eligible"])
+
+    def test_actual_deploy_app_release_is_full_revision_and_conflicting_fallback_cannot_replace_it(self):
+        with patch.dict("os.environ", {"APP_RELEASE": "b" * 40, "APP_COMMIT_SHA": "a" * 40}):
+            self.assertEqual(self.report()["backend_revision"], "b" * 40)
+        with patch.dict("os.environ", {"APP_RELEASE": "unknown-release", "APP_COMMIT_SHA": "a" * 40}):
+            self.assertIsNone(self.report()["backend_revision"])
+        with patch.dict("os.environ", {"APP_RELEASE": "", "APP_COMMIT_SHA": "a" * 40}):
+            self.assertIsNone(self.report()["backend_revision"])
+        with patch.dict("os.environ", {"APP_COMMIT_SHA": "a" * 40}):
+            os.environ.pop("APP_RELEASE", None)
+            self.assertEqual(self.report()["backend_revision"], "a" * 40)
 
     def test_command_enforces_read_only_before_company_lookup_and_runs_actual_report(self):
         from founder_tools.models import VibeRaisingCompany
