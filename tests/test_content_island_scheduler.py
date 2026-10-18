@@ -99,6 +99,16 @@ class IslandRefreshSchedulerTestCase(TestCase):
     CONTENT_ISLANDS_REFRESH_MAX_PER_TICK=3,
 )
 class IslandRefreshSchedulerTests(IslandRefreshSchedulerTestCase):
+    def test_invalid_organization_domain_does_not_queue_but_other_research_continues(self):
+        invalid = self.make_org("n", islands=1)
+        valid = self.make_org("valid.example.com", islands=1)
+        with patch(POST_HELPER, return_value=_accepted()) as post:
+            result = run_island_refresh_scheduler(now=DUE_NOW)
+        self.assertEqual(result["failed"], 1)
+        self.assertEqual(result["dispatched"], 1)
+        self.assertEqual(post.call_args.kwargs["payload"]["domain"], valid.domain)
+        self.assertFalse(ContentIslandRefreshDispatch.objects.filter(organization=invalid).exists())
+
     def test_a_due_org_is_dispatched_with_the_documented_request_body(self):
         organization = self.make_org("acme.com", islands=2)
 
