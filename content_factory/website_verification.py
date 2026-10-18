@@ -88,6 +88,9 @@ def read_ci_proof(connection, data):
 
 def record_ci_attestation(data, *, owner_review=False, origin="authenticated_ci"):
     """Two-phase provider verification with a final cancellation/consent fence."""
+    if type(data.get("schema_version")) is int and data["schema_version"] == 4:
+        from .website_publisher_reservations_v4 import record_native_setup
+        return record_native_setup(data, origin=origin)
     attestation_origin = origin
     if attestation_origin not in {"authenticated_ci", "authenticated_hosted"}:
         raise ValueError("Unknown native attestation origin")

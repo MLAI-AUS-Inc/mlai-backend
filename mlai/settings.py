@@ -2313,6 +2313,9 @@ ARTICLES_HOSTED_ENVIRONMENT_RECOVERY_ENABLED = _env_is_true("ARTICLES_HOSTED_ENV
 # C3 post-merge native hosted proof must be available before this default changes.
 ARTICLES_HOSTED_ATTESTATION_ENABLED = _env_is_true("ARTICLES_HOSTED_ATTESTATION_ENABLED", False)
 ARTICLES_PUBLISHING_INPUTS_V3_ENABLED = _env_is_true("ARTICLES_PUBLISHING_INPUTS_V3_ENABLED", False)
+# Native publisher setup acceptance remains independently disabled until its
+# original-source transport and full article/repeat publisher are integrated.
+ARTICLES_PUBLISHING_INPUTS_V4_ENABLED = _env_is_true("ARTICLES_PUBLISHING_INPUTS_V4_ENABLED", False)
 
 ARTICLES_DEPLOYMENT_DETECTION_ENABLED = _env_is_true("ARTICLES_DEPLOYMENT_DETECTION_ENABLED", False)
 ARTICLES_SITE_FINGERPRINT_ENABLED = _env_is_true("ARTICLES_SITE_FINGERPRINT_ENABLED", False)
