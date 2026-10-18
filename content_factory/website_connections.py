@@ -476,6 +476,11 @@ def authority_guard(data, *, action="read", domain="", github_repo="", require_s
             target = connection.targets.filter(target_key=target_key, generation=connection.generation).first() if target_key else None
             if target_key and target is None:
                 raise WebsiteAuthorityError("website_target_changed", "The publishing target changed.")
+            if target and (action == "publish" or action == "merge" and "requiredProofVersion" in (target.capabilities or {})):
+                from .website_sealed_workflow import required
+                from .website_verification import current_ci_attestation
+                if required(connection, target) and current_ci_attestation(connection, target) is None:
+                    raise WebsiteAuthorityError("ci_attestation_required", "The selected target needs its current execution proof.")
             if action in {"publish", "merge"} and target and target.adapter == "custom_contract_v1":
                 raise WebsiteAuthorityError("publishing_adapter_required", "A verified build contract needs an implemented article publishing adapter. Portable drafts remain available.")
             if action in {"publish", "merge"} and (target is None or not target.verified_at or not target.capabilities.get("publishingReady") or target.source_sha != connection.verified_sha):
@@ -1029,26 +1034,49 @@ def record_scan_evidence(connection, data):
                 continue
             proof = target.get("verification") if isinstance(target.get("verification"), dict) else {}
             ready = native_allowed and proof.get("status") in {"passed", "verified"} and proof.get("source_sha") == sha
-            verified |= bool(ready and target.get("publish_capability") in {"direct", "hook"})
             preview_ready = native_allowed and proof.get("status") == "preview_verified" and proof.get("base_sha") == sha and bool(SHA_PATTERN.fullmatch(str(proof.get("source_sha") or "")))
-            preview |= bool((ready or preview_ready) and proof.get("preview_capable"))
             previous = connection.targets.filter(target_key=str(target["target_id"]), generation=connection.generation).first()
             from .incident_guards import target_update_allowed, proof_stamp
+            from .website_publishing_inputs import candidate_for_target, has_candidate, PublishingInputsError
             if not target_update_allowed(previous, target, generation=connection.generation, sha=sha):
-                verified |= bool(previous.capabilities.get("publishingReady"))
-                preview |= bool((previous.contract.get("verification") or {}).get("preview_capable"))
+                from .website_sealed_workflow import required
+                from .website_verification import current_ci_attestation
+                accepted_proof = not required(connection, previous) or current_ci_attestation(connection, previous) is not None
+                verified |= bool(native_allowed and accepted_proof and previous.source_sha == sha and previous.capabilities.get("publishingReady"))
+                preview |= bool(native_allowed and accepted_proof and previous.source_sha == sha and (previous.contract.get("verification") or {}).get("preview_capable"))
                 continue
+            try:
+                candidate = candidate_for_target(target)
+            except PublishingInputsError:
+                raise WebsiteAuthorityError("ci_attestation_contract_mismatch", "The publishing input candidate is incomplete or inconsistent.") from None
+            if candidate is not None:
+                # Worker flags and copied legacy proof cannot attest the new
+                # execution inputs. Store this proposal without certification.
+                ready = preview_ready = False
+            verified |= bool(ready and target.get("publish_capability") in {"direct", "hook"})
+            preview |= bool((ready or preview_ready) and proof.get("preview_capable"))
             custom_certified = bool(previous and previous.adapter == "custom_contract_v1" and previous.capabilities.get("adapterCertified")
                 and previous.contract.get("contract_digest") == target.get("contract_digest"))
             WebsiteConnectionTarget.objects.update_or_create(connection=connection, target_key=str(target["target_id"]), generation=connection.generation, defaults={
                 "adapter": str(target.get("delivery_adapter") or ""),
                 "adapter_version": str(target.get("adapter_version") or ""), "source_sha": sha, "contract": target,
-                "capabilities": {"publishingReady": bool(ready), "adapterCertified": custom_certified}, "verified_at": (previous.verified_at if previous and previous.source_sha == sha and evidence_digest(previous.contract) == evidence_digest(target) else proof_stamp(proof) or timezone.now()) if ready or preview_ready else None})
+                "capabilities": {"publishingReady": bool(ready), "adapterCertified": custom_certified,
+                    "previewSupported": bool(native_allowed and previous and previous.source_sha == sha
+                        and previous.capabilities.get("previewSupported"))},
+                "verified_at": (previous.verified_at if previous and previous.source_sha == sha and evidence_digest(previous.contract) == evidence_digest(target) else proof_stamp(proof) or timezone.now()) if ready or preview_ready else None})
         # Absence from a scan is not revocation of an accepted proof.
         accepted_targets = connection.targets.filter(generation=connection.generation, source_sha=sha, verified_at__isnull=False)
+        from .website_publishing_inputs import has_candidate
         for accepted in accepted_targets:
-            verified |= bool(accepted.capabilities.get("publishingReady"))
-            preview |= bool((accepted.contract.get("verification") or {}).get("preview_capable"))
+            from .website_sealed_workflow import required
+            from .website_verification import current_ci_attestation
+            if required(connection, accepted) and current_ci_attestation(connection, accepted) is None:
+                continue
+            verified |= bool(native_allowed and accepted.capabilities.get("publishingReady"))
+            preview |= bool(native_allowed and ((accepted.contract.get("verification") or {}).get("preview_capable")
+                or accepted.capabilities.get("previewSupported")
+                or (sha == connection.verified_sha and caps.get("previewSupported")
+                    and accepted.capabilities.get("publishingReady"))))
         if verified or preview:
             check_source_identity(connection, {"source_sha": sha}, required=True)
             if (str(connection.pk), connection.generation, sha) not in _verified_heads.get():

@@ -1,0 +1,151 @@
+{
+  "canonicalization": "mlai_utf8_json_v1",
+  "digest": "7e8c180ded09a20a86d25ed75a0cd892829307722438103f667c8e8d905867ca",
+  "payload": {
+    "normalizer_version": 1,
+    "publishing": {
+      "source_selection": {},
+      "target": {
+        "build_tool": "unknown",
+        "content_extension": ".json",
+        "content_path_pattern": "data/articles.json",
+        "delivery_adapter": "stack_native",
+        "example_path": "",
+        "framework": "static-html",
+        "hook_config_path": "",
+        "input_format": "content_bundle_v1",
+        "kind": "stack_native_collection",
+        "language": "unknown",
+        "live_marker": {
+          "kind": "artifact_digest",
+          "meta_name": "mlai-artifact-digest",
+          "schema_version": 1,
+          "value": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+        },
+        "metadata_strategy": {
+          "seo_path_template": "/stories/{slug}/",
+          "static_source_materialization": {
+            "app_root": "",
+            "detail_source_path_pattern": "stories/{slug}/index.html",
+            "listing_source_path": "stories/index.html",
+            "materializer_command": [
+              "python3",
+              "scripts/materialize_articles.py",
+              "--output-dir",
+              "cf-articles-preview"
+            ],
+            "preview_output_dir": "cf-articles-preview",
+            "schema_version": 1
+          },
+          "type": "stack_native_collection"
+        },
+        "preferred_verifier_queue": "verify-static",
+        "preview_discovery": null,
+        "preview_strategy": "repo_preview",
+        "publish_capability": "direct",
+        "registration_strategy": {
+          "path": "data/articles.json",
+          "store_kind": "json_data_file",
+          "type": "stack_native_collection"
+        },
+        "route_path": "/stories",
+        "route_template": "/stories/{slug}/",
+        "runtime_family": "static",
+        "supported": true,
+        "target_config": null,
+        "target_id": "stack_native_collection_data_articles_json_static"
+      }
+    },
+    "verification": {
+      "baseline_policy": {
+        "kind": "fixed_setup_source",
+        "source_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      },
+      "execution": {
+        "app_root": ".",
+        "baseline": {
+          "kind": "static_source",
+          "paths": [
+            "stories/index.html"
+          ]
+        },
+        "build_command": [
+          "python3",
+          "scripts/materialize_articles.py",
+          "--output-dir",
+          "cf-articles-preview"
+        ],
+        "build_cwd": ".",
+        "content_path_pattern": "data/articles.json",
+        "content_source_kind": "shared_collection",
+        "environment_names": [],
+        "install_command": [],
+        "install_cwd": ".",
+        "listing_route": "/stories",
+        "lockfiles": [],
+        "materialize_command": [],
+        "materialize_cwd": ".",
+        "package_manager": "",
+        "preview_command": [
+          "python3",
+          "-m",
+          "http.server",
+          "3000",
+          "--bind",
+          "127.0.0.1",
+          "--directory",
+          "cf-articles-preview"
+        ],
+        "preview_cwd": ".",
+        "route_template": "/stories/{slug}/",
+        "runtime_family": "static",
+        "runtime_version": "3.11",
+        "static_source_materialization": {
+          "app_root": "",
+          "detail_source_path_pattern": "stories/{slug}/index.html",
+          "listing_source_path": "stories/index.html",
+          "materializer_command": [
+            "python3",
+            "scripts/materialize_articles.py",
+            "--output-dir",
+            "cf-articles-preview"
+          ],
+          "preview_output_dir": "cf-articles-preview",
+          "schema_version": 1
+        },
+        "verify_steps": [
+          {
+            "command": [
+              "python3",
+              "scripts/materialize_articles.py",
+              "--output-dir",
+              "cf-articles-preview"
+            ],
+            "cwd": ".",
+            "name": ""
+          }
+        ]
+      },
+      "oracle": {
+        "artifact_digest": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+        "artifact_marker_routes": [
+          "/stories",
+          "/stories/seed/"
+        ],
+        "existing_seed_source": null,
+        "expected_h1": "Seed",
+        "port": 3000,
+        "seed_is_setup_example": false,
+        "seed_slug": "seed"
+      },
+      "verifier": {
+        "execution_schema_version": 1,
+        "playwright_version": "1.58.0",
+        "profile": "native_ci_v1",
+        "python_version": "3.11",
+        "runner_sha256": "43dce732666d5129a10440b09568c961d01aad2c0284141bd8e21bf238bf8c4f"
+      }
+    }
+  },
+  "schema_version": 1
+}

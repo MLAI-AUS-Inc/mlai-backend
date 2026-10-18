@@ -31,6 +31,22 @@ The token endpoint's closed `permission_profile` is `repository` by default. `wo
 
 Inventory is saved through config PUT as `repository_inventory` with an exact `source_sha`, `discovery_complete`, and evidence. Inventory-only updates preserve targets/templates and never create publishing readiness. Target verification requires `verification.status=passed|verified` and `verification.source_sha` equal to the evidence source SHA. Detection metadata alone is insufficient. The worker is responsible for build/render verification and exact source identity.
 
+Once a target has accepted verification at the current source, worker scan/config
+writes may replay that exact stored contract but cannot change its publishing
+inputs or proof metadata. A copied or newer `checked_at` value is not new proof.
+Conflicting scan inputs stay in `WebsiteScanSnapshot`; provider attestation uses
+its separate source/operation-checked promotion path. Worker proposals also
+cannot switch an already certified selected target, even to a different previously
+certified target. A changed source still requires reverification; preserving a
+contract never grants readiness at that new revision.
+
+Provider CI promotion records preview capability on the target. Same-source
+repair scans retain that capability and the already accepted connection-level
+preview fact for older targets whose CI proof omitted `preview_capable`.
+Different-source scans and native-verification refusals do not inherit it.
+This guards stored acceptance and its readers; expanding the native contract
+digest to seal every execution/listing input remains separate work.
+
 Private repository provider proof uses the separate `ci_evidence` permission profile with explicit `permission_mode=read` and `action=read`, the original operation tuple and immutable repository. Only canonical CI/status verification consumers request it; model and source readers retain `repository`. This profile narrows existing App and installation grants to Contents, Pull requests, Checks and Commit statuses read access, permits only incidental Metadata read, and never includes Actions or Workflows. Fresh grant evidence is checked before cached credentials are used; missing CI read grants return nonretryable `github_ci_evidence_permission_required` without issuing credentials or changing permissions. Provider proof still requires the exact source and operation, with final consent/cancellation fencing and ephemeral credential revocation.
 
 Provider check responses validate documented states, scalar metadata and inventory counts before inspection. Native verification may find its exact provider-sealed attestation on the first bounded page of 100 checks; that attestation does not imply that every repository check passed. Cleanup verification requires the complete inventory and rejects paginated or unfinished checks. Malformed provider evidence returns retryable unavailability, never a missing-permission diagnosis or successful verification.
