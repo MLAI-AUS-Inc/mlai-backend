@@ -76,11 +76,13 @@ class StoppedAutoMergeTests(SimpleTestCase):
         self.assertEqual(self.reads.f.fixture.fixture.depth,0)
         self.assertEqual((method,url),("POST","https://api.github.com/graphql"))
         row=self.latest(); self.assertEqual(row.receipt["mutation"]["state"],"possible")
-        self.assertEqual(kw["body"]["variables"],{"id":"PR_fixture_42","nonce":str(row.pk)})
+        number = row.payload["target"]["number"]
+        node = self.reads.pulls[number]["node_id"]
+        self.assertEqual(kw["body"]["variables"],{"id":node,"nonce":str(row.pk)})
         self.assertIn("disablePullRequestAutoMerge",kw["body"]["query"])
         self.assertNotIn("enablePullRequestAutoMerge",kw["body"]["query"])
-        self.reads.pulls[42]["auto_merge"]=None
-        return httpx.Response(200,json={"data":{"disablePullRequestAutoMerge":{"clientMutationId":str(row.pk),"pullRequest":{"id":"PR_fixture_42"}}}})
+        self.reads.pulls[number]["auto_merge"]=None
+        return httpx.Response(200,json={"data":{"disablePullRequestAutoMerge":{"clientMutationId":str(row.pk),"pullRequest":{"id":node}}}})
 
     def advance(self,seconds=0):
         return merges.advance(self.parent,self.config,self.observation,now=self.now+timedelta(seconds=seconds))
@@ -269,6 +271,201 @@ class StoppedAutoMergeTests(SimpleTestCase):
         self.assertEqual(call.call_count,1)
         self.assertEqual(self.parent.receipt[merges.KEY]["result"]["outcome"],"not_pending")
         self.graphql.assert_called_once()
+
+
+    def _spent_budget_stop(self, *, initial=False):
+        self.stack.enter_context(self.settings(ARTICLES_GOAL_MODEL_USD=25))
+        self.parent.receipt["goal"]["budget_used"]["model_cost"] = 25
+        self.reads.root.status = "cancelled"
+        self.reads.f.fixture.workflow.state = "cancelled"
+        if initial:
+            self.parent.receipt.pop("article_source_stop")
+        sealed = self.stack.enter_context(patch("content_factory.website_article_source_history.advance", return_value={"sealed": True}))
+        self.stack.enter_context(patch.object(reads, "advance", return_value=self.observation))
+        self.assertTrue(stops.advance(self.parent, self.config, now=self.now))
+        self.graphql.assert_called_once()
+        sealed.assert_called_once()
+        self.assertEqual(self.parent.receipt[merges.KEY]["result"]["outcome"], "not_pending")
+        self.assertEqual(self.parent.state, "needs_attention")
+        self.assertEqual(self.parent.receipt["budget_stop_reason"], "model_cost")
+        self.assertIsNone(self.parent.next_attempt_at)
+        self.assertEqual(self.reads.root.status, "cancelled")
+        self.assertEqual(self.reads.f.fixture.workflow.state, "cancelled")
+        self.assertEqual(self.reads.f.fixture.fixture.chain.fixture.spend.call_count, 1)
+        for key in ("quiet", "inventory_complete", "effect_authority", "approval_carried"):
+            self.assertIs(self.parent.receipt[merges.KEY][key], False)
+
+    def test_spent_goal_budget_cannot_skip_original_auto_merge_withdrawal(self):
+        self._spent_budget_stop()
+
+    def test_first_stop_acknowledgement_removes_pending_merge_before_spent_budget_stop(self):
+        self._spent_budget_stop(initial=True)
+
+
+    def _budget_cleanup(self, *, sealed=True):
+        self.stack.enter_context(self.settings(ARTICLES_GOAL_MODEL_USD=25))
+        self.parent.receipt["goal"]["budget_used"]["model_cost"] = 25
+        seal = self.stack.enter_context(patch("content_factory.website_article_source_history.advance",
+            return_value={"sealed": True} if sealed else None))
+        self.stack.enter_context(patch.object(reads, "advance", side_effect=lambda *a, **kw: self.observation))
+        return seal
+
+    def test_budget_cleanup_reconciles_a_lost_reply_without_recharging_or_resuming_positive_work(self):
+        from . import website_article_stop_budget as cleanup, website_first_article as first
+        self._budget_cleanup()
+        def lost(*a, **kw):
+            self.disable(*a, **kw)
+            raise ServiceUnavailable("synthetic lost reply")
+        self.graphql.side_effect = lost
+        self.assertTrue(stops.advance(self.parent, self.config, now=self.now))
+        self.assertEqual(self.parent.state, "pending")
+        self.assertEqual(self.parent.receipt["status"], "stopped")
+        self.assertFalse(first.active(self.parent))
+        self.assertEqual(self.parent.receipt[cleanup.KEY]["last_failure"]["failure_class"], "transient")
+        self.parent.state = "running"
+        self.assertTrue(stops.advance(self.parent, self.config, now=self.now+timedelta(seconds=61)))
+        self.assertEqual(self.graphql.call_count, 1)
+        self.parent.state = "running"
+        self.assertTrue(stops.advance(self.parent, self.config, now=self.now+timedelta(seconds=181)))
+        self.assertEqual(self.parent.state, "needs_attention")
+        self.assertEqual(self.parent.receipt[cleanup.KEY]["state"], "observed")
+        self.assertEqual(self.graphql.call_count, 1)
+        self.assertEqual(self.reads.f.fixture.fixture.chain.fixture.spend.call_count, 1)
+
+    def test_spent_budget_drains_two_owned_subjects_in_separate_bounded_passes(self):
+        from . import website_article_stop_budget as cleanup, website_first_article as first
+        self.reads.effect(43, key="e")
+        self.reads.pulls[43].update(node_id="PR_fixture_43", state="open", merged=False, merge_commit_sha=None)
+        self.observation = self.reads.advance(seconds=1)
+        self._budget_cleanup()
+        self.assertTrue(stops.advance(self.parent, self.config, now=self.now+timedelta(seconds=1)))
+        self.assertEqual(self.parent.state, "pending")
+        self.assertFalse(first.active(self.parent))
+        self.assertEqual(self.graphql.call_count, 1)
+        self.parent.state = "running"
+        self.assertTrue(stops.advance(self.parent, self.config, now=self.now+timedelta(seconds=61)))
+        self.assertEqual(self.graphql.call_count, 2)
+        self.assertEqual(self.parent.receipt[cleanup.KEY]["state"], "observed")
+        self.assertEqual(self.parent.state, "needs_attention")
+        self.assertEqual(self.reads.f.fixture.fixture.chain.fixture.spend.call_count, 1)
+
+    def test_cleanup_has_its_own_finite_pass_cap_and_cannot_reset_after_exhaustion(self):
+        from . import website_article_stop_budget as cleanup
+        seal = self._budget_cleanup(sealed=False)
+        self.stack.enter_context(patch.object(cleanup, "MAX_PASSES", 2))
+        for seconds in (0, 61):
+            self.parent.state = "running"
+            self.assertTrue(stops.advance(self.parent, self.config, now=self.now+timedelta(seconds=seconds)))
+        self.assertEqual(self.parent.receipt[cleanup.KEY]["state"], "exhausted")
+        self.assertIsNone(self.parent.next_attempt_at)
+        self.parent.state = "running"
+        self.assertTrue(stops.advance(self.parent, self.config, now=self.now+timedelta(seconds=122)))
+        self.assertEqual(seal.call_count, 2)
+        self.assertEqual(self.parent.receipt[cleanup.KEY]["passes"], 2)
+        self.graphql.assert_not_called()
+
+    def test_cleanup_pass_cannot_fall_through_to_journey_after_rollout_rollback(self):
+        from .website_prepare import _advance_claimed_prepare
+        self.parent.receipt["budget_stop_reason"] = "model_cost"
+        with self.settings(ARTICLES_ARTICLE_SOURCE_REFRESH_ENABLED=False), \
+                patch("content_factory.website_first_article_billing.reservation_ready", return_value=True), \
+                patch("content_factory.website_prepare.journey_for_context", side_effect=AssertionError("No positive journey after budget stop")), \
+                patch("content_factory.website_prepare._finish_prepare", return_value=self.parent):
+            self.assertIs(_advance_claimed_prepare(self.parent, now=self.now, handlers=None), self.parent)
+        self.assertEqual(self.parent.state, "needs_attention")
+        self.graphql.assert_not_called()
+
+    def test_refunded_original_goal_cannot_acquire_a_budget_cleanup_purpose(self):
+        from . import website_article_stop_budget as cleanup
+        self._budget_cleanup()
+        self.reads.f.fixture.fixture.chain.fixture.refunds.return_value.exists.return_value = True
+        calls = self.reads.mint.call_count
+        with self.assertRaises(WebsiteAuthorityError): stops.advance(self.parent, self.config, now=self.now)
+        self.assertEqual(self.reads.mint.call_count, calls)
+        self.assertNotIn(cleanup.KEY, self.parent.receipt)
+        self.graphql.assert_not_called()
+
+    def test_corrupt_cleanup_counter_cause_or_grant_is_not_a_new_budget(self):
+        from . import website_article_stop_budget as cleanup
+        self._budget_cleanup(sealed=False)
+        stops.advance(self.parent, self.config, now=self.now)
+        original = deepcopy(self.parent.receipt[cleanup.KEY])
+        for change in ({"passes": True}, {"quiet": True}, {"request_digest": "e"*64}):
+            self.parent.state = "running"
+            self.parent.receipt[cleanup.KEY] = {**deepcopy(original), **change}
+            with self.subTest(change=change), self.assertRaises(WebsiteAuthorityError):
+                stops.advance(self.parent, self.config, now=self.now+timedelta(seconds=61))
+        self.graphql.assert_not_called()
+
+    def test_budget_raise_does_not_convert_cleanup_into_new_work(self):
+        from . import website_article_stop_budget as cleanup, website_first_article as first
+        self._budget_cleanup(sealed=False)
+        stops.advance(self.parent, self.config, now=self.now)
+        self.parent.state = "running"
+        with self.settings(ARTICLES_GOAL_MODEL_USD=1000):
+            stops.advance(self.parent, self.config, now=self.now+timedelta(seconds=61))
+        self.assertEqual(self.parent.receipt[cleanup.KEY]["passes"], 2)
+        self.assertEqual(self.parent.receipt["budget_stop_reason"], "model_cost")
+        self.assertFalse(first.active(self.parent))
+        self.graphql.assert_not_called()
+
+
+    def test_goal_finalization_does_not_reapply_retained_failure_and_erase_cleanup_schedule(self):
+        from uuid import uuid4
+        from .website_failure_contract import classify_failure
+        from .website_goal_runner import finish_goal
+        self._budget_cleanup(sealed=False)
+        occurrence = str(uuid4())
+        self.parent.receipt["goal"]["failure_occurrences"].append(occurrence)
+        self.parent.receipt.update(failure=classify_failure("website_prepare_dependency_transient", "first_article"),
+            failure_occurrence_id=occurrence)
+        stops.advance(self.parent, self.config, now=self.now)
+        due = self.parent.next_attempt_at
+        finish_goal(self.parent, now=self.now)
+        self.assertEqual(self.parent.state, "pending")
+        self.assertEqual(self.parent.next_attempt_at, due)
+        self.assertEqual(self.parent.receipt["status"], "stopped")
+        self.assertEqual(self.parent.receipt["goal"]["failure_occurrences"].count(occurrence), 1)
+        self.graphql.assert_not_called()
+
+
+    def test_broker_pagination_keeps_an_earlier_pending_page_until_a_clean_cycle(self):
+        from uuid import uuid4
+        from . import website_article_stop_budget as cleanup
+        self.advance()
+        self._budget_cleanup()
+        source_request = stops._operation(self.parent.receipt[stops.KEY]).payload["request"]
+        def page(pending, cursor):
+            return {"schema_version": 2, "request_digest": source_request["digest"],
+                "source_fence_id": source_request["source_fence_id"], "channel": "website_token_broker",
+                "scope": "captured_and_source_scoped_operations", "operations": [{"operation_id": str(uuid4()), "revoked": 0, "pending": pending}],
+                "next_inventory_id": cursor, "quiet": False, "inventory_complete": False, "effect_authority": False}
+        self.stack.enter_context(patch.object(stops, "_retire_original_credentials",
+            side_effect=[page(1, str(uuid4())), page(0, None), page(0, None)]))
+        for seconds in (0, 61):
+            self.parent.state = "running"
+            stops.advance(self.parent, self.config, now=self.now+timedelta(seconds=seconds))
+            self.assertEqual(self.parent.state, "pending")
+        self.parent.state = "running"
+        stops.advance(self.parent, self.config, now=self.now+timedelta(seconds=122))
+        self.assertEqual(self.parent.state, "needs_attention")
+        self.assertEqual(self.parent.receipt[cleanup.KEY]["state"], "observed")
+        self.assertIs(self.parent.receipt[cleanup.KEY]["quiet"], False)
+        self.graphql.assert_called_once()
+
+    def test_crash_on_last_pass_cannot_reset_the_cleanup_budget(self):
+        from . import website_article_stop_budget as cleanup
+        self._budget_cleanup(sealed=False)
+        self.stack.enter_context(patch.object(cleanup, "MAX_PASSES", 1))
+        retire = self.stack.enter_context(patch.object(stops, "_retire_original_credentials", side_effect=SystemExit("synthetic crash")))
+        with self.assertRaises(SystemExit): stops.advance(self.parent, self.config, now=self.now)
+        self.assertEqual(self.parent.receipt[cleanup.KEY]["state"], "exhausted")
+        self.parent.state = "running"
+        self.assertTrue(stops.advance(self.parent, self.config, now=self.now+timedelta(seconds=61)))
+        self.assertEqual(self.parent.state, "needs_attention")
+        self.assertEqual(retire.call_count, 1)
+        self.assertEqual(self.parent.receipt[cleanup.KEY]["passes"], 1)
+        self.graphql.assert_not_called()
 
 
     def test_expired_private_lease_stops_before_provider_mutation_and_retires_token(self):

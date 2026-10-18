@@ -229,6 +229,20 @@ def _retire_original_credentials(parent, config, request, *, now):
         return receipt
 
 
+def _remove_owned_publication_effects(parent, config, *, now):
+    """Use bounded original stopping purposes before enforcing new-work budgets."""
+    from .website_article_source_history import advance as seal_original_history
+    sealed = seal_original_history(parent, config, now=now)
+    if sealed is not None:
+        from .website_article_stopped_publications import advance as observe_stopped_publications
+        observation = observe_stopped_publications(parent, config, now=now)
+        from .website_article_stopped_automerge import advance as stop_original_auto_merge
+        stop_original_auto_merge(parent, config, observation, now=now)
+        from .website_article_stopped_automerge import has_pending
+        return has_pending(parent, config, observation, now=now)
+    return True
+
+
 def advance(parent, config, *, now):
     """Drain the durable stop before source verification, models, or inspection.
 
@@ -242,20 +256,13 @@ def advance(parent, config, *, now):
     from .website_first_article import _save_fields, _wait
     operation, request = reserve(parent, config)
     if parent.receipt.get("article_source_stop") is not None:
-        _retire_original_credentials(parent, config, request, now=now)
         from . import website_goal_budget as budget
-        reason = budget.exhaustion(parent.receipt["goal"], now=now) if budget.enabled() else None
+        reason = parent.receipt.get("budget_stop_reason") or (budget.exhaustion(parent.receipt["goal"], now=now) if budget.enabled() else None)
         if reason:
-            from .website_goal_runner import stop_goal
-            stop_goal(parent, parent.receipt["goal"], reason=reason, now=now)
-            return True
-        from .website_article_source_history import advance as seal_original_history
-        sealed = seal_original_history(parent, config, now=now)
-        if sealed is not None:
-            from .website_article_stopped_publications import advance as observe_stopped_publications
-            observation = observe_stopped_publications(parent, config, now=now)
-            from .website_article_stopped_automerge import advance as stop_original_auto_merge
-            stop_original_auto_merge(parent, config, observation, now=now)
+            from .website_article_stop_budget import advance as advance_budget_cleanup
+            return advance_budget_cleanup(parent, config, request, reason=reason, now=now)
+        _retire_original_credentials(parent, config, request, now=now)
+        _remove_owned_publication_effects(parent, config, now=now)
         _wait(parent, now, "Reconciling outstanding article work after preserving the original editorial content.")
         return True
 
@@ -293,15 +300,17 @@ def advance(parent, config, *, now):
             "local_stop": receipt, "remote_confirmed": False, "effect_authority": False}
         operation.save(update_fields=["receipt", "updated_at"])
         _save_fields(parent, {"article_source_stop": receipt})
-    _retire_original_credentials(parent, config, request, now=now)
     # Removing old effects must get its first pass even after a compute budget
     # was spent. The reconciliation wait still inherits the original wall and
     # class limits; it cannot become an unbounded pre-journey polling loop.
     from . import website_goal_budget as budget
-    reason = budget.exhaustion(parent.receipt["goal"], now=now) if budget.enabled() else None
+    reason = parent.receipt.get("budget_stop_reason") or (budget.exhaustion(parent.receipt["goal"], now=now) if budget.enabled() else None)
     if reason:
-        from .website_goal_runner import stop_goal
-        stop_goal(parent, parent.receipt["goal"], reason=reason, now=now)
-        return True
+        # Reaching a compute/wall limit cannot leave an already owned queued
+        # merge untouched. These independent, bounded private purposes stop
+        # old effects; they grant no generation, approval or replacement work.
+        from .website_article_stop_budget import advance as advance_budget_cleanup
+        return advance_budget_cleanup(parent, config, request, reason=reason, now=now)
+    _retire_original_credentials(parent, config, request, now=now)
     _wait(parent, now, "Reconciling the stopped article's outstanding work before recovery.")
     return True

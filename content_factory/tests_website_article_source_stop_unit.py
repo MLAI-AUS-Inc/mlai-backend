@@ -195,12 +195,17 @@ class ArticleSourceStopTests(SimpleTestCase):
         with self.assertRaises(WebsiteAuthorityError): stop.advance(self.parent, self.config, now=self.now)
         self.rpc.assert_not_called()
 
-    def test_original_budget_stops_reconciliation_after_first_effect_removal_pass(self):
-        self.assertTrue(stop.advance(self.parent, self.config, now=self.now + timedelta(hours=49)))
+    def test_spent_goal_retains_a_bounded_cleanup_pass_without_new_work(self):
+        with patch("content_factory.website_article_source_history.advance", return_value=None) as seal:
+            self.assertTrue(stop.advance(self.parent, self.config, now=self.now + timedelta(hours=49)))
+        seal.assert_called_once()
         self.assertEqual(self.rpc.call_count, 1)
         self.assertIn("article_source_stop", self.parent.receipt)
-        self.assertEqual(self.parent.state, "needs_attention")
-        self.assertIsNone(self.parent.next_attempt_at)
+        self.assertEqual(self.parent.state, "pending")
+        self.assertEqual(self.parent.receipt["status"], "stopped")
+        self.assertEqual(self.parent.receipt["budget_stop_reason"], "wall_time")
+        self.assertEqual(self.parent.receipt["article_budget_stop_cleanup"]["state"], "pending")
+        self.assertIsNotNone(self.parent.next_attempt_at)
         self.assertFalse(self.parent.receipt["article_source_stop"]["quiet"])
 
     def test_no_fence_no_effects_or_http(self):

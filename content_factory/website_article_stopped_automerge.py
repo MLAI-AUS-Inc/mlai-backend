@@ -247,6 +247,35 @@ def _execute(parent, config, payload, lease):
                     _credential(identifier, payload, revocation_state="confirmed" if confirmed else "uncertain", revocation_attempts=1)
 
 
+def _attempts(connection, snapshot):
+    from .website_models import WebsiteConnectionOperation
+    rows = list(WebsiteConnectionOperation.objects.filter(connection_id=connection.pk, generation=connection.generation, action=ACTION,
+        payload__snapshot__source_fence_id=snapshot["source_fence_id"]).order_by("pk")[:MAX_ATTEMPTS])
+    for row in rows: _valid(row, row.payload)
+    return rows
+
+
+def _candidates(observation, attempts):
+    completed = {row.payload["target"]["number"] for row in attempts if row.state == "completed"}
+    unfinished = {row.payload["target"]["number"] for row in attempts if row.state == "running"}
+    return [value for value in observation["pulls"] if value["matching_backend_mutations"]
+        and value["number"] not in completed and (value["number"] in unfinished or value["auto_merge_pending"]
+            and value["state"] == "open" and not value["merged"])]
+
+
+def has_pending(parent, config, observation, *, now):
+    """Inspect this bounded owned stopping inventory, never full quiet or new work."""
+    from .website_connections import authority_guard, contract_for
+    if observation is None: return True
+    if not isinstance(observation, dict): _deny()
+    with authority_guard(contract_for(parent.connection), action="read") as connection:
+        snapshot = reads._snapshot(parent, config, connection)
+        reads._valid_observation(reads._row(connection, observation.get("operation_id"), lock=True), snapshot, observation)
+        stamp = goals.stamp(observation["observed_at"])
+        if stamp is None or not now - reads.FRESH <= stamp <= now: _deny()
+        return bool(_candidates(observation, _attempts(connection, snapshot)))
+
+
 def advance(parent, config, observation, *, now):
     """Stop at most one owned queued merge per pass; results grant no new effects."""
     from . import website_article_source_stop as stops
@@ -269,14 +298,8 @@ def advance(parent, config, observation, *, now):
             if prior is None or goals.digest(prior.payload) != lease["purpose_digest"]: _deny()
             _valid(prior, prior.payload)
             if goals.stamp(lease["expires_at"]) > now: return None
-        attempts = list(WebsiteConnectionOperation.objects.filter(connection_id=connection.pk, generation=connection.generation, action=ACTION,
-            payload__snapshot__source_fence_id=snapshot["source_fence_id"]).order_by("pk")[:MAX_ATTEMPTS])
-        for prior in attempts: _valid(prior, prior.payload)
-        completed = {prior.payload["target"]["number"] for prior in attempts if prior.state == "completed"}
-        unfinished = {prior.payload["target"]["number"] for prior in attempts if prior.state == "running"}
-        candidates = [value for value in observation["pulls"] if value["matching_backend_mutations"]
-            and value["number"] not in completed and (value["number"] in unfinished or value["auto_merge_pending"]
-                and value["state"] == "open" and not value["merged"])]
+        attempts = _attempts(connection, snapshot)
+        candidates = _candidates(observation, attempts)
         if not candidates: return None
         if len(attempts) >= MAX_ATTEMPTS: _deny()
         selected = candidates[0]

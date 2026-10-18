@@ -24,15 +24,17 @@ keep their existing paths.
 The worker receipt is a local control acknowledgement, always quiet=false,
 inventory_complete=false and effect_authority=false. The backend continues
 to wait for complete reconciliation and records remote_confirmed=false. It
-does not yet grant historical artifact reads or a replacement. Next work is
-independent token/resource/operation inventory closure, complete accounting,
-owned publication/auto-merge reconciliation, a separately admitted historical
-read and durable content seal, then current-source execution under the same
-original paid root. All rollout flags remain off; draft only.
+does not grant a replacement. Separate private purposes now seal historical
+editorial JSON, observe captured publications and withdraw exact owned pending
+auto-merge. Remaining work is full token/resource/operation inventory closure,
+complete accounting, unpaired/merge-queue reconciliation and separately admitted
+current-source execution under the same original paid root. All rollout flags remain off; draft only.
 
 Reconciliation inherits the original wall, compute, model and class limits.
 The first effect-removal pass runs before evaluating those limits; an expired
-goal then stops with its original budget reason instead of polling forever.
+goal keeps its original budget stop for new work. A separate bounded cleanup
+schedule can continue removing owned effects; it cannot renew execution or poll
+indefinitely.
 
 Validation: 551 combined source-stop/refresh/fence, first-article, lifecycle,
 incident, facade/profile and sparse-settings checks pass without DB or network.
@@ -53,8 +55,10 @@ authority or test mutation assertion was relaxed.
 ## Independent historical editorial sealing
 
 A later prepare pass now advances a distinct action=article-source-history
-outbox once the local stop receipt is saved. It inherits the original goal wall
-and failure budgets. This purpose preserves content before full external quiet;
+outbox once the local stop receipt is saved. It preserves the original goal wall
+and failure budgets for new work; a budget-stopped goal may use the separate
+bounded stopping continuation described below. This purpose preserves content
+before full external quiet;
 it grants no execution. One operation/request is reused for the same stop cause,
 current canonical connection/configuration/deletion scope and source SHA. The
 original paid key, payer and actual spend/refund are rechecked; no new fee or
@@ -373,7 +377,7 @@ stop implementation and passes after restoration. The audit checks 875 productio
 emissions, all 614 test modules are fully assigned, and the read-only model check
 reports no changes. Existing disposable database CI additionally covers private
 scheduler exclusion and a new original-generation settlement/changed-snapshot
-case; no local database or migration is run. The baseline at 258fc77 passed full remote CI 39081905268: the complete bootstrap measured 499.91 ms cold and 245,558 bytes under unchanged 1,000 ms/300 KB limits. The new merge-stop changes require their own full CI result.
+case; no local database or migration is run. The baseline at 258fc77 passed full remote CI 39081905268: the complete bootstrap measured 499.91 ms cold and 245,558 bytes under unchanged 1,000 ms/300 KB limits. The merge-stop baseline at a8b906f passed full remote CI 39088377269, including PostgreSQL, migration, native provider and worker-profile checks; deployment was skipped. Later cleanup changes require their own full CI result.
 No rollout defaults, contract/transport/example bytes or immutable producer pin
 change. This remains draft-only and cannot make the full one-shot goal complete.
 
@@ -395,3 +399,17 @@ A completed attempt invalidates the latest publication-read cache pointer, prese
 Validation: 1,992 strict no-database/no-network checks across 146 explicit labels pass in 65.397 seconds. Earlier focused validation passed 84 checks before the final cache-refresh case. The offline audit reports 876 production emissions and valid vendored digests; all 616 test modules are assigned, with no omissions. Read-only model checks report no changes. The preceding real source-stop controller fails the new controller-chain regression with `AssertionError: 0 != 1`; exact source was restored atomically. Evidence: `/tmp/articles-d2-stopped-automerge-before.log`, `/tmp/articles-d2-stopped-automerge-combined-final.log`, `/tmp/articles-d2-stopped-automerge-final-focused.log`, `/tmp/articles-d2-stopped-automerge-audit.log`, `/tmp/articles-d2-stopped-automerge-assignment.log`, `/tmp/articles-d2-stopped-automerge-models.log`. Remote-only PostgreSQL coverage includes original-generation settlement and the shared private-scheduler exclusion loop. No local database, migration, service, real provider mutation or customer action was run. Live provider acceptance and the new full CI remain unproven at this source checkpoint.
 
 The full D2 execution flow and full one-shot plan are not complete. Unattributed worker PR references, merge-queue effects, uncertain creation/provider outcomes, comprehensive channel birth/runtime coverage, other direct token issuers and aggregate goal budgeting still need reconciliation or implementation. Replacement requires a separately admitted execution and dispatch idempotency under the original billing identity, plus fresh source/build/preview/review/merge/live proofs. Quiet/inventory/effect/approval grants remain false; rollout defaults and immutable producer pins are unchanged.
+
+### Cleanup continues after the new-work budget is spent
+
+The controller checked the goal budget before sealing/reading the old publication and withdrawing its pending auto-merge. It could therefore stop at `needs_attention` while GitHub still held merge authority. The real two controller regressions fail the preceding source with zero withdrawal requests, including the first stop acknowledgement; the current source was restored atomically after that check.
+
+The original stop now gives bounded negative work a separate continuation after the original budget is spent. It retains the same paid goal, stop request digest, source fence and original spend. The normal five-minute prepare claim and all existing private-purpose leases, original owner/company/payment/refund, source/provider and exact PR ownership checks still apply. It retires broker credentials, seals editorial history, reads captured publications and stops one owned queued merge per pass. A lost reply resumes through the saved lease and fresh PR read; a second owned PR gets a later pass. It never regenerates, recharges, approves, merges or deploys an article.
+
+The saved `article_budget_stop_cleanup` record has a closed version/causal identity and at most 32 passes. Each pass commits its count before remote work; a last-pass crash cannot reset the allowance. Transient failures retain their canonical B1 envelope and the next bounded stopping pass. Broker pending state is retained across cursor pages until a complete clean observed cycle, so a quiet last page cannot hide an earlier pending token. The immutable read/merge receipts and actual credential expiry/retirement remain their separate observations. Every cleanup record keeps quiet, inventory completeness and effect authority false. `observed` describes only this narrow stopping pass, not worker/provider quiet.
+
+While cleanup is due, the scheduler may claim the same prepare row as pending, with its owner-facing status and original budget still stopped. `website_first_article.active` rejects the durable budget stop. The prepare controller cannot fall through to an ordinary journey if source stopping is disabled during rollback, and normal event/source wake policy still refuses spent goals. Only a server-side in-process marker from the verified cleanup pass preserves its schedule during goal finalization, preventing retained positive-work failures from erasing it or being charged to the policy again. The marker is not serialized or accepted from worker/request data. Completion of the narrow work, the pass cap, authority withdrawal or invalid state leaves the original budget stop in place. A larger configured budget does not turn this continuation into positive work.
+
+Validation: all 2,004 combined strict database/network-denying checks across 146 explicit labels pass in 66.65 seconds. The final focused controller/goal suite passes 98 checks; 877 production emissions and all 616 module assignments pass their audits. Focused checks cover model/wall stops, first acknowledgement, lost mutation reply, multiple PRs, lease waits, refund denial, typed counter/cause/grant corruption, finalization with retained failures, cursor-cycle pending state, last-pass interruption and rollback. Remote-only database coverage adds real prepare-claim JSON persistence/stale-actor rejection and the actual rollback-to-stop controller path. No local database, migration, service or provider/customer operation was run. Logs: `/tmp/articles-d2-budget-stop-cleanup-before.log`, `/tmp/articles-d2-budget-stop-cleanup-final-focused2.log`, `/tmp/articles-d2-budget-stop-cleanup-final-combined2.log`, `/tmp/articles-d2-budget-stop-cleanup-final-audit.log`, `/tmp/articles-d2-budget-stop-cleanup-final-assignment.log`.
+
+Full task/resource/provider coverage, merge queue handling, unpaired references, uncertainty beyond these bounded observations, changed current-purpose scope, separately admitted current-source execution and fresh proofs remain outstanding. The existing fallback and E4 nightly first-live acceptance still require their own verification. This change proves no live customer or full-plan outcome.

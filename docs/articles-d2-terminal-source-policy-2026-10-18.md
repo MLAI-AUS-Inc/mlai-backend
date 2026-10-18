@@ -9,7 +9,7 @@ and child cancellation happened before the event's stop policy was checked.
 Automatic source changes now reuse only an active, unstopped existing goal.
 They never create a successor to a terminal goal. A completed first article
 retains its original paid root, consent, proof history and result. A budget
-or strategy stop remains inert even if another callback left an active state.
+or strategy stop remains inert for new work even if another callback left an active state. A budget-stopped source goal may schedule only its independently bounded original-effect cleanup; its durable budget marker still rejects event/source wakes and positive article activity. See [the stopping continuation](articles-d2-source-stop-2026-10-18.md#cleanup-continues-after-the-new-work-budget-is-spent).
 Only the explicit owner-start/retry path may create a new goal. No completed
 goal is rewritten to claim that its old proofs verify a different source.
 
