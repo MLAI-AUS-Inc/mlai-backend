@@ -1,0 +1,1287 @@
+{
+  "$defs": {
+    "BaselinePolicy": {
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "const": "fixed_setup_source",
+          "title": "Kind",
+          "type": "string"
+        },
+        "source_sha": {
+          "pattern": "^[a-f0-9]{40}(?:[a-f0-9]{24})?$",
+          "title": "Source Sha",
+          "type": "string"
+        }
+      },
+      "required": [
+        "kind",
+        "source_sha"
+      ],
+      "title": "BaselinePolicy",
+      "type": "object"
+    },
+    "CommandBaseline": {
+      "additionalProperties": false,
+      "properties": {
+        "install_command": {
+          "items": {
+            "maxLength": 1000,
+            "type": "string"
+          },
+          "maxItems": 100,
+          "title": "Install Command",
+          "type": "array"
+        },
+        "install_cwd": {
+          "default": ".",
+          "maxLength": 1000,
+          "title": "Install Cwd",
+          "type": "string"
+        },
+        "kind": {
+          "const": "commands",
+          "title": "Kind",
+          "type": "string"
+        },
+        "verify_steps": {
+          "items": {
+            "$ref": "#/$defs/VerifyStep"
+          },
+          "maxItems": 20,
+          "minItems": 1,
+          "title": "Verify Steps",
+          "type": "array"
+        }
+      },
+      "required": [
+        "kind",
+        "install_command",
+        "install_cwd",
+        "verify_steps"
+      ],
+      "title": "CommandBaseline",
+      "type": "object"
+    },
+    "Execution": {
+      "additionalProperties": false,
+      "properties": {
+        "app_root": {
+          "default": ".",
+          "maxLength": 1000,
+          "title": "App Root",
+          "type": "string"
+        },
+        "baseline": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/CommandBaseline"
+            },
+            {
+              "$ref": "#/$defs/StaticBaseline"
+            }
+          ],
+          "title": "Baseline"
+        },
+        "build_command": {
+          "items": {
+            "maxLength": 1000,
+            "type": "string"
+          },
+          "maxItems": 100,
+          "title": "Build Command",
+          "type": "array"
+        },
+        "build_cwd": {
+          "default": ".",
+          "maxLength": 1000,
+          "title": "Build Cwd",
+          "type": "string"
+        },
+        "content_path_pattern": {
+          "maxLength": 1000,
+          "title": "Content Path Pattern",
+          "type": "string"
+        },
+        "content_source_kind": {
+          "enum": [
+            "document_per_file",
+            "shared_collection"
+          ],
+          "title": "Content Source Kind",
+          "type": "string"
+        },
+        "environment_names": {
+          "items": {},
+          "maxItems": 0,
+          "title": "Environment Names",
+          "type": "array"
+        },
+        "install_command": {
+          "items": {
+            "maxLength": 1000,
+            "type": "string"
+          },
+          "maxItems": 100,
+          "title": "Install Command",
+          "type": "array"
+        },
+        "install_cwd": {
+          "default": ".",
+          "maxLength": 1000,
+          "title": "Install Cwd",
+          "type": "string"
+        },
+        "listing_route": {
+          "maxLength": 1000,
+          "title": "Listing Route",
+          "type": "string"
+        },
+        "lockfiles": {
+          "items": {
+            "maxLength": 1000,
+            "type": "string"
+          },
+          "maxItems": 20,
+          "title": "Lockfiles",
+          "type": "array"
+        },
+        "materialize_command": {
+          "items": {
+            "maxLength": 1000,
+            "type": "string"
+          },
+          "maxItems": 100,
+          "title": "Materialize Command",
+          "type": "array"
+        },
+        "materialize_cwd": {
+          "default": ".",
+          "maxLength": 1000,
+          "title": "Materialize Cwd",
+          "type": "string"
+        },
+        "package_manager": {
+          "default": "",
+          "maxLength": 1000,
+          "title": "Package Manager",
+          "type": "string"
+        },
+        "preview_command": {
+          "items": {
+            "maxLength": 1000,
+            "type": "string"
+          },
+          "maxItems": 100,
+          "minItems": 1,
+          "title": "Preview Command",
+          "type": "array"
+        },
+        "preview_cwd": {
+          "default": ".",
+          "maxLength": 1000,
+          "title": "Preview Cwd",
+          "type": "string"
+        },
+        "route_template": {
+          "maxLength": 1000,
+          "title": "Route Template",
+          "type": "string"
+        },
+        "runtime_family": {
+          "enum": [
+            "node",
+            "python",
+            "static"
+          ],
+          "title": "Runtime Family",
+          "type": "string"
+        },
+        "runtime_version": {
+          "maxLength": 1000,
+          "title": "Runtime Version",
+          "type": "string"
+        },
+        "static_source_materialization": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/StaticMaterialization"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "verify_steps": {
+          "items": {
+            "$ref": "#/$defs/VerifyStep"
+          },
+          "maxItems": 20,
+          "title": "Verify Steps",
+          "type": "array"
+        }
+      },
+      "required": [
+        "app_root",
+        "runtime_family",
+        "runtime_version",
+        "package_manager",
+        "lockfiles",
+        "install_command",
+        "install_cwd",
+        "materialize_command",
+        "materialize_cwd",
+        "build_command",
+        "build_cwd",
+        "verify_steps",
+        "preview_command",
+        "preview_cwd",
+        "content_path_pattern",
+        "content_source_kind",
+        "route_template",
+        "listing_route",
+        "environment_names",
+        "baseline",
+        "static_source_materialization"
+      ],
+      "title": "Execution",
+      "type": "object"
+    },
+    "Marker": {
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "const": "artifact_digest",
+          "title": "Kind",
+          "type": "string"
+        },
+        "meta_name": {
+          "const": "mlai-artifact-digest",
+          "default": "mlai-artifact-digest",
+          "title": "Meta Name",
+          "type": "string"
+        },
+        "schema_version": {
+          "const": 1,
+          "default": 1,
+          "title": "Schema Version",
+          "type": "integer"
+        },
+        "value": {
+          "pattern": "^[a-f0-9]{64}$",
+          "title": "Value",
+          "type": "string"
+        }
+      },
+      "required": [
+        "kind",
+        "value",
+        "meta_name",
+        "schema_version"
+      ],
+      "title": "Marker",
+      "type": "object"
+    },
+    "NativeInputsV1": {
+      "additionalProperties": false,
+      "properties": {
+        "canonicalization": {
+          "const": "mlai_utf8_json_v1",
+          "title": "Canonicalization",
+          "type": "string"
+        },
+        "digest": {
+          "pattern": "^[a-f0-9]{64}$",
+          "title": "Digest",
+          "type": "string"
+        },
+        "payload": {
+          "$ref": "#/$defs/Payload"
+        },
+        "schema_version": {
+          "const": 1,
+          "title": "Schema Version",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "schema_version",
+        "canonicalization",
+        "digest",
+        "payload"
+      ],
+      "title": "Seal",
+      "type": "object"
+    },
+    "Oracle": {
+      "additionalProperties": false,
+      "properties": {
+        "artifact_digest": {
+          "pattern": "^[a-f0-9]{64}$",
+          "title": "Artifact Digest",
+          "type": "string"
+        },
+        "artifact_marker_routes": {
+          "items": {
+            "maxLength": 1000,
+            "type": "string"
+          },
+          "maxItems": 2,
+          "minItems": 1,
+          "title": "Artifact Marker Routes",
+          "type": "array"
+        },
+        "existing_seed_source": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/SourceWitness"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "expected_h1": {
+          "maxLength": 512,
+          "minLength": 1,
+          "title": "Expected H1",
+          "type": "string"
+        },
+        "port": {
+          "maximum": 65535,
+          "minimum": 1024,
+          "title": "Port",
+          "type": "integer"
+        },
+        "seed_is_setup_example": {
+          "title": "Seed Is Setup Example",
+          "type": "boolean"
+        },
+        "seed_slug": {
+          "maxLength": 200,
+          "minLength": 1,
+          "title": "Seed Slug",
+          "type": "string"
+        }
+      },
+      "required": [
+        "seed_slug",
+        "seed_is_setup_example",
+        "expected_h1",
+        "artifact_digest",
+        "port",
+        "existing_seed_source",
+        "artifact_marker_routes"
+      ],
+      "title": "Oracle",
+      "type": "object"
+    },
+    "Payload": {
+      "additionalProperties": false,
+      "properties": {
+        "normalizer_version": {
+          "const": 1,
+          "title": "Normalizer Version",
+          "type": "integer"
+        },
+        "publishing": {
+          "$ref": "#/$defs/Publishing"
+        },
+        "verification": {
+          "$ref": "#/$defs/Verification"
+        }
+      },
+      "required": [
+        "normalizer_version",
+        "publishing",
+        "verification"
+      ],
+      "title": "Payload",
+      "type": "object"
+    },
+    "Publishing": {
+      "additionalProperties": false,
+      "properties": {
+        "source_selection": {
+          "additionalProperties": false,
+          "properties": {
+            "app_root": {
+              "maxLength": 1000,
+              "type": "string"
+            },
+            "branch": {
+              "maxLength": 1000,
+              "minLength": 1,
+              "type": "string"
+            }
+          },
+          "type": "object"
+        },
+        "target": {
+          "$ref": "#/$defs/TargetInputs"
+        }
+      },
+      "required": [
+        "target",
+        "source_selection"
+      ],
+      "title": "Publishing",
+      "type": "object"
+    },
+    "ReactMetadata": {
+      "additionalProperties": false,
+      "properties": {
+        "registry_slug_template": {
+          "maxLength": 1000,
+          "title": "Registry Slug Template",
+          "type": "string"
+        },
+        "seo_path_template": {
+          "maxLength": 1000,
+          "title": "Seo Path Template",
+          "type": "string"
+        },
+        "type": {
+          "const": "react_article_system",
+          "title": "Type",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "registry_slug_template",
+        "seo_path_template"
+      ],
+      "title": "ReactMetadata",
+      "type": "object"
+    },
+    "ReactRegistration": {
+      "additionalProperties": false,
+      "properties": {
+        "author_alias_path": {
+          "default": "",
+          "maxLength": 1000,
+          "title": "Author Alias Path",
+          "type": "string"
+        },
+        "author_registry_path": {
+          "default": "",
+          "maxLength": 1000,
+          "title": "Author Registry Path",
+          "type": "string"
+        },
+        "registry_path": {
+          "maxLength": 1000,
+          "title": "Registry Path",
+          "type": "string"
+        },
+        "seo_config_path": {
+          "maxLength": 1000,
+          "title": "Seo Config Path",
+          "type": "string"
+        },
+        "type": {
+          "const": "registry_seo_patch",
+          "title": "Type",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "registry_path",
+        "seo_config_path",
+        "author_registry_path",
+        "author_alias_path"
+      ],
+      "title": "ReactRegistration",
+      "type": "object"
+    },
+    "SourceWitness": {
+      "additionalProperties": false,
+      "properties": {
+        "path": {
+          "maxLength": 1000,
+          "title": "Path",
+          "type": "string"
+        },
+        "sha256": {
+          "pattern": "^[a-f0-9]{64}$",
+          "title": "Sha256",
+          "type": "string"
+        }
+      },
+      "required": [
+        "path",
+        "sha256"
+      ],
+      "title": "SourceWitness",
+      "type": "object"
+    },
+    "StaticBaseline": {
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "const": "static_source",
+          "title": "Kind",
+          "type": "string"
+        },
+        "paths": {
+          "items": {
+            "maxLength": 1000,
+            "type": "string"
+          },
+          "maxItems": 100,
+          "minItems": 1,
+          "title": "Paths",
+          "type": "array"
+        }
+      },
+      "required": [
+        "kind",
+        "paths"
+      ],
+      "title": "StaticBaseline",
+      "type": "object"
+    },
+    "StaticMaterialization": {
+      "additionalProperties": false,
+      "properties": {
+        "app_root": {
+          "const": "",
+          "title": "App Root",
+          "type": "string"
+        },
+        "detail_source_path_pattern": {
+          "maxLength": 1000,
+          "title": "Detail Source Path Pattern",
+          "type": "string"
+        },
+        "listing_source_path": {
+          "maxLength": 1000,
+          "title": "Listing Source Path",
+          "type": "string"
+        },
+        "materializer_command": {
+          "items": {
+            "maxLength": 1000,
+            "type": "string"
+          },
+          "maxItems": 100,
+          "title": "Materializer Command",
+          "type": "array"
+        },
+        "preview_output_dir": {
+          "maxLength": 1000,
+          "title": "Preview Output Dir",
+          "type": "string"
+        },
+        "schema_version": {
+          "const": 1,
+          "title": "Schema Version",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "schema_version",
+        "materializer_command",
+        "listing_source_path",
+        "detail_source_path_pattern",
+        "app_root",
+        "preview_output_dir"
+      ],
+      "title": "StaticMaterialization",
+      "type": "object"
+    },
+    "StaticMetadata": {
+      "additionalProperties": false,
+      "properties": {
+        "seo_path_template": {
+          "maxLength": 1000,
+          "title": "Seo Path Template",
+          "type": "string"
+        },
+        "static_source_materialization": {
+          "$ref": "#/$defs/StaticMaterialization"
+        },
+        "type": {
+          "const": "stack_native_collection",
+          "title": "Type",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "seo_path_template",
+        "static_source_materialization"
+      ],
+      "title": "StaticMetadata",
+      "type": "object"
+    },
+    "StaticRegistration": {
+      "additionalProperties": false,
+      "properties": {
+        "path": {
+          "maxLength": 1000,
+          "title": "Path",
+          "type": "string"
+        },
+        "store_kind": {
+          "const": "json_data_file",
+          "title": "Store Kind",
+          "type": "string"
+        },
+        "type": {
+          "const": "stack_native_collection",
+          "title": "Type",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "store_kind",
+        "path"
+      ],
+      "title": "StaticRegistration",
+      "type": "object"
+    },
+    "TargetInputs": {
+      "additionalProperties": false,
+      "properties": {
+        "build_tool": {
+          "default": "unknown",
+          "maxLength": 1000,
+          "title": "Build Tool",
+          "type": "string"
+        },
+        "content_extension": {
+          "default": "",
+          "maxLength": 1000,
+          "title": "Content Extension",
+          "type": "string"
+        },
+        "content_path_pattern": {
+          "maxLength": 1000,
+          "title": "Content Path Pattern",
+          "type": "string"
+        },
+        "delivery_adapter": {
+          "enum": [
+            "react_component",
+            "stack_native"
+          ],
+          "title": "Delivery Adapter",
+          "type": "string"
+        },
+        "example_path": {
+          "default": "",
+          "maxLength": 1000,
+          "title": "Example Path",
+          "type": "string"
+        },
+        "framework": {
+          "default": "",
+          "maxLength": 1000,
+          "title": "Framework",
+          "type": "string"
+        },
+        "hook_config_path": {
+          "const": "",
+          "default": "",
+          "title": "Hook Config Path",
+          "type": "string"
+        },
+        "input_format": {
+          "const": "content_bundle_v1",
+          "default": "content_bundle_v1",
+          "title": "Input Format",
+          "type": "string"
+        },
+        "kind": {
+          "enum": [
+            "react_article_system",
+            "stack_native_collection"
+          ],
+          "title": "Kind",
+          "type": "string"
+        },
+        "language": {
+          "default": "unknown",
+          "maxLength": 1000,
+          "title": "Language",
+          "type": "string"
+        },
+        "live_marker": {
+          "$ref": "#/$defs/Marker"
+        },
+        "metadata_strategy": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ReactMetadata"
+            },
+            {
+              "$ref": "#/$defs/StaticMetadata"
+            }
+          ],
+          "title": "Metadata Strategy"
+        },
+        "preferred_verifier_queue": {
+          "default": "verify-static",
+          "maxLength": 1000,
+          "title": "Preferred Verifier Queue",
+          "type": "string"
+        },
+        "preview_discovery": {
+          "default": null,
+          "title": "Preview Discovery",
+          "type": "null"
+        },
+        "preview_strategy": {
+          "const": "repo_preview",
+          "default": "repo_preview",
+          "title": "Preview Strategy",
+          "type": "string"
+        },
+        "publish_capability": {
+          "const": "direct",
+          "default": "direct",
+          "title": "Publish Capability",
+          "type": "string"
+        },
+        "registration_strategy": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ReactRegistration"
+            },
+            {
+              "$ref": "#/$defs/StaticRegistration"
+            }
+          ],
+          "title": "Registration Strategy"
+        },
+        "route_path": {
+          "maxLength": 1000,
+          "title": "Route Path",
+          "type": "string"
+        },
+        "route_template": {
+          "maxLength": 1000,
+          "title": "Route Template",
+          "type": "string"
+        },
+        "runtime_family": {
+          "default": "unknown",
+          "maxLength": 1000,
+          "title": "Runtime Family",
+          "type": "string"
+        },
+        "supported": {
+          "const": true,
+          "default": true,
+          "title": "Supported",
+          "type": "boolean"
+        },
+        "target_config": {
+          "default": null,
+          "title": "Target Config",
+          "type": "null"
+        },
+        "target_id": {
+          "maxLength": 200,
+          "minLength": 1,
+          "title": "Target Id",
+          "type": "string"
+        }
+      },
+      "required": [
+        "target_id",
+        "kind",
+        "supported",
+        "delivery_adapter",
+        "preview_strategy",
+        "content_path_pattern",
+        "route_template",
+        "metadata_strategy",
+        "registration_strategy",
+        "preview_discovery",
+        "framework",
+        "content_extension",
+        "example_path",
+        "runtime_family",
+        "language",
+        "build_tool",
+        "publish_capability",
+        "preferred_verifier_queue",
+        "hook_config_path",
+        "input_format",
+        "target_config",
+        "live_marker",
+        "route_path"
+      ],
+      "title": "TargetInputs",
+      "type": "object"
+    },
+    "Verification": {
+      "additionalProperties": false,
+      "properties": {
+        "baseline_policy": {
+          "$ref": "#/$defs/BaselinePolicy"
+        },
+        "execution": {
+          "$ref": "#/$defs/Execution"
+        },
+        "oracle": {
+          "$ref": "#/$defs/Oracle"
+        },
+        "verifier": {
+          "$ref": "#/$defs/Verifier"
+        }
+      },
+      "required": [
+        "execution",
+        "oracle",
+        "baseline_policy",
+        "verifier"
+      ],
+      "title": "Verification",
+      "type": "object"
+    },
+    "Verifier": {
+      "additionalProperties": false,
+      "properties": {
+        "execution_schema_version": {
+          "const": 1,
+          "title": "Execution Schema Version",
+          "type": "integer"
+        },
+        "playwright_version": {
+          "const": "1.58.0",
+          "title": "Playwright Version",
+          "type": "string"
+        },
+        "profile": {
+          "const": "native_ci_v1",
+          "title": "Profile",
+          "type": "string"
+        },
+        "python_version": {
+          "pattern": "^\\d+\\.\\d+(?:\\.\\d+)?$",
+          "title": "Python Version",
+          "type": "string"
+        },
+        "runner_sha256": {
+          "pattern": "^[a-f0-9]{64}$",
+          "title": "Runner Sha256",
+          "type": "string"
+        }
+      },
+      "required": [
+        "profile",
+        "runner_sha256",
+        "execution_schema_version",
+        "python_version",
+        "playwright_version"
+      ],
+      "title": "Verifier",
+      "type": "object"
+    },
+    "VerifyStep": {
+      "additionalProperties": false,
+      "properties": {
+        "command": {
+          "items": {
+            "maxLength": 1000,
+            "type": "string"
+          },
+          "maxItems": 100,
+          "minItems": 1,
+          "title": "Command",
+          "type": "array"
+        },
+        "cwd": {
+          "default": ".",
+          "maxLength": 1000,
+          "title": "Cwd",
+          "type": "string"
+        },
+        "name": {
+          "default": "",
+          "maxLength": 1000,
+          "title": "Name",
+          "type": "string"
+        }
+      },
+      "required": [
+        "name",
+        "command",
+        "cwd"
+      ],
+      "title": "VerifyStep",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "canonicalization": {
+      "const": "mlai_utf8_json_v1"
+    },
+    "digest": {
+      "maxLength": 500,
+      "minLength": 1,
+      "pattern": "[a-f0-9]{64}",
+      "type": "string"
+    },
+    "payload": {
+      "additionalProperties": false,
+      "properties": {
+        "baseline": {
+          "additionalProperties": false,
+          "properties": {
+            "source_inventory_digest": {
+              "maxLength": 500,
+              "minLength": 1,
+              "pattern": "[a-f0-9]{64}",
+              "type": "string"
+            },
+            "source_sha": {
+              "maxLength": 500,
+              "minLength": 1,
+              "pattern": "[a-f0-9]{40}(?:[a-f0-9]{24})?",
+              "type": "string"
+            },
+            "source_tree_sha": {
+              "maxLength": 500,
+              "minLength": 1,
+              "pattern": "[a-f0-9]{40}(?:[a-f0-9]{24})?",
+              "type": "string"
+            }
+          },
+          "required": [
+            "source_sha",
+            "source_tree_sha",
+            "source_inventory_digest"
+          ],
+          "type": "object"
+        },
+        "executor": {
+          "additionalProperties": false,
+          "properties": {
+            "controller_sha256": {
+              "maxLength": 500,
+              "minLength": 1,
+              "pattern": "[a-f0-9]{64}",
+              "type": "string"
+            },
+            "profile": {
+              "const": "pinned_existing_publisher_v1"
+            },
+            "python_version": {
+              "maxLength": 20,
+              "minLength": 1,
+              "pattern": "\\d+\\.\\d+\\.\\d+",
+              "type": "string"
+            },
+            "pyyaml_version": {
+              "maxLength": 20,
+              "minLength": 1,
+              "pattern": "\\d+\\.\\d+\\.\\d+",
+              "type": "string"
+            },
+            "runtime_image": {
+              "maxLength": 500,
+              "minLength": 1,
+              "pattern": "sha256:[a-f0-9]{64}",
+              "type": "string"
+            }
+          },
+          "required": [
+            "profile",
+            "controller_sha256",
+            "runtime_image",
+            "python_version",
+            "pyyaml_version"
+          ],
+          "type": "object"
+        },
+        "native_inputs_v1": {
+          "$ref": "#/$defs/NativeInputsV1"
+        },
+        "normalizer_version": {
+          "const": 2
+        },
+        "original_scope": {
+          "additionalProperties": false,
+          "properties": {
+            "app_root": {
+              "const": ""
+            },
+            "branch": {
+              "maxLength": 200,
+              "minLength": 1,
+              "type": "string"
+            },
+            "connection_generation": {
+              "maximum": 9223372036854775807,
+              "minimum": 1,
+              "type": "integer"
+            },
+            "deletion_epoch": {
+              "maximum": 9223372036854775807,
+              "minimum": 0,
+              "type": "integer"
+            },
+            "github_repo": {
+              "maxLength": 201,
+              "minLength": 1,
+              "pattern": "[A-Za-z0-9_.-]{1,100}/[A-Za-z0-9_.-]{1,100}",
+              "type": "string"
+            },
+            "repository_id": {
+              "maximum": 9223372036854775807,
+              "minimum": 1,
+              "type": "integer"
+            },
+            "setup_operation_attempt": {
+              "maximum": 9223372036854775807,
+              "minimum": 1,
+              "type": "integer"
+            },
+            "setup_operation_id": {
+              "maxLength": 36,
+              "minLength": 1,
+              "type": "string"
+            },
+            "site_origin": {
+              "maxLength": 500,
+              "minLength": 1,
+              "type": "string"
+            },
+            "website_connection_id": {
+              "maxLength": 36,
+              "minLength": 1,
+              "type": "string"
+            }
+          },
+          "required": [
+            "website_connection_id",
+            "connection_generation",
+            "repository_id",
+            "github_repo",
+            "deletion_epoch",
+            "branch",
+            "app_root",
+            "setup_operation_id",
+            "setup_operation_attempt",
+            "site_origin"
+          ],
+          "type": "object"
+        },
+        "pipeline": {
+          "additionalProperties": false,
+          "properties": {
+            "marker_policy": {
+              "additionalProperties": false,
+              "properties": {
+                "artifact_digest": {
+                  "maxLength": 500,
+                  "minLength": 1,
+                  "pattern": "[a-f0-9]{64}",
+                  "type": "string"
+                },
+                "kind": {
+                  "const": "artifact_digest"
+                },
+                "listing_path": {
+                  "maxLength": 500,
+                  "minLength": 1,
+                  "type": "string"
+                },
+                "meta_name": {
+                  "const": "mlai-artifact-digest"
+                }
+              },
+              "required": [
+                "kind",
+                "artifact_digest",
+                "meta_name",
+                "listing_path"
+              ],
+              "type": "object"
+            },
+            "profile": {
+              "const": "original_python_static_marker_v1"
+            },
+            "wrapper_path": {
+              "const": ".mlai/materialize-existing-articles.py"
+            },
+            "wrapper_sha256": {
+              "maxLength": 500,
+              "minLength": 1,
+              "pattern": "[a-f0-9]{64}",
+              "type": "string"
+            }
+          },
+          "required": [
+            "profile",
+            "wrapper_path",
+            "wrapper_sha256",
+            "marker_policy"
+          ],
+          "type": "object"
+        },
+        "probe_record_digests": {
+          "items": {
+            "maxLength": 500,
+            "minLength": 1,
+            "pattern": "[a-f0-9]{64}",
+            "type": "string"
+          },
+          "maxItems": 2,
+          "minItems": 2,
+          "type": "array"
+        },
+        "recipe": {
+          "additionalProperties": false,
+          "properties": {
+            "checks": {
+              "items": {
+                "additionalProperties": false,
+                "properties": {
+                  "argv": {
+                    "items": {
+                      "maxLength": 500,
+                      "minLength": 1,
+                      "type": "string"
+                    },
+                    "maxItems": 20,
+                    "minItems": 2,
+                    "type": "array"
+                  },
+                  "job": {
+                    "maxLength": 100,
+                    "minLength": 1,
+                    "type": "string"
+                  },
+                  "step": {
+                    "maximum": 999,
+                    "minimum": 0,
+                    "type": "integer"
+                  },
+                  "workflow_path": {
+                    "maxLength": 500,
+                    "minLength": 1,
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "argv",
+                  "workflow_path",
+                  "job",
+                  "step"
+                ],
+                "type": "object"
+              },
+              "maxItems": 10,
+              "minItems": 1,
+              "type": "array"
+            },
+            "detail_path_pattern": {
+              "maxLength": 500,
+              "minLength": 1,
+              "type": "string"
+            },
+            "generated_paths": {
+              "items": {
+                "maxLength": 500,
+                "minLength": 1,
+                "type": "string"
+              },
+              "maxItems": 20,
+              "minItems": 0,
+              "type": "array"
+            },
+            "kind": {
+              "const": "static_json_existing_publisher"
+            },
+            "listing_path": {
+              "maxLength": 500,
+              "minLength": 1,
+              "type": "string"
+            },
+            "publisher_argv": {
+              "items": {
+                "maxLength": 500,
+                "minLength": 1,
+                "type": "string"
+              },
+              "maxItems": 20,
+              "minItems": 2,
+              "type": "array"
+            },
+            "schema_version": {
+              "const": 1
+            },
+            "site_origin": {
+              "maxLength": 500,
+              "minLength": 1,
+              "type": "string"
+            },
+            "source_inventory_digest": {
+              "maxLength": 500,
+              "minLength": 1,
+              "pattern": "[a-f0-9]{64}",
+              "type": "string"
+            },
+            "source_sha": {
+              "maxLength": 500,
+              "minLength": 1,
+              "pattern": "[a-f0-9]{40}(?:[a-f0-9]{24})?",
+              "type": "string"
+            },
+            "store_path": {
+              "maxLength": 500,
+              "minLength": 1,
+              "type": "string"
+            }
+          },
+          "required": [
+            "schema_version",
+            "kind",
+            "source_sha",
+            "source_inventory_digest",
+            "store_path",
+            "listing_path",
+            "detail_path_pattern",
+            "publisher_argv",
+            "checks",
+            "generated_paths",
+            "site_origin"
+          ],
+          "type": "object"
+        }
+      },
+      "required": [
+        "normalizer_version",
+        "native_inputs_v1",
+        "original_scope",
+        "baseline",
+        "recipe",
+        "executor",
+        "probe_record_digests",
+        "pipeline"
+      ],
+      "type": "object"
+    },
+    "schema_version": {
+      "const": 2
+    }
+  },
+  "required": [
+    "schema_version",
+    "canonicalization",
+    "digest",
+    "payload"
+  ],
+  "type": "object"
+}

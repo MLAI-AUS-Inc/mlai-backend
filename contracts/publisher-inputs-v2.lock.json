@@ -1,0 +1,27 @@
+{
+  "schema_version": 1,
+  "source_repository": "drsamdonegan/content-factory",
+  "source_revision": "9880289d43597c3f6e6fc759c38f7bd040ce937a",
+  "artifacts": {
+    "contracts/publishing-inputs-v2.schema.json": {
+      "source_path": "contracts/publishing-inputs-v2.schema.json",
+      "sha256": "1d8a9b1e89f4d94f27e8074d6b4e421b9cbeb9aee4514da638cc40f1bfb80a0a"
+    },
+    "contracts/publisher-component-v1.schema.json": {
+      "source_path": "contracts/publisher-component-v1.schema.json",
+      "sha256": "3f263fcc22d1f291620d54ce1785dc0f1b896105559d67d27cabf7cab7000769"
+    },
+    "content_factory/publisher_contract_v2.py": {
+      "source_path": "backend/publisher_contract_v2.py",
+      "sha256": "e8d016b9800ac3c34e9e1268909e4e01d60a28ca617a895999dabcac6e985e15"
+    },
+    "content_factory/testdata/publisher-inputs-v2/component.json": {
+      "source_path": "backend/tests/fixtures/publisher-inputs-v2/component.json",
+      "sha256": "0d2c5f6cff97f80965440ae7e2e3ccb8fcd4410a355b624fec511e45018de822"
+    }
+  },
+  "producer": {
+    "source_path": "backend/original_publisher_inputs.py",
+    "sha256": "42fbde310708c5c824b96fbad8baec51125e1ae2153165c91730d5d6032e42c0"
+  }
+}

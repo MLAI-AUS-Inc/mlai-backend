@@ -1,0 +1,373 @@
+{
+  "candidate": {
+    "canonicalization": "mlai_utf8_json_v1",
+    "digest": "1e03e9c46e1f2da5a36b279239d0f44deedd42cb3147b7aba0344bd8e02dc9b0",
+    "payload": {
+      "baseline": {
+        "source_inventory_digest": "eb3edb1e0e64423db5fcbbdf870c2cd578f27f7a18e4ba471834a0ea0ef5601d",
+        "source_sha": "d139dee9ccd660c9ebbbf1964a0fce97937bd5c3",
+        "source_tree_sha": "233aaf7bac4b5eb3e39c73f0f6cf0211ec0ae62a"
+      },
+      "executor": {
+        "controller_sha256": "a8f0bec0551a0a0193769387124321f9fbd03374c24e4f461bd1917df66b06fb",
+        "profile": "pinned_existing_publisher_v1",
+        "python_version": "3.11.17",
+        "pyyaml_version": "6.0.3",
+        "runtime_image": "sha256:39b4222d4dadf70d44220ecfe385895cf6e4d5e6660a32b9b68ad97e23a083d7"
+      },
+      "native_inputs_v1": {
+        "canonicalization": "mlai_utf8_json_v1",
+        "digest": "def589915871ac865777fa0854c163e6ac6deb4940e78f2be7bd3248ece79896",
+        "payload": {
+          "normalizer_version": 1,
+          "publishing": {
+            "source_selection": {
+              "app_root": "",
+              "branch": "main"
+            },
+            "target": {
+              "build_tool": "unknown",
+              "content_extension": ".json",
+              "content_path_pattern": "data/articles.json",
+              "delivery_adapter": "stack_native",
+              "example_path": "",
+              "framework": "static-html",
+              "hook_config_path": "",
+              "input_format": "content_bundle_v1",
+              "kind": "stack_native_collection",
+              "language": "unknown",
+              "live_marker": {
+                "kind": "artifact_digest",
+                "meta_name": "mlai-artifact-digest",
+                "schema_version": 1,
+                "value": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+              },
+              "metadata_strategy": {
+                "seo_path_template": "/stories/{slug}/",
+                "static_source_materialization": {
+                  "app_root": "",
+                  "detail_source_path_pattern": "stories/{slug}/index.html",
+                  "listing_source_path": "stories/index.html",
+                  "materializer_command": [
+                    "python3",
+                    ".mlai/materialize-existing-articles.py"
+                  ],
+                  "preview_output_dir": "cf-articles-preview",
+                  "schema_version": 1
+                },
+                "type": "stack_native_collection"
+              },
+              "preferred_verifier_queue": "verify-static",
+              "preview_discovery": null,
+              "preview_strategy": "repo_preview",
+              "publish_capability": "direct",
+              "registration_strategy": {
+                "path": "data/articles.json",
+                "store_kind": "json_data_file",
+                "type": "stack_native_collection"
+              },
+              "route_path": "/stories",
+              "route_template": "/stories/{slug}/",
+              "runtime_family": "static",
+              "supported": true,
+              "target_config": null,
+              "target_id": "stack_native_collection_data_articles_json_static"
+            }
+          },
+          "verification": {
+            "baseline_policy": {
+              "kind": "fixed_setup_source",
+              "source_sha": "d139dee9ccd660c9ebbbf1964a0fce97937bd5c3"
+            },
+            "execution": {
+              "app_root": ".",
+              "baseline": {
+                "kind": "static_source",
+                "paths": [
+                  "stories/index.html"
+                ]
+              },
+              "build_command": [
+                "python3",
+                ".mlai/materialize-existing-articles.py"
+              ],
+              "build_cwd": ".",
+              "content_path_pattern": "data/articles.json",
+              "content_source_kind": "shared_collection",
+              "environment_names": [],
+              "install_command": [],
+              "install_cwd": ".",
+              "listing_route": "/stories",
+              "lockfiles": [],
+              "materialize_command": [
+                "python3",
+                ".mlai/materialize-existing-articles.py"
+              ],
+              "materialize_cwd": ".",
+              "package_manager": "",
+              "preview_command": [
+                "python3",
+                "-m",
+                "http.server",
+                "3000",
+                "--bind",
+                "127.0.0.1",
+                "--directory",
+                "cf-articles-preview"
+              ],
+              "preview_cwd": ".",
+              "route_template": "/stories/{slug}/",
+              "runtime_family": "static",
+              "runtime_version": "3.11",
+              "static_source_materialization": {
+                "app_root": "",
+                "detail_source_path_pattern": "stories/{slug}/index.html",
+                "listing_source_path": "stories/index.html",
+                "materializer_command": [
+                  "python3",
+                  ".mlai/materialize-existing-articles.py"
+                ],
+                "preview_output_dir": "cf-articles-preview",
+                "schema_version": 1
+              },
+              "verify_steps": [
+                {
+                  "command": [
+                    "python3",
+                    "scripts/check_site.py"
+                  ],
+                  "cwd": ".",
+                  "name": "Customer check"
+                }
+              ]
+            },
+            "oracle": {
+              "artifact_digest": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+              "artifact_marker_routes": [
+                "/stories"
+              ],
+              "existing_seed_source": null,
+              "expected_h1": "Seed",
+              "port": 3000,
+              "seed_is_setup_example": false,
+              "seed_slug": "seed"
+            },
+            "verifier": {
+              "execution_schema_version": 1,
+              "playwright_version": "1.58.0",
+              "profile": "native_ci_v1",
+              "python_version": "3.11",
+              "runner_sha256": "41eb86a32a9edd2a65ff95119fbcc8eae1fddca37c1adcd234877440e12caee4"
+            }
+          }
+        },
+        "schema_version": 1
+      },
+      "normalizer_version": 2,
+      "original_scope": {
+        "app_root": "",
+        "branch": "main",
+        "connection_generation": 2,
+        "deletion_epoch": 0,
+        "github_repo": "fixture/site",
+        "repository_id": 17,
+        "setup_operation_attempt": 1,
+        "setup_operation_id": "00000000-0000-0000-0000-000000000021",
+        "site_origin": "https://fixture.invalid",
+        "website_connection_id": "00000000-0000-0000-0000-000000000013"
+      },
+      "pipeline": {
+        "marker_policy": {
+          "artifact_digest": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+          "kind": "artifact_digest",
+          "listing_path": "stories/index.html",
+          "meta_name": "mlai-artifact-digest"
+        },
+        "profile": "original_python_static_marker_v1",
+        "wrapper_path": ".mlai/materialize-existing-articles.py",
+        "wrapper_sha256": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+      },
+      "probe_record_digests": [
+        "719dbfa942566803ed143ed185b193ee977b16cbf8590c38d2f2ed20cdf995e2",
+        "741ced38237d10077c2c7b98ce6e08d226d8d3d272002ac3e65900f386f9b9cf"
+      ],
+      "recipe": {
+        "checks": [
+          {
+            "argv": [
+              "python3",
+              "scripts/check_site.py"
+            ],
+            "job": "check",
+            "step": 1,
+            "workflow_path": ".github/workflows/site-checks.yml"
+          }
+        ],
+        "detail_path_pattern": "stories/{slug}/index.html",
+        "generated_paths": [
+          "LINKS.md"
+        ],
+        "kind": "static_json_existing_publisher",
+        "listing_path": "stories/index.html",
+        "publisher_argv": [
+          "python3",
+          "scripts/materialize_articles.py"
+        ],
+        "schema_version": 1,
+        "site_origin": "https://fixture.invalid",
+        "source_inventory_digest": "eb3edb1e0e64423db5fcbbdf870c2cd578f27f7a18e4ba471834a0ea0ef5601d",
+        "source_sha": "d139dee9ccd660c9ebbbf1964a0fce97937bd5c3",
+        "store_path": "data/articles.json"
+      }
+    },
+    "schema_version": 2
+  },
+  "original_binding": {
+    "app_root": "",
+    "branch": "main",
+    "connection_generation": 2,
+    "deletion_epoch": 0,
+    "github_repo": "fixture/site",
+    "publishing_inputs_digest": "1e03e9c46e1f2da5a36b279239d0f44deedd42cb3147b7aba0344bd8e02dc9b0",
+    "repository_id": 17,
+    "setup_operation_attempt": 1,
+    "setup_operation_id": "00000000-0000-0000-0000-000000000021",
+    "site_origin": "https://fixture.invalid",
+    "source_inventory_digest": "eb3edb1e0e64423db5fcbbdf870c2cd578f27f7a18e4ba471834a0ea0ef5601d",
+    "source_sha": "d139dee9ccd660c9ebbbf1964a0fce97937bd5c3",
+    "source_tree_sha": "233aaf7bac4b5eb3e39c73f0f6cf0211ec0ae62a",
+    "website_connection_id": "00000000-0000-0000-0000-000000000013"
+  },
+  "provenance": {
+    "component_ci_run": 39117612063,
+    "component_source_sha": "ee6391cb0f15d7d1a1f6cc17aae069567b603121",
+    "original_scope": "synthetic fixture only",
+    "pipeline_verified": false,
+    "publication_authority": false,
+    "wrapper_sha256": "placeholder; no wrapper was executed or admitted"
+  },
+  "receipt": {
+    "component_result": {
+      "isolation": {
+        "kind": "ephemeral_container",
+        "lockfile_digests": {},
+        "network": "none",
+        "runtime_image": "sha256:39b4222d4dadf70d44220ecfe385895cf6e4d5e6660a32b9b68ad97e23a083d7",
+        "runtime_image_reference": "mlai-publisher-broker-fixture",
+        "source_ref": "main",
+        "source_sha": "d139dee9ccd660c9ebbbf1964a0fce97937bd5c3",
+        "source_tree_sha": "233aaf7bac4b5eb3e39c73f0f6cf0211ec0ae62a"
+      },
+      "publisher_component": {
+        "browser_proven": false,
+        "independent_publications": [
+          {
+            "article_count": 36,
+            "generated_sha256": {
+              "LINKS.md": "26069edda6aa05bc8fe8ffec9c90f6ae6ebe60d20a1df4307afb593f5affddf0",
+              "data/articles.json": "c3d92c31e48fc8870f0f8188c843b415939b49bd74ae33ee55f6361709c72967",
+              "stories/index.html": "daad2e09e263c4a2ec2b93749c099a8b244f6af8f0ddd262381953510d99fec5"
+            },
+            "new_detail_sha256": {
+              "stories/broker-article-1/index.html": "6d0a9a2482584394ddc0f856da73325bb9d5ea6b9d2e4edd0ffadd6089d277d5"
+            },
+            "output_inventory_digest": "44df3ccbeeb4efb1c0ee31cf0ea516ec96c57a5fc450109e9217a1090fc3da70"
+          },
+          {
+            "article_count": 36,
+            "generated_sha256": {
+              "LINKS.md": "045b19dab8830184a4fdf9bc060416b39a66b6ab522465a602a39e7720df45ce",
+              "data/articles.json": "1d0affc38f3da8d5bf3e34dead97dd1c9decd47f9e9f9e8759cf8d580d49d04a",
+              "stories/index.html": "e9400802282adc0374332d25fe3be303ebc85352ae76998993050c20192f0f3b"
+            },
+            "new_detail_sha256": {
+              "stories/broker-article-2/index.html": "06fdbdfaa327078732a9d1df6bd023717e8c9acb3caed834d895ae703ca37b38"
+            },
+            "output_inventory_digest": "322d390bb72cff8ec0cb46dfb8055991add4c443eb5af53bb8485e6b25215874"
+          }
+        ],
+        "kind": "existing_publisher_execution_component",
+        "live_goal_proof": false,
+        "original_article_count": 35,
+        "production_adoption": "unimplemented",
+        "recipe_digest": "b3912ba10ab204fe31f05476623f87539ed900407f792d82466de2e2b666e7dc",
+        "record_digests": [
+          "719dbfa942566803ed143ed185b193ee977b16cbf8590c38d2f2ed20cdf995e2",
+          "741ced38237d10077c2c7b98ce6e08d226d8d3d272002ac3e65900f386f9b9cf"
+        ],
+        "regeneration_reproduced": true,
+        "schema_version": 1,
+        "source_inventory_digest": "eb3edb1e0e64423db5fcbbdf870c2cd578f27f7a18e4ba471834a0ea0ef5601d",
+        "source_sha_input": "d139dee9ccd660c9ebbbf1964a0fce97937bd5c3",
+        "status": "passed",
+        "successive_publications": [
+          {
+            "article_count": 36,
+            "generated_sha256": {
+              "LINKS.md": "26069edda6aa05bc8fe8ffec9c90f6ae6ebe60d20a1df4307afb593f5affddf0",
+              "data/articles.json": "c3d92c31e48fc8870f0f8188c843b415939b49bd74ae33ee55f6361709c72967",
+              "stories/index.html": "daad2e09e263c4a2ec2b93749c099a8b244f6af8f0ddd262381953510d99fec5"
+            },
+            "new_detail_sha256": {
+              "stories/broker-article-1/index.html": "6d0a9a2482584394ddc0f856da73325bb9d5ea6b9d2e4edd0ffadd6089d277d5"
+            },
+            "output_inventory_digest": "44df3ccbeeb4efb1c0ee31cf0ea516ec96c57a5fc450109e9217a1090fc3da70"
+          },
+          {
+            "article_count": 37,
+            "generated_sha256": {
+              "LINKS.md": "fb5a70af208b8cf85d86726ce806aadc781b3b9a1675eea50e10e7d5543b8744",
+              "data/articles.json": "8edeefa5a0c9d1da32a676cf5355ac2b0317d8523f5533250f53cbcdb41afee2",
+              "stories/index.html": "23a90c3cbb7141e295819f816eea54249c73c5cf931937eecc830a2c5f56ad16"
+            },
+            "new_detail_sha256": {
+              "stories/broker-article-1/index.html": "6d0a9a2482584394ddc0f856da73325bb9d5ea6b9d2e4edd0ffadd6089d277d5",
+              "stories/broker-article-2/index.html": "06fdbdfaa327078732a9d1df6bd023717e8c9acb3caed834d895ae703ca37b38"
+            },
+            "output_inventory_digest": "a86dfe84c8e3984260dbbc8b43dfdffd5f27feca782d08832ffa26c938c07f45"
+          }
+        ],
+        "support_proven": false
+      },
+      "publisher_execution": {
+        "controller_sha256": "a8f0bec0551a0a0193769387124321f9fbd03374c24e4f461bd1917df66b06fb",
+        "kind": "pinned_existing_publisher_component",
+        "python_version": "3.11.17",
+        "pyyaml_version": "6.0.3",
+        "recipe_digest": "b3912ba10ab204fe31f05476623f87539ed900407f792d82466de2e2b666e7dc",
+        "record_digests": [
+          "719dbfa942566803ed143ed185b193ee977b16cbf8590c38d2f2ed20cdf995e2",
+          "741ced38237d10077c2c7b98ce6e08d226d8d3d272002ac3e65900f386f9b9cf"
+        ],
+        "schema_version": 1,
+        "source_inventory_digest": "eb3edb1e0e64423db5fcbbdf870c2cd578f27f7a18e4ba471834a0ea0ef5601d",
+        "source_sha": "d139dee9ccd660c9ebbbf1964a0fce97937bd5c3",
+        "source_tree_sha": "233aaf7bac4b5eb3e39c73f0f6cf0211ec0ae62a"
+      }
+    },
+    "kind": "original_publisher_component",
+    "original_scope_digest": "01093b0dd5846b2b96648d30c39a5e944d8e14c56ef7c98f20aaae3fe8e31f2c",
+    "pipeline_verified": false,
+    "publication_authority": false,
+    "publishing_inputs_digest": "1e03e9c46e1f2da5a36b279239d0f44deedd42cb3147b7aba0344bd8e02dc9b0",
+    "receipt_id": "bb26f0f8866e96f95fe2920a12fe0bfd8b645d2cf92485735061c2cbd5d227d6",
+    "schema_version": 1
+  },
+  "trusted_profile": {
+    "executor": {
+      "controller_sha256": "a8f0bec0551a0a0193769387124321f9fbd03374c24e4f461bd1917df66b06fb",
+      "profile": "pinned_existing_publisher_v1",
+      "python_version": "3.11.17",
+      "pyyaml_version": "6.0.3",
+      "runtime_image": "sha256:39b4222d4dadf70d44220ecfe385895cf6e4d5e6660a32b9b68ad97e23a083d7"
+    },
+    "native_verifier": {
+      "execution_schema_version": 1,
+      "playwright_version": "1.58.0",
+      "profile": "native_ci_v1",
+      "python_version": "3.11",
+      "runner_sha256": "41eb86a32a9edd2a65ff95119fbcc8eae1fddca37c1adcd234877440e12caee4"
+    },
+    "wrapper_sha256": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+  }
+}

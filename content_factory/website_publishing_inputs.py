@@ -223,6 +223,9 @@ def validate_candidate(value):
 def candidate_for_target(target):
     """Read the single nested candidate location; absent is explicitly legacy."""
     contract = target.get("contract") if isinstance(target, dict) else None
+    if isinstance(contract, dict) and any(isinstance(key, str) and key.startswith("publishing_inputs_v")
+            and key != "publishing_inputs_v1" for key in contract):
+        raise PublishingInputsError("publishing_inputs_version_unsupported")
     if isinstance(contract, dict) and "publishing_inputs_v1" in contract:
         candidate = validate_candidate(contract["publishing_inputs_v1"])
         frozen = candidate["payload"]["publishing"]["target"]
@@ -245,4 +248,4 @@ def candidate_for_target(target):
 def has_candidate(target):
     """Detect presence even when malformed, so old proofs cannot bypass the fence."""
     contract = target.get("contract") if isinstance(target, dict) else None
-    return isinstance(contract, dict) and "publishing_inputs_v1" in contract
+    return isinstance(contract, dict) and any(isinstance(key, str) and key.startswith("publishing_inputs_v") for key in contract)

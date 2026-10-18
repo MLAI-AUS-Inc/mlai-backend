@@ -1,0 +1,367 @@
+{
+  "additionalProperties": false,
+  "properties": {
+    "component_result": {
+      "additionalProperties": false,
+      "properties": {
+        "isolation": {
+          "additionalProperties": false,
+          "properties": {
+            "kind": {
+              "const": "ephemeral_container"
+            },
+            "lockfile_digests": {
+              "additionalProperties": false,
+              "properties": {},
+              "required": [],
+              "type": "object"
+            },
+            "network": {
+              "const": "none"
+            },
+            "runtime_image": {
+              "maxLength": 500,
+              "minLength": 1,
+              "pattern": "sha256:[a-f0-9]{64}",
+              "type": "string"
+            },
+            "runtime_image_reference": {
+              "maxLength": 500,
+              "minLength": 0,
+              "type": "string"
+            },
+            "source_ref": {
+              "maxLength": 500,
+              "minLength": 1,
+              "type": "string"
+            },
+            "source_sha": {
+              "maxLength": 500,
+              "minLength": 1,
+              "pattern": "[a-f0-9]{40}(?:[a-f0-9]{24})?",
+              "type": "string"
+            },
+            "source_tree_sha": {
+              "maxLength": 500,
+              "minLength": 1,
+              "pattern": "[a-f0-9]{40}(?:[a-f0-9]{24})?",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "source_sha",
+            "source_tree_sha",
+            "source_ref",
+            "runtime_image",
+            "runtime_image_reference",
+            "lockfile_digests",
+            "network"
+          ],
+          "type": "object"
+        },
+        "publisher_component": {
+          "additionalProperties": false,
+          "properties": {
+            "browser_proven": {
+              "const": false
+            },
+            "independent_publications": {
+              "items": {
+                "additionalProperties": false,
+                "properties": {
+                  "article_count": {
+                    "maximum": 2002,
+                    "minimum": 1,
+                    "type": "integer"
+                  },
+                  "generated_sha256": {
+                    "additionalProperties": {
+                      "maxLength": 500,
+                      "minLength": 1,
+                      "pattern": "[a-f0-9]{64}",
+                      "type": "string"
+                    },
+                    "maxProperties": 22,
+                    "type": "object"
+                  },
+                  "new_detail_sha256": {
+                    "additionalProperties": {
+                      "maxLength": 500,
+                      "minLength": 1,
+                      "pattern": "[a-f0-9]{64}",
+                      "type": "string"
+                    },
+                    "maxProperties": 2,
+                    "type": "object"
+                  },
+                  "output_inventory_digest": {
+                    "maxLength": 500,
+                    "minLength": 1,
+                    "pattern": "[a-f0-9]{64}",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "article_count",
+                  "output_inventory_digest",
+                  "generated_sha256",
+                  "new_detail_sha256"
+                ],
+                "type": "object"
+              },
+              "maxItems": 2,
+              "minItems": 2,
+              "type": "array"
+            },
+            "kind": {
+              "const": "existing_publisher_execution_component"
+            },
+            "live_goal_proof": {
+              "const": false
+            },
+            "original_article_count": {
+              "maximum": 2000,
+              "minimum": 0,
+              "type": "integer"
+            },
+            "production_adoption": {
+              "const": "unimplemented"
+            },
+            "recipe_digest": {
+              "maxLength": 500,
+              "minLength": 1,
+              "pattern": "[a-f0-9]{64}",
+              "type": "string"
+            },
+            "record_digests": {
+              "items": {
+                "maxLength": 500,
+                "minLength": 1,
+                "pattern": "[a-f0-9]{64}",
+                "type": "string"
+              },
+              "maxItems": 2,
+              "minItems": 2,
+              "type": "array"
+            },
+            "regeneration_reproduced": {
+              "const": true
+            },
+            "schema_version": {
+              "const": 1
+            },
+            "source_inventory_digest": {
+              "maxLength": 500,
+              "minLength": 1,
+              "pattern": "[a-f0-9]{64}",
+              "type": "string"
+            },
+            "source_sha_input": {
+              "maxLength": 500,
+              "minLength": 1,
+              "pattern": "[a-f0-9]{40}(?:[a-f0-9]{24})?",
+              "type": "string"
+            },
+            "status": {
+              "const": "passed"
+            },
+            "successive_publications": {
+              "items": {
+                "additionalProperties": false,
+                "properties": {
+                  "article_count": {
+                    "maximum": 2002,
+                    "minimum": 1,
+                    "type": "integer"
+                  },
+                  "generated_sha256": {
+                    "additionalProperties": {
+                      "maxLength": 500,
+                      "minLength": 1,
+                      "pattern": "[a-f0-9]{64}",
+                      "type": "string"
+                    },
+                    "maxProperties": 22,
+                    "type": "object"
+                  },
+                  "new_detail_sha256": {
+                    "additionalProperties": {
+                      "maxLength": 500,
+                      "minLength": 1,
+                      "pattern": "[a-f0-9]{64}",
+                      "type": "string"
+                    },
+                    "maxProperties": 2,
+                    "type": "object"
+                  },
+                  "output_inventory_digest": {
+                    "maxLength": 500,
+                    "minLength": 1,
+                    "pattern": "[a-f0-9]{64}",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "article_count",
+                  "output_inventory_digest",
+                  "generated_sha256",
+                  "new_detail_sha256"
+                ],
+                "type": "object"
+              },
+              "maxItems": 2,
+              "minItems": 2,
+              "type": "array"
+            },
+            "support_proven": {
+              "const": false
+            }
+          },
+          "required": [
+            "schema_version",
+            "kind",
+            "status",
+            "recipe_digest",
+            "source_sha_input",
+            "source_inventory_digest",
+            "record_digests",
+            "original_article_count",
+            "regeneration_reproduced",
+            "independent_publications",
+            "successive_publications",
+            "support_proven",
+            "live_goal_proof",
+            "browser_proven",
+            "production_adoption"
+          ],
+          "type": "object"
+        },
+        "publisher_execution": {
+          "additionalProperties": false,
+          "properties": {
+            "controller_sha256": {
+              "maxLength": 500,
+              "minLength": 1,
+              "pattern": "[a-f0-9]{64}",
+              "type": "string"
+            },
+            "kind": {
+              "const": "pinned_existing_publisher_component"
+            },
+            "python_version": {
+              "maxLength": 20,
+              "minLength": 1,
+              "pattern": "\\d+\\.\\d+\\.\\d+",
+              "type": "string"
+            },
+            "pyyaml_version": {
+              "maxLength": 20,
+              "minLength": 1,
+              "pattern": "\\d+\\.\\d+\\.\\d+",
+              "type": "string"
+            },
+            "recipe_digest": {
+              "maxLength": 500,
+              "minLength": 1,
+              "pattern": "[a-f0-9]{64}",
+              "type": "string"
+            },
+            "record_digests": {
+              "items": {
+                "maxLength": 500,
+                "minLength": 1,
+                "pattern": "[a-f0-9]{64}",
+                "type": "string"
+              },
+              "maxItems": 2,
+              "minItems": 2,
+              "type": "array"
+            },
+            "schema_version": {
+              "const": 1
+            },
+            "source_inventory_digest": {
+              "maxLength": 500,
+              "minLength": 1,
+              "pattern": "[a-f0-9]{64}",
+              "type": "string"
+            },
+            "source_sha": {
+              "maxLength": 500,
+              "minLength": 1,
+              "pattern": "[a-f0-9]{40}(?:[a-f0-9]{24})?",
+              "type": "string"
+            },
+            "source_tree_sha": {
+              "maxLength": 500,
+              "minLength": 1,
+              "pattern": "[a-f0-9]{40}(?:[a-f0-9]{24})?",
+              "type": "string"
+            }
+          },
+          "required": [
+            "schema_version",
+            "kind",
+            "source_sha",
+            "source_tree_sha",
+            "source_inventory_digest",
+            "recipe_digest",
+            "record_digests",
+            "controller_sha256",
+            "python_version",
+            "pyyaml_version"
+          ],
+          "type": "object"
+        }
+      },
+      "required": [
+        "publisher_component",
+        "publisher_execution",
+        "isolation"
+      ],
+      "type": "object"
+    },
+    "kind": {
+      "const": "original_publisher_component"
+    },
+    "original_scope_digest": {
+      "maxLength": 500,
+      "minLength": 1,
+      "pattern": "[a-f0-9]{64}",
+      "type": "string"
+    },
+    "pipeline_verified": {
+      "const": false
+    },
+    "publication_authority": {
+      "const": false
+    },
+    "publishing_inputs_digest": {
+      "maxLength": 500,
+      "minLength": 1,
+      "pattern": "[a-f0-9]{64}",
+      "type": "string"
+    },
+    "receipt_id": {
+      "maxLength": 500,
+      "minLength": 1,
+      "pattern": "[a-f0-9]{64}",
+      "type": "string"
+    },
+    "schema_version": {
+      "const": 1
+    }
+  },
+  "required": [
+    "schema_version",
+    "kind",
+    "publishing_inputs_digest",
+    "original_scope_digest",
+    "component_result",
+    "pipeline_verified",
+    "publication_authority",
+    "receipt_id"
+  ],
+  "type": "object"
+}
