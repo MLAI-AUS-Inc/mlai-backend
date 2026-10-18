@@ -84,6 +84,31 @@ def preserve_during_prepare_write(op, write):
         return write()
 
 
+def append_observation(op, event, *, now, initial_setup=False):
+    """Append a private event under the caller's original-operation row lock."""
+    if not isinstance(event, str) or not goals.DIGEST.fullmatch(event):
+        return
+    raw = goals.mapping(op.receipt).get("goal_audit")
+    if not _valid(raw, str(op.pk)):
+        seed(op, from_start=False, now=now)
+        raw = goals.mapping(op.receipt).get("goal_audit")
+    if not _valid(raw, str(op.pk)):
+        return
+    raw = deepcopy(raw)
+    if event in raw["event_ids"]:
+        return
+    if len(raw["event_ids"]) < MAX_EVENTS:
+        raw["event_ids"].append(event)
+        if initial_setup and raw["from_start"] and raw["initial_setup_event"] is None:
+            raw["initial_setup_event"] = event
+    else:
+        raw["overflow"] = True
+    raw["last_observed_at"] = now.isoformat()
+    op.receipt = {**op.receipt, "goal_audit": raw}
+    # updated_at is the prepare worker's lease, not an audit timestamp.
+    op.save(update_fields=["receipt"])
+
+
 def observe_owner_http(request, context, config, *, action, run_id=None, initial_setup=False, operation=None):
     """Record a deduplicated owner HTTP intent, excluding internal goal dispatch.
 
@@ -127,29 +152,12 @@ def observe_owner_http(request, context, config, *, action, run_id=None, initial
             scope = goals.scope_for(connection, context.company.pk)
             if not goals.valid_goal(goal, scope) or goal.get("goal_id") != str(op.pk):
                 return
-            raw = goals.mapping(op.receipt).get("goal_audit")
             now = timezone.now()
-            if not _valid(raw, str(op.pk)):
-                seed(op, from_start=False, now=now)
-                raw = op.receipt["goal_audit"]
-            raw = deepcopy(raw)
             identity = (request.headers.get("Idempotency-Key") or request.data.get("idempotency_key")
                 or request.data.get("client_request_id") or str(uuid4()))
             event = goals.digest({"kind": "owner_http_intent", "goal_id": str(op.pk),
                 "action": str(action)[:100], "run_id": str(run_id or "")[:100],
                 "actor_id": str(request.user.pk), "request_id": str(identity)[:1024]})
-            if event in raw["event_ids"]:
-                return
-            if len(raw["event_ids"]) < MAX_EVENTS:
-                raw["event_ids"].append(event)
-                if initial_setup and raw["from_start"] and raw["initial_setup_event"] is None:
-                    raw["initial_setup_event"] = event
-            else:
-                raw["overflow"] = True
-            raw["last_observed_at"] = now.isoformat()
-            op.receipt = {**op.receipt, "goal_audit": raw}
-            # updated_at is the prepare worker's lease, not an audit timestamp.
-            # Its final CAS preserves this journal under the same row lock.
-            op.save(update_fields=["receipt"])
+            append_observation(op, event, now=now, initial_setup=initial_setup)
     except Exception:
         logger.warning("articles_goal_audit_observation_unavailable")

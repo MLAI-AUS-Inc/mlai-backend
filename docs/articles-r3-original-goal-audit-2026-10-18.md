@@ -55,7 +55,7 @@ company, run ownership, connection generation and exact current goal scope.
 Completed goals stop accepting observations. The journal is bounded at 512
 events; overflow is an explicit coverage gap, never a reset or exhaustive zero.
 
-An observation locks only its original operation row and writes its receipt. It
+The original owner wrapper locks its operation row and writes its receipt. It
 does not change the worker's `updated_at` lease. A prepare's final compare-and-set
 preserves newer audit observations while holding that row lock. This prevents a
 worker snapshot from overwriting an owner action without forcing a new lease or
@@ -108,3 +108,58 @@ Effective service flags and revisions use the R4 checker as their owning
 semantics. This audit does not infer CF state, manufacture a service revision or
 turn a backend limit into reported provider spend. It is a truthful R3 producer
 component; the full zoo and the four gates remain unproved.
+
+## Review mutation intent observation
+
+The authenticated article-review facade now records supported mutation intents
+before billing and Content Factory dispatch. A validated attempt still counts
+if billing, revision conflict or service availability later prevents completion.
+These are authenticated principal intents; a browser or API caller can be
+automated, so they do not prove a human origin. Every public audit still returns
+`complete:false`, `human_actions:null` and the full existing coverage-gap list.
+
+The new observer requires the run's exact saved connection, generation,
+repository, branch, app root, domain and source. It locks the current connection
+and an unambiguous prepare parent: agreeing explicit original-goal identities,
+or exactly one saved parent reference to that run. It never chooses a latest
+goal. The goal's full company/organization/connection/configuration/deletion
+scope and any saved budget-scope digest must match. Unowned, conflicting,
+orphaned, ambiguous, stale and inactive/terminal parents are not reassigned.
+They emit fixed unavailable diagnostics and retain incomplete coverage. This is
+not a terminal coverage checkpoint or a solution for successor attribution.
+
+Text/batch/image/undo/AI-permission updates use the real review protocol's
+validated `operationId` and an immutable intent fingerprint. The fingerprint
+excludes `expectedRevision`, as the actual retry protocol does. Identical retries
+count once; changed edits under the same ID and identical edits with distinct IDs
+are separate attempted interventions. Batch aliases share their actual normalized
+`applyUpdate` identity. `discardImage` has no operation replay contract, so each
+request counts even when a caller repeats an idempotency header. GET and `refresh`
+do not count: refresh may be automatic polling or recovery. Those ambiguous paths,
+comment CRUD, MCP controls and external actions remain coverage gaps.
+
+For direct mutations, this observer validates the action, replay-identity syntax
+and revision shape; the service still owns field/content validation. A later
+semantic refusal counts the authenticated attempted intervention conservatively,
+without claiming that an edit succeeded or that its origin was human. Batched
+updates use the backend's existing full normalization. A valid newest-revision
+HTTP edit with no explicit original-goal binding, or a saved run whose source is
+older than its still-active parent's source, remains explicitly unavailable.
+Neither is reassigned to a newer goal or interpreted as zero human actions.
+
+Only a private digest enters the existing bounded 512-event journal. No review
+text, actor, raw operation ID or request key is added to public receipts or logs.
+Intent hashing is capped at 1 MiB and rejects nonfinite or malformed data; missing
+or oversized identities remain unmeasured. Optional observation errors do not
+change the review response. Writes preserve the worker lease and use the same
+prepare persistence guard as other observations. Existing default-off enrollment
+and doctor gates apply; disabled observation adds no lookup or write.
+
+The isolated review tests exercise actual DRF authentication, founder selection,
+ownership, review dispatch, normalized batch persistence and the public original
+operation reader. Only ORM/transactions and the Content Factory service boundary
+are replaced. Before the hook, three regressions observed zero instead of the
+new intent count. A paired local check then feeds these actual public receipts
+through CF #1089's telemetry and shared zero-action predicate: observed zero,
+one and two intents all remain incomplete and nonqualifying. Synthetic test
+records are never installed as production or nightly evidence.
