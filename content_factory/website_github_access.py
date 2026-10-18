@@ -6,6 +6,20 @@ from django.utils import timezone
 from .website_contract import evidence_digest
 
 
+# How long a probe result stays readable by observation-only projections (the
+# bootstrap and website journey never probe). A verified result has to outlive
+# the article form, or a ready website reads as "not set up" mid-form; article
+# admission always re-probes (force=True), and any local revocation, reconnect
+# or reinstall changes the observation key, so a longer positive window cannot
+# admit work on revoked access. Failures stay short so a fix shows quickly.
+VERIFIED_ACCESS_OBSERVATION_SECONDS = 15 * 60
+FAILED_ACCESS_OBSERVATION_SECONDS = 15
+
+
+def access_observation_seconds(verified) -> int:
+    return VERIFIED_ACCESS_OBSERVATION_SECONDS if verified else FAILED_ACCESS_OBSERVATION_SECONDS
+
+
 def verify_account_access(user, *, installations=(), connection=None, force=False, allow_probe=True):
     """Read a finite observation, probing only at an explicitly allowed boundary."""
     from integrations.services.github_app import probe_installation_liveness, INSTALLATION_LIVE
@@ -25,7 +39,7 @@ def verify_account_access(user, *, installations=(), connection=None, force=Fals
     try:
         verified = any(probe_installation_liveness(identifier) == INSTALLATION_LIVE for identifier in sorted(ids))
         proof = {"verified": verified, "reasonCode": "" if verified else "github_access_required", "checkedAt": timezone.now().isoformat()}
-        cache.set(key, proof, 60 if verified else 15)
+        cache.set(key, proof, access_observation_seconds(verified))
         return proof
     finally:
         cache.delete(lease)
