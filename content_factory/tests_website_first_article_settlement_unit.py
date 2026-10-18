@@ -325,6 +325,25 @@ class ParentSettlementTests(SimpleTestCase):
             settlement.stop_children(evidence, parent_id=self.op.pk)
         remote.assert_not_called()
 
+    def test_parent_stop_sends_captured_scope_before_provider_rebind(self):
+        from .website_cancellation_retirement import expected_article_cancellation
+        child = self.child()
+        child.status, child.result = "failed", {}
+        evidence = settlement.capture(self.op, self.held)
+        expected = deepcopy(expected_article_cancellation(child))
+        def rebind_after_send(**kwargs):
+            self.assertEqual(kwargs["payload"]["expected_cancellation_v1"], expected)
+            child.run_request["operation_attempt"] += 1
+            return {"status": "scope_mismatch"}
+        with patch("workflow_runs.models.ContentFactoryRun.objects.filter") as selected, \
+            patch("content_factory.vibe_marketing_views._call_content_factory_run_action", side_effect=rebind_after_send) as remote, \
+            patch("content_factory.service_views._apply_cancellation_receipt") as apply:
+            selected.return_value.first.return_value = child
+            settlement.stop_children(evidence, parent_id=self.op.pk)
+        remote.assert_called_once()
+        apply.assert_not_called()
+        self.credit.assert_not_called()
+
     def test_completed_published_child_is_not_cancelled_for_missing_stop_proof(self):
         child = self.child("article-goal-pending-publication-v1.json")
         child.status = "completed"

@@ -229,6 +229,7 @@ def stop_children(evidence, *, parent_id):
     """Request bounded stops after releasing billing locks; no credit occurs here."""
     from workflow_runs.models import ContentFactoryRun
     from .vibe_marketing_views import _call_content_factory_run_action
+    from .website_cancellation_retirement import expected_article_cancellation
     from .service_views import _apply_cancellation_receipt
     from .website_models import WebsiteConnectionOperation
     from .website_first_article_billing import REFUND_TERMINAL, _reservation
@@ -250,7 +251,8 @@ def stop_children(evidence, *, parent_id):
             continue
         try:
             remote = _call_content_factory_run_action(run_id=run.run_id, action="cancel", workflow=run.workflow,
-                payload={"reason": "first_article_goal_ended"}, transport_errors_are_pending=True)
+                payload={"reason": "first_article_goal_ended",
+                    "expected_cancellation_v1": expected_article_cancellation(run)}, transport_errors_are_pending=True)
             if cancellation_receipt(run, remote) is None:
                 continue
             incoming = {**goals.mapping(remote.get("result")), **{key: remote[key]

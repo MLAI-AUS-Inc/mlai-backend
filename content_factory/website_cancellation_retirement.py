@@ -53,8 +53,9 @@ def run_for(op, run_id):
     from workflow_runs.models import ContentFactoryRun
     run = ContentFactoryRun.objects.filter(run_id=run_id, organization_id=op.connection.organization_id).first()
     request = goals.mapping(run.run_request) if run else {}
+    binding = run_binding(run) if run else None
     owners = {str(op.payload.get("cancelled_operation_id")), *map(str, op.payload.get("cancelled_child_operation_ids", []))}
-    if (run is None or goals.mapping(op.payload.get("cancel_run_bindings")).get(run_id) != run_binding(run)
+    if (run is None or binding is None or goals.mapping(op.payload.get("cancel_run_bindings")).get(run_id) != binding
         or str(run.organization_id) != str(op.connection.organization_id)
         or request.get("website_connection_id") != str(op.connection_id)
         or type(request.get("connection_generation")) is not int or request["connection_generation"] != op.generation
@@ -123,6 +124,8 @@ def acknowledge(op, run, run_id, status, body):
             _remember(op, "cancel_cleanup_obligation_run_ids", run_id)
         return True
     request = goals.mapping(run.run_request)
+    if type(request.get("operation_attempt")) is not int or request["operation_attempt"] < 1:
+        return False
     # These observed non-article responses identify the exact fenced job/attempt.
     # Generic 200/404, a wrong endpoint and an untyped article response do not.
     direct = (body.get("run_id") == run_id and body.get("workflow") == run.workflow

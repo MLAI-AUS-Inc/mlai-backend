@@ -274,6 +274,8 @@ class ArticleCancellationSettlementTests(SimpleTestCase):
             locked.return_value.filter.return_value.first.return_value = self.run
             self.assertEqual(reconciliation._settle_exhausted_article_runs(limit=10, now=timezone.now()), 1)
         remote.assert_called_once()
+        from .website_cancellation_retirement import expected_article_cancellation
+        self.assertEqual(remote.call_args.kwargs["payload"]["expected_cancellation_v1"], expected_article_cancellation(self.run))
         self.assertEqual(self.run.status, "cancelled")
         self.assertTrue(self.run.result["reconciliation_refund_pending"])
         self.assertEqual(self.run.result["article_settlement_attempts"], 1)
@@ -433,7 +435,7 @@ class ArticleCancellationSettlementTests(SimpleTestCase):
                 patch.object(reconciliation.ContentFactoryRun.objects, "select_for_update") as locked, \
                 patch.object(reconciliation.ContentFactoryRun.objects, "filter") as rows, \
                 patch.object(reconciliation.requests, "post", return_value=SimpleNamespace(status_code=202,
-                    json=lambda: {"article_cancellation_v1": receipt})), \
+                    json=lambda: {"article_cancellation_v1": receipt})) as remote, \
                 patch.object(reconciliation, "_finalize_run_failure") as fail, \
                 patch.object(service_views, "_serialize_content_factory_run", side_effect=lambda run: {"status": run.status}), \
                 patch("content_factory.website_operations.observe_workflow_status"):
@@ -441,6 +443,8 @@ class ArticleCancellationSettlementTests(SimpleTestCase):
             rows.return_value.update.return_value = 1
             outcome = reconciliation.recover_stalled_run(self.run, base_url="https://worker.fixture.test", headers={}, now=timezone.now())
         fail.assert_not_called()
+        from .website_cancellation_retirement import expected_article_cancellation
+        self.assertEqual(remote.call_args.kwargs["json"]["expected_cancellation_v1"], expected_article_cancellation(self.run))
         self.assertEqual(outcome, "cancelled_stalled")
         self.assertEqual(self.run.status, "cancelled")
         self.assertTrue(self.run.result["reconciliation_required"])

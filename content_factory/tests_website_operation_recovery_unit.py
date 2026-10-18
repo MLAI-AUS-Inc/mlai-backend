@@ -134,7 +134,8 @@ class WebsiteOperationRecoveryTests(SimpleTestCase):
         from .website_models import WebsiteConnection
         self.run.pk, self.run.status, self.run.resume_available, self.run.error = 7, "running", True, "Old progress"
         self.run.save = Mock()
-        completed = SimpleNamespace(status="completed", resume_available=False, error="", result={"article": "Saved"})
+        completed = SimpleNamespace(**{**vars(self.run), "workflow": "article_system_setup",
+            "status": "completed", "resume_available": False, "error": "", "result": {"article": "Saved"}})
         with patch.object(authority, "authority_guard", side_effect=WebsiteAuthorityError("website_connection_changed", "Changed")), \
                 patch.object(authority, "contract_for", return_value=self.binding), \
                 patch.object(operations.transaction, "atomic", side_effect=lambda: nullcontext()), \

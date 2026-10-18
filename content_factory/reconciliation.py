@@ -569,7 +569,8 @@ def recover_stalled_run(run, *, base_url, headers, now):
             return _stop_stalled_article(run, base_url=base_url, headers=headers, now=now)
         try:
             requests.post(f"{base_url}/api/runs/{run.run_id}/cancel", headers=headers,
-                json={"reason": "worker_heartbeat_lost"}, timeout=(3, 15))
+                json={"reason": "worker_heartbeat_lost",
+                "expected_cancellation_v1": expected_article_cancellation(run)}, timeout=(3, 15))
         except requests.RequestException:
             pass
         return "failed_stalled" if _finalize_run_failure(run.run_id,
@@ -591,6 +592,7 @@ def recover_stalled_run(run, *, base_url, headers, now):
 def _stop_stalled_article(run, *, base_url, headers, now):
     """A recovery deadline requests a stop; it never proves that a write failed."""
     from .article_publication_evidence import cancellation_receipt
+    from .website_cancellation_retirement import expected_article_cancellation
     from .service_views import _apply_cancellation_receipt
     result = dict(run.result or {})
     attempts = result.get("article_stop_attempts", 0)
@@ -602,7 +604,8 @@ def _stop_stalled_article(run, *, base_url, headers, now):
         return "callback_won"
     try:
         response = requests.post(f"{base_url}/api/runs/{run.run_id}/cancel", headers=headers,
-            json={"reason": "worker_heartbeat_lost"}, timeout=(3, 15))
+            json={"reason": "worker_heartbeat_lost",
+                "expected_cancellation_v1": expected_article_cancellation(run)}, timeout=(3, 15))
         remote = response.json() if response.status_code in {200, 202} else {}
         if cancellation_receipt(run, remote) is not None:
             incoming = dict(remote.get("result") or {})
@@ -681,6 +684,7 @@ def _refund_failed_run(run, *, reason):
 def _settle_exhausted_article_runs(*, limit, now):
     """Ask the worker to fence exhausted work; elapsed time never proves no effects."""
     from .article_publication_evidence import exhausted_article_candidate, cancellation_receipt
+    from .website_cancellation_retirement import expected_article_cancellation
     from .run_state import ARTICLE_WORKFLOWS
     from .vibe_marketing_views import _call_content_factory_run_action
     from .service_views import _apply_cancellation_receipt
@@ -707,7 +711,8 @@ def _settle_exhausted_article_runs(*, limit, now):
             continue
         try:
             remote = _call_content_factory_run_action(run_id=run.run_id, action="cancel", workflow=run.workflow,
-                payload={"reason": "article_terminal_no_value" if run.status in {"failed", "cancelled"} else "article_budget_exhausted"}, transport_errors_are_pending=True)
+                payload={"reason": "article_terminal_no_value" if run.status in {"failed", "cancelled"} else "article_budget_exhausted",
+                    "expected_cancellation_v1": expected_article_cancellation(run)}, transport_errors_are_pending=True)
             if cancellation_receipt(run, remote) is None:
                 continue
             incoming = dict(remote.get("result") or {})

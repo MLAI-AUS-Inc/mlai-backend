@@ -483,3 +483,12 @@ repository, domain, workflow, goal and exact execution scope before remote work.
 A resumed attempt, changed deletion epoch or newly added run ID cannot reuse the
 old cancellation. Historical follow-ups without that binding retain an unknown
 obligation and retire repeated requests; the consumer never guesses their scope.
+
+Automatic article stops from lifecycle cleanup, heartbeat recovery, exhausted-run
+settlement and first-article parent settlement send the same captured
+`expected_cancellation_v1` envelope. Content Factory must validate it inside its
+run/lifecycle lock before stopping work. A stale caller cannot cancel an attempt
+that resumed after the backend read. A scoped 409 retains the original obligation;
+it does not borrow the new attempt's identity. Deploy the companion scoped-cancel
+endpoint before these senders, since older endpoints ignore the JSON envelope.
+Explicit owner cancellation remains compatible with the legacy empty-body route.

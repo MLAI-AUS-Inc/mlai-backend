@@ -204,3 +204,22 @@ class CancelRetirementTests(SimpleTestCase):
                 posted.assert_not_called()
                 self.now += timedelta(hours=1)
         self.assertEqual(written["state"], "needs_attention")
+
+    def test_invalid_goal_binding_cannot_match_an_absent_legacy_digest(self):
+        op = self.pure()
+        run = self.saved_run(op)
+        run.run_request.update(first_article_goal_id="first", strategy_goal_id="other")
+        op.payload.pop("cancel_run_bindings")
+        with patch("workflow_runs.models.ContentFactoryRun.objects.filter") as runs:
+            runs.return_value.first.return_value = run
+            written, posted = self._process(op)
+        posted.assert_not_called()
+        self.assertNotEqual(written["state"], "completed")
+
+    def test_nonarticle_saved_boolean_attempt_cannot_match_integer_acknowledgement(self):
+        op = self.pure()
+        run = self.saved_run(op)
+        run.run_request["operation_attempt"] = True
+        self.assertFalse(policy.acknowledge(op, run, run.run_id, 200, {
+            "schema_version": 1, "status": "cancel_requested", "operation_id": run.run_request["operation_id"],
+            "operation_attempt": 1}))
