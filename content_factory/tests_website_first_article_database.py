@@ -92,9 +92,9 @@ class FirstArticleProviderChainTests(OneClickBillingFixture,TransactionTestCase)
         contract={"target_id":"native","contract_digest":"c"*64,"route_path":"/articles",
             "route_template":"/articles/{slug}","live_marker":{"kind":"artifact_digest","schema_version":1,
                 "meta_name":"mlai-artifact-digest","value":"f"*64}}
-        WebsiteConnectionTarget.objects.create(connection=self.website,generation=self.website.generation,
-            target_key="native",adapter="react_article_system",source_sha=self.website.verified_sha,
-            verified_at=timezone.now(),contract=contract,capabilities={"publishingReady":True})
+        WebsiteConnectionTarget.objects.update_or_create(connection=self.website,generation=self.website.generation,
+            target_key="native",defaults={"adapter":"react_article_system","source_sha":self.website.verified_sha,
+                "verified_at":timezone.now(),"contract":contract,"capabilities":{"publishingReady":True}})
         self.config.default_publish_target_id="native";self.config.publish_targets=[contract]
         self.config.save(update_fields=["default_publish_target_id","publish_targets"])
         # The test begins at Ready, including the publishing guard's owning
