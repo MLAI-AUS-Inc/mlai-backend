@@ -798,6 +798,13 @@ def _validate_article_start_reservation(context, payload):
         raise WebsiteAuthorityError("website_connection_changed", "The selected website changed before billing.")
     validate_authority(website, payload, action="read", domain=context.organization.domain, github_repo=payload.get("github_repo", ""))
     validate_operation(website, payload)
+    # Provider admission is deliberately outside this transaction. A pending
+    # publishing proof can be recorded meanwhile without changing the website
+    # generation, so recheck its stored authority before spending or dispatching.
+    from .activation import durable_integration_evidence
+    if not durable_integration_evidence(config, website).get("verified"):
+        raise WebsiteAuthorityError("website_publish_verification_required",
+            "Verify the current articles integration before starting this article.")
 
 
 def _charge_roo_points_for_article(request, *, context, payload: dict, goal_operation_id=None):

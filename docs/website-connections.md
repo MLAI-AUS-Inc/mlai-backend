@@ -466,7 +466,13 @@ retains its payment; pending publication and uncertain dispatch remain unresolve
 Children and rejected-dispatch handlers defer to this parent even after it stops.
 
 Admission writes the generation dispatch in the same transaction that validates
-the active parent. Its absent row can prove pre-dispatch cancellation only while
+the active parent. After provider admission, it rechecks the stored integration
+proof under the organization and connection locks before spending or consuming a
+reservation. A pending sealed proof therefore blocks new dispatch even when it
+appears after the provider read; the original goal hold remains unchanged. Exact
+hosted proof can resume that hold. Verification readiness is not refund evidence:
+settlement still requires each child's independent stop and delivered-value proof.
+Its absent row can prove pre-dispatch cancellation only while
 that parent lock excludes new admission and no prior child/dispatch evidence
 exists. A dispatch with zero attempts can already have a synchronous POST in
 flight; it remains unknown. Stops run outside the billing transaction, at most
