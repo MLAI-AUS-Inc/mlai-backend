@@ -42,7 +42,7 @@ class SealedProvenanceTests(SimpleTestCase):
     def test_checked_in_bytes_and_manifest_are_valid_without_claiming_remote_provenance(self):
         fetch = Mock(side_effect=AssertionError("Network must not be used"))
         lock = provenance.verify(fetch=fetch)
-        self.assertEqual(lock["source_revision"], "7e827bf9a236730d1e0b6a6b59d6c6ae733a31c7")
+        self.assertEqual(lock["source_revision"], "6274430937df29a69e7fd59caf4b68705e99d56d")
         fetch.assert_not_called()
 
     def test_remote_fetches_all_artifacts_and_actual_runner_at_one_exact_sha(self):
