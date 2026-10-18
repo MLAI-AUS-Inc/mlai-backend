@@ -88,6 +88,49 @@ class CompatibilityGuardTests(SimpleTestCase):
             self.assertEqual(review.remote_review(self.run,payload={**payload,'website_connection_id':str(uuid4()),'connection_generation':2}).status_code,409)
             request.assert_not_called()
 
+    def test_comment_revision_child_fence_is_checked_apart_from_source_run(self):
+        # 18 Oct production: saved article requests carry run_id, so pairing the
+        # source run with the child's reserved operation always raised
+        # "The operation identity changed." and no website revision could start.
+        from . import website_operations as operations
+        from workflow_runs.models import ContentFactoryRun
+        website=SimpleNamespace(pk=uuid4(),organization_id=7,generation=2,blockers=[],operations=Mock())
+        source_op=SimpleNamespace(pk=uuid4(),generation=2,state='running',action='workflow',payload={'attempt':1})
+        child_op=SimpleNamespace(pk=uuid4(),generation=2,state='running',action='workflow',payload={'attempt':1})
+        ops={str(source_op.pk):source_op,str(child_op.pk):child_op}
+        website.operations.filter.side_effect=lambda pk:SimpleNamespace(first=lambda:ops.get(str(pk)))
+        binding={'website_connection_id':str(website.pk),'connection_generation':2,'repository_id':3}
+        source=SimpleNamespace(run_id='source-article',workflow='confirmed_topic',organization_id=7,
+            status='approval_required',domain='owned.test',github_repo='fixture/site',
+            run_request={**binding,'run_id':'source-article','operation_id':str(source_op.pk),
+                         'operation_attempt':1,'deletion_epoch':0,'delivery_mode':'review_draft'})
+        def guarded(payload,**kwargs):
+            operations.validate_operation(website,payload)
+            return nullcontext()
+        response=SimpleNamespace(status_code=202,json=lambda:{'revision':'saved','previewPending':True})
+        payload={'action':'applyUpdate','operation_id':str(child_op.pk),'operation_attempt':1,'deletion_epoch':0}
+        with patch.object(ContentFactoryRun.objects,'filter',return_value=SimpleNamespace(first=lambda:source)), \
+             patch.object(review.views,'authority_guard',side_effect=guarded) as guard, \
+             patch.object(review.views,'_content_factory_remote_config',return_value={'enabled':True,'base_url':'https://factory.invalid'}), \
+             patch.object(review.views,'_content_factory_headers',return_value={'X-API-Key':'synthetic'}), \
+             patch.object(review.views.http_client,'request',return_value=response) as request:
+            refused=review.remote_review(source,payload=payload)
+            self.assertEqual((refused.status_code,refused.data['detail']),(409,'The operation identity changed.'))
+            request.assert_not_called()
+            guard.reset_mock()
+            self.assertEqual(review.remote_review(source,payload=payload,child_operation=True)['revision'],'saved')
+        checked=[call.args[0] for call in guard.call_args_list]
+        self.assertEqual((checked[0]['run_id'],checked[0]['operation_id']),('source-article',str(source_op.pk)))
+        self.assertEqual(checked[1]['operation_id'],str(child_op.pk))
+        self.assertNotIn('run_id',checked[1])
+        self.assertEqual(request.call_args.kwargs['json']['operation_id'],str(child_op.pk))
+        source.status='cancelled'
+        with patch.object(ContentFactoryRun.objects,'filter',return_value=SimpleNamespace(first=lambda:source)), \
+             patch.object(review.views,'authority_guard',side_effect=guarded), \
+             patch.object(review.views.http_client,'request') as request:
+            self.assertEqual(review.remote_review(source,payload=payload,child_operation=True).status_code,409)
+            request.assert_not_called()
+
     def test_capability_path_traversal_is_rejected_with_existing_authority_checks_retained(self):
         for path in ('../other','%252e%252e/other','assets\\..\\other','/api'):
             self.assertFalse(lease.safe_preview_path(path))
@@ -173,7 +216,7 @@ class CompatibilityDispatchReplayTests(SimpleTestCase):
 
     def test_fast_callback_then_lost_response_returns_same_child_and_keeps_outcomes(self):
         from rest_framework.response import Response
-        def dispatch(run,*,payload=None):
+        def dispatch(run,*,payload=None,child_operation=False):
             if payload is None:return self.snapshot
             entry=run.result['article_review_updates']['operation-1']
             self.assertEqual(entry['status'],'submitted')
@@ -198,7 +241,7 @@ class CompatibilityDispatchReplayTests(SimpleTestCase):
     def test_uncertain_retry_reuses_operation_and_frozen_context_before_completion(self):
         from rest_framework.response import Response
         captured=[]
-        def dispatch(run,*,payload):
+        def dispatch(run,*,payload,child_operation=False):
             captured.append(payload)
             return Response({'detail':'Response lost'},status=502) if len(captured)==1 else self.snapshot
         with patch.object(review,'remote_review',side_effect=dispatch):
