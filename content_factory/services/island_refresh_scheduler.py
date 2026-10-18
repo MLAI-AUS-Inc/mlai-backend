@@ -32,6 +32,7 @@ from integrations.services.article_generation import (
     _post_content_factory_queue_request,
 )
 from organizations.models import Organization
+from .island_refresh_domain import validate_refresh_domain
 
 logger = logging.getLogger(__name__)
 
@@ -125,9 +126,10 @@ def _fail_stuck_dispatches(now) -> int:
 
 def dispatch_island_refresh(organization, *, local_date, include_expansion=True) -> dict:
     """Queue one island refresh in content-factory. Returns a result dict; never raises."""
-    domain = str(getattr(organization, "domain", "") or "").strip()
-    if not domain:
-        return {"status": "failed", "error": "Organization has no domain."}
+    try:
+        domain = validate_refresh_domain(getattr(organization, "domain", None))
+    except ValueError:
+        return {"status": "failed", "error": "A valid organization domain is required."}
 
     idempotency_key = build_island_refresh_idempotency_key(domain, local_date)
     dispatch, _created = ContentIslandRefreshDispatch.objects.update_or_create(
@@ -260,7 +262,11 @@ def refresh_islands_for_domain(domain, *, local_date=None, include_expansion=Tru
     operator intent. ``force`` additionally re-dispatches when today's dispatch row
     already exists.
     """
-    organization = Organization.objects.filter(domain__iexact=str(domain or "").strip()).first()
+    try:
+        domain = validate_refresh_domain(domain)
+    except ValueError:
+        return {"status": "failed", "error": "A valid organization domain is required."}
+    organization = Organization.objects.filter(domain__iexact=domain).first()
     if organization is None:
         return {"status": "failed", "error": f"Unknown organization domain: {domain!r}"}
     if local_date is None:

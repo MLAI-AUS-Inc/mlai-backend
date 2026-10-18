@@ -2031,6 +2031,45 @@
       "site_sha256": "9685e6639eed613947cd195ee6111cdee9b003664cc5ef912044ca13db620c7a",
       "source": "owner/company/billing/measurement request schema; not a causal Articles run failure",
       "test": "content_factory.tests_failure_contract_unit.ScannerTests.test_dynamic_audits_are_exact_and_bounded"
+    },
+    {
+      "adapter": "nonfailure_category",
+      "allowed_codes_ref": "contracts/failure-codes.json#/codes",
+      "category": "private read-only diagnostic request status; not a causal Articles run failure",
+      "expression": "'invalid_original_goal_selection'",
+      "field": "code",
+      "function": "get",
+      "owner": "backend.website_runtime_observation",
+      "path": "content_factory/website_runtime_observation.py",
+      "site_sha256": "c718c86c29f2de2f14804a4d352f8548375d4c6e64bc8d05a1810d4110dcd943",
+      "source": "Static local selector/snapshot exceptions from the authenticated process observer; never changes goal failure policy, retry, dispatch, readiness or enrollment.",
+      "test": "content_factory.tests_website_runtime_observation_unit.RuntimeObservationTests.test_malformed_duplicate_or_caller_observation_fields_reject_before_queries"
+    },
+    {
+      "adapter": "nonfailure_category",
+      "allowed_codes_ref": "contracts/failure-codes.json#/codes",
+      "category": "private read-only diagnostic request status; not a causal Articles run failure",
+      "expression": "str(exc)",
+      "field": "code",
+      "function": "get",
+      "owner": "backend.website_runtime_observation",
+      "path": "content_factory/website_runtime_observation.py",
+      "site_sha256": "80ea817f00aba4d09445d442dc31bce46f3cff0feb5130c01e064d5bc65d073a",
+      "source": "Static local selector/snapshot exceptions from the authenticated process observer; never changes goal failure policy, retry, dispatch, readiness or enrollment.",
+      "test": "content_factory.tests_website_runtime_observation_unit.RuntimeObservationTests.test_changed_backend_configuration_during_remote_read_is_rejected"
+    },
+    {
+      "adapter": "nonfailure_category",
+      "allowed_codes_ref": "contracts/failure-codes.json#/codes",
+      "category": "private read-only diagnostic request status; not a causal Articles run failure",
+      "expression": "'runtime_observation_unavailable'",
+      "field": "code",
+      "function": "get",
+      "owner": "backend.website_runtime_observation",
+      "path": "content_factory/website_runtime_observation.py",
+      "site_sha256": "975d8a1176ffcf1eb4a9dfec7316eacfa171388a7dd1b9406e640d87f82c5c66",
+      "source": "Static local selector/snapshot exceptions from the authenticated process observer; never changes goal failure policy, retry, dispatch, readiness or enrollment.",
+      "test": "content_factory.tests_website_runtime_observation_unit.RuntimeObservationTests.test_unexpected_database_error_exposes_only_static_diagnostic"
     }
   ],
   "owner": "backend.content_factory",

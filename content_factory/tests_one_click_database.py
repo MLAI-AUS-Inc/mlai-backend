@@ -23,7 +23,7 @@ from .tests_website_connections import WebsiteDatabaseFixture
 from .website_connections import transition_connection
 from .website_contract import WebsiteAuthorityError
 from .website_disconnect import refund_cancelled_runs, start_disconnect
-from .website_models import WebsiteConnectionOperation
+from .website_models import WebsiteConnectionOperation, WebsiteConnectionTarget
 
 
 class OneClickBillingFixture(WebsiteDatabaseFixture):
@@ -45,14 +45,29 @@ class OneClickBillingFixture(WebsiteDatabaseFixture):
         self.actor = preferred_actor_id_for_user(self.requester)
         self.context = SimpleNamespace(organization=self.org, company=self.company)
         self.request = SimpleNamespace(user=self.requester, data={})
+        # Billing starts from a real persisted Ready integration. Provider
+        # observations alone cannot satisfy the final, locked admission check.
+        verified_at = timezone.now()
+        self.website.verified_sha = 'a' * 40
+        self.website.last_verified_at = verified_at
+        self.website.save(update_fields=['verified_sha', 'last_verified_at'])
+        contract = {'target_id': 'native', 'route_path': '/articles',
+            'route_template': '/articles/{slug}'}
+        WebsiteConnectionTarget.objects.create(connection=self.website,
+            generation=self.website.generation, target_key='native',
+            adapter='react_article_system', source_sha=self.website.verified_sha,
+            verified_at=verified_at, contract=contract, capabilities={'publishingReady': True})
+        self.config.default_publish_target_id = 'native'
+        self.config.publish_targets = [contract]
+        self.config.save(update_fields=['default_publish_target_id', 'publish_targets'])
 
     def payload(self, key='synthetic-article'):
         return {**self.binding, 'domain': self.org.domain, 'github_repo': self.website.github_repo,
             'client_request_id': key, 'topic': 'Synthetic article', 'expected_cost_points': 6}
 
     def charge(self, payload):
-        # Only the provider-backed readiness read is mocked. Wallet choice,
-        # local consent locks, spend, operation and outbox all use the database.
+        # Only provider-backed admission is replaced. Stored readiness, wallet
+        # choice, local consent, spend, operation and outbox use real records.
         with patch.object(views, '_validate_article_start_admission'):
             return views._charge_roo_points_for_article(self.request, context=self.context, payload=payload)
 
@@ -258,9 +273,12 @@ class OneClickPersistenceTests(OneClickBillingFixture, TestCase):
     def paid_source(self):
         payload = self.payload()
         self.charge(payload)
-        return ContentFactoryRun.objects.create(run_id='original-paid-source', organization=self.org,
+        source = ContentFactoryRun.objects.create(run_id='original-paid-source', organization=self.org,
             domain=self.org.domain, github_repo=self.website.github_repo, workflow='article_generation',
             status='failed', run_request=payload)
+        source.result = self.article_stop_payload(source)
+        source.save(update_fields=['result'])
+        return source
 
     def test_company_funded_terminal_failure_refunds_the_ledger_payer_after_opt_out(self):
         from .models import ContentFactoryJob
@@ -297,8 +315,6 @@ class OneClickPersistenceTests(OneClickBillingFixture, TestCase):
         self.org.billing_user = None
         self.org.save(update_fields=['billing_user'])
         def unavailable_credit(**kwargs):
-            ContentFactoryRun.objects.filter(pk=source.pk).update(status='cancelled',
-                result={'worker_receipt': 'newer', 'reconciliation_refund_pending': True})
             raise RuntimeError('Synthetic transient refund service failure')
         with patch.object(PointsService, 'refund', side_effect=unavailable_credit), \
                 patch('integrations.services.slack.SlackService.send_dm'):
@@ -310,6 +326,10 @@ class OneClickPersistenceTests(OneClickBillingFixture, TestCase):
         self.assertTrue(source.result['reconciliation_refund_pending'])
         self.assertEqual(source.result['article_terminal_refund']['status'], 'pending')
         self.assertFalse(Ledger.objects.filter(kind='REFUND').exists())
+        # A later callback outside the rolled-back credit retains the obligation.
+        source.status = 'cancelled'
+        source.result = {**source.result, 'worker_receipt': 'newer'}
+        source.save(update_fields=['status', 'result'])
         # A repeat poll exits early; the durable scheduler owns the refund now.
         _handle_status_failure(job.job_id, {'error_code': 'RUN_BUDGET_EXHAUSTED'})
         self.org.billing_user = self.requester
@@ -356,7 +376,8 @@ class OneClickPersistenceTests(OneClickBillingFixture, TestCase):
         from integrations.services.article_generation import maybe_auto_refund_terminal_failure
         source = self.paid_source()
         source.run_request = dict(self.binding)
-        source.save(update_fields=['run_request'])
+        source.result = self.article_stop_payload(source)
+        source.save(update_fields=['run_request', 'result'])
         job = ContentFactoryJob.objects.create(job_id=source.run_id, domain=self.org.domain,
             slack_user_id=self.actor, client_request_id='unresolved-charge',
             billing_status='charged', billing_amount=6, request_meta={})
@@ -369,6 +390,64 @@ class OneClickPersistenceTests(OneClickBillingFixture, TestCase):
         self.assertTrue(source.result['reconciliation_refund_pending'])
         self.assertEqual(source.result['article_terminal_refund']['status'], 'pending')
         self.assertFalse(Ledger.objects.filter(kind='REFUND').exists())
+        self.assertEqual(self.balance(self.payer), 14_000_000)
+
+    def article_stop_payload(self, run, *, delivered=False):
+        from hashlib import sha256
+        from .article_publication_evidence import original_scope
+        from .website_failure_contract import canonical_bytes
+        scope = original_scope(run)
+        receipt = {"version": 1, "purpose": "article_cancellation", "run_id": run.run_id,
+            "goal_id": None, "scope": scope, "generation": 0, "state_version": 1,
+            "outcome": "no_article_effect", "cancelled": True, "delivered_value": delivered,
+            "watermark": {"operation_id": scope.get("operation_id"), "attempt": scope.get("operation_attempt"), "cancelled": True}}
+        receipt["receipt_id"] = sha256(canonical_bytes(receipt)).hexdigest()
+        return {"article_cancellation_v1": receipt, "publication_evidence_v1": {
+            "version": 1, "purpose": "setup", "run_id": run.run_id, "goal_id": None,
+            "scope": scope, "state": "observed", "kind": "pr", "pr_url": f"https://github.com/{run.github_repo}/pull/40"}}
+
+    def test_setup_only_cancellation_refunds_reused_original_spend_exactly_once(self):
+        source = self.paid_source()
+        child = ContentFactoryRun.objects.create(run_id="blocked-repair-child", organization=self.org,
+            domain=self.org.domain, github_repo=self.website.github_repo, workflow="article_generation", status="blocked",
+            run_request={**source.run_request, "client_request_id": "fresh-repair-key", "roo_points_billing_status": "reused",
+                "original_billing_source_run_id": source.run_id}, result={"pr_url": f"https://github.com/{self.website.github_repo}/pull/40"})
+        stop = self.article_stop_payload(child)
+        views._cancel_local_article_run(run=child, organization=self.org, remote_data=stop)
+        child.refresh_from_db()
+        self.assertTrue(child.result["reconciliation_refund_pending"])
+        # Ledger I/O can fail after the durable stop; a later sweep must retry.
+        with patch("roo.services.PointsService.refund", side_effect=RuntimeError("Synthetic ledger unavailable")):
+            _settle_sweep_refunds(limit=10)
+        child.refresh_from_db()
+        self.assertTrue(child.result["reconciliation_refund_pending"])
+        with patch("content_factory.billing.get_content_factory_article_cost_points", return_value=99):
+            _settle_sweep_refunds(limit=10)
+        child.refresh_from_db()
+        views._cancel_local_article_run(run=child, organization=self.org, remote_data=stop)
+        _settle_sweep_refunds(limit=10)
+        child.refresh_from_db()
+        self.assertFalse(child.result["reconciliation_refund_pending"])
+        self.assertEqual(child.result["article_terminal_refund"]["status"], "refunded")
+        self.assertEqual(Ledger.objects.filter(kind="REFUND").count(), 1)
+        refund = Ledger.objects.get(kind="REFUND")
+        self.assertEqual((refund.user_id, refund.delta_microroo), (self.payer.pk, 6_000_000))
+        self.assertEqual(refund.idempotency_key, "content_factory:refund:synthetic-article")
+        self.assertEqual(self.balance(self.payer), 20_000_000)
+        self.assertEqual(child.run_request["client_request_id"], "fresh-repair-key")
+
+    def test_useful_article_review_cancellation_preserves_charge_and_artifacts(self):
+        source = self.paid_source()
+        source.status, source.current_step = "blocked", "await_review"
+        source.run_request.update(delivery_mode="content_only", delivery_mode_confirmed=True)
+        source.result = {"status": "preview_ready", "content_package": {"content_packaged": True}}
+        source.save()
+        views._cancel_local_article_run(run=source, organization=self.org,
+            remote_data=self.article_stop_payload(source, delivered=True))
+        _settle_sweep_refunds(limit=10)
+        source.refresh_from_db()
+        self.assertTrue(source.result["content_package"]["content_packaged"])
+        self.assertFalse(Ledger.objects.filter(kind="REFUND").exists())
         self.assertEqual(self.balance(self.payer), 14_000_000)
 
     def test_disconnect_reused_child_refunds_original_charge_once_after_opt_out(self):

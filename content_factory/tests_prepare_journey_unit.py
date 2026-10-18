@@ -202,8 +202,10 @@ class PrepareJourneyReplayTests(SimpleTestCase):
         self.config.github_repo = self.op.connection.github_repo
         with patch("content_factory.website_connections.authority_guard", return_value=nullcontext(self.op.connection)), \
                 patch("workflow_runs.models.ContentFactoryRun.objects.filter") as rows, \
+                patch("workflow_runs.models.ContentFactoryRun.objects.select_for_update") as locked, \
                 patch.object(operations.WebsiteConnectionOperation.objects, "get_or_create", return_value=(Mock(), True)):
             rows.return_value.first.return_value = None
+            locked.return_value.filter.return_value.order_by.return_value = []
             rows.return_value.values_list.return_value = []
             operations.cancel_operation(self.config, data={"website_connection_id": str(uuid4()), "connection_generation": 3,
                 "operation_id": str(self.op.pk)}, idempotency_key="cancel")

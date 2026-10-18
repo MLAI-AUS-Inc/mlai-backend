@@ -322,6 +322,13 @@ def _persist_prepare(op, *, now):
 
 
 def _persist_prepare_state(op, *, now):
+    from .website_goal_audit import enabled, preserve_during_prepare_write
+    if enabled(op.connection.organization_id):
+        return preserve_during_prepare_write(op, lambda: _persist_prepare_claim(op, now=now))
+    return _persist_prepare_claim(op, now=now)
+
+
+def _persist_prepare_claim(op, *, now):
     # Compare the lease and generation after remote work. A disconnect always wins.
     query = WebsiteConnectionOperation.objects.filter(pk=op.pk, action="prepare", state="running", attempts=op.attempts,
         updated_at=op._claimed_at, connection__generation=op.generation, connection__state="connected")
@@ -636,6 +643,8 @@ def _selected_setup_child(op, config, *, run=None):
 
 
 def _correlate_setup_child(op, run):
+    from .website_hosted_setup_lineage import discard_for_new_setup
+    discard_for_new_setup(op)
     op.receipt = {**op.receipt, "child_run_id": run.run_id, "setup_run_id": run.run_id, "current_step": "setup",
         "status": "working", "message": "Preparing your selected articles page.", "user_action": None,
         "reason_code": "", "blocked_step": None, "step_failures": {}, "last_completed": None, "retryable": False}
@@ -918,6 +927,9 @@ def _advance_claimed_prepare(op, *, now, handlers):
             outcome = handler(op, context, config, user=user) if handler else _dispatch_prepare_step(op, context, config, step, user=user, journey=journey)
             run_id = (outcome or {}).get("run_id") or (outcome or {}).get("runId")
             if run_id:
+                if step == "setup":
+                    from .website_hosted_setup_lineage import discard_for_new_setup
+                    discard_for_new_setup(op)
                 op.receipt.update(child_run_id=run_id, **{f"{step}_run_id": run_id})
                 op.payload = {**op.payload, "run_id": run_id}
                 break
@@ -999,12 +1011,15 @@ def wake_prepare_for_source(connection_id, *, organization_id, owned_merge_run_i
         profile__user_id=connection.authorized_by_id).first()
     if config is None or company is None:
         return None
-    from .website_goal_runner import wake_goal_for_source, owns_goal
+    from .website_goal_runner import wake_goal_for_source, owns_goal, terminal_first_article_goal
     from .website_goal import enrolled
-    if enrolled(connection.organization_id):
-        latest = connection.operations.filter(generation=connection.generation, action="prepare").order_by("-created_at", "-pk").first()
-        if latest and owns_goal(latest):
-            return wake_goal_for_source(config, company_id=company.pk, user=connection.authorized_by, now=timezone.now())
+    latest = connection.operations.filter(generation=connection.generation, action="prepare").order_by("-created_at", "-pk").first()
+    # A flag rollback cannot turn the finished original paid goal into legacy
+    # source work. A new first article requires an explicit owner submission.
+    if latest and terminal_first_article_goal(latest):
+        return None
+    if enrolled(connection.organization_id) and latest and owns_goal(latest):
+        return wake_goal_for_source(config, company_id=company.pk, user=connection.authorized_by, now=timezone.now())
     op = start_prepare(config, company_id=company.pk, user=connection.authorized_by)
     reopenable = ["completed", "needs_user", "needs_attention", "pending", "stopped"]
     owned_setup = bool(owned_merge_run_id) and ContentFactoryRun.objects.filter(run_id=owned_merge_run_id,
@@ -1039,6 +1054,10 @@ def _begin_post_merge_attempt(op, child):
     The merge's push webhook cannot reopen an operation this worker still holds,
     so a rescan or check reusing the pre-merge keys would conflict.
     """
+    if op.receipt.get("merged_setup_run_id") == child.run_id:
+        return  # A replay after the local transition cannot rotate its identity again.
+    from .website_hosted_setup_lineage import retain_post_merge_inputs
+    retain_post_merge_inputs(op, child)
     op.payload = {**{key: value for key, value in op.payload.items() if key not in {"run_id", "repair_setup"}},
         "attempt": op.payload.get("attempt", 1) + 1, "retry_epoch": uuid4().hex, "source_reverify": True}
     for key in ("scan_run_id", "setup_run_id", "completed_steps", "last_completed"):
@@ -1060,6 +1079,8 @@ def _return_to_open_setup_pr(op, config, journey):
         # The owner cannot fix MLAI's own verification job on this pull request;
         # their Try again builds a new setup and kit instead of re-reading it.
         return None
+    from .website_hosted_setup_lineage import discard_for_new_setup
+    discard_for_new_setup(op)
     op.receipt = {**op.receipt, "child_run_id": run.run_id, "setup_run_id": run.run_id, "current_step": "merge",
         "status": "working", "message": "Returning to your articles setup pull request.", "user_action": None,
         "reason_code": "", "blocked_step": None, "step_failures": {}, "last_completed": None, "retryable": False}

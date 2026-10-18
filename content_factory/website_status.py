@@ -129,6 +129,8 @@ def status_for_context(context, config, *, journey, now=None):
             "milestones": [], "expectedTime": None, "mode": "goal"}
     scope, source = goals.scope_for(connection, context.company.pk), source_for(connection, journey)
     result = project_status(op, scope=scope, source_sha=source, journey=journey, now=now)
+    from .website_native_inventory import add_display
+    result = add_display(result, op)
     if getattr(settings, "ARTICLES_WEBSITE_DOCTOR_ENABLED", False):
         from .website_doctor import read_doctor
         result["doctor"] = read_doctor(op, scope=scope, source_sha=source, milestones=result["milestones"])

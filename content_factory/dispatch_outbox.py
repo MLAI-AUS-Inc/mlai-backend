@@ -1,5 +1,6 @@
 """Retry charged content starts with the same request identity, then refund."""
 from datetime import timedelta
+from types import SimpleNamespace
 
 from django.db import transaction
 from django.db.models import Q
@@ -74,8 +75,19 @@ def reserve_dispatch(*, organization, payload, endpoint="article", workflow="art
 
 def mark_dispatch_delivered(client_request_id, run_id):
     """Record a synchronous delivery without creating a duplicate scheduler run."""
-    return ContentFactoryDispatchOutbox.objects.filter(client_request_id=client_request_id,
+    changed = ContentFactoryDispatchOutbox.objects.filter(client_request_id=client_request_id,
         state__in=["pending", "delivering"]).update(state="delivered", run_id=run_id, last_error="", updated_at=timezone.now())
+    if changed:
+        transaction.on_commit(lambda: wake_dispatch_settlement_by_key(client_request_id), robust=True)
+    return changed
+
+
+def wake_dispatch_settlement_by_key(client_request_id):
+    """Resolve the committed synchronous dispatch before waking its parent."""
+    from .website_first_article_refunds import wake_dispatch_settlement
+    row = ContentFactoryDispatchOutbox.objects.filter(client_request_id=client_request_id).first()
+    if row and row.payload.get("request", {}).get("first_article_goal_operation_id"):
+        wake_dispatch_settlement(row.pk)
 
 
 def _research_dispatch(row):
@@ -85,6 +97,14 @@ def _research_dispatch(row):
 
 def refund_dispatch(row, *, reason):
     """The original spend identity makes retries of refund safe."""
+    request = row.payload.get("request", {})
+    if request.get("first_article_goal_operation_id"):
+        # The parent allocation can fund more than one repair child. Even a
+        # proven rejected dispatch cannot credit it around another child's
+        # publication or delivery obligation. Its terminal outbox owns credit.
+        from .website_first_article_billing import defer_goal_settlement
+        defer_goal_settlement(request, resolved_domain=row.organization.domain)
+        return
     from django.contrib.auth import get_user_model
     from integrations.services.article_generation import (
         refund_content_factory_request_for_user, refund_content_factory_topic_generation_for_user,
@@ -102,7 +122,8 @@ def _deliver(row):
     from integrations import http_client
     from .vibe_marketing_views import _content_factory_remote_config, _content_factory_headers, _lookup_content_factory_dispatch_by_key, _refresh_article_editorial_payload
     from .website_connections import authority_guard, require_unlocked_remote_call
-    from .portable_drafts import explicit_portable_request
+    from .portable_drafts import original_portable_run
+    from .website_operations import OPERATION_FIELDS
     request = dict(row.payload["request"])
     remote = _content_factory_remote_config()
     if not remote["enabled"]:
@@ -114,6 +135,8 @@ def _deliver(row):
         return _accept_delivery(row, request, existing, recovered=True)
     if known == "rejected":
         return "failed", "dispatch_rejected", ""
+    portable = (original_portable_run(SimpleNamespace(run_request=row.payload["request"]))
+        and not any(key in request for key in OPERATION_FIELDS))
     from django.contrib.auth import get_user_model
     if _research_dispatch(row):
         # Discovery needs only the current owning founder/domain, plus the
@@ -134,7 +157,7 @@ def _deliver(row):
         if audience != request.get("research_audience"):
             raise WebsiteAuthorityError("research_audience_changed", "The approved research audience changed.")
     else:
-        if not explicit_portable_request(request):
+        if not portable:
             with authority_guard(request, action="read"):
                 pass
         policy_error = _refresh_article_editorial_payload(organization=row.organization, payload=request)
@@ -144,6 +167,14 @@ def _deliver(row):
         requester = get_user_model().objects.get(pk=request["roo_points_requested_by_user_id"], is_active=True)
         require_article_activation(domain=row.organization.domain, actor_id=row.payload.get("actor_id") or "",
             user=requester, expected_repo=request.get("github_repo", ""), article_request=request)
+        if not portable:
+            from .vibe_marketing_views import _validate_article_start_reservation
+            # Provider admission examines today's configuration outside SQL.
+            # Retry only the original target/source, with current stored proof;
+            # do not upgrade a historical paid request to today's selection.
+            with transaction.atomic():
+                _validate_article_start_reservation(SimpleNamespace(organization=row.organization),
+                    request, require_website=True)
     require_unlocked_remote_call()
     response = http_client.post(f"{remote['base_url']}/api/runs/{row.payload['endpoint']}",
         headers=_content_factory_headers(), json=request, timeout=(3, 30))
@@ -243,5 +274,8 @@ def process_dispatch_outbox(*, limit=20, now=None):
         applied = ContentFactoryDispatchOutbox.objects.filter(pk=row.pk, updated_at=claimed_at,
             state__in=["delivering", "refund_pending"]).update(state=state, run_id=run_id or row.run_id,
                 last_error=code, next_attempt_at=now + timedelta(seconds=900 if state == "awaiting_resolution" else retry_delay(row.attempts)), updated_at=timezone.now())
+        if applied and state in {"delivered", "failed"} and row.payload.get("request", {}).get("first_article_goal_operation_id"):
+            from .website_first_article_refunds import wake_dispatch_settlement
+            transaction.on_commit(lambda identifier=row.pk: wake_dispatch_settlement(identifier), robust=True)
         result[state if applied and state in result else "pending"] += 1
     return result

@@ -729,3 +729,310 @@ class SetupDeliveryContractTests(SimpleTestCase):
         value = envelope()
         self.assertEqual(value["state_sha256"], digest({"scope": value["scope"],
             "state_projection": value["body"]["state_projection"]}))
+
+
+class WorkflowOrderFormattingTests(SimpleTestCase):
+    """Actual v1 receiver paths; ORM and transaction boundaries only are replaced."""
+    ORDER = ["fetch_org_config", "generate_directory_sources", "draft_section:one", "verify_build"]
+
+    def value(self, *, version=1, event="order-event", order=None):
+        from .workflow_order import KEY
+        order = self.ORDER if order is None else order
+        value = envelope(version=version, event_id=event)
+        projection = value["body"]["state_projection"]
+        projection["current_step"] = order[0]
+        projection["step_states"] = {key: {"status": "pending", "required": True, "attempts": 0}
+            for key in sorted(order)}
+        projection["result"] = {"article_system_setup": {KEY: {"version": 1, "steps": list(order)}}}
+        return signed(value)
+
+    def chain(self, *, admitted=True):
+        case = SetupDeliveryChainTests("runTest")
+        case.setUp()
+        self.addCleanup(case.doCleanups)
+        if admitted:
+            case.run.run_request["workflow_order_v1"] = {"version": 1}
+            case.operation.payload["setup_delivery_request"] = deepcopy(case.run.run_request)
+        return case
+
+    @override_settings(CONTENT_FACTORY_SETUP_DELIVERY_V1_APPLY_ENABLED=True, ROO_API_KEY="fixture-service-key")
+    def test_current_apply_orders_rows_and_run_array_but_replays_and_stale_events_do_not_project(self):
+        case, value = self.chain(), self.value(version=5)
+        response = case.post(value)
+        self.assertEqual(response.status_code, 200, response.data)
+        self.assertEqual(case.run.step_order, self.ORDER)
+        self.assertEqual([(call.kwargs["step_key"], call.kwargs["defaults"]["display_order"])
+            for call in case.steps.call_args_list], list(zip(self.ORDER, range(len(self.ORDER)))))
+        self.assertTrue(any("step_order" in call.kwargs["update_fields"] for call in case.run.save.call_args_list))
+        with patch("content_factory.workflow_order.received_order", side_effect=AssertionError("non-current projection")):
+            self.assertEqual(case.post(value).data["disposition"], "duplicate")
+            older = self.value(version=4, event="older", order=list(reversed(self.ORDER)))
+            self.assertEqual(case.post(older).data["disposition"], "ignored_stale")
+        self.assertEqual(case.run.step_order, self.ORDER)
+        snapshot = deepcopy(value)
+        snapshot.update(kind="run_snapshot", event_id="order-mirror", event_type=None)
+        self.assertEqual(case.put(signed(snapshot)).data["disposition"], "duplicate")
+
+    @override_settings(CONTENT_FACTORY_SETUP_DELIVERY_V1_APPLY_ENABLED=True, ROO_API_KEY="fixture-service-key")
+    def test_absent_original_admission_cannot_be_invented_by_worker_metadata(self):
+        for source in ("none", "run_only", "operation_only"):
+            with self.subTest(source=source):
+                case = self.chain(admitted=False)
+                if source == "run_only": case.run.run_request["workflow_order_v1"] = {"version": 1}
+                if source == "operation_only":
+                    case.operation.payload["setup_delivery_request"] = {"workflow_order_v1": {"version": 1}}
+                self.assertEqual(case.post(self.value()).status_code, 200)
+                self.assertEqual(case.run.step_order, [])
+                case.doCleanups()
+
+    @override_settings(CONTENT_FACTORY_SETUP_DELIVERY_V1_APPLY_ENABLED=True, ROO_API_KEY="fixture-service-key")
+    def test_invalid_optional_order_never_blocks_business_delivery_or_grants_proof(self):
+        from .workflow_order import KEY
+        invalid = [None, {}, {"version": True, "steps": self.ORDER}, {"version": 2, "steps": self.ORDER},
+            {"version": 1, "steps": self.ORDER[:-1]}, {"version": 1, "steps": [*self.ORDER, self.ORDER[0]]},
+            {"version": 1, "steps": [*self.ORDER, "unknown"]}, {"version": 1, "steps": [1]},
+            {"version": 1, "steps": self.ORDER, "approved": True}]
+        for metadata in invalid:
+            with self.subTest(metadata=metadata):
+                case, value = self.chain(), self.value()
+                value["body"]["state_projection"]["result"]["article_system_setup"][KEY] = metadata
+                response = case.post(signed(value))
+                self.assertEqual(response.status_code, 200, response.data)
+                self.assertEqual(response.data["disposition"], "applied")
+                self.assertEqual(case.run.step_order, [])
+                self.assertNotEqual(case.run.approval_state, "approved")
+                self.assertEqual(case.run.verification_summary, {})
+                case.doCleanups()
+
+    def test_shared_bounds_and_version_validation(self):
+        from .workflow_order import validated_order
+        for count in (0, 512, 513):
+            order = [f"step_{i}" for i in range(count)]
+            result = validated_order({"version": 1, "steps": order}, dict.fromkeys(order))
+            self.assertEqual(result is not None, count <= 512)
+        self.assertIsNone(validated_order({"version": 1, "steps": ["a" * 121]}, {"a" * 121: {}}))
+
+    @override_settings(CONTENT_FACTORY_SETUP_DELIVERY_V1_APPLY_ENABLED=True,
+        CONTENT_FACTORY_SETUP_DELIVERY_ENROLLED_ORGANIZATIONS=("7",),
+        CONTENT_FACTORY_WORKFLOW_ORDER_FORMATTING_ADMISSION_ENABLED=True)
+    def test_only_new_owned_b5_runs_admit_formatting_and_both_presence_choices_stay_sticky(self):
+        from .setup_delivery_enrollment import enroll_setup_delivery
+        scope = envelope()["scope"]
+        website = SimpleNamespace(organization_id=7, organization=SimpleNamespace(domain="fixture.test"), github_repo="fixture/site")
+        op, payload = SimpleNamespace(payload={}), deepcopy(scope)
+        self.assertTrue(enroll_setup_delivery(op, payload, website, "article_system_setup", new_run=True))
+        self.assertEqual(payload["workflow_order_v1"], {"version": 1})
+        with override_settings(CONTENT_FACTORY_WORKFLOW_ORDER_FORMATTING_ADMISSION_ENABLED=False):
+            self.assertTrue(enroll_setup_delivery(op, payload, website, "article_system_setup"))
+            self.assertEqual(payload["workflow_order_v1"], {"version": 1})
+        historical = SimpleNamespace(payload={"setup_delivery_v1": {"schema_version": 1},
+            "setup_delivery_request": {**scope, "setup_delivery_v1": {"schema_version": 1}}})
+        old_payload = {**scope, "workflow_order_v1": {"version": 1}}
+        self.assertTrue(enroll_setup_delivery(historical, old_payload, website, "article_system_setup"))
+        self.assertNotIn("workflow_order_v1", old_payload)
+        self.assertNotIn("workflow_order_v1", historical.payload["setup_delivery_request"])
+        with override_settings(CONTENT_FACTORY_WORKFLOW_ORDER_FORMATTING_ADMISSION_ENABLED=False):
+            default_op, default_payload = SimpleNamespace(payload={}), deepcopy(scope)
+            self.assertTrue(enroll_setup_delivery(default_op, default_payload, website, "article_system_setup", new_run=True))
+            self.assertNotIn("workflow_order_v1", default_payload)
+        review = {**scope, "workflow_order_v1": {"version": 1}, "feedback_batch_id": "independent"}
+        self.assertFalse(enroll_setup_delivery(SimpleNamespace(payload={}), review, website, "article_system_setup", new_run=True))
+        self.assertNotIn("workflow_order_v1", review)
+        with override_settings(CONTENT_FACTORY_SETUP_DELIVERY_V1_APPLY_ENABLED=False):
+            denied = {**scope, "workflow_order_v1": {"version": 1}}
+            self.assertFalse(enroll_setup_delivery(SimpleNamespace(payload={}), denied, website, "article_system_setup", new_run=True))
+            self.assertNotIn("workflow_order_v1", denied)
+
+    def test_worker_merge_never_enrolls_replaces_or_removes_original_formatting_marker(self):
+        merge = service_views._merge_django_owned_run_request
+        self.assertNotIn("workflow_order_v1", merge({}, {"workflow_order_v1": {"version": 1}}))
+        original = {"workflow_order_v1": {"version": 1}}
+        self.assertEqual(merge(original, {}), original)
+        self.assertEqual(merge(original, {"workflow_order_v1": {"version": 2}}), original)
+
+    @override_settings(CONTENT_FACTORY_ARTICLE_DELIVERY_V1_APPLY_ENABLED=True, ROO_API_KEY="fixture-service-key")
+    def test_article_stream_reads_raw_order_without_granting_or_replacing_article_evidence(self):
+        from .workflow_order import KEY
+        for workflow in ("direct_generate", "confirmed_topic"):
+            with self.subTest(workflow=workflow):
+                article = ArticleDeliveryChainTests("runTest")
+                article.setUp()
+                try:
+                    case, value = article.chain, deepcopy(article.input)
+                    case.operation.payload["article_delivery_workflow"] = value["workflow"] = workflow
+                    if workflow == "confirmed_topic":
+                        case.operation.payload["article_delivery_request"]["source_run_id"] = "topic-source"
+                        case.run.run_request["source_run_id"] = "topic-source"
+                    for request in (case.operation.payload["article_delivery_request"], case.run.run_request):
+                        request["workflow_order_v1"] = {"version": 1}
+                    projection = value["body"]["state_projection"]
+                    projection["step_states"] = {key: {"status": "pending", "required": True, "attempts": 0}
+                        for key in sorted(self.ORDER)}
+                    projection["result"]["article_system_setup"] = {KEY: {"version": 1, "steps": self.ORDER}}
+                    response = case.post(signed(value))
+                    self.assertEqual(response.status_code, 200, response.data)
+                    self.assertEqual(case.run.step_order, self.ORDER)
+                    self.assertEqual(case.run.result["article_quality"], {"saved_identity": "original"})
+                    self.assertNotIn("article_system_setup", case.run.result)
+                    self.assertNotEqual(case.run.approval_state, "approved")
+                    self.assertEqual(case.post(value).data["disposition"], "duplicate")
+                finally:
+                    article.doCleanups()
+
+    @override_settings(CONTENT_FACTORY_SETUP_DELIVERY_V1_APPLY_ENABLED=True, ROO_API_KEY="fixture-service-key")
+    def test_step_write_failure_rolls_back_order_with_state_and_receipt_then_same_bytes_recover(self):
+        from contextlib import contextmanager
+        case, value = self.chain(), self.value()
+        rows, attempts = {}, [0]
+        @contextmanager
+        def atomic():
+            fields = ("status", "current_step", "step_order", "result", "approval_state", "resume_available",
+                "verification_summary", "acceptance_summary", "last_event_emitted_at")
+            before = {key: deepcopy(getattr(case.run, key)) for key in fields}
+            before_rows = deepcopy(rows)
+            try:
+                yield
+            except Exception:
+                for key, item in before.items(): setattr(case.run, key, item)
+                rows.clear(); rows.update(before_rows)
+                raise
+        def write(**kwargs):
+            attempts[0] += 1
+            if attempts[0] == 2: raise RuntimeError("synthetic database write failure")
+            rows[kwargs["step_key"]] = deepcopy(kwargs["defaults"])
+        with patch.object(receiver.transaction, "atomic", side_effect=lambda: atomic()), patch.object(
+                receiver.ContentFactoryRunStep.objects, "update_or_create", side_effect=write):
+            with self.assertRaisesRegex(RuntimeError, "synthetic database"):
+                case.post(value)
+            self.assertEqual(case.run.step_order, [])
+            self.assertEqual(rows, {})
+            receipt = case.run.result["delivery_v1"]["receipts"][value["event_id"]]
+            self.assertIsNone(receipt["processed_at"])
+            future = timezone.now() + timedelta(seconds=121)
+            with patch.object(receiver.timezone, "now", return_value=future):
+                self.assertEqual(case.post(value).data["disposition"], "applied")
+        self.assertEqual(case.run.step_order, self.ORDER)
+        self.assertEqual([key for key, row in sorted(rows.items(), key=lambda item: item[1]["display_order"])], self.ORDER)
+
+    @override_settings(CONTENT_FACTORY_SETUP_DELIVERY_V1_APPLY_ENABLED=True, ROO_API_KEY="fixture-service-key")
+    def test_higher_absent_or_invalid_metadata_clears_stale_order_in_actual_public_rows(self):
+        from .workflow_order import KEY
+        from .vibe_marketing_views import _serialize_run
+        case = self.chain()
+        self.assertEqual(case.post(self.value()).data["disposition"], "applied")
+        self.assertEqual(case.run.step_order, self.ORDER)
+        current = [step for step in self.ORDER if step != "draft_section:one"]
+        for version, metadata in ((2, None), (3, {"version": 2, "steps": current}),
+                (4, {"version": 1, "steps": [*current, current[0]]})):
+            value = self.value(version=version, event=f"missing-{version}", order=current)
+            setup = value["body"]["state_projection"]["result"]["article_system_setup"]
+            if metadata is None: setup.pop(KEY)
+            else: setup[KEY] = metadata
+            self.assertEqual(case.post(signed(value)).data["disposition"], "applied")
+            self.assertEqual(case.run.step_order, [])
+            self.assertFalse(case.run.result["delivery_v1"]["workflow_order"]["available"])
+            persisted = {}
+            for i, call in enumerate(case.steps.call_args_list):
+                fields = {"step_key": call.kwargs["step_key"], "message": "", "error": "", "artifacts": [],
+                    "started_at": None, "completed_at": None, "id": i, **call.kwargs["defaults"]}
+                persisted[fields["step_key"]] = SimpleNamespace(**fields)
+            relation = SimpleNamespace(all=lambda: list(persisted.values()),
+                order_by=lambda *args: sorted(persisted.values(), key=lambda row: (row.display_order, row.id)))
+            with patch.object(type(case.run), "steps", PropertyMock(return_value=relation)):
+                case.run._bootstrap_component_comments = []
+                case.run.created_at = case.run.updated_at = timezone.now()
+                public = _serialize_run(case.run)
+            self.assertEqual(public["stepOrder"], [])
+            self.assertEqual([row["key"] for row in public["steps"]], sorted(current))
+            self.assertNotIn("draft_section:one", [row["key"] for row in public["steps"]])
+
+    def test_optional_public_row_filter_falls_through_unknown_or_malformed_legacy_json(self):
+        from .vibe_marketing_views import _serialize_run_steps
+        case = self.chain(admitted=False)
+        row = SimpleNamespace(step_key="legacy_step", required=True, status="pending", attempts=0,
+            message="", error="", artifacts=[], started_at=None, completed_at=None)
+        relation = SimpleNamespace(order_by=lambda *args: [row])
+        malformed = [None, ["truthy"], "truthy", 7, {"delivery_v1": ["truthy"]},
+            {"delivery_v1": {"workflow_order": "truthy"}},
+            {"delivery_v1": {"workflow_order": {"version": 2, "step_keys": []}}},
+            {"delivery_v1": {"workflow_order": {"version": 1, "available": False,
+                "step_keys": [], "execution": None}, "latest": {"execution": None}}},
+            {"delivery_v1": {"workflow_order": {"version": 1, "available": False,
+                "step_keys": [], "execution": [0, 1]}, "latest": "truthy"}}]
+        with patch.object(type(case.run), "steps", PropertyMock(return_value=relation)):
+            for request in ({}, {"workflow_order_v1": {"version": 1}}):
+                for result in malformed:
+                    with self.subTest(request=request, result=result):
+                        case.run.run_request, case.run.result = request, result
+                        self.assertEqual([item["key"] for item in _serialize_run_steps(case.run)], ["legacy_step"])
+
+    @override_settings(CONTENT_FACTORY_SETUP_DELIVERY_V1_APPLY_ENABLED=True, ROO_API_KEY="fixture-service-key")
+    def test_malformed_saved_request_remains_an_upstream_scope_rejection_not_a_formatting_error(self):
+        from .workflow_order import admitted, original_admission
+        for malformed in (["not-a-mapping"], "not-a-mapping", 7):
+            with self.subTest(malformed=malformed):
+                self.assertFalse(admitted(malformed))
+                case = self.chain()
+                case.run.run_request = malformed
+                self.assertFalse(original_admission(case.run, case.operation, self.value()))
+                response = case.post(self.value())
+                self.assertEqual(response.status_code, 409, response.data)
+                self.assertEqual(response.data["code"], "website_scope_mismatch")
+                case.steps.assert_not_called()
+                case.doCleanups()
+@override_settings(CONTENT_FACTORY_ARTICLE_DELIVERY_V1_APPLY_ENABLED=True)
+class ArticleDeliveryEnrollmentWorkflowTests(SimpleTestCase):
+    """Fresh server reservations must accept their actual worker's wire name."""
+
+    def setUp(self):
+        self.goal_id = "44444444-4444-4444-8444-444444444444"
+        self.website = SimpleNamespace(organization_id=7, organization=SimpleNamespace(domain="fixture.test"),
+            github_repo="fixture/site")
+        self.parent = SimpleNamespace(pk=self.goal_id, receipt={"goal": {"current_source_sha": "a" * 40}})
+        self.manager = Mock()
+        self.manager.select_related.return_value.filter.return_value.first.return_value = self.parent
+        self.stack = ExitStack()
+        self.addCleanup(self.stack.close)
+        self.stack.enter_context(patch("content_factory.website_models.WebsiteConnectionOperation.objects", self.manager))
+        self.stack.enter_context(patch("content_factory.website_article_recovery.enabled", return_value=True))
+
+    def request(self, *, source=False):
+        return {**envelope()["scope"], "first_article_goal_id": self.goal_id,
+            "first_article_goal_operation_id": self.goal_id, "expected_source_sha": "a" * 40,
+            **({"source_run_id": "original-paid-article"} if source else {})}
+
+    def test_new_reservations_map_backend_workflow_and_source_to_actual_worker(self):
+        from .setup_delivery_enrollment import enroll_article_delivery, delivery_workflow
+        for workflow, source, expected in (
+            ("article_publish", True, "direct_generate"), ("publish_article", True, "direct_generate"),
+            ("article_publish", False, "direct_generate"), ("publish_article", False, "direct_generate"),
+            ("article_generation", True, "confirmed_topic"), ("article_generation", False, "direct_generate"),
+            ("direct_generate", True, "direct_generate"), ("confirmed_topic", False, "confirmed_topic"),
+            ("confirmed_topic", True, "confirmed_topic")):
+            with self.subTest(workflow=workflow, source=source):
+                payload, operation = self.request(source=source), SimpleNamespace(payload={})
+                self.assertTrue(enroll_article_delivery(operation, payload, self.website, workflow))
+                self.assertEqual(operation.payload["article_delivery_workflow"], expected)
+                self.assertEqual(delivery_workflow(SimpleNamespace(workflow=workflow, run_request=payload)), expected)
+                self.assertEqual(operation.payload["article_delivery_request"]["source_run_id"] if source else None,
+                    "original-paid-article" if source else None)
+
+    def test_existing_stream_keeps_its_frozen_wire_even_when_new_enrollment_is_disabled(self):
+        from .setup_delivery_enrollment import enroll_article_delivery
+        payload, operation = self.request(source=True), SimpleNamespace(payload={})
+        self.assertTrue(enroll_article_delivery(operation, payload, self.website, "article_generation"))
+        with override_settings(CONTENT_FACTORY_ARTICLE_DELIVERY_V1_APPLY_ENABLED=False):
+            self.assertTrue(enroll_article_delivery(operation, payload, self.website, "article_generation"))
+        self.assertEqual(operation.payload["article_delivery_workflow"], "confirmed_topic")
+        changed = {**payload, "expected_source_sha": "b" * 40}
+        from .website_contract import WebsiteAuthorityError
+        with self.assertRaises(WebsiteAuthorityError):
+            enroll_article_delivery(operation, changed, self.website, "article_publish")
+        self.assertEqual(operation.payload["article_delivery_workflow"], "confirmed_topic")
+
+    def test_wrong_goal_or_source_cannot_create_a_new_publication_stream(self):
+        from .setup_delivery_enrollment import enroll_article_delivery
+        for changes in ({"first_article_goal_id": "foreign"}, {"expected_source_sha": "b" * 40}):
+            payload, operation = {**self.request(source=True), **changes}, SimpleNamespace(payload={})
+            self.assertFalse(enroll_article_delivery(operation, payload, self.website, "article_publish"))
+            self.assertNotIn("article_delivery_v1", operation.payload)

@@ -34,6 +34,11 @@ def guarded_owner_operation(action, *, bind_selected=False, run_operation=False,
             context, config, error = _context(request)
             if error:
                 return error
+            def invoke():
+                from .website_goal_audit import observe_owner_http
+                observe_owner_http(request, context, config, action=kwargs.get("action") or action,
+                    run_id=(kwargs.get("run_id") or (args[0] if args else None)) if run_operation else None)
+                return method(self, request, *args, **kwargs)
             try:
                 from .portable_drafts import explicit_portable_request, original_portable_run
                 if not run_operation and action == "read" and explicit_portable_request(request.data):
@@ -44,10 +49,10 @@ def guarded_owner_operation(action, *, bind_selected=False, run_operation=False,
                             raise WebsiteAuthorityError("website_connection_changed", "The reviewed website connection changed. Refresh before continuing.")
                         with authority_guard({**dict(request.data), "domain": context.organization.domain, "github_repo": current.github_repo}, action="portable"):
                             pass
-                    return method(self, request, *args, **kwargs)
+                    return invoke()
                 run_action = kwargs.get("action")
                 if run_operation and run_action in {"cancel", "deny", "refresh-setup-pr-status"}:
-                    return method(self, request, *args, **kwargs)
+                    return invoke()
                 if run_operation:
                     run_id = kwargs.get("run_id") or (args[0] if args else None)
                     run = ContentFactoryRun.objects.filter(run_id=run_id).first()
@@ -60,7 +65,7 @@ def guarded_owner_operation(action, *, bind_selected=False, run_operation=False,
                             "delivery_mode", "deliveryMode", "resolved_delivery_mode", "resolvedDeliveryMode",
                         )):
                             raise WebsiteAuthorityError("portable_repository_access_denied", "A confirmed portable draft cannot switch to repository delivery. Start a separately reviewed repository run.")
-                        return method(self, request, *args, **kwargs)
+                        return invoke()
                     payload = scoped_run_contract(run)
                     expected = connection_contract(request.data)
                     if expected and any(connection_contract(payload).get(key) != value for key, value in expected.items()):
@@ -93,11 +98,11 @@ def guarded_owner_operation(action, *, bind_selected=False, run_operation=False,
                     effective_action = run_action_authority(run, run_action)
                 with authority_guard(payload, action=effective_action):
                     if local_only:
-                        return method(self, request, *args, **kwargs)
+                        return invoke()
                 # The worker synchronously reauthorizes dispatch and mutations.
                 # Preserve consent identity across HTTP, never the DB row locks.
                 with owner_operation_scope(payload):
-                    return method(self, request, *args, **kwargs)
+                    return invoke()
             except WebsiteAuthorityError as exc:
                 return Response(exc.as_dict(), status=exc.status)
         return wrapped
@@ -121,6 +126,8 @@ class WebsiteConnectionView(APIView):
         if error:
             return error
         try:
+            from .website_goal_audit import observe_owner_http
+            observe_owner_http(request, context, config, action="connection:bind")
             connection = bind_website(config, user=request.user,
                 repo=request.data.get("githubRepo") or request.data.get("github_repo") or config.github_repo,
                 app_root=request.data.get("appRoot", ""), branch=request.data.get("branch", ""),
@@ -146,12 +153,16 @@ class WebsiteConnectionActionView(APIView):
             key = str(request.headers.get("Idempotency-Key") or request.data.get("idempotency_key") or request.data.get("client_request_id") or uuid.uuid4())
             if action == "purge" and request.data.get("preserve_published_articles", True) is not True:
                 raise WebsiteAuthorityError("published_content_review_required", "Published articles require a separately reviewed removal proposal.")
+            from .website_goal_audit import observe_owner_http
+            if action != "prepare" and not (action == "github-revoke" and request.data.get("phase", "plan") == "plan"):
+                observe_owner_http(request, context, config, action="connection:" + action)
             if action == "prepare":
                 from .website_prepare import start_prepare, advance_prepare
                 operation = start_prepare(config, expected=dict(request.data), company_id=context.company.pk,
                     user=request.user, retry=True, target=request.data.get("goal_target", "ready"), consent=request.data.get("setup_consent"))
                 advance_prepare(operation.pk)
                 operation.refresh_from_db()
+                observe_owner_http(request, context, config, action="connection:prepare", initial_setup=True, operation=operation)
             elif action == "disconnect":
                 from .website_disconnect import start_disconnect
                 operation = start_disconnect(config, user=request.user, data=dict(request.data))
@@ -269,7 +280,7 @@ class WebsiteConnectionAuthorizeView(APIView):
             with authority_guard(dict(request.query_params.items()), action="read" if action == "ci_attestation" else action) as connection:
                 if action == "ci_attestation":
                     from .website_verification import ci_attestation_for
-                    return Response(ci_attestation_for(connection, dict(request.query_params.items())))
+                    return Response(ci_attestation_for(connection, dict(request.query_params.items()), query=True))
                 portable = request.query_params.get("action") == "portable"
                 from .website_operations import deletion_epoch
                 return Response({"allowed": True, **contract_for(connection), "state": connection.state,
@@ -341,6 +352,9 @@ class WebsiteMutationView(APIView):
                         if data.get(key) and not (key == "status" and row.status == "applied" and data[key] != "applied"):
                             setattr(row, key, data[key])
                     row.save(update_fields=["head_sha", "pr_url", "branch", "status", "updated_at"])
-                return Response({"id": str(row.pk), "created": created, "patch_digest": row.patch_digest}, status=201 if created else 200)
+                from .article_publication_observation import register_intent
+                intent_id = register_intent(connection, row, data)
+                return Response({"id": str(row.pk), "created": created, "patch_digest": row.patch_digest,
+                    **({"article_publication_intent_id": intent_id} if intent_id else {})}, status=201 if created else 200)
         except WebsiteAuthorityError as exc:
             return Response(exc.as_dict(), status=exc.status)

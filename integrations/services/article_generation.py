@@ -952,8 +952,8 @@ def _refund_content_factory_request(
     from roo.services import PointsService
     from roo.models import Ledger
 
-    from content_factory.website_first_article_billing import defer_child_refund
-    if defer_child_refund(article_request, resolved_domain=resolved_domain):
+    from content_factory.website_first_article_billing import defer_goal_settlement
+    if defer_goal_settlement(article_request, resolved_domain=resolved_domain):
         return None
 
     client_request_id = _get_client_request_id(article_request)
@@ -1300,11 +1300,15 @@ def _record_terminal_article_refund(job, *, status, error_code, ledger=None):
         result = dict(current.result or {})
         saved = result.get('article_terminal_refund')
         receipt = dict(saved) if isinstance(saved, dict) else {}
+        if receipt.get('status') in {'refunded', 'not_required'}:
+            return
+        if status == 'pending' and receipt.get('status') in {'stop_required', 'needs_reconciliation', 'deferred_to_goal'}:
+            status = receipt['status']
         receipt.update(status=status, paid_obligation=True, job_id=job_id, error_code=str(error_code or '')[:100])
         if ledger is not None:
             receipt['refund_ledger_id'] = str(ledger.pk)
         current.result = {**result, 'article_terminal_refund': receipt,
-            'reconciliation_refund_pending': status == 'pending'}
+            'reconciliation_refund_pending': status in {'pending', 'stop_required', 'needs_reconciliation', 'deferred_to_goal'}}
         current.save(update_fields=['result', 'updated_at'])
 
 
@@ -1323,15 +1327,24 @@ def maybe_auto_refund_terminal_failure(
         resolved_domain=getattr(job, "domain", "")):
         return False, 0
 
-    # content-factory owns the refundability decision and may flag a no-value
-    # terminal failure `refundable` explicitly; the error-code allowlist is the
-    # fallback for that signal. Either path requires an actually-charged job below.
+    # A terminal failure signal queues settlement, but never proves an absence
+    # of side effects. Article credit also needs the bound worker stop below.
     resolved_error_code = str(error_code or "").strip().upper()
     research_paid = (getattr(job, "request_meta", {}) or {}).get("roo_points_action") == CONTENT_FACTORY_ACTION_CONTENT_ISLAND_TOPIC_GENERATION
-    from content_factory.incident_guards import NO_DELIVERY_REFUND_CODES, delivered_content
+    from content_factory.incident_guards import NO_DELIVERY_REFUND_CODES
     from workflow_runs.models import ContentFactoryRun
-    run = ContentFactoryRun.objects.filter(run_id=job.job_id).first() if resolved_error_code in NO_DELIVERY_REFUND_CODES and getattr(job, "job_id", None) else None
-    no_value_failure = resolved_error_code in NO_DELIVERY_REFUND_CODES and run is not None and not delivered_content(run)
+    run = ContentFactoryRun.objects.filter(run_id=job.job_id).first() if not research_paid and getattr(job, "job_id", None) else None
+    if run is not None:
+        from content_factory.article_publication_evidence import publication_state, useful_delivery, cancellation_receipt
+        if publication_state(run) in {"article", "unknown"} or useful_delivery(run):
+            return False, 0
+        try:
+            stopped = cancellation_receipt(run, run.result or {})
+        except (ValueError, TypeError):
+            return False, 0
+        if stopped and (stopped["outcome"] != "no_article_effect" or stopped.get("delivered_value") is not False):
+            return False, 0
+    no_value_failure = resolved_error_code in NO_DELIVERY_REFUND_CODES and run is not None
     if not research_paid and not bool(refundable) and not no_value_failure and resolved_error_code not in AUTO_REFUND_ERROR_CODES:
         return False, 0
 
@@ -1360,6 +1373,19 @@ def maybe_auto_refund_terminal_failure(
 
     if not research_paid and not paid_article:
         _record_terminal_article_refund(job, status='pending', error_code=resolved_error_code)
+    if not research_paid:
+        # The durable run owns evidence and charge lineage. Recheck both under
+        # the shared organization/run lock through database-only settlement;
+        # an optimistic failure callback must not race a publication receipt.
+        if run is None:
+            return False, 0
+        from content_factory.reconciliation import _refund_failed_run
+        try:
+            ledger = _refund_failed_run(run, reason=str(error_message or resolved_error_code or "Article could not complete."))
+        except Exception:
+            logger.warning('content_factory_terminal_refund_pending job_id=%s reason=credit_unavailable', getattr(job, 'job_id', ''))
+            return False, 0
+        return (True, int(ledger.delta_microroo or 0) // 1_000_000) if ledger else (False, 0)
     try:
         user = _get_content_factory_user_for_job(billed_job)
     except Exception:

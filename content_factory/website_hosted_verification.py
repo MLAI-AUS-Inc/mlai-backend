@@ -34,22 +34,61 @@ def request_for(op,context,config,target,source):
     from workflow_runs.models import ContentFactoryRun
     connection=config.website_connection
     source_run=goals.mapping(op.receipt).get("setup_run_id")
+    from . import website_sealed_workflow as sealed
+    candidate = snapshot = None
+    if sealed.required(connection, target):
+        candidate, snapshot = sealed.prepare_candidate(op, context, config, target, source)
+        source_run = snapshot["source_run_id"]
     if not source_run:raise WebsiteAuthorityError("verified_target_required","The original setup verifier inputs are not yet available.",retryable=True)
     payload={**contract_for(connection),"domain":context.organization.domain,"github_repo":connection.github_repo,
         "branch":connection.branch,"expected_source_sha":source,"source_run_id":source_run,
         "target_id":target.target_key,"contract_digest":target.contract.get("contract_digest"),
         "client_request_id":f"goal:{op.pk}:hosted:{source}:{op.payload.get('attempt',1)}:{op.payload.get('retry_epoch','initial')}"}
+    if candidate is not None:
+        payload["publishing_inputs_digest"] = candidate["digest"]
+        # Bound identity length while preserving every original request input.
+        payload["client_request_id"] = "hosted-v3:" + sealed.digest({"request": payload, "snapshot": snapshot})
     from .website_goal_budget import enabled as budget_enabled
     if budget_enabled():
         goal=op.receipt["goal"];used=goals.mapping(goal.get("budget_used"))
         payload["goal_budget"]={"version":1,"goal_id":goal["goal_id"],"scope_digest":goals.digest(goal["scope"]),
             "remaining_active_seconds":settings.ARTICLES_GOAL_ACTIVE_SECONDS-(used.get("active_seconds") or 0),
             "remaining_model_usd":settings.ARTICLES_GOAL_MODEL_USD-(used.get("model_cost") or 0)}
-    child=reserve_workflow_operation(connection,workflow="hosted_native_verification",payload=payload)
+    if candidate is not None:
+        with authority_guard(snapshot["parent_binding"], action="read") as current:
+            target.refresh_from_db()
+            sealed.fence_pending(current, target, {"candidate": candidate, "snapshot": snapshot})
+            existing = current.operations.filter(idempotency_key=f"{connection.pk}:workflow:{payload['client_request_id']}").first()
+            if existing is not None and existing.payload.get("remote_request"):
+                original = existing.payload["remote_request"]
+                expected = {key: value for key, value in payload.items() if key != "goal_budget"}
+                actual = {key: value for key, value in original.items() if key not in {"goal_budget", "run_id", "operation_id", "operation_attempt", "deletion_epoch"}}
+                if (actual != expected or existing.payload.get("sealed_inputs") != {"candidate": candidate, "snapshot": snapshot}
+                        or existing.generation != current.generation or existing.state in {"cancelled", "denied", "deleted"}
+                        or existing.payload.get("workflow") != "hosted_native_verification"):
+                    raise WebsiteAuthorityError("operation_key_conflict", "The saved execution request changed.")
+                # A later budget projection must not change the reserved child
+                # identity or relaunch work after a lost provider response.
+                child, payload = existing, dict(original)
+            else:
+                child=reserve_workflow_operation(connection,workflow="hosted_native_verification",payload=payload)
+    else:
+        child=reserve_workflow_operation(connection,workflow="hosted_native_verification",payload=payload)
     payload["run_id"]=str(child.pk)
-    with authority_guard(payload,action="read"):
+    with authority_guard(payload,action="read") as current:
         child.refresh_from_db()
-        child.payload={**child.payload,"run_id":payload["run_id"],"source_run_id":source_run,"binding":dict(payload)}
+        binding = dict(payload)
+        if candidate is not None:
+            target.refresh_from_db()
+            sealed.fence_pending(current, target, {"candidate": candidate, "snapshot": snapshot})
+            verification = candidate["payload"]["verification"]
+            binding.update(baseline_source_sha=verification["baseline_policy"]["source_sha"],
+                verifier_sha256=verification["verifier"]["runner_sha256"])
+            pending = {"candidate": candidate, "snapshot": snapshot}
+            if child.payload.get("sealed_inputs", pending) != pending:
+                raise WebsiteAuthorityError("website_configuration_changed", "The original execution proposal changed.")
+            child.payload = {**child.payload, "sealed_inputs": pending, "remote_request": dict(payload)}
+        child.payload={**child.payload,"run_id":payload["run_id"],"source_run_id":source_run,"binding":binding}
         child.save(update_fields=["payload","updated_at"])
         run,_=ContentFactoryRun.objects.get_or_create(run_id=payload["run_id"],defaults={"organization":context.organization,
             "domain":context.organization.domain,"github_repo":connection.github_repo,"workflow":"hosted_native_verification","status":"queued","run_request":dict(payload)})
@@ -62,8 +101,23 @@ def request_for(op,context,config,target,source):
 
 def advance(op,context,config,target,source):
     """Bounded reconciliation; lost POST/worker/callback is recovered by the saved job."""
+    from . import website_sealed_workflow as sealed
+    if config is not None and sealed.required(config.website_connection, target):
+        from .website_verification import current_ci_attestation, record_ci_attestation
+        proof = current_ci_attestation(config.website_connection, target)
+        if proof and proof.get("source_sha") == source:
+            child = config.website_connection.operations.filter(pk=proof["operation_id"], generation=config.website_connection.generation).first()
+            saved = goals.mapping(child.payload.get("binding")) if child else {}
+            from .website_sealed_verification import PROOF_FIELDS
+            receipt = record_ci_attestation({**{key: proof[key] for key in PROOF_FIELDS},
+                "run_id": saved.get("run_id"), "source_run_id": saved.get("source_run_id")}, origin="authenticated_hosted")
+            return {"status": "completed", "operation_id": str(receipt.pk)}
     child,payload=request_for(op,context,config,target,source)
-    outcome=remote_request("post","/api/runs/hosted-native-verification",data=payload)
+    if "publishing_inputs_digest" in payload:
+        from .website_sealed_candidate import authenticated_request
+        outcome=authenticated_request("post","/api/runs/hosted-native-verification",data=payload)
+    else:
+        outcome=remote_request("post","/api/runs/hosted-native-verification",data=payload)
     from workflow_runs.models import ContentFactoryRun
     state=outcome.get("status")
     if outcome.get("run_id") != payload["run_id"] or state not in {"pending","queued","running","completed","failed","cancelled","denied"}:
@@ -88,6 +142,14 @@ def advance(op,context,config,target,source):
 def read_completed_proof(connection,data):
     """Authenticate original service output; caller JSON cannot select its proof origin."""
     from .website_operations import validate_operation
+    if type(data.get("schema_version")) is int and data["schema_version"] == 3:
+        from .website_sealed_workflow import child_inputs, validate_child_proof
+        from .website_sealed_candidate import authenticated_request
+        _, binding, _ = child_inputs(connection, data)
+        result = authenticated_request("get", f"/api/runs/{binding['run_id']}/hosted-native-verification")
+        if result.get("status") != "completed" or result.get("run_id") != binding["run_id"]:
+            raise WebsiteAuthorityError("ci_attestation_required", "The executing verifier has not completed this source.")
+        return validate_child_proof(connection, data, result.get("verification"))
     origin=validate_operation(connection,data)
     binding=goals.mapping(origin.payload.get("binding")) if origin else {}
     if (not origin or origin.payload.get("workflow")!="hosted_native_verification" or origin.state!="completed"

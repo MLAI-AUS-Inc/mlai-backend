@@ -30,6 +30,7 @@ from .website_connections import (
     guarded_setup_merge_observation,
 )
 from .website_views import guarded_owner_operation
+from .website_comment_action_audit import capture as observe_comment_intent, after_transaction as observe_comment_dispatch
 from .portable_drafts import has_connected_website, original_portable_run, website_preview_delivery_mode
 from io import BytesIO
 from datetime import timedelta, timezone as datetime_timezone
@@ -769,7 +770,12 @@ def _reserve_article_start_connection(context, payload):
             supplied = connection_contract(payload) or connection_contract(owner_operation_contract())
             if supplied and any(connection_contract(contract_for(website)).get(key) != value for key, value in supplied.items() if key != "connection_target_id"):
                 raise WebsiteAuthorityError("website_connection_changed", "The website changed before the article charge.")
-            payload.update(contract_for(website))
+            selected = str(config.default_publish_target_id or "")
+            if supplied.get("connection_target_id") not in (None, "", selected):
+                raise WebsiteAuthorityError("website_target_changed", "The selected articles target changed before admission.")
+            if payload.get("expected_source_sha") not in (None, "", website.verified_sha):
+                raise WebsiteAuthorityError("website_source_changed", "The verified website source changed before admission.")
+            payload.update(contract_for(website), connection_target_id=selected, expected_source_sha=website.verified_sha)
             from .website_operations import reserve_workflow_operation
             reserve_workflow_operation(website, workflow="article_generation", payload=payload)
         except WebsiteAuthorityError as exc:
@@ -783,10 +789,20 @@ def _validate_article_start_admission(context, user, actor_id, article_request):
     require_article_activation(domain=context.organization.domain, actor_id=actor_id, user=user, article_request=article_request)
 
 
-def _validate_article_start_reservation(context, payload):
-    """Recheck the persisted consent and operation under billing transaction locks."""
-    if payload.get("delivery_mode") == "content_only":
+def _validate_article_start_reservation(context, payload, *, require_website=False):
+    """Recheck original consent and proof under billing/dispatch transaction locks."""
+    if not require_website and payload.get("delivery_mode") == "content_only":
         return
+    if require_website and (not payload.get("operation_id")
+            or any(key not in payload for key in ("operation_attempt", "deletion_epoch"))):
+        raise WebsiteAuthorityError("website_operation_required",
+            "The original website operation for this article request is unavailable.")
+    if any(not isinstance(payload.get(key), str) or not payload[key] for key in (
+            "website_connection_id", "connection_target_id", "expected_source_sha")):
+        # Old outboxes cannot reconstruct what was selected from today's config.
+        # Their original dispatch key can still recover an already owned child.
+        raise WebsiteAuthorityError("website_publish_verification_required",
+            "The original website verification for this article request is unavailable.")
     from organizations.models import Organization
     from .website_models import WebsiteConnection
     from .website_contract import validate_authority
@@ -797,7 +813,25 @@ def _validate_article_start_reservation(context, payload):
     if config is None or config.website_connection_id != website.pk:
         raise WebsiteAuthorityError("website_connection_changed", "The selected website changed before billing.")
     validate_authority(website, payload, action="read", domain=context.organization.domain, github_repo=payload.get("github_repo", ""))
-    validate_operation(website, payload)
+    operation = validate_operation(website, payload)
+    if require_website and (operation is None or operation.action != "workflow"
+            or operation.state not in {"pending", "running"}
+            or operation.payload.get("workflow") != "article_generation"
+            or not payload.get("client_request_id")
+            or operation.payload.get("client_request_id") != payload["client_request_id"]):
+        raise WebsiteAuthorityError("website_operation_changed",
+            "The original article operation no longer authorizes a new dispatch.")
+    if payload.get("connection_target_id") != str(config.default_publish_target_id or ""):
+        raise WebsiteAuthorityError("website_target_changed", "The selected articles target changed during admission.")
+    if payload.get("expected_source_sha") != website.verified_sha:
+        raise WebsiteAuthorityError("website_source_changed", "The verified website source changed during admission.")
+    # Provider admission is deliberately outside this transaction. A pending
+    # publishing proof can be recorded meanwhile without changing the website
+    # generation, so recheck its stored authority before spending or dispatching.
+    from .activation import durable_integration_evidence
+    if not durable_integration_evidence(config, website).get("verified"):
+        raise WebsiteAuthorityError("website_publish_verification_required",
+            "Verify the current articles integration before starting this article.")
 
 
 def _charge_roo_points_for_article(request, *, context, payload: dict, goal_operation_id=None):
@@ -1603,7 +1637,7 @@ def _latest_runs_for_org(organization, limit=24, *, config=None, prefetch_feedba
         rows = rows.filter(~Q(workflow__in=REPOSITORY_WORKFLOWS)
             | Q(run_request__website_connection_id=str(connection.pk), run_request__connection_generation=connection.generation)
             | Q(run_request__delivery_mode="content_only", run_request__website_connection_id__isnull=True))
-    rows = rows.prefetch_related("steps").order_by("-updated_at")
+    rows = rows.order_by("-updated_at")
     candidates = list(rows[:max(limit * 4, 48)])
     # Current setup and scan observations must survive a busy article history.
     # Select them before applying the ordinary recent-run display window.
@@ -1616,8 +1650,11 @@ def _latest_runs_for_org(organization, limit=24, *, config=None, prefetch_feedba
     retained_ids = {run.run_id for run in retained}
     ordinary = [run for run in candidates if run.run_id not in retained_ids and not article_setup_reset_ignores_run(config, run)]
     selected_runs = sorted(retained + ordinary[:max(limit - len(retained), 0)], key=lambda run: run.updated_at, reverse=True)
+    # Prefetch only the final display window. Discarded candidates must not
+    # acquire reverse-relation cycles that retain their large result JSON.
+    from django.db.models import Prefetch, prefetch_related_objects
+    prefetch_related_objects(selected_runs, "steps")
     if prefetch_feedback:
-        from django.db.models import Prefetch, prefetch_related_objects
         prefetch_related_objects(selected_runs, Prefetch("component_comments", to_attr="_bootstrap_component_comments"))
     return selected_runs
 
@@ -3237,22 +3274,41 @@ def _serialize_article_draft(run, *, written_keys):
     }
 
 
-def _recent_article_drafts(organization, *, limit=8, scan_limit=50):
+def _article_draft_run_window(organization, *, scan_limit, loaded_runs=None):
+    """Reuse only identical request-owned versions, preserving the whole draft window."""
+    rows = ContentFactoryRun.objects.filter(domain=organization.domain, workflow__in=ARTICLE_WORKFLOWS).exclude(
+        status=ContentFactoryRunStatus.CANCELLED).order_by("-updated_at")
+    def full(query):
+        # These cards need result/request/acceptance fields, including legacy
+        # nested packages; do not replace them with an incomplete JSON allowlist.
+        return list(query.defer("verification_summary", "step_order").prefetch_related("steps"))
+    if loaded_runs is None:
+        owned = full(rows[:scan_limit])
+        return owned, owned
+    identities = list(rows.values_list("pk", "updated_at")[:scan_limit])
+    versions = dict(identities)
+    available = {run.pk: run for run in loaded_runs if getattr(run, "pk", None) in versions
+        and run.updated_at == versions[run.pk] and run.domain == organization.domain
+        and run.workflow in ARTICLE_WORKFLOWS and run.status != ContentFactoryRunStatus.CANCELLED}
+    missing = [identifier for identifier, _ in identities if identifier not in available]
+    owned = full(rows.filter(pk__in=missing)) if missing else []
+    available.update({run.pk: run for run in owned})
+    return [available[identifier] for identifier, _ in identities if identifier in available], owned
+
+
+def _recent_article_drafts(organization, *, limit=8, scan_limit=50, loaded_runs=None):
     written_keys = _written_article_identity_keys(organization)
+    runs, owned = _article_draft_run_window(organization, scan_limit=scan_limit, loaded_runs=loaded_runs)
+    try:
+        return _article_draft_cards(runs, written_keys=written_keys, limit=limit)
+    finally:
+        from .bootstrap_run_lifetime import release_projection_runs
+        release_projection_runs(owned)
+
+
+def _article_draft_cards(runs, *, written_keys, limit):
     drafts = []
     seen = set()
-    runs = list(
-        ContentFactoryRun.objects.filter(domain=organization.domain, workflow__in=ARTICLE_WORKFLOWS)
-        .exclude(status=ContentFactoryRunStatus.CANCELLED)
-        # verification_summary (can be ~tens of KB/run) and step_order are not read
-        # by _serialize_article_draft or its helpers; defer them so the draft scan
-        # (up to scan_limit rows) doesn't haul those blobs out of Postgres.
-        # NOTE: result / run_request / acceptance_summary ARE read here, so they
-        # must stay loaded to avoid a per-row deferred-field query (N+1).
-        .defer("verification_summary", "step_order")
-        .prefetch_related("steps")
-        .order_by("-updated_at")[:scan_limit]
-    )
     # Collapse every attempt at a topic into one card. Edits, failed publishes,
     # restarts (which deliberately start a fresh run with no source_run_id) and
     # independent regenerations of the same keyword are one job, keyed by the topic
@@ -5381,6 +5437,9 @@ def _run_has_article_review_preview_marker(run):
 
 
 def _run_has_external_publish_evidence(run):
+    if run.workflow in ARTICLE_WORKFLOWS:
+        from .article_publication_evidence import publication_state
+        return publication_state(run) in {"article", "unknown"}
     result = _run_mapping(run.result)
     evidence = _publish_evidence_from_run(run)
     return bool(
@@ -7199,6 +7258,16 @@ def _cancel_local_article_system_setup_run(*, run, organization, remote_data=Non
         return locked_run
 
 
+def _article_cancel_receipt_conflict(run, remote_data):
+    """Known external work may stop locally only with a valid worker tombstone."""
+    from .article_publication_evidence import cancellation_receipt
+    try:
+        receipt = cancellation_receipt(run, remote_data)
+    except (ValueError, TypeError):
+        return True
+    return receipt is None and _run_has_external_publish_evidence(run)
+
+
 def _cancel_local_article_run(*, run, organization, remote_data=None):
     remote_data = remote_data if isinstance(remote_data, dict) else {}
     now = timezone.now()
@@ -7207,25 +7276,23 @@ def _cancel_local_article_run(*, run, organization, remote_data=None):
         warnings.append(str(remote_data.get("error")))
     cleanup = remote_data.get("cleanup") if isinstance(remote_data.get("cleanup"), dict) else {}
 
-    _release_cancelled_article_keyword(organization, run)
-
     with transaction.atomic():
         locked_run = ContentFactoryRun.objects.select_for_update().get(pk=run.pk)
-        VibeMarketingComponentComment.objects.filter(run=locked_run).delete()
-        locked_run.steps.update(
+        from .article_publication_evidence import cancellation_result
+        preserved = cancellation_result(locked_run, remote_data)
+        _release_cancelled_article_keyword(organization, locked_run)
+        locked_run.steps.exclude(status=ContentFactoryStepStatus.COMPLETED).update(
             status=ContentFactoryStepStatus.CANCELLED,
             message="Cancelled by user.",
             error="",
-            artifacts=[],
         )
         locked_run.status = ContentFactoryRunStatus.CANCELLED
         locked_run.current_step = "cancelled"
         locked_run.approval_state = ContentFactoryApprovalState.NOT_REQUIRED
         locked_run.resume_available = False
-        locked_run.acceptance_summary = {}
-        locked_run.verification_summary = {}
         locked_run.error = ""
         locked_run.result = {
+            **preserved,
             "status": ContentFactoryRunStatus.CANCELLED,
             "cancelled": True,
             "cancelled_at": now.isoformat(),
@@ -7246,18 +7313,6 @@ def _cancel_local_article_run(*, run, organization, remote_data=None):
             ]
         )
         return locked_run
-
-
-def _cancel_refused_for_resolved_pr_link(run):
-    """Finish a cancel Content Factory refused only because of a PR link.
-
-    Content Factory refuses any article run that carries a PR link, including
-    a PR already confirmed closed and a setup PR copied onto a setup-blocked
-    draft. The backend has resolved that link, so the local cancel is the
-    record; stop the run's preview so it does not outlive the cancelled draft.
-    """
-    _call_content_factory_live_preview(run_id=run.run_id, method="DELETE")
-    return {}
 
 
 def _cancel_local_scan_run(*, run, remote_data=None):
@@ -10793,7 +10848,25 @@ def _log_terminal_repo_scan_status(run, payload):
 
 def _serialize_run_steps(run, *, compact=False):
     step_states = []
+    from .workflow_order import admitted
+    delivery = _run_mapping(_run_mapping(run.result).get("delivery_v1"))
+    order = _run_mapping(delivery.get("workflow_order"))
+    execution = order.get("execution")
+    current_keys = None
+    if (admitted(run.run_request) and set(order) == {"version", "available", "execution", "step_keys"}
+            and type(order.get("version")) is int and order["version"] == 1 and type(order.get("available")) is bool
+            and isinstance(execution, list) and len(execution) == 2
+            and all(type(value) is int and value >= 0 for value in execution)
+            and execution == _run_mapping(delivery.get("latest")).get("execution")
+            and isinstance(order.get("step_keys"), list) and len(order["step_keys"]) <= 512
+            and all(isinstance(key, str) and 1 <= len(key) <= 120 for key in order["step_keys"])
+            and len(set(order["step_keys"])) == len(order["step_keys"])):
+        # Keep prior step records as history, but only serialize this accepted
+        # execution's current map after explicit formatting admission.
+        current_keys = set(order["step_keys"])
     for step in run.steps.order_by("display_order", "id"):
+        if current_keys is not None and step.step_key not in current_keys:
+            continue
         step_states.append(
             {
                 "key": step.step_key,
@@ -11076,7 +11149,7 @@ def _nested_run_result_value(result, *keys):
 
 def _serialize_run(
     run, *, context=None, latest_runs=None, checks=None, mode="full",
-    topic_candidates=None, precomputed_article_setup_state=None, config=None,
+    topic_candidates=None, precomputed_article_setup_state=None, config=None, include_workflow_progress=True,
 ):
     from .setup_status_projection import terminal_setup_projection
     run = terminal_setup_projection(_setup_pr_creation_failure_view(run))
@@ -11197,7 +11270,7 @@ def _serialize_run(
             **({"contentIsland": content_island, "content_island": content_island} if content_island else {}),
             "workflowProgress": _workflow_progress(
                 context=context, run=run, latest_runs=latest_runs, checks=checks, topic_candidates=topic_candidates, config=config
-            ),
+            ) if include_workflow_progress else None,
             "result": _strip_missing_setup_run_refs(_compact_result_for_run(run)),
             **reliability_presentation(result, status=run.status, workflow=run.workflow,
                                        current_step=run.current_step, resume_available=run.resume_available,
@@ -11276,7 +11349,7 @@ def _serialize_run(
         "componentFeedback": _component_feedback_from_run(run),
         "workflowProgress": _workflow_progress(
             context=context, run=run, latest_runs=latest_runs, checks=checks, topic_candidates=topic_candidates, config=config
-        ),
+        ) if include_workflow_progress else None,
         "result": _strip_missing_setup_run_refs(response_result),
         **reliability_presentation(result, status=run.status, workflow=run.workflow,
                                    current_step=run.current_step, resume_available=run.resume_available,
@@ -11673,22 +11746,29 @@ def _serialize_bootstrap(context, request=None, *, view="summary"):
             payload = None
 
     runs = _latest_runs_for_org(context.organization, config=config, prefetch_feedback=payload is None)
-    capabilities = None
-    if payload is None:
-        payload = _compute_bootstrap_payload(context, request=request, view=view, config=config, latest_runs=runs)
-        capabilities = payload.get("articleCapabilities")
-        if cache_key is not None:
-            try:
-                cache.set(cache_key, payload, ttl)
-            except Exception:
-                logger.exception(
-                    "vibe_bootstrap_cache_set_failed org_id=%s",
-                    getattr(context.organization, "id", None),
-                )
+    try:
+        capabilities = None
+        if payload is None:
+            # The live overlay projects progress once for root + displayed runs,
+            # after current capabilities. Do not compute the same graph here too.
+            payload = _compute_bootstrap_payload(context, request=request, view=view, config=config,
+                latest_runs=runs, defer_workflow_progress=True)
+            capabilities = payload.get("articleCapabilities")
+            if cache_key is not None:
+                try:
+                    cache.set(cache_key, payload, ttl)
+                except Exception:
+                    logger.exception(
+                        "vibe_bootstrap_cache_set_failed org_id=%s",
+                        getattr(context.organization, "id", None),
+                    )
 
-    # Per-user / per-request fields are always recomputed; never served from cache.
-    return _overlay_live_bootstrap_fields(payload, context=context, request=request, config=config,
-        latest_runs=runs, capabilities=capabilities)
+        # Per-user / per-request fields are always recomputed; never served from cache.
+        return _overlay_live_bootstrap_fields(payload, context=context, request=request, config=config,
+            latest_runs=runs, capabilities=capabilities)
+    finally:
+        from .bootstrap_run_lifetime import release_projection_runs
+        release_projection_runs(runs)
 
 
 _BOOTSTRAP_WORKFLOW_RUN_FIELDS = (
@@ -11705,7 +11785,7 @@ def _bootstrap_workflow_run_ref(serialized_run):
     return {key: serialized_run.get(key) for key in _BOOTSTRAP_WORKFLOW_RUN_FIELDS}
 
 
-def _compute_bootstrap_payload(context, request=None, *, view="summary", config=None, latest_runs=None):
+def _compute_bootstrap_payload(context, request=None, *, view="summary", config=None, latest_runs=None, defer_workflow_progress=False):
     compact = view == "summary"
     if config is None:
         config = _get_config(context.organization)
@@ -11768,6 +11848,7 @@ def _compute_bootstrap_payload(context, request=None, *, view="summary", config=
         _serialize_run(
             run, context=context, latest_runs=latest_runs, checks=checks,
             mode=run_mode, topic_candidates=topic_candidates, config=config,
+            include_workflow_progress=not defer_workflow_progress,
             # Only scan/setup runs can change which scan or setup is projected.
             # Other runs are already in latest_runs and share this computed state.
             precomputed_article_setup_state=(
@@ -11844,7 +11925,7 @@ def _compute_bootstrap_payload(context, request=None, *, view="summary", config=
         **({"islandGraph": island_graph} if island_graph is not None else {}),
         "hiddenTopicCandidates": hidden_topic_candidates,
         "declinedTopicFeedback": [serialize_topic_feedback(item) for item in declined_topic_feedback],
-        "draftArticles": _recent_article_drafts(context.organization, scan_limit=20 if compact else 50),
+        "draftArticles": _recent_article_drafts(context.organization, scan_limit=20 if compact else 50, loaded_runs=latest_runs),
         "writtenTopics": _recent_written_topics(context.organization),
         "publishEvidence": _publish_evidence_from_run(latest_article_run, compact=compact),
         "guidedSteps": guided_steps,
@@ -11856,7 +11937,7 @@ def _compute_bootstrap_payload(context, request=None, *, view="summary", config=
             checks=checks,
             topic_candidates=topic_candidates,
             config=config,
-        ),
+        ) if not defer_workflow_progress else None,
         "hasCompletedArticleFlow": has_completed_article_flow,
         "startPageMode": "topic_picker" if topic_picker_ready else "first_article_setup",
     }
@@ -17720,6 +17801,7 @@ class VibeMarketingRunCommentsMixin:
             return None, None, Response({"detail": "A newer draft is ready. Open that revision before adding feedback."}, status=409)
         return context, run, None
 
+@method_decorator(observe_comment_dispatch, name="dispatch")
 @method_decorator(transaction.atomic, name="dispatch")
 class VibeMarketingRunCommentsView(VibeMarketingRunCommentsMixin, APIView):
     allows_setup_review_updates = True
@@ -17746,6 +17828,7 @@ class VibeMarketingRunCommentsView(VibeMarketingRunCommentsMixin, APIView):
             if not isinstance(operation_id, str) or not re.fullmatch(r"[\w-]{8,100}", operation_id):
                 return Response({"detail": "A valid comment operation identity is required."}, status=status.HTTP_400_BAD_REQUEST)
             payload["context"] = {**payload.get("context", {}), "operationId": operation_id}
+            observe_comment_intent(request, _context, run, action="create", payload=payload, operation_id=operation_id)
             # The unique primary key closes the concurrent retry race without a
             # new column or migration. Include run and actor in its namespace.
             identity = uuid.uuid5(uuid.NAMESPACE_URL, f"review-comment:{run.run_id}:{request.user.pk}:{operation_id}")
@@ -17756,6 +17839,7 @@ class VibeMarketingRunCommentsView(VibeMarketingRunCommentsMixin, APIView):
                 return Response({"detail": "This comment request identity was used for different feedback."}, status=status.HTTP_409_CONFLICT)
             return Response(_serialize_component_comment(comment),
                             status=status.HTTP_201_CREATED if created else status.HTTP_200_OK)
+        observe_comment_intent(request, _context, run, action="create", payload=payload)
         if run.workflow != "article_system_setup" and ((run.result or {}).get("article_review_approval") or _run_has_external_publish_evidence(run)):
             return Response({"detail": "This article is already approved. Start a new revision to comment."}, status=409)
         comment = VibeMarketingComponentComment.objects.create(
@@ -17765,6 +17849,7 @@ class VibeMarketingRunCommentsView(VibeMarketingRunCommentsMixin, APIView):
         )
         return Response(_serialize_component_comment(comment), status=status.HTTP_201_CREATED)
 
+@method_decorator(observe_comment_dispatch, name="dispatch")
 @method_decorator(transaction.atomic, name="dispatch")
 class VibeMarketingRunCommentDetailView(VibeMarketingRunCommentsMixin, APIView):
     allows_setup_review_updates = True
@@ -17772,6 +17857,11 @@ class VibeMarketingRunCommentDetailView(VibeMarketingRunCommentsMixin, APIView):
         _context, run, error_response = self._resolve_run(request, run_id)
         if error_response is not None:
             return error_response
+        data = request.data if isinstance(request.data, dict) else {}
+        observed_action = data.get("action")
+        observe_comment_intent(request, _context, run,
+            action=observed_action if isinstance(observed_action, str) and observed_action in {"resolve", "reopen"} else "edit",
+            payload=data, comment_id=comment_id)
         comment = VibeMarketingComponentComment.objects.select_for_update().filter(id=comment_id, run=run).first()
         if comment is None:
             comment = VibeMarketingComponentComment.objects.filter(run=run, context__sourceCommentId=str(comment_id)).first()
@@ -17832,6 +17922,7 @@ class VibeMarketingRunCommentDetailView(VibeMarketingRunCommentsMixin, APIView):
         _context, run, error_response = self._resolve_run(request, run_id)
         if error_response is not None:
             return error_response
+        observe_comment_intent(request, _context, run, action="delete", payload={}, comment_id=comment_id)
         comment = VibeMarketingComponentComment.objects.select_for_update().filter(id=comment_id, run=run).first()
         if comment is None:
             comment = VibeMarketingComponentComment.objects.filter(run=run, context__sourceCommentId=str(comment_id)).first()
@@ -18637,15 +18728,17 @@ def control_article_run(*, user, context, run, action, data, run_id=None, goal_o
                     payload=payload,
                     workflow=member.workflow,
                 )
-                if int(member_remote.get("content_factory_status_code") or 0) == 409:
-                    if not has_pr_link:
-                        protected_ids.append(member.run_id)
-                        continue
-                    member_remote = _cancel_refused_for_resolved_pr_link(member)
+                if int(member_remote.get("content_factory_status_code") or 0) == 409 or _article_cancel_receipt_conflict(member, member_remote):
+                    protected_ids.append(member.run_id)
+                    continue
                 if pull_requests:
                     cleanup = member_remote.get("cleanup") if isinstance(member_remote.get("cleanup"), dict) else {}
                     member_remote = {**member_remote, "cleanup": {**cleanup, "pull_requests": pull_requests}}
-                _cancel_local_article_run(run=member, organization=context.organization, remote_data=member_remote)
+                try:
+                    _cancel_local_article_run(run=member, organization=context.organization, remote_data=member_remote)
+                except (ValueError, TypeError):
+                    protected_ids.append(member.run_id)
+                    continue
                 cancelled_ids.append(member.run_id)
 
             if not cancelled_ids and protected_ids:
@@ -18662,21 +18755,15 @@ def control_article_run(*, user, context, run, action, data, run_id=None, goal_o
             body["protectedRunIds"] = protected_ids
             return Response(body, status=status.HTTP_202_ACCEPTED)
 
-        has_pr_link = _run_has_external_publish_evidence(run)
-        if has_pr_link and _draft_pull_request_urls(run):
-            return Response(
-                {"detail": "This article already has external publish evidence. Close or clean up the external PR manually before cancelling."},
-                status=status.HTTP_409_CONFLICT,
-            )
-
         remote_data = _call_content_factory_run_action(run_id=run_id, action=action, payload=payload, workflow=run.workflow)
-        if int(remote_data.get("content_factory_status_code") or 0) == 409:
-            if not has_pr_link:
-                detail = remote_data.get("error") or "Content Factory rejected cancellation for this run."
-                return Response({"detail": detail}, status=status.HTTP_409_CONFLICT)
-            remote_data = _cancel_refused_for_resolved_pr_link(run)
+        if int(remote_data.get("content_factory_status_code") or 0) == 409 or _article_cancel_receipt_conflict(run, remote_data):
+            detail = remote_data.get("error") or "Content Factory rejected cancellation for this run."
+            return Response({"detail": detail}, status=status.HTTP_409_CONFLICT)
 
-        run = _cancel_local_article_run(run=run, organization=context.organization, remote_data=remote_data)
+        try:
+            run = _cancel_local_article_run(run=run, organization=context.organization, remote_data=remote_data)
+        except (ValueError, TypeError):
+            return Response({"detail": "The cancellation receipt no longer matches this article."}, status=409)
         run = ContentFactoryRun.objects.prefetch_related("steps").get(pk=run.pk)
         return Response(_serialize_run(run, context=context), status=status.HTTP_202_ACCEPTED)
 

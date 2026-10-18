@@ -322,6 +322,9 @@ def _project_state(run, operation, envelope, *, website, proof_connection=None):
     """Persist validated current state without notification, refund or action."""
     from .service_views import _merge_django_owned_run_result
     from .website_operations import observe_workflow_status
+    from .workflow_order import received_order, original_admission
+    order_admitted = original_admission(run, operation, envelope)
+    step_order = received_order(run, operation, envelope)
     if envelope["workflow"] in ARTICLE_WORKFLOWS:
         # Durable article transport records the outcome, not publication proof.
         # The canonical article reader still verifies quality/approval/live
@@ -349,13 +352,24 @@ def _project_state(run, operation, envelope, *, website, proof_connection=None):
     failure = projection["failure"]
     run.error = failure.get("user_message", "") if failure else ""
     run.last_event_emitted_at = parse_datetime(envelope["emitted_at"])
+    order_fields = []
+    if order_admitted:
+        # A higher current snapshot can come from an older producer. Its absent
+        # optional metadata must not leave a previous semantic order current.
+        run.step_order = step_order if step_order is not None else []
+        order_fields.append("step_order")
     run.save(update_fields=["status", "current_step", "approval_state", "resume_available",
-        "verification_summary", "acceptance_summary", "result", "error", "last_event_emitted_at", "updated_at"])
-    for index, (step_key, state) in enumerate(projection["step_states"].items()):
+        "verification_summary", "acceptance_summary", "result", "error", "last_event_emitted_at", "updated_at", *order_fields])
+    states = projection["step_states"]
+    ordered_states = ((key, states[key]) for key in step_order) if step_order is not None else states.items()
+    for index, (step_key, state) in enumerate(ordered_states):
         ContentFactoryRunStep.objects.update_or_create(run=run, step_key=step_key,
             defaults={"display_order": index, "status": state["status"],
                       "required": state["required"], "attempts": state["attempts"]})
     metadata = _metadata(run)
+    if order_admitted:
+        metadata["workflow_order"] = {"version": 1, "available": step_order is not None,
+            "execution": list(_version(envelope)), "step_keys": list(states)}
     metadata["latest"] = {"execution": list(_version(envelope)), "state_sha256": envelope["state_sha256"],
         "scope": deepcopy(envelope["scope"]), "received_at": timezone.now().isoformat()}
     metadata["waiting_acknowledged"] = run.status in {"awaiting_approval", "awaiting_confirmation", "awaiting_delivery_mode"}
