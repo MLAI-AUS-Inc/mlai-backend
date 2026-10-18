@@ -91,9 +91,13 @@ def delivered_content(run):
     acceptance = getattr(run, "acceptance_summary", None) or {}
     package = result.get("content_package") or result.get("contentPackage") or {}
     package = package if isinstance(package, dict) else {}
-    return bool(acceptance.get("content_packaged") or package.get("content_packaged")
+    pr_delivery = bool(result.get("pr_url"))
+    if pr_delivery and result.get("publication_evidence_v1") is not None:
+        from .article_publication_evidence import publication_state
+        pr_delivery = publication_state(run) != "setup_only"
+    return bool(pr_delivery or acceptance.get("content_packaged") or package.get("content_packaged")
         or package.get("contentPackaged") or any(result.get(key) for key in
-            ("article", "content", "markdown", "pr_url", "publish_url", "live_url")))
+            ("article", "content", "markdown", "publish_url", "live_url")))
 
 
 def publish_child_binding(config, source_run, payload, remote_data, *, reviewed_source=None):

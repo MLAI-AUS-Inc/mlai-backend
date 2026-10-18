@@ -292,14 +292,24 @@ class StopPreparingKeepsOpenPullRequestTests(SimpleTestCase):
             return rows
         with patch("content_factory.website_connections.authority_guard", return_value=nullcontext(op.connection)), \
                 patch("workflow_runs.models.ContentFactoryRun.objects.filter", side_effect=runs), \
+                patch("workflow_runs.models.ContentFactoryRun.objects.select_for_update") as locked, \
                 patch.object(operations.WebsiteConnectionOperation.objects, "get_or_create",
                     return_value=(Mock(), True)) as followup:
+            scan = SimpleNamespace(run_id="queued-scan", organization_id=7, domain="fixture.test", github_repo=op.connection.github_repo,
+                workflow="repo_scan", run_request={"operation_id": str(op.pk), "operation_attempt": 1,
+                    "website_connection_id": str(op.connection.pk), "connection_generation": 3, "deletion_epoch": 0})
+            locked.return_value.filter.return_value.order_by.return_value = [scan]
             operations.cancel_operation(config, data={"website_connection_id": str(uuid4()), "connection_generation": 3,
                 "operation_id": str(op.pk)}, idempotency_key="stop")
         self.assertEqual(op.state, "cancelled")
         cancelled = [kwargs["run_id__in"] for kwargs, values in updates if values.get("status") == "cancelled"]
         self.assertEqual(cancelled, [["queued-scan"]])
         self.assertEqual(followup.call_args.kwargs["defaults"]["payload"]["cancel_run_ids"], ["queued-scan"])
+        from .website_cancellation_retirement import run_binding
+        self.assertEqual(followup.call_args.kwargs["defaults"]["payload"]["cancel_run_bindings"], {scan.run_id: run_binding(scan)})
+        original = run_binding(scan)
+        scan.run_request["operation_attempt"] = 2
+        self.assertNotEqual(run_binding(scan), original)
 
 
 class JourneyNextStepTests(SimpleTestCase):

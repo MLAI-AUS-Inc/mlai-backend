@@ -1731,7 +1731,7 @@ class VibeMarketingComponentCommentTests(_PublishRetryApprovalFixture, TestCase)
         self.assertEqual(response.data["latestBatch"]["status"], "completed")
 
     @override_settings(CONTENT_FACTORY_URL="https://content-factory.test", CONTENT_FACTORY_API_KEY="secret-key", IS_LOCAL_ENV=False)
-    def test_cancel_article_run_marks_tombstone_and_hides_from_bootstrap(self):
+    def test_legacy_cancel_hides_run_but_preserves_unsettled_delivery_evidence(self):
         self.run.status = ContentFactoryRunStatus.RUNNING
         self.run.current_step = "draft_article"
         self.run.run_request = {**self.website_binding, "target_keyword": "ai marketing"}
@@ -1780,12 +1780,14 @@ class VibeMarketingComponentCommentTests(_PublishRetryApprovalFixture, TestCase)
 
         self.assertEqual(response.status_code, 202)
         self.assertEqual(response.data["status"], ContentFactoryRunStatus.CANCELLED)
-        self.assertFalse(response.data["contentPackage"])
-        self.assertFalse(VibeMarketingComponentComment.objects.filter(run=self.run).exists())
+        self.assertEqual(response.data["contentPackage"]["title"], "AI Marketing")
+        self.assertTrue(VibeMarketingComponentComment.objects.filter(run=self.run).exists())
         self.run.refresh_from_db()
         self.assertEqual(self.run.status, ContentFactoryRunStatus.CANCELLED)
         self.assertEqual(self.run.current_step, "cancelled")
         self.assertTrue(self.run.result["cancelled"])
+        self.assertEqual(self.run.result["delivery_package"]["article_markdown"], "steps/package/article.md")
+        self.assertNotIn("reconciliation_refund_pending", self.run.result)
         self.assertEqual(self.run.steps.get(step_key="draft_article").status, "cancelled")
         keyword = ResearchedKeyword.objects.get(organization=self.organization, keyword_normalized="ai marketing")
         self.assertEqual(keyword.status, KeywordStatus.PENDING)
@@ -2096,7 +2098,7 @@ class VibeMarketingComponentCommentTests(_PublishRetryApprovalFixture, TestCase)
         self.assertEqual(unrelated.status, ContentFactoryRunStatus.BLOCKED)
 
     @override_settings(CONTENT_FACTORY_URL="https://content-factory.test", CONTENT_FACTORY_API_KEY="secret-key", IS_LOCAL_ENV=False)
-    def test_cancel_group_skips_publish_protected_attempts_and_reports_them(self):
+    def test_cancel_group_preserves_publish_evidence_when_remote_stop_is_untyped(self):
         source_run_id = "disc-protected-ai-detectors"
         keyword = "how ai detector reports work"
         cancellable_one = self._create_bound_run(
@@ -2151,7 +2153,9 @@ class VibeMarketingComponentCommentTests(_PublishRetryApprovalFixture, TestCase)
         self.assertEqual(response.data["protectedRunIds"], [protected.run_id])
         self.assertTrue(any(cancellable_one.run_id in url for url in cancelled_urls))
         self.assertTrue(any(cancellable_two.run_id in url for url in cancelled_urls))
-        self.assertFalse(any(protected.run_id in url for url in cancelled_urls))
+        # The stop request is allowed, but its untyped reply cannot establish
+        # the published attempt's cancellation or erase its external evidence.
+        self.assertTrue(any(protected.run_id in url for url in cancelled_urls))
 
         cancellable_one.refresh_from_db()
         cancellable_two.refresh_from_db()
@@ -2159,6 +2163,8 @@ class VibeMarketingComponentCommentTests(_PublishRetryApprovalFixture, TestCase)
         self.assertEqual(cancellable_one.status, ContentFactoryRunStatus.CANCELLED)
         self.assertEqual(cancellable_two.status, ContentFactoryRunStatus.CANCELLED)
         self.assertEqual(protected.status, ContentFactoryRunStatus.BLOCKED)
+        self.assertEqual(protected.result["draft_pr_url"], "https://github.com/MLAI-AUS-Inc/mlai-au/pull/77")
+        self.assertNotIn("reconciliation_refund_pending", protected.result)
 
         bootstrap = self.client.get("/api/v1/vibe-marketing/bootstrap/?view=summary")
         self.assertEqual(bootstrap.status_code, 200)

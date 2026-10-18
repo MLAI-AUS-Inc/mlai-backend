@@ -301,7 +301,8 @@ def defer_child_refund(article_request, *, resolved_domain):
 def release(op, *, reason):
     """Credit a terminal goal's exact original spend through the existing refund path.
 
-    The caller holds the goal lock, after its terminal state wins its lease CAS.
+    The caller holds organization, connection and goal locks, after its terminal
+    state wins its lease CAS, then child/dispatch locks through the credit.
     A rollout change or disconnected site must not strand an existing payment.
     """
     goal = goals.mapping(op.receipt.get("goal"))
@@ -314,11 +315,9 @@ def release(op, *, reason):
     receipt = _reservation(op, goal)
     if receipt["status"] == "refunded":
         return receipt
-    if op.state in {"cancelled", "denied", "deleted"} and any(
-        item["name"] == "first_draft" and item["state"] == "passed"
-        and goals.valid_proof("first_draft", item.get("proof"), scope=goal["scope"],
-            source_sha=goals.mapping(item.get("proof")).get("source_sha"),
-            now=goals.stamp(goals.mapping(item.get("proof")).get("at"))) for item in goal["milestones"]):
+    from .website_first_article_settlement import capture
+    evidence = capture(op, receipt)
+    if evidence["status"] != "refundable":
         return receipt
     # A crash after credit but before saving this receipt reuses the refund key.
     # Validate the spend without rejecting that already committed refund here.
@@ -332,6 +331,23 @@ def release(op, *, reason):
                 "roo_points_ledger_id":receipt["spend_ledger_id"], "roo_points_cost":receipt["cost_points"]},
             resolved_domain=op.connection.organization.domain, reason=reason)
     return _save(op, {**receipt, "status":"refunded"})
+
+
+def defer_goal_settlement(article_request, *, resolved_domain):
+    """A goal-owned child never credits the shared reservation, even after stop."""
+    identifier = article_request.get("first_article_goal_operation_id")
+    if not identifier:
+        return False
+    from .website_models import WebsiteConnectionOperation
+    parent = WebsiteConnectionOperation.objects.select_related("connection__organization").filter(
+        pk=identifier, action="prepare").first()
+    if (parent is None or parent.connection.organization.domain.casefold() != str(resolved_domain).casefold()
+        or goals.mapping(parent.receipt.get("goal")).get("goal_id") != str(identifier)):
+        raise ValueError("The original article goal payment needs reconciliation.")
+    _reservation(parent, goals.mapping(parent.receipt.get("goal")))
+    from .website_first_article_refunds import reserve_refund
+    reserve_refund(parent)
+    return True
 
 
 def cancel_held_goals(connection):

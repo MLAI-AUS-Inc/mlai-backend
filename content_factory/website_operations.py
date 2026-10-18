@@ -286,13 +286,15 @@ def bind_operation_run(operation, run):
             op.payload = {**op.payload, "run_id": run.run_id}
             op.state = "cancelled"
             op.save(update_fields=["payload", "state", "updated_at"])
+            current = ContentFactoryRun.objects.select_for_update().get(pk=run.pk)
+            from .website_cancellation_retirement import bindings_for
             cleanup, _ = WebsiteConnectionOperation.objects.get_or_create(idempotency_key=f"{website.pk}:late-dispatch:{op.pk}", defaults={
                 "connection": website, "generation": website.generation, "action": "cancel-operation" if op.generation == website.generation else "disconnect",
-                "payload": {"previous_generation": op.generation, "cancelled_operation_id": str(op.pk), "cancel_run_ids": [run.run_id], "stop_preview_run_ids": [run.run_id]},
+                "payload": {"previous_generation": op.generation, "cancelled_operation_id": str(op.pk), "cancel_run_ids": [run.run_id], "stop_preview_run_ids": [run.run_id],
+                    "cancel_run_bindings": bindings_for([current])},
                 "receipt": {"status": "late_dispatch_cancel_requested", "remote_cleanup_pending": True, "repository_modified": None}})
             # A completed callback may have won before we acquired consent
             # locks. Read its current history under lock before cancelling.
-            current = ContentFactoryRun.objects.select_for_update().get(pk=run.pk)
             if current.status in {"completed", "denied", "cancelled"}:
                 run.status, run.resume_available, run.error, run.result = current.status, current.resume_available, current.error, current.result
             else:
@@ -407,10 +409,14 @@ def cancel_operation(config, *, data, idempotency_key):
                 payload__run_id__in=run_ids).values_list("id", flat=True)) if run_ids else []
             connection.operations.filter(pk__in=child_operations).exclude(state__in=["completed", "failed", "denied", "deleted"]).update(
                 state="cancelled", next_attempt_at=None, updated_at=timezone.now())
+        from .website_cancellation_retirement import bindings_for
+        cancel_bindings = bindings_for(ContentFactoryRun.objects.select_for_update().filter(
+            run_id__in=run_ids, organization=connection.organization).order_by("pk"))
         ContentFactoryRun.objects.filter(run_id__in=run_ids, organization=connection.organization).update(status="cancelled", resume_available=False, error="Website operation cancelled.", updated_at=timezone.now())
         followup, _ = WebsiteConnectionOperation.objects.get_or_create(idempotency_key=f"{connection.pk}:cancel:{idempotency_key}", defaults={
             "connection": connection, "generation": connection.generation, "action": "cancel-operation", "payload": {"cancel_run_ids": run_ids,
                 "stop_preview_run_ids": run_ids, "cancelled_operation_id": str(op.pk), "cancelled_action": op.action,
+                "cancel_run_bindings": cancel_bindings,
                 "cancelled_child_operation_ids": [str(item) for item in child_operations], "previous_generation": connection.generation},
             "receipt": dict(op.receipt)})
         return followup
@@ -491,7 +497,9 @@ def advance_workflow_attempt(run):
         op.state = "running"
         op.save(update_fields=["payload", "state", "updated_at"])
         fields = {"operation_id": str(op.pk), "operation_attempt": op.payload["attempt"], "deletion_epoch": deletion_epoch(website)}
-        run.run_request = {**(run.run_request or {}), **contract_for(website), **fields}
+        # The consent guard verified the saved scope. Advancing an execution
+        # must not add absent target/root fields or change its original payment.
+        run.run_request = {**(run.run_request or {}), **fields}
         from .setup_delivery_enrollment import enroll_setup_delivery
         if enroll_setup_delivery(op, run.run_request, website, getattr(run, "workflow", "")):
             op.save(update_fields=["payload", "updated_at"])

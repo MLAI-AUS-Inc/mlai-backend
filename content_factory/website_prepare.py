@@ -999,12 +999,15 @@ def wake_prepare_for_source(connection_id, *, organization_id, owned_merge_run_i
         profile__user_id=connection.authorized_by_id).first()
     if config is None or company is None:
         return None
-    from .website_goal_runner import wake_goal_for_source, owns_goal
+    from .website_goal_runner import wake_goal_for_source, owns_goal, terminal_first_article_goal
     from .website_goal import enrolled
-    if enrolled(connection.organization_id):
-        latest = connection.operations.filter(generation=connection.generation, action="prepare").order_by("-created_at", "-pk").first()
-        if latest and owns_goal(latest):
-            return wake_goal_for_source(config, company_id=company.pk, user=connection.authorized_by, now=timezone.now())
+    latest = connection.operations.filter(generation=connection.generation, action="prepare").order_by("-created_at", "-pk").first()
+    # A flag rollback cannot turn the finished original paid goal into legacy
+    # source work. A new first article requires an explicit owner submission.
+    if latest and terminal_first_article_goal(latest):
+        return None
+    if enrolled(connection.organization_id) and latest and owns_goal(latest):
+        return wake_goal_for_source(config, company_id=company.pk, user=connection.authorized_by, now=timezone.now())
     op = start_prepare(config, company_id=company.pk, user=connection.authorized_by)
     reopenable = ["completed", "needs_user", "needs_attention", "pending", "stopped"]
     owned_setup = bool(owned_merge_run_id) and ContentFactoryRun.objects.filter(run_id=owned_merge_run_id,

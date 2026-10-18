@@ -327,6 +327,7 @@ def run_content_factory_reconciliation_sweep(*, limit: Optional[int] = None, now
         "errors": 0,
         "recovery_requested": 0,
         "failed_stalled": 0,
+        "cancelled_stalled": 0,
     }
     from .setup_delivery_reconciliation import run_setup_delivery_reconciliation_sweep
     summary.update(run_setup_delivery_reconciliation_sweep(limit=limit, now=now))
@@ -334,6 +335,7 @@ def run_content_factory_reconciliation_sweep(*, limit: Optional[int] = None, now
     summary["settled_restart_receipts"] = _reconcile_restart_receipts(limit=limit, now=now)
     summary["redriven"] = _redrive_fixed_runs(limit=limit, now=now)
     summary["refusal_alerts"] = report_repeated_refusals(limit=limit, now=now)
+    summary["settled_exhausted_articles"] = _settle_exhausted_article_runs(limit=limit, now=now)
     _settle_sweep_refunds(limit=limit)
     if not candidates:
         return summary
@@ -562,6 +564,9 @@ def recover_stalled_run(run, *, base_url, headers, now):
     if previous:
         if requested_at and now - requested_at < timedelta(minutes=5):
             return "waiting_for_recovery"
+        from .run_state import ARTICLE_WORKFLOWS
+        if getattr(run, "workflow", None) in ARTICLE_WORKFLOWS:
+            return _stop_stalled_article(run, base_url=base_url, headers=headers, now=now)
         try:
             requests.post(f"{base_url}/api/runs/{run.run_id}/cancel", headers=headers,
                 json={"reason": "worker_heartbeat_lost"}, timeout=(3, 15))
@@ -583,39 +588,152 @@ def recover_stalled_run(run, *, base_url, headers, now):
     return "recovery_requested" if accepted else "recovery_unconfirmed"
 
 
+def _stop_stalled_article(run, *, base_url, headers, now):
+    """A recovery deadline requests a stop; it never proves that a write failed."""
+    from .article_publication_evidence import cancellation_receipt
+    from .website_cancellation_retirement import expected_article_cancellation
+    from .service_views import _apply_cancellation_receipt
+    result = dict(run.result or {})
+    attempts = result.get("article_stop_attempts", 0)
+    if type(attempts) is not int or attempts >= 3:
+        return "recovery_unconfirmed"
+    claimed = ContentFactoryRun.objects.filter(pk=run.pk, status=run.status, updated_at=run.updated_at).update(
+        result={**result, "article_stop_attempts": attempts + 1})
+    if not claimed:
+        return "callback_won"
+    try:
+        response = requests.post(f"{base_url}/api/runs/{run.run_id}/cancel", headers=headers,
+            json={"reason": "worker_heartbeat_lost",
+                "expected_cancellation_v1": expected_article_cancellation(run)}, timeout=(3, 15))
+        remote = response.json() if response.status_code in {200, 202} else {}
+        if cancellation_receipt(run, remote) is not None:
+            incoming = dict(remote.get("result") or {})
+            for key in ("article_cancellation_v1", "publication_evidence_v1"):
+                if key in remote:
+                    incoming[key] = remote[key]
+            receipt = _apply_cancellation_receipt(run.run_id, {"domain": run.domain, "status": "cancelled", "result": incoming})
+            if receipt.status_code == 200:
+                return "cancelled_stalled"
+    except Exception:
+        logger.warning("article_stall_stop_unconfirmed run_id=%s", run.run_id)
+    if attempts == 2:
+        ContentFactoryRun.objects.filter(pk=run.pk, status=run.status, updated_at=run.updated_at).update(
+            status="blocked", resume_available=False,
+            error="Worker cancellation could not be verified. Publication and payment need reconciliation.",
+            result={**result, "article_stop_attempts": 3, "article_settlement_status": "needs_reconciliation"})
+    return "recovery_unconfirmed"
+
+
 def _refund_failed_run(run, *, reason):
     from .billing_lineage import ARTICLE_CHARGE_PREFIX, original_article_spend_for_run, paid_article_request
+    from .article_publication_evidence import refund_reconciliation_reason
     from integrations.services.article_generation import refund_content_factory_request_for_user
-    request = run.run_request or {}
-    terminal_receipt = (run.result or {}).get("article_terminal_refund")
-    paid_obligation = isinstance(terminal_receipt, dict) and terminal_receipt.get("paid_obligation") is True
-    ledger = original_article_spend_for_run(run)
-    refund = None
-    if ledger and ledger.user:
-        request = {**request, "client_request_id": ledger.idempotency_key.removeprefix(ARTICLE_CHARGE_PREFIX)}
-        refund = refund_content_factory_request_for_user(user=ledger.user, actor_id=ledger.created_by_slack_id or "",
-            article_request=request, resolved_domain=run.domain, reason=reason)
-        if refund is None:
-            raise ValueError("The recorded spend's refund could not be verified.")
-    elif paid_article_request(request) or paid_obligation:
-        raise ValueError("The recorded spend could not be resolved for refund.")
-    # Refund I/O may overlap a worker receipt. Merge the fresh result under a
-    # brief lock rather than replacing it with our pre-refund snapshot.
+    # Credit is local ledger I/O. Keep the run lock through the idempotent credit
+    # so a later callback cannot replace the checked evidence midway through it.
     with transaction.atomic():
+        from organizations.models import Organization
+        if getattr(run, "organization_id", None):
+            Organization.objects.select_for_update().filter(pk=run.organization_id).first()
         current = ContentFactoryRun.objects.select_for_update().filter(pk=run.pk).first()
-        if current:
-            result = dict(current.result or {})
-            if isinstance(result.get("article_terminal_refund"), dict):
-                result["article_terminal_refund"] = {**result["article_terminal_refund"],
-                    "status": "refunded" if refund else "not_required"}
-                if refund:
-                    result["article_terminal_refund"]["refund_ledger_id"] = str(refund.pk)
-            current.result = {**result, "reconciliation_refund_pending": False}
+        if current is None:
+            return
+        result = dict(current.result or {})
+        terminal_receipt = result.get("article_terminal_refund")
+        receipt = dict(terminal_receipt) if isinstance(terminal_receipt, dict) else {}
+        if receipt.get("status") in {"refunded", "not_required"}:
+            return
+        if (current.run_request or {}).get("first_article_goal_operation_id"):
+            # A legacy child outbox cannot credit the parent's shared spend after
+            # a different repair child delivers. Preserve the obligation under
+            # its original goal owner; the goal's own refund outbox settles it.
+            current.result = {**result, "article_settlement_owner": "first_article_goal",
+                "article_terminal_refund": {**receipt, "status": "deferred_to_goal"},
+                "reconciliation_refund_pending": True}
             current.save(update_fields=["result"])
+            return
+        stop_reason = refund_reconciliation_reason(current)
+        if stop_reason:
+            if stop_reason == "stop_required" and receipt.get("status") == "needs_reconciliation":
+                stop_reason = "needs_reconciliation"
+            current.result = {**result, "article_terminal_refund": {**receipt, "status": stop_reason},
+                "reconciliation_refund_pending": True}
+            current.save(update_fields=["result"])
+            return
+        request = current.run_request or {}
+        paid_obligation = receipt.get("paid_obligation") is True or receipt.get("billing_resolution_required") is True
+        ledger = original_article_spend_for_run(current)
+        refund = None
+        if ledger and ledger.user:
+            request = {**request, "client_request_id": ledger.idempotency_key.removeprefix(ARTICLE_CHARGE_PREFIX)}
+            refund = refund_content_factory_request_for_user(user=ledger.user, actor_id=ledger.created_by_slack_id or "",
+                article_request=request, resolved_domain=current.domain, reason=reason)
+            if refund is None:
+                raise ValueError("The recorded spend's refund could not be verified.")
+        elif paid_article_request(request) or paid_obligation:
+            raise ValueError("The recorded spend could not be resolved for refund.")
+        if receipt:
+            result["article_terminal_refund"] = {**receipt, "status": "refunded" if refund else "not_required"}
+            if refund:
+                result["article_terminal_refund"]["refund_ledger_id"] = str(refund.pk)
+        current.result = {**result, "reconciliation_refund_pending": False}
+        current.save(update_fields=["result"])
+        return refund
+
+
+def _settle_exhausted_article_runs(*, limit, now):
+    """Ask the worker to fence exhausted work; elapsed time never proves no effects."""
+    from .article_publication_evidence import exhausted_article_candidate, cancellation_receipt
+    from .website_cancellation_retirement import expected_article_cancellation
+    from .run_state import ARTICLE_WORKFLOWS
+    from .vibe_marketing_views import _call_content_factory_run_action
+    from .service_views import _apply_cancellation_receipt
+    count = 0
+    candidates = ContentFactoryRun.objects.filter(status__in=["blocked", "failed", "cancelled"], workflow__in=ARTICLE_WORKFLOWS,
+        updated_at__lt=now - _stale_after()).filter(
+        Q(reconciled_at__isnull=True) | Q(reconciled_at__lt=now - _probe_interval())).order_by("updated_at")[:limit]
+    for run in candidates:
+        if not exhausted_article_candidate(run):
+            continue
+        result = dict(run.result or {})
+        attempts = result.get("article_settlement_attempts", 0)
+        if type(attempts) is not int or attempts >= 3:
+            continue
+        claimed_result = {**result, "article_settlement_attempts": attempts + 1,
+            "article_settlement_status": "needs_reconciliation" if attempts == 2 else "stop_pending"}
+        if attempts == 2 and run.status in {"failed", "cancelled"}:
+            claimed_result["article_terminal_refund"] = {**dict(result.get("article_terminal_refund") or {}),
+                "status": "needs_reconciliation"}
+        # Claim before remote I/O; duplicate sweeps cannot spend the same attempt.
+        claimed = ContentFactoryRun.objects.filter(pk=run.pk, status=run.status, updated_at=run.updated_at,
+            reconciled_at=run.reconciled_at).update(reconciled_at=now, result=claimed_result)
+        if not claimed:
+            continue
+        try:
+            remote = _call_content_factory_run_action(run_id=run.run_id, action="cancel", workflow=run.workflow,
+                payload={"reason": "article_terminal_no_value" if run.status in {"failed", "cancelled"} else "article_budget_exhausted",
+                    "expected_cancellation_v1": expected_article_cancellation(run)}, transport_errors_are_pending=True)
+            if cancellation_receipt(run, remote) is None:
+                continue
+            incoming = dict(remote.get("result") or {})
+            for key in ("article_cancellation_v1", "publication_evidence_v1"):
+                if key in remote:
+                    incoming[key] = remote[key]
+            response = _apply_cancellation_receipt(run.run_id, {"domain": run.domain, "status": "cancelled",
+                "result": incoming})
+            if response.status_code == 200:
+                count += 1
+        except Exception:
+            # Keep the claimed attempt durable and continue the batch. Never log
+            # provider bodies or turn unavailable evidence into a credit.
+            logger.warning("article_settlement_pending run_id=%s", run.run_id)
+    return count
 
 
 def _settle_sweep_refunds(*, limit):
-    for run in ContentFactoryRun.objects.filter(status__in=["failed", "cancelled"], result__reconciliation_refund_pending=True).filter(_legacy_delivery_rows("run_request"))[:limit]:
+    for run in ContentFactoryRun.objects.filter(status__in=["failed", "cancelled"], result__reconciliation_refund_pending=True).filter(_legacy_delivery_rows("run_request") |
+            Q(result__article_cancellation_v1__purpose="article_cancellation")).filter(
+            Q(result__article_terminal_refund__status__isnull=True) |
+            ~Q(result__article_terminal_refund__status__in=["needs_reconciliation", "deferred_to_goal"]))[:limit]:
         try:
             if (run.run_request or {}).get("pending_billing_refund"):
                 from .vibe_marketing_views import _process_pending_dispatch_refund

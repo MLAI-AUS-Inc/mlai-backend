@@ -15,6 +15,7 @@ from .website_connections import contract_for, transition_connection
 from .website_contract import cleanup_plan, safe_repository_path, evidence_digest
 from .website_models import WebsiteConnection, WebsiteConnectionOperation, WebsiteScanSnapshot
 from . import website_preview_cleanup_budget as preview_budget
+from . import website_cancellation_retirement as cancel_work
 
 logger = logging.getLogger(__name__)
 
@@ -871,6 +872,7 @@ def process_website_connection_operations(*, limit=20, now=None, connection_id=N
             result["processed"] += 1
             op.attempts += 1
             preview_budget.start(op, now=now)
+            cancel_work.claim(op, now=now)
             op.next_attempt_at = now + timedelta(minutes=5)
             op.save(update_fields=["attempts", "receipt", "next_attempt_at", "updated_at"])
             claimed_at = op.updated_at
@@ -901,25 +903,34 @@ def process_website_connection_operations(*, limit=20, now=None, connection_id=N
                 preview_pending = list(preview_ids[20:])
                 remote = _content_factory_remote_config()
                 for run_id in cancel_ids[:20]:
+                    bounded_cancel = cancel_work.applicable(op)
+                    run = cancel_work.run_for(op, run_id) if bounded_cancel else None
+                    if bounded_cancel and (not cancel_work.can_call(op, now=now) or run is None
+                            or run_id not in op.receipt[cancel_work.KEY]["run_ids"]):
+                        pending.append(run_id)
+                        continue
                     if not remote["enabled"]:
                         pending.append(run_id)
                         continue
-                    if op.action == "cancel-operation" and op.payload.get("cancelled_action") != "prepare":
-                        cancelled = op.connection.operations.get(pk=op.payload["cancelled_operation_id"])
-                        from .website_operations import deletion_epoch
+                    from .run_state import ARTICLE_WORKFLOWS
+                    if bounded_cancel and run.workflow not in ARTICLE_WORKFLOWS:
                         response = http_client.post(f"{remote['base_url']}/api/connections/{op.connection_id}/cancel-operation",
-                            headers=_content_factory_headers(), json={**contract_for(op.connection), "run_id": run_id,
-                                "operation_id": str(cancelled.pk), "operation_attempt": cancelled.payload.get("attempt", 1),
-                                "deletion_epoch": deletion_epoch(op.connection)}, timeout=(3, 15))
+                            headers=_content_factory_headers(), json=cancel_work.scoped_nonarticle_request(run), timeout=(3, 15))
                     else:
+                        payload = {"reason": "website_connection_changed"}
+                        if bounded_cancel:
+                            payload["expected_cancellation_v1"] = cancel_work.expected_article_cancellation(run)
                         response = http_client.post(f"{remote['base_url']}/api/runs/{run_id}/cancel",
-                            headers=_content_factory_headers(), json={"reason": "website_connection_changed"}, timeout=(3, 15))
+                            headers=_content_factory_headers(), json=payload, timeout=(3, 15))
                     try:
                         body = response.json()
                     except (ValueError, AttributeError):
                         body = {}
                     cleanup_pending = isinstance(body, dict) and (body.get("cleanup_pending") is True or body.get("cleanupPending") is True)
-                    if response.status_code not in {200, 204, 404} or cleanup_pending:
+                    if bounded_cancel:
+                        if not cancel_work.acknowledge(op, run, run_id, response.status_code, body):
+                            pending.append(run_id)
+                    elif response.status_code not in {200, 204, 404} or cleanup_pending:
                         pending.append(run_id)
                     if op.action == "cancel-operation" and isinstance(body, dict):
                         op.receipt["remote_outcomes"] = body.get("remote_outcomes", [])
@@ -991,6 +1002,7 @@ def process_website_connection_operations(*, limit=20, now=None, connection_id=N
         except Exception:
             # No transport messages can accidentally include credentials or source bodies.
             op.receipt = {**op.receipt, "last_error": "remote_reconciliation_unavailable"}
+        cancel_work.finish(op, now=now)
         preview_budget.completed(op, now=now)
         op.next_attempt_at = None if op.state == "needs_attention" else now + timedelta(seconds=min(3600, 15 * 2 ** min(op.attempts, 8)))
         if op.action == "disconnect" and "remove_setup" in op.payload:
