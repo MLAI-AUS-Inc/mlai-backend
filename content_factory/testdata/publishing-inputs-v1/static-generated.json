@@ -1,6 +1,6 @@
 {
   "canonicalization": "mlai_utf8_json_v1",
-  "digest": "7e8c180ded09a20a86d25ed75a0cd892829307722438103f667c8e8d905867ca",
+  "digest": "ec2256e36f37078d42b4361de35dd88f510e50988c930e996b20d2aa81ff19a0",
   "payload": {
     "normalizer_version": 1,
     "publishing": {
@@ -143,7 +143,7 @@
         "playwright_version": "1.58.0",
         "profile": "native_ci_v1",
         "python_version": "3.11",
-        "runner_sha256": "43dce732666d5129a10440b09568c961d01aad2c0284141bd8e21bf238bf8c4f"
+        "runner_sha256": "41eb86a32a9edd2a65ff95119fbcc8eae1fddca37c1adcd234877440e12caee4"
       }
     }
   },

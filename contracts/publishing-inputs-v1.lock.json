@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "source_repository": "drsamdonegan/content-factory",
-  "source_revision": "b692d88741e5aebf17ebcc7a3d3e3cfebca7a098",
+  "source_revision": "6274430937df29a69e7fd59caf4b68705e99d56d",
   "artifacts": {
     "contracts/publishing-inputs-v1.schema.json": {
       "source_path": "contracts/publishing-inputs-v1.schema.json",
@@ -9,11 +9,11 @@
     },
     "content_factory/testdata/publishing-inputs-v1/react-generated.json": {
       "source_path": "backend/tests/fixtures/publishing-inputs-v1/react-generated.json",
-      "sha256": "c7d0da2b6b14d77a30d002bb42d2a543fbcfd70f2d66789a96d028009316e00d"
+      "sha256": "37b184c7027b899f5b35f7ac662c73e949045826883f5b124be1ade964b6b169"
     },
     "content_factory/testdata/publishing-inputs-v1/static-generated.json": {
       "source_path": "backend/tests/fixtures/publishing-inputs-v1/static-generated.json",
-      "sha256": "a3209d19833c94e16c765f7098bc6add7483230b0eb9b5f6852b2051dfbe3f94"
+      "sha256": "1bd88f61505477545ef1d1744ab5218f458e42dd18f7b4cc2d99b8d4430bfdd3"
     }
   }
 }

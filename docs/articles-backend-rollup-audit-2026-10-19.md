@@ -110,3 +110,9 @@ Before the final #1149 extraction: 1,175 tests passed through the strict runner 
 Merge resolutions kept the union of test selections and documentation. The service callback merge retains both immutable original-run identity filtering and original workflow formatting admission. The delivery mapping extraction keeps B5 formatting enrollment. The latest main draft-delete cleanup remains in the branch. No migrations were changed.
 
 Rollup risks: lifecycle/billing changes are active corrections and require PostgreSQL exact-head CI; missing old receipt history remains conservatively unresolved. R3 action counts remain explicitly incomplete. Cross-repository producer locks will be repinned to the actually merged CF source before backend merge; source pinning does not assert a production CF release.
+
+## Consolidated producer pins
+
+All five retained CF locks now pin immutable producer commit `6274430937df29a69e7fd59caf4b68705e99d56d` from CF #1121. Thirteen artifact/runner byte comparisons were checked directly from that commit. The two v1 generated candidate fixtures were refreshed solely for their embedded verifier hash (old `43dce732…` to current `41eb86a3…`) and resulting envelope digest; all schemas and the actual schema3 verifier/fixtures stayed identical. Backend merge must verify this producer commit is contained in the CF merged main. That condition does not authorize or claim CF production deployment.
+
+Final local checks: 1,185 strict tests; 565 fully assigned modules; 753 audited failure emissions. Optional v3, inventory, workflow-formatting and profiling flags remain off; current legacy generation and callback regressions pass. The new CF static preview reference is private: its `_post` strips `_static_prepared_reference`, so the backend mutation file contract is unchanged.
