@@ -71,9 +71,9 @@ class SealedAdmissionBillingTests(SimpleTestCase):
             self.outbox = stack.enter_context(patch("content_factory.dispatch_outbox.reserve_dispatch"))
             yield
 
-    def charge(self, *, parent=False):
+    def charge(self, *, parent=False, supplied=None):
         value = self.value
-        payload = {**contract_for(value.website), "delivery_mode": "publish_code", "client_request_id": "ordinary"}
+        payload = {**contract_for(value.website), "delivery_mode": "publish_code", "client_request_id": "ordinary", **(supplied or {})}
         result = views._charge_roo_points_for_article(SimpleNamespace(user=value.user, data={"expectedCostPoints": 6}),
             context=value.context, payload=payload, goal_operation_id=value.prepare.pk if parent else None)
         return result, payload
@@ -107,6 +107,81 @@ class SealedAdmissionBillingTests(SimpleTestCase):
             self.assertEqual(self.value.prepare.receipt["first_article_billing"], held)
             self.spend.assert_called_once()
             self.ordinary_charge.assert_not_called()
+            self.outbox.assert_not_called()
+
+    def test_new_valid_source_cannot_authorize_previously_admitted_payload(self):
+        with self.charge_boundaries():
+            source = self.value.website.verified_sha
+            actual_admission = views._validate_article_start_admission
+            def admitted_then_changed(*args, **kwargs):
+                actual_admission(*args, **kwargs)
+                self.value.website.verified_sha = "f" * 40
+                self.value.target.source_sha = "f" * 40
+                self.assertTrue(durable_integration_evidence(self.value.config, self.value.website)["verified"])
+            with patch.object(views, "_validate_article_start_admission", side_effect=admitted_then_changed):
+                result, payload = self.charge()
+            self.assertIsNotNone(result[3])
+            self.assertEqual(payload["expected_source_sha"], source)
+            self.ordinary_charge.assert_not_called()
+            self.outbox.assert_not_called()
+
+    def test_new_valid_default_cannot_authorize_another_selected_target(self):
+        with self.charge_boundaries():
+            selected = self.value.config.default_publish_target_id
+            actual_admission = views._validate_article_start_admission
+            def admitted_then_changed(*args, **kwargs):
+                actual_admission(*args, **kwargs)
+                self.value.config.default_publish_target_id = "another-valid-target"
+                self.value.target.target_key = "another-valid-target"
+                self.assertTrue(durable_integration_evidence(self.value.config, self.value.website)["verified"])
+            with patch.object(views, "_validate_article_start_admission", side_effect=admitted_then_changed):
+                result, payload = self.charge()
+            self.assertIsNotNone(result[3])
+            self.assertEqual(payload["connection_target_id"], selected)
+            self.ordinary_charge.assert_not_called()
+            self.outbox.assert_not_called()
+
+    def test_supplied_foreign_source_or_target_is_rejected_without_retargeting(self):
+        for supplied in ({"expected_source_sha": "f" * 40}, {"connection_target_id": "different"},
+                {"connectionTargetId": "different"}):
+            with self.subTest(supplied=supplied), self.charge_boundaries():
+                result, payload = self.charge(supplied=supplied)
+                self.assertIsNotNone(result[3])
+                self.assertEqual({key: payload[key] for key in supplied}, supplied)
+                self.ordinary_charge.assert_not_called()
+                self.outbox.assert_not_called()
+
+    def test_original_owner_context_target_cannot_be_silently_replaced(self):
+        payload = {"delivery_mode": "publish_code", "client_request_id": "ordinary"}
+        binding = {**contract_for(self.value.website), "connection_target_id": "original-other-target"}
+        with self.charge_boundaries(), patch.object(views, "owner_operation_contract", return_value=binding):
+            error = views._reserve_article_start_connection(self.value.context, payload)
+            self.assertIsNotNone(error)
+            self.assertEqual(error.status_code, 409)
+            self.assertNotIn("connection_target_id", payload)
+            self.ordinary_charge.assert_not_called()
+            self.outbox.assert_not_called()
+
+    def test_legacy_reserved_identity_cannot_be_upgraded_to_current_target(self):
+        from . import website_operations
+        from .website_models import WebsiteConnectionOperation
+        from .website_contract import evidence_digest
+        reserve = website_operations.reserve_workflow_operation
+        old_payload = {**contract_for(self.value.website), "delivery_mode": "publish_code", "client_request_id": "ordinary"}
+        legacy = SimpleNamespace(generation=self.value.website.generation, state="running", save=Mock(), receipt={},
+            payload={"workflow": "article_generation", "attempt": 1,
+                "request_digest": evidence_digest({key: value for key, value in old_payload.items() if key != "client_request_id"})})
+        original = deepcopy(legacy.payload)
+        with self.charge_boundaries(), patch.object(website_operations, "reserve_workflow_operation", new=reserve), \
+                patch.object(WebsiteConnectionOperation.objects, "get_or_create", return_value=(legacy, False)):
+            result, payload = self.charge()
+            self.assertEqual(result[3].status_code, 409)
+            self.assertEqual(result[3].data["code"], "operation_key_conflict")
+            self.assertEqual(payload["client_request_id"], old_payload["client_request_id"])
+            self.assertEqual(legacy.payload, original)
+            legacy.save.assert_not_called()
+            self.ordinary_charge.assert_not_called()
+            self.spend.assert_not_called()
             self.outbox.assert_not_called()
 
     def test_promoted_exact_proof_reuses_original_hold_and_dispatch_identity(self):

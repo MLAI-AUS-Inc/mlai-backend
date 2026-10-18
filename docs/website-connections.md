@@ -468,10 +468,18 @@ Children and rejected-dispatch handlers defer to this parent even after it stops
 Admission writes the generation dispatch in the same transaction that validates
 the active parent. After provider admission, it rechecks the stored integration
 proof under the organization and connection locks before spending or consuming a
-reservation. A pending sealed proof therefore blocks new dispatch even when it
+reservation. Admission captures the selected target and exact verified source
+before reserving the workflow; supplied identities cannot be replaced. The locked
+check rejects a changed selection or source even if the new one has valid proof.
+A pending sealed proof therefore blocks new dispatch even when it
 appears after the provider read; the original goal hold remains unchanged. Exact
 hosted proof can resume that hold. Verification readiness is not refund evidence:
 settlement still requires each child's independent stop and delivered-value proof.
+Legacy reserved workflow rows whose original digest lacks target/source binding
+are not upgraded to today's selection. Replaying the same client identity fails
+closed without another spend or dispatch. Before rollout, reconcile these rows
+through a separately reviewed recovery using their actual saved request, outbox
+and payment evidence; missing history is not permission to invent a binding.
 Its absent row can prove pre-dispatch cancellation only while
 that parent lock excludes new admission and no prior child/dispatch evidence
 exists. A dispatch with zero attempts can already have a synchronous POST in

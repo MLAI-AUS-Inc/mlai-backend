@@ -769,7 +769,12 @@ def _reserve_article_start_connection(context, payload):
             supplied = connection_contract(payload) or connection_contract(owner_operation_contract())
             if supplied and any(connection_contract(contract_for(website)).get(key) != value for key, value in supplied.items() if key != "connection_target_id"):
                 raise WebsiteAuthorityError("website_connection_changed", "The website changed before the article charge.")
-            payload.update(contract_for(website))
+            selected = str(config.default_publish_target_id or "")
+            if supplied.get("connection_target_id") not in (None, "", selected):
+                raise WebsiteAuthorityError("website_target_changed", "The selected articles target changed before admission.")
+            if payload.get("expected_source_sha") not in (None, "", website.verified_sha):
+                raise WebsiteAuthorityError("website_source_changed", "The verified website source changed before admission.")
+            payload.update(contract_for(website), connection_target_id=selected, expected_source_sha=website.verified_sha)
             from .website_operations import reserve_workflow_operation
             reserve_workflow_operation(website, workflow="article_generation", payload=payload)
         except WebsiteAuthorityError as exc:
@@ -798,6 +803,10 @@ def _validate_article_start_reservation(context, payload):
         raise WebsiteAuthorityError("website_connection_changed", "The selected website changed before billing.")
     validate_authority(website, payload, action="read", domain=context.organization.domain, github_repo=payload.get("github_repo", ""))
     validate_operation(website, payload)
+    if payload.get("connection_target_id") != str(config.default_publish_target_id or ""):
+        raise WebsiteAuthorityError("website_target_changed", "The selected articles target changed during admission.")
+    if payload.get("expected_source_sha") != website.verified_sha:
+        raise WebsiteAuthorityError("website_source_changed", "The verified website source changed during admission.")
     # Provider admission is deliberately outside this transaction. A pending
     # publishing proof can be recorded meanwhile without changing the website
     # generation, so recheck its stored authority before spending or dispatching.
