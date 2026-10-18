@@ -322,6 +322,13 @@ def _persist_prepare(op, *, now):
 
 
 def _persist_prepare_state(op, *, now):
+    from .website_goal_audit import enabled, preserve_during_prepare_write
+    if enabled(op.connection.organization_id):
+        return preserve_during_prepare_write(op, lambda: _persist_prepare_claim(op, now=now))
+    return _persist_prepare_claim(op, now=now)
+
+
+def _persist_prepare_claim(op, *, now):
     # Compare the lease and generation after remote work. A disconnect always wins.
     query = WebsiteConnectionOperation.objects.filter(pk=op.pk, action="prepare", state="running", attempts=op.attempts,
         updated_at=op._claimed_at, connection__generation=op.generation, connection__state="connected")
