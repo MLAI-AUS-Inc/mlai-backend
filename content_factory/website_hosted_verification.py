@@ -34,11 +34,12 @@ def request_for(op,context,config,target,source):
     from workflow_runs.models import ContentFactoryRun
     connection=config.website_connection
     source_run=goals.mapping(op.receipt).get("setup_run_id")
-    if not source_run:raise WebsiteAuthorityError("verified_target_required","The original setup verifier inputs are not yet available.",retryable=True)
     from . import website_sealed_workflow as sealed
     candidate = snapshot = None
     if sealed.required(connection, target):
         candidate, snapshot = sealed.prepare_candidate(op, context, config, target, source)
+        source_run = snapshot["source_run_id"]
+    if not source_run:raise WebsiteAuthorityError("verified_target_required","The original setup verifier inputs are not yet available.",retryable=True)
     payload={**contract_for(connection),"domain":context.organization.domain,"github_repo":connection.github_repo,
         "branch":connection.branch,"expected_source_sha":source,"source_run_id":source_run,
         "target_id":target.target_key,"contract_digest":target.contract.get("contract_digest"),
