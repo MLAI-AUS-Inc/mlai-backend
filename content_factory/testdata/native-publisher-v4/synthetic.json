@@ -1,0 +1,515 @@
+{
+  "candidate": {
+    "canonicalization": "mlai_utf8_json_v1",
+    "digest": "e8d731d74154c582e72039c1d28920a7ad09d98cfd8ce935b08dc8fe51ad9650",
+    "payload": {
+      "baseline": {
+        "source_inventory_digest": "2bc904e506fb9d9d7c76e849540e78e8fc52a9f82065a14f5776e6be01cbc342",
+        "source_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "source_tree_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+      },
+      "executor": {
+        "controller_sha256": "a8f0bec0551a0a0193769387124321f9fbd03374c24e4f461bd1917df66b06fb",
+        "profile": "pinned_existing_publisher_v1",
+        "python_version": "3.11.14",
+        "pyyaml_version": "6.0.3",
+        "runtime_image": "sha256:39b4222d4dadf70d44220ecfe385895cf6e4d5e6660a32b9b68ad97e23a083d7"
+      },
+      "native_inputs_v1": {
+        "canonicalization": "mlai_utf8_json_v1",
+        "digest": "a00df6340a69ab5204308f497a10af506ea5047a655c441f4e80024e3326ecff",
+        "payload": {
+          "normalizer_version": 1,
+          "publishing": {
+            "source_selection": {
+              "app_root": "",
+              "branch": "main"
+            },
+            "target": {
+              "build_tool": "unknown",
+              "content_extension": ".json",
+              "content_path_pattern": "data/articles.json",
+              "delivery_adapter": "stack_native",
+              "example_path": "",
+              "framework": "static-html",
+              "hook_config_path": "",
+              "input_format": "content_bundle_v1",
+              "kind": "stack_native_collection",
+              "language": "unknown",
+              "live_marker": {
+                "kind": "artifact_digest",
+                "meta_name": "mlai-artifact-digest",
+                "schema_version": 1,
+                "value": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+              },
+              "metadata_strategy": {
+                "seo_path_template": "/stories/{slug}/",
+                "static_source_materialization": {
+                  "app_root": "",
+                  "detail_source_path_pattern": "stories/{slug}/index.html",
+                  "listing_source_path": "stories/index.html",
+                  "materializer_command": [
+                    "python3",
+                    ".mlai/materialize-existing-articles.py"
+                  ],
+                  "preview_output_dir": "cf-articles-preview",
+                  "schema_version": 1
+                },
+                "type": "stack_native_collection"
+              },
+              "preferred_verifier_queue": "verify-static",
+              "preview_discovery": null,
+              "preview_strategy": "repo_preview",
+              "publish_capability": "direct",
+              "registration_strategy": {
+                "path": "data/articles.json",
+                "store_kind": "json_data_file",
+                "type": "stack_native_collection"
+              },
+              "route_path": "/stories",
+              "route_template": "/stories/{slug}/",
+              "runtime_family": "static",
+              "supported": true,
+              "target_config": null,
+              "target_id": "stack_native_collection_data_articles_json_static"
+            }
+          },
+          "verification": {
+            "baseline_policy": {
+              "kind": "fixed_setup_source",
+              "source_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+            },
+            "execution": {
+              "app_root": ".",
+              "baseline": {
+                "kind": "static_source",
+                "paths": [
+                  "stories/index.html"
+                ]
+              },
+              "build_command": [
+                "python3",
+                ".mlai/materialize-existing-articles.py"
+              ],
+              "build_cwd": ".",
+              "content_path_pattern": "data/articles.json",
+              "content_source_kind": "shared_collection",
+              "environment_names": [],
+              "install_command": [],
+              "install_cwd": ".",
+              "listing_route": "/stories",
+              "lockfiles": [],
+              "materialize_command": [
+                "python3",
+                ".mlai/materialize-existing-articles.py"
+              ],
+              "materialize_cwd": ".",
+              "package_manager": "",
+              "preview_command": [
+                "python3",
+                "-m",
+                "http.server",
+                "3000",
+                "--bind",
+                "127.0.0.1",
+                "--directory",
+                "cf-articles-preview"
+              ],
+              "preview_cwd": ".",
+              "route_template": "/stories/{slug}/",
+              "runtime_family": "static",
+              "runtime_version": "3.11",
+              "static_source_materialization": {
+                "app_root": "",
+                "detail_source_path_pattern": "stories/{slug}/index.html",
+                "listing_source_path": "stories/index.html",
+                "materializer_command": [
+                  "python3",
+                  ".mlai/materialize-existing-articles.py"
+                ],
+                "preview_output_dir": "cf-articles-preview",
+                "schema_version": 1
+              },
+              "verify_steps": [
+                {
+                  "command": [
+                    "python3",
+                    "scripts/check_site.py"
+                  ],
+                  "cwd": ".",
+                  "name": "Customer check"
+                }
+              ]
+            },
+            "oracle": {
+              "artifact_digest": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+              "artifact_marker_routes": [
+                "/stories"
+              ],
+              "existing_seed_source": {
+                "path": "stories/original-story/index.html",
+                "sha256": "15ec8c0a271bd2860725f233c43c0f21cf1b97ac264a6c6f3f4927fd2a75998b"
+              },
+              "expected_h1": "Original story",
+              "port": 3000,
+              "seed_is_setup_example": false,
+              "seed_slug": "original-story"
+            },
+            "verifier": {
+              "execution_schema_version": 1,
+              "playwright_version": "1.58.0",
+              "profile": "native_ci_v1",
+              "python_version": "3.11",
+              "runner_sha256": "41eb86a32a9edd2a65ff95119fbcc8eae1fddca37c1adcd234877440e12caee4"
+            }
+          }
+        },
+        "schema_version": 1
+      },
+      "normalizer_version": 2,
+      "original_scope": {
+        "app_root": "",
+        "branch": "main",
+        "connection_generation": 2,
+        "deletion_epoch": 0,
+        "github_repo": "fixture/site",
+        "repository_id": 17,
+        "setup_operation_attempt": 1,
+        "setup_operation_id": "00000000-0000-0000-0000-000000000021",
+        "site_origin": "https://fixture.invalid",
+        "website_connection_id": "00000000-0000-0000-0000-000000000013"
+      },
+      "pipeline": {
+        "marker_policy": {
+          "artifact_digest": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+          "kind": "artifact_digest",
+          "listing_path": "stories/index.html",
+          "meta_name": "mlai-artifact-digest"
+        },
+        "profile": "original_python_static_marker_v1",
+        "wrapper_path": ".mlai/materialize-existing-articles.py",
+        "wrapper_sha256": "17732a29cc4442d56416c83ac9ae027f4411fb02253ae2406011fb97bdfca1dc"
+      },
+      "probe_record_digests": [
+        "2ded46d85ecd3367d38e8ceb37475acefbd271ea1cbef8881c57d3690934e262",
+        "28ee22b4ef84f4221d12d100ec77c3fafff495a521fe47542869abd2833aed34"
+      ],
+      "recipe": {
+        "checks": [
+          {
+            "argv": [
+              "python3",
+              "scripts/check_site.py"
+            ],
+            "job": "check",
+            "step": 1,
+            "workflow_path": ".github/workflows/site-checks.yml"
+          }
+        ],
+        "detail_path_pattern": "stories/{slug}/index.html",
+        "generated_paths": [
+          "LINKS.md"
+        ],
+        "kind": "static_json_existing_publisher",
+        "listing_path": "stories/index.html",
+        "publisher_argv": [
+          "python3",
+          "scripts/materialize_articles.py"
+        ],
+        "schema_version": 1,
+        "site_origin": "https://fixture.invalid",
+        "source_inventory_digest": "2bc904e506fb9d9d7c76e849540e78e8fc52a9f82065a14f5776e6be01cbc342",
+        "source_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "store_path": "data/articles.json"
+      }
+    },
+    "schema_version": 2
+  },
+  "current_binding": {
+    "source_inventory_digest": "843c3767be3d69288a8e8f9d6ee8dceeedfe6402abf20d4852e3beb109cceb18",
+    "source_sha": "cccccccccccccccccccccccccccccccccccccccc",
+    "source_tree_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+  },
+  "identity": {
+    "connection_generation": 2,
+    "deletion_epoch": 0,
+    "github_repo": "fixture/site",
+    "operation_attempt": 1,
+    "operation_id": "00000000-0000-4000-8000-000000000099",
+    "repository_id": 17,
+    "target_id": "stack_native_collection_data_articles_json_static",
+    "target_inputs_digest": "ce5fb6df0578332351617d4e5f825f9a9210a7364bd4fd9cfb24ce0420b067df",
+    "website_connection_id": "00000000-0000-0000-0000-000000000013"
+  },
+  "original_binding": {
+    "app_root": "",
+    "branch": "main",
+    "connection_generation": 2,
+    "deletion_epoch": 0,
+    "github_repo": "fixture/site",
+    "publishing_inputs_digest": "e8d731d74154c582e72039c1d28920a7ad09d98cfd8ce935b08dc8fe51ad9650",
+    "repository_id": 17,
+    "setup_operation_attempt": 1,
+    "setup_operation_id": "00000000-0000-0000-0000-000000000021",
+    "site_origin": "https://fixture.invalid",
+    "source_inventory_digest": "2bc904e506fb9d9d7c76e849540e78e8fc52a9f82065a14f5776e6be01cbc342",
+    "source_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "source_tree_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "website_connection_id": "00000000-0000-0000-0000-000000000013"
+  },
+  "profile": {
+    "controller_sha256": "ef9fca5da8d9069479ff18c6df5a18b9561886b48ac61521c005efbc2f60792d",
+    "layout_sha256": "83f37573fe66fc6f845c4c1d3c6f8af301666301fbc3a6edcb624ebe6d8e721b",
+    "oracle_sha256": "41eb86a32a9edd2a65ff95119fbcc8eae1fddca37c1adcd234877440e12caee4",
+    "playwright_version": "1.58.0",
+    "python_version": "3.11.14",
+    "pyyaml_version": "6.0.3",
+    "runtime_image": "sha256:39b4222d4dadf70d44220ecfe385895cf6e4d5e6660a32b9b68ad97e23a083d7"
+  },
+  "provenance": {
+    "git_transport": "mocked",
+    "kind": "synthetic_contract_fixture",
+    "native_execution": "mocked",
+    "publication_authority": false
+  },
+  "receipt": {
+    "baseline": {
+      "source_inventory_digest": "2bc904e506fb9d9d7c76e849540e78e8fc52a9f82065a14f5776e6be01cbc342",
+      "source_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "source_tree_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+    },
+    "cases": [
+      {
+        "added_record_digests": [],
+        "article_count": 1,
+        "base_source_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "case": "baseline",
+        "checks": {
+          "assets": true,
+          "body_copy": true,
+          "browser": true,
+          "canonical": true,
+          "content_loading": true,
+          "detail": true,
+          "listing": true,
+          "narrow_layout": true,
+          "unknown_slug_404": true,
+          "wide_layout": true
+        },
+        "content_evidence_digest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "layout_evidence_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "layout_preserved": true,
+        "oracle_digest": "864dd7fe4cd8d629ea6ea5433a5ca7bd28786d8925c865dd7fc0eef52ddd4cf5",
+        "result_source_inventory_digest": "2bc904e506fb9d9d7c76e849540e78e8fc52a9f82065a14f5776e6be01cbc342",
+        "verified_routes": {
+          "detail": "/stories/original-story/",
+          "listing": "/stories",
+          "unknown_slug": "/stories/mlai-nonexistent-ce5fb6df0578/"
+        }
+      },
+      {
+        "added_record_digests": [],
+        "article_count": 1,
+        "base_source_sha": "cccccccccccccccccccccccccccccccccccccccc",
+        "case": "initial",
+        "checks": {
+          "assets": true,
+          "body_copy": true,
+          "browser": true,
+          "canonical": true,
+          "content_loading": true,
+          "detail": true,
+          "listing": true,
+          "narrow_layout": true,
+          "unknown_slug_404": true,
+          "wide_layout": true
+        },
+        "content_evidence_digest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "layout_evidence_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "layout_preserved": true,
+        "oracle_digest": "32f9458ea7321a1ad175ec1a87747cfbe9522fe93c921eca9138e27a94566287",
+        "result_source_inventory_digest": "843c3767be3d69288a8e8f9d6ee8dceeedfe6402abf20d4852e3beb109cceb18",
+        "verified_routes": {
+          "detail": "/stories/original-story/",
+          "listing": "/stories",
+          "unknown_slug": "/stories/mlai-nonexistent-dddddddddddd/"
+        }
+      },
+      {
+        "added_record_digests": [
+          "2ded46d85ecd3367d38e8ceb37475acefbd271ea1cbef8881c57d3690934e262"
+        ],
+        "article_count": 2,
+        "base_source_sha": "cccccccccccccccccccccccccccccccccccccccc",
+        "case": "independent_1",
+        "checks": {
+          "assets": true,
+          "body_copy": true,
+          "browser": true,
+          "canonical": true,
+          "content_loading": true,
+          "detail": true,
+          "listing": true,
+          "narrow_layout": true,
+          "unknown_slug_404": true,
+          "wide_layout": true
+        },
+        "content_evidence_digest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "layout_evidence_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "layout_preserved": true,
+        "oracle_digest": "021c830d00050cea6740f25cc5a47283c81c50acff1a426cfe8039643aaf6f57",
+        "result_source_inventory_digest": "7bf0d317d6a87a0636bcbbb925c65336f3e4012d22703b5518b7eb9c9f0ef2d8",
+        "verified_routes": {
+          "detail": "/stories/new-story-1/",
+          "listing": "/stories",
+          "unknown_slug": "/stories/mlai-nonexistent-dddddddddddd/"
+        }
+      },
+      {
+        "added_record_digests": [
+          "28ee22b4ef84f4221d12d100ec77c3fafff495a521fe47542869abd2833aed34"
+        ],
+        "article_count": 2,
+        "base_source_sha": "cccccccccccccccccccccccccccccccccccccccc",
+        "case": "independent_2",
+        "checks": {
+          "assets": true,
+          "body_copy": true,
+          "browser": true,
+          "canonical": true,
+          "content_loading": true,
+          "detail": true,
+          "listing": true,
+          "narrow_layout": true,
+          "unknown_slug_404": true,
+          "wide_layout": true
+        },
+        "content_evidence_digest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "layout_evidence_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "layout_preserved": true,
+        "oracle_digest": "3ca333b98bc39e3c314712ffc909d63a33e68db99eb0dd082eab38c709c487c5",
+        "result_source_inventory_digest": "b4b42676b98a5bbec2115a8e69d51732c508bd488504d8a433c5efdbcef66eb2",
+        "verified_routes": {
+          "detail": "/stories/new-story-2/",
+          "listing": "/stories",
+          "unknown_slug": "/stories/mlai-nonexistent-dddddddddddd/"
+        }
+      },
+      {
+        "added_record_digests": [
+          "2ded46d85ecd3367d38e8ceb37475acefbd271ea1cbef8881c57d3690934e262"
+        ],
+        "article_count": 2,
+        "base_source_sha": "cccccccccccccccccccccccccccccccccccccccc",
+        "case": "successive_1",
+        "checks": {
+          "assets": true,
+          "body_copy": true,
+          "browser": true,
+          "canonical": true,
+          "content_loading": true,
+          "detail": true,
+          "listing": true,
+          "narrow_layout": true,
+          "unknown_slug_404": true,
+          "wide_layout": true
+        },
+        "content_evidence_digest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "layout_evidence_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "layout_preserved": true,
+        "oracle_digest": "021c830d00050cea6740f25cc5a47283c81c50acff1a426cfe8039643aaf6f57",
+        "result_source_inventory_digest": "7bf0d317d6a87a0636bcbbb925c65336f3e4012d22703b5518b7eb9c9f0ef2d8",
+        "verified_routes": {
+          "detail": "/stories/new-story-1/",
+          "listing": "/stories",
+          "unknown_slug": "/stories/mlai-nonexistent-dddddddddddd/"
+        }
+      },
+      {
+        "added_record_digests": [
+          "2ded46d85ecd3367d38e8ceb37475acefbd271ea1cbef8881c57d3690934e262",
+          "28ee22b4ef84f4221d12d100ec77c3fafff495a521fe47542869abd2833aed34"
+        ],
+        "article_count": 3,
+        "base_source_sha": "cccccccccccccccccccccccccccccccccccccccc",
+        "case": "successive_2",
+        "checks": {
+          "assets": true,
+          "body_copy": true,
+          "browser": true,
+          "canonical": true,
+          "content_loading": true,
+          "detail": true,
+          "listing": true,
+          "narrow_layout": true,
+          "unknown_slug_404": true,
+          "wide_layout": true
+        },
+        "content_evidence_digest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "layout_evidence_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "layout_preserved": true,
+        "oracle_digest": "3ca333b98bc39e3c314712ffc909d63a33e68db99eb0dd082eab38c709c487c5",
+        "result_source_inventory_digest": "ebc6948c847e3ff708dbce4b58d48aa8a4a750a9178ba0d8e0bce3078cd22862",
+        "verified_routes": {
+          "detail": "/stories/new-story-2/",
+          "listing": "/stories",
+          "unknown_slug": "/stories/mlai-nonexistent-dddddddddddd/"
+        }
+      }
+    ],
+    "current": {
+      "source_inventory_digest": "843c3767be3d69288a8e8f9d6ee8dceeedfe6402abf20d4852e3beb109cceb18",
+      "source_sha": "cccccccccccccccccccccccccccccccccccccccc",
+      "source_tree_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+    },
+    "evidence_digest": "d19b68a1b593e85c936ed48b81046b3f1f491c02c82bc4986da3474a3ba5ed7b",
+    "identity": {
+      "connection_generation": 2,
+      "deletion_epoch": 0,
+      "github_repo": "fixture/site",
+      "operation_attempt": 1,
+      "operation_id": "00000000-0000-4000-8000-000000000099",
+      "repository_id": 17,
+      "target_id": "stack_native_collection_data_articles_json_static",
+      "target_inputs_digest": "ce5fb6df0578332351617d4e5f825f9a9210a7364bd4fd9cfb24ce0420b067df",
+      "website_connection_id": "00000000-0000-0000-0000-000000000013"
+    },
+    "kind": "original_publisher_native_verification",
+    "live_goal_proof": false,
+    "native_verified": true,
+    "original_scope_digest": "01093b0dd5846b2b96648d30c39a5e944d8e14c56ef7c98f20aaae3fe8e31f2c",
+    "pipeline_evidence_digest": "e8aa4d5ddadbe5b7114132a2fec80abac124163273bde465d3051d979b2e0102",
+    "profile": {
+      "controller_sha256": "ef9fca5da8d9069479ff18c6df5a18b9561886b48ac61521c005efbc2f60792d",
+      "layout_sha256": "83f37573fe66fc6f845c4c1d3c6f8af301666301fbc3a6edcb624ebe6d8e721b",
+      "oracle_sha256": "41eb86a32a9edd2a65ff95119fbcc8eae1fddca37c1adcd234877440e12caee4",
+      "playwright_version": "1.58.0",
+      "python_version": "3.11.14",
+      "pyyaml_version": "6.0.3",
+      "runtime_image": "sha256:39b4222d4dadf70d44220ecfe385895cf6e4d5e6660a32b9b68ad97e23a083d7"
+    },
+    "publication_authority": false,
+    "publishing_inputs_digest": "e8d731d74154c582e72039c1d28920a7ad09d98cfd8ce935b08dc8fe51ad9650",
+    "schema_version": 4,
+    "support_proven": false,
+    "verification_mode": "setup"
+  },
+  "records": [
+    {
+      "author": "Owner",
+      "body": "Ordinary article 1",
+      "date": "2026-10-18",
+      "description": "Existing content ",
+      "slug": "new-story-1",
+      "title": "New story 1"
+    },
+    {
+      "author": "Owner",
+      "body": "Ordinary article 2",
+      "date": "2026-10-18",
+      "description": "Existing content ",
+      "slug": "new-story-2",
+      "title": "New story 2"
+    }
+  ]
+}

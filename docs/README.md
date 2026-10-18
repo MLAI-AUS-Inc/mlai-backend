@@ -24,6 +24,7 @@ subsystem-specific contracts and runbooks.
 ## Content Factory
 
 - [Publisher-v2 component reader](articles-r0-publisher-inputs-v2-2026-10-18.md) — closed original publisher inputs, pinned component evidence and legacy downgrade fences; no Ready promotion
+- [Native publisher schema4 reader](articles-r0-native-publisher-v4-reader-2026-10-18.md) — source-pinned hosted native setup evidence with independent original/current/profile inputs; no promotion
 - [Interrupted article publication observation](articles-publication-observation.md) — bounded positive GitHub evidence, exact original intent and preserved settlement obligations
 - [Original queued article admission](articles-dispatch-admission.md) — original target/source checks before retrying paid work and held legacy identities
 - [R3 original goal audit](articles-r3-original-goal-audit-2026-10-18.md) — persisted partial owner observations, public unknown counts and remaining external coverage

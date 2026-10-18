@@ -1,0 +1,30 @@
+{
+  "schema_version": 1,
+  "source_repository": "drsamdonegan/content-factory",
+  "source_revision": "d3caadaa0822385dc7db28876a28ef2ae458a128",
+  "artifacts": {
+    "content_factory/native_publisher_contract_v4.py": {
+      "source_path": "backend/native_publisher_contract_v4.py",
+      "sha256": "40fa479b29f2c2de9485226f7a5987f94e84e545cb4bde5664b8ebc932b90900"
+    },
+    "contracts/native-publisher-v4.schema.json": {
+      "source_path": "contracts/native-publisher-v4.schema.json",
+      "sha256": "b8410040711f3299436e275cb1c4de7972f22c123985ae36b11a61d0ef454bf4"
+    },
+    "content_factory/testdata/native-publisher-v4/synthetic.json": {
+      "source_path": "backend/tests/fixtures/native-publisher-v4/synthetic.json",
+      "sha256": "5a1d41eae80af9fb554c97bf030b2add3cc1a0994d51eff737fef37861e49540"
+    }
+  },
+  "producers": {
+    "backend/harness/native_publisher_worker.py": {
+      "sha256": "781fca06dd581e2ffb5c187b80ca3a30a941ab16f96c31441944b909e379b79a"
+    },
+    "backend/harness/original_publisher_pipeline_worker.py": {
+      "sha256": "f684d15ac3c01a8d4de8e3887986e4d1ccd10a38f4c600bbeffd441d26e045c6"
+    },
+    "scripts/fixtures/native-publisher-runtime.Dockerfile": {
+      "sha256": "2132a2343e4f63436cd53a95ab6b0be9f8a3fe265948cf52f5bb6856ae2a054e"
+    }
+  }
+}

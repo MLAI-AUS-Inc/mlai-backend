@@ -1,0 +1,427 @@
+{
+  "additionalProperties": false,
+  "properties": {
+    "baseline": {
+      "additionalProperties": false,
+      "properties": {
+        "source_inventory_digest": {
+          "maxLength": 64,
+          "minLength": 1,
+          "pattern": "[a-f0-9]{64}",
+          "type": "string"
+        },
+        "source_sha": {
+          "maxLength": 64,
+          "minLength": 1,
+          "pattern": "[a-f0-9]{40}(?:[a-f0-9]{24})?",
+          "type": "string"
+        },
+        "source_tree_sha": {
+          "maxLength": 64,
+          "minLength": 1,
+          "pattern": "[a-f0-9]{40}(?:[a-f0-9]{24})?",
+          "type": "string"
+        }
+      },
+      "required": [
+        "source_sha",
+        "source_tree_sha",
+        "source_inventory_digest"
+      ],
+      "type": "object"
+    },
+    "cases": {
+      "items": {
+        "additionalProperties": false,
+        "properties": {
+          "added_record_digests": {
+            "items": {
+              "maxLength": 64,
+              "minLength": 1,
+              "pattern": "[a-f0-9]{64}",
+              "type": "string"
+            },
+            "maxItems": 2,
+            "minItems": 0,
+            "type": "array"
+          },
+          "article_count": {
+            "maximum": 2002,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "base_source_sha": {
+            "maxLength": 64,
+            "minLength": 1,
+            "pattern": "[a-f0-9]{40}(?:[a-f0-9]{24})?",
+            "type": "string"
+          },
+          "case": {
+            "enum": [
+              "baseline",
+              "initial",
+              "independent_1",
+              "independent_2",
+              "successive_1",
+              "successive_2"
+            ],
+            "type": "string"
+          },
+          "checks": {
+            "additionalProperties": false,
+            "properties": {
+              "assets": {
+                "const": true,
+                "type": "boolean"
+              },
+              "body_copy": {
+                "const": true,
+                "type": "boolean"
+              },
+              "browser": {
+                "const": true,
+                "type": "boolean"
+              },
+              "canonical": {
+                "const": true,
+                "type": "boolean"
+              },
+              "content_loading": {
+                "const": true,
+                "type": "boolean"
+              },
+              "detail": {
+                "const": true,
+                "type": "boolean"
+              },
+              "listing": {
+                "const": true,
+                "type": "boolean"
+              },
+              "narrow_layout": {
+                "const": true,
+                "type": "boolean"
+              },
+              "unknown_slug_404": {
+                "const": true,
+                "type": "boolean"
+              },
+              "wide_layout": {
+                "const": true,
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "assets",
+              "body_copy",
+              "browser",
+              "canonical",
+              "content_loading",
+              "detail",
+              "listing",
+              "narrow_layout",
+              "unknown_slug_404",
+              "wide_layout"
+            ],
+            "type": "object"
+          },
+          "content_evidence_digest": {
+            "maxLength": 64,
+            "minLength": 1,
+            "pattern": "[a-f0-9]{64}",
+            "type": "string"
+          },
+          "layout_evidence_digest": {
+            "maxLength": 64,
+            "minLength": 1,
+            "pattern": "[a-f0-9]{64}",
+            "type": "string"
+          },
+          "layout_preserved": {
+            "const": true,
+            "type": "boolean"
+          },
+          "oracle_digest": {
+            "maxLength": 64,
+            "minLength": 1,
+            "pattern": "[a-f0-9]{64}",
+            "type": "string"
+          },
+          "result_source_inventory_digest": {
+            "maxLength": 64,
+            "minLength": 1,
+            "pattern": "[a-f0-9]{64}",
+            "type": "string"
+          },
+          "verified_routes": {
+            "additionalProperties": false,
+            "properties": {
+              "detail": {
+                "maxLength": 500,
+                "minLength": 1,
+                "pattern": "/[^\\\\?#\\s]*",
+                "type": "string"
+              },
+              "listing": {
+                "maxLength": 500,
+                "minLength": 1,
+                "pattern": "/[^\\\\?#\\s]*",
+                "type": "string"
+              },
+              "unknown_slug": {
+                "maxLength": 500,
+                "minLength": 1,
+                "pattern": "/[^\\\\?#\\s]*",
+                "type": "string"
+              }
+            },
+            "required": [
+              "listing",
+              "detail",
+              "unknown_slug"
+            ],
+            "type": "object"
+          }
+        },
+        "required": [
+          "case",
+          "base_source_sha",
+          "article_count",
+          "added_record_digests",
+          "oracle_digest",
+          "result_source_inventory_digest",
+          "layout_evidence_digest",
+          "content_evidence_digest",
+          "layout_preserved",
+          "checks",
+          "verified_routes"
+        ],
+        "type": "object"
+      },
+      "maxItems": 6,
+      "minItems": 6,
+      "type": "array"
+    },
+    "current": {
+      "additionalProperties": false,
+      "properties": {
+        "source_inventory_digest": {
+          "maxLength": 64,
+          "minLength": 1,
+          "pattern": "[a-f0-9]{64}",
+          "type": "string"
+        },
+        "source_sha": {
+          "maxLength": 64,
+          "minLength": 1,
+          "pattern": "[a-f0-9]{40}(?:[a-f0-9]{24})?",
+          "type": "string"
+        },
+        "source_tree_sha": {
+          "maxLength": 64,
+          "minLength": 1,
+          "pattern": "[a-f0-9]{40}(?:[a-f0-9]{24})?",
+          "type": "string"
+        }
+      },
+      "required": [
+        "source_sha",
+        "source_tree_sha",
+        "source_inventory_digest"
+      ],
+      "type": "object"
+    },
+    "evidence_digest": {
+      "maxLength": 64,
+      "minLength": 1,
+      "pattern": "[a-f0-9]{64}",
+      "type": "string"
+    },
+    "identity": {
+      "additionalProperties": false,
+      "properties": {
+        "connection_generation": {
+          "maximum": 9223372036854775807,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "deletion_epoch": {
+          "maximum": 9223372036854775807,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "github_repo": {
+          "maxLength": 201,
+          "minLength": 1,
+          "pattern": "[A-Za-z0-9_.-]{1,100}/[A-Za-z0-9_.-]{1,100}",
+          "type": "string"
+        },
+        "operation_attempt": {
+          "maximum": 9223372036854775807,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "operation_id": {
+          "maxLength": 36,
+          "minLength": 1,
+          "pattern": "[a-f0-9]{8}-(?:[a-f0-9]{4}-){3}[a-f0-9]{12}",
+          "type": "string"
+        },
+        "repository_id": {
+          "maximum": 9223372036854775807,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "target_id": {
+          "maxLength": 200,
+          "minLength": 1,
+          "type": "string"
+        },
+        "target_inputs_digest": {
+          "maxLength": 64,
+          "minLength": 1,
+          "pattern": "[a-f0-9]{64}",
+          "type": "string"
+        },
+        "website_connection_id": {
+          "maxLength": 36,
+          "minLength": 1,
+          "pattern": "[a-f0-9]{8}-(?:[a-f0-9]{4}-){3}[a-f0-9]{12}",
+          "type": "string"
+        }
+      },
+      "required": [
+        "website_connection_id",
+        "connection_generation",
+        "repository_id",
+        "github_repo",
+        "deletion_epoch",
+        "operation_id",
+        "operation_attempt",
+        "target_id",
+        "target_inputs_digest"
+      ],
+      "type": "object"
+    },
+    "kind": {
+      "const": "original_publisher_native_verification",
+      "type": "string"
+    },
+    "live_goal_proof": {
+      "const": false,
+      "type": "boolean"
+    },
+    "native_verified": {
+      "const": true,
+      "type": "boolean"
+    },
+    "original_scope_digest": {
+      "maxLength": 64,
+      "minLength": 1,
+      "pattern": "[a-f0-9]{64}",
+      "type": "string"
+    },
+    "pipeline_evidence_digest": {
+      "maxLength": 64,
+      "minLength": 1,
+      "pattern": "[a-f0-9]{64}",
+      "type": "string"
+    },
+    "profile": {
+      "additionalProperties": false,
+      "properties": {
+        "controller_sha256": {
+          "maxLength": 64,
+          "minLength": 1,
+          "pattern": "[a-f0-9]{64}",
+          "type": "string"
+        },
+        "layout_sha256": {
+          "maxLength": 64,
+          "minLength": 1,
+          "pattern": "[a-f0-9]{64}",
+          "type": "string"
+        },
+        "oracle_sha256": {
+          "maxLength": 64,
+          "minLength": 1,
+          "pattern": "[a-f0-9]{64}",
+          "type": "string"
+        },
+        "playwright_version": {
+          "const": "1.58.0",
+          "type": "string"
+        },
+        "python_version": {
+          "maxLength": 20,
+          "minLength": 1,
+          "pattern": "\\d+\\.\\d+\\.\\d+",
+          "type": "string"
+        },
+        "pyyaml_version": {
+          "maxLength": 20,
+          "minLength": 1,
+          "pattern": "\\d+\\.\\d+\\.\\d+",
+          "type": "string"
+        },
+        "runtime_image": {
+          "maxLength": 71,
+          "minLength": 1,
+          "pattern": "sha256:[a-f0-9]{64}",
+          "type": "string"
+        }
+      },
+      "required": [
+        "controller_sha256",
+        "oracle_sha256",
+        "layout_sha256",
+        "python_version",
+        "pyyaml_version",
+        "playwright_version",
+        "runtime_image"
+      ],
+      "type": "object"
+    },
+    "publication_authority": {
+      "const": false,
+      "type": "boolean"
+    },
+    "publishing_inputs_digest": {
+      "maxLength": 64,
+      "minLength": 1,
+      "pattern": "[a-f0-9]{64}",
+      "type": "string"
+    },
+    "schema_version": {
+      "const": 4,
+      "type": "integer"
+    },
+    "support_proven": {
+      "const": false,
+      "type": "boolean"
+    },
+    "verification_mode": {
+      "const": "setup",
+      "type": "string"
+    }
+  },
+  "required": [
+    "schema_version",
+    "kind",
+    "verification_mode",
+    "identity",
+    "publishing_inputs_digest",
+    "original_scope_digest",
+    "baseline",
+    "current",
+    "pipeline_evidence_digest",
+    "profile",
+    "cases",
+    "native_verified",
+    "publication_authority",
+    "support_proven",
+    "live_goal_proof",
+    "evidence_digest"
+  ],
+  "type": "object"
+}
