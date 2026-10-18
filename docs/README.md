@@ -27,6 +27,7 @@ subsystem-specific contracts and runbooks.
 - [Original queued article admission](articles-dispatch-admission.md) — original target/source checks before retrying paid work and held legacy identities
 - [R3 original goal audit](articles-r3-original-goal-audit-2026-10-18.md) — persisted partial owner observations, public unknown counts and remaining external coverage
 - [R2 bootstrap memory and optional profiling](articles-r2-bootstrap-memory-2026-10-18.md) — independent extraction, unchanged recycling and scoped disposable CI
+- [R4 fixture rollout inspection and refund retention](articles-r4-rollout-refunds-2026-10-18.md) — read-only flags and enrollment diagnostics, unknown CF observations, and credits retained through disconnect
 - [F2 bootstrap summary and rendering](articles-f2-bootstrap-summary-2026-10-16.md) — default compact reads, explicit full details, and remaining latency/overlay validation
 - [F3 recorded usage and operational alerts](articles-f3-cost-accounting-2026-10-16.md) — original-run accounting, company coverage and durable budget/stall/repair notices
 - [G6 preview cleanup deadline](articles-g6-preview-cleanup-2026-10-16.md) — durable 24-hour lifecycle limit and one scoped operational incident
@@ -35,6 +36,7 @@ subsystem-specific contracts and runbooks.
 - [Articles B5 setup delivery](articles-b5-implementation-2026-10-14.md) — durable receipts, pure reconciliation and initial implementation evidence
 - [Articles B2 goal runner design](articles-b2-design-2026-10-14.md) — proposed milestone proofs, per-site execution and one backend status for Chat
 - [B2 implementation and validation](articles-b2-implementation-2026-10-14.md)
+- `inspect_articles_zoo_scope --observation <recorded-night.json>` reads saved original-goal/run ownership in a fresh PostgreSQL REPEATABLE READ, READ ONLY snapshot. It emits only safe IDs and closed binding digests; missing lineage remains unknown. It produces scope evidence only, never runtime eligibility, deployment proof or a qualifying zoo night. Collect before adoption/disconnect changes the original selected connection. No flags, providers or saved state are changed.
 - [Continuous one-shot implementation progress](articles-continuous-implementation-2026-10-14.md)
 - [E2 hosted attempt and recovery design](articles-e2-build-recovery-2026-10-16.md) — temporary preview branches and gated recovery for scoped partial environment receipts
 - [E1 site fingerprint](articles-e1-site-fingerprint-2026-10-15.md) — bounded immutable facts, source validation, strategy/deploy hints and pinned producer parity
