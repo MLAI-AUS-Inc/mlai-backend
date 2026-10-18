@@ -165,8 +165,13 @@ class ArticleSourceCredentialRetirementTests(SimpleTestCase):
         token = self.seed_token()
         self.advance(now=self.now + timedelta(hours=49))
         self.assertEqual(token.receipt["revocation_state"], "confirmed")
-        self.assertEqual(self.parent.state, "needs_attention")
-        self.assertIsNone(self.parent.next_attempt_at)
+        self.assertEqual(self.parent.state, "pending")
+        self.assertIsNotNone(self.parent.next_attempt_at)
+        self.assertEqual(self.parent.receipt["status"], "stopped")
+        self.assertEqual(self.parent.receipt["budget_stop_reason"], "wall_time")
+        from .website_first_article import active
+        self.assertFalse(active(self.parent))
+        self.assertEqual(self.fixture.fixture.fixture.chain.fixture.spend.call_count, 1)
         self.assertFalse(self.receipt()["quiet"])
 
     def test_same_goal_and_source_do_not_authorize_retiring_a_distinct_execution(self):

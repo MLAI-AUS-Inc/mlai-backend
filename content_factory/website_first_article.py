@@ -17,6 +17,7 @@ def active(op):
     """Require the explicit first-article rollout and original sealed consent."""
     goal=goals.mapping(op.receipt.get("goal"))
     return bool(getattr(settings,"ARTICLES_FIRST_ARTICLE_GOAL_ENABLED",False)
+        and not op.receipt.get("budget_stop_reason")
         and op.state in {"pending","running","needs_user"} and goal.get("goal_id")==str(op.pk)
         and goals.enrolled(op.connection.organization_id) and goal.get("target")=="first_article_live"
         and goals.valid_goal(goal,goals.scope_for(op.connection,op.payload.get("company_id"))) and valid_consent(goal))

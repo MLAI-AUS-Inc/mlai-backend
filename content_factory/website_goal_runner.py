@@ -197,6 +197,11 @@ def finish_goal(op, *, now=None):
         except ValueError:
             stop_goal(op, goal, reason="invalid_budget_contract", now=now)
             return
+    # Only the verified in-process stop controller sets this marker. Retained
+    # positive-work failure/strategy history must not erase its bounded cleanup
+    # schedule or re-account the old failure. The budget/status stay stopped.
+    if getattr(op, "_article_budget_cleanup_pending", False):
+        return
     if op.receipt.get("strategy_observation_invalid"):
         op.state, op.next_attempt_at = "needs_attention", None
         op.receipt.update(status="stopped", message="Strategy evidence does not match the saved website goal.",

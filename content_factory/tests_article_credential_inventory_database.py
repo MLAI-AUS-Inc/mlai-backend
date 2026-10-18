@@ -10,6 +10,74 @@ from .website_reconciliation import process_website_connection_operations
 
 
 class ArticleCredentialInventoryDatabaseTests(WebsiteDatabaseFixture, TestCase):
+    def test_budget_cleanup_claim_persists_original_json_and_rejects_a_stale_actor(self):
+        from datetime import timedelta
+        from django.utils import timezone
+        from . import website_goal as goals
+        from .website_prepare import _claim_prepare, _persist_prepare_state
+        from .website_first_article import _save_fields
+        from .website_contract import WebsiteAuthorityError
+        now = timezone.now()
+        parent = WebsiteConnectionOperation.objects.create(connection=self.website, generation=self.website.generation,
+            action="prepare", state="pending", idempotency_key="budget-cleanup-claim", payload={"company_id": "9"})
+        goal = goals.new_goal(str(parent.pk), goals.scope_for(self.website, "9"), target="first_article_live", now=now)
+        goal["budget_used"]["model_cost"] = 25
+        parent.receipt = {"goal": goal, "budget_stop_reason": "model_cost", "status": "stopped"}
+        parent.save(update_fields=["receipt"])
+        with self.settings(ARTICLES_WEBSITE_GOAL_RUNNER_ENABLED=True,
+                ARTICLES_FAILURE_TAXONOMY_POLICY_ENABLED=True,
+                ARTICLES_FAILURE_TAXONOMY_ENROLLED_ORGANIZATIONS=[str(self.org.pk)],
+                ARTICLES_WEBSITE_GOAL_ENROLLED_ORGANIZATIONS=[str(self.org.pk)]):
+            claimed = _claim_prepare(parent.pk, now)
+            record = {"schema_version": 1, "passes": 1, "state": "pending", "quiet": False}
+            _save_fields(claimed, {"article_budget_stop_cleanup": record})
+            claimed.state, claimed.next_attempt_at = "pending", now+timedelta(minutes=1)
+            self.assertIsNotNone(_persist_prepare_state(claimed, now=now))
+            parent.refresh_from_db()
+            self.assertEqual(parent.receipt["goal"], goal)
+            self.assertEqual(parent.receipt["article_budget_stop_cleanup"], record)
+            self.assertEqual(parent.receipt["status"], "stopped")
+            self.assertIsNone(_claim_prepare(parent.pk, now+timedelta(seconds=30)))
+            replacement = _claim_prepare(parent.pk, now+timedelta(seconds=61))
+            self.assertIsNotNone(replacement)
+            with self.assertRaises(WebsiteAuthorityError):
+                _save_fields(claimed, {"article_budget_stop_cleanup": {**record, "state": "observed"}})
+        parent.refresh_from_db()
+        self.assertEqual(parent.receipt["article_budget_stop_cleanup"], record)
+
+    def test_budget_cleanup_prepare_cannot_reach_journey_after_source_rollout_rollback(self):
+        from types import SimpleNamespace
+        from uuid import uuid4
+        from django.utils import timezone
+        from . import website_goal as goals
+        from .website_prepare import advance_prepare
+        from .website_article_source_fence import KEY
+        now = timezone.now()
+        parent = WebsiteConnectionOperation.objects.create(connection=self.website, generation=self.website.generation,
+            action="prepare", state="pending", idempotency_key="budget-cleanup-rollback", payload={"company_id": "9"})
+        goal = goals.new_goal(str(parent.pk), goals.scope_for(self.website, "9"), target="first_article_live", now=now)
+        goal["budget_used"]["model_cost"] = 25
+        parent.receipt = {"goal": goal, "budget_stop_reason": "model_cost", "status": "stopped", KEY: str(uuid4())}
+        parent.save(update_fields=["receipt"])
+        context = SimpleNamespace(organization=self.org, company=SimpleNamespace(pk=9))
+        with self.settings(ARTICLES_WEBSITE_GOAL_RUNNER_ENABLED=True,
+                ARTICLES_FAILURE_TAXONOMY_POLICY_ENABLED=True,
+                ARTICLES_FAILURE_TAXONOMY_ENROLLED_ORGANIZATIONS=[str(self.org.pk)],
+                ARTICLES_WEBSITE_GOAL_ENROLLED_ORGANIZATIONS=[str(self.org.pk)],
+                ARTICLES_FIRST_ARTICLE_GOAL_ENABLED=False,
+                ARTICLES_ARTICLE_SOURCE_REFRESH_ENABLED=False, ARTICLES_OPERATIONAL_ALERTS_ENABLED=False,
+                ARTICLES_GOAL_NOTIFICATIONS_ENABLED=False), \
+                patch("content_factory.website_prepare._prepare_context", return_value=(context, self.config, object())), \
+                patch("content_factory.website_prepare.journey_for_context", side_effect=AssertionError("No new journey after budget stop")), \
+                patch("integrations.services.github_app.create_installation_access_token", side_effect=AssertionError("No provider mint")):
+            advance_prepare(parent.pk, now=now)
+            self.assertIsNone(advance_prepare(parent.pk, now=now))
+        parent.refresh_from_db()
+        self.assertEqual(parent.state, "needs_attention")
+        self.assertIsNone(parent.next_attempt_at)
+        self.assertEqual(parent.receipt["budget_stop_reason"], "model_cost")
+        self.assertEqual(parent.receipt["goal"]["goal_id"], goal["goal_id"])
+
     def test_stopped_read_settles_its_recorded_generation_after_owner_revocation(self):
         from copy import deepcopy
         from datetime import timedelta

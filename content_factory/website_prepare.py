@@ -806,6 +806,13 @@ def _advance_claimed_prepare(op, *, now, handlers):
         from .website_article_source_stop import advance as advance_source_stop
         if advance_source_stop(op, config, now=now):
             return _finish_prepare(op, now=now)
+        from .website_article_source_fence import KEY as source_fence_key
+        if op.receipt.get("budget_stop_reason") and op.receipt.get(source_fence_key):
+            # A rollback can disable the private stopping purpose mid-cleanup.
+            # Its scheduler claim must still never fall through to new work.
+            from .website_goal_runner import stop_goal
+            stop_goal(op, op.receipt["goal"], reason=op.receipt["budget_stop_reason"], now=now)
+            return _finish_prepare(op, now=now)
         journey = journey_for_context(context, config)
         journey = _cleanup_retry_journey(op, context, config, journey)
         from .website_goal_runner import owns_goal, goal_journey, ready
