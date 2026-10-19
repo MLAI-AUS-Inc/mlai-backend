@@ -775,7 +775,11 @@ def _charge_content_factory_user(
         raise ArticleGenerationError(str(exc)) from exc
     article_request.update(roo_points_requested_by_user_id=requester.pk, roo_points_billing_user_id=user.pk)
     client_request_id = _get_client_request_id(article_request)
-    cost_points = _original_content_charge_points(user, f"content_factory:charge:{client_request_id}")
+    try:
+        cost_points = _original_content_charge_points(user, f"content_factory:charge:{client_request_id}")
+    except ArticleGenerationError as exc:
+        exc.code = "content_factory_billing_key_conflict"
+        raise
     if not cost_points:
         cost_points = get_content_factory_article_cost_points(resolved_domain, user=requester)
     _require_expected_cost(article_request, cost_points)
@@ -937,9 +941,7 @@ def _original_content_charge_points(user, key):
     if charge is None:
         return 0
     if charge.user_id != user.pk or charge.source != CONTENT_FACTORY_LEDGER_SOURCE:
-        error = ArticleGenerationError("The original charge does not belong to this request.")
-        error.code = "content_factory_billing_key_conflict"
-        raise error
+        raise ArticleGenerationError("The original charge does not belong to this request.")
     amount = -(charge.delta_microroo or 0)
     if amount <= 0 or amount % 1_000_000:
         raise ArticleGenerationError("The original article charge needs reconciliation.")
