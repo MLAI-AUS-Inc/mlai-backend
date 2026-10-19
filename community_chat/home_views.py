@@ -152,6 +152,9 @@ class CommunityHomeView(APIView):
                     "meeting_rooms": bool(
                         getattr(settings, "MEETING_ROOM_BOOKING_ENABLED", False)
                     ),
+                    "mentor_booking": bool(
+                        getattr(settings, "MENTOR_BOOKING_ENABLED", False)
+                    ),
                 },
             },
             headers={"Cache-Control": "private, no-store"},
