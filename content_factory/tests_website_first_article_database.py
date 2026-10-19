@@ -439,7 +439,7 @@ class FirstArticleProviderChainTests(OneClickBillingFixture,TransactionTestCase)
         self.assertEqual(op.receipt["first_article_billing"]["status"], "reserved")
         self.assertTrue(child.result["reconciliation_refund_pending"])
         self.assertFalse(Ledger.objects.filter(kind="REFUND", source="CONTENT_FACTORY").exists())
-        self.assertEqual(self.balance(self.payer), 14_000_000)
+        self.assertEqual(self.balance(self.payer), 8_000_000)
 
     def test_duplicate_parent_settlement_credits_one_original_allocation(self):
         op, child, row = self.terminal_parent_child(outcome="no_article_effect")

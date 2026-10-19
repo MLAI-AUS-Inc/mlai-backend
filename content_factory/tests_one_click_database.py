@@ -431,7 +431,7 @@ class OneClickPersistenceTests(OneClickBillingFixture, TestCase):
         self.assertEqual(child.result["article_terminal_refund"]["status"], "refunded")
         self.assertEqual(Ledger.objects.filter(kind="REFUND").count(), 1)
         refund = Ledger.objects.get(kind="REFUND")
-        self.assertEqual((refund.user_id, refund.delta_microroo), (self.payer.pk, 6_000_000))
+        self.assertEqual((refund.user_id, refund.delta_microroo), (self.payer.pk, 12_000_000))
         self.assertEqual(refund.idempotency_key, "content_factory:refund:synthetic-article")
         self.assertEqual(self.balance(self.payer), 20_000_000)
         self.assertEqual(child.run_request["client_request_id"], "fresh-repair-key")
@@ -448,7 +448,7 @@ class OneClickPersistenceTests(OneClickBillingFixture, TestCase):
         source.refresh_from_db()
         self.assertTrue(source.result["content_package"]["content_packaged"])
         self.assertFalse(Ledger.objects.filter(kind="REFUND").exists())
-        self.assertEqual(self.balance(self.payer), 14_000_000)
+        self.assertEqual(self.balance(self.payer), 8_000_000)
 
     def test_disconnect_reused_child_refunds_original_charge_once_after_opt_out(self):
         source = self.paid_source()
