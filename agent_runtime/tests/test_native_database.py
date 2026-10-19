@@ -210,6 +210,7 @@ class NativeDatabaseTests(unittest.TestCase):
         self.addCleanup(lambda: get_user_model().objects.filter(pk=guest.pk).delete())
         device = CommunityChatDevice.objects.create(user=guest, public_key=native_crypto.public_key(PrivateKey()),
             status="verified", verified_at=timezone.now())
+        self.addCleanup(lambda: CommunityChatDevice.objects.filter(pk=device.pk).delete())
         self.source_events = [self.metadata(caller=device.public_key)]
         self.assertEqual(community.poll_mentions(), 1)
         invocation = AgentInvocation.objects.get(installation=installation)
