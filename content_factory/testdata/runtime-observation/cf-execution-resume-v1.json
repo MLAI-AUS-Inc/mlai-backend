@@ -1,0 +1,279 @@
+{
+  "provenance": "Actual guarded_run + attempt adoption + generation rewind producer; synthetic fixture and mocked authorization/mirror only; not live qualification",
+  "journal": {
+    "schema_version": 1,
+    "basis": "cf_admitted_task_execution_v1",
+    "run_id": "scan-child",
+    "goal_id": "33333333-3333-4333-8333-333333333333",
+    "scope_fields": [
+      "app_root",
+      "branch",
+      "client_request_id",
+      "connection_generation",
+      "deletion_epoch",
+      "domain",
+      "github_repo",
+      "operation_attempt",
+      "operation_id",
+      "repository_id",
+      "website_connection_id"
+    ],
+    "request_scope_digest": "0c81f4cfd388bceff5b1ec98f663adbc283b05e99c8f6cbf84298d3e27f36cef",
+    "lineage_fields": [
+      "goal_budget"
+    ],
+    "goal_lineage_digest": "2c6da6cae3ddc9a56a70e7b79499bfab69faeeb230dc51243a3e48e9d20e30ca",
+    "scope_epochs": [
+      {
+        "goal_lineage_digest": "2c6da6cae3ddc9a56a70e7b79499bfab69faeeb230dc51243a3e48e9d20e30ca",
+        "lineage": {
+          "goal_budget": {
+            "goal_id": "33333333-3333-4333-8333-333333333333",
+            "scope_digest": "6c350a4ca6426694ffe1ceb918d0f51dc2c810bda2ee67a54710965651382f4b"
+          }
+        },
+        "lineage_fields": [
+          "goal_budget"
+        ],
+        "request_scope_digest": "1998ffa8dfce816d33b404212c633012f310515cfc7ff3f2c578813412a68b1d",
+        "scope": {
+          "app_root": "",
+          "branch": "main",
+          "client_request_id": "prepare:prepare:scan:1:initial",
+          "connection_generation": 3,
+          "deletion_epoch": 0,
+          "domain": "fixture.test",
+          "github_repo": "fixture/site",
+          "operation_attempt": 1,
+          "operation_id": "38170401-a750-4d3e-90d2-f8d1d1c31133",
+          "repository_id": 123,
+          "website_connection_id": "0bbb76a0-58ed-4c42-8b21-3e45a1eb17c2"
+        },
+        "scope_fields": [
+          "app_root",
+          "branch",
+          "client_request_id",
+          "connection_generation",
+          "deletion_epoch",
+          "domain",
+          "github_repo",
+          "operation_attempt",
+          "operation_id",
+          "repository_id",
+          "website_connection_id"
+        ]
+      },
+      {
+        "goal_lineage_digest": "2c6da6cae3ddc9a56a70e7b79499bfab69faeeb230dc51243a3e48e9d20e30ca",
+        "lineage": {
+          "goal_budget": {
+            "goal_id": "33333333-3333-4333-8333-333333333333",
+            "scope_digest": "6c350a4ca6426694ffe1ceb918d0f51dc2c810bda2ee67a54710965651382f4b"
+          }
+        },
+        "lineage_fields": [
+          "goal_budget"
+        ],
+        "request_scope_digest": "0c81f4cfd388bceff5b1ec98f663adbc283b05e99c8f6cbf84298d3e27f36cef",
+        "scope": {
+          "app_root": "",
+          "branch": "main",
+          "client_request_id": "prepare:prepare:scan:1:initial",
+          "connection_generation": 3,
+          "deletion_epoch": 0,
+          "domain": "fixture.test",
+          "github_repo": "fixture/site",
+          "operation_attempt": 2,
+          "operation_id": "38170401-a750-4d3e-90d2-f8d1d1c31133",
+          "repository_id": 123,
+          "website_connection_id": "0bbb76a0-58ed-4c42-8b21-3e45a1eb17c2"
+        },
+        "scope_fields": [
+          "app_root",
+          "branch",
+          "client_request_id",
+          "connection_generation",
+          "deletion_epoch",
+          "domain",
+          "github_repo",
+          "operation_attempt",
+          "operation_id",
+          "repository_id",
+          "website_connection_id"
+        ]
+      }
+    ],
+    "overflow": false,
+    "coverage": "complete",
+    "records": [
+      {
+        "sequence": 1,
+        "execution_id": "11111111111111111111111111111111",
+        "event": "entry",
+        "outcome": null,
+        "task": "scan",
+        "instance_id": "cb90a9eb105d4b6887947fd6da6d60d6",
+        "observed_at": "2026-10-19T02:23:54.278558+00:00",
+        "revision": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "configuration": "observed",
+        "flags": {
+          "CONTENT_FACTORY_ARTICLES_COST_ACCOUNTING_ENABLED": false,
+          "CONTENT_FACTORY_ARTICLES_DEPENDENCY_CACHE_ENABLED": false,
+          "CONTENT_FACTORY_ARTICLES_EXISTING_INVENTORY_ENABLED": false,
+          "CONTENT_FACTORY_ARTICLES_FAILURE_TAXONOMY_EMIT_ENABLED": false,
+          "CONTENT_FACTORY_ARTICLES_GOAL_USAGE_ENABLED": false,
+          "CONTENT_FACTORY_ARTICLES_HOSTED_VERIFICATION_ENABLED": false,
+          "CONTENT_FACTORY_ARTICLES_REPRODUCIBLE_BUILDS_ENABLED": false,
+          "CONTENT_FACTORY_ARTICLES_SITE_FINGERPRINT_ENABLED": false,
+          "CONTENT_FACTORY_ARTICLE_DELIVERY_V1_ENABLED": false,
+          "CONTENT_FACTORY_SETUP_DELIVERY_V1_ENABLED": false,
+          "CONTENT_FACTORY_SETUP_DELIVERY_V1_SEND_ENABLED": false
+        },
+        "run_predicates": {
+          "goal_usage_enabled": false,
+          "setup_delivery_enrolled": false,
+          "taxonomy_enabled": false
+        },
+        "generation": 0,
+        "state_version": 1,
+        "request_scope_digest": "1998ffa8dfce816d33b404212c633012f310515cfc7ff3f2c578813412a68b1d",
+        "goal_lineage_digest": "2c6da6cae3ddc9a56a70e7b79499bfab69faeeb230dc51243a3e48e9d20e30ca",
+        "lease_proof": null,
+        "handoff_proof": null
+      },
+      {
+        "sequence": 2,
+        "execution_id": "11111111111111111111111111111111",
+        "event": "outcome",
+        "outcome": "generation_superseded",
+        "task": "scan",
+        "instance_id": "cb90a9eb105d4b6887947fd6da6d60d6",
+        "observed_at": "2026-10-19T02:23:54.284616+00:00",
+        "revision": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "configuration": "observed",
+        "flags": {
+          "CONTENT_FACTORY_ARTICLES_COST_ACCOUNTING_ENABLED": false,
+          "CONTENT_FACTORY_ARTICLES_DEPENDENCY_CACHE_ENABLED": false,
+          "CONTENT_FACTORY_ARTICLES_EXISTING_INVENTORY_ENABLED": false,
+          "CONTENT_FACTORY_ARTICLES_FAILURE_TAXONOMY_EMIT_ENABLED": false,
+          "CONTENT_FACTORY_ARTICLES_GOAL_USAGE_ENABLED": false,
+          "CONTENT_FACTORY_ARTICLES_HOSTED_VERIFICATION_ENABLED": false,
+          "CONTENT_FACTORY_ARTICLES_REPRODUCIBLE_BUILDS_ENABLED": false,
+          "CONTENT_FACTORY_ARTICLES_SITE_FINGERPRINT_ENABLED": false,
+          "CONTENT_FACTORY_ARTICLE_DELIVERY_V1_ENABLED": false,
+          "CONTENT_FACTORY_SETUP_DELIVERY_V1_ENABLED": false,
+          "CONTENT_FACTORY_SETUP_DELIVERY_V1_SEND_ENABLED": false
+        },
+        "run_predicates": {
+          "goal_usage_enabled": false,
+          "setup_delivery_enrolled": false,
+          "taxonomy_enabled": false
+        },
+        "generation": 1,
+        "state_version": 2,
+        "request_scope_digest": "0c81f4cfd388bceff5b1ec98f663adbc283b05e99c8f6cbf84298d3e27f36cef",
+        "goal_lineage_digest": "2c6da6cae3ddc9a56a70e7b79499bfab69faeeb230dc51243a3e48e9d20e30ca",
+        "lease_proof": null,
+        "handoff_proof": null
+      },
+      {
+        "sequence": 3,
+        "execution_id": "cd6a578f398d4210826e2331c3080d65",
+        "event": "entry",
+        "outcome": null,
+        "task": "scan",
+        "instance_id": "cb90a9eb105d4b6887947fd6da6d60d6",
+        "observed_at": "2026-10-19T02:23:54.284620+00:00",
+        "revision": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "configuration": "observed",
+        "flags": {
+          "CONTENT_FACTORY_ARTICLES_COST_ACCOUNTING_ENABLED": false,
+          "CONTENT_FACTORY_ARTICLES_DEPENDENCY_CACHE_ENABLED": false,
+          "CONTENT_FACTORY_ARTICLES_EXISTING_INVENTORY_ENABLED": false,
+          "CONTENT_FACTORY_ARTICLES_FAILURE_TAXONOMY_EMIT_ENABLED": false,
+          "CONTENT_FACTORY_ARTICLES_GOAL_USAGE_ENABLED": false,
+          "CONTENT_FACTORY_ARTICLES_HOSTED_VERIFICATION_ENABLED": false,
+          "CONTENT_FACTORY_ARTICLES_REPRODUCIBLE_BUILDS_ENABLED": false,
+          "CONTENT_FACTORY_ARTICLES_SITE_FINGERPRINT_ENABLED": false,
+          "CONTENT_FACTORY_ARTICLE_DELIVERY_V1_ENABLED": false,
+          "CONTENT_FACTORY_SETUP_DELIVERY_V1_ENABLED": false,
+          "CONTENT_FACTORY_SETUP_DELIVERY_V1_SEND_ENABLED": false
+        },
+        "run_predicates": {
+          "goal_usage_enabled": false,
+          "setup_delivery_enrolled": false,
+          "taxonomy_enabled": false
+        },
+        "generation": 1,
+        "state_version": 2,
+        "request_scope_digest": "0c81f4cfd388bceff5b1ec98f663adbc283b05e99c8f6cbf84298d3e27f36cef",
+        "goal_lineage_digest": "2c6da6cae3ddc9a56a70e7b79499bfab69faeeb230dc51243a3e48e9d20e30ca",
+        "lease_proof": null,
+        "handoff_proof": null
+      },
+      {
+        "sequence": 4,
+        "execution_id": "cd6a578f398d4210826e2331c3080d65",
+        "event": "outcome",
+        "outcome": "returned",
+        "task": "scan",
+        "instance_id": "cb90a9eb105d4b6887947fd6da6d60d6",
+        "observed_at": "2026-10-19T02:23:54.287201+00:00",
+        "revision": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "configuration": "observed",
+        "flags": {
+          "CONTENT_FACTORY_ARTICLES_COST_ACCOUNTING_ENABLED": false,
+          "CONTENT_FACTORY_ARTICLES_DEPENDENCY_CACHE_ENABLED": false,
+          "CONTENT_FACTORY_ARTICLES_EXISTING_INVENTORY_ENABLED": false,
+          "CONTENT_FACTORY_ARTICLES_FAILURE_TAXONOMY_EMIT_ENABLED": false,
+          "CONTENT_FACTORY_ARTICLES_GOAL_USAGE_ENABLED": false,
+          "CONTENT_FACTORY_ARTICLES_HOSTED_VERIFICATION_ENABLED": false,
+          "CONTENT_FACTORY_ARTICLES_REPRODUCIBLE_BUILDS_ENABLED": false,
+          "CONTENT_FACTORY_ARTICLES_SITE_FINGERPRINT_ENABLED": false,
+          "CONTENT_FACTORY_ARTICLE_DELIVERY_V1_ENABLED": false,
+          "CONTENT_FACTORY_SETUP_DELIVERY_V1_ENABLED": false,
+          "CONTENT_FACTORY_SETUP_DELIVERY_V1_SEND_ENABLED": false
+        },
+        "run_predicates": {
+          "goal_usage_enabled": false,
+          "setup_delivery_enrolled": false,
+          "taxonomy_enabled": false
+        },
+        "generation": 1,
+        "state_version": 2,
+        "request_scope_digest": "0c81f4cfd388bceff5b1ec98f663adbc283b05e99c8f6cbf84298d3e27f36cef",
+        "goal_lineage_digest": "2c6da6cae3ddc9a56a70e7b79499bfab69faeeb230dc51243a3e48e9d20e30ca",
+        "lease_proof": null,
+        "handoff_proof": null
+      }
+    ],
+    "gaps": [],
+    "coverage_scope": "admitted_task_body_journal_only"
+  },
+  "locator": {
+    "run_id": "scan-child",
+    "scope_fields": [
+      "app_root",
+      "branch",
+      "client_request_id",
+      "connection_generation",
+      "deletion_epoch",
+      "domain",
+      "github_repo",
+      "operation_attempt",
+      "operation_id",
+      "repository_id",
+      "website_connection_id"
+    ],
+    "request_scope_digest": "0c81f4cfd388bceff5b1ec98f663adbc283b05e99c8f6cbf84298d3e27f36cef",
+    "lineage_fields": [
+      "goal_budget"
+    ],
+    "goal_lineage_digest": "2c6da6cae3ddc9a56a70e7b79499bfab69faeeb230dc51243a3e48e9d20e30ca",
+    "workflow": "repo_scan",
+    "execution": {
+      "generation": 1,
+      "state_version": 2
+    }
+  }
+}

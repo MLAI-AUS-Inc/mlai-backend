@@ -164,9 +164,11 @@ def advance_refund(identifier, *, now=None):
             if receipt is None:
                 raise WebsiteAuthorityError("website_operation_changed", "The original article refund receipt is unavailable.")
             from .website_first_article_billing import reserve_replacement_after_credit
+            evidence = goals.mapping(parent.receipt.get(KEY))
             if receipt["status"]=="refunded":
                 reserve_replacement_after_credit(parent,now=now)
-            evidence = goals.mapping(parent.receipt.get(KEY))
+            elif evidence.get("status")=="retained":
+                reserve_replacement_after_credit(parent,now=now,retained=True)
             outcome = "credited" if receipt["status"] == "refunded" else evidence.get("status", "needs_reconciliation")
             if outcome in {"credited", "retained"}:
                 row.state, row.next_attempt_at = "completed", None
@@ -186,6 +188,14 @@ def advance_refund(identifier, *, now=None):
             state = row.state
         if state == "pending" and evidence:
             stop_children(evidence, parent_id=parent.pk)
+        if state == "completed":
+            try:
+                from .website_sandbox_faults import observe_budget_settlement
+                observe_budget_settlement(parent, row)
+            except Exception:
+                # An optional acceptance receipt cannot undo a committed credit
+                # or turn it into another financial attempt.
+                pass
         return state
     except Exception as exc:
         if before is None:

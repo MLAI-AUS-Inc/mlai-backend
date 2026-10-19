@@ -41,6 +41,8 @@ def start_goal(current, *, company_id, user, retry, target, now, force_successor
         latest.save(update_fields=["receipt", "updated_at"])
     source = getattr(current, "verified_sha", "")
     if latest and compatible and latest.state not in TERMINAL and not force_successor:
+        from .website_owner_transport import require_admitted_goal
+        require_admitted_goal(latest)
         if retry and latest.state == "needs_user":
             latest.state, latest.next_attempt_at = "pending", now
             latest.receipt = {**latest.receipt, "status": "working", "user_action": None, "dispatch_outcome": "replayed"}
@@ -66,6 +68,10 @@ def start_goal(current, *, company_id, user, retry, target, now, force_successor
         latest.receipt = {**latest.receipt, "goal": enrolled_goal}
         from .website_goal_audit import seed
         seed(latest, from_start=False, now=now)
+        from .website_execution_observation import record
+        record(latest, "admission", now=now, from_start=False)
+        from .website_owner_transport import require_admitted_goal
+        require_admitted_goal(latest)
         if latest.next_attempt_at is None and latest.state in {"pending", "running"}:
             latest.next_attempt_at = now
         latest.save(update_fields=["receipt", "next_attempt_at", "updated_at"])
@@ -89,6 +95,8 @@ def start_goal(current, *, company_id, user, retry, target, now, force_successor
         "receipt": {"status": "working", "current_step": "verify-access", "message": "Preparing your website for articles."}})
     if created:
         goal = goals.new_goal(str(op.pk), scope, target=target, now=now)
+        from .website_sandbox_faults import admit_budget_profile
+        goal = admit_budget_profile(op, goal)
         if selected is not None:
             goal["consent"] = setup_consent.seal(goal, selected, user_id=user.pk, now=now)
         goal["predecessor_goal_id"] = predecessor
@@ -96,6 +104,10 @@ def start_goal(current, *, company_id, user, retry, target, now, force_successor
         op.receipt = {**op.receipt, "goal": goal}
         from .website_goal_audit import seed
         seed(op, from_start=True, now=now)
+        from .website_owner_transport import require_admitted_goal
+        require_admitted_goal(op)
+        from .website_execution_observation import record
+        record(op, "admission", now=now, from_start=True)
         op.save(update_fields=["receipt", "updated_at"])
     elif not goals.valid_goal(goals.mapping(op.receipt).get("goal"), scope):
         raise WebsiteAuthorityError("website_operation_changed", "The saved website goal has changed. Refresh its current status.")

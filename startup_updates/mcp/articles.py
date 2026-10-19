@@ -128,6 +128,15 @@ def _call_tool(principal, name, arguments):
         raise ValidationError("Audience selection requires its current editorial catalog version.")
     principal = valid_grant(principal.grant["id"], scope=TOOL_SCOPES[name])
     company = company_for(principal.user, arguments["companyId"], principal.grant)
+    from content_factory.website_owner_transport import MCP_WRITES, mcp_intent
+    if name in MCP_WRITES:
+        with mcp_intent(principal.user, company, name=name, arguments=arguments):
+            return _dispatch_owned_tool(principal, company, name, arguments)
+    return _dispatch_owned_tool(principal, company, name, arguments)
+
+
+def _dispatch_owned_tool(principal, company, name, arguments):
+    """The authenticated transport context surrounds every declared write tool."""
     if name == "get_startup_account":
         return operations.account(principal.user, company)
     if name == "get_article_capabilities":
@@ -145,6 +154,9 @@ def _call_tool(principal, name, arguments):
     if name == "prepare_article_publication":
         return operations.publication(principal.user, company, arguments["runId"])
     return operations.publish(principal.user, company, arguments)
+
+
+_call_tool._articles_transport_observed = True
 
 
 def call_tool(principal, name, arguments):

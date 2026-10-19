@@ -48,11 +48,11 @@ def request_for(op,context,config,target,source):
         payload["publishing_inputs_digest"] = candidate["digest"]
         # Bound identity length while preserving every original request input.
         payload["client_request_id"] = "hosted-v3:" + sealed.digest({"request": payload, "snapshot": snapshot})
-    from .website_goal_budget import enabled as budget_enabled
+    from .website_goal_budget import enabled as budget_enabled, active_limit
     if budget_enabled():
         goal=op.receipt["goal"];used=goals.mapping(goal.get("budget_used"))
         payload["goal_budget"]={"version":1,"goal_id":goal["goal_id"],"scope_digest":goals.digest(goal["scope"]),
-            "remaining_active_seconds":settings.ARTICLES_GOAL_ACTIVE_SECONDS-(used.get("active_seconds") or 0),
+            "remaining_active_seconds":active_limit(goal)-(used.get("active_seconds") or 0),
             "remaining_model_usd":settings.ARTICLES_GOAL_MODEL_USD-(used.get("model_cost") or 0)}
     if candidate is not None:
         with authority_guard(snapshot["parent_binding"], action="read") as current:

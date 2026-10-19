@@ -246,7 +246,7 @@ def advance(op, context, config, *, user, now):
         if budget.enabled():
             used=goals.mapping(op.receipt["goal"].get("budget_used"))
             contract["goal_budget"]={"version":1,"goal_id":op.receipt["goal"]["goal_id"],"scope_digest":goals.digest(op.receipt["goal"]["scope"]),
-                "remaining_active_seconds":settings.ARTICLES_GOAL_ACTIVE_SECONDS-(used.get("active_seconds") or 0),
+                "remaining_active_seconds":budget.active_limit(op.receipt["goal"])-(used.get("active_seconds") or 0),
                 "remaining_model_usd":settings.ARTICLES_GOAL_MODEL_USD-(used.get("model_cost") or 0)}
         response=views.start_article_generation(user=user,context=context,data=data,website_contract=contract,goal_operation_id=op.pk)
         if response.status_code>=400 and goals.mapping(response.data).get("field")=="topicCandidateId":
@@ -300,7 +300,9 @@ def advance(op, context, config, *, user, now):
             "The article publication is repairing its failed checks.",retryable=goals.mapping(child.result).get("retryable") is True)
         error.result=goals.mapping(child.result)
         raise error
-    views._maybe_auto_merge_publish_child(child=child,viewed_run=run,context=context)
+    from .website_sandbox_faults import stage
+    stage(op, context, run_id=child.run_id, boundary="merge_observation",
+        forward=lambda: views._maybe_auto_merge_publish_child(child=child,viewed_run=run,context=context))
     child.refresh_from_db()
     if goals.mapping(child.result).get("merge_status")=="manual_merge_required":
         try:observed=observe_manual_merge(op,child,now=now)
@@ -319,7 +321,8 @@ def advance(op, context, config, *, user, now):
         _save_fields(op,{"first_article_deployment_source_sha":merge["source_sha"]},remove=("deployment_wait_started_at","deployment_attempts"))
     views._apply_publish_child_evidence_to_article(context.organization,run,child)
     from .article_publish_status import refresh_publish_statuses,latest_live_observation
-    articles=refresh_publish_statuses(context.organization,config,limit=6,force=True,source_run_ids=(run.run_id,child.run_id))
+    articles=stage(op, context, run_id=child.run_id, boundary="deployment_observation",
+        forward=lambda: refresh_publish_statuses(context.organization,config,limit=6,force=True,source_run_ids=(run.run_id,child.run_id)))
     for article in articles:
         if article.source_run_id not in {run.run_id,child.run_id}:continue
         receipt=latest_live_observation(article)

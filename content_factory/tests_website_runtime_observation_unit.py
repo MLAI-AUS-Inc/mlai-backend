@@ -117,13 +117,14 @@ class RuntimeObservationTests(SimpleTestCase):
         text = json.dumps(value.data)
         for private in (SECRET, PRIVATE_PATH, "synthetic-internal-observer-key", "synthetic-cf-observer-key"):
             self.assertNotIn(private, text)
-        prepared = send.call_args.args[0]
+        # Current-process diagnostics are distinct from the new per-run reads.
+        prepared = send.call_args_list[0].args[0]
         self.assertEqual(prepared.url, "https://cf.example.test/api/internal/articles/process-observations")
         self.assertEqual(prepared.headers["X-API-Key"], "synthetic-cf-observer-key")
         self.assertFalse(send.call_args.kwargs["allow_redirects"])
         self.assertTrue(send.call_args.kwargs["verify"])
         self.assertEqual(send.call_args.kwargs["proxies"], {})
-        self.assertEqual(send.call_args.kwargs["timeout"], (3, 8))
+        self.assertEqual(send.call_args_list[0].kwargs["timeout"], (3, 8))
         self.assertEqual(db.cursor.call_count, 2)
 
     def test_readonly_fence_precedes_saved_scope_queries(self):

@@ -74,6 +74,7 @@ def backend_process(organization_id):
         "configuration_scope": BACKEND_CONFIGURATION_SCOPE, "configuration_digest": digest,
         "flags": flags, "new_work_membership": value["enrollment"],
         "new_work_goal_enabled": value["goal_enrolled"], "enrollment_scope_digest": None,
+        "backend_eligible": {key: row["backend_eligible"] for key, row in value["steps"].items()},
         "original_execution_eligibility": None}
 
 
@@ -206,6 +207,10 @@ class WebsiteRuntimeObservationView(APIView):
         try:
             original, process = read_original(row, target)
             cf = fetch_cf_processes()
+            from .website_execution_transport import fetch
+            executions = fetch(original)
+            from .website_github_action_archive import read_bound_archive
+            provider_actions = read_bound_archive(original)
             current, latest_process = read_original(row, target)
             if original != current or process != {**latest_process, "observed_at": process["observed_at"]}:
                 raise ObservationUnavailable("original_observation_changed")
@@ -216,7 +221,25 @@ class WebsiteRuntimeObservationView(APIView):
                 headers={"Cache-Control": "no-store"})
         return Response({"schema_version": 1, "observed_at": timezone.now().isoformat(),
             "basis": "original_goal_process_diagnostics_v1", "scope_evidence": original,
+            "backend_execution": original["backend_execution"],
+            "owner_transports": original["owner_transports"],
+            "content_factory_executions": executions,
+            "provider_action_archive": provider_actions,
             "backend_process": process, "content_factory_processes": cf,
             "coverage": "partial", "original_execution_eligibility": None, "effective_rollout": None,
             "gaps": ["original_execution_observations_missing", "scheduler_observations_missing",
                 "cf_processes_unbound", "owner_action_audit_incomplete"]}, headers={"Cache-Control": "no-store"})
+
+
+class WebsiteProviderObservationProfileView(APIView):
+    """Freeze the current private provider observer configuration before admission."""
+
+    authentication_classes = []
+    permission_classes = [HasObservationServiceKey]
+
+    def get(self, request):
+        if request.query_params:
+            return Response({"code": "invalid_original_goal_selection"}, status=400,
+                headers={"Cache-Control": "no-store"})
+        from .website_github_action_archive import read_profile
+        return Response(read_profile(), headers={"Cache-Control": "no-store"})

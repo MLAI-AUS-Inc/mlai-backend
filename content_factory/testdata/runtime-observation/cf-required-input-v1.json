@@ -1,0 +1,51 @@
+{
+  "provenance": "Actual inspect_required_inputs -> preflight_failure -> canonical classify_failure; synthetic declared NPM_TOKEN name; no credential/install/build/subprocess/network; not live qualification",
+  "result": {
+    "success": false,
+    "stage": "input_preflight",
+    "failure_kind": "MISSING_CONFIG",
+    "error_code": "MISSING_CONFIG",
+    "retryable": false,
+    "error": "This build needs these declared inputs: NPM_TOKEN",
+    "missing_requirements": [
+      "NPM_TOKEN"
+    ],
+    "build_input_preflight": {
+      "schema_version": 1,
+      "status": "needs_input",
+      "required_names": [
+        "NPM_TOKEN"
+      ],
+      "registry_auth_names": [
+        "NPM_TOKEN"
+      ],
+      "missing_names": [
+        "NPM_TOKEN"
+      ]
+    },
+    "findings": [
+      {
+        "code": "MISSING_CONFIG",
+        "constraint": "NPM_TOKEN"
+      }
+    ],
+    "failure": {
+      "schema_version": 1,
+      "registry_version": 1,
+      "registry_sha256": "17a17b189772e7b44c593510100e005eb8445a5db32358b11adb8359173ffd1c",
+      "fingerprint_version": 1,
+      "code": "MISSING_CONFIG",
+      "failure_class": "needs_user",
+      "failure_fingerprint": "sha256:ce7c3fc231c0c6ceeede25e27f4850908273cba53c8940b96912460f314cee6b",
+      "stage": "setup",
+      "retryable": false,
+      "user_message": "Review the required website action to continue.",
+      "action": {
+        "id": "review_setup",
+        "label": "Review setup",
+        "url": null
+      },
+      "evidence_refs": []
+    }
+  }
+}

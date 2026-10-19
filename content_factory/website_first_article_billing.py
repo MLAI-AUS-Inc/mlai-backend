@@ -150,8 +150,12 @@ def reserve_or_wait(op, *, user, now, predecessor=None):
     return reserve(op,user=user,now=now)
 
 
-def reserve_replacement_after_credit(parent, *, now):
-    """Credit and re-hold in one transaction, without exposing the funds between goals."""
+def reserve_replacement_after_credit(parent, *, now, retained=False):
+    """Resolve a waiting, independently consented successor after settlement.
+
+    A credit is re-held in the same transaction. Retained delivered value keeps
+    its original charge; the successor needs its own separately accepted spend.
+    """
     from .website_models import WebsiteConnectionOperation
     if not enabled(parent.connection):
         return
@@ -163,7 +167,17 @@ def reserve_replacement_after_credit(parent, *, now):
     if wait.get("predecessor_operation_id")!=str(parent.pk):
         return
     previous=_reservation(parent,goals.mapping(parent.receipt.get("goal")))
-    if (previous["status"]!="refunded" or wait.get("client_request_id")!=previous["client_request_id"]
+    if retained:
+        from .website_first_article_settlement import _saved, _binding
+        settled=_saved(parent,_binding(parent,previous))
+        if (previous["status"] not in {"reserved","consumed"} or settled.get("status")!="retained"
+            or settled.get("history_complete") is not True
+            or settled.get("dispatch") not in {"not_dispatched","no_work","delivered"}
+            or any(item.get("state") not in {"no_value","retained"} for item in settled.get("children",[]))):
+            _deny()
+    elif previous["status"]!="refunded":
+        _deny()
+    if (wait.get("client_request_id")!=previous["client_request_id"]
         or wait.get("payer_user_id")!=previous["payer_user_id"]):
         _deny()
     from django.contrib.auth import get_user_model
@@ -356,8 +370,15 @@ def cancel_held_goals(connection):
     rows = WebsiteConnectionOperation.objects.select_for_update().filter(connection=connection,
         generation=connection.generation, action="prepare", receipt__has_key="first_article_billing").exclude(state="completed")
     for op in rows:
+        was_running = op.state == "running"
         op.state, op.next_attempt_at = "cancelled", None
         op.receipt = {**op.receipt, "status":"authority_revoked", "repository_modified":False, "user_action":None}
+        if was_running:
+            # The lifecycle transaction owns the original row and revokes its
+            # lease. A stale controller may never persist its normal outcome.
+            from .website_execution_observation import record
+            from django.utils import timezone
+            record(op, "authority_revoked", now=timezone.now())
         op.save(update_fields=["state", "next_attempt_at", "receipt", "updated_at"])
         from .website_first_article_refunds import reserve_refund
         reserve_refund(op)

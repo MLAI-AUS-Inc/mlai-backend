@@ -4,9 +4,12 @@ from . import service_views as views
 from .website_views import WebsiteConnectionAuthorizeView, WebsiteMutationView
 from .website_current import WebsiteCurrentConnectionView
 from .website_verification import WebsiteCiAttestationView
-from .website_runtime_observation import WebsiteRuntimeObservationView
+from .website_policy_observation import WebsitePolicyObservationView
+from .website_runtime_observation import WebsiteRuntimeObservationView, WebsiteProviderObservationProfileView
 
 urlpatterns = [
+    path('articles/policy-observation/', WebsitePolicyObservationView.as_view(), name='articles_policy_observation'),
+    path('articles/provider-observation-profile/', WebsiteProviderObservationProfileView.as_view(), name='articles_provider_observation_profile'),
     path('articles/runtime-observation/', WebsiteRuntimeObservationView.as_view(), name='articles_runtime_observation'),
     path('connections/current', WebsiteCurrentConnectionView.as_view()),
     path('connections/current/', WebsiteCurrentConnectionView.as_view()),

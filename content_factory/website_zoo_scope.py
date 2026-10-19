@@ -132,7 +132,7 @@ def _lineage(request, original_goal):
     return result or None
 
 
-def _run_locator(run_id, *, company, connection, operation):
+def _run_locator(run_id, *, company, connection, operation, historical_policy=False):
     from django.db.models import F
     from workflow_runs.models import ContentFactoryRun
     from .website_models import WebsiteConnectionOperation
@@ -142,17 +142,19 @@ def _run_locator(run_id, *, company, connection, operation):
         scope_state_version=F("result__state_version")).only("run_id", "workflow", "domain", "github_repo",
             "organization_id", "run_request").filter(run_id=run_id, organization_id=company.organization_id).first()
     request = goals.mapping(getattr(run, "run_request", None))
+    generation = operation.generation if historical_policy else connection.generation
+    watermark = goals.mapping(goals.mapping(operation.receipt.get("goal")).get("scope")).get("deletion_epoch") if historical_policy else deletion_epoch(connection)
     if (run is None or run.workflow not in WORKFLOWS or run.github_repo != connection.github_repo
             or run.domain != connection.organization.domain or request.get("website_connection_id") != str(connection.pk)
-            or type(request.get("connection_generation")) is not int or request["connection_generation"] != connection.generation
+            or type(request.get("connection_generation")) is not int or request["connection_generation"] != generation
             or type(request.get("repository_id")) is not int or request["repository_id"] != connection.repository_id
-            or type(request.get("deletion_epoch")) is not int or request["deletion_epoch"] != deletion_epoch(connection)):
+            or type(request.get("deletion_epoch")) is not int or request["deletion_epoch"] != watermark):
         return None
     lineage = _lineage(request, str(operation.pk))
     if lineage is None or any(key not in request for key in SCOPE_FIELDS) or not uuid_id(request.get("operation_id")):
         return None
     child_op = WebsiteConnectionOperation.objects.filter(pk=request["operation_id"], connection_id=connection.pk,
-        generation=connection.generation, action="workflow").first()
+        generation=generation, action="workflow").first()
     payload = goals.mapping(getattr(child_op, "payload", None))
     if (child_op is None or payload.get("run_id") != run_id
             or type(request.get("operation_attempt")) is not int
@@ -220,10 +222,13 @@ def _resolve_case(case_id, row, *, target):
         return _unknown(case_id, "child_reference_capacity")
     locators = [_run_locator(key, company=company, connection=connection, operation=operation) for key in run_ids]
     complete = bool(run_ids) and all(item is not None for item in locators)
+    from .website_execution_observation import project
+    from .website_goal_audit import transport_coverage
     return {"case_id": case_id, "state": "bound", "reason": None if complete else "child_lineage_unproved",
         "company_id": str(company.pk), "organization_id": str(company.organization_id),
         "original_goal_id": str(operation.pk), "target": target, "scope_digest": goals.digest(scope),
-        "runs": [item for item in locators if item is not None], "runs_complete": complete}
+        "runs": [item for item in locators if item is not None], "runs_complete": complete,
+        "backend_execution": project(operation), "owner_transports": transport_coverage(operation)}
 
 
 def resolve_case(case_id, row, *, target):

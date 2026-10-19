@@ -1,0 +1,260 @@
+{
+  "provenance": "Actual acquired stale foreign guard + same-generation guarded_run takeover; synthetic fixture and mocked authorization only; not live qualification",
+  "journal": {
+    "schema_version": 1,
+    "basis": "cf_admitted_task_execution_v1",
+    "run_id": "scan-child",
+    "goal_id": "33333333-3333-4333-8333-333333333333",
+    "scope_fields": [
+      "app_root",
+      "branch",
+      "client_request_id",
+      "connection_generation",
+      "deletion_epoch",
+      "domain",
+      "github_repo",
+      "operation_attempt",
+      "operation_id",
+      "repository_id",
+      "website_connection_id"
+    ],
+    "request_scope_digest": "1998ffa8dfce816d33b404212c633012f310515cfc7ff3f2c578813412a68b1d",
+    "lineage_fields": [
+      "goal_budget"
+    ],
+    "goal_lineage_digest": "2c6da6cae3ddc9a56a70e7b79499bfab69faeeb230dc51243a3e48e9d20e30ca",
+    "scope_epochs": [
+      {
+        "goal_lineage_digest": "2c6da6cae3ddc9a56a70e7b79499bfab69faeeb230dc51243a3e48e9d20e30ca",
+        "lineage": {
+          "goal_budget": {
+            "goal_id": "33333333-3333-4333-8333-333333333333",
+            "scope_digest": "6c350a4ca6426694ffe1ceb918d0f51dc2c810bda2ee67a54710965651382f4b"
+          }
+        },
+        "lineage_fields": [
+          "goal_budget"
+        ],
+        "request_scope_digest": "1998ffa8dfce816d33b404212c633012f310515cfc7ff3f2c578813412a68b1d",
+        "scope": {
+          "app_root": "",
+          "branch": "main",
+          "client_request_id": "prepare:prepare:scan:1:initial",
+          "connection_generation": 3,
+          "deletion_epoch": 0,
+          "domain": "fixture.test",
+          "github_repo": "fixture/site",
+          "operation_attempt": 1,
+          "operation_id": "38170401-a750-4d3e-90d2-f8d1d1c31133",
+          "repository_id": 123,
+          "website_connection_id": "0bbb76a0-58ed-4c42-8b21-3e45a1eb17c2"
+        },
+        "scope_fields": [
+          "app_root",
+          "branch",
+          "client_request_id",
+          "connection_generation",
+          "deletion_epoch",
+          "domain",
+          "github_repo",
+          "operation_attempt",
+          "operation_id",
+          "repository_id",
+          "website_connection_id"
+        ]
+      }
+    ],
+    "overflow": false,
+    "coverage": "complete",
+    "records": [
+      {
+        "sequence": 1,
+        "execution_id": "11111111111111111111111111111111",
+        "event": "entry",
+        "outcome": null,
+        "task": "scan",
+        "instance_id": "cb90a9eb105d4b6887947fd6da6d60d6",
+        "observed_at": "2026-10-19T02:23:54.301674+00:00",
+        "revision": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "configuration": "observed",
+        "flags": {
+          "CONTENT_FACTORY_ARTICLES_COST_ACCOUNTING_ENABLED": false,
+          "CONTENT_FACTORY_ARTICLES_DEPENDENCY_CACHE_ENABLED": false,
+          "CONTENT_FACTORY_ARTICLES_EXISTING_INVENTORY_ENABLED": false,
+          "CONTENT_FACTORY_ARTICLES_FAILURE_TAXONOMY_EMIT_ENABLED": false,
+          "CONTENT_FACTORY_ARTICLES_GOAL_USAGE_ENABLED": false,
+          "CONTENT_FACTORY_ARTICLES_HOSTED_VERIFICATION_ENABLED": false,
+          "CONTENT_FACTORY_ARTICLES_REPRODUCIBLE_BUILDS_ENABLED": false,
+          "CONTENT_FACTORY_ARTICLES_SITE_FINGERPRINT_ENABLED": false,
+          "CONTENT_FACTORY_ARTICLE_DELIVERY_V1_ENABLED": false,
+          "CONTENT_FACTORY_SETUP_DELIVERY_V1_ENABLED": false,
+          "CONTENT_FACTORY_SETUP_DELIVERY_V1_SEND_ENABLED": false
+        },
+        "run_predicates": {
+          "goal_usage_enabled": false,
+          "setup_delivery_enrolled": false,
+          "taxonomy_enabled": false
+        },
+        "generation": 0,
+        "state_version": 1,
+        "request_scope_digest": "1998ffa8dfce816d33b404212c633012f310515cfc7ff3f2c578813412a68b1d",
+        "goal_lineage_digest": "2c6da6cae3ddc9a56a70e7b79499bfab69faeeb230dc51243a3e48e9d20e30ca",
+        "lease_proof": {
+          "lease_id": "dbc6bb9b6cc84e88b81a302629669581",
+          "owner_digest": "0bc70ec617b87b5da1ce12a67165cb194f50d8c42aa3c1976db6e051268d4184"
+        },
+        "handoff_proof": null
+      },
+      {
+        "sequence": 2,
+        "execution_id": "11111111111111111111111111111111",
+        "event": "outcome",
+        "outcome": "lease_superseded",
+        "task": "scan",
+        "instance_id": "cb90a9eb105d4b6887947fd6da6d60d6",
+        "observed_at": "2026-10-19T02:23:54.308297+00:00",
+        "revision": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "configuration": "observed",
+        "flags": {
+          "CONTENT_FACTORY_ARTICLES_COST_ACCOUNTING_ENABLED": false,
+          "CONTENT_FACTORY_ARTICLES_DEPENDENCY_CACHE_ENABLED": false,
+          "CONTENT_FACTORY_ARTICLES_EXISTING_INVENTORY_ENABLED": false,
+          "CONTENT_FACTORY_ARTICLES_FAILURE_TAXONOMY_EMIT_ENABLED": false,
+          "CONTENT_FACTORY_ARTICLES_GOAL_USAGE_ENABLED": false,
+          "CONTENT_FACTORY_ARTICLES_HOSTED_VERIFICATION_ENABLED": false,
+          "CONTENT_FACTORY_ARTICLES_REPRODUCIBLE_BUILDS_ENABLED": false,
+          "CONTENT_FACTORY_ARTICLES_SITE_FINGERPRINT_ENABLED": false,
+          "CONTENT_FACTORY_ARTICLE_DELIVERY_V1_ENABLED": false,
+          "CONTENT_FACTORY_SETUP_DELIVERY_V1_ENABLED": false,
+          "CONTENT_FACTORY_SETUP_DELIVERY_V1_SEND_ENABLED": false
+        },
+        "run_predicates": {
+          "goal_usage_enabled": false,
+          "setup_delivery_enrolled": false,
+          "taxonomy_enabled": false
+        },
+        "generation": 0,
+        "state_version": 1,
+        "request_scope_digest": "1998ffa8dfce816d33b404212c633012f310515cfc7ff3f2c578813412a68b1d",
+        "goal_lineage_digest": "2c6da6cae3ddc9a56a70e7b79499bfab69faeeb230dc51243a3e48e9d20e30ca",
+        "lease_proof": {
+          "lease_id": "b169e2dc232d4df99304ba699a8c5da7",
+          "owner_digest": "bf91e96490502f9875c8cf191ec172394226335c7d5da2c4d6587c932b640a7e"
+        },
+        "handoff_proof": {
+          "observed_at": "2026-10-19T02:23:54.308297+00:00",
+          "previous_heartbeat_at": "2000-01-01T00:00:00+00:00",
+          "previous_lease_id": "dbc6bb9b6cc84e88b81a302629669581",
+          "previous_outcome": null,
+          "previous_owner_digest": "0bc70ec617b87b5da1ce12a67165cb194f50d8c42aa3c1976db6e051268d4184",
+          "previous_released": false,
+          "ttl_seconds": 150.0
+        }
+      },
+      {
+        "sequence": 3,
+        "execution_id": "20ba91bef2f246b49e9ac22844b15cb7",
+        "event": "entry",
+        "outcome": null,
+        "task": "scan",
+        "instance_id": "cb90a9eb105d4b6887947fd6da6d60d6",
+        "observed_at": "2026-10-19T02:23:54.308344+00:00",
+        "revision": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "configuration": "observed",
+        "flags": {
+          "CONTENT_FACTORY_ARTICLES_COST_ACCOUNTING_ENABLED": false,
+          "CONTENT_FACTORY_ARTICLES_DEPENDENCY_CACHE_ENABLED": false,
+          "CONTENT_FACTORY_ARTICLES_EXISTING_INVENTORY_ENABLED": false,
+          "CONTENT_FACTORY_ARTICLES_FAILURE_TAXONOMY_EMIT_ENABLED": false,
+          "CONTENT_FACTORY_ARTICLES_GOAL_USAGE_ENABLED": false,
+          "CONTENT_FACTORY_ARTICLES_HOSTED_VERIFICATION_ENABLED": false,
+          "CONTENT_FACTORY_ARTICLES_REPRODUCIBLE_BUILDS_ENABLED": false,
+          "CONTENT_FACTORY_ARTICLES_SITE_FINGERPRINT_ENABLED": false,
+          "CONTENT_FACTORY_ARTICLE_DELIVERY_V1_ENABLED": false,
+          "CONTENT_FACTORY_SETUP_DELIVERY_V1_ENABLED": false,
+          "CONTENT_FACTORY_SETUP_DELIVERY_V1_SEND_ENABLED": false
+        },
+        "run_predicates": {
+          "goal_usage_enabled": false,
+          "setup_delivery_enrolled": false,
+          "taxonomy_enabled": false
+        },
+        "generation": 0,
+        "state_version": 1,
+        "request_scope_digest": "1998ffa8dfce816d33b404212c633012f310515cfc7ff3f2c578813412a68b1d",
+        "goal_lineage_digest": "2c6da6cae3ddc9a56a70e7b79499bfab69faeeb230dc51243a3e48e9d20e30ca",
+        "lease_proof": {
+          "lease_id": "b169e2dc232d4df99304ba699a8c5da7",
+          "owner_digest": "bf91e96490502f9875c8cf191ec172394226335c7d5da2c4d6587c932b640a7e"
+        },
+        "handoff_proof": null
+      },
+      {
+        "sequence": 4,
+        "execution_id": "20ba91bef2f246b49e9ac22844b15cb7",
+        "event": "outcome",
+        "outcome": "returned",
+        "task": "scan",
+        "instance_id": "cb90a9eb105d4b6887947fd6da6d60d6",
+        "observed_at": "2026-10-19T02:23:54.310460+00:00",
+        "revision": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "configuration": "observed",
+        "flags": {
+          "CONTENT_FACTORY_ARTICLES_COST_ACCOUNTING_ENABLED": false,
+          "CONTENT_FACTORY_ARTICLES_DEPENDENCY_CACHE_ENABLED": false,
+          "CONTENT_FACTORY_ARTICLES_EXISTING_INVENTORY_ENABLED": false,
+          "CONTENT_FACTORY_ARTICLES_FAILURE_TAXONOMY_EMIT_ENABLED": false,
+          "CONTENT_FACTORY_ARTICLES_GOAL_USAGE_ENABLED": false,
+          "CONTENT_FACTORY_ARTICLES_HOSTED_VERIFICATION_ENABLED": false,
+          "CONTENT_FACTORY_ARTICLES_REPRODUCIBLE_BUILDS_ENABLED": false,
+          "CONTENT_FACTORY_ARTICLES_SITE_FINGERPRINT_ENABLED": false,
+          "CONTENT_FACTORY_ARTICLE_DELIVERY_V1_ENABLED": false,
+          "CONTENT_FACTORY_SETUP_DELIVERY_V1_ENABLED": false,
+          "CONTENT_FACTORY_SETUP_DELIVERY_V1_SEND_ENABLED": false
+        },
+        "run_predicates": {
+          "goal_usage_enabled": false,
+          "setup_delivery_enrolled": false,
+          "taxonomy_enabled": false
+        },
+        "generation": 0,
+        "state_version": 1,
+        "request_scope_digest": "1998ffa8dfce816d33b404212c633012f310515cfc7ff3f2c578813412a68b1d",
+        "goal_lineage_digest": "2c6da6cae3ddc9a56a70e7b79499bfab69faeeb230dc51243a3e48e9d20e30ca",
+        "lease_proof": {
+          "lease_id": "b169e2dc232d4df99304ba699a8c5da7",
+          "owner_digest": "bf91e96490502f9875c8cf191ec172394226335c7d5da2c4d6587c932b640a7e"
+        },
+        "handoff_proof": null
+      }
+    ],
+    "gaps": [],
+    "coverage_scope": "admitted_task_body_journal_only"
+  },
+  "locator": {
+    "run_id": "scan-child",
+    "scope_fields": [
+      "app_root",
+      "branch",
+      "client_request_id",
+      "connection_generation",
+      "deletion_epoch",
+      "domain",
+      "github_repo",
+      "operation_attempt",
+      "operation_id",
+      "repository_id",
+      "website_connection_id"
+    ],
+    "request_scope_digest": "1998ffa8dfce816d33b404212c633012f310515cfc7ff3f2c578813412a68b1d",
+    "lineage_fields": [
+      "goal_budget"
+    ],
+    "goal_lineage_digest": "2c6da6cae3ddc9a56a70e7b79499bfab69faeeb230dc51243a3e48e9d20e30ca",
+    "workflow": "repo_scan",
+    "execution": {
+      "generation": 0,
+      "state_version": 1
+    }
+  }
+}

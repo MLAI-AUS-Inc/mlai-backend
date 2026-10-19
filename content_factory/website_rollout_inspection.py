@@ -36,7 +36,7 @@ RULES = (
 )
 # Cosmetic admission is observed for configuration-window identity, while the
 # delivery rules remain independent of its optional formatting behavior.
-OBSERVATION_ONLY_FLAGS = ("CONTENT_FACTORY_WORKFLOW_ORDER_FORMATTING_ADMISSION_ENABLED",)
+OBSERVATION_ONLY_FLAGS = ("CONTENT_FACTORY_WORKFLOW_ORDER_FORMATTING_ADMISSION_ENABLED", "ARTICLES_OWNER_AUDIT_REQUIRED_ENABLED")
 BACKEND_FLAGS = tuple(sorted({name for _, names, _, _, _ in RULES for name in names}
     | set(OBSERVATION_ONLY_FLAGS)))
 CF_FLAGS = tuple(sorted({name for _, _, _, names, _ in RULES for name in names}))

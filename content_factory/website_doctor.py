@@ -5,6 +5,7 @@ from django.conf import settings
 from django.utils import timezone
 from . import website_goal as goals
 from .website_failure_redaction import redact_secret_text
+from .website_goal_budget import active_limit
 
 CREDENTIAL_PREFIX = re.compile(r"(?:sk-|xox[baprs]-|AKIA|ASIA)")
 ID = re.compile(r"[A-Za-z0-9_.:-]{1,100}")
@@ -110,7 +111,7 @@ def project_doctor(op, *, scope, source_sha, milestones=None, children=(), recei
             "modelCalls":number(used.get("model_calls"),integer=True),"tokens":number(used.get("tokens"),integer=True),
             "providerSeconds":number(used.get("provider_seconds")),"builds":number(used.get("builds"),integer=True),"previews":number(used.get("previews"),integer=True),
             "attemptsByClass":{name:number(attempts.get(name),integer=True) for name in goals.CLASSES},
-            "limits":{"wallSeconds":number(getattr(settings,"ARTICLES_GOAL_WALL_SECONDS",None)),"activeSeconds":number(getattr(settings,"ARTICLES_GOAL_ACTIVE_SECONDS",None)),"modelUsd":number(getattr(settings,"ARTICLES_GOAL_MODEL_USD",None))}}}
+            "limits":{"wallSeconds":number(getattr(settings,"ARTICLES_GOAL_WALL_SECONDS",None)),"activeSeconds":number(active_limit(goal)),"modelUsd":number(getattr(settings,"ARTICLES_GOAL_MODEL_USD",None))}}}
 
 
 def read_doctor(op, *, scope, source_sha, milestones=None):

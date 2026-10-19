@@ -141,6 +141,7 @@ def eligible(request, context, *, methods):
     return not (not audit.enabled(getattr(getattr(context, "organization", None), "pk", None))
             or not isinstance(request, Request) or not isinstance(getattr(request, "_request", None), HttpRequest)
             or request.method not in methods or getattr(request, "_website_prepare_dispatch", False)
+            or getattr(request, "_articles_transport_observed", False)
             or not request.user.is_authenticated or request.user.pk is None)
 
 

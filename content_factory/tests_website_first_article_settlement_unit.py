@@ -192,12 +192,118 @@ class ParentSettlementTests(SimpleTestCase):
             self.assertEqual(refunds.advance_refund(row.pk, now=self.now), "completed")
         self.assertEqual(order, ["organization", "connection", "refund", "parent", "credit"])
 
+    def test_acceptance_budget_receipt_is_observed_only_after_original_credit_commits(self):
+        self.op.receipt["budget_stop_reason"] = "active_compute"
+        row = self.refund_row()
+        depth = [0]
+        @contextmanager
+        def atomic():
+            depth[0] += 1
+            try:
+                yield
+            finally:
+                depth[0] -= 1
+        def observed(parent, settlement_row):
+            self.assertEqual(depth[0], 0)
+            self.assertIs(parent, self.op)
+            self.assertIs(settlement_row, row)
+            self.assertEqual(parent.receipt["first_article_billing"]["status"], "refunded")
+            self.assertEqual(settlement_row.state, "completed")
+        with patch.object(refunds.transaction, "atomic", side_effect=atomic), \
+                patch("content_factory.website_sandbox_faults.observe_budget_settlement", side_effect=observed) as observe:
+            self.assertEqual(refunds.advance_refund(row.pk, now=self.now), "completed")
+            self.assertIsNone(refunds.advance_refund(row.pk, now=self.now))
+        observe.assert_called_once()
+        self.credit.assert_called_once()
+
     def test_useful_review_retains_parent_charge_after_technical_stop(self):
         child = self.child()
         child.result.update(preview_content_verified=True, preview_url="https://preview.example.test/article")
         row = self.refund_row()
         self.assertEqual(refunds.advance_refund(row.pk, now=self.now), "completed")
         self.assertEqual(row.receipt["status"], "retained_after_draft")
+        self.credit.assert_not_called()
+
+    def waiting_replacement(self):
+        """An owner accepted new choices before the old draft callback arrived."""
+        self.op.state = "cancelled"
+        goal = goals.new_goal("replacement", goals.scope_for(self.connection, 9),
+            target="first_article_live", now=self.now)
+        goal["consent"] = consent.seal(goal, answers(publish_mode="review"), user_id=4, now=self.now)
+        replacement = SimpleNamespace(pk="replacement", connection=self.connection, generation=2,
+            action="prepare", state="pending", payload={"company_id":"9","requested_by_user_id":"4"},
+            receipt={"goal":goal}, save=Mock())
+        billing.reserve_or_wait(replacement, user=self.user, now=self.now, predecessor=self.op)
+        self.assertFalse(billing.reservation_ready(replacement))
+        self.rows.return_value.select_related.return_value.filter.return_value.order_by.return_value.first.return_value = replacement
+        next_ledger = SimpleNamespace(**{**vars(self.ledger), "pk":12, "id":12,
+            "reference_id":billing.request_key(goal), "idempotency_key":"content_factory:charge:" + billing.request_key(goal)})
+        self.spend.return_value = next_ledger, True
+        from django.contrib.auth import get_user_model
+        users = self.stack.enter_context(patch.object(get_user_model().objects, "filter"))
+        users.return_value.first.return_value = self.user
+        return replacement
+
+    def test_late_useful_draft_settles_and_funds_separately_consented_replacement_once(self):
+        replacement = self.waiting_replacement()
+        held = deepcopy(self.held)
+        child = self.child()
+        child.result.update(preview_content_verified=True, preview_url="https://preview.example.test/article")
+        row = self.refund_row()
+        self.assertEqual(refunds.advance_refund(row.pk, now=self.now), "completed")
+        self.assertIsNone(refunds.advance_refund(row.pk, now=self.now))
+        self.assertEqual(row.receipt["status"], "retained_after_draft")
+        self.assertTrue(billing.reservation_ready(replacement))
+        self.assertEqual(self.op.receipt["first_article_billing"], held)
+        self.assertNotEqual(replacement.receipt["first_article_billing"]["client_request_id"], held["client_request_id"])
+        self.assertEqual(replacement.receipt["first_article_billing"]["spend_ledger_id"], "12")
+        self.assertEqual(self.spend.call_count, 2)
+        self.credit.assert_not_called()
+        billing.reserve_replacement_after_credit(self.op, now=self.now, retained=True)
+        self.assertEqual(self.spend.call_count, 2)
+
+    def test_retained_predecessor_with_insufficient_points_requests_billing_without_refund(self):
+        from roo.permissions import InsufficientBalanceError
+        from .website_contract import WebsiteAuthorityError
+        replacement = self.waiting_replacement()
+        child = self.child()
+        child.result.update(preview_content_verified=True, preview_url="https://preview.example.test/article")
+        row = self.refund_row()
+        self.spend.side_effect = InsufficientBalanceError("synthetic insufficient balance")
+        self.assertEqual(refunds.advance_refund(row.pk, now=self.now), "completed")
+        self.assertEqual(replacement.receipt["first_article_billing_wait_error"], "roo_points_required")
+        self.assertNotIn("first_article_billing", replacement.receipt)
+        with self.assertRaises(WebsiteAuthorityError) as caught:
+            billing.reservation_ready(replacement)
+        self.assertEqual(caught.exception.status, 402)
+        self.credit.assert_not_called()
+
+    def test_unknown_predecessor_and_withdrawn_successor_consent_never_buy_another_article(self):
+        replacement = self.waiting_replacement()
+        self.child("article-goal-pending-publication-v1.json")
+        row = self.refund_row()
+        self.assertEqual(refunds.advance_refund(row.pk, now=self.now), "needs_attention")
+        self.assertEqual(self.spend.call_count, 1)
+        self.assertNotIn("first_article_billing", replacement.receipt)
+        # A known retained outcome still cannot revive withdrawn owner consent.
+        self.children.clear()
+        self.op.receipt.pop("first_article_run_id", None)
+        self.dispatch_rows.return_value.filter.return_value.first.return_value = None
+        replacement.state = "cancelled"
+        billing.reserve_replacement_after_credit(self.op, now=self.now, retained=True)
+        self.assertEqual(self.spend.call_count, 1)
+        self.credit.assert_not_called()
+
+    def test_retained_predecessor_cannot_spend_from_changed_successor_owner_or_quote(self):
+        replacement = self.waiting_replacement()
+        child = self.child()
+        child.result.update(preview_content_verified=True, preview_url="https://preview.example.test/article")
+        row = self.refund_row()
+        replacement.receipt["goal"]["consent"]["answers"]["billing"]["expected_points"] = 99
+        self.assertEqual(refunds.advance_refund(row.pk, now=self.now), "completed")
+        self.assertEqual(self.spend.call_count, 1)
+        self.assertNotIn("first_article_billing", replacement.receipt)
+        self.assertEqual(replacement.receipt["first_article_billing_wait_error"], "roo_points_required")
         self.credit.assert_not_called()
 
     def test_erasure_keeps_unknown_obligation_after_child_and_dispatch_are_removed(self):

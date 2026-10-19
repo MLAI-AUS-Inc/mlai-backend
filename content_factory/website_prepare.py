@@ -266,14 +266,23 @@ def _claim_prepare(identifier, now):
         from .website_goal import enrolled
         if owns_goal(op) and not enrolled(op.connection.organization_id):
             return None
+        if owns_goal(op):
+            from .website_owner_transport import require_admitted_goal
+            require_admitted_goal(op)
         if op.generation != op.connection.generation or op.connection.state != "connected":
             op.state = "cancelled"
             op.receipt = {**op.receipt, "status": "authority_changed", "message": "Website access changed."}
             op.save(update_fields=["state", "receipt", "updated_at"])
             return None
+        from .website_execution_observation import record
+        if op.state == "running" and op.next_attempt_at is not None and op.next_attempt_at <= now:
+            # The new lease revokes this old claim. Record that fence, rather
+            # than inventing a return from the process whose lease expired.
+            record(op, "superseded", now=now)
         op.state, op.attempts = "running", op.attempts + 1
         op.next_attempt_at = now + timedelta(minutes=5)
-        op.save(update_fields=["state", "attempts", "next_attempt_at", "updated_at"])
+        record(op, "claim", now=now)
+        op.save(update_fields=["state", "attempts", "next_attempt_at", "receipt", "updated_at"])
         op._claimed_at = op.updated_at
         if owns_goal(op):
             from .website_goal import mapping as goal_mapping
@@ -347,6 +356,8 @@ def _finish_prepare(op, *, now):
     from .website_goal_runner import owns_goal, finish_goal
     if owns_goal(op):
         finish_goal(op, now=now)
+        from .website_execution_observation import record
+        record(op, "outcome", now=now)
     logger.info("website_prepare operation=%s company=%s connection=%s generation=%s step=%s state=%s reason=%s attempt=%s next_attempt=%s dispatch_outcome=%s",
         op.pk, op.payload.get("company_id"), op.connection_id, op.generation, op.receipt.get("current_step"),
         op.state, op.receipt.get("reason_code", ""), op.attempts, op.next_attempt_at, op.receipt.get("dispatch_outcome", ""))
@@ -583,7 +594,7 @@ def _owner_request(op, context, config, step, *, user, journey=None):
         from django.conf import settings
         data["goal_budget"] = {"version": 1, "goal_id": goal["goal_id"],
             "scope_digest": goals.digest(goal["scope"]),
-            "remaining_active_seconds": settings.ARTICLES_GOAL_ACTIVE_SECONDS - (used.get("active_seconds") or 0),
+            "remaining_active_seconds": goal_budget.active_limit(goal) - (used.get("active_seconds") or 0),
             "remaining_model_usd": settings.ARTICLES_GOAL_MODEL_USD - (used.get("model_cost") or 0)}
     if "goal" in op.receipt and step == "setup":
         from .website_strategy import request_pin
@@ -722,7 +733,9 @@ def _dispatch_prepare_step(op, context, config, step, *, user, journey=None):
             ci = record_ci_attestation(proof)
             receipt = ci.receipt
     if step == "verify":
-        deployment = verify_live_deployment(config, data=receipt)
+        from .website_sandbox_faults import stage
+        deployment = stage(op, context, run_id=op.receipt.get("setup_run_id") or op.receipt.get("merged_setup_run_id"),
+            boundary="deployment_observation", forward=lambda: verify_live_deployment(config, data=receipt))
         return {"status": "completed", "operation_id": str(deployment.pk)}
     return {"status": "completed", "operation_id": str(ci.pk)}
 
@@ -811,6 +824,9 @@ def _advance_claimed_prepare(op, *, now, handlers):
         if (journey.get("nextAction") or {}).get("id")=="first-article":
             from .website_first_article import advance as advance_first_article
             step="first-article"
+            from .website_sandbox_faults import disconnect_before_article
+            if disconnect_before_article(op, context, config):
+                return _finish_prepare(op, now=now)
             advance_first_article(op,context,config,user=user,now=now)
             return _finish_prepare(op,now=now)
         child_id = op.receipt.get("child_run_id")
@@ -881,7 +897,9 @@ def _advance_claimed_prepare(op, *, now, handlers):
                 if owns_goal(op) and not any(item["name"] == "previewed" and item["state"] == "passed"
                         for item in op.receipt["goal"]["milestones"]):
                     raise WebsiteAuthorityError("setup_preview_verification_required", "Waiting for the exact setup preview proof.", retryable=True)
-                merge = maybe_merge_prepared_setup(child, context, config, user=user, goal=op.receipt.get("goal"))
+                from .website_sandbox_faults import stage
+                merge = stage(op, context, run_id=getattr(child, "run_id", None), boundary="merge_observation",
+                    forward=lambda: maybe_merge_prepared_setup(child, context, config, user=user, goal=op.receipt.get("goal")))
                 if merge.get("status") == "needs_user":
                     review = merge["user_action"].get("id") == "review_setup" and not merge["user_action"].get("pr_number")
                     op.state, op.next_attempt_at = "needs_user", None

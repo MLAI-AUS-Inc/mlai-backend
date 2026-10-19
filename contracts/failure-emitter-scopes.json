@@ -2070,6 +2070,32 @@
       "site_sha256": "975d8a1176ffcf1eb4a9dfec7316eacfa171388a7dd1b9406e640d87f82c5c66",
       "source": "Static local selector/snapshot exceptions from the authenticated process observer; never changes goal failure policy, retry, dispatch, readiness or enrollment.",
       "test": "content_factory.tests_website_runtime_observation_unit.RuntimeObservationTests.test_unexpected_database_error_exposes_only_static_diagnostic"
+    },
+    {
+      "adapter": "nonfailure_category",
+      "allowed_codes_ref": "contracts/failure-codes.json#/codes",
+      "category": "private read-only policy diagnostic request status; not a causal Articles run failure",
+      "expression": "str(exc)",
+      "field": "code",
+      "function": "get",
+      "owner": "backend.website_policy_observation",
+      "path": "content_factory/website_policy_observation.py",
+      "site_sha256": "052bb3c72e65bfcde7c67e5553f712575f4c76ffdcccd6dd8f45a5b11854e95d",
+      "source": "Static local original selector or read-only snapshot diagnostics; never mutates goal, authority, retry, dispatch, enrollment, ledger or refund policy.",
+      "test": "content_factory.tests_website_policy_observation_unit.PrivateObservationRouteTests.test_policy_observation_changed_or_private_storage_error_stays_a_static_diagnostic"
+    },
+    {
+      "adapter": "nonfailure_category",
+      "allowed_codes_ref": "contracts/failure-codes.json#/codes",
+      "category": "private read-only policy diagnostic request status; not a causal Articles run failure",
+      "expression": "'original_policy_observation_unavailable'",
+      "field": "code",
+      "function": "get",
+      "owner": "backend.website_policy_observation",
+      "path": "content_factory/website_policy_observation.py",
+      "site_sha256": "f8d63b084dcd0bdc08bd80d4c997d0b98eb56f5d85f016333ef685b0423b97f5",
+      "source": "Static local original selector or read-only snapshot diagnostics; never mutates goal, authority, retry, dispatch, enrollment, ledger or refund policy.",
+      "test": "content_factory.tests_website_policy_observation_unit.PrivateObservationRouteTests.test_policy_observation_changed_or_private_storage_error_stays_a_static_diagnostic"
     }
   ],
   "owner": "backend.content_factory",

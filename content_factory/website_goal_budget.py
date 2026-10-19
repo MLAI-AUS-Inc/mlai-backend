@@ -23,6 +23,28 @@ def numeric(value):
         return False
 
 
+def active_limit(goal):
+    """Honor only a bound original operator fixture cap that lowers normal policy."""
+    ordinary = getattr(settings, "ARTICLES_GOAL_ACTIVE_SECONDS", 7200)
+    if "sandbox_budget_profile" not in goal:
+        return ordinary
+    profile = goal["sandbox_budget_profile"]
+    from .website_sandbox_faults import configured
+    expected = {"version", "origin", "goal_id", "authority_digest", "manifest_digest", "case_id", "active_seconds", "digest"}
+    if (not configured() or not isinstance(profile, dict) or set(profile) != expected
+            or type(profile.get("version")) is not int or profile["version"] != 1
+            or profile.get("origin") != "isolated_acceptance_operator_v1"
+            or profile.get("goal_id") != goal.get("goal_id")
+            or profile.get("authority_digest") != goals.digest({key: value for key, value in goals.mapping(goal.get("scope")).items() if key != "configuration_revision"})
+            or not isinstance(profile.get("manifest_digest"), str) or not goals.DIGEST.fullmatch(profile["manifest_digest"])
+            or not isinstance(profile.get("case_id"), str) or not 1 <= len(profile["case_id"]) <= 100
+            or not numeric(ordinary) or not numeric(profile.get("active_seconds"))
+            or not 0 < profile["active_seconds"] <= min(7200, ordinary)
+            or profile.get("digest") != goals.digest({key: value for key, value in profile.items() if key != "digest"})):
+        return None
+    return profile["active_seconds"]
+
+
 def valid_usage(report, run_id):
     """A report is cumulative for an exact original run, never a transport delta."""
     return (isinstance(report, dict) and type(report.get("version")) is int and report["version"] == 1
@@ -169,7 +191,7 @@ def exhaustion(goal, *, now, action=None):
         return "usage_unknown"
     started = goals.stamp(goal.get("started_at"))
     limits = {"wall": getattr(settings, "ARTICLES_GOAL_WALL_SECONDS", 172800),
-        "active": getattr(settings, "ARTICLES_GOAL_ACTIVE_SECONDS", 7200),
+        "active": active_limit(goal),
         "usd": getattr(settings, "ARTICLES_GOAL_MODEL_USD", 25),
         "transient": getattr(settings, "ARTICLES_GOAL_TRANSIENT_ATTEMPTS", 20),
         "repairable": getattr(settings, "ARTICLES_GOAL_REPAIRABLE_ATTEMPTS", 6)}

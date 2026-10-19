@@ -4,7 +4,7 @@ from functools import wraps
 import uuid
 
 from rest_framework.response import Response
-from rest_framework.views import APIView
+from .website_owner_transport import ObservedOwnerAPIView as APIView
 
 from core.permissions import HasRooApiKey
 from .website_contract import WebsiteAuthorityError, connection_contract, sanitized_evidence
@@ -105,6 +105,7 @@ def guarded_owner_operation(action, *, bind_selected=False, run_operation=False,
                     return invoke()
             except WebsiteAuthorityError as exc:
                 return Response(exc.as_dict(), status=exc.status)
+        wrapped._articles_audit_action = action
         return wrapped
     return decorate
 

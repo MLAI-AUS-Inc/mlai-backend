@@ -8,7 +8,7 @@ from django.db import transaction
 from urllib.parse import quote
 
 from rest_framework.response import Response
-from rest_framework.views import APIView
+from .website_owner_transport import ObservedOwnerAPIView as APIView
 
 from . import vibe_marketing_views as views
 from .article_export import article_export

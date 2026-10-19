@@ -94,6 +94,22 @@ class GoalAuditTests(SimpleTestCase):
         self.assertEqual(audit.public_audit(self.op)["observed_owner_actions"], 1)
         self.assertTrue(all(item["update_fields"] == ["receipt"] for item in self.saved))
 
+    def test_changed_website_intent_under_one_request_key_is_another_observed_action(self):
+        first = self.request(data={"branch": "main", "setup_consent": {"publish_mode": "review"}})
+        changed = self.request(data={"branch": "main", "setup_consent": {"publish_mode": "auto"}})
+        self.observe(action="connection:prepare", initial=True, request=first)
+        self.observe(action="connection:prepare", initial=True, request=first)
+        self.observe(action="connection:prepare", initial=True, request=changed)
+        self.assertEqual(audit.public_audit(self.op)["observed_owner_actions"], 1)
+        self.assertNotIn("publish_mode", str(self.op.receipt["goal_audit"]))
+
+    def test_oversized_or_nonfinite_owner_intent_stays_unobserved_without_private_payload(self):
+        for data in ({"private": "x" * (audit.MAX_INTENT_BYTES + 1)}, {"private": float("inf")}):
+            request = self.request(data={})
+            request._full_data = data
+            self.observe(request=request)
+        self.assertEqual(audit.public_audit(self.op)["observed_owner_actions"], 0)
+
     def test_original_first_article_link_is_used_instead_of_a_newer_goal(self):
         run = ContentFactoryRun(run_id="article", organization=self.organization, domain=self.organization.domain,
             run_request={"first_article_goal_operation_id": str(self.op.pk)})

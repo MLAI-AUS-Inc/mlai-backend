@@ -404,6 +404,33 @@ class FirstArticleProviderChainTests(OneClickBillingFixture,TransactionTestCase)
         self.assertEqual(Ledger.objects.filter(kind="SPEND",source="CONTENT_FACTORY").count(),2)
         self.assertEqual(Ledger.objects.filter(kind="REFUND",source="CONTENT_FACTORY").count(),1)
 
+    def test_retained_predecessor_reserves_new_consent_once_and_fences_waiting_claim(self):
+        first, child, refund = self.terminal_parent_child(outcome="no_article_effect")
+        first.state = "cancelled"
+        first.save(update_fields=["state", "updated_at"])
+        # The useful draft arrived after cancellation and before the parent's
+        # first_draft proof. Settlement retains it; the successor has new consent.
+        child.result.update(preview_content_verified=True, preview_url="https://preview.example.test/article")
+        child.save(update_fields=["result", "updated_at"])
+        successor = self.start(answers(publish_mode="review"))
+        self.assertNotIn("first_article_billing", successor.receipt)
+        original = deepcopy(first.receipt["first_article_billing"])
+        stale = prepare._claim_prepare(successor.pk, timezone.now())
+        self.assertIsNotNone(stale)
+        self.assertEqual(advance_refund(refund.pk), "completed")
+        self.assertIsNone(advance_refund(refund.pk))
+        successor.refresh_from_db(); first.refresh_from_db(); refund.refresh_from_db()
+        self.assertEqual(refund.receipt["status"], "retained_after_draft")
+        self.assertEqual(first.receipt["first_article_billing"], original)
+        self.assertNotEqual(successor.receipt["first_article_billing"]["client_request_id"], original["client_request_id"])
+        stale.state = "pending"; stale.next_attempt_at = timezone.now()
+        self.assertIsNone(prepare._persist_prepare(stale, now=timezone.now()))
+        successor.refresh_from_db()
+        self.assertIn("first_article_billing", successor.receipt)
+        self.assertEqual(self.balance(self.payer), 8_000_000)
+        self.assertEqual(Ledger.objects.filter(kind="SPEND", source="CONTENT_FACTORY").count(), 2)
+        self.assertEqual(Ledger.objects.filter(kind="REFUND", source="CONTENT_FACTORY").count(), 0)
+
     def terminal_parent_child(self, *, outcome):
         """Synthetic dynamic DB IDs; raw CF producer fixtures are checked offline."""
         from .article_publication_evidence import original_scope

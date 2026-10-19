@@ -54,7 +54,7 @@ from rest_framework import status
 from rest_framework.parsers import FormParser, MultiPartParser
 from rest_framework.renderers import BaseRenderer
 from rest_framework.response import Response
-from rest_framework.views import APIView
+from .website_owner_transport import ObservedOwnerAPIView as APIView
 
 from content_factory.article_setup_reset import (
     article_setup_reset_at,
@@ -17420,6 +17420,8 @@ class VibeMarketingRunView(APIView):
                 run = ContentFactoryRun.objects.prefetch_related("steps").get(pk=run.pk)
             run = _annotate_publish_handoff_staleness(run)
             run = _annotate_publish_child_state(run, context=context)
+            from .website_repeat_publication import refresh_owned_publication
+            refresh_owned_publication(run=run, context=context, config=None, max_seconds=3.0)
             repair_result = _run_mapping(run.result)
             setup_run_id = str(
                 repair_result.get("setup_run_id")
@@ -17802,7 +17804,7 @@ class VibeMarketingRunCommentsMixin:
         return context, run, None
 
 @method_decorator(observe_comment_dispatch, name="dispatch")
-@method_decorator(transaction.atomic, name="dispatch")
+@method_decorator(transaction.atomic, name="post")
 class VibeMarketingRunCommentsView(VibeMarketingRunCommentsMixin, APIView):
     allows_setup_review_updates = True
     def get(self, request, run_id):
@@ -17850,7 +17852,8 @@ class VibeMarketingRunCommentsView(VibeMarketingRunCommentsMixin, APIView):
         return Response(_serialize_component_comment(comment), status=status.HTTP_201_CREATED)
 
 @method_decorator(observe_comment_dispatch, name="dispatch")
-@method_decorator(transaction.atomic, name="dispatch")
+@method_decorator(transaction.atomic, name="patch")
+@method_decorator(transaction.atomic, name="delete")
 class VibeMarketingRunCommentDetailView(VibeMarketingRunCommentsMixin, APIView):
     allows_setup_review_updates = True
     def patch(self, request, run_id, comment_id):
