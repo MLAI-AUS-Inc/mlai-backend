@@ -1,3 +1,4 @@
+import time
 from datetime import date, datetime, timedelta, timezone as dt_timezone
 from functools import wraps
 from typing import Any, Optional, Tuple
@@ -1329,7 +1330,7 @@ class StartupUpdateIngestNextPageView(APIView):
                 cursor.last_history_id = str(max(artifact_history_ids))
         if sync_result.get("history_id"):
             cursor.last_history_id = sync_result["history_id"]
-        if not sync_result.get("next_page_token"):
+        if not sync_result.get("next_page_token") and sync_result.get("page_complete", True):
             cursor.backfill_completed_at = timezone.now()
         cursor.save()
 
@@ -1351,6 +1352,7 @@ class StartupUpdateIngestNextPageView(APIView):
                 "ingested_count": len(sync_result["artifacts"]),
                 "result_size_estimate": sync_result["result_size_estimate"],
                 "next_page_token": sync_result["next_page_token"],
+                "page_complete": sync_result.get("page_complete", True),
                 "history_id": sync_result.get("history_id", ""),
                 "cursor_reset": bool(sync_result.get("cursor_reset", False)),
                 "reused_existing_count": int(sync_result.get("reused_existing_count") or 0),
@@ -2674,6 +2676,51 @@ def _update_linear_filtering_summary(
     run.save(update_fields=["run_request", "updated_at"])
 
 
+def _linear_rate_limit_page(connection, exc):
+    """Retain the existing rate-limit receipt shape and retry hint."""
+    return {
+        "connectionId": connection.id, "connection_id": connection.id,
+        "provider": "linear", "status": "rate_limited",
+        "projectsSynced": 0, "projects_synced": 0,
+        "issuesSynced": 0, "issues_synced": 0,
+        "updatesSynced": 0, "updates_synced": 0,
+        "projects": [], "has_more": True,
+        "retry_after_seconds": exc.retry_after_seconds,
+    }
+
+
+def _sync_linear_backfill_slice(connection, *, run_id, project_ids, include_unselected):
+    """Aggregate bounded project work while retaining the final legacy context."""
+    deadline = time.monotonic() + 20
+    aggregate = None
+    last_page = None
+    projects_done = 0
+    for _ in range(10):
+        try:
+            page = sync_linear_connection_page(connection, run_id=run_id,
+                project_ids=project_ids, include_unselected=include_unselected)
+        except ConnectorRateLimitError as exc:
+            if aggregate is None:
+                raise
+            last_page = _linear_rate_limit_page(connection, exc)
+            aggregate.update(status="rate_limited", has_more=True,
+                retry_after_seconds=exc.retry_after_seconds)
+            return aggregate, last_page
+        last_page = page
+        totals = {}
+        for camel, snake in (("projectsSynced", "projects_synced"), ("issuesSynced", "issues_synced"),
+                ("updatesSynced", "updates_synced"), ("membersSynced", "members_synced")):
+            value = int((aggregate or {}).get(snake, (aggregate or {}).get(camel, 0)) or 0)
+            value += int(page.get(snake, page.get(camel, 0)) or 0)
+            totals[camel] = totals[snake] = value
+        projects = [*((aggregate or {}).get("projects") or []), *(page.get("projects") or [])]
+        aggregate = {**(aggregate or {}), **page, **totals, "projects": projects}
+        projects_done = aggregate["projects_synced"]
+        if not page.get("has_more") or projects_done >= 10 or time.monotonic() >= deadline:
+            break
+    return aggregate, last_page
+
+
 class StartupUpdateLinearBackfillView(APIView):
     authentication_classes = []
     permission_classes = [HasRooApiKey]
@@ -2711,28 +2758,14 @@ class StartupUpdateLinearBackfillView(APIView):
                 )
             ]
         try:
-            sync_result = sync_linear_connection_page(
+            sync_result, context_page = _sync_linear_backfill_slice(
                 connection,
                 run_id=run.run_id,
                 project_ids=project_ids,
                 include_unselected="automatic_source_scope" in (run.run_request or {}),
             )
         except ConnectorRateLimitError as exc:
-            sync_result = {
-                "connectionId": connection.id,
-                "connection_id": connection.id,
-                "provider": "linear",
-                "status": "rate_limited",
-                "projectsSynced": 0,
-                "projects_synced": 0,
-                "issuesSynced": 0,
-                "issues_synced": 0,
-                "updatesSynced": 0,
-                "updates_synced": 0,
-                "projects": [],
-                "has_more": True,
-                "retry_after_seconds": exc.retry_after_seconds,
-            }
+            sync_result = context_page = _linear_rate_limit_page(connection, exc)
         except ConnectorConfigurationError as exc:
             return Response({"error": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
         except ConnectorOAuthError as exc:
@@ -2756,7 +2789,9 @@ class StartupUpdateLinearBackfillView(APIView):
         external_context = dict(run_request.get("external_context") or {})
         linear_context = dict(external_context.get("linear") or {})
         linear_context["selected_project_ids"] = project_ids
-        linear_context["last_sync"] = sync_result
+        # Curation consumes this context. Keep its last single-page value
+        # byte-identical to the old one-project endpoint, not the aggregate.
+        linear_context["last_sync"] = context_page
         external_context["linear"] = linear_context
         run_request["external_context"] = external_context
         run.run_request = run_request

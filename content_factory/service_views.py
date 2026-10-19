@@ -8678,6 +8678,25 @@ def _serialize_content_factory_run(run: ContentFactoryRun) -> dict:
     }
 
 
+def _serialize_content_factory_run_ack(run):
+    """Serialize sync control fields without result or step/attempt traversal."""
+    from .setup_status_projection import terminal_setup_projection
+    run = terminal_setup_projection(run)
+    return {
+        "run_id": run.run_id,
+        "workflow": run.workflow,
+        "domain": run.domain,
+        "status": run.status,
+        "current_step": run.current_step,
+        "step_order": run.step_order or [],
+        "run_request": run.run_request or {},
+        "error": run.error or None,
+        "resume_available": run.resume_available,
+        "created_at": run.created_at.isoformat(),
+        "updated_at": run.updated_at.isoformat(),
+    }
+
+
 def _is_retryable_sqlite_lock(exc: Exception) -> bool:
     return connection.vendor == "sqlite" and "database is locked" in str(exc).lower()
 
@@ -8815,8 +8834,9 @@ def _merge_django_owned_run_request(existing_request, incoming_request):
     return merged
 
 
-def _content_factory_run_snapshot_unchanged(run: ContentFactoryRun, *, data: dict, step_states: dict) -> bool:
-    core_fields = {
+def _run_fields(data):
+    """Map a validated snapshot to the existing persisted run fields."""
+    return {
         "workflow": data["workflow"],
         "domain": data.get("domain") or "",
         "github_repo": data.get("github_repo") or "",
@@ -8833,6 +8853,52 @@ def _content_factory_run_snapshot_unchanged(run: ContentFactoryRun, *, data: dic
         "error": data.get("error") or "",
         "resume_available": bool(data.get("resume_available")),
     }
+
+
+def _step_fields(index, state_payload):
+    """Map step fields identically for comparison and persistence."""
+    return {
+        "display_order": index,
+        "required": bool(state_payload.get("required", True)),
+        "status": state_payload.get("status", ContentFactoryStepStatus.PENDING),
+        "attempts": int(state_payload.get("attempts", 0)),
+        "message": state_payload.get("message") or "",
+        "started_at": _parse_optional_datetime(state_payload.get("started_at")),
+        "completed_at": _parse_optional_datetime(state_payload.get("completed_at")),
+        "error": state_payload.get("error") or "",
+        "latest_attempt_path": state_payload.get("latest_attempt_path") or "",
+        "artifacts": state_payload.get("artifacts") or [],
+    }
+
+
+def _attempt_fields(attempt_payload):
+    """Map attempt fields identically for comparison and persistence."""
+    return {
+        "status": attempt_payload.get("status", ContentFactoryStepStatus.PENDING),
+        "message": attempt_payload.get("message") or "",
+        "started_at": _parse_optional_datetime(attempt_payload.get("started_at")),
+        "completed_at": _parse_optional_datetime(attempt_payload.get("completed_at")),
+        "artifacts": attempt_payload.get("artifacts") or [],
+        "error": attempt_payload.get("error") or "",
+        "input_path": attempt_payload.get("input_path") or "",
+        "output_path": attempt_payload.get("output_path") or "",
+        "notes_path": attempt_payload.get("notes_path") or "",
+        "status_path": attempt_payload.get("status_path") or "",
+    }
+
+
+def _assign_changed_fields(instance, fields):
+    """Assign only values that differ, returning their model field names."""
+    changed = []
+    for field, value in fields.items():
+        if getattr(instance, field) != value:
+            setattr(instance, field, value)
+            changed.append(field)
+    return changed
+
+
+def _content_factory_run_snapshot_unchanged(run: ContentFactoryRun, *, data: dict, step_states: dict) -> bool:
+    core_fields = _run_fields(data)
     for field, expected in core_fields.items():
         if getattr(run, field) != expected:
             return False
@@ -8846,18 +8912,7 @@ def _content_factory_run_snapshot_unchanged(run: ContentFactoryRun, *, data: dic
         if step is None:
             return False
         state_payload = dict(step_states.get(step_key) or {"name": step_key})
-        expected_step = {
-            "display_order": index,
-            "required": bool(state_payload.get("required", True)),
-            "status": state_payload.get("status", ContentFactoryStepStatus.PENDING),
-            "attempts": int(state_payload.get("attempts", 0)),
-            "message": state_payload.get("message") or "",
-            "started_at": _parse_optional_datetime(state_payload.get("started_at")),
-            "completed_at": _parse_optional_datetime(state_payload.get("completed_at")),
-            "error": state_payload.get("error") or "",
-            "latest_attempt_path": state_payload.get("latest_attempt_path") or "",
-            "artifacts": state_payload.get("artifacts") or [],
-        }
+        expected_step = _step_fields(index, state_payload)
         for field, expected in expected_step.items():
             if getattr(step, field) != expected:
                 return False
@@ -8873,18 +8928,7 @@ def _content_factory_run_snapshot_unchanged(run: ContentFactoryRun, *, data: dic
             attempt = attempts.get(attempt_number)
             if attempt is None:
                 return False
-            expected_attempt = {
-                "status": attempt_payload.get("status", ContentFactoryStepStatus.PENDING),
-                "message": attempt_payload.get("message") or "",
-                "started_at": _parse_optional_datetime(attempt_payload.get("started_at")),
-                "completed_at": _parse_optional_datetime(attempt_payload.get("completed_at")),
-                "artifacts": attempt_payload.get("artifacts") or [],
-                "error": attempt_payload.get("error") or "",
-                "input_path": attempt_payload.get("input_path") or "",
-                "output_path": attempt_payload.get("output_path") or "",
-                "notes_path": attempt_payload.get("notes_path") or "",
-                "status_path": attempt_payload.get("status_path") or "",
-            }
+            expected_attempt = _attempt_fields(attempt_payload)
             for field, expected in expected_attempt.items():
                 if getattr(attempt, field) != expected:
                     return False
@@ -8972,69 +9016,50 @@ def _sync_content_factory_run_snapshot(*, run_id: str, data: dict, step_states: 
             refund_empty_or_failed_research(existing_run)
             return existing_run, False
 
-        run, _ = ContentFactoryRun.objects.update_or_create(
-            run_id=run_id,
-            defaults={
-                "workflow": data["workflow"],
-                "domain": data.get("domain") or "",
-                "github_repo": data.get("github_repo") or "",
-                "slack_user_id": data.get("slack_user_id") or "",
-                "status": data["status"],
-                "current_step": data.get("current_step") or "",
-                "approval_state": data.get("approval_state") or ContentFactoryApprovalState.NOT_REQUIRED,
-                "artifact_root": data.get("artifact_root") or "",
-                "step_order": data.get("step_order") or [],
-                "acceptance_summary": data.get("acceptance_summary") or {},
-                "verification_summary": data.get("verification_summary") or {},
-                "run_request": data.get("run_request") or {},
-                "result": data.get("result") or {},
-                "error": data.get("error") or "",
-                "resume_available": bool(data.get("resume_available")),
-            },
-        )
+        defaults = _run_fields(data)
+        if created:
+            run, _ = ContentFactoryRun.objects.update_or_create(run_id=run_id, defaults=defaults)
+        else:
+            run = existing_run
+            changed = _assign_changed_fields(run, defaults)
+            run.save(update_fields=[*changed, "updated_at"])
 
+        existing_steps = {step.step_key: step for step in existing_run.steps.all()}
         seen_steps = set()
         ordered_steps = data.get("step_order") or list(step_states.keys())
         for index, step_key in enumerate(ordered_steps):
             state_payload = dict(step_states.get(step_key) or {"name": step_key})
-            step, _ = ContentFactoryRunStep.objects.update_or_create(
-                run=run,
-                step_key=step_key,
-                defaults={
-                    "display_order": index,
-                    "required": bool(state_payload.get("required", True)),
-                    "status": state_payload.get("status", ContentFactoryStepStatus.PENDING),
-                    "attempts": int(state_payload.get("attempts", 0)),
-                    "message": state_payload.get("message") or "",
-                    "started_at": _parse_optional_datetime(state_payload.get("started_at")),
-                    "completed_at": _parse_optional_datetime(state_payload.get("completed_at")),
-                    "error": state_payload.get("error") or "",
-                    "latest_attempt_path": state_payload.get("latest_attempt_path") or "",
-                    "artifacts": state_payload.get("artifacts") or [],
-                },
-            )
+            fields = _step_fields(index, state_payload)
+            step = existing_steps.get(step_key)
+            if step is None:
+                step = ContentFactoryRunStep.objects.create(run=run, step_key=step_key, **fields)
+                attempts = {}
+            else:
+                attempts = {attempt.attempt: attempt for attempt in step.attempt_history.all()}
+                changed = _assign_changed_fields(step, fields)
+                if changed:
+                    step.save(update_fields=changed)
             seen_steps.add(step_key)
+            existing_steps[step_key] = step
 
             for attempt_payload in state_payload.get("attempt_history", []):
-                ContentFactoryRunStepAttempt.objects.update_or_create(
-                    step=step,
-                    attempt=int(attempt_payload.get("attempt", 0)),
-                    defaults={
-                        "status": attempt_payload.get("status", ContentFactoryStepStatus.PENDING),
-                        "message": attempt_payload.get("message") or "",
-                        "started_at": _parse_optional_datetime(attempt_payload.get("started_at")),
-                        "completed_at": _parse_optional_datetime(attempt_payload.get("completed_at")),
-                        "artifacts": attempt_payload.get("artifacts") or [],
-                        "error": attempt_payload.get("error") or "",
-                        "input_path": attempt_payload.get("input_path") or "",
-                        "output_path": attempt_payload.get("output_path") or "",
-                        "notes_path": attempt_payload.get("notes_path") or "",
-                        "status_path": attempt_payload.get("status_path") or "",
-                    },
-                )
+                number = int(attempt_payload.get("attempt", 0))
+                fields = _attempt_fields(attempt_payload)
+                attempt = attempts.get(number)
+                if attempt is None:
+                    attempt = ContentFactoryRunStepAttempt.objects.create(step=step, attempt=number, **fields)
+                    attempts[number] = attempt
+                else:
+                    changed = _assign_changed_fields(attempt, fields)
+                    if changed:
+                        attempt.save(update_fields=changed)
 
         if seen_steps:
             ContentFactoryRunStep.objects.filter(run=run).exclude(step_key__in=seen_steps).delete()
+        # The locked instance was prefetched before these writes. Full legacy
+        # replies must reload newly created/deleted steps and attempt histories;
+        # ack replies never traverse this relation and pay no extra query cost.
+        getattr(run, "_prefetched_objects_cache", {}).pop("steps", None)
 
     from .island_research import refund_empty_or_failed_research
     refund_empty_or_failed_research(run)
@@ -9067,7 +9092,8 @@ class ContentFactoryRunView(APIView):
 
     @guarded_service_write("config_write", only_repository=True, portable=True, cancellation_receipts=True, observation_fallback=True)
     def _put_legacy(self, request, run_id: str):
-        return _apply_run_snapshot(run_id, request.data)
+        return _apply_run_snapshot(run_id, request.data,
+            ack=request.headers.get("X-Run-Sync-Response", "").strip().lower() == "ack")
 
 
 def _apply_cancellation_receipt(run_id, payload):
@@ -9114,7 +9140,7 @@ def _apply_cancellation_receipt(run_id, payload):
         return Response(response, status=200)
 
 
-def _apply_run_snapshot(run_id, payload):
+def _apply_run_snapshot(run_id, payload, *, ack=False):
     existing_run = ContentFactoryRun.objects.filter(run_id=run_id).first()
     payload = sanitize_json_for_postgres(dict(payload))
     payload["run_id"] = run_id
@@ -9171,7 +9197,8 @@ def _apply_run_snapshot(run_id, payload):
         )
         and not active_retry_snapshot
     ):
-        response_payload = _serialize_content_factory_run(existing_run)
+        response_payload = (_serialize_content_factory_run_ack(existing_run) if ack
+                            else _serialize_content_factory_run(existing_run))
         response_payload["sync_status"] = "ignored_terminal_state"
         return Response(response_payload, status=status.HTTP_200_OK)
 
@@ -9200,7 +9227,7 @@ def _apply_run_snapshot(run_id, payload):
             )
             time.sleep(0.25 * attempt_number)
 
-    response_payload = _serialize_content_factory_run(run)
+    response_payload = _serialize_content_factory_run_ack(run) if ack else _serialize_content_factory_run(run)
     response_payload["sync_status"] = (
         "unchanged"
         if getattr(run, "_content_factory_sync_unchanged", False)

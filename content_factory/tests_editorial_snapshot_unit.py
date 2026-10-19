@@ -243,6 +243,7 @@ class EditorialSnapshotPersistenceSeamTests(unittest.TestCase):
             "ContentFactoryRunStep": self.steps, "ContentFactoryRunStepAttempt": self.attempts,
             "ContentFactoryRunStatus": SimpleNamespace(QUEUED="queued", BLOCKED="blocked", FAILED="failed", DENIED="denied", CANCELLED="cancelled", COMPLETED="completed"),
             "ContentFactoryApprovalState": SimpleNamespace(NOT_REQUIRED="not_required"),
+            "ContentFactoryStepStatus": SimpleNamespace(PENDING="pending"),
             "DURABLE_ACTIVE_RUN_STATUSES": ACTIVE_RUN_STATUSES, "sanitize_json_for_postgres": deepcopy,
             "EditorialRunConflict": EditorialRunConflict, "merge_editorial_run_snapshot": merge_editorial_run_snapshot,
             "BRIEF_KEYS": BRIEF_KEYS, "deepcopy": deepcopy,
@@ -274,7 +275,7 @@ class EditorialSnapshotPersistenceSeamTests(unittest.TestCase):
                                       "content_factory.setup_delivery_receiver": delivery})
         seam.start()
         self.addCleanup(seam.stop)
-        names = {"_apply_run_snapshot", "_sync_content_factory_run_snapshot", "_content_factory_run_snapshot_unchanged", "_merge_django_owned_run_result", "_merge_django_owned_run_request"}
+        names = {"_apply_run_snapshot", "_sync_content_factory_run_snapshot", "_content_factory_run_snapshot_unchanged", "_merge_django_owned_run_result", "_merge_django_owned_run_request", "_run_fields", "_step_fields", "_attempt_fields", "_assign_changed_fields", "_parse_optional_datetime"}
         tree = ast.parse((root / "service_views.py").read_text())
         nodes = [n for n in tree.body if (isinstance(n, ast.FunctionDef) and n.name in names) or
                  (isinstance(n, ast.Assign) and any(isinstance(t, ast.Name) and t.id.startswith("_DJANGO_OWNED_RUN_RESULT_") for t in n.targets))]
@@ -343,7 +344,7 @@ class EditorialSnapshotPersistenceSeamTests(unittest.TestCase):
         return self.ns["_sync_content_factory_run_snapshot"](run_id="run-1", data=incoming, step_states={})
 
     def put(self, payload, run_id="run-1"):
-        return self.ns["_snapshot_put_under_test"](self.view, SimpleNamespace(data=payload), run_id)
+        return self.ns["_snapshot_put_under_test"](self.view, SimpleNamespace(data=payload, headers={}), run_id)
 
     def test_actual_snapshot_preserves_the_brief_and_exact_retry_is_a_noop(self):
         incoming = {"workflow": "article_generation", "domain": "example.test", "status": "running", "run_request": {"worker_only": 1}}

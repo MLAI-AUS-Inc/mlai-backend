@@ -179,6 +179,27 @@ class ReportingCohortCanaries(TestCase):
         self.assertEqual(frozen_memo(draft, published=True)["highlights"], ["Revision A."])
 
 
+    def test_legacy_receipt_extraction_is_reused_after_context_hoist(self):
+        from startup_updates.source_evidence import source_receipt
+        import copy
+        org, _, run = self.startup("legacy-reuse", ["manual_documents"])
+        run.run_request["startup_context"] = {"notes": "Pinned founder context."}
+        bundle = {"cleaned_text": "The February pilot signed."}
+        # Reconstruct a staged pre-change receipt; its fingerprint has the same
+        # contract as the independently pinned main-branch golden fixture.
+        legacy = source_receipt(run, "notion", "page", bundle)
+        legacy.pop("startup_context_hash")
+        legacy["startup_context"] = copy.deepcopy(run.run_request["startup_context"])
+        legacy["output"] = {"events": [{"title": "Pilot signed"}], "source_fingerprint": legacy["fingerprint"]}
+        run.result = {"source_evidence": {"notion:page": legacy}}
+        run.save()
+        later = ContentFactoryRun.objects.create(run_id="legacy-reuse-later", organization=org,
+            workflow=run.workflow, domain=org.domain, run_request=copy.deepcopy(run.run_request))
+        cached = stage_source(later, "notion", "page", bundle)
+        self.assertEqual(cached["source_fingerprint"], legacy["fingerprint"])
+        self.assertEqual(cached["cached_extraction"], legacy["output"])
+        self.assertNotIn("startup_context", later.result["source_evidence"]["notion:page"])
+
     def test_worker_checkpoint_cannot_erase_evidence_or_change_founder_inputs(self):
         from content_factory.service_views import _sync_content_factory_run_snapshot
         _, _, run = self.startup("checkpoint", ["manual_documents"])
@@ -194,6 +215,21 @@ class ReportingCohortCanaries(TestCase):
         self.assertEqual(run.result["source_evidence"], original_evidence)
         self.assertEqual(run.result["update_candidates"][0]["founder_status"], "approved")
         self.assertEqual(run.result["pending_drafts"][0]["month"], "2026-08-01")
+
+    def test_worker_omitting_backend_owned_keys_keeps_saved_receipts_and_founder_choices(self):
+        from content_factory.service_views import _sync_content_factory_run_snapshot
+        _, _, run = self.startup("omitted-keys", ["manual_documents"])
+        owned = {"source_evidence": {"gmail:one": {"fingerprint": "frozen", "output": {"events": []}}},
+            "update_candidates": [{"event_id": 7, "founder_status": "approved"}],
+            "_cancel_backups": {"receipt": "retained"}}
+        run.result = owned
+        run.save()
+        _sync_content_factory_run_snapshot(run_id=run.run_id, data={"workflow": run.workflow,
+            "domain": run.domain, "status": "running", "result": {"ingest": {"cursor": "page-2"}}}, step_states={})
+        run.refresh_from_db()
+        for key, value in owned.items():
+            self.assertEqual(run.result[key], value)
+        self.assertEqual(run.result["ingest"], {"cursor": "page-2"})
 
     def test_currency_mismatch_stays_unknown_and_failed_review_survives_edit(self):
         from rest_framework.exceptions import ValidationError
