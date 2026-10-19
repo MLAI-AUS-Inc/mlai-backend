@@ -114,7 +114,7 @@ class ArticleGenerationServiceTest(TestCase):
     def _record_article_payment(self, job, *, amount=12):
         key = f'paid:{job.job_id}'
         ledger, _ = PointsService.spend(user=self.user, delta=amount, source='CONTENT_FACTORY',
-            description='Confirmed article fixture', idempotency_key=f'content_factory:charge:{key}',
+            description='Confirmed article fixture', created_by_slack_id=self.slack_user_id, idempotency_key=f'content_factory:charge:{key}',
             reference_type='CONTENT_FACTORY', reference_id=key)
         job.client_request_id = key
         job.billing_ledger = ledger
@@ -145,7 +145,7 @@ class ArticleGenerationServiceTest(TestCase):
                     description='Replay fixture funding', idempotency_key=f'funding-{shape}')
                 key = f'raw-{shape}'
                 original, _ = PointsService.spend(user=self.user, delta=amount, source='CONTENT_FACTORY',
-                    description='Original article fixture', idempotency_key=f'content_factory:charge:{key}',
+                    description='Original article fixture', created_by_slack_id=self.slack_user_id, idempotency_key=f'content_factory:charge:{key}',
                     reference_type='CONTENT_FACTORY', reference_id=key)
                 if shape != 'unbound':
                     if shape == 'other-company':
@@ -227,14 +227,13 @@ class ArticleGenerationServiceTest(TestCase):
         self.assertFalse(Ledger.objects.filter(kind='REFUND').exists())
         self.assertEqual(ContentFactoryJob.objects.get(client_request_id=key).domain, 'other.test')
 
-    @patch("integrations.services.article_generation.http_requests.post")
-    def test_source_only_six_point_replay_preserves_key_and_rejects_changed_scope_payer_or_refund(self, post):
+    def _assert_source_only_paid_replay(self, post, *, amount):
         from integrations.services.article_generation import quote_content_factory_article
-        source = self._source_job(job_id='source-only-six', domain='mlai.au', slack_user_id=self.slack_user_id)
-        original = self._record_article_payment(source, amount=6)
-        self.assertEqual(quote_content_factory_article(actor_id=self.requester_actor_id, source_run_id=source.job_id), 6)
+        source = self._source_job(job_id=f'source-only-{amount}', domain='mlai.au', slack_user_id=self.slack_user_id)
+        original = self._record_article_payment(source, amount=amount)
+        self.assertEqual(quote_content_factory_article(actor_id=self.requester_actor_id, source_run_id=source.job_id), amount)
         post.return_value.status_code = 202
-        post.return_value.json.return_value = {'job_id': 'source-only-child', 'status': 'queued'}
+        post.return_value.json.return_value = {'job_id': f'source-only-child-{amount}', 'status': 'queued'}
         kwargs = dict(domain='mlai.au', confirmed_keyword='AI Agents', slack_user_id=self.slack_user_id, source_run_id=source.job_id)
         first = confirm_topic(**kwargs)
         self.assertEqual(confirm_topic(**kwargs)['job_id'], first['job_id'])
@@ -258,10 +257,11 @@ class ArticleGenerationServiceTest(TestCase):
         with self.assertRaises(ArticleGenerationError):
             confirm_topic(**kwargs)
         self.assertEqual(Ledger.objects.filter(kind='SPEND').count(), 1)
-        self.assertEqual(PointsService.get_balance(self.user)['balance'], 14)
+        self.assertEqual(PointsService.get_balance(self.user)['balance'], 20 - amount)
         self.org.billing_user = None
         self.org.save(update_fields=['billing_user'])
-        PointsService.refund(user=self.user, delta=6, source='CONTENT_FACTORY', description='Original refund',
+        PointsService.refund(user=self.user, delta=amount, source='CONTENT_FACTORY', description='Original refund',
+            created_by_slack_id=self.slack_user_id,
             idempotency_key=f'content_factory:refund:{source.client_request_id}', original_spend_key=original.idempotency_key,
             reference_type='CONTENT_FACTORY', reference_id=source.client_request_id)
         with self.assertRaises(ArticleGenerationError):
@@ -272,6 +272,14 @@ class ArticleGenerationServiceTest(TestCase):
         self.assertEqual(Ledger.objects.filter(kind='REFUND').count(), 1)
         self.assertEqual(PointsService.get_balance(self.user)['balance'], 20)
         post.assert_called_once()
+
+    @patch("integrations.services.article_generation.http_requests.post")
+    def test_source_only_six_point_replay_preserves_key_and_rejects_changed_scope_payer_or_refund(self, post):
+        self._assert_source_only_paid_replay(post, amount=6)
+
+    @patch("integrations.services.article_generation.http_requests.post")
+    def test_source_only_twelve_point_replay_preserves_key_and_rejects_changed_scope_payer_or_refund(self, post):
+        self._assert_source_only_paid_replay(post, amount=12)
 
     @patch("integrations.services.article_generation.http_requests.post")
     def test_uncharged_job_status_cannot_bypass_missing_article_quote(self, post):
@@ -301,7 +309,7 @@ class ArticleGenerationServiceTest(TestCase):
     @patch("integrations.services.article_generation.http_requests.post")
     def test_paid_research_confirmation_without_article_quote_cannot_spend_or_dispatch(self, post):
         ledger, _ = PointsService.spend(user=self.user, delta=3, source='CONTENT_FACTORY',
-            description='Research payment', idempotency_key='content_factory:topic_generation:charge:research-key',
+            description='Research payment', created_by_slack_id=self.slack_user_id, idempotency_key='content_factory:topic_generation:charge:research-key',
             reference_type='CONTENT_FACTORY', reference_id='research-key')
         job = self._source_job(job_id='paid-research', domain='mlai.au', slack_user_id=self.slack_user_id,
             client_request_id='research-key', billing_status='charged', billing_ledger=ledger, billing_amount=3,
@@ -318,7 +326,7 @@ class ArticleGenerationServiceTest(TestCase):
     @patch("integrations.services.article_generation.http_requests.post")
     def test_confirmed_research_retains_new_article_key_and_replays_without_quote(self, post):
         ledger, _ = PointsService.spend(user=self.user, delta=3, source='CONTENT_FACTORY',
-            description='Research payment', idempotency_key='content_factory:topic_generation:charge:research-key',
+            description='Research payment', created_by_slack_id=self.slack_user_id, idempotency_key='content_factory:topic_generation:charge:research-key',
             reference_type='CONTENT_FACTORY', reference_id='research-key')
         job = self._source_job(job_id='paid-research', domain='mlai.au', slack_user_id=self.slack_user_id,
             client_request_id='research-key', billing_status='charged', billing_ledger=ledger, billing_amount=3,
@@ -370,7 +378,7 @@ class ArticleGenerationServiceTest(TestCase):
                     research_ledger = None
                     if research:
                         research_ledger, _ = PointsService.spend(user=self.user, delta=3, source='CONTENT_FACTORY',
-                            description='Research fixture', idempotency_key=f'content_factory:topic_generation:charge:{key}',
+                            description='Research fixture', created_by_slack_id=self.slack_user_id, idempotency_key=f'content_factory:topic_generation:charge:{key}',
                             reference_type='CONTENT_FACTORY', reference_id=key)
                     source = self._source_job(job_id=key, domain='mlai.au', slack_user_id=self.slack_user_id,
                         client_request_id=key, billing_status='charged' if research else 'deferred',
