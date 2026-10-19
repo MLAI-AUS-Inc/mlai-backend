@@ -87,8 +87,8 @@ to the provider manually.
 
 ## Disabled-by-default rollout
 
-The following controls default off. Admission, replay, durable watches and lapse
-alerts are implemented; renewal is a separate release. The default lease policy
+The following controls default off. Admission, replay and durable watches
+are implemented; renewal is a separate release. The default lease policy
 remains `24h`. Changing these defaults is a separate owner deployment action.
 
 | Setting | Default | Allowed |
@@ -102,7 +102,6 @@ remains `24h`. Changing these defaults is a separate owner deployment action.
 | `AGENT_RUNTIME_NATIVE_DURABLE_WATCH` | `false` | true / false |
 | `AGENT_RUNTIME_NATIVE_DENIAL_GRACE_SECONDS` | `600` | 60–86400 |
 | `AGENT_RUNTIME_NATIVE_UNIFIED_GRACE_SECONDS` | `86400` | 600–604800 |
-| `AGENT_RUNTIME_NATIVE_LAPSE_ALERTS` | `false` | true / false |
 | `AGENT_RUNTIME_NATIVE_RENEWAL_ENABLED` | `false` | true / false |
 | `MLAI_MCP_AGENT_GRANT_EXTENSION_ENABLED` | `false` | true / false |
 | `MLAI_MCP_REFRESH_REPLAY_GRACE_SECONDS` | `0` | 0–300 |
@@ -226,9 +225,8 @@ mention after the compatible backend, relay and client are deployed.
 
 PR-4 adds no migration, scope, channel or client requirement. After the compatible
 relay is deployed, explicitly enable `AGENT_RUNTIME_NATIVE_ALWAYS_ADMIT`,
-`AGENT_RUNTIME_NATIVE_BACKLOG_REPLAY`, `AGENT_RUNTIME_NATIVE_DURABLE_WATCH`, and
-`AGENT_RUNTIME_NATIVE_LAPSE_ALERTS`, and set
-`AGENT_RUNTIME_MCP_EVENTS_LEASE_POLICY=grant`. Leave renewal controls off until
+`AGENT_RUNTIME_NATIVE_BACKLOG_REPLAY` and `AGENT_RUNTIME_NATIVE_DURABLE_WATCH`,
+and set `AGENT_RUNTIME_MCP_EVENTS_LEASE_POLICY=grant`. Leave renewal controls off until
 the separate renewal implementation is reviewed. Use the normal deployment
 workflow to install validated values in every runtime; do not edit subscription
 rows or invent provider callback credentials.
@@ -269,14 +267,10 @@ The additive owner `delivery` object includes `listening`, `held_reason`,
 `needs=subscribe|reconnect|renew|resume|null` when durable watches are enabled.
 The existing top-level mentionable status values stay unchanged.
 
-Lapse alerts use the existing email adapter and record one acknowledged send
-per lapse. Their bodies contain counts, stop/hold reason and time, plus the
-existing guarded setup prompt; never chat text. Recipient addresses and provider
-exception details are never recorded in audit/log metadata. Failed sends back
-off for five minutes. The idempotency key is stable for a lapse. A renewed hold
-uses its held-at time as a fresh lapse, rather than incorrectly sharing an old
-stop's debounce key. External delivery and the audit commit are not atomic;
-provider-side idempotency remains subject to the existing email adapter.
+Watch interruptions do not send email. The lapse notification flow and its
+enablement setting have been removed. Listening state and recovery instructions
+remain available in Apps & agents; mention queuing, webhook delivery and replies
+continue independently.
 
 To recover an already stopped watch, ask Maek in its own Dot to establish a new
 subscription through the MLAI plugin. Only that provider handshake can supply
