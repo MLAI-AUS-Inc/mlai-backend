@@ -8,7 +8,7 @@ import subprocess
 import tempfile
 import unittest
 
-from scripts.validate_native_agent_deploy_config import FLAGS, validate, validate_single
+from scripts.validate_native_agent_deploy_config import FLAGS, OPTIONAL_FLAGS, validate, validate_single
 
 ROOT = Path(__file__).resolve().parents[1]
 COMMUNITIES = json.dumps({"9277de1c-c526-47cb-876c-7402b087b3d8": {
@@ -213,7 +213,8 @@ class MaekSafetyConfigTests(unittest.TestCase):
             (root / "scripts").mkdir()
             for name in ("upsert_env_value_from_stdin.sh", "validate_native_agent_deploy_config.py"):
                 shutil.copy2(ROOT / "scripts" / name, root / "scripts" / name)
-            for key, default in self.defaults.items():
+            values = {**dict.fromkeys(OPTIONAL_FLAGS, "false"), **self.defaults}
+            for key, default in values.items():
                 with self.subTest(key=key):
                     env_file = root / ".env"
                     env_file.write_text("KEEP_ME=yes\n")
@@ -223,10 +224,11 @@ class MaekSafetyConfigTests(unittest.TestCase):
                     self.assertEqual(result.returncode, 0, result.stderr)
                     self.assertIn(key + "=" + default + "\n", env_file.read_text())
                     before = env_file.read_bytes()
-                    result = subprocess.run(command, input="invalid value\nINJECT=true", text=True,
-                                            capture_output=True, env={"PATH": os.defpath}, timeout=5)
-                    self.assertNotEqual(result.returncode, 0)
-                    self.assertEqual(before, env_file.read_bytes())
+                    for invalid in ("invalid value", "false\nINJECT=true"):
+                        result = subprocess.run(command, input=invalid, text=True,
+                                                capture_output=True, env={"PATH": os.defpath}, timeout=5)
+                        self.assertNotEqual(result.returncode, 0)
+                        self.assertEqual(before, env_file.read_bytes())
 
 class CommunityDeployConfigTests(unittest.TestCase):
     def test_community_is_off_by_default_and_requires_gateway_and_host_provider(self):
