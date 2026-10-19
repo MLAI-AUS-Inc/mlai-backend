@@ -238,6 +238,21 @@ class VibeMarketingComponentCommentTests(_PublishRetryApprovalFixture, TestCase)
         )
         self.client.force_authenticate(user=self.user)
 
+    def _record_original_article_payment(self):
+        """Seed the original persisted debit needed before revising an article."""
+        from roo.models import Ledger
+        from content_factory.models import ContentFactoryJob
+        charge = Ledger.objects.create(user=self.user, kind="SPEND", source="CONTENT_FACTORY", delta=-12,
+            reference_id=self.run.run_id, idempotency_key=f"content_factory:charge:{self.run.run_id}")
+        self.run.run_request.update(client_request_id=self.run.run_id,
+            roo_points_authorized=True, roo_points_action="article_generation",
+            roo_points_cost=12, roo_points_required=12, roo_points_billing_status="charged",
+            roo_points_ledger_id=str(charge.pk))
+        self.run.save(update_fields=["run_request", "updated_at"])
+        ContentFactoryJob.objects.create(job_id=self.run.run_id, domain=self.run.domain,
+            client_request_id=self.run.run_id, billing_source_job_id=self.run.run_id,
+            billing_status="charged", billing_amount=12, billing_ledger=charge)
+
     def _create_mlai_featured_components(self):
         for name in (
             "ArticleDisclaimer",
@@ -2343,6 +2358,7 @@ class VibeMarketingComponentCommentTests(_PublishRetryApprovalFixture, TestCase)
 
     @override_settings(CONTENT_FACTORY_URL="https://content-factory.test", CONTENT_FACTORY_API_KEY="secret-key", IS_LOCAL_ENV=False)
     def test_submit_from_completed_revision_uses_revision_draft_comments(self):
+        self._record_original_article_payment()
         revision_run = self._create_bound_run(
             run_id="article-run-comments-revision",
             workflow="article_revision",
@@ -2383,7 +2399,7 @@ class VibeMarketingComponentCommentTests(_PublishRetryApprovalFixture, TestCase)
         with patch("content_factory.vibe_marketing_views.http_client.post", side_effect=fake_post):
             response = self.client.post(f"/api/v1/vibe-marketing/runs/{revision_run.run_id}/comments/submit", {}, format="json")
 
-        self.assertEqual(response.status_code, 202)
+        self.assertEqual(response.status_code, 202, response.data)
         self.assertEqual(captured["url"], "https://content-factory.test/api/runs/article-run-comments-revision/component-revisions")
         self.assertEqual(captured["payload"]["source_run_id"], revision_run.run_id)
         self.assertEqual(captured["payload"]["comments"][0]["comment_id"], str(revision_comment.id))
@@ -2391,6 +2407,7 @@ class VibeMarketingComponentCommentTests(_PublishRetryApprovalFixture, TestCase)
 
     @override_settings(CONTENT_FACTORY_URL="https://content-factory.test", CONTENT_FACTORY_API_KEY="secret-key", IS_LOCAL_ENV=False)
     def test_submit_sends_anchor_to_content_factory_revision(self):
+        self._record_original_article_payment()
         comment = VibeMarketingComponentComment.objects.create(
             run=self.run,
             actor=self.user,
@@ -2435,6 +2452,7 @@ class VibeMarketingComponentCommentTests(_PublishRetryApprovalFixture, TestCase)
 
     @override_settings(CONTENT_FACTORY_URL="https://content-factory.test", CONTENT_FACTORY_API_KEY="secret-key", IS_LOCAL_ENV=False)
     def test_failed_package_review_draft_can_submit_section_deletion(self):
+        self._record_original_article_payment()
         self.run.status = ContentFactoryRunStatus.FAILED
         self.run.current_step = "package_content_delivery"
         self.run.result = {
@@ -2903,6 +2921,7 @@ class VibeMarketingComponentCommentTests(_PublishRetryApprovalFixture, TestCase)
 
     @override_settings(CONTENT_FACTORY_URL="https://content-factory.test", CONTENT_FACTORY_API_KEY="secret-key", IS_LOCAL_ENV=False)
     def test_submit_retries_latest_submitted_batch(self):
+        self._record_original_article_payment()
         comment = VibeMarketingComponentComment.objects.create(
             run=self.run,
             actor=self.user,
@@ -2930,6 +2949,7 @@ class VibeMarketingComponentCommentTests(_PublishRetryApprovalFixture, TestCase)
 
     @override_settings(CONTENT_FACTORY_URL="https://content-factory.test", CONTENT_FACTORY_API_KEY="secret-key", IS_LOCAL_ENV=False)
     def test_submit_from_failed_revision_retries_source_batch(self):
+        self._record_original_article_payment()
         revision_run = self._create_bound_run(
             run_id="article-run-comments-revision",
             workflow="article_revision",
@@ -2971,6 +2991,7 @@ class VibeMarketingComponentCommentTests(_PublishRetryApprovalFixture, TestCase)
 
     @override_settings(CONTENT_FACTORY_URL="https://content-factory.test", CONTENT_FACTORY_API_KEY="secret-key", IS_LOCAL_ENV=False)
     def test_submit_keeps_retryable_timeout_batch_submitted(self):
+        self._record_original_article_payment()
         comment = VibeMarketingComponentComment.objects.create(
             run=self.run,
             actor=self.user,

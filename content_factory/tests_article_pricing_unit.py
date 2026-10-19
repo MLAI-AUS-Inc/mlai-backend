@@ -73,6 +73,13 @@ class ArticlePricingTests(SimpleTestCase):
                 article_request={"client_request_id": "article-7", "expectedCostPoints": expected}, resolved_domain="mlai.au")
         return result, spend
 
+    def test_original_charge_from_a_different_payer_has_a_typed_conflict(self):
+        with patch("roo.models.Ledger.objects.filter") as ledger:
+            ledger.return_value.first.return_value = Obj(user_id=8, source="CONTENT_FACTORY")
+            with self.assertRaises(service.ArticleGenerationError) as error:
+                service._original_content_charge_points(self.user, "content_factory:charge:article-7")
+        self.assertEqual(error.exception.code, "content_factory_billing_key_conflict")
+
     def test_regular_and_discounted_quotes_are_the_actual_debit(self):
         for price in (6, 12):
             result, spend = self.charge(price=price, expected=price)

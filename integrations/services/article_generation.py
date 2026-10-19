@@ -931,13 +931,15 @@ def charge_content_factory_topic_generation_for_user(
 
 
 def _original_content_charge_points(user, key):
-    """Refund the recorded charge even if the live price changes during a run."""
+    """Read the original points for billing retries and refunds across price changes."""
     from roo.models import Ledger
     charge = Ledger.objects.filter(idempotency_key=key, kind="SPEND").first()
     if charge is None:
         return 0
     if charge.user_id != user.pk or charge.source != CONTENT_FACTORY_LEDGER_SOURCE:
-        raise ArticleGenerationError("The original charge does not belong to this request.")
+        error = ArticleGenerationError("The original charge does not belong to this request.")
+        error.code = "content_factory_billing_key_conflict"
+        raise error
     amount = -(charge.delta_microroo or 0)
     if amount <= 0 or amount % 1_000_000:
         raise ArticleGenerationError("The original article charge needs reconciliation.")
