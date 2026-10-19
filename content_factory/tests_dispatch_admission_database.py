@@ -31,7 +31,7 @@ class DispatchAdmissionDatabaseTests(fixtures.OneClickBillingFixture, Transactio
         _, _, _, error = self.charge(self.payload())
         self.assertIsNone(error)
         self.assertEqual(Ledger.objects.filter(kind="SPEND").count(), 1)
-        self.assertEqual(self.balance(self.payer), 14_000_000)
+        self.assertEqual(self.balance(self.payer), 8_000_000)
         return ContentFactoryDispatchOutbox.objects.get()
 
     @contextmanager
@@ -58,7 +58,7 @@ class DispatchAdmissionDatabaseTests(fixtures.OneClickBillingFixture, Transactio
         self.assertEqual(row.payload, original)
         self.assertFalse(Ledger.objects.filter(kind="REFUND").exists())
         self.assertEqual(Ledger.objects.filter(kind="SPEND").count(), 1)
-        self.assertEqual(self.balance(self.payer), 14_000_000)
+        self.assertEqual(self.balance(self.payer), 8_000_000)
 
     def test_actual_scheduler_bounds_unknown_legacy_dispatch_without_post_or_refund(self):
         row = self.charged_row()

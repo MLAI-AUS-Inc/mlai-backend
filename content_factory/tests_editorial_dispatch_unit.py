@@ -192,7 +192,7 @@ class ArticleDispatchControlFlowTests(unittest.TestCase):
             "_refund_roo_points_for_article_start": self.refund, "_refund_roo_points_for_content_island_topic_start": Mock(),
             "charge_content_factory_request_for_user": self.charge, "InsufficientRooPointsError": type("Insufficient", (Exception,), {}),
             "build_roo_points_authorization_payload": lambda **kwargs: {"roo_points_billing_status": kwargs["billing_status"]},
-            "get_content_factory_ai_agent_required_points": lambda domain: 6, "get_content_factory_article_cost_points": lambda domain: 6, "_roo_points_balance_for_user": lambda user: 20,
+            "get_content_factory_ai_agent_required_points": lambda domain: 6, "get_content_factory_article_cost_points": lambda domain, **kwargs: 12, "_roo_points_balance_for_user": lambda user: 20,
             "_resolve_context_or_response": lambda request: (self.context, None),
             "_setup_blocked_response_for_generation": lambda *args, **kwargs: None,
             "match_covered_topic": lambda **kwargs: None, "_github_repo_operable": lambda config: True,
@@ -669,6 +669,7 @@ class AtomicArticleChargeTests(unittest.TestCase):
             self.assertEqual(kwargs['payload']['roo_points_requested_by_user_id'], 2)
             self.assertEqual(kwargs['payload']['roo_points_billing_user_id'], 7)
         with patch.object(views, '_quoted_price_response', return_value=None), \
+                patch.object(views, 'get_content_factory_article_cost_points', return_value=6), \
                 patch.object(views, '_refresh_article_editorial_payload', return_value=None), \
                 patch.object(views, '_reserve_article_start_connection', return_value=None), \
                 patch.object(views, '_validate_article_start_admission', side_effect=admission), \

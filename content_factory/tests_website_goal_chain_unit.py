@@ -58,6 +58,7 @@ class RealGoalChainTests(SimpleTestCase):
         commit = Mock(status_code=200)
         commit.json.return_value = {"sha": website.verified_sha}
         with ExitStack() as stack:
+            stack.enter_context(patch("startup_updates.benefits.has_monthly_update_discount", return_value=False))
             # All seams below load/store records, call providers, or contact the
             # cache. The frozen context, journey loader/projector, dispatcher,
             # request builder and guarded owner view execute their real code.

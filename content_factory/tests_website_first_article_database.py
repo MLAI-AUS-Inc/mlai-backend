@@ -54,7 +54,15 @@ class FirstArticleProviderChainTests(OneClickBillingFixture,TransactionTestCase)
 
     def start(self,choices=None):
         return prepare.start_prepare(self.config,company_id=self.company.pk,user=self.requester,
-            target="first_article_live",consent=choices or answers())
+            target="first_article_live",consent=choices or answers(billing={"policy":"reserved","expected_points":12,"accepted":True}))
+
+    def test_stale_first_article_consent_cannot_reserve_a_payment(self):
+        with self.assertRaises(WebsiteAuthorityError) as error:
+            self.start(answers(billing={"policy":"reserved","expected_points":6,"accepted":True}))
+        self.assertEqual(error.exception.code,"website_prepare_blocked")
+        self.assertEqual(self.balance(self.payer),20_000_000)
+        self.assertFalse(Ledger.objects.filter(kind="SPEND",source="CONTENT_FACTORY").exists())
+        self.assertFalse(ContentFactoryDispatchOutbox.objects.exists())
 
     def ready(self,op):
         """Seed the already verified Ready precondition; exercise article effects below."""
@@ -347,7 +355,7 @@ class FirstArticleProviderChainTests(OneClickBillingFixture,TransactionTestCase)
         self.assertEqual(op.receipt["goal"]["completed_source_sha"],"e"*40)
         self.assertEqual(Ledger.objects.filter(kind="SPEND",source="CONTENT_FACTORY").count(),1)
         self.assertFalse(Ledger.objects.filter(kind="REFUND",source="CONTENT_FACTORY").exists())
-        self.assertEqual(self.balance(self.payer),14_000_000)
+        self.assertEqual(self.balance(self.payer),8_000_000)
         self.assertEqual(remote["posts"],["https://synthetic-worker.test/api/runs/article",
             *(["https://synthetic-worker.test/api/runs/first-article/resume"] if repair else []),
             "https://synthetic-worker.test/api/runs/first-article/approve","https://synthetic-worker.test/api/runs/first-article/publish-pr"])
@@ -378,7 +386,7 @@ class FirstArticleProviderChainTests(OneClickBillingFixture,TransactionTestCase)
             prepare._finish_prepare(claimed,now=timezone.now())
         post.assert_called_once()
         self.assertEqual(Ledger.objects.filter(kind="SPEND",source="CONTENT_FACTORY").count(),1)
-        self.assertEqual(self.balance(self.payer),14_000_000)
+        self.assertEqual(self.balance(self.payer),8_000_000)
         run=ContentFactoryRun.objects.get(run_id="first-article")
         self.assertEqual(run.run_request["first_article_goal_operation_id"],str(op.pk))
         self.assertEqual(run.run_request["expected_source_sha"],"a"*40)
@@ -388,19 +396,19 @@ class FirstArticleProviderChainTests(OneClickBillingFixture,TransactionTestCase)
 
     def test_replacement_credit_reholds_accepted_price_and_stale_claim_cannot_erase_it(self):
         first=self.start()
-        successor=self.start(answers(publish_mode="review"))
+        successor=self.start(answers(publish_mode="review",billing={"policy":"reserved","expected_points":12,"accepted":True}))
         first.refresh_from_db();self.assertEqual(first.state,"cancelled")
         self.assertNotIn("first_article_billing",successor.receipt)
         stale=prepare._claim_prepare(successor.pk,timezone.now())
         refund=WebsiteConnectionOperation.objects.get(action="goal-refund",payload__goal_operation_id=str(first.pk))
         self.assertEqual(advance_refund(refund.pk,now=timezone.now()),"completed")
         successor.refresh_from_db()
-        self.assertEqual(successor.receipt["first_article_billing"]["cost_points"],6)
+        self.assertEqual(successor.receipt["first_article_billing"]["cost_points"],12)
         stale.state="pending";stale.next_attempt_at=timezone.now()
         self.assertIsNone(prepare._persist_prepare(stale,now=timezone.now()))
         successor.refresh_from_db()
         self.assertIn("first_article_billing",successor.receipt)
-        self.assertEqual(self.balance(self.payer),14_000_000)
+        self.assertEqual(self.balance(self.payer),8_000_000)
         self.assertEqual(Ledger.objects.filter(kind="SPEND",source="CONTENT_FACTORY").count(),2)
         self.assertEqual(Ledger.objects.filter(kind="REFUND",source="CONTENT_FACTORY").count(),1)
 
@@ -439,7 +447,7 @@ class FirstArticleProviderChainTests(OneClickBillingFixture,TransactionTestCase)
         self.assertEqual(op.receipt["first_article_billing"]["status"], "reserved")
         self.assertTrue(child.result["reconciliation_refund_pending"])
         self.assertFalse(Ledger.objects.filter(kind="REFUND", source="CONTENT_FACTORY").exists())
-        self.assertEqual(self.balance(self.payer), 14_000_000)
+        self.assertEqual(self.balance(self.payer), 8_000_000)
 
     def test_duplicate_parent_settlement_credits_one_original_allocation(self):
         op, child, row = self.terminal_parent_child(outcome="no_article_effect")

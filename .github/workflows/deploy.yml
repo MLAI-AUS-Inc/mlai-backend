@@ -152,6 +152,7 @@ jobs:
         python scripts/test_without_database.py \
           community_chat.tests.test_startup_connections_unit \
           content_factory.tests_activation_unit \
+          content_factory.tests_article_pricing_unit \
           content_factory.tests_research_automation_billing_unit \
           community_chat.tests.test_startup_activity_defaults \
           startup_updates.tests_linear_reconnect_unit \

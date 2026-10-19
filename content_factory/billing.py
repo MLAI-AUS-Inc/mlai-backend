@@ -4,7 +4,7 @@ from typing import Optional
 from urllib.parse import urlsplit
 
 
-CONTENT_FACTORY_ARTICLE_COST_POINTS = 6
+CONTENT_FACTORY_ARTICLE_COST_POINTS = 12
 CONTENT_FACTORY_CONTENT_ISLAND_TOPIC_COST_POINTS = 1
 CONTENT_FACTORY_MINIMUM_AI_AGENT_POINTS = 6
 FREE_CONTENT_FACTORY_DOMAINS = {"mlai.au"}
@@ -43,9 +43,13 @@ def is_free_content_factory_domain(domain: Optional[str]) -> bool:
     return normalize_content_factory_domain(domain) in FREE_CONTENT_FACTORY_DOMAINS
 
 
-def get_content_factory_article_cost_points(domain: Optional[str]) -> int:
-    if is_free_content_factory_domain(domain):
-        return 0
+def get_content_factory_article_cost_points(domain: Optional[str], *, user=None) -> int:
+    """Quote every article at 12 points, halved by the existing founder benefit."""
+    if user is not None:
+        from startup_updates.benefits import has_monthly_update_discount
+
+        if has_monthly_update_discount(user):
+            return CONTENT_FACTORY_ARTICLE_COST_POINTS // 2
     return CONTENT_FACTORY_ARTICLE_COST_POINTS
 
 
@@ -92,6 +96,8 @@ def build_roo_points_payload(
         if cost_points is not None
         else get_content_factory_article_cost_points(normalized_domain)
     )
+    if required_points is None and action == CONTENT_FACTORY_ACTION_ARTICLE_GENERATION:
+        required = cost
     balance = int(current_balance or 0)
     account = mask_billing_email(account_email)
     payer = mask_billing_email(billing_email) if billing_email else account
@@ -112,7 +118,7 @@ def build_roo_points_payload(
         "required_points": required,
         "current_balance": balance,
         "cost_points": cost,
-        "free_domain": is_free_content_factory_domain(normalized_domain),
+        "free_domain": action != CONTENT_FACTORY_ACTION_ARTICLE_GENERATION and is_free_content_factory_domain(normalized_domain),
         "domain": normalized_domain,
         "action": action,
         "retryable": False,
@@ -139,10 +145,11 @@ def build_roo_points_authorization_payload(
         "roo_points_required": int(
             required_points
             if required_points is not None
+            else cost_points if action == CONTENT_FACTORY_ACTION_ARTICLE_GENERATION
             else get_content_factory_ai_agent_required_points(domain)
         ),
         "roo_points_billing_status": str(billing_status or "").strip(),
-        "free_domain": is_free_content_factory_domain(domain),
+        "free_domain": action != CONTENT_FACTORY_ACTION_ARTICLE_GENERATION and is_free_content_factory_domain(domain),
     }
     if current_balance is not None:
         payload["roo_points_balance"] = int(current_balance)

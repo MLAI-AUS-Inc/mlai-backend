@@ -46,7 +46,7 @@ def billing_summary(organization, requester):
     payer = billing_user_for_organization(organization, requester)
     balance = PointsService.get_balance(payer)
     points = int(balance.get("digital_service_balance_microroo") or 0) // 1_000_000
-    cost = get_content_factory_article_cost_points(organization.domain)
+    cost = get_content_factory_article_cost_points(organization.domain, user=requester)
     return {"setupPoints": 0, "articlePoints": cost, "balance": points,
         "signedInAccount": mask_billing_email(requester.email), "billingAccount": mask_billing_email(payer.email),
         "companyBillingEnabled": bool(organization.billing_user_id), "billingFounderIsYou": payer.pk == requester.pk,

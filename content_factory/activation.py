@@ -215,7 +215,7 @@ def durable_integration_evidence(config, connection, *, now=None):
     return {**base, "verified": True, "publishingVerified": live_deployment_verified(connection, target, now=now), "routePath": "/" + route.strip("/"), "verifiedAt": verified_at.isoformat(), "reasonCode": ""}
 
 
-def article_capabilities(config, *, domain="", account=None, evidence=None, repository_access=None):
+def article_capabilities(config, *, domain="", user=None, account=None, evidence=None, repository_access=None):
     """Return the versioned, action-specific client projection, failing closed."""
     account = account or github_account_state(config)
     evidence = evidence or integration_evidence(config)
@@ -257,7 +257,7 @@ def article_capabilities(config, *, domain="", account=None, evidence=None, repo
             "integrationVerified": bool(evidence.get("verified")), "routePath": route, "surfaceLabel": label,
             "nextStep": "repository" if not repo_selected or not account.get("saved") or code.startswith("github_") else "articles",
             "verifiedAt": evidence.get("verifiedAt"),
-            "prices": {"article": get_content_factory_article_cost_points(domain), "researchTopic": unit, "research": unit * 4, "islandResearch": unit, "automationResearch": unit * 3}}
+            "prices": {"article": get_content_factory_article_cost_points(domain, user=user), "researchTopic": unit, "research": unit * 4, "islandResearch": unit, "automationResearch": unit * 3}}
 
 
 def founder_context_for_domain(user, domain):

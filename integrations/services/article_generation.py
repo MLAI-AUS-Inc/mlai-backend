@@ -1,6 +1,7 @@
 import logging
 import time
 from typing import Optional
+from uuid import uuid4
 from django.conf import settings
 from django.utils import timezone
 from datetime import timedelta
@@ -407,8 +408,9 @@ def _raise_content_factory_precondition(
     )
 
 
-def _append_refund_instruction(message: str, domain: Optional[str]) -> str:
-    cost_points = get_content_factory_article_cost_points(domain)
+def _append_refund_instruction(message: str, domain: Optional[str], *, cost_points=None) -> str:
+    if cost_points is None:
+        cost_points = get_content_factory_article_cost_points(domain)
     if cost_points == 0:
         return message
 
@@ -627,7 +629,7 @@ def _content_factory_authorization_payload(
         domain=resolved_domain,
         action=action,
         cost_points=cost_points,
-        required_points=get_content_factory_ai_agent_required_points(resolved_domain),
+        required_points=cost_points if action == CONTENT_FACTORY_ACTION_ARTICLE_GENERATION and cost_points > 0 else get_content_factory_ai_agent_required_points(resolved_domain),
         current_balance=current_balance,
         billing_status=billing_status,
         ledger_id=getattr(ledger, "id", None),
@@ -773,7 +775,13 @@ def _charge_content_factory_user(
         raise ArticleGenerationError(str(exc)) from exc
     article_request.update(roo_points_requested_by_user_id=requester.pk, roo_points_billing_user_id=user.pk)
     client_request_id = _get_client_request_id(article_request)
-    cost_points = get_content_factory_article_cost_points(resolved_domain)
+    try:
+        cost_points = _original_content_charge_points(user, f"content_factory:charge:{client_request_id}")
+    except ArticleGenerationError as exc:
+        exc.code = "content_factory_billing_key_conflict"
+        raise
+    if not cost_points:
+        cost_points = get_content_factory_article_cost_points(resolved_domain, user=requester)
     _require_expected_cost(article_request, cost_points)
     existing_refunded = (
         ContentFactoryJob.objects.filter(
@@ -808,7 +816,7 @@ def _charge_content_factory_user(
                 domain=resolved_domain,
                 action=CONTENT_FACTORY_ACTION_ARTICLE_GENERATION,
                 current_balance=_content_factory_balance_for_user(user),
-                required_points=get_content_factory_ai_agent_required_points(resolved_domain),
+                required_points=cost_points,
                 cost_points=cost_points,
                 account_email=requester.email,
                 billing_email=user.email,
@@ -927,7 +935,7 @@ def charge_content_factory_topic_generation_for_user(
 
 
 def _original_content_charge_points(user, key):
-    """Refund the recorded charge even if the live price changes during a run."""
+    """Read the original points for billing retries and refunds across price changes."""
     from roo.models import Ledger
     charge = Ledger.objects.filter(idempotency_key=key, kind="SPEND").first()
     if charge is None:
@@ -1458,6 +1466,7 @@ def _charge_deferred_discovery_job_if_needed(
     confirmed_keyword: str,
     custom_title: Optional[str] = None,
     billing_user=None,
+    expected_cost_points=None,
 ):
     research_paid = (getattr(source_job, "request_meta", {}) or {}).get("roo_points_action") == CONTENT_FACTORY_ACTION_CONTENT_ISLAND_TOPIC_GENERATION
     if not _job_uses_deferred_billing(source_job) and not research_paid:
@@ -1468,6 +1477,8 @@ def _charge_deferred_discovery_job_if_needed(
     # research quote belongs to its earlier debit, not this separate action.
     request_meta.pop("expectedCostPoints", None)
     request_meta.pop("expected_cost_points", None)
+    if expected_cost_points is not None:
+        request_meta["expected_cost_points"] = expected_cost_points
     request_meta.setdefault("domain", normalize_domain(domain))
     request_meta.setdefault("topic", custom_title or confirmed_keyword)
     request_meta.setdefault("target_keyword", confirmed_keyword)
@@ -2627,7 +2638,7 @@ def _handle_status_failure(job_id: str, result: dict):
             if auto_refunded:
                 slack_text = _append_auto_refund_message(slack_text, refund_points)
             else:
-                slack_text = _append_refund_instruction(slack_text, job.domain)
+                slack_text = _append_refund_instruction(slack_text, job.domain, cost_points=job.billing_amount)
             SlackService.send_dm(job.slack_user_id, slack_text)
         except Exception as e:
             logger.warning(f"Failed to send failure notification for job {job_id}: {e}")
@@ -3047,6 +3058,7 @@ def confirm_topic(
     notification_context: Optional[dict] = None,
     billing_user=None,
     expected_cost_points=None,
+    client_request_id: Optional[str] = None,
 ) -> dict:
     """
     Confirm topic selection and trigger Phase 2 generation.
@@ -3057,6 +3069,7 @@ def confirm_topic(
         confirmed_keyword: The selected keyword (or alternative) to generate.
         slack_user_id: The Slack user confirming the topic.
         custom_title: Optional custom title override.
+        client_request_id: Stable identity for a new article without a research run.
         skip_alternatives: List of keywords to send back as temporary rejections/cooldowns.
                           These are the alternatives that were shown but not selected.
 
@@ -3069,18 +3082,42 @@ def confirm_topic(
     require_article_activation(domain=normalized_domain,
         actor_id=requested_by_slack_user_id or slack_user_id, user=billing_user,
         article_request={"delivery_mode": delivery_mode, "delivery_mode_confirmed": delivery_mode_confirmed})
-    _require_expected_cost({"expected_cost_points": expected_cost_points}, get_content_factory_article_cost_points(normalized_domain))
+    from integrations.services.github_installations import resolve_user_for_actor_id
+    quote_user = billing_user or resolve_user_for_actor_id(requested_by_slack_user_id or slack_user_id)
+    _require_expected_cost({"expected_cost_points": expected_cost_points}, get_content_factory_article_cost_points(normalized_domain, user=quote_user))
     source_job = None
     if source_run_id:
         from content_factory.models import ContentFactoryJob
 
         source_job = ContentFactoryJob.objects.filter(job_id=source_run_id).first()
+        if source_job is None:
+            raise ArticleGenerationError("The source research run is unavailable. Start a new article request.")
+    if source_job is None:
+        # Legacy confirmations have no research identity. Keep one request ID
+        # through the paid queue's transport retries; callers can supply it for
+        # retries across requests, just as they do for direct generation.
+        article_request = {
+            "client_request_id": client_request_id or f"confirm-topic:{uuid4().hex}",
+            "domain": normalized_domain, "topic": custom_title or confirmed_keyword,
+            "target_keyword": confirmed_keyword, "custom_title": custom_title,
+            "skip_alternatives": skip_alternatives,
+            "requested_by_slack_user_id": requested_by_slack_user_id or slack_user_id,
+            "expected_cost_points": expected_cost_points, "request_source": request_source,
+            "delivery_mode": delivery_mode, "delivery_mode_confirmed": delivery_mode_confirmed,
+            "slack_channel_id": slack_channel_id, "slack_thread_ts": slack_thread_ts,
+            "slack_root_message_ts": slack_root_message_ts, "progress_message_ts": progress_message_ts,
+            **({"notification_context": notification_context} if notification_context else {}),
+        }
+        try:
+            return trigger_article_generation(slack_user_id, article_request, billing_user=billing_user)
+        except ContentFactoryBackendUnavailableError as exc:
+            raise ContentFactoryBackendUnavailableError({**exc.payload, "operation": "confirm_topic"}) from exc
     if source_job and not (slack_channel_id or slack_thread_ts or slack_root_message_ts):
         if source_job:
             slack_channel_id = source_job.slack_channel_id or ""
             slack_thread_ts = source_job.slack_thread_ts or ""
             slack_root_message_ts = source_job.slack_root_message_ts or slack_thread_ts
-    deferred_charge_started = bool(source_job and _job_uses_deferred_billing(source_job))
+    deferred_charge_started = bool(source_job and (_job_uses_deferred_billing(source_job) or (source_job.request_meta or {}).get("roo_points_action") == CONTENT_FACTORY_ACTION_CONTENT_ISLAND_TOPIC_GENERATION))
     if source_job:
         source_job = _charge_deferred_discovery_job_if_needed(
             source_job=source_job,
@@ -3089,6 +3126,7 @@ def confirm_topic(
             confirmed_keyword=confirmed_keyword,
             custom_title=custom_title,
             billing_user=billing_user,
+            expected_cost_points=expected_cost_points,
         )
         progress_message_ts = source_job.progress_message_ts or progress_message_ts
 
@@ -3189,16 +3227,6 @@ def confirm_topic(
                 cost_points=source_charge_amount,
                 billing_status=str(getattr(source_job, "billing_status", "") or "reused"),
                 ledger=getattr(source_job, "billing_ledger", None),
-                current_balance=None,
-            )
-        )
-    elif is_free_content_factory_domain(normalized_domain):
-        payload.update(
-            _content_factory_authorization_payload(
-                resolved_domain=normalized_domain,
-                action=CONTENT_FACTORY_ACTION_ARTICLE_GENERATION,
-                cost_points=0,
-                billing_status="free",
                 current_balance=None,
             )
         )

@@ -6075,7 +6075,6 @@ class ContentFactoryCallbackView(APIView):
         """Handle generation_failed event from content-factory."""
         from content_factory.models import ContentFactoryJob
         from integrations.services.article_generation import (
-            get_content_factory_article_cost_points,
             maybe_auto_refund_terminal_failure,
         )
         from integrations.services.daily_discovery import (
@@ -6262,7 +6261,7 @@ class ContentFactoryCallbackView(APIView):
                     if auto_refunded and refund_points > 0:
                         message += f"\n\nYour {refund_points} Roo points were refunded automatically."
                     else:
-                        manual_refund_points = get_content_factory_article_cost_points(domain)
+                        manual_refund_points = int(getattr(job, "billing_amount", 0) or 0)
                         if manual_refund_points > 0:
                             message += (
                                 f"\n\nIf this run failed and you want your {manual_refund_points} Roo points back, "
@@ -7268,9 +7267,7 @@ class ContentFactoryCallbackView(APIView):
                         }
                     }
                 ]
-                from integrations.services.article_generation import get_content_factory_article_cost_points
-
-                refund_points = get_content_factory_article_cost_points(domain)
+                refund_points = int(getattr(job, "billing_amount", 0) or 0)
                 if refund_points > 0:
                     blocks.append(
                         {

@@ -8,7 +8,6 @@ from types import SimpleNamespace
 
 from django.test import TestCase
 
-from content_factory.billing import get_content_factory_article_cost_points
 from content_factory.vibe_marketing_views import (
     _merge_job_billing_into_run_request,
     _persist_web_article_billing_to_job,
@@ -31,7 +30,7 @@ class MergeJobBillingTests(TestCase):
             run_id=run_id, workflow="article_generation", domain=PAID_DOMAIN, run_request=run_request,
         )
 
-    def test_mirrors_charged_job_billing_onto_run(self):
+    def test_mirrors_original_six_point_charge_without_repricing_the_run(self):
         from content_factory.models import ContentFactoryJob
         led = self._charge_ledger("vibe-article-job:abc")
         ContentFactoryJob.objects.create(
@@ -47,7 +46,7 @@ class MergeJobBillingTests(TestCase):
         self.assertTrue(rr["roo_points_authorized"])
         self.assertEqual(rr["roo_points_billing_status"], "charged")
         self.assertEqual(str(rr["roo_points_ledger_id"]), str(led.id))
-        self.assertEqual(rr["roo_points_cost"], get_content_factory_article_cost_points(PAID_DOMAIN))
+        self.assertEqual(rr["roo_points_cost"], 6)
         self.assertEqual(rr["client_request_id"], "vibe-article-job:abc")
         self.assertEqual(rr["topic"], "X")  # existing run_request data preserved
 

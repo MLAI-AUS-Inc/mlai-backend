@@ -28,7 +28,7 @@ def start_goal(current, *, company_id, user, retry, target, now, force_successor
     selected = None
     if setup_consent.enabled(current.organization_id) and consent is not None:
         from .billing import get_content_factory_article_cost_points
-        selected = setup_consent.answers(consent, expected_points=get_content_factory_article_cost_points(current.organization.domain))
+        selected = setup_consent.answers(consent, expected_points=get_content_factory_article_cost_points(current.organization.domain, user=user))
     if target == "first_article_live" and not selected and not (isinstance(goal,dict) and setup_consent.valid(goal)):
         raise WebsiteAuthorityError("website_prepare_blocked", "Review the first-article choices before starting.", status=422)
     compatible = goals.valid_goal(goal, scope) and goal.get("target") == target

@@ -45,6 +45,7 @@ class SetupExampleCleanupActionTests(SimpleTestCase):
         return query
 
     def setUp(self):
+        self.enterContext(patch("startup_updates.benefits.has_monthly_update_discount", return_value=False))
         # B2 also reads reserved goal rows before allowing legacy redispatch.
         self.enterContext(patch.object(WebsiteConnectionOperation.objects, "filter", return_value=self.rows()))
         self.user = get_user_model()(pk=4, is_active=True, email="founder@example.test")
