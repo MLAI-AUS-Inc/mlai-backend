@@ -40,7 +40,8 @@ def refund_empty_or_failed_research(run):
         return
     if result.get("island_research_refunded"):
         return
-    failed = run.status in {"failed", "cancelled", "blocked"}
+    # A worker refusal ("denied") never researched anything, so it is refunded too.
+    failed = run.status in {"failed", "cancelled", "blocked", "denied"}
     empty = run.status == "completed" and result.get("island_research") and not result.get("suggested_islands")
     if not (failed or empty):
         return
