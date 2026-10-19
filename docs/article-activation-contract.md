@@ -169,6 +169,12 @@ eligibility as coworking. The `mlai.au` research exception remains. Bootstrap,
 company billing and first-article setup consent quote the requesting founder's
 price. Retries and refunds retain the original recorded debit.
 
+Legacy topic confirmations without a research run use the paid article path.
+They accept `client_request_id` to reuse an accepted request across caller
+retries. For older clients, a generated request identity stays unchanged through
+queue transport retries. Confirmation timeout responses retain the
+`confirm_topic` operation identity.
+
 `expectedCostPoints` (or legacy `expected_cost_points`) is optional for older
 clients. New clients submit their confirmed integer quote. A changed/invalid
 quote returns 409 `roo_points_quote_changed` with the current `costPoints`

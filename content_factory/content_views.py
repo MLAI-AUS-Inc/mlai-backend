@@ -810,6 +810,8 @@ class ContentConfirmView(APIView):
                 confirm_kwargs["notification_context"] = request.data.get("notification_context")
             if requested_by_slack_user_id:
                 confirm_kwargs["requested_by_slack_user_id"] = requested_by_slack_user_id
+            if request.data.get("client_request_id"):
+                confirm_kwargs["client_request_id"] = request.data["client_request_id"]
 
             result = confirm_topic(
                 **confirm_kwargs,

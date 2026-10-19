@@ -1,6 +1,7 @@
 import logging
 import time
 from typing import Optional
+from uuid import uuid4
 from django.conf import settings
 from django.utils import timezone
 from datetime import timedelta
@@ -3053,6 +3054,7 @@ def confirm_topic(
     notification_context: Optional[dict] = None,
     billing_user=None,
     expected_cost_points=None,
+    client_request_id: Optional[str] = None,
 ) -> dict:
     """
     Confirm topic selection and trigger Phase 2 generation.
@@ -3063,6 +3065,7 @@ def confirm_topic(
         confirmed_keyword: The selected keyword (or alternative) to generate.
         slack_user_id: The Slack user confirming the topic.
         custom_title: Optional custom title override.
+        client_request_id: Stable identity for a new article without a research run.
         skip_alternatives: List of keywords to send back as temporary rejections/cooldowns.
                           These are the alternatives that were shown but not selected.
 
@@ -3086,16 +3089,25 @@ def confirm_topic(
         if source_job is None:
             raise ArticleGenerationError("The source research run is unavailable. Start a new article request.")
     if source_job is None:
-        return trigger_article_generation(slack_user_id, {
+        # Legacy confirmations have no research identity. Keep one request ID
+        # through the paid queue's transport retries; callers can supply it for
+        # retries across requests, just as they do for direct generation.
+        article_request = {
+            "client_request_id": client_request_id or f"confirm-topic:{uuid4().hex}",
             "domain": normalized_domain, "topic": custom_title or confirmed_keyword,
-            "target_keyword": confirmed_keyword,
+            "target_keyword": confirmed_keyword, "custom_title": custom_title,
+            "skip_alternatives": skip_alternatives,
             "requested_by_slack_user_id": requested_by_slack_user_id or slack_user_id,
             "expected_cost_points": expected_cost_points, "request_source": request_source,
             "delivery_mode": delivery_mode, "delivery_mode_confirmed": delivery_mode_confirmed,
             "slack_channel_id": slack_channel_id, "slack_thread_ts": slack_thread_ts,
-            "slack_root_message_ts": slack_root_message_ts,
+            "slack_root_message_ts": slack_root_message_ts, "progress_message_ts": progress_message_ts,
             **({"notification_context": notification_context} if notification_context else {}),
-        }, billing_user=billing_user)
+        }
+        try:
+            return trigger_article_generation(slack_user_id, article_request, billing_user=billing_user)
+        except ContentFactoryBackendUnavailableError as exc:
+            raise ContentFactoryBackendUnavailableError({**exc.payload, "operation": "confirm_topic"}) from exc
     if source_job and not (slack_channel_id or slack_thread_ts or slack_root_message_ts):
         if source_job:
             slack_channel_id = source_job.slack_channel_id or ""

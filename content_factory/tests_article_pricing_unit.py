@@ -104,14 +104,32 @@ class ArticlePricingTests(SimpleTestCase):
             self.assertEqual(original["expectedCostPoints"], 3)
 
     def test_confirmation_without_research_uses_paid_direct_generation(self):
+        for request_id in (None, "confirmed-topic-7"):
+            with patch.object(service, "require_article_activation"), \
+                 patch.object(service, "get_content_factory_article_cost_points", return_value=6), \
+                 patch.object(service, "uuid4", return_value=Obj(hex="generated-request")), \
+                 patch.object(service, "trigger_article_generation", return_value={"job_id": "paid-article"}) as generate:
+                result = service.confirm_topic(domain="mlai.au", confirmed_keyword="founder tools",
+                    slack_user_id="mlai_user:7", billing_user=self.user, expected_cost_points=6,
+                    client_request_id=request_id, custom_title="Founder tools", skip_alternatives=["other topic"])
+            self.assertEqual(result["job_id"], "paid-article")
+            payload = generate.call_args.args[1]
+            self.assertEqual(payload["expected_cost_points"], 6)
+            self.assertEqual(payload["client_request_id"], request_id or "confirm-topic:generated-request")
+            self.assertEqual(payload["custom_title"], "Founder tools")
+            self.assertEqual(payload["skip_alternatives"], ["other topic"])
+            self.assertIs(generate.call_args.kwargs["billing_user"], self.user)
+
+    def test_direct_confirmation_timeout_preserves_the_confirmation_error_contract(self):
+        unavailable = service.ContentFactoryBackendUnavailableError({
+            "error_code": "CONTENT_FACTORY_UNAVAILABLE", "operation": "queue_article", "retryable": True})
         with patch.object(service, "require_article_activation"), \
-             patch.object(service, "get_content_factory_article_cost_points", return_value=6), \
-             patch.object(service, "trigger_article_generation", return_value={"job_id": "paid-article"}) as generate:
-            result = service.confirm_topic(domain="mlai.au", confirmed_keyword="founder tools",
-                slack_user_id="mlai_user:7", billing_user=self.user, expected_cost_points=6)
-        self.assertEqual(result["job_id"], "paid-article")
-        self.assertEqual(generate.call_args.args[1]["expected_cost_points"], 6)
-        self.assertIs(generate.call_args.kwargs["billing_user"], self.user)
+             patch.object(service, "get_content_factory_article_cost_points", return_value=12), \
+             patch.object(service, "trigger_article_generation", side_effect=unavailable):
+            with self.assertRaises(service.ContentFactoryBackendUnavailableError) as error:
+                service.confirm_topic(domain="mlai.au", confirmed_keyword="founder tools",
+                    slack_user_id="mlai_user:7", billing_user=self.user, client_request_id="confirm-7")
+        self.assertEqual(error.exception.payload, {**unavailable.payload, "operation": "confirm_topic"})
 
     def test_missing_source_run_cannot_create_a_new_paid_article(self):
         with patch.object(service, "require_article_activation"), \
