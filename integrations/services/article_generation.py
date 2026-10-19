@@ -678,10 +678,38 @@ def _require_content_factory_ai_agent_points(
     return user, current_balance
 
 
-def _get_existing_billed_source_job(client_request_id: str):
+def _require_article_job_payment(job, *, user, domain, expected_cost_points=None):
+    """A saved status is not article consent; require its original scoped spend."""
+    from content_factory.billing_lineage import ARTICLE_CHARGE_PREFIX, original_spend_for_job
+    from content_factory.company_billing import resolve_content_billing_user
+    from roo.models import Ledger
+
+    def conflict():
+        error = ArticleGenerationError("The original article payment does not belong to this request. Start a new article request.")
+        error.code = "content_factory_billing_key_conflict"
+        return error
+
+    if user is None or normalize_domain(job.domain) != normalize_domain(domain):
+        raise conflict()
+    original = original_spend_for_job(job)
+    if original and not str(original.idempotency_key).startswith(ARTICLE_CHARGE_PREFIX):
+        original = None  # A paid research run does not authorize an article.
+    payer = resolve_content_billing_user(user, domain)
+    if original and (original.user_id != payer.pk or getattr(job, "billing_status", "") == CONTENT_FACTORY_BILLING_STATUS_REFUNDED
+            or Ledger.objects.filter(idempotency_key=original.idempotency_key.replace(ARTICLE_CHARGE_PREFIX, "content_factory:refund:", 1), kind="REFUND").exists()):
+        raise conflict()
+    original_cost = -original.delta_microroo // 1_000_000 if original else 0
+    _require_expected_cost({"expected_cost_points": expected_cost_points},
+        original_cost or get_content_factory_article_cost_points(domain, user=user), require_quote=not bool(original_cost))
+    if not original:
+        raise conflict()
+    return original
+
+
+def _get_existing_billed_source_job(client_request_id: str, *, article_request=None, user=None, domain=""):
     from content_factory.models import ContentFactoryJob
 
-    return (
+    job = (
         ContentFactoryJob.objects.filter(
             client_request_id=client_request_id,
             billing_status=CONTENT_FACTORY_BILLING_STATUS_CHARGED,
@@ -689,6 +717,55 @@ def _get_existing_billed_source_job(client_request_id: str):
         .order_by("-updated_at", "-created_at")
         .first()
     )
+    if job and article_request is not None:
+        _require_article_job_payment(job, user=user, domain=domain,
+            expected_cost_points=article_request.get("expected_cost_points", article_request.get("expectedCostPoints")))
+    return job
+
+
+def quote_content_factory_article(*, actor_id, domain=None, client_request_id=None, source_run_id=None):
+    """Read an owned founder's article price without activation or account writes."""
+    from content_factory.activation import founder_context_for_domain
+    from content_factory.billing_lineage import ARTICLE_CHARGE_PREFIX, _matches_charge, _same_company_charge
+    from content_factory.company_billing import resolve_content_billing_user
+    from content_factory.models import ContentFactoryJob
+    from integrations.services.github_installations import resolve_user_for_actor_id
+    from roo.models import Ledger
+
+    user = resolve_user_for_actor_id(actor_id)
+    if user is None or not user.is_active:
+        raise PermissionError("An active founder account is required for an article quote.")
+    _validate_authenticated_content_factory_actor(user=user, actor_id=actor_id)
+    job = None
+    if source_run_id:
+        job = ContentFactoryJob.objects.filter(job_id=source_run_id).first()
+        if job is None:
+            raise ArticleGenerationError("The source article request is unavailable.")
+    domain = normalize_domain(domain or (job.domain if job else ""))
+    context = founder_context_for_domain(user, domain)
+    current_cost = get_content_factory_article_cost_points(domain, user=user)
+    if not source_run_id and client_request_id:
+        job = ContentFactoryJob.objects.filter(client_request_id=client_request_id).order_by("-updated_at", "-created_at").first()
+    if job:
+        if normalize_domain(job.domain) != domain:
+            raise PermissionError("The article request does not belong to this startup.")
+        if _job_uses_deferred_billing(job) or (job.request_meta or {}).get("roo_points_action") == CONTENT_FACTORY_ACTION_CONTENT_ISLAND_TOPIC_GENERATION:
+            return current_cost  # Research consent covers research only.
+        if client_request_id and job.client_request_id != client_request_id:
+            raise PermissionError("The article request does not match the original payment key.")
+        original = _require_article_job_payment(job, user=user, domain=domain)
+        return -original.delta_microroo // 1_000_000
+    if client_request_id:
+        original = Ledger.objects.filter(idempotency_key=ARTICLE_CHARGE_PREFIX + client_request_id, kind="SPEND").first()
+        if original:
+            payer = resolve_content_billing_user(user, domain)
+            if (original.user_id != payer.pk or not _matches_charge(original, {}, prefix=ARTICLE_CHARGE_PREFIX, key=client_request_id)
+                    or not _same_company_charge(original, organization_id=context.organization.pk, domain=domain, key=client_request_id)):
+                raise PermissionError("The original article payment does not belong to this startup and payer.")
+            if Ledger.objects.filter(idempotency_key="content_factory:refund:" + client_request_id, kind="REFUND").exists():
+                raise ArticleGenerationError("This article payment was already refunded. Start a new article request.")
+            return -original.delta_microroo // 1_000_000
+    return current_cost
 
 
 def _serialize_existing_billed_job(job) -> dict:
@@ -744,12 +821,14 @@ def require_article_activation(*, domain, actor_id, user=None, expected_repo="",
     return config
 
 
-def _require_expected_cost(article_request, cost_points):
+def _require_expected_cost(article_request, cost_points, *, require_quote=False):
     """Reject changed client quotes before any ledger write."""
     expected = article_request.get("expected_cost_points", article_request.get("expectedCostPoints"))
-    if expected is not None and (isinstance(expected, bool) or not isinstance(expected, int) or expected != cost_points):
+    if (expected is None and require_quote) or (expected is not None and (
+            isinstance(expected, bool) or not isinstance(expected, int) or expected != cost_points)):
         error = ArticleGenerationError("The Roo point price changed. Review the updated price before continuing.")
         error.payload = {"detail": str(error), "code": "roo_points_quote_changed", "costPoints": cost_points}
+        error.code = "roo_points_quote_changed"
         raise error
 
 
@@ -776,13 +855,12 @@ def _charge_content_factory_user(
     article_request.update(roo_points_requested_by_user_id=requester.pk, roo_points_billing_user_id=user.pk)
     client_request_id = _get_client_request_id(article_request)
     try:
-        cost_points = _original_content_charge_points(user, f"content_factory:charge:{client_request_id}")
+        original_cost = _original_content_charge_points(user, f"content_factory:charge:{client_request_id}")
     except ArticleGenerationError as exc:
         exc.code = "content_factory_billing_key_conflict"
         raise
-    if not cost_points:
-        cost_points = get_content_factory_article_cost_points(resolved_domain, user=requester)
-    _require_expected_cost(article_request, cost_points)
+    cost_points = original_cost or get_content_factory_article_cost_points(resolved_domain, user=requester)
+    _require_expected_cost(article_request, cost_points, require_quote=not bool(original_cost))
     existing_refunded = (
         ContentFactoryJob.objects.filter(
             client_request_id=client_request_id,
@@ -1467,14 +1545,28 @@ def _charge_deferred_discovery_job_if_needed(
     custom_title: Optional[str] = None,
     billing_user=None,
     expected_cost_points=None,
+    client_request_id=None,
 ):
+    if normalize_domain(source_job.domain) != normalize_domain(domain):
+        error = ArticleGenerationError("The source article belongs to a different company.")
+        error.code = "content_factory_billing_key_conflict"
+        raise error
     research_paid = (getattr(source_job, "request_meta", {}) or {}).get("roo_points_action") == CONTENT_FACTORY_ACTION_CONTENT_ISLAND_TOPIC_GENERATION
     if not _job_uses_deferred_billing(source_job) and not research_paid:
+        if client_request_id and client_request_id != source_job.client_request_id:
+            error = ArticleGenerationError("The article request key does not match its original payment.")
+            error.code = "content_factory_billing_key_conflict"
+            raise error
+        from integrations.services.github_installations import resolve_user_for_actor_id
+        actor = _resolve_requested_by_slack_user_id(slack_user_id, source_job.request_meta or {})
+        _require_article_job_payment(source_job, user=billing_user or resolve_user_for_actor_id(actor),
+            domain=domain, expected_cost_points=expected_cost_points)
         return source_job
 
     request_meta = dict(getattr(source_job, "request_meta", {}) or {})
-    # Topic confirmation has already checked the current article quote. A
-    # research quote belongs to its earlier debit, not this separate action.
+    # A research quote belongs to its earlier debit, not this separate action.
+    # The shared article charge requires the caller's actual confirmation or
+    # a verified original article spend; never synthesize today's quote here.
     request_meta.pop("expectedCostPoints", None)
     request_meta.pop("expected_cost_points", None)
     if expected_cost_points is not None:
@@ -1483,10 +1575,11 @@ def _charge_deferred_discovery_job_if_needed(
     request_meta.setdefault("topic", custom_title or confirmed_keyword)
     request_meta.setdefault("target_keyword", confirmed_keyword)
     request_meta.setdefault("request_source", CONTENT_FACTORY_REQUEST_SOURCE)
-    request_meta.setdefault(
-        "client_request_id",
-        getattr(source_job, "client_request_id", "") or f"scheduled-confirm:{source_job.job_id}",
-    )
+    if client_request_id:
+        request_meta["client_request_id"] = client_request_id
+    else:
+        request_meta.setdefault("client_request_id",
+            getattr(source_job, "client_request_id", "") or f"scheduled-confirm:{source_job.job_id}")
 
     charged_user, charge_ledger, charge_amount = _charge_content_factory_request(
         slack_user_id,
@@ -2227,7 +2320,13 @@ def trigger_article_generation(
         client_request_id = "legacy-research:" + hashlib.sha256(
             f"{research_user.pk}:{resolved_domain}:{client_request_id}".encode()).hexdigest()
         article_request["client_request_id"] = client_request_id
-    existing_job = _get_existing_billed_source_job(client_request_id)
+    if article_request.get("topic"):
+        from integrations.services.github_installations import resolve_user_for_actor_id
+        requester = billing_user or resolve_user_for_actor_id(_resolve_requested_by_slack_user_id(slack_user_id, article_request))
+        existing_job = _get_existing_billed_source_job(client_request_id,
+            article_request=article_request, user=requester, domain=resolved_domain)
+    else:
+        existing_job = _get_existing_billed_source_job(client_request_id)
     if existing_job:
         logger.info(
             "Reusing existing Content Factory source job %s for client_request_id=%s",
@@ -3082,9 +3181,10 @@ def confirm_topic(
     require_article_activation(domain=normalized_domain,
         actor_id=requested_by_slack_user_id or slack_user_id, user=billing_user,
         article_request={"delivery_mode": delivery_mode, "delivery_mode_confirmed": delivery_mode_confirmed})
+    # The shared charge boundary selects the original paid price on retries.
+    # Checking today's quote here would reject a legitimate historical debit.
     from integrations.services.github_installations import resolve_user_for_actor_id
-    quote_user = billing_user or resolve_user_for_actor_id(requested_by_slack_user_id or slack_user_id)
-    _require_expected_cost({"expected_cost_points": expected_cost_points}, get_content_factory_article_cost_points(normalized_domain, user=quote_user))
+    requester = billing_user or resolve_user_for_actor_id(requested_by_slack_user_id or slack_user_id)
     source_job = None
     if source_run_id:
         from content_factory.models import ContentFactoryJob
@@ -3125,8 +3225,9 @@ def confirm_topic(
             domain=normalized_domain,
             confirmed_keyword=confirmed_keyword,
             custom_title=custom_title,
-            billing_user=billing_user,
+            billing_user=requester,
             expected_cost_points=expected_cost_points,
+            client_request_id=client_request_id,
         )
         progress_message_ts = source_job.progress_message_ts or progress_message_ts
 
@@ -3136,6 +3237,10 @@ def confirm_topic(
         custom_title=custom_title,
     )
     if existing_child_job:
+        from integrations.services.github_installations import resolve_user_for_actor_id
+        requester = billing_user or resolve_user_for_actor_id(requested_by_slack_user_id or slack_user_id)
+        _require_article_job_payment(existing_child_job, user=requester, domain=normalized_domain,
+            expected_cost_points=expected_cost_points)
         logger.info(
             "Reusing existing confirmed-topic child job %s for source_run_id=%s status=%s",
             existing_child_job.job_id,
@@ -3281,6 +3386,11 @@ def confirm_topic(
                     progress_message_ts=progress_message_ts,
                     last_progress_milestone_key="queued",
                     last_progress_updated_at=timezone.now(),
+                    client_request_id=source_job.client_request_id,
+                    billing_source_job_id=source_job.billing_source_job_id or source_job.job_id,
+                    billing_amount=source_job.billing_amount,
+                    billing_status=CONTENT_FACTORY_BILLING_STATUS_REUSED,
+                    billing_ledger_id=source_job.billing_ledger_id,
                 )
             return data
         else:

@@ -721,6 +721,8 @@ class ContentFactoryAppArticleView(APIView):
                     delivery_mode_confirmed=True,
                     request_source=CONTENT_FACTORY_REQUEST_SOURCE,
                     billing_user=request.user,
+                    expected_cost_points=data.get("expected_cost_points", data.get("expectedCostPoints")),
+                    client_request_id=data.get("client_request_id"),
                 )
             else:
                 article_request = {
@@ -739,6 +741,7 @@ class ContentFactoryAppArticleView(APIView):
                     "user_first_name": request.user.first_name,
                     "user_last_name": request.user.last_name,
                     "user_avatar_url": request.user.avatar_url,
+                    **{key: data[key] for key in ("expected_cost_points", "expectedCostPoints") if key in data},
                 }
                 result = trigger_article_generation(
                     actor_id,
@@ -753,6 +756,8 @@ class ContentFactoryAppArticleView(APIView):
         except ArticleGenerationError as exc:
             payload = getattr(exc, "payload", None)
             if isinstance(payload, dict):
+                if payload.get("code") == "roo_points_quote_changed":
+                    return Response(payload, status=status.HTTP_409_CONFLICT)
                 return Response(payload, status=status.HTTP_412_PRECONDITION_FAILED)
             return Response({"error": str(exc)}, status=status.HTTP_409_CONFLICT)
 

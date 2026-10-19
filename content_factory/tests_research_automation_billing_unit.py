@@ -133,14 +133,14 @@ class ResearchAutomationBillingTests(SimpleTestCase):
     def test_article_confirmation_does_not_reuse_previous_research_quote(self):
         original = {"roo_points_action": "content_island_topic_generation", "expectedCostPoints": 3,
                     "client_request_id": "research-key"}
-        job = Obj(job_id="research-1", client_request_id="research-key", request_meta=original,
+        job = Obj(job_id="research-1", domain="fixture.test", client_request_id="research-key", request_meta=original,
                   billing_status="charged", save=Mock())
         def charge(actor, payload, domain, **kwargs):
             self.assertNotIn("expectedCostPoints", payload)
             return self.user, Obj(pk=14), 6
         with patch.object(billing, "_charge_content_factory_request", side_effect=charge):
             billing._charge_deferred_discovery_job_if_needed(source_job=job, slack_user_id="mlai_user:7",
-                domain="fixture.test", confirmed_keyword="Culture")
+                domain="fixture.test", confirmed_keyword="Culture", expected_cost_points=6)
         self.assertEqual(job.billing_amount, 6)
         self.assertEqual(job.request_meta["roo_points_action"], "article_generation")
         self.assertEqual(original["expectedCostPoints"], 3)

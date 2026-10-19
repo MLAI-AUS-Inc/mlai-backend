@@ -175,10 +175,49 @@ retries. For older clients, a generated request identity stays unchanged through
 queue transport retries. Confirmation timeout responses retain the
 `confirm_topic` operation identity.
 
-`expectedCostPoints` (or legacy `expected_cost_points`) is optional for older
-clients. New clients submit their confirmed integer quote. A changed/invalid
-quote returns 409 `roo_points_quote_changed` with the current `costPoints`
-before any debit. Research keys are bound to payer/startup; ledger and remote
+New article admission through founder HTTP/MCP, the authenticated Articles app,
+and Roo API-key generation/confirmation requires the confirmed integer
+`expectedCostPoints` (or legacy `expected_cost_points`) in the request body.
+Missing, null, changed or invalid quotes return 409 `roo_points_quote_changed`
+with the current `costPoints` before website reservation, debit or dispatch.
+A retry may omit the quote only after a recorded positive `CONTENT_FACTORY`
+spend with that request key is verified against the same company payer. It
+retains the original price, including historical six-point charges; a request
+key alone or another payer's debit cannot grant consent. Original payload,
+website authority and billing lineage checks still apply. Internal first-article
+goal dispatch consumes its persisted explicit consent and reservation.
+API-key authentication and a saved job's billing status do not establish price
+consent. Replayed jobs also require their original article-spend proof, normalized
+startup domain and current resolved company payer; a research debit cannot be
+reused as an article payment. Confirmation forwards only the newly submitted
+article quote and strips the prior research quote. Already paid six-point work
+does not need to accept today's twelve-point price.
+
+`POST /api/v1/content/quote` is a price-only read protected by `HasStrictRooApiKey`.
+Supply `slack_user_id` or `requested_by_slack_user_id` (the latter selects the
+actual requester when both are present), and `domain` or `source_run_id`.
+Optional `client_request_id` and `source_run_id` select verified original paid
+work; a paid source must match its original request key. Research/deferred
+confirmation may supply a new stable article key, retained through payment and
+retries. A source-only
+read resolves its saved domain before checking founder ownership. The response
+is HTTP 200 with exactly `{"costPoints": 12}` or the applicable integer price,
+including six-point benefits and verified original six-point article payments.
+Unknown/inactive actors and unowned domains are refused. Cross-company,
+changed-payer, refunded or unproven original payments cannot supply a replay
+quote. Paid research returns the new article quote. This read creates no user,
+wallet, reservation, debit or provider operation and does not activate setup.
+Caller-supplied billing users and cost fields are ignored.
+
+Roo/Slack/Chat callers must display the returned article price, obtain explicit
+confirmation and submit that exact integer using a stable request identity.
+On 409 `roo_points_quote_changed`, show the returned price for reconfirmation;
+do not retry automatically at a higher price. Older clients without confirmed
+quotes safely receive 409 for new paid work.
+
+Research keeps omitted-quote compatibility for older clients. A supplied
+changed/invalid quote returns the same 409 before any debit. Research keys are
+bound to payer/startup; ledger and remote
 dispatch share the same key. Retry reuses a durable run. An ambiguous queue
 response holds the debit until key lookup establishes whether the worker
 accepted it; confirmed rejection uses the existing idempotent refund path.

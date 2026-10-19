@@ -26,7 +26,8 @@ from integrations.services.article_generation import (
     promote_article_bundle,
     trigger_article_generation,
 )
-from roo.models import PointsAccount
+from roo.models import Ledger, PointsAccount
+from roo.services import PointsService
 from tests.website_fixtures import bind_verified_target_fixture, install_github_provider_fixture
 
 
@@ -106,7 +107,100 @@ class ArticleGenerationServiceTest(TestCase):
             "user_avatar_url": "https://avatar.test/writer.png",
         }
         request.update(overrides)
+        if request.get('topic'):
+            request.setdefault('expected_cost_points', 12)
         return request
+
+    def _record_article_payment(self, job, *, amount=12):
+        key = f'paid:{job.job_id}'
+        ledger, _ = PointsService.spend(user=self.user, delta=amount, source='CONTENT_FACTORY',
+            description='Confirmed article fixture', idempotency_key=f'content_factory:charge:{key}',
+            reference_type='CONTENT_FACTORY', reference_id=key)
+        job.client_request_id = key
+        job.billing_ledger = ledger
+        job.billing_amount = amount
+        job.billing_status = 'charged'
+        job.request_meta = {**job.request_meta, 'roo_points_action': 'article_generation'}
+        job.save()
+        return ledger
+
+    @patch("integrations.services.article_generation.http_requests.post")
+    def test_new_article_without_quote_cannot_spend_or_dispatch(self, post):
+        with self.assertRaises(ArticleGenerationError) as error:
+            trigger_article_generation(self.slack_user_id, self._article_request(expected_cost_points=None))
+        self.assertEqual(error.exception.payload['code'], 'roo_points_quote_changed')
+        self.assertFalse(Ledger.objects.filter(kind='SPEND').exists())
+        self.user.points_account.refresh_from_db()
+        self.assertEqual(self.user.points_account.balance, 20)
+        post.assert_not_called()
+
+    @patch("integrations.services.article_generation.http_requests.post")
+    def test_uncharged_job_status_cannot_bypass_missing_article_quote(self, post):
+        self._source_job(job_id='fabricated-paid-job', domain='mlai.au', slack_user_id=self.slack_user_id,
+            client_request_id='content-factory-service-request', billing_status='charged')
+        with self.assertRaises(ArticleGenerationError) as error:
+            trigger_article_generation(self.slack_user_id, self._article_request(expected_cost_points=None))
+        self.assertEqual(error.exception.payload['code'], 'roo_points_quote_changed')
+        self.assertFalse(Ledger.objects.filter(kind='SPEND').exists())
+        post.assert_not_called()
+
+    @patch("integrations.services.article_generation.http_requests.post")
+    def test_verified_original_six_point_job_replays_without_quote_or_second_debit(self, post):
+        job = self._source_job(job_id='original-paid-job', domain='mlai.au', slack_user_id=self.slack_user_id,
+            status='queued', request_meta={'topic': 'AI Agents'})
+        ledger = self._record_article_payment(job, amount=6)
+        for _ in range(2):
+            result = trigger_article_generation(self.slack_user_id,
+                self._article_request(client_request_id=job.client_request_id, expected_cost_points=None))
+            self.assertEqual(result['job_id'], job.job_id)
+        self.assertEqual(Ledger.objects.filter(kind='SPEND').count(), 1)
+        self.assertEqual(ContentFactoryJob.objects.get(job_id=job.job_id).billing_ledger_id, ledger.pk)
+        self.user.points_account.refresh_from_db()
+        self.assertEqual(self.user.points_account.balance, 14)
+        post.assert_not_called()
+
+    @patch("integrations.services.article_generation.http_requests.post")
+    def test_paid_research_confirmation_without_article_quote_cannot_spend_or_dispatch(self, post):
+        ledger, _ = PointsService.spend(user=self.user, delta=3, source='CONTENT_FACTORY',
+            description='Research payment', idempotency_key='content_factory:topic_generation:charge:research-key',
+            reference_type='CONTENT_FACTORY', reference_id='research-key')
+        job = self._source_job(job_id='paid-research', domain='mlai.au', slack_user_id=self.slack_user_id,
+            client_request_id='research-key', billing_status='charged', billing_ledger=ledger, billing_amount=3,
+            request_meta={'roo_points_action': 'content_island_topic_generation', 'expectedCostPoints': 3})
+        with self.assertRaises(ArticleGenerationError) as error:
+            confirm_topic(domain='mlai.au', confirmed_keyword='agentic', slack_user_id=self.slack_user_id,
+                source_run_id=job.job_id, client_request_id='content-factory-confirm-paid-research')
+        self.assertEqual(error.exception.payload['code'], 'roo_points_quote_changed')
+        self.assertEqual(Ledger.objects.filter(kind='SPEND').count(), 1)
+        self.user.points_account.refresh_from_db()
+        self.assertEqual(self.user.points_account.balance, 17)
+        post.assert_not_called()
+
+    @patch("integrations.services.article_generation.http_requests.post")
+    def test_confirmed_research_retains_new_article_key_and_replays_without_quote(self, post):
+        ledger, _ = PointsService.spend(user=self.user, delta=3, source='CONTENT_FACTORY',
+            description='Research payment', idempotency_key='content_factory:topic_generation:charge:research-key',
+            reference_type='CONTENT_FACTORY', reference_id='research-key')
+        job = self._source_job(job_id='paid-research', domain='mlai.au', slack_user_id=self.slack_user_id,
+            client_request_id='research-key', billing_status='charged', billing_ledger=ledger, billing_amount=3,
+            request_meta={'roo_points_action': 'content_island_topic_generation', 'expectedCostPoints': 3})
+        post.return_value.status_code = 202
+        post.return_value.json.return_value = {'job_id': 'confirmed-research-child', 'status': 'queued'}
+        kwargs = dict(domain='mlai.au', confirmed_keyword='agentic', slack_user_id=self.slack_user_id,
+            source_run_id=job.job_id, client_request_id='content-factory-confirm-paid-research')
+        first = confirm_topic(**kwargs, expected_cost_points=12)
+        repeated = confirm_topic(**kwargs)
+        self.assertEqual(first['job_id'], repeated['job_id'])
+        post.assert_called_once()
+        job.refresh_from_db()
+        child = ContentFactoryJob.objects.get(job_id=first['job_id'])
+        self.assertEqual(job.client_request_id, kwargs['client_request_id'])
+        self.assertEqual(child.client_request_id, job.client_request_id)
+        self.assertEqual(child.billing_ledger_id, job.billing_ledger_id)
+        self.assertNotEqual(child.billing_ledger_id, ledger.pk)
+        self.assertEqual(Ledger.objects.filter(kind='SPEND').count(), 2)
+        self.user.points_account.refresh_from_db()
+        self.assertEqual(self.user.points_account.balance, 5)
 
     @patch("integrations.services.article_generation.http_requests.post")
     def test_trigger_generation_payload(self, mock_post):
@@ -371,6 +465,7 @@ class ArticleGenerationServiceTest(TestCase):
                 slack_user_id=self.slack_user_id,
                 custom_title="Agentic AI",
                 request_source="roo_slackbot",
+                expected_cost_points=12,
             )
 
         self.assertEqual(result["job_id"], "job_confirm_123")
@@ -393,7 +488,7 @@ class ArticleGenerationServiceTest(TestCase):
         mock_post.return_value.json.return_value = {"job_id": "confirmed-paid-article", "status": "queued"}
         kwargs = dict(domain="mlai.au", confirmed_keyword="agentic ai", slack_user_id=self.slack_user_id,
             request_source="roo_slackbot", client_request_id="confirmed-paid-request")
-        first = confirm_topic(**kwargs)
+        first = confirm_topic(**kwargs, expected_cost_points=12)
         repeated = confirm_topic(**kwargs)
         self.assertEqual(first["job_id"], repeated["job_id"])
         mock_post.assert_called_once()
@@ -421,6 +516,7 @@ class ArticleGenerationServiceTest(TestCase):
                 requested_by_slack_user_id=self.requester_actor_id,
                 custom_title="Agentic AI",
                 request_source="roo_slackbot",
+                expected_cost_points=12,
             )
 
         self.assertEqual(result["job_id"], "job_confirm_delegated_123")
@@ -436,6 +532,7 @@ class ArticleGenerationServiceTest(TestCase):
             slack_user_id=self.slack_user_id,
             status="awaiting_confirmation",
         )
+        ledger = self._record_article_payment(source_job, amount=6)
         child_job = self._source_job(
             job_id="job-child-active-123",
             domain="mlai.au",
@@ -446,6 +543,8 @@ class ArticleGenerationServiceTest(TestCase):
                 "topic": "Agentic AI",
                 "target_keyword": "agentic ai",
             },
+            client_request_id=source_job.client_request_id, billing_ledger=ledger,
+            billing_amount=6, billing_status='reused',
         )
 
         result = confirm_topic(
@@ -471,6 +570,7 @@ class ArticleGenerationServiceTest(TestCase):
                 confirmed_keyword="agentic ai",
                 slack_user_id=self.slack_user_id,
                 request_source="roo_slackbot",
+                expected_cost_points=12,
             )
 
         self.assertEqual(exc.exception.payload["error_code"], "CONTENT_FACTORY_UNAVAILABLE")
@@ -840,6 +940,7 @@ class ArticleGenerationServiceTest(TestCase):
                 "delivery_mode_confirmed": True,
             },
         )
+        self._record_article_payment(source_job)
 
         mock_response = MagicMock()
         mock_response.status_code = 202

@@ -44,7 +44,7 @@ class OneClickBillingFixture(WebsiteDatabaseFixture):
             description='Synthetic test funding', idempotency_key='synthetic-funding')
         self.actor = preferred_actor_id_for_user(self.requester)
         self.context = SimpleNamespace(organization=self.org, company=self.company)
-        self.request = SimpleNamespace(user=self.requester, data={})
+        self.request = SimpleNamespace(user=self.requester, data={'expectedCostPoints': 12})
         # Billing starts from a real persisted Ready integration. Provider
         # observations alone cannot satisfy the final, locked admission check.
         verified_at = timezone.now()
@@ -79,6 +79,58 @@ class OneClickBillingFixture(WebsiteDatabaseFixture):
 
 
 class OneClickPersistenceTests(OneClickBillingFixture, TestCase):
+    def assert_quote_rejected_without_new_work(self, *, spends=0):
+        _, _, _, error = self.charge(self.payload())
+        self.assertEqual(error.status_code, 409)
+        self.assertEqual(error.data['code'], 'roo_points_quote_changed')
+        self.assertEqual(error.data['costPoints'], 12)
+        self.assertEqual(self.balance(self.payer), 20_000_000)
+        self.assertEqual(Ledger.objects.filter(kind='SPEND').count(), spends)
+        self.assertFalse(ContentFactoryDispatchOutbox.objects.exists())
+        self.assertFalse(WebsiteConnectionOperation.objects.filter(action='workflow').exists())
+
+    def test_missing_or_invalid_article_quote_is_rejected_before_new_work(self):
+        for data in ({}, {'expectedCostPoints': None}, {'expected_cost_points': None},
+                {'expectedCostPoints': True}, {'expectedCostPoints': '12'},
+                {'expectedCostPoints': 12.0}, {'expectedCostPoints': 0}):
+            with self.subTest(data=data):
+                self.request.data = data
+                # The payload's price is not the caller's confirmed quote.
+                self.assert_quote_rejected_without_new_work()
+
+    def test_fabricated_request_id_without_original_payment_cannot_bypass_quote(self):
+        self.request.data = {'clientRequestId': 'synthetic-article'}
+        self.assert_quote_rejected_without_new_work()
+
+    def test_original_debit_from_another_payer_cannot_bypass_missing_quote(self):
+        PointsService.credit_purchased_topup(user=self.requester, delta=20,
+            description='Synthetic other wallet', idempotency_key='other-wallet-funding')
+        PointsService.spend(user=self.requester, delta=6, source='CONTENT_FACTORY',
+            description='Other payer article', created_by_slack_id=self.actor,
+            idempotency_key='content_factory:charge:synthetic-article',
+            reference_type='CONTENT_FACTORY', reference_id='synthetic-article')
+        self.request.data = {}
+        self.assert_quote_rejected_without_new_work(spends=1)
+        self.assertEqual(self.balance(self.requester), 14_000_000)
+
+    def test_omitted_quote_retry_reuses_original_six_point_debit_once(self):
+        original, _ = PointsService.spend(user=self.payer, delta=6, source='CONTENT_FACTORY',
+            description='Previously confirmed article', created_by_slack_id=self.actor,
+            idempotency_key='content_factory:charge:synthetic-article',
+            reference_type='CONTENT_FACTORY', reference_id='synthetic-article')
+        self.request.data = {}
+        for _ in range(2):
+            payload = {**self.payload(), 'expected_cost_points': 6}
+            payer, ledger, _, error = self.charge(payload)
+            self.assertIsNone(error)
+            self.assertEqual((payer.pk, ledger.pk), (self.payer.pk, original.pk))
+        self.assertEqual(self.balance(self.payer), 14_000_000)
+        self.assertEqual(Ledger.objects.filter(kind='SPEND').count(), 1)
+        self.assertEqual(ContentFactoryDispatchOutbox.objects.count(), 1)
+        row = ContentFactoryDispatchOutbox.objects.get()
+        self.assertEqual(row.payload['request']['roo_points_cost'], 6)
+        self.assertEqual(row.payload['billing_user_id'], str(self.payer.pk))
+
     def test_stale_article_quote_is_rejected_before_debit_or_dispatch(self):
         self.request.data = {'expectedCostPoints': 6}
         _, _, _, error = self.charge(self.payload())
@@ -557,6 +609,7 @@ class MCPResearchPersistenceTests(OneClickBillingFixture, TestCase):
 
     def setUp(self):
         super().setUp()
+        self.request.data = {}  # Research retains omitted-quote compatibility.
         PointsService.credit_purchased_topup(user=self.requester, delta=20,
             description='Synthetic research funding', idempotency_key='research-funding')
 
