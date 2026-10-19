@@ -2209,12 +2209,12 @@ class VibeMarketingAutofillTests(TestCase):
         self.assertEqual(captured["source_run_id"], "discovery-selection-1")
         self.assertEqual(captured["client_request_id"], "vibe-article-selected-1")
         self.assertEqual(captured["roo_points_action"], "article_generation")
-        self.assertEqual(captured["roo_points_cost"], 6)
+        self.assertEqual(captured["roo_points_cost"], 12)
         self.assertEqual(captured["roo_points_billing_status"], "charged")
         self.assertTrue(captured["roo_points_ledger_id"])
         self.assertNotIn("source_discovery_run_id", captured)
         self.user.points_account.refresh_from_db()
-        self.assertEqual(self.user.points_account.balance, 14)
+        self.assertEqual(self.user.points_account.balance, 8)
 
     @override_settings(CONTENT_FACTORY_URL="https://content-factory.test", CONTENT_FACTORY_API_KEY="secret-key", IS_LOCAL_ENV=False)
     def test_article_start_accepts_legacy_frontend_stored_keyword_topic_id(self):
