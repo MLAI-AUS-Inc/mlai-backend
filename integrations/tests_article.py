@@ -135,6 +135,145 @@ class ArticleGenerationServiceTest(TestCase):
         post.assert_not_called()
 
     @patch("integrations.services.article_generation.http_requests.post")
+    def test_raw_article_debit_needs_same_company_proof_and_cannot_reuse_a_refund(self, post):
+        from integrations.services.article_generation import _charge_content_factory_user, _refund_content_factory_request
+        from content_factory.dispatch_models import ContentFactoryDispatchOutbox
+        for shape in ('unbound', 'other-company', 'refunded', 'valid-six', 'valid-twelve'):
+            with self.subTest(shape=shape):
+                amount = 12 if shape == 'valid-twelve' else 6
+                PointsService.credit_purchased_topup(user=self.user, delta=amount,
+                    description='Replay fixture funding', idempotency_key=f'funding-{shape}')
+                key = f'raw-{shape}'
+                original, _ = PointsService.spend(user=self.user, delta=amount, source='CONTENT_FACTORY',
+                    description='Original article fixture', idempotency_key=f'content_factory:charge:{key}',
+                    reference_type='CONTENT_FACTORY', reference_id=key)
+                if shape != 'unbound':
+                    if shape == 'other-company':
+                        other_org = Organization.objects.create(domain='other.test', name='Other startup')
+                        VibeRaisingCompany.objects.create(profile=self.profile, organization=other_org,
+                            name='Other startup', domain=other_org.domain)
+                    ContentFactoryJob.objects.create(job_id=f'proof-{shape}', client_request_id=key,
+                        domain='other.test' if shape == 'other-company' else 'mlai.au',
+                        billing_ledger=original, billing_amount=amount)
+                payload = {'client_request_id': key, 'topic': 'AI Agents'}
+                if shape == 'refunded':
+                    refund = _refund_content_factory_request(user=self.user, slack_user_id=self.slack_user_id,
+                        article_request=payload, resolved_domain='mlai.au', reason='Original failed request')
+                    # No refunded job may be required to detect the ledger marker.
+                    ContentFactoryJob.objects.filter(client_request_id=key).delete()
+                    ContentFactoryDispatchOutbox.objects.create(client_request_id=key, organization=self.org,
+                        payload={'billing_user_id': str(self.user.pk), 'request': {
+                            'domain': 'mlai.au', 'roo_points_ledger_id': str(original.pk)}})
+                    repeated = _refund_content_factory_request(user=self.user, slack_user_id=self.slack_user_id,
+                        article_request=payload, resolved_domain='mlai.au', reason='Repeated failed request')
+                    self.assertEqual(refund.pk, repeated.pk)
+                before = PointsService.get_balance(self.user)['balance']
+                spends = Ledger.objects.filter(kind='SPEND').count()
+                if shape.startswith('valid-'):
+                    _, replay, points = _charge_content_factory_user(user=self.user, created_by_slack_id=self.slack_user_id,
+                        article_request=payload, resolved_domain='mlai.au', prevalidated_admission=True)
+                    self.assertEqual((replay.pk, points), (original.pk, amount))
+                else:
+                    with self.assertRaises(ArticleGenerationError) as error:
+                        _charge_content_factory_user(user=self.user, created_by_slack_id=self.slack_user_id,
+                            article_request=payload, resolved_domain='mlai.au', prevalidated_admission=True)
+                    self.assertEqual(error.exception.code, 'content_factory_billing_key_conflict')
+                self.assertEqual(PointsService.get_balance(self.user)['balance'], before)
+                self.assertEqual(Ledger.objects.filter(kind='SPEND').count(), spends)
+        post.assert_not_called()
+
+    def test_quote_and_paid_source_reject_unavailable_configured_payer_with_typed_error(self):
+        from types import SimpleNamespace
+        from content_factory.content_views import ContentQuoteView
+        from integrations.services.article_generation import _require_article_job_payment
+        source = self._source_job(job_id='original-payer-source', domain='mlai.au', slack_user_id=self.slack_user_id)
+        self._record_article_payment(source, amount=6)
+        for active in (False, True):
+            with self.subTest(active=active):
+                payer = User.objects.create_user(email=f'unavailable-{active}@example.test', is_active=active)
+                self.org.billing_user = payer
+                self.org.save(update_fields=['billing_user'])
+                response = ContentQuoteView().post(SimpleNamespace(data={
+                    'domain': 'mlai.au', 'requested_by_slack_user_id': self.requester_actor_id}))
+                self.assertEqual((response.status_code, response.data['code']), (409, 'company_billing_founder_unavailable'))
+                with self.assertRaises(ArticleGenerationError) as error:
+                    _require_article_job_payment(source, user=self.user, domain='mlai.au')
+                self.assertEqual(error.exception.payload['code'], 'company_billing_founder_unavailable')
+        self.assertEqual(Ledger.objects.filter(kind='SPEND').count(), 1)
+        self.assertEqual(PointsService.get_balance(self.user)['balance'], 14)
+
+    def test_shared_charge_revalidates_a_concurrently_inserted_other_company_debit(self):
+        from integrations.services.article_generation import _charge_content_factory_user
+        spend = PointsService.spend
+        key = 'concurrent-other-company'
+        other_org = Organization.objects.create(domain='other.test', name='Other startup')
+        VibeRaisingCompany.objects.create(profile=self.profile, organization=other_org, name='Other startup', domain=other_org.domain)
+        originals = []
+        def competing_spend(**kwargs):
+            original, _ = spend(**kwargs)
+            originals.append(original)
+            ContentFactoryJob.objects.create(job_id='other-company-concurrent-proof', domain='other.test',
+                client_request_id=key, billing_ledger=original, billing_amount=12)
+            return spend(**kwargs)
+        with patch.object(PointsService, 'spend', side_effect=competing_spend):
+            with self.assertRaises(ArticleGenerationError) as error:
+                _charge_content_factory_user(user=self.user, created_by_slack_id=self.slack_user_id,
+                    article_request={'client_request_id': key, 'topic': 'AI Agents', 'expected_cost_points': 12},
+                    resolved_domain='mlai.au', prevalidated_admission=True)
+        self.assertEqual(error.exception.code, 'content_factory_billing_key_conflict')
+        self.assertEqual(Ledger.objects.filter(kind='SPEND').count(), 1)
+        self.assertEqual(Ledger.objects.get(kind='SPEND').pk, originals[0].pk)
+        self.assertEqual(PointsService.get_balance(self.user)['balance'], 8)
+        self.assertFalse(Ledger.objects.filter(kind='REFUND').exists())
+        self.assertEqual(ContentFactoryJob.objects.get(client_request_id=key).domain, 'other.test')
+
+    @patch("integrations.services.article_generation.http_requests.post")
+    def test_source_only_six_point_replay_preserves_key_and_rejects_changed_scope_payer_or_refund(self, post):
+        from integrations.services.article_generation import quote_content_factory_article
+        source = self._source_job(job_id='source-only-six', domain='mlai.au', slack_user_id=self.slack_user_id)
+        original = self._record_article_payment(source, amount=6)
+        self.assertEqual(quote_content_factory_article(actor_id=self.requester_actor_id, source_run_id=source.job_id), 6)
+        post.return_value.status_code = 202
+        post.return_value.json.return_value = {'job_id': 'source-only-child', 'status': 'queued'}
+        kwargs = dict(domain='mlai.au', confirmed_keyword='AI Agents', slack_user_id=self.slack_user_id, source_run_id=source.job_id)
+        first = confirm_topic(**kwargs)
+        self.assertEqual(confirm_topic(**kwargs)['job_id'], first['job_id'])
+        self.assertEqual(ContentFactoryJob.objects.get(job_id=first['job_id']).client_request_id, source.client_request_id)
+        post.assert_called_once()
+        with self.assertRaises(PermissionError):
+            quote_content_factory_article(actor_id=self.requester_actor_id, source_run_id=source.job_id, client_request_id='different-key')
+        with self.assertRaises(ArticleGenerationError):
+            confirm_topic(**kwargs, client_request_id='different-key')
+        with self.assertRaises(PermissionError):
+            quote_content_factory_article(actor_id=self.requester_actor_id, source_run_id=source.job_id, domain='other.test')
+        with self.assertRaises(ArticleGenerationError):
+            confirm_topic(**{**kwargs, 'domain': 'other.test'})
+        payer = User.objects.create_user(email='changed-payer@example.test')
+        profile = VibeRaisingProfile.objects.create(user=payer, role='founder')
+        VibeRaisingCompany.objects.create(profile=profile, organization=self.org, name='Test Org', domain='mlai.au')
+        self.org.billing_user = payer
+        self.org.save(update_fields=['billing_user'])
+        with self.assertRaises(ArticleGenerationError):
+            quote_content_factory_article(actor_id=self.requester_actor_id, source_run_id=source.job_id)
+        with self.assertRaises(ArticleGenerationError):
+            confirm_topic(**kwargs)
+        self.assertEqual(Ledger.objects.filter(kind='SPEND').count(), 1)
+        self.assertEqual(PointsService.get_balance(self.user)['balance'], 14)
+        self.org.billing_user = None
+        self.org.save(update_fields=['billing_user'])
+        PointsService.refund(user=self.user, delta=6, source='CONTENT_FACTORY', description='Original refund',
+            idempotency_key=f'content_factory:refund:{source.client_request_id}', original_spend_key=original.idempotency_key,
+            reference_type='CONTENT_FACTORY', reference_id=source.client_request_id)
+        with self.assertRaises(ArticleGenerationError):
+            quote_content_factory_article(actor_id=self.requester_actor_id, source_run_id=source.job_id)
+        with self.assertRaises(ArticleGenerationError):
+            confirm_topic(**kwargs)
+        self.assertEqual(Ledger.objects.filter(kind='SPEND').count(), 1)
+        self.assertEqual(Ledger.objects.filter(kind='REFUND').count(), 1)
+        self.assertEqual(PointsService.get_balance(self.user)['balance'], 20)
+        post.assert_called_once()
+
+    @patch("integrations.services.article_generation.http_requests.post")
     def test_uncharged_job_status_cannot_bypass_missing_article_quote(self, post):
         self._source_job(job_id='fabricated-paid-job', domain='mlai.au', slack_user_id=self.slack_user_id,
             client_request_id='content-factory-service-request', billing_status='charged')
@@ -219,6 +358,42 @@ class ArticleGenerationServiceTest(TestCase):
         self.assertIsNone(source.billing_ledger_id)
         self.user.points_account.refresh_from_db()
         self.assertEqual(self.user.points_account.balance, 14)
+        post.assert_not_called()
+
+    @patch("integrations.services.article_generation.http_requests.post")
+    def test_existing_unpaid_or_conflicting_child_cannot_leave_rejected_confirmation_charged(self, post):
+        for research in (False, True):
+            for conflicting_child in (False, True):
+                with self.subTest(research=research, conflicting_child=conflicting_child):
+                    suffix = f'{research}-{conflicting_child}'
+                    key = f'research-{suffix}'
+                    research_ledger = None
+                    if research:
+                        research_ledger, _ = PointsService.spend(user=self.user, delta=3, source='CONTENT_FACTORY',
+                            description='Research fixture', idempotency_key=f'content_factory:topic_generation:charge:{key}',
+                            reference_type='CONTENT_FACTORY', reference_id=key)
+                    source = self._source_job(job_id=key, domain='mlai.au', slack_user_id=self.slack_user_id,
+                        client_request_id=key, billing_status='charged' if research else 'deferred',
+                        billing_ledger=research_ledger, billing_amount=3 if research else 0,
+                        request_meta={'roo_points_action': 'content_island_topic_generation'} if research else {})
+                    child = self._source_job(job_id=f'child-{suffix}', domain='mlai.au', slack_user_id=self.slack_user_id,
+                        status='queued', request_meta={'source_run_id': source.job_id, 'topic': 'Agentic AI'})
+                    if conflicting_child:
+                        self._record_article_payment(child, amount=6)
+                    original = (source.client_request_id, source.billing_ledger_id, source.billing_amount,
+                        source.billing_status, dict(source.request_meta))
+                    before_balance = PointsService.get_balance(self.user)['balance']
+                    before_spends = Ledger.objects.filter(kind='SPEND').count()
+                    with self.assertRaises(ArticleGenerationError) as error:
+                        confirm_topic(domain='mlai.au', confirmed_keyword='Agentic AI', slack_user_id=self.slack_user_id,
+                            source_run_id=source.job_id, client_request_id=f'article-{suffix}', expected_cost_points=12)
+                    self.assertEqual(error.exception.code, 'content_factory_billing_key_conflict')
+                    source.refresh_from_db()
+                    self.assertEqual((source.client_request_id, source.billing_ledger_id, source.billing_amount,
+                        source.billing_status, source.request_meta), original)
+                    self.assertEqual(PointsService.get_balance(self.user)['balance'], before_balance)
+                    self.assertEqual(Ledger.objects.filter(kind='SPEND').count(), before_spends)
+                    self.assertFalse(Ledger.objects.filter(kind='REFUND').exists())
         post.assert_not_called()
 
     @patch("integrations.services.article_generation.http_requests.post")

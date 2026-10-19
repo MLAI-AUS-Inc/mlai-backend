@@ -584,7 +584,7 @@ class ContentGenerateView(APIView):
             return _handle_insufficient_roo_points_error(e)
         except ArticleGenerationError as e:
             logger.warning(f"Generation error: {e}")
-            if getattr(e, "payload", {}).get("code") == "roo_points_quote_changed":
+            if getattr(e, "payload", {}).get("code") in {"roo_points_quote_changed", "company_billing_founder_unavailable"}:
                 return Response(e.payload, status=status.HTTP_409_CONFLICT)
             error_str = str(e)
 
@@ -919,7 +919,7 @@ class ContentConfirmView(APIView):
             return _handle_insufficient_roo_points_error(e)
         except ArticleGenerationError as e:
             error_str = str(e)
-            if getattr(e, "payload", {}).get("code") == "roo_points_quote_changed":
+            if getattr(e, "payload", {}).get("code") in {"roo_points_quote_changed", "company_billing_founder_unavailable"}:
                 return Response(e.payload, status=status.HTTP_409_CONFLICT)
             if error_str.startswith("PREREQUISITE_MISSING:"):
                 return _handle_prerequisite_error(
@@ -1185,7 +1185,7 @@ class ContentJobConfirmView(APIView):
             return _handle_insufficient_roo_points_error(e)
         except ArticleGenerationError as e:
             error_str = str(e)
-            if getattr(e, "payload", {}).get("code") == "roo_points_quote_changed":
+            if getattr(e, "payload", {}).get("code") in {"roo_points_quote_changed", "company_billing_founder_unavailable"}:
                 return Response(e.payload, status=status.HTTP_409_CONFLICT)
             if error_str.startswith("PREREQUISITE_MISSING:"):
                 return _handle_prerequisite_error(

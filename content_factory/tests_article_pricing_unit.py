@@ -174,6 +174,18 @@ class ArticleQuoteReadTests(SimpleTestCase):
             with self.assertRaises(PermissionError):
                 self.quote(client_request_id="original")
 
+    def test_unavailable_company_payer_returns_typed_quote_and_source_denials(self):
+        from .content_views import ContentQuoteView
+        from .website_contract import WebsiteAuthorityError
+        job = self.paid_job()
+        with patch("content_factory.company_billing.resolve_content_billing_user", side_effect=WebsiteAuthorityError(
+                "company_billing_founder_unavailable", "Update company billing.")):
+            response = ContentQuoteView().post(Obj(data={"domain": "example.test", "slack_user_id": "U7"}))
+            self.assertEqual((response.status_code, response.data["code"]), (409, "company_billing_founder_unavailable"))
+            with self.assertRaises(service.ArticleGenerationError) as error:
+                service._require_article_job_payment(job, user=self.user, domain="example.test")
+            self.assertEqual(error.exception.payload["code"], "company_billing_founder_unavailable")
+
     @override_settings(ROO_API_KEY="synthetic-quote-key")
     def test_registered_endpoint_requires_strict_key_and_returns_integer_quote(self):
         from django.urls import resolve
@@ -247,6 +259,11 @@ class ArticleAdmissionQuoteTests(SimpleTestCase):
         self.enterContext(patch("content_factory.company_billing.resolve_content_billing_user", return_value=self.payer))
         self.ledgers = self.enterContext(patch("roo.models.Ledger.objects.filter"))
         self.ledgers.return_value.first.return_value = None
+        self.ledgers.return_value.exists.return_value = False
+        self.lineage_jobs = self.enterContext(patch("content_factory.models.ContentFactoryJob.objects.filter"))
+        self.lineage_jobs.return_value.exists.return_value = False
+        outboxes = self.enterContext(patch("content_factory.dispatch_models.ContentFactoryDispatchOutbox.objects.filter"))
+        outboxes.return_value.first.return_value = None
         self.editorial = self.enterContext(patch.object(views, "_refresh_article_editorial_payload", return_value=None))
         self.reservation = self.enterContext(patch.object(views, "_reserve_article_start_connection", return_value=None))
         self.admission = self.enterContext(patch.object(views, "_validate_article_start_admission"))
@@ -292,14 +309,17 @@ class ArticleAdmissionQuoteTests(SimpleTestCase):
 
     def test_foreign_payer_or_non_article_debit_cannot_replace_consent(self):
         for payer_id, source in ((self.user.pk, "CONTENT_FACTORY"), (self.payer.pk, "OTHER")):
-            self.ledgers.return_value.first.return_value = Obj(user_id=payer_id,
-                source=source, delta_microroo=-6_000_000)
+            self.ledgers.return_value.first.return_value = Obj(pk=10, user_id=payer_id, kind="SPEND",
+                source=source, delta_microroo=-6_000_000, idempotency_key="content_factory:charge:article-7",
+                reference_type="CONTENT_FACTORY", reference_id="article-7")
             with self.subTest(payer_id=payer_id, source=source):
                 self.assert_rejected_before_new_work(self.charge_request({}, client_request_id="article-7"))
 
     def test_omitted_quote_retry_accepts_verified_same_payer_original_price(self):
-        original = Obj(id=10, user_id=self.payer.pk, source="CONTENT_FACTORY", delta_microroo=-6_000_000)
+        original = Obj(pk=10, id=10, user_id=self.payer.pk, kind="SPEND", source="CONTENT_FACTORY", delta_microroo=-6_000_000,
+            idempotency_key="content_factory:charge:article-7", reference_type="CONTENT_FACTORY", reference_id="article-7")
         self.ledgers.return_value.first.return_value = original
+        self.lineage_jobs.return_value.exists.return_value = True
         self.charge.return_value = (self.payer, original, 6)
         result = self.charge_request({}, client_request_id="article-7")
         self.assertEqual(result[:2], (self.payer, original))
@@ -308,8 +328,10 @@ class ArticleAdmissionQuoteTests(SimpleTestCase):
         self.assertEqual(self.outbox.call_args.kwargs["payload"]["roo_points_cost"], 6)
 
     def test_paid_retry_cannot_bypass_an_invalid_supplied_quote(self):
-        self.ledgers.return_value.first.return_value = Obj(user_id=self.payer.pk,
-            source="CONTENT_FACTORY", delta_microroo=-6_000_000)
+        self.ledgers.return_value.first.return_value = Obj(pk=10, user_id=self.payer.pk, kind="SPEND",
+            source="CONTENT_FACTORY", delta_microroo=-6_000_000, idempotency_key="content_factory:charge:article-7",
+            reference_type="CONTENT_FACTORY", reference_id="article-7")
+        self.lineage_jobs.return_value.exists.return_value = True
         self.assert_rejected_before_new_work(self.charge_request({"expectedCostPoints": "6"}, client_request_id="article-7"), cost_points=6)
 
     def test_body_forged_goal_fields_cannot_replace_consent(self):
@@ -328,16 +350,81 @@ class ArticleAdmissionQuoteTests(SimpleTestCase):
         self.assertIsNone(views._quoted_price_response(Obj(data={}), cost_points=3))
 
 
+class ArticleOriginalAdmissionProofTests(SimpleTestCase):
+    def test_original_debit_requires_same_company_and_no_refund_before_shared_spend(self):
+        user = Obj(pk=7)
+        ledger = Obj(pk=10, user_id=7, kind="SPEND", source="CONTENT_FACTORY", delta_microroo=-6_000_000,
+            idempotency_key="content_factory:charge:original", reference_type="CONTENT_FACTORY", reference_id="original")
+        row = Obj(organization_id=9, payload={"billing_user_id": "7", "request": {
+            "domain": "example.test", "roo_points_ledger_id": "10"}})
+        for shape in ("same-company", "other-company", "unbound", "refunded"):
+            with self.subTest(shape=shape), patch.object(service, "require_article_activation"), \
+                 patch("content_factory.company_billing.resolve_content_billing_user", return_value=user), \
+                 patch("roo.models.Ledger.objects.filter") as ledgers, \
+                 patch("organizations.models.Organization.objects.filter") as organizations, \
+                 patch("content_factory.models.ContentFactoryJob.objects.filter") as jobs, \
+                 patch("content_factory.dispatch_models.ContentFactoryDispatchOutbox.objects.filter") as outboxes, \
+                 patch("roo.services.PointsService.spend", return_value=(ledger, False)) as spend:
+                ledgers.return_value.first.return_value = ledger
+                ledgers.return_value.exists.return_value = shape == "refunded"
+                organizations.return_value.only.return_value.first.return_value = Obj(pk=20 if shape == "other-company" else 9)
+                jobs.return_value.exists.return_value = False
+                jobs.return_value.order_by.return_value.first.return_value = None
+                outboxes.return_value.first.return_value = None if shape == "unbound" else row
+                kwargs = dict(user=user, created_by_slack_id="mlai_user:7", article_request={"client_request_id": "original"},
+                    resolved_domain="other.test" if shape == "other-company" else "example.test")
+                if shape == "same-company":
+                    self.assertEqual(service._charge_content_factory_user(**kwargs)[2], 6)
+                    spend.assert_called_once()
+                else:
+                    with self.assertRaises(service.ArticleGenerationError) as error:
+                        service._charge_content_factory_user(**kwargs)
+                    self.assertEqual(error.exception.code, "content_factory_billing_key_conflict")
+                    spend.assert_not_called()
+
+
+    def test_concurrent_reused_debit_is_revalidated_for_company_and_refund(self):
+        user = Obj(pk=7)
+        ledger = Obj(pk=10, user_id=7, kind="SPEND", source="CONTENT_FACTORY", delta_microroo=-12_000_000,
+            idempotency_key="content_factory:charge:original", reference_type="CONTENT_FACTORY", reference_id="original")
+        for shape in ("same-company", "other-company", "refunded"):
+            with self.subTest(shape=shape), patch.object(service, "require_article_activation"), \
+                 patch.object(service, "get_content_factory_article_cost_points", return_value=12), \
+                 patch("content_factory.company_billing.resolve_content_billing_user", return_value=user), \
+                 patch("roo.models.Ledger.objects.filter") as ledgers, \
+                 patch("organizations.models.Organization.objects.filter") as organizations, \
+                 patch("content_factory.models.ContentFactoryJob.objects.filter") as jobs, \
+                 patch("content_factory.dispatch_models.ContentFactoryDispatchOutbox.objects.filter") as outboxes, \
+                 patch("roo.services.PointsService.spend", return_value=(ledger, False)) as spend:
+                ledgers.return_value.first.side_effect = [None, ledger]
+                ledgers.return_value.exists.return_value = shape == "refunded"
+                organizations.return_value.only.return_value.first.return_value = Obj(pk=9)
+                jobs.return_value.order_by.return_value.first.return_value = None
+                outboxes.return_value.first.return_value = Obj(organization_id=20 if shape == "other-company" else 9,
+                    payload={"billing_user_id": "7", "request": {"domain": "example.test", "roo_points_ledger_id": "10"}})
+                kwargs = dict(user=user, created_by_slack_id="mlai_user:7", article_request={
+                    "client_request_id": "original", "expected_cost_points": 12}, resolved_domain="example.test")
+                if shape == "same-company":
+                    self.assertEqual(service._charge_content_factory_user(**kwargs)[2], 12)
+                else:
+                    with self.assertRaises(service.ArticleGenerationError) as error:
+                        service._charge_content_factory_user(**kwargs)
+                    self.assertEqual(error.exception.code, "content_factory_billing_key_conflict")
+                spend.assert_called_once()
+
+
 class ArticlePricingTests(SimpleTestCase):
     def setUp(self):
         self.user = Obj(pk=7, email="pricing@example.test")
 
     def confirmation_io(self, job):
         self.enterContext(patch.object(service, "require_article_activation"))
+        self.enterContext(patch.object(service, "_find_active_confirm_child_job", return_value=None))
         self.enterContext(patch.object(service.transaction, "atomic", side_effect=nullcontext))
         rows = self.enterContext(patch("content_factory.models.ContentFactoryJob.objects.select_for_update"))
         rows.return_value.get.return_value = job
         ledgers = self.enterContext(patch("roo.models.Ledger.objects.filter"))
+        ledgers.return_value.first.return_value = None
         ledgers.return_value.exists.return_value = False
         return rows, ledgers
 
@@ -384,11 +471,20 @@ class ArticlePricingTests(SimpleTestCase):
     def charge(self, *, price, expected, existing=None, require_new_charge=False, created=None):
         with patch.object(service, "require_article_activation"), \
              patch("content_factory.company_billing.resolve_content_billing_user", return_value=self.user), \
-             patch.object(service, "_original_content_charge_points", return_value=-existing.delta if existing is not None else 0), \
+             patch("roo.models.Ledger.objects.filter") as ledgers, \
+             patch("organizations.models.Organization.objects.filter") as organizations, \
+             patch("content_factory.dispatch_models.ContentFactoryDispatchOutbox.objects.filter") as outboxes, \
              patch.object(service, "get_content_factory_article_cost_points", return_value=price), \
              patch("content_factory.models.ContentFactoryJob.objects") as jobs, \
              patch("roo.services.PointsService.spend", return_value=(Obj(pk=9), existing is None if created is None else created)) as spend:
             self.last_spend = spend
+            ledgers.return_value.first.return_value = (Obj(pk=9, user_id=7, kind="SPEND", source="CONTENT_FACTORY",
+                idempotency_key="content_factory:charge:article-7", reference_type="CONTENT_FACTORY", reference_id="article-7",
+                delta_microroo=existing.delta * 1_000_000) if existing else None)
+            ledgers.return_value.exists.return_value = False
+            organizations.return_value.only.return_value.first.return_value = Obj(pk=9)
+            outboxes.return_value.first.return_value = None
+            jobs.filter.return_value.exists.return_value = bool(existing)
             jobs.filter.return_value.order_by.return_value.first.return_value = None
             result = service._charge_content_factory_user(user=self.user, created_by_slack_id="mlai_user:7",
                 article_request={"client_request_id": "article-7", "expectedCostPoints": expected}, resolved_domain="mlai.au",
@@ -478,7 +574,6 @@ class ArticlePricingTests(SimpleTestCase):
             with self.subTest(research=research), patch.object(service, "require_article_activation"), \
                  patch.object(service, "_validate_authenticated_content_factory_actor"), \
                  patch("content_factory.company_billing.resolve_content_billing_user", return_value=self.user), \
-                 patch.object(service, "_original_content_charge_points", return_value=0), \
                  patch.object(service, "get_content_factory_article_cost_points", return_value=12), \
                  patch("roo.services.PointsService.spend") as spend:
                 with self.assertRaises(service.ArticleGenerationError) as error:
@@ -489,6 +584,25 @@ class ArticlePricingTests(SimpleTestCase):
                 job.save.assert_not_called()
                 self.assertEqual(original["expectedCostPoints"], 3)
                 self.assertEqual(original["expected_cost_points"], 3)
+
+    def test_source_only_research_or_deferred_confirmation_keeps_saved_stable_key(self):
+        for research in (False, True):
+            metadata = {"client_request_id": "persisted-source-key"}
+            if research:
+                metadata["roo_points_action"] = "content_island_topic_generation"
+            source = Obj(pk=7, job_id="research-7", domain="example.test", client_request_id="persisted-source-key",
+                request_meta=metadata, billing_status="charged" if research else "deferred", save=Mock())
+            self.confirmation_io(source)
+            with self.subTest(research=research), patch.object(service, "_charge_content_factory_request",
+                    return_value=(self.user, Obj(pk=9), 12)) as charge:
+                result = service._charge_deferred_discovery_job_if_needed(source_job=source, slack_user_id="mlai_user:7",
+                    domain="example.test", confirmed_keyword="Founder tools", expected_cost_points=12, billing_user=self.user)
+            self.assertEqual(charge.call_args.args[1]["client_request_id"], "persisted-source-key")
+            self.assertEqual(result.client_request_id, "persisted-source-key")
+            self.assertEqual(result.request_meta["client_request_id"], "persisted-source-key")
+            self.assertEqual(result.billing_amount, 12)
+            self.assertTrue(result._article_confirmation_charge_created)
+            charge.assert_called_once()
 
     def test_research_source_cannot_adopt_or_refund_an_unrelated_article_key(self):
         job = Obj(pk=7, domain="example.test", job_id="research", client_request_id="research-key",
@@ -503,6 +617,27 @@ class ArticlePricingTests(SimpleTestCase):
                 self.assertEqual(error.exception.code, "content_factory_billing_key_conflict")
                 charge.assert_not_called()
                 job.save.assert_not_called()
+
+    def test_existing_unpaid_child_rejects_confirmation_before_source_debit(self):
+        source = Obj(pk=7, domain="example.test", job_id="research", client_request_id="research-key",
+            request_meta={"roo_points_action": "content_island_topic_generation"}, billing_status="charged",
+            billing_ledger_id=None, billing_amount=3, slack_channel_id="", slack_thread_ts="",
+            slack_root_message_ts="", progress_message_ts="", save=Mock())
+        child = Obj(domain="example.test", request_meta={"source_run_id": "research"})
+        self.confirmation_io(source)
+        ledger = Obj(pk=9, user_id=7, idempotency_key="content_factory:charge:article-key", delta_microroo=-12_000_000)
+        with patch("content_factory.models.ContentFactoryJob.objects.filter") as jobs, \
+             patch.object(service, "_find_active_confirm_child_job", return_value=child), \
+             patch.object(service, "_charge_content_factory_request", return_value=(self.user, ledger, 12)) as charge, \
+             patch("content_factory.billing_lineage.original_spend_for_job", side_effect=lambda job: ledger if getattr(job, "client_request_id", None) == "article-key" else None), \
+             patch("content_factory.company_billing.resolve_content_billing_user", return_value=self.user), \
+             patch.object(service, "get_content_factory_article_cost_points", return_value=12):
+            jobs.return_value.first.return_value = source
+            with self.assertRaises(service.ArticleGenerationError):
+                service.confirm_topic(domain="example.test", confirmed_keyword="Founder tools", slack_user_id="mlai_user:7",
+                    source_run_id="research", client_request_id="article-key", expected_cost_points=12, billing_user=self.user)
+        charge.assert_not_called()
+        source.save.assert_not_called()
 
     def test_competing_key_reloads_paid_source_under_lock_before_another_debit(self):
         stale = Obj(pk=7, domain="example.test", job_id="research", request_meta={"roo_points_action": "content_island_topic_generation"}, billing_status="charged")

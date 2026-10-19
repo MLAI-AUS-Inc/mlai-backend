@@ -113,11 +113,30 @@ class OneClickPersistenceTests(OneClickBillingFixture, TestCase):
         self.assert_quote_rejected_without_new_work(spends=1)
         self.assertEqual(self.balance(self.requester), 14_000_000)
 
+    def test_other_company_debit_cannot_supply_omitted_quote_consent(self):
+        from .models import ContentFactoryJob
+        original, _ = PointsService.spend(user=self.payer, delta=6, source='CONTENT_FACTORY',
+            description='Other company article', created_by_slack_id=self.actor,
+            idempotency_key='content_factory:charge:synthetic-article',
+            reference_type='CONTENT_FACTORY', reference_id='synthetic-article')
+        ContentFactoryJob.objects.create(job_id='other-company-proof', domain='other.example.test',
+            client_request_id='synthetic-article', billing_ledger=original, billing_amount=6)
+        self.request.data = {}
+        _, _, _, error = self.charge(self.payload())
+        self.assertEqual((error.status_code, error.data['code']), (409, 'roo_points_quote_changed'))
+        self.assertEqual(self.balance(self.payer), 14_000_000)
+        self.assertEqual(Ledger.objects.filter(kind='SPEND').count(), 1)
+        self.assertFalse(ContentFactoryDispatchOutbox.objects.exists())
+        self.assertFalse(WebsiteConnectionOperation.objects.filter(action='workflow').exists())
+
     def test_omitted_quote_retry_reuses_original_six_point_debit_once(self):
         original, _ = PointsService.spend(user=self.payer, delta=6, source='CONTENT_FACTORY',
             description='Previously confirmed article', created_by_slack_id=self.actor,
             idempotency_key='content_factory:charge:synthetic-article',
             reference_type='CONTENT_FACTORY', reference_id='synthetic-article')
+        from .models import ContentFactoryJob
+        ContentFactoryJob.objects.create(job_id='original-six-point-article', domain=self.org.domain,
+            client_request_id='synthetic-article', billing_ledger=original, billing_amount=6, billing_status='charged')
         self.request.data = {}
         for _ in range(2):
             payload = {**self.payload(), 'expected_cost_points': 6}

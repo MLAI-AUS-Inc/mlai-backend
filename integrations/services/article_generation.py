@@ -679,10 +679,42 @@ def _require_content_factory_ai_agent_points(
     return user, current_balance
 
 
+def _article_billing_user(requester, domain):
+    from content_factory.company_billing import resolve_content_billing_user
+    from content_factory.website_contract import WebsiteAuthorityError
+    try:
+        return resolve_content_billing_user(requester, domain)
+    except WebsiteAuthorityError as exc:
+        error = ArticleGenerationError(str(exc))
+        error.code = exc.code
+        error.payload = exc.as_dict()
+        raise error from exc
+
+
+def _original_article_admission_points(user, key, *, domain, article_request=None, organization_id=None):
+    """A debit supplies consent only with its original unrefunded company proof."""
+    from content_factory.billing_lineage import ARTICLE_CHARGE_PREFIX, _matches_charge, _same_company_charge
+    from roo.models import Ledger
+    charge = Ledger.objects.filter(idempotency_key=ARTICLE_CHARGE_PREFIX + key, kind="SPEND").first()
+    if charge is None:
+        return 0
+    domain = normalize_domain(domain)
+    valid = charge.user_id == user.pk and _matches_charge(charge, article_request or {}, prefix=ARTICLE_CHARGE_PREFIX, key=key)
+    if valid and organization_id is None:
+        organization = Organization.objects.filter(domain=domain).only("pk").first()
+        organization_id = organization.pk if organization else None
+    if (not valid or not organization_id or not _same_company_charge(charge,
+            organization_id=organization_id, domain=domain, key=key)
+            or Ledger.objects.filter(idempotency_key="content_factory:refund:" + key, kind="REFUND").exists()):
+        error = ArticleGenerationError("The original article payment is unavailable for this company and request.")
+        error.code = "content_factory_billing_key_conflict"
+        raise error
+    return -charge.delta_microroo // 1_000_000
+
+
 def _require_article_job_payment(job, *, user, domain, expected_cost_points=None):
     """A saved status is not article consent; require its original scoped spend."""
     from content_factory.billing_lineage import ARTICLE_CHARGE_PREFIX, original_spend_for_job
-    from content_factory.company_billing import resolve_content_billing_user
     from roo.models import Ledger
 
     def conflict():
@@ -695,7 +727,7 @@ def _require_article_job_payment(job, *, user, domain, expected_cost_points=None
     original = original_spend_for_job(job)
     if original and not str(original.idempotency_key).startswith(ARTICLE_CHARGE_PREFIX):
         original = None  # A paid research run does not authorize an article.
-    payer = resolve_content_billing_user(user, domain)
+    payer = _article_billing_user(user, domain)
     if original and (original.user_id != payer.pk or getattr(job, "billing_status", "") == CONTENT_FACTORY_BILLING_STATUS_REFUNDED
             or Ledger.objects.filter(idempotency_key=original.idempotency_key.replace(ARTICLE_CHARGE_PREFIX, "content_factory:refund:", 1), kind="REFUND").exists()):
         raise conflict()
@@ -758,7 +790,6 @@ def quote_content_factory_article(*, actor_id, domain=None, client_request_id=No
     """Read an owned founder's article price without activation or account writes."""
     from content_factory.activation import founder_context_for_domain
     from content_factory.billing_lineage import ARTICLE_CHARGE_PREFIX, _matches_charge, _same_company_charge
-    from content_factory.company_billing import resolve_content_billing_user
     from content_factory.models import ContentFactoryJob
     from integrations.services.github_installations import resolve_user_for_actor_id
     from roo.models import Ledger
@@ -774,6 +805,7 @@ def quote_content_factory_article(*, actor_id, domain=None, client_request_id=No
             raise ArticleGenerationError("The source article request is unavailable.")
     domain = normalize_domain(domain or (job.domain if job else ""))
     context = founder_context_for_domain(user, domain)
+    payer = _article_billing_user(user, domain)
     current_cost = get_content_factory_article_cost_points(domain, user=user)
     if not source_run_id and client_request_id:
         job = ContentFactoryJob.objects.filter(client_request_id=client_request_id).order_by("-updated_at", "-created_at").first()
@@ -789,7 +821,6 @@ def quote_content_factory_article(*, actor_id, domain=None, client_request_id=No
     if client_request_id:
         original = Ledger.objects.filter(idempotency_key=ARTICLE_CHARGE_PREFIX + client_request_id, kind="SPEND").first()
         if original:
-            payer = resolve_content_billing_user(user, domain)
             if (original.user_id != payer.pk or not _matches_charge(original, {}, prefix=ARTICLE_CHARGE_PREFIX, key=client_request_id)
                     or not _same_company_charge(original, organization_id=context.organization.pk, domain=domain, key=client_request_id)):
                 raise PermissionError("The original article payment does not belong to this startup and payer.")
@@ -878,16 +909,13 @@ def _charge_content_factory_user(
 
     if not prevalidated_admission:
         require_article_activation(domain=resolved_domain, actor_id=created_by_slack_id, user=user, article_request=article_request)
-    from content_factory.company_billing import resolve_content_billing_user
     requester = user
-    try:
-        user = resolve_content_billing_user(requester, resolved_domain)
-    except ValueError as exc:
-        raise ArticleGenerationError(str(exc)) from exc
+    user = _article_billing_user(requester, resolved_domain)
     article_request.update(roo_points_requested_by_user_id=requester.pk, roo_points_billing_user_id=user.pk)
     client_request_id = _get_client_request_id(article_request)
     try:
-        original_cost = _original_content_charge_points(user, f"content_factory:charge:{client_request_id}")
+        original_cost = _original_article_admission_points(user, client_request_id,
+            domain=resolved_domain, article_request=article_request)
     except ArticleGenerationError as exc:
         exc.code = "content_factory_billing_key_conflict"
         raise
@@ -926,6 +954,11 @@ def _charge_content_factory_user(
         )
         if require_new_charge and not created:
             error = ArticleGenerationError("This article payment was already claimed by another confirmation.")
+            error.code = "content_factory_billing_key_conflict"
+            raise error
+        if not created and _original_article_admission_points(user, client_request_id,
+                domain=resolved_domain, article_request=article_request) != cost_points:
+            error = ArticleGenerationError("The original article payment changed during admission.")
             error.code = "content_factory_billing_key_conflict"
             raise error
     except InsufficientBalanceError:
@@ -1635,6 +1668,15 @@ def _charge_discovery_article_locked(*, source_job, slack_user_id, domain, confi
             domain=domain, expected_cost_points=expected_cost_points)
         source_job._article_confirmation_charge_created = False
         return source_job
+
+    # A research source cannot prove payment for an existing article child.
+    # Reject under the source lock before committing a new debit; validating
+    # that child after this transaction would leave a rejected request charged.
+    if _find_active_confirm_child_job(source_run_id=source_job.job_id,
+            confirmed_keyword=confirmed_keyword, custom_title=custom_title):
+        error = ArticleGenerationError("The source already has an article without matching original payment. Refresh that article before confirming again.")
+        error.code = "content_factory_billing_key_conflict"
+        raise error
 
     request_meta = dict(getattr(source_job, "request_meta", {}) or {})
     if requested_by_slack_user_id:
@@ -3322,7 +3364,10 @@ def confirm_topic(
         deferred_charge_started = bool(getattr(source_job, "_article_confirmation_charge_created", False))
         progress_message_ts = source_job.progress_message_ts or progress_message_ts
 
-    existing_child_job = _find_active_confirm_child_job(
+    # New charges checked for children under the source lock before billing.
+    # A child appearing afterward must not turn this charged dispatch into a
+    # rejected replay. Only an already-paid source may reuse an existing child.
+    existing_child_job = None if deferred_charge_started else _find_active_confirm_child_job(
         source_run_id=source_run_id,
         confirmed_keyword=confirmed_keyword,
         custom_title=custom_title,

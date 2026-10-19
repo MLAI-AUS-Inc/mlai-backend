@@ -854,10 +854,11 @@ def _charge_roo_points_for_article(request, *, context, payload: dict, goal_oper
             or _request_value(request.data, "client_request_id", "clientRequestId", default="") or "").strip()
         if existing_key:
             from .company_billing import resolve_content_billing_user
-            from integrations.services.article_generation import _original_content_charge_points
+            from integrations.services.article_generation import _original_article_admission_points
             try:
                 payer = resolve_content_billing_user(request.user, context.organization.domain)
-                original_cost = _original_content_charge_points(payer, f"content_factory:charge:{existing_key}")
+                original_cost = _original_article_admission_points(payer, existing_key,
+                    domain=context.organization.domain, organization_id=context.organization.pk)
             except (ArticleGenerationError, WebsiteAuthorityError):
                 original_cost = 0
             if original_cost:

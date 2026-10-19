@@ -183,8 +183,14 @@ with the current `costPoints` before website reservation, debit or dispatch.
 A retry may omit the quote only after a recorded positive `CONTENT_FACTORY`
 spend with that request key is verified against the same company payer. It
 retains the original price, including historical six-point charges; a request
-key alone or another payer's debit cannot grant consent. Original payload,
-website authority and billing lineage checks still apply. Internal first-article
+key alone or another payer's debit cannot grant consent. Original payload and
+website authority checks still apply. Company-bound outbox/job proof and the absence of a refund marker are required
+before an original debit can supply admission, even without a saved charged
+job. Unbound historical ledger rows fail closed and require reconciliation;
+they cannot authorize a new company request. Refund-only original-spend lookup
+and repeated refunds retain their existing behavior. An inactive or former
+configured billing founder returns a typed 409 denial on quote/source reads.
+Internal first-article
 goal dispatch consumes its persisted explicit consent and reservation.
 API-key authentication and a saved job's billing status do not establish price
 consent. Replayed jobs also require their original article-spend proof, normalized
@@ -195,12 +201,18 @@ does not need to accept today's twelve-point price.
 Historical app confirmation children without copied billing fields may reuse
 their linked, already-paid source after the same domain and payer checks.
 Partial or conflicting child payment records cannot use this fallback.
+Research/deferred confirmation checks for an existing active child under the
+source lock before a new article debit. An incompatible child is rejected
+without changing the source payment or requiring a compensating refund.
 
 `POST /api/v1/content/quote` is a price-only read protected by `HasStrictRooApiKey`.
 Supply `slack_user_id` or `requested_by_slack_user_id` (the latter selects the
 actual requester when both are present), and `domain` or `source_run_id`.
 Optional `client_request_id` and `source_run_id` select verified original paid
-work; a paid source must match its original request key. Research/deferred
+work; a supplied paid-source key must match its original request key.
+Source-only quote and confirmation may omit `client_request_id`; the backend
+resolves the source's saved key after domain/payer/payment/refund checks.
+An explicitly supplied mismatched paid-source key is rejected. Research/deferred
 confirmation may supply a new stable article key, retained through payment and
 retries. A source-only
 read resolves its saved domain before checking founder ownership. The response

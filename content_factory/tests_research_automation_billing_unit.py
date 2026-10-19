@@ -140,6 +140,7 @@ class ResearchAutomationBillingTests(SimpleTestCase):
             return self.user, Obj(pk=14), 6
         from contextlib import nullcontext
         with patch.object(billing, "_charge_content_factory_request", side_effect=charge), \
+             patch.object(billing, "_find_active_confirm_child_job", return_value=None), \
              patch.object(billing, "require_article_activation"), \
              patch.object(billing.transaction, "atomic", side_effect=nullcontext), \
              patch("content_factory.models.ContentFactoryJob.objects.select_for_update") as rows, \

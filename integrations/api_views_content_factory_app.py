@@ -756,7 +756,7 @@ class ContentFactoryAppArticleView(APIView):
         except ArticleGenerationError as exc:
             payload = getattr(exc, "payload", None)
             if isinstance(payload, dict):
-                if payload.get("code") == "roo_points_quote_changed":
+                if payload.get("code") in {"roo_points_quote_changed", "company_billing_founder_unavailable"}:
                     return Response(payload, status=status.HTTP_409_CONFLICT)
                 return Response(payload, status=status.HTTP_412_PRECONDITION_FAILED)
             return Response({"error": str(exc)}, status=status.HTTP_409_CONFLICT)
