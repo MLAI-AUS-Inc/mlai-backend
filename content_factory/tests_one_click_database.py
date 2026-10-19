@@ -48,7 +48,7 @@ class OneClickBillingFixture(WebsiteDatabaseFixture):
 
     def payload(self, key='synthetic-article'):
         return {**self.binding, 'domain': self.org.domain, 'github_repo': self.website.github_repo,
-            'client_request_id': key, 'topic': 'Synthetic article', 'expected_cost_points': 6}
+            'client_request_id': key, 'topic': 'Synthetic article', 'expected_cost_points': 12}
 
     def charge(self, payload):
         # Only the provider-backed readiness read is mocked. Wallet choice,
@@ -72,7 +72,7 @@ class OneClickPersistenceTests(OneClickBillingFixture, TestCase):
         self.assertIsNone(error)
         self.assertEqual(ledger.pk, repeated_ledger.pk)
         self.assertEqual(payer.pk, self.payer.pk)
-        self.assertEqual(self.balance(self.payer), 14_000_000)
+        self.assertEqual(self.balance(self.payer), 8_000_000)
         self.assertFalse(Ledger.objects.filter(user=self.requester, kind='SPEND').exists())
         self.assertEqual(Ledger.objects.filter(kind='SPEND').count(), 1)
         row = ContentFactoryDispatchOutbox.objects.get()
@@ -105,7 +105,7 @@ class OneClickPersistenceTests(OneClickBillingFixture, TestCase):
         self.assertEqual(error.status_code, 409)
         self.assertEqual(error.data['code'], 'content_factory_billing_key_conflict')
         self.assertEqual(Ledger.objects.filter(kind='SPEND').count(), 1)
-        self.assertEqual(self.balance(self.payer), 14_000_000)
+        self.assertEqual(self.balance(self.payer), 8_000_000)
         self.assertFalse(Ledger.objects.filter(user=self.requester).exists())
         row = ContentFactoryDispatchOutbox.objects.get()
         self.assertEqual(row.payload['billing_user_id'], str(self.payer.pk))
@@ -120,7 +120,7 @@ class OneClickPersistenceTests(OneClickBillingFixture, TestCase):
         self.assertEqual(error.data['code'], 'operation_key_conflict')
         self.assertEqual(Ledger.objects.filter(kind='SPEND').count(), 1)
         self.assertEqual(ContentFactoryDispatchOutbox.objects.count(), 1)
-        self.assertEqual(self.balance(self.payer), 14_000_000)
+        self.assertEqual(self.balance(self.payer), 8_000_000)
 
     def test_disconnect_during_admission_fences_the_transaction_before_any_spend(self):
         def disconnect(*args, **kwargs):
@@ -219,7 +219,7 @@ class OneClickPersistenceTests(OneClickBillingFixture, TestCase):
         self.assertEqual(run.result['draft'], 'Retained reviewed article')
         self.assertEqual(ContentFactoryDispatchOutbox.objects.get().state, 'delivered')
         self.assertFalse(Ledger.objects.filter(kind='REFUND').exists())
-        self.assertEqual(self.balance(self.payer), 14_000_000)
+        self.assertEqual(self.balance(self.payer), 8_000_000)
 
     def test_deferred_refund_retries_original_spend_and_preserves_newer_result(self):
         payload = self.payload()
@@ -268,13 +268,13 @@ class OneClickPersistenceTests(OneClickBillingFixture, TestCase):
         source = self.paid_source()
         job = ContentFactoryJob.objects.create(job_id=source.run_id, domain=self.org.domain,
             slack_user_id=self.actor, client_request_id=source.run_request['client_request_id'],
-            billing_status='charged', billing_amount=6, billing_ledger=self.spend(),
+            billing_status='charged', billing_amount=12, billing_ledger=self.spend(),
             request_meta={**source.run_request, 'requested_by_slack_user_id': self.actor,
                 'user_email': self.requester.email})
         self.org.billing_user = None
         self.org.save(update_fields=['billing_user'])
         self.assertEqual(maybe_auto_refund_terminal_failure(job, error_code='WORKER_RECOVERY_EXHAUSTED',
-            error_message='No draft delivered', refundable=True), (True, 6))
+            error_message='No draft delivered', refundable=True), (True, 12))
         job.refresh_from_db()
         self.assertEqual(job.billing_status, 'refunded')
         self.assertEqual(maybe_auto_refund_terminal_failure(job, error_code='WORKER_RECOVERY_EXHAUSTED',
@@ -293,7 +293,7 @@ class OneClickPersistenceTests(OneClickBillingFixture, TestCase):
         job = ContentFactoryJob.objects.create(job_id=source.run_id, domain=self.org.domain,
             slack_user_id=self.actor, status='researching',
             client_request_id=source.run_request['client_request_id'], billing_status='charged',
-            billing_amount=6, billing_ledger=self.spend(), request_meta=source.run_request)
+            billing_amount=12, billing_ledger=self.spend(), request_meta=source.run_request)
         self.org.billing_user = None
         self.org.save(update_fields=['billing_user'])
         def unavailable_credit(**kwargs):
@@ -338,7 +338,7 @@ class OneClickPersistenceTests(OneClickBillingFixture, TestCase):
         source.save(update_fields=['run_request'])
         job = ContentFactoryJob.objects.create(job_id=source.run_id, domain=self.org.domain,
             slack_user_id=self.actor, client_request_id=source.run_request['client_request_id'],
-            billing_status='charged', billing_amount=6, billing_ledger=self.spend(), request_meta=source.run_request)
+            billing_status='charged', billing_amount=12, billing_ledger=self.spend(), request_meta=source.run_request)
         self.assertEqual(maybe_auto_refund_terminal_failure(job, error_code='WORKER_RECOVERY_EXHAUSTED',
             error_message='No draft delivered', refundable=True), (False, 0))
         source.refresh_from_db()
@@ -348,7 +348,7 @@ class OneClickPersistenceTests(OneClickBillingFixture, TestCase):
         self.assertTrue(source.result['reconciliation_refund_pending'])
         self.assertEqual(source.result['article_terminal_refund']['status'], 'pending')
         self.assertFalse(Ledger.objects.filter(kind='REFUND').exists())
-        self.assertEqual(self.balance(self.payer), 14_000_000)
+        self.assertEqual(self.balance(self.payer), 8_000_000)
 
     def test_terminal_paid_job_without_run_payment_metadata_stays_pending(self):
         from .models import ContentFactoryJob
@@ -359,7 +359,7 @@ class OneClickPersistenceTests(OneClickBillingFixture, TestCase):
         source.save(update_fields=['run_request'])
         job = ContentFactoryJob.objects.create(job_id=source.run_id, domain=self.org.domain,
             slack_user_id=self.actor, client_request_id='unresolved-charge',
-            billing_status='charged', billing_amount=6, request_meta={})
+            billing_status='charged', billing_amount=12, request_meta={})
         self.assertEqual(maybe_auto_refund_terminal_failure(job, error_code='RUN_BUDGET_EXHAUSTED',
             error_message='No draft delivered', refundable=True), (False, 0))
         source.refresh_from_db()
@@ -369,7 +369,7 @@ class OneClickPersistenceTests(OneClickBillingFixture, TestCase):
         self.assertTrue(source.result['reconciliation_refund_pending'])
         self.assertEqual(source.result['article_terminal_refund']['status'], 'pending')
         self.assertFalse(Ledger.objects.filter(kind='REFUND').exists())
-        self.assertEqual(self.balance(self.payer), 14_000_000)
+        self.assertEqual(self.balance(self.payer), 8_000_000)
 
     def test_disconnect_reused_child_refunds_original_charge_once_after_opt_out(self):
         source = self.paid_source()
@@ -443,7 +443,7 @@ class OneClickPersistenceTests(OneClickBillingFixture, TestCase):
         self.assertFalse(op.receipt['refunded_run_ids'])
         self.assertFalse(Ledger.objects.filter(kind='REFUND').exists())
         self.assertEqual(self.balance(foreign), 4_000_000)
-        self.assertEqual(self.balance(self.payer), 14_000_000)
+        self.assertEqual(self.balance(self.payer), 8_000_000)
 
 
 class MCPResearchPersistenceTests(OneClickBillingFixture, TestCase):
@@ -548,7 +548,7 @@ class OneClickTransactionTests(OneClickBillingFixture, TransactionTestCase):
         self.assertEqual(Ledger.objects.filter(kind='SPEND').count(), 1)
         self.assertEqual(ContentFactoryDispatchOutbox.objects.count(), 1)
         self.assertEqual(WebsiteConnectionOperation.objects.filter(action='workflow').count(), 1)
-        self.assertEqual(self.balance(self.payer), 14_000_000)
+        self.assertEqual(self.balance(self.payer), 8_000_000)
 
     def test_disconnect_waits_for_complete_charge_and_outbox_transaction(self):
         entered, release, disconnect_started, disconnected = Event(), Event(), Event(), Event()

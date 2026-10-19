@@ -17,6 +17,7 @@ from content_factory.models import ArticlePublishStatus, GeneratedComponent, Key
 from founder_tools.models import VibeRaisingCompany, VibeRaisingProfile
 from organizations.models import Organization
 from roo.models import PointsAccount
+from roo.services import PointsService
 from workflow_runs.models import (
     ContentFactoryApprovalState,
     ContentFactoryRun,
@@ -6124,6 +6125,8 @@ class VibeMarketingComponentCommentTests(_PublishRetryApprovalFixture, TestCase)
         self.assertFalse(config.articles_scaffolded)
 
     def test_merge_setup_pr_marks_setup_merged_and_daily_ready(self):
+        PointsService.credit_purchased_topup(user=self.user, delta=12,
+            description="Synthetic article funding", idempotency_key="setup-merge-article-funding")
         config = self._prepare_articles_setup_gate(status="pr_created")
         config.connected_slack_user_id = "U123"
         config.save(update_fields=["connected_slack_user_id", "updated_at"])
@@ -6219,6 +6222,7 @@ class VibeMarketingComponentCommentTests(_PublishRetryApprovalFixture, TestCase)
 
         self.assertEqual(article_response.status_code, 202)
         self.assertEqual(article_response.data["runId"], "article-after-setup-merge")
+        self.assertEqual(PointsAccount.objects.get(user=self.user).balance_microroo, 0)
 
         enable_response = self.client.post(
             f"/api/v1/vibe-marketing/runs/{setup_run.run_id}/enable-daily-automation",
