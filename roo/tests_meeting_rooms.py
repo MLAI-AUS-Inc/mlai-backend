@@ -101,14 +101,79 @@ class MeetingRoomApiTests(APITestCase):
         self.assertEqual(
             {(room['slug'], room['name']) for room in response.data['rooms']},
             {
-                ('small-meeting-room', 'Small Meeting Room'),
-                ('big-meeting-room', 'Big Meeting Room'),
+                ('small-meeting-room', 'Lovelace'),
+                ('big-meeting-room', 'Turing'),
             },
         )
         self.assertTrue(
             all(set(room) == {'id', 'slug', 'name'} for room in response.data['rooms'])
         )
         self.assertFalse(MeetingRoom.objects.get(slug='meeting-room').is_active)
+
+    def test_room_rename_migration_preserves_data_and_reverses(self):
+        from importlib import import_module
+        from django.db.migrations.loader import MigrationLoader
+
+        starts_at = future_local(1, 9)
+        booking = MeetingRoomBooking.objects.create(
+            room=self.room, user=self.user, starts_at=starts_at,
+            ends_at=starts_at + timedelta(hours=1), points_cost=1,
+            client_request_id=uuid.uuid4(), requested_by_slack_id=self.user.slack_id,
+        )
+        block = MeetingRoomBlock.objects.create(
+            room=self.big_room, starts_at=starts_at,
+            ends_at=starts_at + timedelta(hours=1), reason='Maintenance',
+        )
+        MeetingRoom.objects.filter(pk=self.room.pk).update(
+            name='Small Meeting Room', is_active=False,
+        )
+        MeetingRoom.objects.filter(pk=self.big_room.pk).update(name='Big Meeting Room')
+        unrelated = MeetingRoom.objects.create(slug='conference-room', name='Conference Room')
+        rooms_before = {row['id']: row for row in MeetingRoom.objects.values()}
+        booking_before = MeetingRoomBooking.objects.values().get(pk=booking.pk)
+        block_before = MeetingRoomBlock.objects.values().get(pk=block.pk)
+        account_before = PointsAccount.objects.values().get(user=self.user)
+
+        state = MigrationLoader(connection).project_state([
+            ('roo', '0041_apple_iap_digital_credits'),
+        ])
+        migration = import_module('roo.migrations.0042_rename_meeting_rooms')
+        operation = migration.Migration.operations[0]
+        editor = connection.schema_editor()
+        # Exercise RunPython with the historical app registry and a real local DB.
+        operation.database_forwards('roo', editor, state, state)
+        operation.database_forwards('roo', editor, state, state)
+        self.assertEqual(MeetingRoom.objects.get(pk=self.room.pk).name, 'Lovelace')
+        self.assertEqual(MeetingRoom.objects.get(pk=self.big_room.pk).name, 'Turing')
+        self.assertEqual(MeetingRoom.objects.get(pk=unrelated.pk).name, 'Conference Room')
+        rooms_after = {row['id']: row for row in MeetingRoom.objects.values()}
+        self.assertEqual(rooms_before.keys(), rooms_after.keys())
+        for room_id, before in rooms_before.items():
+            self.assertEqual(
+                {k: v for k, v in before.items() if k != 'name'},
+                {k: v for k, v in rooms_after[room_id].items() if k != 'name'},
+            )
+        self.assertEqual(MeetingRoomBooking.objects.values().get(pk=booking.pk), booking_before)
+        self.assertEqual(MeetingRoomBlock.objects.values().get(pk=block.pk), block_before)
+        self.assertEqual(PointsAccount.objects.values().get(user=self.user), account_before)
+
+        operation.database_backwards('roo', editor, state, state)
+        self.assertEqual({row['id']: row for row in MeetingRoom.objects.values()}, rooms_before)
+
+    def test_room_rename_migration_does_not_recreate_missing_rooms(self):
+        from importlib import import_module
+        from django.db.migrations.loader import MigrationLoader
+
+        self.big_room.delete()
+        state = MigrationLoader(connection).project_state([
+            ('roo', '0041_apple_iap_digital_credits'),
+        ])
+        migration = import_module('roo.migrations.0042_rename_meeting_rooms')
+        operation = migration.Migration.operations[0]
+        editor = connection.schema_editor()
+        operation.database_forwards('roo', editor, state, state)
+        operation.database_backwards('roo', editor, state, state)
+        self.assertFalse(MeetingRoom.objects.filter(slug='big-meeting-room').exists())
 
     def test_two_room_migration_deactivates_other_active_rooms(self):
         from importlib import import_module
