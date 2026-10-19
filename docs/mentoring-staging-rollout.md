@@ -9,6 +9,15 @@ manual rollout described in `docs/backend-staging-development.md`.
 Nothing here has been run against a database, and no database test has been run.
 Do not start until the steps in section 1 are done.
 
+## Isolated staging profile
+
+The hosted `mlai.settings_staging_chat` profile enables mentoring for synthetic
+accounts and explicitly disables Google credentials and requests. Production
+continues to default to `MENTOR_BOOKING_ENABLED=false`. The initial migration
+still requires its exact staging-only manual gate below; it is never applied by
+the automatic updater. A rollback disables the staging flag or restores the
+previous image and retains the additive tables and audit records.
+
 ## 1. Approvals
 
 The proposed migration `mentoring/migrations/0001_initial.py` is in the branch. Still needed

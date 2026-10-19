@@ -52,6 +52,12 @@ for _name in ('MEDHACK_URL','ESAFETY_URL','WATT_THE_HACK_URL','VIBE_RAISING_URL'
 MEDIA_ROOT='/app/staging-media'
 EMAIL_BACKEND='django.core.mail.backends.locmem.EmailBackend'
 MEETING_ROOM_BOOKING_ENABLED=True
+# Synthetic mentoring uses the isolated staging database and normal account roles.
+MENTOR_BOOKING_ENABLED=True
+MENTORING_GOOGLE_ENABLED=False
+MENTORING_GOOGLE_CLIENT_ID=''
+MENTORING_GOOGLE_CLIENT_SECRET=''
+MENTORING_GOOGLE_REFRESH_TOKEN=''
 for _name in list(globals()):
     _value=globals()[_name]
     if _name.isupper() and _name.endswith(('URL','ORIGIN','BASE_URL')) and isinstance(_value,str) and 'mlai.au' in _value and 'staging.mlai.au' not in _value:
