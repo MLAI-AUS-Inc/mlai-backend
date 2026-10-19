@@ -334,6 +334,26 @@ class ArticleAdmissionQuoteTests(SimpleTestCase):
         self.lineage_jobs.return_value.exists.return_value = True
         self.assert_rejected_before_new_work(self.charge_request({"expectedCostPoints": "6"}, client_request_id="article-7"), cost_points=6)
 
+    def test_refunded_retry_returns_billing_denial_before_outbox_or_spend(self):
+        original = Obj(pk=10, user_id=self.payer.pk, kind="SPEND", source="CONTENT_FACTORY", delta_microroo=-12_000_000,
+            idempotency_key="content_factory:charge:article-7", reference_type="CONTENT_FACTORY", reference_id="article-7")
+        self.ledgers.return_value.first.return_value = original
+        self.ledgers.return_value.exists.return_value = True
+        self.lineage_jobs.return_value.exists.return_value = True
+        self.charge.side_effect = lambda **kwargs: service._charge_content_factory_user(user=kwargs["user"],
+            created_by_slack_id=kwargs["actor_id"], article_request=kwargs["article_request"],
+            resolved_domain=kwargs["resolved_domain"], prevalidated_admission=kwargs["prevalidated_admission"])
+        with patch("organizations.models.Organization.objects.filter") as organizations, \
+                patch("roo.services.PointsService.spend") as spend:
+            organizations.return_value.only.return_value.first.return_value = Obj(pk=9)
+            result = self.charge_request({"expectedCostPoints": 12}, client_request_id="article-7")
+        self.assertEqual(result[:3], (None, None, None))
+        self.assertEqual(result[3].status_code, 409)
+        self.assertEqual(result[3].data["code"], "content_factory_billing_key_conflict")
+        self.assertEqual(result[3].data["detail"], "The original article payment is unavailable for this company and request.")
+        spend.assert_not_called()
+        self.outbox.assert_not_called()
+
     def test_body_forged_goal_fields_cannot_replace_consent(self):
         fields = {"goal_operation_id": "prepare", "first_article_goal_operation_id": "prepare"}
         with patch("content_factory.website_first_article_billing.generation_key") as internal_key:

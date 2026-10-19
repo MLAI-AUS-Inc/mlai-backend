@@ -165,6 +165,9 @@ class OneClickPersistenceTests(OneClickBillingFixture, TestCase):
             description='Previously confirmed article', created_by_slack_id=self.actor,
             idempotency_key='content_factory:charge:synthetic-article',
             reference_type='CONTENT_FACTORY', reference_id='synthetic-article')
+        from .models import ContentFactoryJob
+        ContentFactoryJob.objects.create(job_id='legacy-six-point-source', domain=self.org.domain,
+            client_request_id='synthetic-article', billing_ledger=original, billing_amount=6, billing_status='charged')
         self.request.data = {'expectedCostPoints': 6}
         payload = {**self.payload(), 'expected_cost_points': 6}
         payer, ledger, _, error = self.charge(payload)
@@ -309,11 +312,24 @@ class OneClickPersistenceTests(OneClickBillingFixture, TestCase):
         deliver.assert_called_once()
         self.assertEqual(Ledger.objects.filter(kind='REFUND').count(), 1)
         self.assertEqual(self.balance(self.payer), 20_000_000)
-        with self.assertRaises(WebsiteAuthorityError) as denied:
-            self.charge(self.payload())
-        self.assertEqual(denied.exception.code, 'dispatch_already_refunded')
+        row.refresh_from_db()
+        original_outbox = (row.pk, row.state, row.attempts, deepcopy(row.payload))
+        # The shared financial guard rejects the refunded debit before the
+        # outbox's later dispatch_already_refunded exception can be reached.
+        with patch.object(dispatch_outbox, 'reserve_dispatch') as reserve, \
+                patch.object(dispatch_outbox, '_deliver') as redelivery:
+            for _ in range(2):
+                payer, ledger, amount, denied = self.charge(self.payload())
+                self.assertEqual((payer, ledger, amount), (None, None, None))
+                self.assertEqual(denied.status_code, 409)
+                self.assertEqual(denied.data['code'], 'content_factory_billing_key_conflict')
+        reserve.assert_not_called()
+        redelivery.assert_not_called()
         self.assertEqual(Ledger.objects.filter(kind='SPEND').count(), 1)
+        self.assertEqual(Ledger.objects.filter(kind='REFUND').count(), 1)
         self.assertEqual(self.balance(self.payer), 20_000_000)
+        row.refresh_from_db()
+        self.assertEqual((row.pk, row.state, row.attempts, row.payload), original_outbox)
 
     def test_late_outbox_lookup_after_disconnect_preserves_completed_history_without_refund(self):
         payload = self.payload()
