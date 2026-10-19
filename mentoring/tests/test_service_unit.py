@@ -292,6 +292,16 @@ class TransitionTests(Base):
             {'code': 'staging_integration_unavailable', 'capability': 'slack'})))
         self.assertEqual(outcome, 'failed')
 
+    def test_staging_blocks_slack_before_constructing_or_calling_client(self):
+        from mlai.staging_integrations import StagingIntegrationUnavailable
+
+        send = MagicMock(return_value=(True, '1.2'))
+        with patch('mlai.staging_integrations.require_staging_capability',
+                   side_effect=StagingIntegrationUnavailable('slack')):
+            outcome, _ = self._notify(send)
+        self.assertEqual(outcome, 'failed')
+        send.assert_not_called()
+
     def test_mentor_without_slack_is_skipped(self):
         s = make_session('requested')
         s.mentor.user.slack_id = None

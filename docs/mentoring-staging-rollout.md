@@ -6,8 +6,17 @@ mentoring commits). The auto-deploy timer will NOT ship it: the change touches
 `ops/staging-chat/auto-deploy.py` refuses both. This is the separate reviewed
 manual rollout described in `docs/backend-staging-development.md`.
 
-Nothing here has been run against a database, and no database test has been run.
-Do not start until the steps in section 1 are done.
+The guarded rollout was approved and applied to the dedicated staging database
+on 19 October 2026. Only `mentoring.0001_initial` was applied, taking its history
+from 364 to 365 entries. The original eight accounts, passwords and balances
+were preserved. Production was not changed.
+
+Synthetic mentors are assigned to `volunteer05` (video unavailable) and
+`volunteer06` (synthetic venue). Their test price is 5 Roo so existing test
+balances can exercise booking; the ordinary model default remains 40 Roo. No
+extra points were granted. Slack notification attempts are stopped by the
+staging capability guard before creating a client. Google remains disabled.
+The instructions below remain the runbook for a fresh installation.
 
 ## Isolated staging profile
 

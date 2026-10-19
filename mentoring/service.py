@@ -696,6 +696,8 @@ class MentoringService:
             if not slack_id:
                 outcome = MentorSession.NOTIFY_SKIPPED
             else:
+                from mlai.staging_integrations import require_staging_capability
+                require_staging_capability('slack')
                 from integrations.services.slack import SlackService
                 text = (
                     f'New mentor request from {_display_name(session.founder)} for '

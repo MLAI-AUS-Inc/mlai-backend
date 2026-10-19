@@ -1,10 +1,10 @@
 # Migration: mentoring 0001_initial
 
-Status: proposed initial migration for the mentoring app, ready for review. The file
-`mentoring/migrations/0001_initial.py` was generated with `makemigrations mentoring` under
-dummy no-database settings. It has NOT been applied to any production or staging database. It
-may be applied only to a local disposable database until it is reviewed. The field list below
-is the proposed list.
+Status: reviewed and approved for the dedicated `staging_account_api` database;
+applied there on 19 October 2026. Production is excluded. The file was generated
+under no-database settings, and its exact hash and sole pending migration plan
+were checked against the staging database before application. The table list
+below is the approved scope.
 
 - File sha256: `f787b567f1fcdbfc11b415d89136d85a33ba003b00935ea67f40b720d97304e9`
 
