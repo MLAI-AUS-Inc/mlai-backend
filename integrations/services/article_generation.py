@@ -3,6 +3,7 @@ import time
 from typing import Optional
 from uuid import uuid4
 from django.conf import settings
+from django.db import transaction
 from django.utils import timezone
 from datetime import timedelta
 from content_factory.article_system import (
@@ -723,6 +724,36 @@ def _get_existing_billed_source_job(client_request_id: str, *, article_request=N
     return job
 
 
+def _require_confirm_child_payment(job, *, source_job, user, domain, expected_cost_points=None):
+    """Recover legacy app children only through their already-paid source."""
+    request = dict(job.request_meta or {})
+    source_id = str(getattr(source_job, "job_id", "") or "")
+    if (not source_id or request.get("source_run_id") != source_id
+            or normalize_domain(job.domain) != normalize_domain(domain)):
+        error = ArticleGenerationError("The confirmed article does not belong to its paid source.")
+        error.code = "content_factory_billing_key_conflict"
+        raise error
+    original = _require_article_job_payment(source_job, user=user, domain=domain,
+        expected_cost_points=expected_cost_points)
+    # Before billing fields were copied to app confirmation children, only the
+    # source_run_id linked them to the paid source. Never ignore partial or
+    # conflicting payment metadata, or adopt a charge created by this call.
+    legacy = not any(getattr(job, field, None) for field in (
+        "client_request_id", "billing_source_job_id", "billing_ledger_id", "billing_amount", "billing_status")) and not any(
+            request.get(field) for field in ("client_request_id", "roo_points_ledger_id", "roo_points_billing_user_id",
+                "roo_points_cost", "roo_points_billing_status", "roo_points_action"))
+    if legacy and not getattr(source_job, "_article_confirmation_charge_created", False):
+        return original
+    child_original = _require_article_job_payment(job, user=user, domain=domain,
+        expected_cost_points=expected_cost_points)
+    source_billing_id = source_job.billing_source_job_id or source_id
+    if child_original.pk != original.pk or (job.billing_source_job_id and job.billing_source_job_id != source_billing_id):
+        error = ArticleGenerationError("The confirmed article has a conflicting original payment.")
+        error.code = "content_factory_billing_key_conflict"
+        raise error
+    return child_original
+
+
 def quote_content_factory_article(*, actor_id, domain=None, client_request_id=None, source_run_id=None):
     """Read an owned founder's article price without activation or account writes."""
     from content_factory.activation import founder_context_for_domain
@@ -839,6 +870,7 @@ def _charge_content_factory_user(
     article_request: dict,
     resolved_domain: str,
     prevalidated_admission: bool = False,
+    require_new_charge: bool = False,
 ):
     from content_factory.models import ContentFactoryJob
     from roo.permissions import IdempotencyConflictError, InsufficientBalanceError
@@ -859,6 +891,10 @@ def _charge_content_factory_user(
     except ArticleGenerationError as exc:
         exc.code = "content_factory_billing_key_conflict"
         raise
+    if require_new_charge and original_cost:
+        error = ArticleGenerationError("This article payment is already owned by another confirmation.")
+        error.code = "content_factory_billing_key_conflict"
+        raise error
     cost_points = original_cost or get_content_factory_article_cost_points(resolved_domain, user=requester)
     _require_expected_cost(article_request, cost_points, require_quote=not bool(original_cost))
     existing_refunded = (
@@ -878,7 +914,7 @@ def _charge_content_factory_user(
         return user, None, 0
 
     try:
-        ledger, _ = PointsService.spend(
+        ledger, created = PointsService.spend(
             user=user,
             delta=cost_points,
             source=CONTENT_FACTORY_LEDGER_SOURCE,
@@ -888,6 +924,10 @@ def _charge_content_factory_user(
             reference_type="CONTENT_FACTORY",
             reference_id=_ledger_reference_id(client_request_id),
         )
+        if require_new_charge and not created:
+            error = ArticleGenerationError("This article payment was already claimed by another confirmation.")
+            error.code = "content_factory_billing_key_conflict"
+            raise error
     except InsufficientBalanceError:
         raise InsufficientRooPointsError(
             build_roo_points_payload(
@@ -919,6 +959,8 @@ def _charge_content_factory_request(
     resolved_domain: str,
     *,
     billing_user=None,
+    prevalidated_admission=False,
+    require_new_charge=False,
 ):
     requested_by_slack_user_id = _resolve_requested_by_slack_user_id(slack_user_id, article_request)
     if billing_user is None:
@@ -934,6 +976,8 @@ def _charge_content_factory_request(
         created_by_slack_id=requested_by_slack_user_id,
         article_request=article_request,
         resolved_domain=resolved_domain,
+        prevalidated_admission=prevalidated_admission,
+        require_new_charge=require_new_charge,
     )
 
 
@@ -1546,7 +1590,35 @@ def _charge_deferred_discovery_job_if_needed(
     billing_user=None,
     expected_cost_points=None,
     client_request_id=None,
+    requested_by_slack_user_id=None,
 ):
+    kwargs = dict(slack_user_id=slack_user_id, domain=domain, confirmed_keyword=confirmed_keyword,
+        custom_title=custom_title, billing_user=billing_user, expected_cost_points=expected_cost_points,
+        client_request_id=client_request_id, requested_by_slack_user_id=requested_by_slack_user_id)
+    research = (source_job.request_meta or {}).get("roo_points_action") == CONTENT_FACTORY_ACTION_CONTENT_ISLAND_TOPIC_GENERATION
+    if not _job_uses_deferred_billing(source_job) and not research:
+        return _charge_discovery_article_locked(source_job=source_job, **kwargs)
+    # Provider admission must finish before taking SQL locks. Then serialize
+    # the source decision, spend and saved lineage, so competing new keys
+    # cannot debit the same research confirmation twice.
+    snapshot = dict(source_job.request_meta or {})
+    actor = requested_by_slack_user_id or _resolve_requested_by_slack_user_id(slack_user_id, snapshot)
+    require_article_activation(domain=domain, actor_id=actor, user=billing_user,
+        article_request={**snapshot, "topic": custom_title or confirmed_keyword, "target_keyword": confirmed_keyword})
+    from content_factory.models import ContentFactoryJob
+    with transaction.atomic():
+        locked = ContentFactoryJob.objects.select_for_update().get(pk=source_job.pk)
+        still_research = (locked.request_meta or {}).get("roo_points_action") == CONTENT_FACTORY_ACTION_CONTENT_ISLAND_TOPIC_GENERATION
+        if (still_research or _job_uses_deferred_billing(locked)) and locked.request_meta != snapshot:
+            error = ArticleGenerationError("The source research changed before article confirmation.")
+            error.code = "content_factory_billing_key_conflict"
+            raise error
+        return _charge_discovery_article_locked(source_job=locked, prevalidated_admission=True, **kwargs)
+
+
+def _charge_discovery_article_locked(*, source_job, slack_user_id, domain, confirmed_keyword,
+        custom_title=None, billing_user=None, expected_cost_points=None, client_request_id=None,
+        requested_by_slack_user_id=None, prevalidated_admission=False):
     if normalize_domain(source_job.domain) != normalize_domain(domain):
         error = ArticleGenerationError("The source article belongs to a different company.")
         error.code = "content_factory_billing_key_conflict"
@@ -1558,12 +1630,15 @@ def _charge_deferred_discovery_job_if_needed(
             error.code = "content_factory_billing_key_conflict"
             raise error
         from integrations.services.github_installations import resolve_user_for_actor_id
-        actor = _resolve_requested_by_slack_user_id(slack_user_id, source_job.request_meta or {})
+        actor = requested_by_slack_user_id or _resolve_requested_by_slack_user_id(slack_user_id, source_job.request_meta or {})
         _require_article_job_payment(source_job, user=billing_user or resolve_user_for_actor_id(actor),
             domain=domain, expected_cost_points=expected_cost_points)
+        source_job._article_confirmation_charge_created = False
         return source_job
 
     request_meta = dict(getattr(source_job, "request_meta", {}) or {})
+    if requested_by_slack_user_id:
+        request_meta["requested_by_slack_user_id"] = requested_by_slack_user_id
     # A research quote belongs to its earlier debit, not this separate action.
     # The shared article charge requires the caller's actual confirmation or
     # a verified original article spend; never synthesize today's quote here.
@@ -1581,11 +1656,24 @@ def _charge_deferred_discovery_job_if_needed(
         request_meta.setdefault("client_request_id",
             getattr(source_job, "client_request_id", "") or f"scheduled-confirm:{source_job.job_id}")
 
+    # A still-research source has no article payment lineage to reuse. A raw
+    # existing article key may belong to a delivered article or another startup;
+    # adopting it would also let this source refund that unrelated payment.
+    from roo.models import Ledger
+    key = request_meta["client_request_id"]
+    if (Ledger.objects.filter(idempotency_key=f"content_factory:charge:{key}", kind="SPEND").exists()
+            or Ledger.objects.filter(idempotency_key=f"content_factory:refund:{key}", kind="REFUND").exists()):
+        error = ArticleGenerationError("This article key already has a payment. Refresh its original article or use a new request.")
+        error.code = "content_factory_billing_key_conflict"
+        raise error
+
     charged_user, charge_ledger, charge_amount = _charge_content_factory_request(
         slack_user_id,
         request_meta,
         normalize_domain(domain),
         billing_user=billing_user,
+        prevalidated_admission=prevalidated_admission,
+        require_new_charge=True,
     )
     source_job.billing_source_job_id = source_job.job_id
     source_job.billing_amount = charge_amount
@@ -1609,6 +1697,7 @@ def _charge_deferred_discovery_job_if_needed(
             "updated_at",
         ]
     )
+    source_job._article_confirmation_charge_created = True
     return source_job
 
 
@@ -3217,7 +3306,7 @@ def confirm_topic(
             slack_channel_id = source_job.slack_channel_id or ""
             slack_thread_ts = source_job.slack_thread_ts or ""
             slack_root_message_ts = source_job.slack_root_message_ts or slack_thread_ts
-    deferred_charge_started = bool(source_job and (_job_uses_deferred_billing(source_job) or (source_job.request_meta or {}).get("roo_points_action") == CONTENT_FACTORY_ACTION_CONTENT_ISLAND_TOPIC_GENERATION))
+    deferred_charge_started = False
     if source_job:
         source_job = _charge_deferred_discovery_job_if_needed(
             source_job=source_job,
@@ -3228,7 +3317,9 @@ def confirm_topic(
             billing_user=requester,
             expected_cost_points=expected_cost_points,
             client_request_id=client_request_id,
+            requested_by_slack_user_id=requested_by_slack_user_id or slack_user_id,
         )
+        deferred_charge_started = bool(getattr(source_job, "_article_confirmation_charge_created", False))
         progress_message_ts = source_job.progress_message_ts or progress_message_ts
 
     existing_child_job = _find_active_confirm_child_job(
@@ -3239,7 +3330,7 @@ def confirm_topic(
     if existing_child_job:
         from integrations.services.github_installations import resolve_user_for_actor_id
         requester = billing_user or resolve_user_for_actor_id(requested_by_slack_user_id or slack_user_id)
-        _require_article_job_payment(existing_child_job, user=requester, domain=normalized_domain,
+        _require_confirm_child_payment(existing_child_job, source_job=source_job, user=requester, domain=normalized_domain,
             expected_cost_points=expected_cost_points)
         logger.info(
             "Reusing existing confirmed-topic child job %s for source_run_id=%s status=%s",

@@ -128,6 +128,16 @@ class SlackDisplayContentTests(SimpleTestCase):
         self.assertIn("https://app.slack.com/client/TMLAI/CTOPICS", text)
         self.assertNotIn("mlai_action=", text)
 
+    def test_price_confirmation_is_rendered_only_for_roos_hash_bound_card(self):
+        card = self.topics()
+        action = card['blocks'][-1]['elements'][0]
+        action.update(action_id='confirm_article_price', value='opaque-server-confirmation')
+        text = sanitize_slack_message(card, workspace_id='TMLAI', channel_id='CTOPICS')
+        self.assertIn('mlai_action=confirm_article_price', text)
+        self.assertIn(action_digest(card, action), text)
+        card['user'] = 'UOTHER'
+        self.assertNotIn('mlai_action=', sanitize_slack_message(card, workspace_id='TMLAI', channel_id='CTOPICS'))
+
     def test_plain_text_markdown_code_entities_and_link_labels(self):
         self.assertEqual(
             sanitize_slack_text("*bold* _italic_ ~old~ and `*literal*`\nnext"),

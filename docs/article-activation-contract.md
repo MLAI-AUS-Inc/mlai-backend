@@ -192,6 +192,9 @@ startup domain and current resolved company payer; a research debit cannot be
 reused as an article payment. Confirmation forwards only the newly submitted
 article quote and strips the prior research quote. Already paid six-point work
 does not need to accept today's twelve-point price.
+Historical app confirmation children without copied billing fields may reuse
+their linked, already-paid source after the same domain and payer checks.
+Partial or conflicting child payment records cannot use this fallback.
 
 `POST /api/v1/content/quote` is a price-only read protected by `HasStrictRooApiKey`.
 Supply `slack_user_id` or `requested_by_slack_user_id` (the latter selects the

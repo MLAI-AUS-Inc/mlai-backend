@@ -1,6 +1,6 @@
 """Article quotes and debits without a database or network."""
 from datetime import datetime, timezone
-from contextlib import nullcontext
+from contextlib import contextmanager, nullcontext
 from types import SimpleNamespace as Obj
 from unittest.mock import Mock, patch
 
@@ -112,12 +112,45 @@ class ArticleQuoteReadTests(SimpleTestCase):
         with patch.object(service, "_charge_content_factory_request") as charge:
             self.assertIs(service._charge_deferred_discovery_job_if_needed(source_job=job, slack_user_id="U7",
                 domain="example.test", confirmed_keyword="Founder tools"), job)
+            self.assertFalse(job._article_confirmation_charge_created)
         charge.assert_not_called()
 
     def test_research_payment_does_not_supply_an_article_price(self):
         self.paid_job(research=True)
         self.assertEqual(self.quote(source_run_id="research"), 12)
         self.assertEqual(self.quote(source_run_id="research", client_request_id="content-factory-confirm-research"), 12)
+
+    def test_legacy_confirmation_child_uses_verified_original_six_point_source(self):
+        source = self.paid_job()
+        source.job_id = "source"
+        child = Obj(domain="example.test", request_meta={"source_run_id": "source"})
+        original = service._require_confirm_child_payment(child, source_job=source,
+            user=self.user, domain="example.test")
+        self.assertEqual(original.delta_microroo, -6_000_000)
+        for changed in ({"domain": "other.test"}, {"request_meta": {"source_run_id": "other"}},
+                {"billing_status": "refunded"}, {"client_request_id": "fabricated"}):
+            with self.subTest(changed=changed), self.assertRaises(service.ArticleGenerationError):
+                service._require_confirm_child_payment(Obj(**{**vars(child), **changed}),
+                    source_job=source, user=self.user, domain="example.test")
+        self.paid_job(payer_id=8)
+        with self.assertRaises(service.ArticleGenerationError):
+            service._require_confirm_child_payment(child, source_job=source,
+                user=self.user, domain="example.test")
+
+    def test_confirmation_child_cannot_hide_a_conflicting_payment_or_adopt_a_new_charge(self):
+        source = self.paid_job()
+        source.job_id = "source"
+        source.billing_source_job_id = "source"
+        child = Obj(domain="example.test", request_meta={"source_run_id": "source"},
+            billing_source_job_id="source", client_request_id="other", billing_ledger_id=11)
+        original = self.ledgers.return_value.first.return_value
+        other = Obj(**{**vars(original), "pk": 11, "id": 11})
+        with patch.object(service, "_require_article_job_payment", side_effect=[original, other]), self.assertRaises(service.ArticleGenerationError):
+            service._require_confirm_child_payment(child, source_job=source, user=self.user, domain="example.test")
+        source._article_confirmation_charge_created = True
+        with self.assertRaises(service.ArticleGenerationError):
+            service._require_confirm_child_payment(Obj(domain="example.test", request_meta={"source_run_id": "source"}),
+                source_job=source, user=self.user, domain="example.test")
 
     def test_status_without_payment_proof_cannot_supply_original_quote(self):
         self.paid_job()
@@ -182,6 +215,7 @@ class ArticleConsentTransportTests(SimpleTestCase):
             with patch("content_factory.models.ContentFactoryJob.objects.get", return_value=job), \
                  patch.object(service, "confirm_topic", side_effect=self.error) as confirm:
                 response = endpoints.ContentJobConfirmView().post(request, "source")
+            self.assertNotIn("request_meta", job.save.call_args.kwargs["update_fields"])
             self.assertEqual((response.status_code, response.data), (409, self.error.payload))
             self.assertEqual(confirm.call_args.kwargs["expected_cost_points"], 6)
             self.assertEqual(confirm.call_args.kwargs["client_request_id"], self.data["client_request_id"])
@@ -298,6 +332,15 @@ class ArticlePricingTests(SimpleTestCase):
     def setUp(self):
         self.user = Obj(pk=7, email="pricing@example.test")
 
+    def confirmation_io(self, job):
+        self.enterContext(patch.object(service, "require_article_activation"))
+        self.enterContext(patch.object(service.transaction, "atomic", side_effect=nullcontext))
+        rows = self.enterContext(patch("content_factory.models.ContentFactoryJob.objects.select_for_update"))
+        rows.return_value.get.return_value = job
+        ledgers = self.enterContext(patch("roo.models.Ledger.objects.filter"))
+        ledgers.return_value.exists.return_value = False
+        return rows, ledgers
+
     def test_every_domain_has_twelve_point_base_price(self):
         for domain in ("example.com", "mlai.au", "https://www.mlai.au", ""):
             with self.subTest(domain=domain):
@@ -338,17 +381,18 @@ class ArticlePricingTests(SimpleTestCase):
             self.assertFalse(auth["free_domain"])
         self.assertEqual(get_content_factory_content_island_topic_cost_points("mlai.au"), 0)
 
-    def charge(self, *, price, expected, existing=None):
+    def charge(self, *, price, expected, existing=None, require_new_charge=False, created=None):
         with patch.object(service, "require_article_activation"), \
              patch("content_factory.company_billing.resolve_content_billing_user", return_value=self.user), \
              patch.object(service, "_original_content_charge_points", return_value=-existing.delta if existing is not None else 0), \
              patch.object(service, "get_content_factory_article_cost_points", return_value=price), \
              patch("content_factory.models.ContentFactoryJob.objects") as jobs, \
-             patch("roo.services.PointsService.spend", return_value=(Obj(pk=9), existing is None)) as spend:
+             patch("roo.services.PointsService.spend", return_value=(Obj(pk=9), existing is None if created is None else created)) as spend:
             self.last_spend = spend
             jobs.filter.return_value.order_by.return_value.first.return_value = None
             result = service._charge_content_factory_user(user=self.user, created_by_slack_id="mlai_user:7",
-                article_request={"client_request_id": "article-7", "expectedCostPoints": expected}, resolved_domain="mlai.au")
+                article_request={"client_request_id": "article-7", "expectedCostPoints": expected}, resolved_domain="mlai.au",
+                require_new_charge=require_new_charge)
         return result, spend
 
     def test_original_charge_from_a_different_payer_has_a_typed_conflict(self):
@@ -388,6 +432,15 @@ class ArticlePricingTests(SimpleTestCase):
         self.assertEqual(result[2], 6)
         self.assertEqual(spend.call_args.kwargs["delta"], 6)
 
+    def test_new_confirmation_rejects_an_original_or_concurrently_reused_spend(self):
+        with self.assertRaises(service.ArticleGenerationError) as original:
+            self.charge(price=12, expected=6, existing=Obj(delta=-6), require_new_charge=True)
+        self.assertEqual(original.exception.code, "content_factory_billing_key_conflict")
+        self.last_spend.assert_not_called()
+        with self.assertRaises(service.ArticleGenerationError) as concurrent:
+            self.charge(price=12, expected=12, created=False, require_new_charge=True)
+        self.assertEqual(concurrent.exception.code, "content_factory_billing_key_conflict")
+
     def test_retry_retains_original_discount_after_expiry(self):
         result, spend = self.charge(price=12, expected=6, existing=Obj(delta=-6))
         self.assertEqual(result[2], 6)
@@ -396,26 +449,32 @@ class ArticlePricingTests(SimpleTestCase):
     def test_research_confirmation_passes_its_article_quote_to_the_debit(self):
         for price in (6, 12):
             original = {"roo_points_action": "content_island_topic_generation", "expectedCostPoints": 3,
-                "client_request_id": "research-key"}
-            job = Obj(job_id="research-7", domain="mlai.au", client_request_id="research-key", request_meta=original,
+                "client_request_id": "research-key", "requested_by_slack_user_id": "mlai_user:99"}
+            job = Obj(pk=7, job_id="research-7", domain="mlai.au", client_request_id="research-key", request_meta=original,
                 billing_status="charged", save=Mock())
+            self.confirmation_io(job)
             with patch.object(service, "_charge_content_factory_request", return_value=(self.user, Obj(pk=9), price)) as charge:
                 service._charge_deferred_discovery_job_if_needed(source_job=job, slack_user_id="mlai_user:7",
                     domain="mlai.au", confirmed_keyword="Founder tools", expected_cost_points=price,
-                    client_request_id="content-factory-confirm-research-7")
+                    client_request_id="content-factory-confirm-research-7", billing_user=self.user,
+                    requested_by_slack_user_id="mlai_user:7")
             self.assertEqual(charge.call_args.args[1]["expected_cost_points"], price)
             self.assertEqual(charge.call_args.args[1]["client_request_id"], "content-factory-confirm-research-7")
             self.assertEqual(job.client_request_id, "content-factory-confirm-research-7")
+            self.assertEqual(charge.call_args.args[1]["requested_by_slack_user_id"], "mlai_user:7")
+            self.assertEqual(service.require_article_activation.call_args.kwargs["actor_id"], "mlai_user:7")
             self.assertEqual(job.billing_amount, price)
             self.assertEqual(original["expectedCostPoints"], 3)
+            self.assertEqual(original["requested_by_slack_user_id"], "mlai_user:99")
 
     def test_research_or_deferred_confirmation_cannot_invent_article_consent(self):
         for research in (False, True):
             original = {"client_request_id": "research-key", "expectedCostPoints": 3, "expected_cost_points": 3}
             if research:
                 original["roo_points_action"] = "content_island_topic_generation"
-            job = Obj(job_id="research-7", domain="example.test", client_request_id="research-key", request_meta=original,
+            job = Obj(pk=7, job_id="research-7", domain="example.test", client_request_id="research-key", request_meta=original,
                 billing_status="charged" if research else "deferred", save=Mock())
+            self.confirmation_io(job)
             with self.subTest(research=research), patch.object(service, "require_article_activation"), \
                  patch.object(service, "_validate_authenticated_content_factory_actor"), \
                  patch("content_factory.company_billing.resolve_content_billing_user", return_value=self.user), \
@@ -430,6 +489,48 @@ class ArticlePricingTests(SimpleTestCase):
                 job.save.assert_not_called()
                 self.assertEqual(original["expectedCostPoints"], 3)
                 self.assertEqual(original["expected_cost_points"], 3)
+
+    def test_research_source_cannot_adopt_or_refund_an_unrelated_article_key(self):
+        job = Obj(pk=7, domain="example.test", job_id="research", client_request_id="research-key",
+            request_meta={"roo_points_action": "content_island_topic_generation"}, billing_status="charged", save=Mock())
+        _, ledgers = self.confirmation_io(job)
+        for existing in ((True,), (False, True)):
+            ledgers.return_value.exists.side_effect = existing
+            with self.subTest(existing=existing), patch.object(service, "_charge_content_factory_request") as charge:
+                with self.assertRaises(service.ArticleGenerationError) as error:
+                    service._charge_deferred_discovery_job_if_needed(source_job=job, slack_user_id="mlai_user:7",
+                        domain="example.test", confirmed_keyword="Founder tools", client_request_id="unrelated-paid-key")
+                self.assertEqual(error.exception.code, "content_factory_billing_key_conflict")
+                charge.assert_not_called()
+                job.save.assert_not_called()
+
+    def test_competing_key_reloads_paid_source_under_lock_before_another_debit(self):
+        stale = Obj(pk=7, domain="example.test", job_id="research", request_meta={"roo_points_action": "content_island_topic_generation"}, billing_status="charged")
+        paid = Obj(domain="example.test", client_request_id="first-article-key", request_meta={"roo_points_action": "article_generation"}, billing_status="charged")
+        active = {"locked": False}
+        @contextmanager
+        def atomic():
+            active["locked"] = True
+            try:
+                yield
+            finally:
+                active["locked"] = False
+        def provider(**kwargs):
+            self.assertFalse(active["locked"])
+        def reload(**kwargs):
+            self.assertTrue(active["locked"])
+            self.assertEqual(kwargs, {"pk": 7})
+            return paid
+        with patch.object(service, "require_article_activation", side_effect=provider), \
+             patch.object(service.transaction, "atomic", side_effect=atomic), \
+             patch("content_factory.models.ContentFactoryJob.objects.select_for_update") as rows, \
+             patch.object(service, "_charge_content_factory_request") as charge:
+            rows.return_value.get.side_effect = reload
+            with self.assertRaises(service.ArticleGenerationError) as error:
+                service._charge_deferred_discovery_job_if_needed(source_job=stale, slack_user_id="mlai_user:7",
+                    domain="example.test", confirmed_keyword="Founder tools", expected_cost_points=12, client_request_id="second-article-key")
+        self.assertEqual(error.exception.code, "content_factory_billing_key_conflict")
+        charge.assert_not_called()
 
     def test_confirmation_without_research_uses_paid_direct_generation(self):
         for request_id in (None, "confirmed-topic-7"):

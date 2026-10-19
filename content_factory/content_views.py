@@ -1029,8 +1029,9 @@ class ContentJobConfirmView(APIView):
         # 'confirmed' job with no run behind it. Status is stamped after success.
         job.selected_keyword = confirmed_keyword
         job.slack_user_id = slack_user_id
-        job.request_meta = request_meta
-        job.save(update_fields=["selected_keyword", "slack_user_id", "request_meta", "updated_at"])
+        # A competing confirmation may already have saved article billing on
+        # this source. Never overwrite that lineage with this stale snapshot.
+        job.save(update_fields=["selected_keyword", "slack_user_id", "updated_at"])
 
         # Trigger article generation via Content Factory HTTP API
         try:

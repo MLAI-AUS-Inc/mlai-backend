@@ -203,6 +203,25 @@ class ArticleGenerationServiceTest(TestCase):
         self.assertEqual(self.user.points_account.balance, 5)
 
     @patch("integrations.services.article_generation.http_requests.post")
+    def test_research_cannot_adopt_or_refund_a_delivered_articles_key(self, post):
+        article = self._source_job(job_id='delivered-article', domain='mlai.au', slack_user_id=self.slack_user_id, status='completed')
+        self._record_article_payment(article, amount=6)
+        source = self._source_job(job_id='new-research', domain='mlai.au', slack_user_id=self.slack_user_id,
+            client_request_id='new-research-key', billing_status='deferred', request_meta={})
+        with self.assertRaises(ArticleGenerationError) as error:
+            confirm_topic(domain='mlai.au', confirmed_keyword='another article', slack_user_id=self.slack_user_id,
+                source_run_id=source.job_id, client_request_id=article.client_request_id)
+        self.assertEqual(error.exception.code, 'content_factory_billing_key_conflict')
+        self.assertEqual(Ledger.objects.filter(kind='SPEND').count(), 1)
+        self.assertFalse(Ledger.objects.filter(kind='REFUND').exists())
+        source.refresh_from_db()
+        self.assertEqual(source.billing_status, 'deferred')
+        self.assertIsNone(source.billing_ledger_id)
+        self.user.points_account.refresh_from_db()
+        self.assertEqual(self.user.points_account.balance, 14)
+        post.assert_not_called()
+
+    @patch("integrations.services.article_generation.http_requests.post")
     def test_trigger_generation_payload(self, mock_post):
         self.config.article_delivery_mode = "publish_code"
         self.config.save(update_fields=["article_delivery_mode"])
@@ -532,7 +551,7 @@ class ArticleGenerationServiceTest(TestCase):
             slack_user_id=self.slack_user_id,
             status="awaiting_confirmation",
         )
-        ledger = self._record_article_payment(source_job, amount=6)
+        self._record_article_payment(source_job, amount=6)
         child_job = self._source_job(
             job_id="job-child-active-123",
             domain="mlai.au",
@@ -543,8 +562,6 @@ class ArticleGenerationServiceTest(TestCase):
                 "topic": "Agentic AI",
                 "target_keyword": "agentic ai",
             },
-            client_request_id=source_job.client_request_id, billing_ledger=ledger,
-            billing_amount=6, billing_status='reused',
         )
 
         result = confirm_topic(
@@ -558,6 +575,10 @@ class ArticleGenerationServiceTest(TestCase):
 
         self.assertEqual(result["job_id"], child_job.job_id)
         self.assertEqual(result["status"], "queued")
+        self.assertIsNone(child_job.client_request_id)
+        self.assertIsNone(child_job.billing_ledger_id)
+        self.assertEqual(PointsService.get_balance(self.user)["balance"], 14)
+        self.assertEqual(Ledger.objects.filter(kind="SPEND", source="CONTENT_FACTORY").count(), 1)
         mock_post.assert_not_called()
 
     @patch("integrations.services.article_generation.http_requests.post")
