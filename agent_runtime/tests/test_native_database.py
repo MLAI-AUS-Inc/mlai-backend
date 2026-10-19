@@ -23,7 +23,7 @@ from django.test import override_settings
 from django.utils import timezone
 from rest_framework.exceptions import AuthenticationFailed, PermissionDenied, ValidationError
 
-from agent_runtime import broker, community, event_webhooks, native_crypto, native_installations, native_invocations, native_sources, oauth, runtime
+from agent_runtime import broker, community, event_webhooks, native_crypto, native_installations, native_invocations, native_sources, oauth, personal_context, runtime
 from agent_runtime.authentication import token_hash, validate_credential
 from agent_runtime.models import AgentAuditEvent, AgentCredential, AgentEnrollment, AgentEvent, AgentGrant, AgentInstallation, AgentInvocation, AgentInvocationReply, AgentSubscription
 from agent_runtime.policy import AgentPermissionDenied
@@ -83,6 +83,17 @@ class NativeDatabaseTests(unittest.TestCase):
             TRANSPORT_COUNTS["profile_receipts" if payload["kind"] in {0, 10100} else "reply_receipts"] += 1
             return {"accepted": True, "event_id": payload["id"]}
         directive = payload[0]["native_agent"]
+        if directive.get("execution_mode") == "personal_context":
+            if not self.membership or directive["owner_pubkey"] not in self.allowed_keys:
+                raise PermissionDenied("Synthetic conversation membership changed.")
+            event = next(e for e in self.source_events if e["event_id"] == directive["trigger_event_id"])
+            if directive["operation"] == "trigger":
+                return {"trigger": {**event, "context_policy": personal_context.CONTEXT_POLICY}}
+            if directive["operation"] == "thread":
+                return {"messages": [{"id": "d" * 64, "text": "Synthetic invitation at 3 PM", "context_role": "source_data"},
+                    {"id": event["event_id"], "text": "Add this to my calendar", "context_role": "owner_instruction"}],
+                    "truncated": False, "visibility": "private", "channel_type": "dm"}
+            raise AssertionError("Unexpected personal operation")
         if directive["operation"] == "channels":
             return {"channels": [{"id": CHANNEL, "name": "dot-pilot"}]
                     if self.membership and directive["owner_pubkey"] in self.allowed_keys else []}
@@ -135,6 +146,50 @@ class NativeDatabaseTests(unittest.TestCase):
                 "event_id": event_id or uuid4().hex * 2, "root_event_id": "f" * 64,
                 "created_at": int(timezone.now().timestamp())}
 
+    @override_settings(AGENT_RUNTIME_PERSONAL_CONTEXT_ENABLED=True)
+    def test_personal_context_reuses_watch_and_replies_once_in_original_private_conversation(self):
+        installation, grant, principal = self.active()
+        self.subscription(principal)
+        private_channel = str(uuid4())
+        source = {**self.metadata(), "channel_id": private_channel}
+        self.source_events = [source]
+        data = {"community_id": COMMUNITY, "channel_id": private_channel,
+            "event_id": source["event_id"], "owner_public_key": self.device.public_key}
+        first = personal_context.submit(self.owner, installation.pk, data)
+        retry = personal_context.submit(self.owner, installation.pk, data)
+        self.assertEqual(first.pk, retry.pk)
+        self.assertEqual(AgentInvocation.objects.filter(installation=installation).count(), 1)
+        event = AgentEvent.objects.get(source="native", source_event_id=str(first.pk))
+        self.assertEqual(event.resource, RESOURCE)
+        self.assertNotIn(private_channel, json.dumps(event.payload))
+        self.assertEqual(native_invocations.list_pending_invocations(principal)["pending_count"], 1)
+        thread = native_invocations.read_invocation_thread(principal, first.pk)
+        self.assertEqual(thread["messages"][0]["text"], "Synthetic invitation at 3 PM")
+        result = native_invocations.reply_to_invocation(principal, first.pk, "Which date is the invitation for?", "personal-confirmation")
+        self.assertEqual(result["status"], "pending")
+        self.assertEqual(native_invocations.dispatch_native_replies(), 1)
+        self.assertEqual(native_invocations.dispatch_native_replies(), 0)
+        reply = AgentInvocationReply.objects.get(invocation=first)
+        self.assertIn(["h", private_channel], reply.event["tags"])
+        self.assertEqual(reply.status, "sent")
+        self.assertEqual(reply.event["pubkey"], installation.public_key)
+        grant.refresh_from_db()
+        self.assertEqual(grant.resources, [RESOURCE])
+
+    @override_settings(AGENT_RUNTIME_PERSONAL_CONTEXT_ENABLED=True)
+    def test_personal_context_membership_revocation_blocks_read_and_queued_reply(self):
+        installation, _grant, principal = self.active()
+        source = {**self.metadata(), "channel_id": str(uuid4())}
+        self.source_events = [source]
+        invocation = personal_context.submit(self.owner, installation.pk, {"community_id": COMMUNITY,
+            "channel_id": source["channel_id"], "event_id": source["event_id"], "owner_public_key": self.device.public_key})
+        native_invocations.reply_to_invocation(principal, invocation.pk, "A confirmation", "personal-revoke")
+        self.membership = False
+        with self.assertRaises(PermissionDenied):
+            native_invocations.read_invocation_thread(principal, invocation.pk)
+        self.assertEqual(native_invocations.dispatch_native_replies(), 0)
+        self.assertEqual(AgentInvocationReply.objects.get(invocation=invocation).status, "cancelled")
+
     @override_settings(AGENT_RUNTIME_COMMUNITY_ENABLED=True,
         AGENT_RUNTIME_MODEL_BASE_URL="https://model.example/v1", AGENT_RUNTIME_MODEL_NAME="synthetic-model",
         AGENT_RUNTIME_MODEL_API_KEY="synthetic-community-inference-only",
@@ -155,6 +210,7 @@ class NativeDatabaseTests(unittest.TestCase):
         self.addCleanup(lambda: get_user_model().objects.filter(pk=guest.pk).delete())
         device = CommunityChatDevice.objects.create(user=guest, public_key=native_crypto.public_key(PrivateKey()),
             status="verified", verified_at=timezone.now())
+        self.addCleanup(lambda: CommunityChatDevice.objects.filter(pk=device.pk).delete())
         self.source_events = [self.metadata(caller=device.public_key)]
         self.assertEqual(community.poll_mentions(), 1)
         invocation = AgentInvocation.objects.get(installation=installation)

@@ -282,9 +282,14 @@ def _lease(grant, params, now):
 def _start_cursor(grant, resource, existing, latest, now):
     if not getattr(settings, "AGENT_RUNTIME_NATIVE_BACKLOG_REPLAY", False):
         return latest
-    identifiers = AgentInvocation.objects.filter(installation_id=grant.installation_id, grant=grant,
-        generation=grant.generation, resource=resource, status="pending", expires_at__gt=now
-    ).values_list("pk", flat=True)
+    from django.db.models import Q
+    from . import personal_context
+    personal = personal_context.enabled() and resource in grant.resources
+    filters = {} if personal else {"resource": resource}
+    destinations = ((Q(resource=resource) | Q(resource__startswith=
+        f"community:{grant.installation.community_id}:personal-channel:")),) if personal else ()
+    identifiers = AgentInvocation.objects.filter(*destinations, installation_id=grant.installation_id, grant=grant,
+        generation=grant.generation, status="pending", expires_at__gt=now, **filters).values_list("pk", flat=True)
     oldest = AgentEvent.objects.filter(source="native", event_type=MENTION_EVENT, resource=resource,
         source_event_id__in=[str(pk) for pk in identifiers]).aggregate(oldest=Min("pk"))["oldest"]
     start = min(latest, oldest - 1) if oldest is not None else latest

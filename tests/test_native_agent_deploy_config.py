@@ -25,6 +25,20 @@ def active():
 
 
 class NativeAgentDeployConfigTests(unittest.TestCase):
+    def test_personal_context_is_explicit_and_needs_the_existing_gateway(self):
+        validate({})
+        validate({**active(), "AGENT_RUNTIME_PERSONAL_CONTEXT_ENABLED": "true"})
+        for invalid in ("yes", "TRUE", "1"):
+            with self.subTest(value=invalid), self.assertRaises(ValueError):
+                validate({"AGENT_RUNTIME_PERSONAL_CONTEXT_ENABLED": invalid})
+        with self.assertRaises(ValueError):
+            validate({"AGENT_RUNTIME_PERSONAL_CONTEXT_ENABLED": "true"})
+        workflow = (ROOT / ".github/workflows/deploy.yml").read_text()
+        self.assertIn("AGENT_RUNTIME_PERSONAL_CONTEXT_ENABLED: ${{ vars.AGENT_RUNTIME_PERSONAL_CONTEXT_ENABLED || 'false' }}", workflow)
+        deploy = (ROOT / "deploy.sh").read_text()
+        self.assertIn('AGENT_RUNTIME_PERSONAL_CONTEXT_ENABLED="${AGENT_RUNTIME_PERSONAL_CONTEXT_ENABLED:-false}"', deploy)
+        self.assertIn("export AGENT_RUNTIME_PERSONAL_CONTEXT_ENABLED", deploy)
+
     def test_dormant_configuration_and_complete_explicit_activation(self):
         validate({})
         validate({"AGENT_RUNTIME_NATIVE_COMMUNITIES": "{}"})

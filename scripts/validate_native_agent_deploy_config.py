@@ -10,7 +10,7 @@ from uuid import UUID
 FLAGS = {"MLAI_MCP_NATIVE_AGENTS_ENABLED", "AGENT_RUNTIME_ENABLED", "AGENT_RUNTIME_NATIVE_ENABLED",
          "AGENT_RUNTIME_NATIVE_REPLIES_ENABLED", "AGENT_RUNTIME_MCP_EVENTS_ENABLED"}
 # These remain independently switchable even while the pilot is enabled.
-OPTIONAL_FLAGS = {"AGENT_RUNTIME_COMMUNITY_ENABLED", "AGENT_RUNTIME_NATIVE_ALWAYS_ADMIT", "AGENT_RUNTIME_NATIVE_BACKLOG_REPLAY",
+OPTIONAL_FLAGS = {"AGENT_RUNTIME_COMMUNITY_ENABLED", "AGENT_RUNTIME_PERSONAL_CONTEXT_ENABLED", "AGENT_RUNTIME_NATIVE_ALWAYS_ADMIT", "AGENT_RUNTIME_NATIVE_BACKLOG_REPLAY",
                   "AGENT_RUNTIME_NATIVE_DURABLE_WATCH", "AGENT_RUNTIME_NATIVE_LAPSE_ALERTS",
                   "AGENT_RUNTIME_NATIVE_RENEWAL_ENABLED", "MLAI_MCP_AGENT_GRANT_EXTENSION_ENABLED"}
 BOUNDED_INTEGERS = {
@@ -97,6 +97,9 @@ def validate(environment, *, check_provider=False):
         if environment.get(key):
             validate_single(key, environment[key])
     community = environment.get("AGENT_RUNTIME_COMMUNITY_ENABLED") == "true"
+    personal_context = environment.get("AGENT_RUNTIME_PERSONAL_CONTEXT_ENABLED") == "true"
+    if personal_context and any(environment.get(key) != "true" for key in FLAGS):
+        raise ValueError("Personal conversation requests require the complete native gateway")
     if community and any(environment.get(key) != "true" for key in FLAGS):
         raise ValueError("Community replies require the complete native gateway")
     # Model credentials stay in the host's secret environment. The local deploy
