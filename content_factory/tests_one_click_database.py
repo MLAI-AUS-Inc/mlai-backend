@@ -79,6 +79,32 @@ class OneClickBillingFixture(WebsiteDatabaseFixture):
 
 
 class OneClickPersistenceTests(OneClickBillingFixture, TestCase):
+    def test_stale_article_quote_is_rejected_before_debit_or_dispatch(self):
+        self.request.data = {'expectedCostPoints': 6}
+        _, _, _, error = self.charge(self.payload())
+        self.assertEqual(error.status_code, 409)
+        self.assertEqual(error.data['code'], 'roo_points_quote_changed')
+        self.assertEqual(error.data['costPoints'], 12)
+        self.assertEqual(self.balance(self.payer), 20_000_000)
+        self.assertFalse(Ledger.objects.filter(kind='SPEND').exists())
+        self.assertFalse(ContentFactoryDispatchOutbox.objects.exists())
+
+    def test_legacy_six_point_charge_is_reused_after_the_current_price_increases(self):
+        original, _ = PointsService.spend(user=self.payer, delta=6, source='CONTENT_FACTORY',
+            description='Previously confirmed article', created_by_slack_id=self.actor,
+            idempotency_key='content_factory:charge:synthetic-article',
+            reference_type='CONTENT_FACTORY', reference_id='synthetic-article')
+        self.request.data = {'expectedCostPoints': 6}
+        payload = {**self.payload(), 'expected_cost_points': 6}
+        payer, ledger, _, error = self.charge(payload)
+        self.assertIsNone(error)
+        self.assertEqual((payer.pk, ledger.pk), (self.payer.pk, original.pk))
+        self.assertEqual(self.balance(self.payer), 14_000_000)
+        self.assertEqual(Ledger.objects.filter(kind='SPEND').count(), 1)
+        row = ContentFactoryDispatchOutbox.objects.get()
+        self.assertEqual(row.payload['request']['roo_points_cost'], 6)
+        self.assertEqual(row.payload['billing_user_id'], str(self.payer.pk))
+
     def test_repeated_start_commits_one_spend_and_one_original_payer_outbox(self):
         first = self.payload()
         payer, ledger, _, error = self.charge(first)
@@ -86,6 +112,7 @@ class OneClickPersistenceTests(OneClickBillingFixture, TestCase):
         _, repeated_ledger, _, error = self.charge(self.payload())
         self.assertIsNone(error)
         self.assertEqual(ledger.pk, repeated_ledger.pk)
+        self.assertEqual(ledger.delta_microroo, -12_000_000)
         self.assertEqual(payer.pk, self.payer.pk)
         self.assertEqual(self.balance(self.payer), 8_000_000)
         self.assertFalse(Ledger.objects.filter(user=self.requester, kind='SPEND').exists())

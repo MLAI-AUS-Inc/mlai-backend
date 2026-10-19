@@ -847,7 +847,23 @@ def _charge_roo_points_for_article(request, *, context, payload: dict, goal_oper
     quote_error = (_quoted_price_response(request, cost_points=get_content_factory_article_cost_points(context.organization.domain, user=request.user))
         if goal_operation_id is None else None)
     if quote_error is not None:
-        return None, None, None, quote_error
+        # A retry keeps the recorded debit even after a benefit expires. This
+        # read only selects the quote; consent, payload and ledger ownership
+        # are still revalidated by the ordinary transaction below.
+        existing_key = str(payload.get("client_request_id")
+            or _request_value(request.data, "client_request_id", "clientRequestId", default="") or "").strip()
+        if existing_key:
+            from .company_billing import resolve_content_billing_user
+            from integrations.services.article_generation import _original_content_charge_points
+            try:
+                payer = resolve_content_billing_user(request.user, context.organization.domain)
+                original_cost = _original_content_charge_points(payer, f"content_factory:charge:{existing_key}")
+            except (ArticleGenerationError, WebsiteAuthorityError):
+                original_cost = 0
+            if original_cost:
+                quote_error = _quoted_price_response(request, cost_points=original_cost)
+        if quote_error is not None:
+            return None, None, None, quote_error
     editorial_error = _refresh_article_editorial_payload(organization=context.organization, payload=payload)
     if editorial_error is not None:
         return None, None, None, editorial_error

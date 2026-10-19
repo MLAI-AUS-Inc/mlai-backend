@@ -56,6 +56,14 @@ class FirstArticleProviderChainTests(OneClickBillingFixture,TransactionTestCase)
         return prepare.start_prepare(self.config,company_id=self.company.pk,user=self.requester,
             target="first_article_live",consent=choices or answers(billing={"policy":"reserved","expected_points":12,"accepted":True}))
 
+    def test_stale_first_article_consent_cannot_reserve_a_payment(self):
+        with self.assertRaises(WebsiteAuthorityError) as error:
+            self.start(answers(billing={"policy":"reserved","expected_points":6,"accepted":True}))
+        self.assertEqual(error.exception.code,"website_prepare_blocked")
+        self.assertEqual(self.balance(self.payer),20_000_000)
+        self.assertFalse(Ledger.objects.filter(kind="SPEND",source="CONTENT_FACTORY").exists())
+        self.assertFalse(ContentFactoryDispatchOutbox.objects.exists())
+
     def ready(self,op):
         """Seed the already verified Ready precondition; exercise article effects below."""
         now=timezone.now();goal=op.receipt["goal"];scope=goal["scope"]
