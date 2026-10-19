@@ -113,6 +113,31 @@ class NativeAgentDeployConfigTests(unittest.TestCase):
         for key in active():
             self.assertIn(key, workflow)
 
+    def test_personal_context_stdin_uses_native_validation_and_keeps_unknown_keys_rejected(self):
+        key = "AGENT_RUNTIME_PERSONAL_CONTEXT_ENABLED"
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "scripts").mkdir()
+            for name in ("upsert_env_value_from_stdin.sh", "validate_native_agent_deploy_config.py"):
+                shutil.copy2(ROOT / "scripts" / name, root / "scripts" / name)
+            env_file = root / ".env"
+            env_file.write_text("UNRELATED_SETTING=preserved\n")
+            def upsert(setting, value):
+                return subprocess.run(["bash", str(root / "scripts/upsert_env_value_from_stdin.sh"), setting],
+                    input=value, text=True, capture_output=True, env={"PATH": os.defpath}, check=False)
+            accepted = upsert(key, "false")
+            self.assertEqual(accepted.returncode, 0, accepted.stderr)
+            self.assertEqual(env_file.read_text(), "UNRELATED_SETTING=preserved\n" + key + "=false\n")
+            before = env_file.read_bytes()
+            for setting, value in ((key, "yes"), (key, "TRUE"), (key, "false\nINJECT=true"),
+                    (key + "_UNREVIEWED", "false")):
+                with self.subTest(setting=setting, value=value):
+                    rejected = upsert(setting, value)
+                    self.assertNotEqual(rejected.returncode, 0)
+                    self.assertEqual(env_file.read_bytes(), before)
+                    if setting != key:
+                        self.assertEqual(rejected.returncode, 64)
+
 
 class MaekSafetyConfigTests(unittest.TestCase):
     # This is the reviewed rollout contract, independent of runtime imports.
