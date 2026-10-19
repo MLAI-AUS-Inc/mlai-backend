@@ -110,7 +110,8 @@ class NativeSafetyTests(SimpleTestCase):
             self.assertEqual(json.loads(stream.getvalue())["error_type"], "ValueError")
             self.assertNotIn("private message", str(log.call_args))
 
-    def test_native_worker_stages_continue_and_expire_after_replies(self):
+    @override_settings(AGENT_RUNTIME_NATIVE_LAPSE_ALERTS=True)
+    def test_native_worker_stages_continue_without_lapse_emails(self):
         stream, order = io.StringIO(), []
         with (patch.object(runtime, "recover_tasks", return_value=0),
               patch.object(scheduler.actions, "recover_actions", return_value=0),
@@ -119,12 +120,15 @@ class NativeSafetyTests(SimpleTestCase):
               patch.object(inv, "dispatch_native_replies", side_effect=lambda **kw: order.append("replies") or 1),
               patch.object(inv, "expire_native_invocations", side_effect=lambda **kw: order.append("expire") or 2),
               patch.object(event_webhooks, "dispatch_webhooks", side_effect=lambda **kw: order.append("webhooks") or 1),
+              patch("integrations.services.notification_adapters._send_email") as send_email,
               patch.object(scheduler.logger, "exception")):
             result = scheduler.tick(native=True, webhooks=True, stdout=stream)
         self.assertEqual(order, ["poll", "replies", "expire", "webhooks"])
         self.assertEqual(result["native_provisioned"], 0)
         self.assertEqual(result["errors"], {"native_provisioned": 1})
         self.assertEqual(result["native_expired"], 2)
+        self.assertNotIn("native_alerts", result)
+        send_email.assert_not_called()
 
     def test_command_removes_stale_heartbeat_before_starting(self):
         with tempfile.TemporaryDirectory() as directory:
