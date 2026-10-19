@@ -190,6 +190,9 @@ job. Unbound historical ledger rows fail closed and require reconciliation;
 they cannot authorize a new company request. Refund-only original-spend lookup
 and repeated refunds retain their existing behavior. An inactive or former
 configured billing founder returns a typed 409 denial on quote/source reads.
+These financial request denials have exact function/expression emitter audits,
+using the existing noncausal billing category. They do not change the pinned
+causal failure registry, article retry policy or run failure classification.
 Internal first-article
 goal dispatch consumes its persisted explicit consent and reservation.
 API-key authentication and a saved job's billing status do not establish price
