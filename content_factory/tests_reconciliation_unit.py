@@ -143,6 +143,15 @@ class SplitRunRecoveryTests(SimpleTestCase):
         self.assertTrue(post.call_args.args[0].endswith("/recover"))
         self.assertTrue(record.call_args.kwargs["accepted"])
 
+    def test_nonarticle_recovery_keeps_its_existing_cancel_contract(self):
+        run, now = self.fake_run(), timezone.now()
+        run.workflow = "discovery"
+        run.result["reconciliation_recovery"] = {"requested_at": (now - timedelta(minutes=10)).isoformat()}
+        with patch.object(reconciliation.requests, "post") as post, \
+                patch.object(reconciliation, "_finalize_run_failure", return_value=True):
+            self.assertEqual(reconciliation.recover_stalled_run(run, base_url="https://fixture.test", headers={}, now=now), "failed_stalled")
+        self.assertEqual(post.call_args.kwargs["json"], {"reason": "worker_heartbeat_lost"})
+
     def test_blocked_code_requires_confirmed_fixed_version(self):
         self.assertFalse(reconciliation.fixed_failure_can_redrive("website_configuration_changed", "2.0.0"))
         self.assertTrue(reconciliation.fixed_failure_can_redrive("website_configuration_changed", "2.1.0"))
@@ -152,8 +161,10 @@ class SplitRunRecoveryTests(SimpleTestCase):
         run = self.fake_run()
         run.pk, run.domain = 1, "fixture.test"
         run.result = {"reconciliation_refund_pending": True}
-        latest = SimpleNamespace(result={"reconciliation_refund_pending": True, "worker_receipt": "later"}, save=Mock())
+        latest = SimpleNamespace(result={"reconciliation_refund_pending": True, "worker_receipt": "later"},
+            run_request={}, save=Mock())
         with patch.object(reconciliation.transaction, "atomic", side_effect=lambda: nullcontext()), \
+                patch("organizations.models.Organization.objects.select_for_update"), \
                 patch("content_factory.billing_lineage.original_article_spend_for_run", return_value=None), \
                 patch.object(reconciliation.ContentFactoryRun.objects, "select_for_update") as runs:
             runs.return_value.filter.return_value.first.return_value = latest

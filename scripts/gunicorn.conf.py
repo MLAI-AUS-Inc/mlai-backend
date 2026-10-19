@@ -13,3 +13,17 @@ def post_worker_init(worker):
 
     get_resolver().url_patterns
     worker.log.info("Django URLconf warmed in Gunicorn worker")
+    from scripts.worker_memory_profile import start_worker_profile
+    start_worker_profile(worker)
+
+
+def post_request(worker, req, environ, resp):
+    """Record bounded process metrics without inspecting request data."""
+    from scripts.worker_memory_profile import record_worker_request
+    record_worker_request(worker)
+
+
+def worker_exit(server, worker):
+    """Record the final worker-process sample for an enabled profile."""
+    from scripts.worker_memory_profile import finish_worker_profile
+    finish_worker_profile(worker)

@@ -193,3 +193,34 @@ class CostUsageTests(SimpleTestCase):
             corrupted_run.run_request["goal_budget"]["scope_digest"] = goals.digest(corrupted.receipt["goal"]["scope"])
             with self.subTest(scope_key=key), self.assertRaises(ValueError):
                 costs.attribution(corrupted, corrupted_run)
+
+
+class LedgerRaceConnectionCleanupTests(SimpleTestCase):
+    def test_actual_race_threads_close_healthy_persistent_connections(self):
+        """Run the real threaded test body with in-memory connection boundaries."""
+        import time
+        from unittest.mock import patch
+        import django.db
+        from django.db.utils import ConnectionHandler
+        from . import tests_website_cost_database as race
+        local = ConnectionHandler({"default": {"ENGINE": "django.db.backends.dummy",
+            "AUTOCOMMIT": True, "CONN_MAX_AGE": 600}})
+        opened = []
+        def record(_value):
+            wrapper = local["default"]
+            # No driver or database is opened. Django's real close()/age policy
+            # still runs on a healthy, unexpired thread-local wrapper.
+            wrapper.connection = object()
+            wrapper.get_autocommit = lambda: True
+            wrapper.close_at = time.monotonic() + 600
+            opened.append(wrapper)
+        fixture = race.LedgerPersistenceTests("test_racing_snapshot_insert_and_update_retains_the_newest_identity")
+        fixture.run = SimpleNamespace(result={"usage": {"state_version": 1, "tokens": 17,
+            "accounting": {"tokens": {"total": 17, "known_subtotal": 17}}}})
+        fixture.read = lambda: {"recordedRuns": 1, "metrics": {"tokens": {"total": 20}}}
+        with patch.object(django.db, "connections", local), patch.object(race, "connections", local, create=True), \
+                patch.object(race.ledger, "record", side_effect=record):
+            fixture.test_racing_snapshot_insert_and_update_retains_the_newest_identity()
+        self.assertEqual(len(opened), 2)
+        self.assertTrue(all(wrapper.connection is None for wrapper in opened),
+            "Both race threads must close healthy persistent sessions before database teardown")

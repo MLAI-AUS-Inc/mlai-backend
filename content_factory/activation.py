@@ -149,12 +149,21 @@ def live_deployment_verified(connection, target, *, now=None):
         return False
     now = now or timezone.now()
     contract = mapping(target.contract)
+    from .website_sealed_workflow import required
+    execution_proof = None
+    if required(connection, target):
+        from .website_verification import current_ci_attestation
+        execution_proof = current_ci_attestation(connection, target)
+        if execution_proof is None:
+            return False
     marker = mapping(contract.get("live_marker"))
     if not contract.get("contract_digest") or not marker.get("value"):
         return False
     operation = connection.operations.filter(generation=connection.generation, action="deployment-verify", state="completed",
         payload__source_sha=connection.verified_sha, payload__target_id=target.target_key).order_by("-created_at").first()
     receipt = mapping(operation.receipt) if operation else {}
+    if execution_proof is not None and receipt.get("ci_evidence_digest") != execution_proof["evidence_digest"]:
+        return False
     stamp = parse_datetime(str(receipt.get("checked_at") or ""))
     return bool(receipt.get("status") == "passed" and receipt.get("source_sha") == connection.verified_sha
         and receipt.get("connection_generation") == connection.generation and receipt.get("target_id") == target.target_key
@@ -196,6 +205,11 @@ def durable_integration_evidence(config, connection, *, now=None):
     if (not verified_at or verified_at > now + timedelta(minutes=5) or now - verified_at > VERIFICATION_MAX_AGE
             or target.verified_at > now + timedelta(minutes=5) or now - target.verified_at > VERIFICATION_MAX_AGE):
         return {**base, "reasonCode": "verification_stale"}
+    from .website_sealed_workflow import required
+    if required(connection, target):
+        from .website_verification import current_ci_attestation
+        if current_ci_attestation(connection, target) is None:
+            return {**base, "reasonCode": "verification_required"}
     contract = mapping(target.contract)
     route = str(contract.get("route_path") or contract.get("public_path") or str(contract.get("route_template") or "").split("{")[0] or "/articles")
     return {**base, "verified": True, "publishingVerified": live_deployment_verified(connection, target, now=now), "routePath": "/" + route.strip("/"), "verifiedAt": verified_at.isoformat(), "reasonCode": ""}

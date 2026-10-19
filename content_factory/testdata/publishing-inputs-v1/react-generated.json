@@ -1,0 +1,138 @@
+{
+  "canonicalization": "mlai_utf8_json_v1",
+  "digest": "c3de26aa57ea211d440c2f67a4d3f7a06014194518eeb78ab05f41f52aa644ad",
+  "payload": {
+    "normalizer_version": 1,
+    "publishing": {
+      "source_selection": {},
+      "target": {
+        "build_tool": "unknown",
+        "content_extension": ".tsx",
+        "content_path_pattern": "src/app/articles/content/{slug}.tsx",
+        "delivery_adapter": "react_component",
+        "example_path": "",
+        "framework": "nextjs",
+        "hook_config_path": "",
+        "input_format": "content_bundle_v1",
+        "kind": "react_article_system",
+        "language": "typescript",
+        "live_marker": {
+          "kind": "artifact_digest",
+          "meta_name": "mlai-artifact-digest",
+          "schema_version": 1,
+          "value": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        },
+        "metadata_strategy": {
+          "registry_slug_template": "{slug}",
+          "seo_path_template": "/articles/{slug}",
+          "type": "react_article_system"
+        },
+        "preferred_verifier_queue": "verify-node",
+        "preview_discovery": null,
+        "preview_strategy": "repo_preview",
+        "publish_capability": "direct",
+        "registration_strategy": {
+          "author_alias_path": "src/app/articles/authors.ts",
+          "author_registry_path": "src/app/articles/authorRegistry.ts",
+          "registry_path": "src/app/articles/registry.ts",
+          "seo_config_path": "src/app/articles/seo-config.ts",
+          "type": "registry_seo_patch"
+        },
+        "route_path": "/articles",
+        "route_template": "/articles/{slug}",
+        "runtime_family": "node",
+        "supported": true,
+        "target_config": null,
+        "target_id": "react_article_system_src_app_articles_content_{slug}_tsx__tsx"
+      }
+    },
+    "verification": {
+      "baseline_policy": {
+        "kind": "fixed_setup_source",
+        "source_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      },
+      "execution": {
+        "app_root": ".",
+        "baseline": {
+          "install_command": [
+            "npm",
+            "ci"
+          ],
+          "install_cwd": ".",
+          "kind": "commands",
+          "verify_steps": [
+            {
+              "command": [
+                "npm",
+                "run",
+                "build"
+              ],
+              "cwd": ".",
+              "name": ""
+            }
+          ]
+        },
+        "build_command": [
+          "npm",
+          "run",
+          "build"
+        ],
+        "build_cwd": ".",
+        "content_path_pattern": "src/app/articles/content/{slug}.tsx",
+        "content_source_kind": "document_per_file",
+        "environment_names": [],
+        "install_command": [
+          "npm",
+          "ci"
+        ],
+        "install_cwd": ".",
+        "listing_route": "/articles",
+        "lockfiles": [],
+        "materialize_command": [],
+        "materialize_cwd": ".",
+        "package_manager": "npm@10.8.2",
+        "preview_command": [
+          "npm",
+          "run",
+          "start"
+        ],
+        "preview_cwd": ".",
+        "route_template": "/articles/{slug}",
+        "runtime_family": "node",
+        "runtime_version": "20.19.0",
+        "static_source_materialization": null,
+        "verify_steps": [
+          {
+            "command": [
+              "npm",
+              "run",
+              "build"
+            ],
+            "cwd": ".",
+            "name": ""
+          }
+        ]
+      },
+      "oracle": {
+        "artifact_digest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "artifact_marker_routes": [
+          "/articles",
+          "/articles/example-article"
+        ],
+        "existing_seed_source": null,
+        "expected_h1": "Example Article",
+        "port": 3000,
+        "seed_is_setup_example": false,
+        "seed_slug": "example-article"
+      },
+      "verifier": {
+        "execution_schema_version": 1,
+        "playwright_version": "1.58.0",
+        "profile": "native_ci_v1",
+        "python_version": "3.11",
+        "runner_sha256": "41eb86a32a9edd2a65ff95119fbcc8eae1fddca37c1adcd234877440e12caee4"
+      }
+    }
+  },
+  "schema_version": 1
+}

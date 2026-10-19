@@ -14,8 +14,14 @@ from . import vibe_marketing_views as views
 from .article_export import article_export
 
 
-def remote_review(run, *, payload=None):
-    """Forward a scoped review operation without passing browser credentials."""
+def remote_review(run, *, payload=None, child_operation=False):
+    """Forward a scoped review operation without passing browser credentials.
+
+    ``child_operation`` marks a payload carrying the separate operation that
+    ``_review_dispatch_contract`` reserved for a comment revision. That fence
+    belongs to the revision child, not to the source run, so it is checked
+    without the source run's identity; the source keeps its own fence check.
+    """
     views.require_unlocked_remote_call()
     if payload is not None:
         original = views.scoped_run_contract(run)
@@ -28,6 +34,14 @@ def remote_review(run, *, payload=None):
                 guarded = {**original, **{key: payload[key] for key in (
                     "operation_id", "operation_attempt", "deletion_epoch",
                 ) if key in payload}}
+                if child_operation and guarded.get("operation_id") != original.get("operation_id"):
+                    # A saved run request names the source run, whose stored
+                    # operation differs from the child's by design. Checking
+                    # the pair together always failed ("The operation identity
+                    # changed.") once run requests carried run_id.
+                    with views.authority_guard(original, action="read"):
+                        pass
+                    guarded = {key: value for key, value in guarded.items() if key not in {"run_id", "job_id"}}
                 with views.authority_guard(guarded, action="read"):
                     pass
                 if (binding and payload.get("action") == "refresh"
@@ -262,7 +276,11 @@ def _review_dispatch_contract(run, payload):
                 "textEdits": payload["textEdits"], "comments": payload["comments"]}
             reserve_workflow_operation(website, workflow="article_system_setup" if run.workflow == "article_system_setup"
                                        else "article_revision", payload=reservation)
-            return {**binding, "client_request_id": reservation["client_request_id"],
+            # Content Factory admits an article revision child only under its
+            # source's exact reviewed commit; setup children pin current source.
+            source = ({"expected_source_sha": original["expected_source_sha"]}
+                      if run.workflow != "article_system_setup" and original.get("expected_source_sha") else {})
+            return {**binding, **source, "client_request_id": reservation["client_request_id"],
                     **{key: reservation[key] for key in OPERATION_FIELDS}}
     except views.WebsiteAuthorityError as exc:
         return Response(exc.as_dict(), status=exc.status)
@@ -342,6 +360,8 @@ def apply_article_review_update(*, user, context, run, data):
             if error is not None:
                 return error
     remote_payload.update(contract)
+    child_operation = bool(contract.get("operation_id")) and (
+        contract.get("operation_id") != views.scoped_run_contract(run).get("operation_id"))
     if claimed and run.workflow != "article_system_setup":
         # The worker can start as soon as dispatch is accepted. Create its
         # learning candidates first, once, as the existing comments path does.
@@ -349,7 +369,7 @@ def apply_article_review_update(*, user, context, run, data):
             organization=context.organization, run=run, comments=comments,
             batch_id=payload["operationId"],
         )
-    result = remote_review(run, payload=remote_payload)
+    result = remote_review(run, payload=remote_payload, child_operation=child_operation)
     definitive_rejection = isinstance(result, Response) and result.status_code in {400, 404, 409, 422}
     if definitive_rejection:
         if _revert_update_submission(run, payload["operationId"], request_hash) and payload["commentIds"]:
@@ -423,6 +443,8 @@ class VibeMarketingArticleReviewView(views.VibeMarketingRunCommentsMixin, APIVie
         if not isinstance(data, dict):
             return Response({"detail": "Use a JSON review update."}, status=400)
         if data.get("action") in {"applyUpdate", "applyReview"}:
+            from .website_review_action_audit import observe_review
+            observe_review(request, context, run, data)
             return self._apply_update(request, context, run, data)
         latest = views._latest_review_ready_component_revision(run, context)
         if latest is not None:
@@ -431,6 +453,8 @@ class VibeMarketingArticleReviewView(views.VibeMarketingRunCommentsMixin, APIVie
         payload = dict(request.data)
         if payload.get("action") not in {"editText", "editTextBatch", "regenerateImage", "chooseImage", "refresh", "undo", "discardImage", "allowAI"}:
             return Response({"detail": "Unknown article operation."}, status=400)
+        from .website_review_action_audit import observe_review
+        observe_review(request, context, run, payload)
         if payload.get("action") == "regenerateImage":
             billing_error = views._reuse_roo_points_authorization_for_article_job(
                 run=run, payload={}, domain=context.organization.domain,

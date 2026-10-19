@@ -933,6 +933,31 @@ class ContentFactoryCallbackTests(ContentFactoryTestDataMixin, TestCase):
             reference_type="CONTENT_FACTORY", reference_id=request_id,
         )[0]
 
+    def _record_no_value_stop(self, job_id):
+        """Seed a scoped worker stop, not just the old refundable failure hint."""
+        from content_factory.article_publication_evidence import original_scope
+        from content_factory.website_goal import digest
+        from roo.models import Ledger
+        job = ContentFactoryJob.objects.get(job_id=job_id)
+        charge = Ledger.objects.get(idempotency_key=f"content_factory:charge:{job.client_request_id}")
+        job.billing_ledger = charge
+        job.save(update_fields=["billing_ledger"])
+        binding = self.client._bound_payload({"run_id": job_id, "domain": job.domain})
+        request = {**binding, "client_request_id": job.client_request_id,
+            "roo_points_ledger_id": str(charge.pk), "roo_points_billing_user_id": charge.user_id}
+        run = ContentFactoryRun.objects.create(run_id=job_id, workflow="direct_generate", domain=job.domain,
+            organization=self.client.website_fixture.organization, github_repo=self.client.website_fixture.github_repo,
+            status="failed", run_request=request)
+        scope = original_scope(run)
+        proof = {"version": 1, "purpose": "article_cancellation", "run_id": run.run_id, "goal_id": None,
+            "scope": scope, "generation": 0, "state_version": 5, "outcome": "no_article_effect", "cancelled": True,
+            "delivered_value": False, "watermark": {"operation_id": scope.get("operation_id"),
+                "attempt": scope.get("operation_attempt"), "cancelled": True}}
+        proof["receipt_id"] = digest(proof)
+        run.result = {"article_cancellation_v1": proof}
+        run.save(update_fields=["result"])
+        return run
+
     @patch("integrations.services.github.refresh_github_token", side_effect=Exception("no stored token"))
     @patch("content_factory.service_views.ContentFactoryCallbackView._send_auth_required_notification")
     def test_auth_required_callback_updates_job_without_import_error(self, mock_notify, mock_refresh):
@@ -2821,6 +2846,7 @@ class ContentFactoryCallbackTests(ContentFactoryTestDataMixin, TestCase):
             },
         )
 
+        self._record_no_value_stop("publish-target-run-1")
         response = self.client.post(
             reverse('content_factory_callback'),
             {
@@ -2870,6 +2896,7 @@ class ContentFactoryCallbackTests(ContentFactoryTestDataMixin, TestCase):
             },
         )
 
+        self._record_no_value_stop("research-shortfall-run-1")
         payload = {
             "event_type": "generation_failed",
             "job_id": "research-shortfall-run-1",
@@ -2986,6 +3013,7 @@ class ContentFactoryCallbackTests(ContentFactoryTestDataMixin, TestCase):
             job_id="changed-price", domain="example.com", slack_user_id=user.slack_id,
             client_request_id="changed-price", billing_amount=6, billing_status="charged",
         )
+        self._record_no_value_stop(job.job_id)
         self.assertEqual(maybe_auto_refund_terminal_failure(
             job, error_code="PUBLISH_TARGET_ACTION_REQUIRED", error_message="No delivery",
         ), (True, 6))
@@ -3016,8 +3044,9 @@ class ContentFactoryCallbackTests(ContentFactoryTestDataMixin, TestCase):
             },
         )
 
-        # A code NOT in AUTO_REFUND_ERROR_CODES still refunds when content-factory
-        # flags the failure refundable explicitly.
+        self._record_no_value_stop(job.job_id)
+        # An explicit hint selects settlement outside the code allowlist, but
+        # credit still requires the original payment and a no-value stop proof.
         refunded, points = maybe_auto_refund_terminal_failure(
             job,
             error_code="SOME_FUTURE_NO_VALUE_CODE",

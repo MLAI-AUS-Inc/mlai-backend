@@ -31,6 +31,22 @@ The token endpoint's closed `permission_profile` is `repository` by default. `wo
 
 Inventory is saved through config PUT as `repository_inventory` with an exact `source_sha`, `discovery_complete`, and evidence. Inventory-only updates preserve targets/templates and never create publishing readiness. Target verification requires `verification.status=passed|verified` and `verification.source_sha` equal to the evidence source SHA. Detection metadata alone is insufficient. The worker is responsible for build/render verification and exact source identity.
 
+Once a target has accepted verification at the current source, worker scan/config
+writes may replay that exact stored contract but cannot change its publishing
+inputs or proof metadata. A copied or newer `checked_at` value is not new proof.
+Conflicting scan inputs stay in `WebsiteScanSnapshot`; provider attestation uses
+its separate source/operation-checked promotion path. Worker proposals also
+cannot switch an already certified selected target, even to a different previously
+certified target. A changed source still requires reverification; preserving a
+contract never grants readiness at that new revision.
+
+Provider CI promotion records preview capability on the target. Same-source
+repair scans retain that capability and the already accepted connection-level
+preview fact for older targets whose CI proof omitted `preview_capable`.
+Different-source scans and native-verification refusals do not inherit it.
+This guards stored acceptance and its readers; expanding the native contract
+digest to seal every execution/listing input remains separate work.
+
 Private repository provider proof uses the separate `ci_evidence` permission profile with explicit `permission_mode=read` and `action=read`, the original operation tuple and immutable repository. Only canonical CI/status verification consumers request it; model and source readers retain `repository`. This profile narrows existing App and installation grants to Contents, Pull requests, Checks and Commit statuses read access, permits only incidental Metadata read, and never includes Actions or Workflows. Fresh grant evidence is checked before cached credentials are used; missing CI read grants return nonretryable `github_ci_evidence_permission_required` without issuing credentials or changing permissions. Provider proof still requires the exact source and operation, with final consent/cancellation fencing and ephemeral credential revocation.
 
 Provider check responses validate documented states, scalar metadata and inventory counts before inspection. Native verification may find its exact provider-sealed attestation on the first bounded page of 100 checks; that attestation does not imply that every repository check passed. Cleanup verification requires the complete inventory and rejects paginated or unfinished checks. Malformed provider evidence returns retryable unavailability, never a missing-permission diagnosis or successful verification.
@@ -50,6 +66,14 @@ Browser lifecycle and setup requests use `Idempotency-Key` and `X-Request-ID`; t
 Cleanup execution requires a second explicit owner POST with `approve_cleanup:true`, `operation_id`, `source_sha` and `proposal_digest`. It revalidates GitHub identity and file hashes, then opens a dedicated removal PR. It never merges or modifies the default branch. A disconnected website receives no general publication grant; this endpoint authorizes only the reviewed cleanup operation. Retries reconcile the same operation-specific branch/PR.
 
 ## One-click preparation, disconnection and billing
+
+The default-off `ARTICLES_EXISTING_INVENTORY_DISPLAY_ENABLED` adds
+`websiteStatus.existingArticles` and one capture evidence message from a validated
+summary on the preparation's canonical setup child. The observed original SHA
+is retained separately from the current branch. Missing/foreign/conflicting
+evidence is omitted; zero requires a valid empty observation. This display has
+no effect on goal milestones, capabilities, approval or publishing. See the
+[E3 disclosure contract](articles-e3-native-inventory-display-2026-10-17.md).
 
 `python manage.py inspect_website_prepare --company-id <uuid>` (or `--domain example.test`)
 prints bounded local preparation diagnostics: connection identity and capabilities,
@@ -372,8 +396,9 @@ source SHA and the exact saved slug/route contract. Older repository-bound draft
 remain reviewable but return `website_repository_changed`,
 `website_source_changed` or `capture_target_mismatch` before a publishing child
 is bound. A refunded original draft payment also denies regeneration/restart;
-no-delivery internal, budget, editorial or source-drift failures refund the
-recorded charge without refunding a saved deliverable.
+no-delivery internal, budget, editorial or source-drift failures queue settlement
+of the recorded charge after the worker has proved it stopped without an article
+effect or a delivered review/package.
 
 `github-revoke` has an account-wide reviewed flow. `phase=plan` returns `githubRevocation.planDigest`, affected owned companies and provider instructions. `phase=apply` requires that exact `plan_digest`, `approved=true` and an idempotency key. It fences all reviewed owned bindings, cancels their work/schedules and clears only this user's saved installation/OAuth credentials. Other users sharing an installation ID are preserved. Local completion does not claim provider uninstall; the receipt retains `provider_cleanup_pending` and GitHub installation/OAuth settings links. Website disconnect remains company-scoped and preserves global account access.
 
@@ -390,3 +415,125 @@ configuration, proof, credentials or billing. Unknown runs return 404 and scope
 mismatches return 409. Terminal setup revisions project their recorded failure over
 stale preview-building labels in browser and worker responses; the read projection
 does not rewrite historical run evidence.
+
+
+### Article cancellation and original-charge settlement
+
+An article's setup PR does not constitute article publication. The worker emits
+`publication_evidence_v1` with `purpose=setup|article`, run/goal identity and the
+original present-only scope: connection/generation/target, repository, source SHA,
+operation/attempt/deletion epoch, client request ID and optional branch/app root.
+A setup receipt explains only its matching PR/branch. Unexplained legacy links,
+pending publication or an article effect retain their evidence and require
+reconciliation. Later sparse snapshots cannot erase that publication evidence or
+change the original scope, billing key, goal or initial delivery consent. Explicit
+backend resume changes the execution attempt; it preserves omitted scope fields.
+
+The worker's `article_cancellation_v1` binds that scope to a nonnegative execution
+generation, monotonically checked state version, cancellation watermark,
+`outcome=no_article_effect|article_effect|unknown` and nullable `delivered_value`.
+Its `receipt_id` is SHA-256 over canonical JSON of every other field. Status-only
+cancellation keeps existing artifact/review/proof and payment records. An article
+with possible external effects can stop locally and remain pending reconciliation;
+HTTP success, elapsed time and a legacy `refundable` flag are never no-value proof.
+
+Credit requires a validated `no_article_effect`/`delivered_value=false` stop and
+no contradictory saved publication or delivered value. A completed package counts
+as portable delivery only for an originally confirmed `content_only` request;
+the internal package created before repository rendering is not that consent.
+Verified review previews retain their charge. A terminal no-value candidate with
+no stop proof records `stop_required`; reconciliation obtains the worker receipt
+outside database locks, with at most three attempts before `needs_reconciliation`.
+Explicitly exhausted blocked runs use the same path. Owner review/merge/deploy
+waits and children whose active first-article goal owns the spend are excluded.
+
+`article_terminal_refund` and `reconciliation_refund_pending` are backend-owned
+outbox fields. Settlement locks the organization and fresh run, rechecks proof and
+holds those locks through database-only credit against the original spend, payer,
+amount and idempotency key. Missing ledger identity, transport uncertainty and
+credit errors retain the obligation. Duplicate cancellation cannot erase a pending
+or completed credit; contradictory later evidence quarantines an uncredited
+obligation. A pre-existing child refund obligation is marked `deferred_to_goal`
+and retained for its original first-article goal owner; the child cannot refund
+the shared spend after another repair child delivers. Confirmed dispatch rejection retains its separate existing refund path.
+Disconnect preserves queued goal-refund operations. An ordinary source wake,
+including the first article's own merge push, cannot create another paid successor
+after a terminal first-article goal, even when the goal-runner flag is rolled back.
+
+The paired worker fixtures cover setup-only cancellation, a trusted resumed
+attempt and a publisher exception with pending effects. Local tests deny database
+and network access; disposable database tests exercise original-ledger settlement.
+These source checks do not claim deployment or resolution of historical balances.
+
+First-article goals settle that shared payment through their existing `goal-refund`
+outbox. A terminal parent, failed child or missing child row does not authorize a
+credit. Settlement locks organization, connection, parent, dispatch and child
+records, and requires each original-payment-owned article child to have a valid
+stop receipt proving no article effect and no delivered value. A verified draft
+retains its payment; pending publication and uncertain dispatch remain unresolved.
+Children and rejected-dispatch handlers defer to this parent even after it stops.
+
+Admission writes the generation dispatch in the same transaction that validates
+the active parent. After provider admission, it rechecks the stored integration
+proof under the organization and connection locks before spending or consuming a
+reservation. Admission captures the selected target and exact verified source
+before reserving the workflow; supplied identities cannot be replaced. The locked
+check rejects a changed selection or source even if the new one has valid proof.
+A pending sealed proof therefore blocks new dispatch even when it
+appears after the provider read; the original goal hold remains unchanged. Exact
+hosted proof can resume that hold. Verification readiness is not refund evidence:
+settlement still requires each child's independent stop and delivered-value proof.
+Legacy reserved workflow rows whose original digest lacks target/source binding
+are not upgraded to today's selection. Replaying the same client identity fails
+closed without another spend or dispatch. Before rollout, reconcile these rows
+through a separately reviewed recovery using their actual saved request, outbox
+and payment evidence; missing history is not permission to invent a binding.
+Its absent row can prove pre-dispatch cancellation only while
+that parent lock excludes new admission and no prior child/dispatch evidence
+exists. A dispatch with zero attempts can already have a synchronous POST in
+flight; it remains unknown. Stops run outside the billing transaction, at most
+three times, before the outbox requires reconciliation. No timeout credits money.
+
+Erasure retains a bounded `first_article_settlement_v1` financial record: original
+payment binding, child identifiers, worker stop receipt digests and versions, and
+the unresolved or proven outcome. It contains no article body, provider response
+or credential. An unexplained missing child, corrupted summary or unknown effect
+keeps the obligation. Positive recorded stop proof survives removal of content;
+the same original ledger idempotency key still ensures one credit.
+
+A fresh, scoped no-effect child stop receipt or confirmed dispatch resolution wakes
+an existing quarantined parent refund after its source transaction commits. This
+preserves lock order and the existing cancellation-attempt count; duplicate proof
+cannot restart the budget. The awakened worker repeats the complete original-ledger
+and all-child evidence checks before crediting. Unknown effects remain retained.
+
+Cancellation follow-ups also have their own persisted three-attempt, 24-hour
+budget, including operations with no preview IDs. A typed article cancellation
+receipt retires repeated stop requests while preserving uncertain publication,
+refund and cleanup obligations. Generic HTTP success, 202 or 404 is not article
+absence evidence. A known non-article acknowledgement must match its original
+job or fenced operation/attempt. Unknown or exhausted cancellation is retained
+for reconciliation; preview teardown and token revocation continue independently.
+No cancellation deadline authorizes a credit or remote resource deletion.
+
+New cancellation intents freeze a digest of each run's original organization,
+repository, domain, workflow, goal and exact execution scope before remote work.
+A resumed attempt, changed deletion epoch or newly added run ID cannot reuse the
+old cancellation. Historical follow-ups without that binding retain an unknown
+obligation and retire repeated requests; the consumer never guesses their scope.
+
+Automatic article stops from lifecycle cleanup, heartbeat recovery, exhausted-run
+settlement and first-article parent settlement send the same captured
+`expected_cancellation_v1` envelope. Content Factory must validate it inside its
+run/lifecycle lock before stopping work. A stale caller cannot cancel an attempt
+that resumed after the backend read. A scoped 409 retains the original obligation;
+it does not borrow the new attempt's identity. Deploy the companion scoped-cancel
+endpoint before these senders, since older endpoints ignore the JSON envelope.
+Explicit owner cancellation remains compatible with the legacy empty-body route.
+
+Draft group deletion retains its own PR close-or-observe cleanup. A closed or
+inaccessible PR, preview deletion, or refused worker cancellation does not prove
+that article work stopped or delivered no value. The existing worker receipt
+guard still protects run state and original payment evidence; typed unknown
+stops retain reconciliation obligations after PR cleanup. Setup-only typed stops
+can finish cancellation without closing the website's setup PR.

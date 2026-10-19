@@ -92,9 +92,9 @@ class FirstArticleProviderChainTests(OneClickBillingFixture,TransactionTestCase)
         contract={"target_id":"native","contract_digest":"c"*64,"route_path":"/articles",
             "route_template":"/articles/{slug}","live_marker":{"kind":"artifact_digest","schema_version":1,
                 "meta_name":"mlai-artifact-digest","value":"f"*64}}
-        WebsiteConnectionTarget.objects.create(connection=self.website,generation=self.website.generation,
-            target_key="native",adapter="react_article_system",source_sha=self.website.verified_sha,
-            verified_at=timezone.now(),contract=contract,capabilities={"publishingReady":True})
+        WebsiteConnectionTarget.objects.update_or_create(connection=self.website,generation=self.website.generation,
+            target_key="native",defaults={"adapter":"react_article_system","source_sha":self.website.verified_sha,
+                "verified_at":timezone.now(),"contract":contract,"capabilities":{"publishingReady":True}})
         self.config.default_publish_target_id="native";self.config.publish_targets=[contract]
         self.config.save(update_fields=["default_publish_target_id","publish_targets"])
         # The test begins at Ready, including the publishing guard's owning
@@ -403,3 +403,73 @@ class FirstArticleProviderChainTests(OneClickBillingFixture,TransactionTestCase)
         self.assertEqual(self.balance(self.payer),8_000_000)
         self.assertEqual(Ledger.objects.filter(kind="SPEND",source="CONTENT_FACTORY").count(),2)
         self.assertEqual(Ledger.objects.filter(kind="REFUND",source="CONTENT_FACTORY").count(),1)
+
+    def terminal_parent_child(self, *, outcome):
+        """Synthetic dynamic DB IDs; raw CF producer fixtures are checked offline."""
+        from .article_publication_evidence import original_scope
+        from .website_first_article_refunds import reserve_refund
+        op = self.start()
+        billing = op.receipt["first_article_billing"]
+        request = {**self.binding, "first_article_goal_id": str(op.pk), "first_article_goal_operation_id": str(op.pk),
+            "client_request_id": billing["client_request_id"], "roo_points_ledger_id": billing["spend_ledger_id"],
+            "roo_points_billing_user_id": billing["payer_user_id"], "github_repo": self.website.github_repo,
+            "deletion_epoch": 0, "operation_id": "synthetic-parent-child", "operation_attempt": 1}
+        run = ContentFactoryRun.objects.create(run_id="parent-settlement-child", organization=self.org, domain=self.org.domain,
+            workflow="article_generation", github_repo=self.website.github_repo, run_request=request, status="cancelled")
+        proof = {"version": 1, "purpose": "article_cancellation", "run_id": run.run_id, "goal_id": str(op.pk),
+            "scope": original_scope(run), "generation": 0, "state_version": 5, "outcome": outcome, "cancelled": True,
+            "delivered_value": False if outcome == "no_article_effect" else None,
+            "watermark": {"operation_id": request["operation_id"], "attempt": 1, "cancelled": True}}
+        proof["receipt_id"] = goals.digest(proof)
+        run.result = {"article_cancellation_v1": proof, "reconciliation_refund_pending": True,
+            "article_terminal_refund": {"status": "deferred_to_goal"}}
+        run.save(update_fields=["result"])
+        ContentFactoryDispatchOutbox.objects.create(client_request_id=billing["client_request_id"], organization=self.org,
+            state="delivered", run_id=run.run_id, payload={"request": request})
+        op.state = "needs_attention"
+        op.receipt = {**op.receipt, "first_article_run_id": run.run_id}
+        op.save(update_fields=["state", "receipt"])
+        return op, run, reserve_refund(op)
+
+    def test_unknown_child_cannot_credit_terminal_parent_or_complete_its_outbox(self):
+        op, child, row = self.terminal_parent_child(outcome="unknown")
+        self.assertEqual(advance_refund(row.pk), "needs_attention")
+        row.refresh_from_db(); op.refresh_from_db(); child.refresh_from_db()
+        self.assertEqual(row.receipt["status"], "credit_needs_reconciliation")
+        self.assertEqual(op.receipt["first_article_billing"]["status"], "reserved")
+        self.assertTrue(child.result["reconciliation_refund_pending"])
+        self.assertFalse(Ledger.objects.filter(kind="REFUND", source="CONTENT_FACTORY").exists())
+        self.assertEqual(self.balance(self.payer), 14_000_000)
+
+    def test_duplicate_parent_settlement_credits_one_original_allocation(self):
+        op, child, row = self.terminal_parent_child(outcome="no_article_effect")
+        self.assertEqual(advance_refund(row.pk), "completed")
+        self.assertIsNone(advance_refund(row.pk))
+        op.refresh_from_db(); child.refresh_from_db()
+        original = Ledger.objects.get(pk=op.receipt["first_article_billing"]["spend_ledger_id"])
+        credit = Ledger.objects.get(kind="REFUND", source="CONTENT_FACTORY")
+        self.assertEqual(credit.refund_of_id, original.pk)
+        self.assertEqual(credit.user_id, self.payer.pk)
+        self.assertEqual(self.balance(self.payer), 20_000_000)
+        self.assertEqual(child.run_request["roo_points_billing_status"], "refunded")
+
+    def test_postgres_competing_parent_workers_credit_once(self):
+        if connection.vendor != "postgresql":
+            self.skipTest("Concurrent row-lock regression requires PostgreSQL")
+        from concurrent.futures import ThreadPoolExecutor
+        from threading import Barrier
+        from django.db import close_old_connections
+        op, child, row = self.terminal_parent_child(outcome="no_article_effect")
+        barrier = Barrier(2)
+        def settle():
+            close_old_connections()
+            try:
+                barrier.wait(timeout=10)
+                return advance_refund(row.pk)
+            finally:
+                close_old_connections()
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            outcomes = list(pool.map(lambda _: settle(), range(2)))
+        self.assertCountEqual(outcomes, ["completed", None])
+        self.assertEqual(Ledger.objects.filter(kind="REFUND", source="CONTENT_FACTORY").count(), 1)
+        self.assertEqual(self.balance(self.payer), 20_000_000)

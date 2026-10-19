@@ -561,6 +561,10 @@ def _scrub_runs(runs: Iterable[ContentFactoryRun], *, request_id: str, reason: s
             run.error = "Cancelled because startup data was deleted."
             update_fields.extend(["status", "error"])
         run.save(update_fields=update_fields)
+        # Saving first acquires the same run row lock as extraction writers.
+        # Delete indexed copies only after any earlier completion has committed.
+        from startup_updates.models import SourceExtractionReceipt
+        SourceExtractionReceipt.objects.filter(run=run).delete()
         scrubbed += 1
     return scrubbed
 

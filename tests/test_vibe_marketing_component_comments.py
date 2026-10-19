@@ -1732,7 +1732,7 @@ class VibeMarketingComponentCommentTests(_PublishRetryApprovalFixture, TestCase)
         self.assertEqual(response.data["latestBatch"]["status"], "completed")
 
     @override_settings(CONTENT_FACTORY_URL="https://content-factory.test", CONTENT_FACTORY_API_KEY="secret-key", IS_LOCAL_ENV=False)
-    def test_cancel_article_run_marks_tombstone_and_hides_from_bootstrap(self):
+    def test_legacy_cancel_hides_run_but_preserves_unsettled_delivery_evidence(self):
         self.run.status = ContentFactoryRunStatus.RUNNING
         self.run.current_step = "draft_article"
         self.run.run_request = {**self.website_binding, "target_keyword": "ai marketing"}
@@ -1781,12 +1781,14 @@ class VibeMarketingComponentCommentTests(_PublishRetryApprovalFixture, TestCase)
 
         self.assertEqual(response.status_code, 202)
         self.assertEqual(response.data["status"], ContentFactoryRunStatus.CANCELLED)
-        self.assertFalse(response.data["contentPackage"])
-        self.assertFalse(VibeMarketingComponentComment.objects.filter(run=self.run).exists())
+        self.assertEqual(response.data["contentPackage"]["title"], "AI Marketing")
+        self.assertTrue(VibeMarketingComponentComment.objects.filter(run=self.run).exists())
         self.run.refresh_from_db()
         self.assertEqual(self.run.status, ContentFactoryRunStatus.CANCELLED)
         self.assertEqual(self.run.current_step, "cancelled")
         self.assertTrue(self.run.result["cancelled"])
+        self.assertEqual(self.run.result["delivery_package"]["article_markdown"], "steps/package/article.md")
+        self.assertNotIn("reconciliation_refund_pending", self.run.result)
         self.assertEqual(self.run.steps.get(step_key="draft_article").status, "cancelled")
         keyword = ResearchedKeyword.objects.get(organization=self.organization, keyword_normalized="ai marketing")
         self.assertEqual(keyword.status, KeywordStatus.PENDING)
@@ -2097,7 +2099,7 @@ class VibeMarketingComponentCommentTests(_PublishRetryApprovalFixture, TestCase)
         self.assertEqual(unrelated.status, ContentFactoryRunStatus.BLOCKED)
 
     @override_settings(CONTENT_FACTORY_URL="https://content-factory.test", CONTENT_FACTORY_API_KEY="secret-key", IS_LOCAL_ENV=False)
-    def test_cancel_group_skips_publish_protected_attempts_and_reports_them(self):
+    def test_cancel_group_preserves_publish_evidence_when_remote_stop_is_untyped(self):
         source_run_id = "disc-protected-ai-detectors"
         keyword = "how ai detector reports work"
         cancellable_one = self._create_bound_run(
@@ -2138,12 +2140,12 @@ class VibeMarketingComponentCommentTests(_PublishRetryApprovalFixture, TestCase)
             cancelled_urls.append(url)
             return _Response(status_code=202, payload={"status": "cancelled", "cleanup": {}})
 
-        def team_changed_pull_request(config, pr_url):
+        def already_closed_pull_request(config, pr_url):
             checked_pull_requests.append(pr_url)
-            return {"prUrl": pr_url, "ok": False, "action": "", "reason": "team_changes"}
+            return {"prUrl": pr_url, "ok": True, "action": "already_closed", "reason": ""}
 
         with patch("content_factory.vibe_marketing_views.http_client.post", side_effect=fake_post), \
-                patch("content_factory.draft_pull_request_cleanup.close_draft_pull_request", side_effect=team_changed_pull_request):
+                patch("content_factory.draft_pull_request_cleanup.close_draft_pull_request", side_effect=already_closed_pull_request):
             response = self.client.post(
                 f"/api/v1/vibe-marketing/runs/{cancellable_one.run_id}/cancel",
                 {"cancel_group": True},
@@ -2159,7 +2161,9 @@ class VibeMarketingComponentCommentTests(_PublishRetryApprovalFixture, TestCase)
         self.assertEqual(checked_pull_requests, ["https://github.com/MLAI-AUS-Inc/mlai-au/pull/77"])
         self.assertTrue(any(cancellable_one.run_id in url for url in cancelled_urls))
         self.assertTrue(any(cancellable_two.run_id in url for url in cancelled_urls))
-        self.assertFalse(any(protected.run_id in url for url in cancelled_urls))
+        # Closing the PR permits a stop request, but its untyped reply cannot
+        # establish cancellation or erase the attempt's external evidence.
+        self.assertTrue(any(protected.run_id in url for url in cancelled_urls))
 
         cancellable_one.refresh_from_db()
         cancellable_two.refresh_from_db()
@@ -2167,6 +2171,8 @@ class VibeMarketingComponentCommentTests(_PublishRetryApprovalFixture, TestCase)
         self.assertEqual(cancellable_one.status, ContentFactoryRunStatus.CANCELLED)
         self.assertEqual(cancellable_two.status, ContentFactoryRunStatus.CANCELLED)
         self.assertEqual(protected.status, ContentFactoryRunStatus.BLOCKED)
+        self.assertEqual(protected.result["draft_pr_url"], "https://github.com/MLAI-AUS-Inc/mlai-au/pull/77")
+        self.assertNotIn("reconciliation_refund_pending", protected.result)
 
         bootstrap = self.client.get("/api/v1/vibe-marketing/bootstrap/?view=summary")
         self.assertEqual(bootstrap.status_code, 200)
@@ -2240,7 +2246,7 @@ class VibeMarketingComponentCommentTests(_PublishRetryApprovalFixture, TestCase)
         )
 
     @override_settings(CONTENT_FACTORY_URL="https://content-factory.test", CONTENT_FACTORY_API_KEY="secret-key", IS_LOCAL_ENV=False)
-    def test_cancel_group_deletes_setup_blocked_draft_without_touching_setup_pr(self):
+    def test_cancel_group_keeps_setup_blocked_draft_when_worker_refuses_stop(self):
         draft = self._setup_blocked_draft_with_copied_setup_pr("talathrive-setup-blocked-draft")
         calls, transport = self._content_factory_refuses_pr_links()
         closed = []
@@ -2254,31 +2260,28 @@ class VibeMarketingComponentCommentTests(_PublishRetryApprovalFixture, TestCase)
                 format="json",
             )
 
-        self.assertEqual(response.status_code, 202, response.data)
-        self.assertEqual(response.data["cancelledRunIds"], [draft.run_id])
-        self.assertEqual(response.data["protectedRunIds"], [])
-        # The setup PR belongs to the website's setup; deletion never closes it.
+        self.assertEqual(response.status_code, 409, response.data)
         self.assertEqual(closed, [])
-        self.assertIn(("DELETE", f"https://content-factory.test/api/runs/{draft.run_id}/live-preview"), calls)
+        self.assertFalse(any(method == "DELETE" for method, _ in calls))
         draft.refresh_from_db()
-        self.assertEqual(draft.status, ContentFactoryRunStatus.CANCELLED)
-        bootstrap = self.client.get("/api/v1/vibe-marketing/bootstrap/?view=summary")
-        self.assertNotIn(draft.run_id, {item["runId"] for item in bootstrap.data["draftArticles"]})
+        self.assertEqual(draft.status, ContentFactoryRunStatus.BLOCKED)
+        self.assertEqual(draft.result["pr_url"], "https://github.com/MLAI-AUS-Inc/mlai-au/pull/42")
+        self.assertNotIn("reconciliation_refund_pending", draft.result)
 
     @override_settings(CONTENT_FACTORY_URL="https://content-factory.test", CONTENT_FACTORY_API_KEY="secret-key", IS_LOCAL_ENV=False)
-    def test_cancel_article_run_proceeds_when_only_pr_link_is_setup_pr(self):
+    def test_cancel_article_run_requires_worker_stop_even_for_setup_link(self):
         draft = self._setup_blocked_draft_with_copied_setup_pr("talathrive-setup-blocked-run-page")
         _calls, transport = self._content_factory_refuses_pr_links()
 
         with transport[0], transport[1], transport[2]:
             response = self.client.post(f"/api/v1/vibe-marketing/runs/{draft.run_id}/cancel", {"cleanup": True}, format="json")
 
-        self.assertEqual(response.status_code, 202, response.data)
+        self.assertEqual(response.status_code, 409, response.data)
         draft.refresh_from_db()
-        self.assertEqual(draft.status, ContentFactoryRunStatus.CANCELLED)
+        self.assertEqual(draft.status, ContentFactoryRunStatus.BLOCKED)
 
     @override_settings(CONTENT_FACTORY_URL="https://content-factory.test", CONTENT_FACTORY_API_KEY="secret-key", IS_LOCAL_ENV=False)
-    def test_cancel_group_closes_drafts_own_pr_before_deleting(self):
+    def test_cancel_group_closes_own_pr_but_keeps_unconfirmed_worker_obligation(self):
         own_pr_url = "https://github.com/MLAI-AUS-Inc/mlai-au/pull/88"
         draft = self._create_bound_run(
             run_id="draft-with-own-open-pr",
@@ -2304,11 +2307,12 @@ class VibeMarketingComponentCommentTests(_PublishRetryApprovalFixture, TestCase)
                 format="json",
             )
 
-        self.assertEqual(response.status_code, 202, response.data)
+        self.assertEqual(response.status_code, 409, response.data)
         self.assertEqual(closed, [own_pr_url])
         draft.refresh_from_db()
-        self.assertEqual(draft.status, ContentFactoryRunStatus.CANCELLED)
-        self.assertEqual(draft.result["cleanup"]["pull_requests"][0]["action"], "closed")
+        self.assertEqual(draft.status, ContentFactoryRunStatus.AWAITING_APPROVAL)
+        self.assertEqual(draft.result["draft_pr_url"], own_pr_url)
+        self.assertNotIn("reconciliation_refund_pending", draft.result)
 
     @override_settings(CONTENT_FACTORY_URL="https://content-factory.test", CONTENT_FACTORY_API_KEY="secret-key", IS_LOCAL_ENV=False)
     def test_cancel_group_explains_why_a_draft_with_merged_pr_is_kept(self):

@@ -633,6 +633,26 @@ class StartupUpdateIngestViewTest(StartupUpdateApiTestCase):
         self.assertEqual(response.data["ingested_count"], 1)
         self.assertEqual(response.data["relevance_counts"]["relevant"], 1)
 
+    @patch("startup_updates.api_views.sync_message_metadata_page")
+    def test_incomplete_first_page_does_not_mark_cursor_complete(self, mock_sync):
+        mock_sync.return_value = {"result_size_estimate": 2, "next_page_token": None,
+            "page_complete": False, "artifacts": []}
+        with self._with_key():
+            response = self.client.post(reverse("startup_updates_ingest_next_page", args=[self.run.run_id]),
+                {}, format="json", **self.headers)
+        self.assertEqual(response.status_code, 200, response.data)
+        self.assertFalse(response.data["page_complete"])
+        self.assertIsNone(response.data["next_page_token"])
+        cursor = GmailSyncCursor.objects.get(organization=self.organization, google_connection=self.google_connection)
+        self.assertIsNone(cursor.backfill_completed_at)
+        mock_sync.return_value["page_complete"] = True
+        with self._with_key():
+            completed = self.client.post(reverse("startup_updates_ingest_next_page", args=[self.run.run_id]),
+                {}, format="json", **self.headers)
+        self.assertTrue(completed.data["page_complete"])
+        cursor.refresh_from_db()
+        self.assertIsNotNone(cursor.backfill_completed_at)
+
     def test_ingest_next_page_returns_source_unavailable_when_gmail_scope_missing(self):
         self.google_connection.scope = "openid https://www.googleapis.com/auth/userinfo.email"
         self.google_connection.save(update_fields=["scope", "updated_at"])

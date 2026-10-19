@@ -340,6 +340,41 @@ class WebsiteDatabaseFixture:
 
 @override_settings(ROO_API_KEY='synthetic-test-key', INTERNAL_API_KEY='synthetic-test-key')
 class WebsiteLifecycleTests(WebsiteDatabaseFixture, TestCase):
+    def test_disconnect_keeps_financial_outbox_rows_and_their_original_leases(self):
+        from .website_first_article_refunds import ACTION
+        generation = self.website.generation
+        retained = []
+        for state in ("pending", "running", "needs_attention"):
+            parent = WebsiteConnectionOperation.objects.create(connection=self.website,
+                generation=generation, action="prepare", state="cancelled",
+                idempotency_key="refund-parent-" + state,
+                receipt={"goal": {"goal_id": state}, "first_article_billing": {"status": "reserved"}})
+            receipt = {"status": "credit_pending", "original_marker": state}
+            due = timezone.now() + timedelta(minutes=3)
+            row = WebsiteConnectionOperation.objects.create(connection=self.website,
+                generation=generation, action=ACTION, state=state, attempts=2,
+                next_attempt_at=due, receipt=receipt,
+                idempotency_key=f"{self.website.pk}:goal-refund:{parent.pk}",
+                payload={"goal_operation_id": str(parent.pk), "goal_id": state})
+            retained.append((row, state, due, receipt))
+        unpaid = WebsiteConnectionOperation.objects.create(connection=self.website,
+            generation=generation, action="prepare", state="running", idempotency_key="new-refund-parent",
+            receipt={"goal": {"goal_id": "new"}, "first_article_billing": {"status": "reserved"}})
+        scan = WebsiteConnectionOperation.objects.create(connection=self.website,
+            generation=generation, action="scan", state="pending", idempotency_key="cancelled-scan")
+
+        transition_connection(self.config, action="disconnect", expected=self.binding)
+
+        for row, state, due, receipt in retained:
+            row.refresh_from_db()
+            self.assertEqual((row.state, row.attempts, row.next_attempt_at, row.receipt), (state, 2, due, receipt))
+        scan.refresh_from_db()
+        self.assertEqual(scan.state, "cancelled")
+        created = WebsiteConnectionOperation.objects.get(idempotency_key=f"{self.website.pk}:goal-refund:{unpaid.pk}")
+        self.assertEqual(created.state, "pending")
+        self.assertEqual(created.generation, generation)
+        self.assertEqual(created.receipt, {"status": "credit_pending"})
+
     def test_source_change_can_record_setup_merge_without_promoting_readiness(self):
         from . import vibe_marketing_views as marketing
         from .website_connections import owner_write_guard, scoped_run_contract
