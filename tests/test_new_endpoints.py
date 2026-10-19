@@ -660,6 +660,8 @@ class ContentGenerateAutoWriteTests(TestCase):
             "user_avatar_url": "https://avatar.test/auto.png",
         }
         data.update(overrides)
+        if data.get("topic") and "expectedCostPoints" not in data:
+            data.setdefault("expected_cost_points", 12)
         return data
 
     def _mock_response(self, status_code, body):
@@ -672,6 +674,7 @@ class ContentGenerateAutoWriteTests(TestCase):
     def test_generate_auto_write_uses_discovery_endpoint_after_scan(self):
         url = reverse('content_generate')
         data = self._generate_request_data(topic=None)
+        self.assertNotIn("expected_cost_points", data)
 
         with patch('integrations.services.article_generation.http_requests.post') as mock_post:
             mock_post.side_effect = [
@@ -732,11 +735,15 @@ class ContentGenerateAutoWriteTests(TestCase):
             mock_post.return_value = self._mock_response(202, {"job_id": "job-article-repo-less-456"})
             response = self.client.post(url, data, format='json')
 
-        self.assertEqual(response.status_code, status.HTTP_202_ACCEPTED)
+        self.assertEqual(response.status_code, status.HTTP_202_ACCEPTED, response.data)
         payload = mock_post.call_args.kwargs.get('json') or {}
         self.assertEqual(payload.get('delivery_mode'), 'content_only')
         self.assertTrue(payload.get('delivery_mode_confirmed'))
         self.assertEqual(payload.get('github_repo'), '')
+        self.assertEqual(payload.get('roo_points_cost'), 12)
+        mock_post.assert_called_once()
+        self.user.points_account.refresh_from_db()
+        self.assertEqual(self.user.points_account.balance, 8)
 
     @patch('content_factory.content_views.trigger_article_generation')
     def test_generate_passes_slack_thread_context_to_service(self, mock_trigger):
@@ -771,6 +778,7 @@ class ContentGenerateAutoWriteTests(TestCase):
                 "user_first_name": "Auto",
                 "user_last_name": "Writer",
                 "user_avatar_url": "https://avatar.test/auto.png",
+                "expected_cost_points": 12,
             },
         )
 
