@@ -2192,6 +2192,7 @@ class VibeMarketingAutofillTests(TestCase):
             response = self.client.post(
                 "/api/v1/vibe-marketing/article/",
                 {
+                    "expectedCostPoints": 12,
                     "clientRequestId": "vibe-article-selected-1",
                     "topicCandidateId": "topic:run:discovery-selection-1:australian-founders",
                     "selectedTitle": "What Australian Founders Need to Know Before Investing in AI Products",
@@ -2245,6 +2246,7 @@ class VibeMarketingAutofillTests(TestCase):
             response = self.client.post(
                 "/api/v1/vibe-marketing/article/",
                 {
+                    "expectedCostPoints": 12,
                     "clientRequestId": "vibe-article-stored-keyword-1",
                     "topicCandidateId": legacy_frontend_id,
                     "selectedTitle": "doctor jobs sydney",
@@ -2333,6 +2335,7 @@ class VibeMarketingAutofillTests(TestCase):
             response = self.client.post(
                 "/api/v1/vibe-marketing/article/",
                 {
+                    "expectedCostPoints": 12,
                     "topic": "Founder workflow automation",
                     "targetKeyword": "founder workflow automation",
                     "deliveryMode": "content_only",
@@ -2378,6 +2381,7 @@ class VibeMarketingAutofillTests(TestCase):
             response = self.client.post(
                 "/api/v1/vibe-marketing/article/",
                 {
+                    "expectedCostPoints": 12,
                     "topic": "Founder workflow automation",
                     "targetKeyword": "founder workflow automation",
                     "deliveryMode": "content_only",
@@ -2974,7 +2978,7 @@ class VibeMarketingAutofillTests(TestCase):
         with patch("content_factory.vibe_marketing_views.http_client.post") as post:
             response = self.client.post(
                 "/api/v1/vibe-marketing/article/",
-                {"topic": "Founder workflow automation", "targetKeyword": "founder workflow automation"},
+                {"expectedCostPoints": 12, "topic": "Founder workflow automation", "targetKeyword": "founder workflow automation"},
                 format="json",
             )
 
@@ -3013,7 +3017,7 @@ class VibeMarketingAutofillTests(TestCase):
         ):
             response = self.client.post(
                 "/api/v1/vibe-marketing/article/",
-                {"topic": "Founder workflow automation", "targetKeyword": "founder workflow automation"},
+                {"expectedCostPoints": 12, "topic": "Founder workflow automation", "targetKeyword": "founder workflow automation"},
                 format="json",
             )
 
@@ -3262,6 +3266,7 @@ class VibeMarketingAutofillTests(TestCase):
             response = self.client.post(
                 "/api/v1/vibe-marketing/article/",
                 {
+                    "expectedCostPoints": 12,
                     "topic": "Founder workflow automation",
                     "deliveryMode": "content_only",
                     "deliveryModeExplicit": True,

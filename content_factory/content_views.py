@@ -14,6 +14,7 @@ from integrations.services.article_generation import (
     publish_article,
     publish_article_as_pr,
     confirm_topic,
+    quote_content_factory_article,
     set_article_delivery_mode,
     ArticleGenerationError,
     ArticleSystemActionRequiredError,
@@ -491,6 +492,30 @@ def _resolve_confirm_job_for_thread(
         payload["message"] = resolved_job.error_message
     return payload
 
+class ContentQuoteView(APIView):
+    """Read the exact owned founder's article price without billing or setup."""
+    authentication_classes = []
+    permission_classes = [HasStrictRooApiKey]
+
+    def post(self, request):
+        data = request.data
+        actor = data.get("requested_by_slack_user_id") or data.get("slack_user_id")
+        domain = data.get("domain")
+        if (not isinstance(actor, str) or not actor.strip() or (domain is not None and not isinstance(domain, str))
+                or not (str(domain or "").strip() or data.get("source_run_id"))):
+            return Response({"error": "An actor and domain or source_run_id are required"}, status=status.HTTP_400_BAD_REQUEST)
+        try:
+            cost = quote_content_factory_article(actor_id=actor.strip(), domain=domain,
+                client_request_id=str(data.get("client_request_id") or "").strip() or None,
+                source_run_id=str(data.get("source_run_id") or "").strip() or None)
+            return Response({"costPoints": cost})
+        except PermissionError as exc:
+            return Response({"error": str(exc)}, status=status.HTTP_403_FORBIDDEN)
+        except ArticleGenerationError as exc:
+            return Response(getattr(exc, "payload", None) or {"error": str(exc), "code": getattr(exc, "code", "article_quote_unavailable")},
+                status=status.HTTP_409_CONFLICT)
+
+
 class ContentGenerateView(APIView):
     """
     Trigger content generation pipeline.
@@ -527,6 +552,7 @@ class ContentGenerateView(APIView):
             "user_first_name": request.data.get("user_first_name"),
             "user_last_name": request.data.get("user_last_name"),
             "user_avatar_url": request.data.get("user_avatar_url"),
+            **{key: request.data[key] for key in ("expected_cost_points", "expectedCostPoints") if key in request.data},
         }
         if request.data.get("notification_context"):
             article_request["notification_context"] = request.data.get("notification_context")
@@ -558,6 +584,8 @@ class ContentGenerateView(APIView):
             return _handle_insufficient_roo_points_error(e)
         except ArticleGenerationError as e:
             logger.warning(f"Generation error: {e}")
+            if getattr(e, "payload", {}).get("code") in {"roo_points_quote_changed", "company_billing_founder_unavailable"}:
+                return Response(e.payload, status=status.HTTP_409_CONFLICT)
             error_str = str(e)
 
             # Handle prerequisite errors — store pending intent and return structured 412
@@ -812,6 +840,8 @@ class ContentConfirmView(APIView):
                 confirm_kwargs["requested_by_slack_user_id"] = requested_by_slack_user_id
             if request.data.get("client_request_id"):
                 confirm_kwargs["client_request_id"] = request.data["client_request_id"]
+            if "expected_cost_points" in request.data or "expectedCostPoints" in request.data:
+                confirm_kwargs["expected_cost_points"] = request.data.get("expected_cost_points", request.data.get("expectedCostPoints"))
 
             result = confirm_topic(
                 **confirm_kwargs,
@@ -889,6 +919,8 @@ class ContentConfirmView(APIView):
             return _handle_insufficient_roo_points_error(e)
         except ArticleGenerationError as e:
             error_str = str(e)
+            if getattr(e, "payload", {}).get("code") in {"roo_points_quote_changed", "company_billing_founder_unavailable"}:
+                return Response(e.payload, status=status.HTTP_409_CONFLICT)
             if error_str.startswith("PREREQUISITE_MISSING:"):
                 return _handle_prerequisite_error(
                     error_str,
@@ -997,8 +1029,9 @@ class ContentJobConfirmView(APIView):
         # 'confirmed' job with no run behind it. Status is stamped after success.
         job.selected_keyword = confirmed_keyword
         job.slack_user_id = slack_user_id
-        job.request_meta = request_meta
-        job.save(update_fields=["selected_keyword", "slack_user_id", "request_meta", "updated_at"])
+        # A competing confirmation may already have saved article billing on
+        # this source. Never overwrite that lineage with this stale snapshot.
+        job.save(update_fields=["selected_keyword", "slack_user_id", "updated_at"])
 
         # Trigger article generation via Content Factory HTTP API
         try:
@@ -1023,12 +1056,19 @@ class ContentJobConfirmView(APIView):
             if requested_by_slack_user_id:
                 confirm_kwargs["requested_by_slack_user_id"] = requested_by_slack_user_id
 
+            if "expected_cost_points" in request.data or "expectedCostPoints" in request.data:
+                confirm_kwargs["expected_cost_points"] = request.data.get("expected_cost_points", request.data.get("expectedCostPoints"))
+            if request.data.get("client_request_id"):
+                confirm_kwargs["client_request_id"] = request.data["client_request_id"]
             result = confirm_topic(**confirm_kwargs)
             # Content Factory accepted the confirmation — only now is 'confirmed' true.
             # Narrow update_fields: confirm_topic's deferred-charge path may have
             # rewritten request_meta/billing on a fresh instance of this row.
             job.status = 'confirmed'
             job.save(update_fields=["status", "updated_at"])
+            # Deferred confirmation may have replaced the research payment and
+            # key on a fresh source instance. Carry that saved article lineage.
+            job.refresh_from_db()
             result_status = str(result.get("status") or "").strip()
             new_job_id = result.get("job_id") or result.get("run_id")
             active_job_id = new_job_id or job.job_id
@@ -1145,6 +1185,8 @@ class ContentJobConfirmView(APIView):
             return _handle_insufficient_roo_points_error(e)
         except ArticleGenerationError as e:
             error_str = str(e)
+            if getattr(e, "payload", {}).get("code") in {"roo_points_quote_changed", "company_billing_founder_unavailable"}:
+                return Response(e.payload, status=status.HTTP_409_CONFLICT)
             if error_str.startswith("PREREQUISITE_MISSING:"):
                 return _handle_prerequisite_error(
                     error_str,

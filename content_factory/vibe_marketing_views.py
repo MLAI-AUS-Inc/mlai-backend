@@ -749,10 +749,10 @@ def _mark_roo_points_gate_authorized(payload: dict, *, domain: str, action: str,
     )
 
 
-def _quoted_price_response(request, *, cost_points):
+def _quoted_price_response(request, *, cost_points, require_quote=False):
     expected = _request_value(request.data, "expectedCostPoints", "expected_cost_points", default=None)
-    if expected is None:
-        return None  # Compatibility: old clients still receive authoritative billing.
+    if expected is None and not require_quote:
+        return None  # Research and verified original-paid retries retain compatibility.
     if isinstance(expected, bool) or not isinstance(expected, int) or expected != cost_points:
         return Response({"detail": "The Roo point price changed. Review the updated price before continuing.",
                          "code": "roo_points_quote_changed", "costPoints": cost_points}, status=409)
@@ -844,7 +844,7 @@ def _charge_roo_points_for_article(request, *, context, payload: dict, goal_oper
             payload.update(first_article_goal_operation_id=str(goal_operation_id),first_article_goal_id=str(goal_operation_id))
         except WebsiteAuthorityError as exc:
             return None, None, None, Response(exc.as_dict(), status=exc.status)
-    quote_error = (_quoted_price_response(request, cost_points=get_content_factory_article_cost_points(context.organization.domain, user=request.user))
+    quote_error = (_quoted_price_response(request, cost_points=get_content_factory_article_cost_points(context.organization.domain, user=request.user), require_quote=True)
         if goal_operation_id is None else None)
     if quote_error is not None:
         # A retry keeps the recorded debit even after a benefit expires. This
@@ -854,10 +854,11 @@ def _charge_roo_points_for_article(request, *, context, payload: dict, goal_oper
             or _request_value(request.data, "client_request_id", "clientRequestId", default="") or "").strip()
         if existing_key:
             from .company_billing import resolve_content_billing_user
-            from integrations.services.article_generation import _original_content_charge_points
+            from integrations.services.article_generation import _original_article_admission_points
             try:
                 payer = resolve_content_billing_user(request.user, context.organization.domain)
-                original_cost = _original_content_charge_points(payer, f"content_factory:charge:{existing_key}")
+                original_cost = _original_article_admission_points(payer, existing_key,
+                    domain=context.organization.domain, organization_id=context.organization.pk)
             except (ArticleGenerationError, WebsiteAuthorityError):
                 original_cost = 0
             if original_cost:

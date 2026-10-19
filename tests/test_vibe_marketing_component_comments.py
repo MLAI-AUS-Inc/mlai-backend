@@ -6230,6 +6230,8 @@ class VibeMarketingComponentCommentTests(_PublishRetryApprovalFixture, TestCase)
         workflow_steps = {step["id"]: step for step in bootstrap_response.data["workflowProgress"]["steps"]}
         self.assertEqual(workflow_steps["research"]["status"], "ready")
 
+        article_price = bootstrap_response.data["articleCapabilities"]["prices"]["article"]
+        self.assertEqual(article_price, 12)
         queued_article = self._create_bound_run(
             run_id="article-after-setup-merge",
             workflow="article_generation",
@@ -6238,16 +6240,17 @@ class VibeMarketingComponentCommentTests(_PublishRetryApprovalFixture, TestCase)
             status=ContentFactoryRunStatus.QUEUED,
             result={},
         )
-        with patch("content_factory.vibe_marketing_views._queue_content_factory_run", return_value=queued_article):
+        with patch("content_factory.vibe_marketing_views._queue_content_factory_run", return_value=queued_article) as queue:
             article_response = self.client.post(
                 "/api/v1/vibe-marketing/article/",
-                {"topic": "AI adoption", "targetKeyword": "ai adoption"},
+                {"expectedCostPoints": article_price, "topic": "AI adoption", "targetKeyword": "ai adoption"},
                 format="json",
             )
 
-        self.assertEqual(article_response.status_code, 202)
+        self.assertEqual(article_response.status_code, 202, article_response.data)
         self.assertEqual(article_response.data["runId"], "article-after-setup-merge")
         self.assertEqual(PointsAccount.objects.get(user=self.user).balance_microroo, 0)
+        queue.assert_called_once()
 
         enable_response = self.client.post(
             f"/api/v1/vibe-marketing/runs/{setup_run.run_id}/enable-daily-automation",

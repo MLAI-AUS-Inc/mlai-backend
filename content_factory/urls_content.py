@@ -3,6 +3,7 @@ from django.urls import path
 from . import content_views as views
 
 urlpatterns = [
+    path('quote', views.ContentQuoteView.as_view(), name='content_quote'),
     path('generate', views.ContentGenerateView.as_view(), name='content_generate'),
     path('article-system/decision', views.ArticleSystemDecisionView.as_view(), name='content_article_system_decision'),
     path('jobs/resolve-thread', views.ContentResolveThreadView.as_view(), name='content_job_resolve_thread'),

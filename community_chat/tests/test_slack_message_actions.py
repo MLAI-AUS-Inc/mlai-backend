@@ -81,6 +81,43 @@ class SlackMessageActionsTests(SimpleTestCase):
         self.authority.assert_called_once()
         self.assertIn(IsAuthenticated, SlackMessageActionView.permission_classes)
 
+    def test_article_price_action_keeps_account_actor_and_exact_source_hash(self):
+        response = self.invoke(action_id="confirm_article_price", user_id="UATTACKER", value="forged-price")
+        self.assertEqual(response.status_code, 200)
+        payload = self.post.call_args.kwargs['json']
+        self.assertEqual(payload['action_id'], 'confirm_article_price')
+        self.assertEqual(payload['user_id'], 'UOWNER')
+        for key in ('workspace_id', 'channel_id', 'message_ts', 'thread_ts', 'action_hash'):
+            self.assertEqual(payload[key], self.data[key])
+        self.assertNotIn('value', payload)
+        self.authority.assert_called_once()
+
+    def test_article_price_action_rechecks_consent_and_rejects_invalid_hash(self):
+        self.assertEqual(self.invoke(action_id='confirm_article_price', action_hash='bad').status_code, 400)
+        self.authority.side_effect = SlackDmMirrorError('Revoked')
+        self.assertEqual(self.invoke(action_id='confirm_article_price').status_code, 403)
+        self.post.assert_not_called()
+
+    def test_article_price_action_propagates_fresh_origin_or_digest_rejection(self):
+        for rejected in (403, 409):
+            with self.subTest(rejected=rejected):
+                self.post.reset_mock()
+                self.post.return_value.status_code = rejected
+                response = self.invoke(action_id='confirm_article_price',
+                    thread_ts='1790000000.000002', action_hash='b' * 64,
+                    user_id='UATTACKER', value='forged-token', expectedCostPoints=0)
+                self.assertEqual(response.status_code, rejected)
+                self.post.assert_called_once()
+                forwarded = self.post.call_args.kwargs['json']
+                self.assertEqual(forwarded['user_id'], 'UOWNER')
+                self.assertEqual(forwarded['workspace_id'], self.data['workspace_id'])
+                self.assertEqual(forwarded['channel_id'], self.data['channel_id'])
+                self.assertEqual(forwarded['message_ts'], self.data['message_ts'])
+                self.assertEqual(forwarded['thread_ts'], '1790000000.000002')
+                self.assertEqual(forwarded['action_hash'], 'b' * 64)
+                self.assertNotIn('value', forwarded)
+                self.assertNotIn('expectedCostPoints', forwarded)
+
     def test_disconnected_and_other_workspace_never_dispatch(self):
         self.grant.side_effect = SlackDmMirrorError("Disconnected")
         self.assertEqual(self.invoke().status_code, 403)

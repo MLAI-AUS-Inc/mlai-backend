@@ -300,6 +300,49 @@ class ScannerTests(SimpleTestCase):
             for field in ("path", "function", "field", "expression"):
                 self.assertEqual(audit[field], rows[audit["site_sha256"]][field])
 
+    def test_article_price_admission_sites_are_exact_financial_denials(self):
+        import json
+        from scripts.check_failure_contract import ROOT, inventory, site_key
+        manifest = json.loads((ROOT / "contracts/failure-emitter-scopes.json").read_text())
+        expected = {
+            ("content_factory/content_views.py", "post", "getattr(exc, 'code', 'article_quote_unavailable')"),
+            ("integrations/services/article_generation.py", "_article_billing_user", "exc.code"),
+            *(("integrations/services/article_generation.py", function, "'content_factory_billing_key_conflict'") for function in (
+                "_original_article_admission_points", "_require_article_job_payment.conflict", "_require_confirm_child_payment",
+                "_charge_deferred_discovery_job_if_needed", "_charge_discovery_article_locked")),
+        }
+        audits = [entry for entry in manifest["nonfailure_sites"] if entry["owner"] == "backend.article_pricing"]
+        self.assertEqual({(entry["path"], entry["function"], entry["expression"]) for entry in audits}, expected)
+        self.assertEqual(len(audits), 7)
+        rows = {site_key(row): row for row in inventory()}
+        for entry in audits:
+            self.assertEqual(entry["adapter"], "nonfailure_category")
+            self.assertEqual(entry["field"], "code")
+            self.assertEqual(entry["test"], f"{__name__}.ScannerTests.test_article_price_admission_sites_are_exact_financial_denials")
+            self.assertIn("not a causal Articles run failure", entry["category"])
+            self.assertIn(entry["site_sha256"], rows)
+
+    def test_article_financial_audit_does_not_cover_another_function_or_code(self):
+        import json
+        from scripts.check_failure_contract import ROOT, check_emitters
+        root, _ = self.fixture_root()
+        path = "integrations/services/article_generation.py"
+        audit = next(entry for entry in json.loads((ROOT / "contracts/failure-emitter-scopes.json").read_text())["nonfailure_sites"]
+            if entry["path"] == path and entry["function"] == "_original_article_admission_points")
+        (root / "contracts/failure-emitter-scopes.json").write_text(json.dumps({"dynamic_adapters": [], "nonfailure_sites": [audit]}))
+        module = root / path
+        module.parent.mkdir(parents=True)
+        source = 'def _original_article_admission_points():\n    error.code = "content_factory_billing_key_conflict"\n'
+        module.write_text(source)
+        self.assertEqual(check_emitters(root)[0], [])
+        for changed in (source.replace("_original_article_admission_points", "other_billing_function"),
+                source.replace("content_factory_billing_key_conflict", "unreviewed_billing_code")):
+            with self.subTest(changed=changed):
+                module.write_text(changed)
+                errors, _ = check_emitters(root)
+                self.assertTrue(any("unregistered code literal" in error for error in errors))
+                self.assertTrue(any("stale emitter audit" in error for error in errors))
+
     def test_ast_covers_constructor_mutations_constants_enums_and_finite_strings(self):
         from scripts.check_failure_contract import python_emissions
         source = '''

@@ -391,14 +391,14 @@ class ArticleDispatchControlFlowTests(unittest.TestCase):
 
     def test_current_policy_is_checked_before_new_charge(self):
         self.strategy = retired_catalog()
-        result = self.ns["_charge_roo_points_for_article"](SimpleNamespace(user=self.user, data={}), context=self.context,
+        result = self.ns["_charge_roo_points_for_article"](SimpleNamespace(user=self.user, data={"expectedCostPoints": 6}), context=self.context,
                                                          payload={"editorial_brief": selected_brief()})
         self.assertEqual(result[3].status_code, 400)
         self.charge.assert_not_called()
 
     def test_valid_charge_keeps_the_resolved_brief_and_billing_contract(self):
         payload = {"editorialBrief": selected_brief()}
-        result = self.ns["_charge_roo_points_for_article"](SimpleNamespace(user=self.user, data={}), context=self.context, payload=payload)
+        result = self.ns["_charge_roo_points_for_article"](SimpleNamespace(user=self.user, data={"expectedCostPoints": 6}), context=self.context, payload=payload)
         self.assertIsNone(result[3])
         self.assertEqual(self.charge.call_args.kwargs["article_request"]["editorial_brief"], selected_brief())
         self.assertNotIn("editorialBrief", payload)
@@ -668,8 +668,7 @@ class AtomicArticleChargeTests(unittest.TestCase):
             self.assertEqual(kwargs['billing_user_id'], 7)
             self.assertEqual(kwargs['payload']['roo_points_requested_by_user_id'], 2)
             self.assertEqual(kwargs['payload']['roo_points_billing_user_id'], 7)
-        with patch.object(views, '_quoted_price_response', return_value=None), \
-                patch.object(views, 'get_content_factory_article_cost_points', return_value=6), \
+        with patch.object(views, 'get_content_factory_article_cost_points', return_value=6), \
                 patch.object(views, '_refresh_article_editorial_payload', return_value=None), \
                 patch.object(views, '_reserve_article_start_connection', return_value=None), \
                 patch.object(views, '_validate_article_start_admission', side_effect=admission), \
@@ -679,7 +678,7 @@ class AtomicArticleChargeTests(unittest.TestCase):
                 patch.object(views.transaction, 'atomic', atomic), \
                 patch.object(views, 'charge_content_factory_request_for_user', side_effect=charge), \
                 patch.object(dispatch_outbox, 'reserve_dispatch', side_effect=reserve):
-            result = views._charge_roo_points_for_article(SimpleNamespace(user=requester, data={}),
+            result = views._charge_roo_points_for_article(SimpleNamespace(user=requester, data={'expectedCostPoints': 6}),
                 context=context, payload={'delivery_mode': 'content_only', 'client_request_id': 'article-key'})
         self.assertIsNone(result[3])
         self.assertEqual(events, ['admitted', 'charged', 'reserved', 'committed'])

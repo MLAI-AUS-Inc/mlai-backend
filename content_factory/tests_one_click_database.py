@@ -44,7 +44,7 @@ class OneClickBillingFixture(WebsiteDatabaseFixture):
             description='Synthetic test funding', idempotency_key='synthetic-funding')
         self.actor = preferred_actor_id_for_user(self.requester)
         self.context = SimpleNamespace(organization=self.org, company=self.company)
-        self.request = SimpleNamespace(user=self.requester, data={})
+        self.request = SimpleNamespace(user=self.requester, data={'expectedCostPoints': 12})
         # Billing starts from a real persisted Ready integration. Provider
         # observations alone cannot satisfy the final, locked admission check.
         verified_at = timezone.now()
@@ -79,6 +79,77 @@ class OneClickBillingFixture(WebsiteDatabaseFixture):
 
 
 class OneClickPersistenceTests(OneClickBillingFixture, TestCase):
+    def assert_quote_rejected_without_new_work(self, *, spends=0):
+        _, _, _, error = self.charge(self.payload())
+        self.assertEqual(error.status_code, 409)
+        self.assertEqual(error.data['code'], 'roo_points_quote_changed')
+        self.assertEqual(error.data['costPoints'], 12)
+        self.assertEqual(self.balance(self.payer), 20_000_000)
+        self.assertEqual(Ledger.objects.filter(kind='SPEND').count(), spends)
+        self.assertFalse(ContentFactoryDispatchOutbox.objects.exists())
+        self.assertFalse(WebsiteConnectionOperation.objects.filter(action='workflow').exists())
+
+    def test_missing_or_invalid_article_quote_is_rejected_before_new_work(self):
+        for data in ({}, {'expectedCostPoints': None}, {'expected_cost_points': None},
+                {'expectedCostPoints': True}, {'expectedCostPoints': '12'},
+                {'expectedCostPoints': 12.0}, {'expectedCostPoints': 0}):
+            with self.subTest(data=data):
+                self.request.data = data
+                # The payload's price is not the caller's confirmed quote.
+                self.assert_quote_rejected_without_new_work()
+
+    def test_fabricated_request_id_without_original_payment_cannot_bypass_quote(self):
+        self.request.data = {'clientRequestId': 'synthetic-article'}
+        self.assert_quote_rejected_without_new_work()
+
+    def test_original_debit_from_another_payer_cannot_bypass_missing_quote(self):
+        PointsService.credit_purchased_topup(user=self.requester, delta=20,
+            description='Synthetic other wallet', idempotency_key='other-wallet-funding')
+        PointsService.spend(user=self.requester, delta=6, source='CONTENT_FACTORY',
+            description='Other payer article', created_by_slack_id=self.actor,
+            idempotency_key='content_factory:charge:synthetic-article',
+            reference_type='CONTENT_FACTORY', reference_id='synthetic-article')
+        self.request.data = {}
+        self.assert_quote_rejected_without_new_work(spends=1)
+        self.assertEqual(self.balance(self.requester), 14_000_000)
+
+    def test_other_company_debit_cannot_supply_omitted_quote_consent(self):
+        from .models import ContentFactoryJob
+        original, _ = PointsService.spend(user=self.payer, delta=6, source='CONTENT_FACTORY',
+            description='Other company article', created_by_slack_id=self.actor,
+            idempotency_key='content_factory:charge:synthetic-article',
+            reference_type='CONTENT_FACTORY', reference_id='synthetic-article')
+        ContentFactoryJob.objects.create(job_id='other-company-proof', domain='other.example.test',
+            client_request_id='synthetic-article', billing_ledger=original, billing_amount=6)
+        self.request.data = {}
+        _, _, _, error = self.charge(self.payload())
+        self.assertEqual((error.status_code, error.data['code']), (409, 'roo_points_quote_changed'))
+        self.assertEqual(self.balance(self.payer), 14_000_000)
+        self.assertEqual(Ledger.objects.filter(kind='SPEND').count(), 1)
+        self.assertFalse(ContentFactoryDispatchOutbox.objects.exists())
+        self.assertFalse(WebsiteConnectionOperation.objects.filter(action='workflow').exists())
+
+    def test_omitted_quote_retry_reuses_original_six_point_debit_once(self):
+        original, _ = PointsService.spend(user=self.payer, delta=6, source='CONTENT_FACTORY',
+            description='Previously confirmed article', created_by_slack_id=self.actor,
+            idempotency_key='content_factory:charge:synthetic-article',
+            reference_type='CONTENT_FACTORY', reference_id='synthetic-article')
+        from .models import ContentFactoryJob
+        ContentFactoryJob.objects.create(job_id='original-six-point-article', domain=self.org.domain,
+            client_request_id='synthetic-article', billing_ledger=original, billing_amount=6, billing_status='charged')
+        self.request.data = {}
+        for _ in range(2):
+            payload = {**self.payload(), 'expected_cost_points': 6}
+            payer, ledger, _, error = self.charge(payload)
+            self.assertIsNone(error)
+            self.assertEqual((payer.pk, ledger.pk), (self.payer.pk, original.pk))
+        self.assertEqual(self.balance(self.payer), 14_000_000)
+        self.assertEqual(Ledger.objects.filter(kind='SPEND').count(), 1)
+        self.assertEqual(ContentFactoryDispatchOutbox.objects.count(), 1)
+        row = ContentFactoryDispatchOutbox.objects.get()
+        self.assertEqual(row.payload['request']['roo_points_cost'], 6)
+        self.assertEqual(row.payload['billing_user_id'], str(self.payer.pk))
+
     def test_stale_article_quote_is_rejected_before_debit_or_dispatch(self):
         self.request.data = {'expectedCostPoints': 6}
         _, _, _, error = self.charge(self.payload())
@@ -94,6 +165,9 @@ class OneClickPersistenceTests(OneClickBillingFixture, TestCase):
             description='Previously confirmed article', created_by_slack_id=self.actor,
             idempotency_key='content_factory:charge:synthetic-article',
             reference_type='CONTENT_FACTORY', reference_id='synthetic-article')
+        from .models import ContentFactoryJob
+        ContentFactoryJob.objects.create(job_id='legacy-six-point-source', domain=self.org.domain,
+            client_request_id='synthetic-article', billing_ledger=original, billing_amount=6, billing_status='charged')
         self.request.data = {'expectedCostPoints': 6}
         payload = {**self.payload(), 'expected_cost_points': 6}
         payer, ledger, _, error = self.charge(payload)
@@ -238,11 +312,24 @@ class OneClickPersistenceTests(OneClickBillingFixture, TestCase):
         deliver.assert_called_once()
         self.assertEqual(Ledger.objects.filter(kind='REFUND').count(), 1)
         self.assertEqual(self.balance(self.payer), 20_000_000)
-        with self.assertRaises(WebsiteAuthorityError) as denied:
-            self.charge(self.payload())
-        self.assertEqual(denied.exception.code, 'dispatch_already_refunded')
+        row.refresh_from_db()
+        original_outbox = (row.pk, row.state, row.attempts, deepcopy(row.payload))
+        # The shared financial guard rejects the refunded debit before the
+        # outbox's later dispatch_already_refunded exception can be reached.
+        with patch.object(dispatch_outbox, 'reserve_dispatch') as reserve, \
+                patch.object(dispatch_outbox, '_deliver') as redelivery:
+            for _ in range(2):
+                payer, ledger, amount, denied = self.charge(self.payload())
+                self.assertEqual((payer, ledger, amount), (None, None, None))
+                self.assertEqual(denied.status_code, 409)
+                self.assertEqual(denied.data['code'], 'content_factory_billing_key_conflict')
+        reserve.assert_not_called()
+        redelivery.assert_not_called()
         self.assertEqual(Ledger.objects.filter(kind='SPEND').count(), 1)
+        self.assertEqual(Ledger.objects.filter(kind='REFUND').count(), 1)
         self.assertEqual(self.balance(self.payer), 20_000_000)
+        row.refresh_from_db()
+        self.assertEqual((row.pk, row.state, row.attempts, row.payload), original_outbox)
 
     def test_late_outbox_lookup_after_disconnect_preserves_completed_history_without_refund(self):
         payload = self.payload()
@@ -557,6 +644,7 @@ class MCPResearchPersistenceTests(OneClickBillingFixture, TestCase):
 
     def setUp(self):
         super().setUp()
+        self.request.data = {}  # Research retains omitted-quote compatibility.
         PointsService.credit_purchased_topup(user=self.requester, delta=20,
             description='Synthetic research funding', idempotency_key='research-funding')
 
@@ -624,6 +712,53 @@ class OneClickTransactionTests(OneClickBillingFixture, TransactionTestCase):
         super().setUp()
         if connection.vendor != 'postgresql':
             self.skipTest('Real row-lock guarantees require PostgreSQL')
+
+    def parallel_research_confirmations(self, *, same_source, same_key):
+        from .models import ContentFactoryJob
+        from integrations.services import article_generation as service
+        PointsService.credit_purchased_topup(user=self.payer, delta=30,
+            description='Concurrent confirmation funding', idempotency_key='confirmation-funding')
+        jobs = [ContentFactoryJob.objects.create(job_id=f'research-{index}', domain=self.org.domain,
+            slack_user_id=self.actor, client_request_id=f'research-key-{index}', billing_status='charged',
+            request_meta={'roo_points_action': 'content_island_topic_generation'}) for index in range(1 if same_source else 2)]
+        ready = Barrier(2)
+        results, errors = [], []
+        def admission(**kwargs):
+            self.assertFalse(transaction.get_connection().in_atomic_block)
+            ready.wait(timeout=10)
+        def confirm(index):
+            close_old_connections()
+            try:
+                source = ContentFactoryJob.objects.get(pk=jobs[0 if same_source else index].pk)
+                results.append(service._charge_deferred_discovery_job_if_needed(source_job=source,
+                    slack_user_id=self.actor, domain=self.org.domain, confirmed_keyword='Synthetic article',
+                    billing_user=self.requester, expected_cost_points=12,
+                    client_request_id='shared-article-key' if same_key else f'article-key-{index}'))
+            except Exception as exc:
+                errors.append(exc)
+            finally:
+                connections.close_all()
+        with patch.object(service, 'require_article_activation', side_effect=admission):
+            workers = [Thread(target=confirm, args=(index,)) for index in range(2)]
+            for worker in workers:
+                worker.start()
+            for worker in workers:
+                worker.join(15)
+        self.assertFalse(any(worker.is_alive() for worker in workers))
+        self.assertEqual(len(results), 1)
+        self.assertEqual(len(errors), 1)
+        self.assertIsInstance(errors[0], service.ArticleGenerationError)
+        self.assertEqual(errors[0].code, 'content_factory_billing_key_conflict')
+        self.assertEqual(Ledger.objects.filter(kind='SPEND').count(), 1)
+        self.assertFalse(Ledger.objects.filter(kind='REFUND').exists())
+        self.assertEqual(self.balance(self.payer), 38_000_000)
+        self.assertEqual(ContentFactoryJob.objects.filter(request_meta__roo_points_action='article_generation').count(), 1)
+
+    def test_distinct_confirmation_keys_cannot_charge_one_research_source_twice(self):
+        self.parallel_research_confirmations(same_source=True, same_key=False)
+
+    def test_distinct_research_sources_cannot_adopt_the_same_article_payment(self):
+        self.parallel_research_confirmations(same_source=False, same_key=True)
 
     def test_parallel_repeated_start_commits_one_spend_and_one_outbox(self):
         ready = Barrier(2)
