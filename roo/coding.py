@@ -673,7 +673,11 @@ def create_turn(*, user, account_session, idempotency_key, local_session_id, mod
         account = PointsAccount.objects.select_for_update().get(user=user)
     PointsService._ensure_microroo_account(account)
     from .digital_points import spendable_balance
-    available = spendable_balance(account)
+    available = max(
+        spendable_balance(account)
+        - PointsService._reserved_microroo(user, include_digital=True),
+        0,
+    )
     if available <= 0:
         raise CodingError(
             "insufficient_points",

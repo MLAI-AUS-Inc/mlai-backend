@@ -1,4 +1,5 @@
 from django.contrib import admin, messages
+from . import event_discount_admin  # noqa: F401 -- register protected event offer/receipt admin
 from django.core.exceptions import ValidationError
 from django.shortcuts import redirect
 from django.utils import timezone

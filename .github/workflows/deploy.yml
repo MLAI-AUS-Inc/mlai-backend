@@ -106,6 +106,12 @@ jobs:
     - name: Check Roo Points GST and Xero capture contracts without database access
       run: python scripts/test_without_database.py roo.tests_purchase_tax_unit roo.tests_startup_update_benefits_unit tests.test_xero_capture_backoff_unit
 
+    - name: Check event discount provider and worker boundaries without database access
+      run: python scripts/test_without_database.py tests.test_luma_event_discounts_unit tests.test_event_discount_worker
+
+    - name: Verify event discounts against disposable migration state
+      run: python scripts/test_event_discounts.py roo.tests_event_discounts roo.tests_event_discount_api roo.tests_event_discount_concurrency
+
     - name: Check coworking report channel permissions without database access
       run: python scripts/test_without_database.py roo.tests_coworking_report_access
 
@@ -610,6 +616,9 @@ jobs:
       run: |
         python -m pip install --upgrade pip
         pip install --require-hashes -r requirements.lock
+
+    - name: Verify event discount row locks and service boundaries on PostgreSQL
+      run: python manage.py test roo.tests_event_discounts roo.tests_event_discount_api roo.tests_event_discount_concurrency --verbosity 2
 
     - name: Run Pulse source cache and Linear cursor PostgreSQL tests
       run: python manage.py test startup_updates.tests_source_cache_database --verbosity 2

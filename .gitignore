@@ -77,6 +77,9 @@ cookies.txt
 /*.md
 /docs/*.md
 /docs/**/*.md
+!/docs/roo-event-discounts.md
+!/docs/roo-event-discount-migration-proposal.md
+/output/event-discount-verification/
 !/docs/mlai-community-agent.md
 !/docs/startup-monthly-groups.md
 !/docs/backend-api-web-handoff.md

@@ -12,6 +12,29 @@ x-logging: &default-logging
     max-file: "5"
 
 services:
+  # Opt-in; keep running when issuance is disabled so uncertain writes drain.
+  event-discount-worker:
+    profiles: [event-discounts]
+    image: mlai-backend-web
+    logging: *default-logging
+    command: >-
+      sh -ec 'python manage.py migrate --check --noinput;
+      exec python manage.py run_periodic_command reconcile_event_discounts
+      --poll-seconds 30 --health-file /tmp/mlai-event-discounts.ok'
+    env_file: [.env]
+    environment:
+      APP_ENV: ${APP_ENV:-production}
+      RUN_MIGRATIONS_ON_START: "0"
+    depends_on: [db]
+    restart: unless-stopped
+    stop_grace_period: 45s
+    healthcheck:
+      test: ["CMD", "python", "-c", "import os,time; p='/tmp/mlai-event-discounts.ok'; raise SystemExit(0 if os.path.isfile(p) and time.time()-os.path.getmtime(p)<600 else 1)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 300s
+
   web:
     build:
       context: .

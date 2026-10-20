@@ -8,6 +8,7 @@ from django.db.models import Q
 from django.utils import timezone
 
 from .apple_models import AppleIapNotification, AppleIapTransaction  # noqa: F401
+from .event_discount_models import EventDiscountOffer, EventDiscountQuote, EventDiscountRedemption  # noqa: F401
 
 
 POINTS_PURCHASE_EXPIRY_HOURS = 24

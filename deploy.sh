@@ -954,6 +954,17 @@ ssh "$DEPLOY_SSH_TARGET" <<EOF
     unset retired_committee_container_ids
 
     source scripts/runtime-services.sh
+    # The reconciler remains independent from issuance so uncertain coupon
+    # writes continue to drain when new quotes are switched off.
+    if [ "\$(read_env_value ROO_EVENT_DISCOUNT_WORKER_ENABLED)" = "true" ]; then
+        runtime_services+=("\${event_discount_runtime_services[@]}")
+    elif [ "\$(read_env_value ROO_EVENT_DISCOUNTS_ENABLED)" = "true" ]; then
+        echo "Event discount issuance requires its supervised reconciliation worker."
+        exit 1
+    else
+        docker compose stop event-discount-worker || true
+        docker compose rm -f event-discount-worker || true
+    fi
     if [ "\$(read_env_value AGENT_RUNTIME_COMMUNITY_ENABLED)" = "true" ]; then
         runtime_services+=("\${community_agent_runtime_services[@]}")
     else
