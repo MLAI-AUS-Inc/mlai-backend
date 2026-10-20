@@ -230,7 +230,7 @@ Locking, constraints and real ledger rows need database tests after migration ap
 ## Becoming a mentor (invite only)
 
 Nobody can apply without an invite. Staff add a Mentor invite in Django admin for an
-existing user; the single-use link (`<chat url>/#/mentoring/apply?invite=<token>`) is
+existing user; the single-use link (`<chat url>/mentoring/apply?invite=<token>`) is
 shown once and only its SHA-256 is stored. It expires after 14 days by default and can
 be revoked from the list. The invited user, signed in as that user, fills the form
 (headline, bio, topics, price 1 to 1000 Roo default 40, session length, location,

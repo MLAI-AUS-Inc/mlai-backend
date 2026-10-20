@@ -9,7 +9,7 @@ from .models import INVITE_TTL_DAYS, MentorAvailabilityRule, MentorInvite, Mento
 
 def invite_link(token):
     base = str(getattr(settings, 'COMMUNITY_CHAT_FRONTEND_URL', '')).rstrip('/')
-    return f'{base}/#/mentoring/apply?invite={token}'
+    return f'{base}/mentoring/apply?invite={token}'
 
 
 class AvailabilityInline(admin.TabularInline):
