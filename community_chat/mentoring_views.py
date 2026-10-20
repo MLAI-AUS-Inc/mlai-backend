@@ -96,6 +96,18 @@ class MyMentorProfileView(MentoringBaseView):
     patch = put
 
 
+class MentorApplicationCheckView(MentoringBaseView):
+    """POST because the invite token must not travel in a URL or query string."""
+
+    def post(self, request):
+        return Response(MentoringService.check_invite(request.user, _body(request).get('token')))
+
+
+class MentorApplicationView(MentoringBaseView):
+    def post(self, request):
+        return Response(MentoringService.submit_application(request.user, _body(request)), status=201)
+
+
 class MentorSessionsView(MentoringBaseView):
     def get(self, request):
         role = request.query_params.get('role', 'founder')

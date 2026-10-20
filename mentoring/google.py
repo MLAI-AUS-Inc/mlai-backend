@@ -15,6 +15,7 @@ never let it change a booking.
 import hashlib
 import logging
 import time
+import uuid
 from datetime import timezone as dt_timezone
 
 import requests
@@ -82,6 +83,8 @@ def _classify(status):
         return 'permission'
     if status in (404, 410):
         return 'not_found'
+    if status == 409:
+        return 'conflict'
     if status in (400, 412):
         return 'bad_request'
     if status in (501,):
@@ -157,7 +160,56 @@ def _event_body(session):
     }
 
 
-def _create_via_meet_api(session):
+def event_id_for(session):
+    """Deterministic Calendar event id for a session, so a retry finds its own event.
+
+    Google accepts client ids of 5 to 1024 chars from a-v and 0-9; a UUID's hex digits fit.
+    """
+    return 'mlaimentor' + uuid.UUID(str(session.pk)).hex
+
+
+def _events_url():
+    return f'{CALENDAR_BASE}/calendars/primary/events'
+
+
+def _get_event(event_id):
+    """The Calendar event with this id, or None when it does not exist."""
+    try:
+        return _api('GET', f'{_events_url()}/{event_id}', params={'conferenceDataVersion': 1})
+    except GoogleError as exc:
+        if exc.code == 'not_found':
+            return None
+        raise
+
+
+def _insert_event(event_id, body, params):
+    """Insert the event under its fixed id; if it already exists (409), return that one."""
+    try:
+        return _api('POST', _events_url(), params=params, json=dict(body, id=event_id))
+    except GoogleError as exc:
+        if exc.code != 'conflict':
+            raise
+    existing = _get_event(event_id)
+    if existing is None:
+        raise GoogleError('conflict')
+    return existing
+
+
+def _event_result(event, event_id, path):
+    """Result for an event that may still be waiting for its Meet link (poll once)."""
+    event_id = event.get('id') or event_id
+    link = event.get('hangoutLink') if path == PATH_CALENDAR else event.get('location')
+    status = ((event.get('conferenceData') or {}).get('createRequest') or {}).get('status', {})
+    if not link and path == PATH_CALENDAR and status.get('statusCode') == 'pending':
+        time.sleep(1)  # poll once
+        event = _api('GET', f'{_events_url()}/{event_id}', params={'conferenceDataVersion': 1})
+        link = event.get('hangoutLink')
+    if not link:
+        raise GoogleError('meet_pending' if status.get('statusCode') == 'pending' else 'no_link')
+    return {'meet_link': link, 'calendar_event_id': event_id, 'path': path, 'error': ''}
+
+
+def _create_via_meet_api(session, event_id):
     space = _api('POST', MEET_SPACES_URL, json={'config': {'accessType': 'OPEN'}})
     link = space.get('meetingUri')
     if not link:
@@ -165,52 +217,56 @@ def _create_via_meet_api(session):
     body = _event_body(session)
     body['location'] = link
     body['description'] = f'Join the session: {link}'
-    event_id = ''
     try:
-        event = _api('POST', f'{CALENDAR_BASE}/calendars/primary/events',
-                     params={'sendUpdates': 'all'}, json=body)
-        event_id = event.get('id', '')
+        event = _insert_event(event_id, body, {'sendUpdates': 'all'})
     except GoogleError as exc:
         # The link works without the invite; keep it and record the reason.
         logger.warning('mentor session %s: calendar event failed (%s)', session.pk, exc.code)
         return {'meet_link': link, 'calendar_event_id': '', 'path': PATH_MEET_API,
                 'error': 'event_' + exc.code}
-    return {'meet_link': link, 'calendar_event_id': event_id, 'path': PATH_MEET_API, 'error': ''}
+    # A concurrent attempt may have won the insert; its link is the one on the invite.
+    return {'meet_link': event.get('location') or link, 'calendar_event_id': event.get('id') or event_id,
+            'path': PATH_MEET_API, 'error': ''}
 
 
-def _create_via_calendar(session):
+def _create_via_calendar(session, event_id):
     body = _event_body(session)
     body['description'] = 'The Google Meet link is attached to this event.'
     body['conferenceData'] = {'createRequest': {
         'requestId': str(session.pk),
         'conferenceSolutionKey': {'type': 'hangoutsMeet'},
     }}
-    url = f'{CALENDAR_BASE}/calendars/primary/events'
-    event = _api('POST', url, params={'conferenceDataVersion': 1, 'sendUpdates': 'all'}, json=body)
-    event_id = event.get('id', '')
-    link = event.get('hangoutLink')
-    status = ((event.get('conferenceData') or {}).get('createRequest') or {}).get('status', {})
-    if not link and status.get('statusCode') == 'pending' and event_id:
-        time.sleep(1)  # poll once
-        event = _api('GET', f'{url}/{event_id}', params={'conferenceDataVersion': 1})
-        link = event.get('hangoutLink')
-    if not link:
-        raise GoogleError('meet_pending' if status.get('statusCode') == 'pending' else 'no_link')
-    return {'meet_link': link, 'calendar_event_id': event_id, 'path': PATH_CALENDAR, 'error': ''}
+    event = _insert_event(event_id, body, {'conferenceDataVersion': 1, 'sendUpdates': 'all'})
+    return _event_result(event, event_id, PATH_CALENDAR)
 
 
-def create_meeting(session):
-    """Create a fresh Meet link and Calendar invite for a session.
+def create_meeting(session, on_event=None):
+    """Create (or finish) the Meet link and Calendar invite for a session.
 
+    Idempotent: the event id is derived from the session, `on_event(event_id)` is
+    called before any insert so the caller can persist it, and an event left by an
+    earlier attempt is reused instead of inserting a second one.
     Returns {meet_link, calendar_event_id, path, error}. Raises GoogleError.
     """
+    event_id = event_id_for(session)
+    if on_event:
+        on_event(event_id)
+    existing = _get_event(event_id)
+    if existing is not None:
+        if existing.get('status') == 'cancelled':
+            raise GoogleError('event_cancelled')
+        if existing.get('hangoutLink'):
+            return _event_result(existing, event_id, PATH_CALENDAR)
+        if existing.get('location'):
+            return _event_result(existing, event_id, PATH_MEET_API)
+        return _event_result(existing, event_id, PATH_CALENDAR)  # link still pending
     try:
-        return _create_via_meet_api(session)
+        return _create_via_meet_api(session, event_id)
     except GoogleError as exc:
         if exc.code not in FALLBACK_CODES:
             raise
         logger.info('mentor session %s: Meet API refused (%s), using Calendar fallback', session.pk, exc.code)
-    return _create_via_calendar(session)
+    return _create_via_calendar(session, event_id)
 
 
 def delete_event(event_id):

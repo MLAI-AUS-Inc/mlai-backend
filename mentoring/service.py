@@ -9,7 +9,8 @@ Points flow (all via PointsService, source MANUAL, reference_type MENTOR_SESSION
 so no roo migration is needed):
   request  -> nothing is charged (only an early balance check)
   accept   -> spend  key mentor_charge:{id}   founder pays the price snapshot
-  cancel after accept (any time before completion) -> refund key mentor_release:{id}
+  cancel after accept, before the start time -> refund key mentor_release:{id}
+  cancel at or after the start time -> refused (session_started), by either side
   decline / expiry / cancel before accept -> no points move
   complete -> award  key mentor_payout:{id}   mentor receives the price
 Expiry and auto-completion are applied lazily whenever sessions are read.
@@ -34,12 +35,14 @@ from roo.services import PointsService
 
 from . import google, scheduling
 from .models import (
+    hash_invite_token,
     DEFAULT_PRICE_ROO,
     LOCATION_MLAI_SPACE,
     LOCATION_VIDEO,
     MAX_SESSION_MINUTES,
     MIN_SESSION_MINUTES,
     MentorAvailabilityRule,
+    MentorInvite,
     MentorProfile,
     MentorSession,
 )
@@ -51,6 +54,8 @@ LEDGER_REFERENCE_TYPE = 'MENTOR_SESSION'
 MAX_PRICE_ROO = 1000
 MAX_AVAILABILITY_WINDOWS = 28
 MAX_AWAY_RANGES = 20
+# A pending meeting claim older than this is stale (the process died) and may be reclaimed.
+MEETING_CLAIM_TIMEOUT_SECONDS = 120
 _TIME_RE = re.compile(r'^([01]\d|2[0-3]):([0-5]\d)$')
 _EMAIL_RE = re.compile(r'^[^@\s]+@[^@\s]+\.[^@\s]+$')
 
@@ -133,15 +138,108 @@ def _clean_url(value, field):
     return value
 
 
-def validate_brief(brief):
+MAX_BRIEF_QUESTIONS = 8
+MAX_QUESTION_TEXT = 200
+MAX_ANSWER_LENGTH = 1000
+_QUESTION_ID_RE = re.compile(r'^[a-z0-9_-]{1,40}$')
+
+# The questions every mentor without a custom list gets. Ids double as the
+# legacy brief keys, so old clients that send {stage, struggle, outcome, link}
+# keep working.
+DEFAULT_BRIEF_QUESTIONS = (
+    {'id': 'stage', 'text': 'Where is your startup at?', 'required': True, 'max_length': 200},
+    {'id': 'struggle', 'text': 'What is the hardest thing right now?', 'required': True, 'max_length': 1000},
+    {'id': 'outcome', 'text': 'What would you like out of this session?', 'required': True, 'max_length': 1000},
+    {'id': 'link', 'text': 'A link to share (optional)', 'required': False, 'max_length': 500, 'kind': 'link'},
+)
+_LEGACY_BRIEF_FIELDS = {
+    'stage': 'brief_stage', 'struggle': 'brief_struggle',
+    'outcome': 'brief_outcome', 'link': 'brief_link',
+}
+
+
+def effective_brief_questions(stored):
+    """The mentor's questions, or the default four when none are set."""
+    if not stored:
+        return [dict(q) for q in DEFAULT_BRIEF_QUESTIONS]
+    return [
+        {'id': q['id'], 'text': q['text'], 'required': bool(q.get('required')),
+         'max_length': MAX_ANSWER_LENGTH}
+        for q in stored
+    ]
+
+
+def validate_brief_questions(value):
+    """Validate a mentor's question list for storage. An empty list resets to defaults."""
+    if not isinstance(value, list) or len(value) > MAX_BRIEF_QUESTIONS:
+        raise MentoringError(
+            'invalid_brief_questions',
+            f'brief_questions must be a list of at most {MAX_BRIEF_QUESTIONS} questions.', 400,
+        )
+    out, seen = [], set()
+    for item in value:
+        if not isinstance(item, dict):
+            raise MentoringError('invalid_brief_questions', 'Each question must be an object.', 400)
+        text = _clean_text(item.get('text'), 'question', MAX_QUESTION_TEXT, required=True)
+        required = item.get('required', True)
+        if not isinstance(required, bool):
+            raise MentoringError('invalid_brief_questions', 'required must be true or false.', 400)
+        qid = item.get('id')
+        if not isinstance(qid, str) or not _QUESTION_ID_RE.match(qid) or qid in seen:
+            qid = uuid.uuid4().hex[:12]
+        seen.add(qid)
+        out.append({'id': qid, 'text': text, 'required': required})
+    return out
+
+
+def validate_brief(brief, questions=None):
+    """Validate answers against the mentor's questions.
+
+    Returns the model fields for a new session: the snapshot in brief_answers
+    (question text copied in) and, for the default questions, the legacy fields.
+    """
     if not isinstance(brief, dict):
         raise MentoringError('invalid_brief', 'A brief is required.', 400)
-    return {
-        'brief_stage': _clean_text(brief.get('stage'), 'brief.stage', 200, required=True),
-        'brief_struggle': _clean_text(brief.get('struggle'), 'brief.struggle', 1000, required=True),
-        'brief_outcome': _clean_text(brief.get('outcome'), 'brief.outcome', 1000, required=True),
-        'brief_link': _clean_url(brief.get('link'), 'brief.link'),
-    }
+    custom = bool(questions)
+    effective = effective_brief_questions(questions)
+    raw_answers = brief.get('answers')
+    if raw_answers is not None:
+        if not isinstance(raw_answers, list):
+            raise MentoringError('invalid_brief', 'answers must be a list.', 400)
+        by_id = {}
+        for item in raw_answers:
+            if not isinstance(item, dict) or not isinstance(item.get('id'), str):
+                raise MentoringError('invalid_brief', 'Each answer needs an id.', 400)
+            by_id[item['id']] = item.get('answer')
+    else:
+        by_id = {q['id']: brief.get(q['id']) for q in effective}
+    snapshot = []
+    for q in effective:
+        label = f"brief.{q['id']}" if not custom else f"answer to '{q['text']}'"
+        if q.get('kind') == 'link':
+            answer = _clean_url(by_id.get(q['id']), label)
+        else:
+            answer = _clean_text(by_id.get(q['id']), label, q['max_length'], required=q['required'])
+        snapshot.append({'id': q['id'], 'question': q['text'], 'required': q['required'], 'answer': answer})
+    fields = {'brief_answers': snapshot}
+    for item in snapshot:
+        if not custom and item['id'] in _LEGACY_BRIEF_FIELDS:
+            fields[_LEGACY_BRIEF_FIELDS[item['id']]] = item['answer']
+    return fields
+
+
+def session_brief_answers(session):
+    """Question and answer pairs for a session, old sessions included."""
+    if getattr(session, "brief_answers", None):
+        return [
+            {'id': a['id'], 'question': a['question'], 'required': bool(a.get('required')), 'answer': a['answer']}
+            for a in session.brief_answers
+        ]
+    return [
+        {'id': q['id'], 'question': q['text'], 'required': q['required'],
+         'answer': getattr(session, _LEGACY_BRIEF_FIELDS[q['id']])}
+        for q in DEFAULT_BRIEF_QUESTIONS
+    ]
 
 
 def _parse_hhmm(value, field):
@@ -254,6 +352,8 @@ def validate_profile_update(payload, current):
         clean['busy_calendar_email'] = email
     if 'space_notes' in payload:
         clean['space_notes'] = _clean_text(payload['space_notes'], 'space_notes', 300)
+    if 'brief_questions' in payload:
+        clean['brief_questions'] = validate_brief_questions(payload['brief_questions'])
     # video_link no longer exists: video sessions always get an automatic Meet link.
     return clean
 
@@ -274,6 +374,7 @@ def serialize_mentor(profile, *, include_private=False):
         'session_minutes': profile.session_minutes,
         'price_roo': profile.price_roo,
         'location_type': profile.location_type,
+        'brief_questions': effective_brief_questions(profile.brief_questions),
     }
     if include_private:
         data.update({
@@ -282,6 +383,15 @@ def serialize_mentor(profile, *, include_private=False):
             'space_notes': profile.space_notes,
         })
     return data
+
+
+def _is_stale_pending(session, now=None):
+    """A pending accepted session whose claim is missing or too old: the attempt died."""
+    if session.status != MentorSession.STATUS_ACCEPTED or session.meeting_status != MentorSession.MEETING_PENDING:
+        return False
+    claimed = session.meeting_claimed_at
+    stale_before = (now or timezone.now()) - timedelta(seconds=MEETING_CLAIM_TIMEOUT_SECONDS)
+    return claimed is None or claimed <= stale_before
 
 
 def serialize_session(session, viewer):
@@ -304,7 +414,11 @@ def serialize_session(session, viewer):
         # Only the two participants ever load a session, and the link is shown
         # only once the session is accepted (or completed).
         'meet_link': (session.meet_link or '') if (is_video and after_acceptance) else '',
-        'meeting_status': session.meeting_status if (is_video and after_acceptance) else None,
+        # A stale pending claim is shown as failed so the mentor is offered Retry (read only, no write).
+        'meeting_status': (
+            ('failed' if _is_stale_pending(session) else session.meeting_status)
+            if (is_video and after_acceptance) else None
+        ),
         'mentor': {
             'id': session.mentor_id,
             'name': _display_name(session.mentor.user),
@@ -320,6 +434,7 @@ def serialize_session(session, viewer):
             'outcome': session.brief_outcome,
             'link': session.brief_link,
         },
+        'brief_answers': session_brief_answers(session),
         'requested_at': session.requested_at.isoformat(),
         'responded_at': session.responded_at.isoformat() if session.responded_at else None,
     }
@@ -580,6 +695,83 @@ class MentoringService:
                 ])
         return cls.get_profile(user)
 
+    # ---- invite-only mentor application
+
+    @staticmethod
+    def _load_invite(token, user, *, lock=False):
+        """The invite for this token, or a MentoringError. Never consumes it."""
+        if not isinstance(token, str) or not 20 <= len(token) <= 200:
+            raise MentoringError('invite_invalid', 'This invite link is not valid.', 404)
+        query = MentorInvite.objects.select_for_update() if lock else MentorInvite.objects
+        try:
+            invite = query.get(token_hash=hash_invite_token(token))
+        except MentorInvite.DoesNotExist:
+            raise MentoringError('invite_invalid', 'This invite link is not valid.', 404)
+        if invite.user_id != user.pk:
+            raise MentoringError(
+                'invite_wrong_user',
+                'This invite was sent to a different account. Sign in as the invited person.', 403,
+            )
+        if invite.revoked_at is not None:
+            raise MentoringError('invite_revoked', 'This invite is no longer valid.', 410)
+        return invite
+
+    @classmethod
+    def check_invite(cls, user, token):
+        """State of an invite for its own user: ready, submitted or approved."""
+        invite = cls._load_invite(token, user)
+        profile = MentorProfile.objects.filter(user=user).first()
+        if invite.used_at is not None:
+            state = 'approved' if profile is not None and profile.is_active else 'submitted'
+            return {'state': state, 'expires_at': invite.expires_at.isoformat()}
+        if invite.expires_at <= timezone.now():
+            raise MentoringError('invite_expired', 'This invite has expired. Ask MLAI for a new one.', 410)
+        if profile is not None and profile.is_active:
+            return {'state': 'approved', 'expires_at': invite.expires_at.isoformat()}
+        return {
+            'state': 'ready',
+            'expires_at': invite.expires_at.isoformat(),
+            'default_price_roo': DEFAULT_PRICE_ROO,
+        }
+
+    @classmethod
+    def submit_application(cls, user, payload):
+        """Create or update the user's profile as pending (is_active False)."""
+        token = payload.get('token') if isinstance(payload, dict) else None
+        with transaction.atomic():
+            invite = cls._load_invite(token, user, lock=True)
+            if invite.used_at is not None:
+                raise MentoringError('invite_used', 'This invite has already been used.', 409)
+            now = timezone.now()
+            if invite.expires_at <= now:
+                raise MentoringError('invite_expired', 'This invite has expired. Ask MLAI for a new one.', 410)
+            profile = MentorProfile.objects.select_for_update().filter(user=user).first()
+            if profile is not None and profile.is_active:
+                raise MentoringError('already_a_mentor', 'You are already an active mentor.', 409)
+            fields = {k: v for k, v in payload.items() if k not in ('token', 'away_dates', 'is_active')}
+            fields.setdefault('price_roo', DEFAULT_PRICE_ROO)
+            clean = validate_profile_update(fields, {})
+            windows = validate_availability(fields.get('availability'))
+            for name in ('headline', 'bio', 'topics', 'session_minutes', 'location_type'):
+                if not clean.get(name):
+                    raise MentoringError('invalid_field', f'{name} is required.', 400)
+            if not windows:
+                raise MentoringError('invalid_field', 'Add at least one weekly availability window.', 400)
+            if profile is None:
+                profile = MentorProfile(user=user)
+            for field, value in clean.items():
+                setattr(profile, field, value)
+            profile.is_active = False  # staff approve by ticking is_active in admin
+            profile.save()
+            profile.availability_rules.all().delete()
+            MentorAvailabilityRule.objects.bulk_create([
+                MentorAvailabilityRule(mentor=profile, weekday=w, start_time=st, end_time=en)
+                for w, st, en in windows
+            ])
+            invite.used_at = now
+            invite.save(update_fields=['used_at'])
+        return {'state': 'submitted'}
+
     # ---- request
 
     @staticmethod
@@ -600,7 +792,8 @@ class MentoringService:
                 'expected_price_required',
                 'expected_price (the whole-number price you were shown) is required.', 400,
             )
-        brief_fields = validate_brief(brief)
+        if not isinstance(brief, dict):
+            raise MentoringError('invalid_brief', 'A brief is required.', 400)
         # A retry of an already created request is answered from the stored
         # session, even if the mentor was deactivated or the price changed since.
         previous = (
@@ -632,6 +825,7 @@ class MentoringService:
                     raise MentoringError('mentor_not_found', 'Mentor not found.', 404)
                 if expected_price != mentor.price_roo:
                     raise MentoringError('price_changed', 'The price has changed. Please review it.', 400)
+                brief_fields = validate_brief(brief, mentor.brief_questions)
                 chosen, detail = cls._location(mentor)
                 ends_at = starts_at + timedelta(minutes=mentor.session_minutes)
                 day = starts_at.astimezone(ZoneInfo(mentor.timezone)).date()
@@ -742,9 +936,18 @@ class MentoringService:
             if not google.is_enabled():
                 outcome, error = MentorSession.MEETING_UNAVAILABLE, 'google_off'
             else:
+                def remember_event(known_id):
+                    # Persist the event id before Google may create it, so a cancel
+                    # can delete it even if this attempt dies or the reply is lost.
+                    nonlocal event_id
+                    event_id = known_id
+                    MentorSession.objects.filter(
+                        pk=session_id, status=MentorSession.STATUS_ACCEPTED,
+                    ).update(calendar_event_id=known_id)
+
                 try:
-                    result = google.create_meeting(session)
-                    event_id = result['calendar_event_id']
+                    result = google.create_meeting(session, on_event=remember_event)
+                    event_id = result['calendar_event_id'] or event_id
                     outcome, error = MentorSession.MEETING_CREATED, result['error']
                     fields = {
                         'meet_link': result['meet_link'], 'calendar_event_id': event_id,
@@ -783,12 +986,21 @@ class MentoringService:
             raise MentoringError('invalid_state', 'Only an accepted video session has a meeting.', 409)
         if session.meeting_status == MentorSession.MEETING_CREATED and session.meet_link:
             return session  # a retried call is a success
-        if session.meeting_status == MentorSession.MEETING_PENDING:
+        now = timezone.now()
+        stale_before = now - timedelta(seconds=MEETING_CLAIM_TIMEOUT_SECONDS)
+        if (
+            session.meeting_status == MentorSession.MEETING_PENDING
+            and session.meeting_claimed_at and session.meeting_claimed_at > stale_before
+        ):
             raise MentoringError('meeting_pending', 'The meeting link is still being created.', 409)
+        # A pending claim with no recent timestamp is stale (the process died after
+        # the commit): reclaim it. Google creation is idempotent and nothing is charged here.
         claimed = MentorSession.objects.filter(
+            Q(meeting_status__in=(MentorSession.MEETING_FAILED, MentorSession.MEETING_UNAVAILABLE))
+            | Q(meeting_status=MentorSession.MEETING_PENDING)
+            & (Q(meeting_claimed_at__isnull=True) | Q(meeting_claimed_at__lte=stale_before)),
             pk=session.pk, status=MentorSession.STATUS_ACCEPTED,
-            meeting_status__in=(MentorSession.MEETING_FAILED, MentorSession.MEETING_UNAVAILABLE),
-        ).update(meeting_status=MentorSession.MEETING_PENDING, meeting_error='')
+        ).update(meeting_status=MentorSession.MEETING_PENDING, meeting_error='', meeting_claimed_at=now)
         if claimed:
             cls.create_meeting(session.pk)
         return MentorSession.objects.select_related('mentor__user', 'founder').get(pk=session.pk)
@@ -870,6 +1082,7 @@ class MentoringService:
         if session.location_type == LOCATION_VIDEO:
             if google.is_enabled():
                 session.meeting_status = MentorSession.MEETING_PENDING
+                session.meeting_claimed_at = now
                 # After the charge commits, best effort, like the Slack DM.
                 pk = session.pk
                 transaction.on_commit(lambda: cls._create_meeting_safely(pk))
@@ -889,8 +1102,11 @@ class MentoringService:
     @classmethod
     def _do_cancelled(cls, session, actor, now):
         cls._need(session, MentorSession.STATUS_REQUESTED, MentorSession.STATUS_ACCEPTED)
-        # Allowed any time before completion, even after the start. Refund only
-        # if the founder was charged (the mentor had accepted).
+        # Not allowed once the session has started (operator decision 20-10-26),
+        # by either side. Before the start: refund only if the founder was
+        # charged (the mentor had accepted).
+        if now >= session.starts_at:
+            raise MentoringError('session_started', 'This session has already started and can no longer be cancelled.', 409)
         _refund_charge(session, actor_slack_id=actor.slack_id)
         if session.calendar_event_id:
             event_id = session.calendar_event_id

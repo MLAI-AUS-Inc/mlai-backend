@@ -37,6 +37,8 @@ from .home_views import CommunityHomeView
 from .insight_views import TokenInsightsView
 from .coworking_views import CoworkingTodayView
 from .mentoring_views import (
+    MentorApplicationCheckView,
+    MentorApplicationView,
     MentorAvailabilityView,
     MentorListView,
     MentorSessionAcceptView,
@@ -81,6 +83,8 @@ urlpatterns = [
     path("mentors/", MentorListView.as_view(), name="community_chat_mentors"),
     path("mentors/<int:mentor_id>/availability/", MentorAvailabilityView.as_view(), name="community_chat_mentor_availability"),
     path("mentor/profile/", MyMentorProfileView.as_view(), name="community_chat_mentor_profile"),
+    path("mentor/application/check/", MentorApplicationCheckView.as_view(), name="community_chat_mentor_application_check"),
+    path("mentor/application/", MentorApplicationView.as_view(), name="community_chat_mentor_application"),
     path("mentor/sessions/", MentorSessionsView.as_view(), name="community_chat_mentor_sessions"),
     path("mentor/sessions/<uuid:session_id>/accept/", MentorSessionAcceptView.as_view(), name="community_chat_mentor_session_accept"),
     path("mentor/sessions/<uuid:session_id>/decline/", MentorSessionDeclineView.as_view(), name="community_chat_mentor_session_decline"),

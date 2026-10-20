@@ -4,11 +4,15 @@ Points are never stored here. Every movement goes through roo.PointsService and
 the resulting Ledger rows are linked from MentorSession.
 """
 
+import hashlib
+import secrets
 import uuid
+from datetime import timedelta
 
 from django.conf import settings
 from django.db import models
 from django.db.models import F, Q
+from django.utils import timezone
 
 DEFAULT_PRICE_ROO = 40
 MIN_SESSION_MINUTES = 15
@@ -53,6 +57,13 @@ class MentorProfile(models.Model):
         ),
     )
     space_notes = models.CharField(max_length=300, blank=True, default='')
+    brief_questions = models.JSONField(
+        default=list, blank=True,
+        help_text=(
+            'Booking questions as [{"id", "text", "required"}]. Empty means the default '
+            'four questions.'
+        ),
+    )
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
@@ -61,6 +72,53 @@ class MentorProfile(models.Model):
 
     def __str__(self):
         return f'Mentor {self.user_id}'
+
+
+INVITE_TTL_DAYS = 14
+
+
+def hash_invite_token(token):
+    return hashlib.sha256(str(token).encode('utf-8')).hexdigest()
+
+
+class MentorInvite(models.Model):
+    """A single-use, expiring invitation for one existing user to apply as a mentor.
+
+    Only the SHA-256 of the token is stored; the link is shown to staff once, at
+    creation. The invited user must be logged in as that user to use it.
+    """
+
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name='mentor_invites'
+    )
+    token_hash = models.CharField(max_length=64, unique=True, editable=False)
+    created_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL, null=True, blank=True,
+        on_delete=models.SET_NULL, related_name='+', editable=False,
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+    expires_at = models.DateTimeField()
+    used_at = models.DateTimeField(null=True, blank=True)
+    revoked_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        ordering = ('-created_at', '-pk')
+        indexes = [models.Index(fields=('user', 'used_at'), name='mentor_invite_user_idx')]
+
+    def __str__(self):
+        return f'Mentor invite for user {self.user_id}'
+
+    @classmethod
+    def issue(cls, user, created_by=None, ttl_days=INVITE_TTL_DAYS):
+        """Create an invite and return (invite, plaintext token)."""
+        token = secrets.token_urlsafe(32)
+        invite = cls.objects.create(
+            user=user,
+            token_hash=hash_invite_token(token),
+            created_by=created_by,
+            expires_at=timezone.now() + timedelta(days=ttl_days),
+        )
+        return invite, token
 
 
 class MentorAvailabilityRule(models.Model):
@@ -148,6 +206,10 @@ class MentorSession(models.Model):
     brief_struggle = models.CharField(max_length=1000)
     brief_outcome = models.CharField(max_length=1000)
     brief_link = models.URLField(max_length=500, blank=True, default='')
+    # Snapshot taken at request time: [{"id", "question", "required", "answer"}].
+    # Empty on sessions made before per-mentor questions; those use the four
+    # fields above.
+    brief_answers = models.JSONField(default=list, blank=True)
 
     client_request_id = models.UUIDField()
 
@@ -179,6 +241,9 @@ class MentorSession(models.Model):
         max_length=12, choices=MEETING_CHOICES, default=MEETING_PENDING
     )
     meeting_error = models.CharField(max_length=40, blank=True, default='')
+    # When a meeting attempt was claimed. A pending claim older than the service
+    # timeout is stale (the process died) and may be reclaimed by a retry.
+    meeting_claimed_at = models.DateTimeField(null=True, blank=True)
     meeting_path = models.CharField(
         max_length=16, blank=True, default='',
         help_text='Which Google path made the link: meet_api or calendar.',
