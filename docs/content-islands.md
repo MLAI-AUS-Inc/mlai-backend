@@ -79,6 +79,14 @@ worker's normal run-sync callback performs this even after the browser closes;
 status polling also reconciles it. The existing ledger refund idempotency key is
 used. A new deliberate attempt after a terminal result uses a new request ID.
 
+`POST /api/v1/vibe-marketing/runs/<runId>/cancel` also accepts company-owned,
+brief-led island research. It confirms the worker has stopped before recording
+cancellation and refunding the original payer. A timeout or unconfirmed worker
+response returns a retryable error and leaves the run available for polling.
+Completed research keeps its measured results if completion wins the race.
+Unresolved dispatches must first resolve their worker identity. Scheduled island
+refreshes are excluded. The browser retains the topic brief after cancellation.
+
 ### Select several measured themes
 
 The results screen has individual checkboxes, Select all/Clear selection, and a
