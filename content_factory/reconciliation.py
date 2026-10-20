@@ -336,6 +336,7 @@ def run_content_factory_reconciliation_sweep(*, limit: Optional[int] = None, now
     summary["settled_restart_receipts"] = _reconcile_restart_receipts(limit=limit, now=now)
     summary["redriven"] = _redrive_fixed_runs(limit=limit, now=now)
     summary["refusal_alerts"] = report_repeated_refusals(limit=limit, now=now)
+    summary["queued_denied_refunds"] = _queue_denied_article_refunds(limit=limit, now=now)
     summary["settled_exhausted_articles"] = _settle_exhausted_article_runs(limit=limit, now=now)
     _settle_sweep_refunds(limit=limit)
     if not candidates:
@@ -688,15 +689,53 @@ def _refund_failed_run(run, *, reason):
         return refund
 
 
+def _queue_denied_article_refunds(*, limit, now):
+    """Reserve the credit of a paid run refused before delivery; its stop still decides.
+
+    A refused run can end denied with its failure callback superseded, so no
+    terminal callback reserves the obligation. The exhausted-run sweep then
+    obtains the worker's bound stop receipt before ``_refund_failed_run`` credits.
+    """
+    from .article_publication_evidence import denied_refund_code
+    from .run_state import ARTICLE_WORKFLOWS
+    from organizations.models import Organization
+    count = 0
+    candidates = ContentFactoryRun.objects.filter(status="denied", workflow__in=ARTICLE_WORKFLOWS,
+        updated_at__lt=now - _stale_after(), result__article_terminal_refund__isnull=True).filter(
+        _legacy_delivery_rows("run_request")).order_by("updated_at")[:limit]
+    for candidate in candidates:
+        code = denied_refund_code(candidate)
+        if not code:
+            continue
+        # Same lock order as _refund_failed_run; a callback may have queued or
+        # settled this obligation, or recorded an effect, since selection.
+        with transaction.atomic():
+            if candidate.organization_id:
+                Organization.objects.select_for_update().filter(pk=candidate.organization_id).first()
+            run = ContentFactoryRun.objects.select_for_update().filter(pk=candidate.pk).first()
+            if run is None or "article_terminal_refund" in (run.result or {}) or denied_refund_code(run) != code:
+                continue
+            run.result = {**(run.result or {}), "reconciliation_refund_pending": True,
+                "article_terminal_refund": {"status": "pending", "paid_obligation": True, "job_id": run.run_id,
+                    "error_code": code[:100], "settlement_reason": "denied_without_delivery"}}
+            run.save(update_fields=["result"])
+        try:
+            _refund_failed_run(run, reason=f"Article run was refused before delivery ({code}).")
+        except Exception:
+            logger.warning("content_factory_denied_refund_pending run_id=%s", run.run_id)
+        count += 1
+    return count
+
+
 def _settle_exhausted_article_runs(*, limit, now):
     """Ask the worker to fence exhausted work; elapsed time never proves no effects."""
-    from .article_publication_evidence import exhausted_article_candidate, cancellation_receipt
+    from .article_publication_evidence import TERMINAL_REFUND_STATUSES, exhausted_article_candidate, cancellation_receipt
     from .website_cancellation_retirement import expected_article_cancellation
     from .run_state import ARTICLE_WORKFLOWS
     from .vibe_marketing_views import _call_content_factory_run_action
     from .service_views import _apply_cancellation_receipt
     count = 0
-    candidates = ContentFactoryRun.objects.filter(status__in=["blocked", "failed", "cancelled"], workflow__in=ARTICLE_WORKFLOWS,
+    candidates = ContentFactoryRun.objects.filter(status__in=["blocked", *sorted(TERMINAL_REFUND_STATUSES)], workflow__in=ARTICLE_WORKFLOWS,
         updated_at__lt=now - _stale_after()).filter(
         Q(reconciled_at__isnull=True) | Q(reconciled_at__lt=now - _probe_interval())).order_by("updated_at")[:limit]
     for run in candidates:
@@ -709,7 +748,7 @@ def _settle_exhausted_article_runs(*, limit, now):
             continue
         claimed_result = {**result, "article_settlement_attempts": attempts + 1,
             "article_settlement_status": "needs_reconciliation" if attempts == 2 else "stop_pending"}
-        if attempts == 2 and run.status in {"failed", "cancelled"}:
+        if attempts == 2 and run.status in TERMINAL_REFUND_STATUSES:
             claimed_result["article_terminal_refund"] = {**dict(result.get("article_terminal_refund") or {}),
                 "status": "needs_reconciliation"}
         # Claim before remote I/O. Preserve evidence-only writes as well as
@@ -720,7 +759,7 @@ def _settle_exhausted_article_runs(*, limit, now):
             continue
         try:
             remote = _call_content_factory_run_action(run_id=run.run_id, action="cancel", workflow=run.workflow,
-                payload={"reason": "article_terminal_no_value" if run.status in {"failed", "cancelled"} else "article_budget_exhausted",
+                payload={"reason": "article_terminal_no_value" if run.status in TERMINAL_REFUND_STATUSES else "article_budget_exhausted",
                     "expected_cancellation_v1": expected_article_cancellation(run)}, transport_errors_are_pending=True)
             if cancellation_receipt(run, remote) is None:
                 continue
@@ -740,7 +779,8 @@ def _settle_exhausted_article_runs(*, limit, now):
 
 
 def _settle_sweep_refunds(*, limit):
-    for run in ContentFactoryRun.objects.filter(status__in=["failed", "cancelled"], result__reconciliation_refund_pending=True).filter(_legacy_delivery_rows("run_request") |
+    from .article_publication_evidence import TERMINAL_REFUND_STATUSES
+    for run in ContentFactoryRun.objects.filter(status__in=sorted(TERMINAL_REFUND_STATUSES), result__reconciliation_refund_pending=True).filter(_legacy_delivery_rows("run_request") |
             Q(result__article_cancellation_v1__purpose="article_cancellation")).filter(
             Q(result__article_terminal_refund__status__isnull=True) |
             ~Q(result__article_terminal_refund__status__in=["needs_reconciliation", "deferred_to_goal"]))[:limit]:

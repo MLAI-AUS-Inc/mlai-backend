@@ -752,3 +752,171 @@ class ArticleCancellationSettlementTests(SimpleTestCase):
         self.assertTrue(self.run.result["article_terminal_refund"]["paid_obligation"])
         self.assertTrue(self.run.result["reconciliation_refund_pending"])
         self.assertEqual(self.run.result["article_settlement_owner"], "first_article_goal")
+
+    def deny_before_delivery(self):
+        """Production shape: the first repository read refused after a merge moved the source."""
+        refusals = [{"at": "2026-10-20T03:20:33+00:00", "code": "website_source_changed"}] * 5
+        self.run.status, self.run.current_step = "denied", "scan_repository"
+        self.run.error = "Website connection is disconnected, changed or no longer authorized."
+        self.run.run_request["roo_points_billing_status"] = "charged"
+        self.run.result = {"generation": 1, "state_version": 8, "status": "denied", "failure": {},
+            "error_code": "website_source_changed", "authority_refusals": refusals}
+
+    def queue_denied(self, *, now=None):
+        from . import reconciliation
+        from datetime import timedelta
+        self.run.updated_at, self.run.reconciled_at = timezone.now() - timedelta(hours=1), None
+        rows = Mock()
+        rows.filter.return_value = rows
+        rows.order_by.return_value = rows
+        rows.__getitem__ = Mock(return_value=[self.run])
+        with patch.object(reconciliation.ContentFactoryRun.objects, "filter", return_value=rows) as select, \
+                patch.object(reconciliation.ContentFactoryRun.objects, "select_for_update") as locked, \
+                patch.object(reconciliation.transaction, "atomic", return_value=nullcontext()), \
+                patch("organizations.models.Organization.objects.select_for_update"), \
+                patch("content_factory.billing_lineage.original_article_spend_for_run") as resolve:
+            locked.return_value.filter.return_value.first.return_value = self.run
+            queued = reconciliation._queue_denied_article_refunds(limit=10, now=now or timezone.now())
+        resolve.assert_not_called()
+        self.assertEqual(select.call_args_list[0].kwargs["status"], "denied")
+        return queued
+
+    def test_website_source_changed_failure_reaches_no_value_settlement(self):
+        from integrations.services import article_generation
+        job = SimpleNamespace(job_id=self.run.run_id, domain=self.run.domain, request_meta={},
+            billing_status="charged", client_request_id="original-charge", billing_ledger_id=123)
+        for code in ("website_source_changed", "SOURCE_CHANGED"):
+            with self.subTest(code=code), patch.object(views.ContentFactoryRun.objects, "filter") as rows, \
+                    patch.object(article_generation, "_record_terminal_article_refund") as reserve, \
+                    patch("content_factory.reconciliation._refund_failed_run",
+                        return_value=SimpleNamespace(pk=222, delta_microroo=6_000_000)) as credit:
+                rows.return_value.first.return_value = self.run
+                self.assertEqual(article_generation.maybe_auto_refund_terminal_failure(job,
+                    error_code=code, error_message="The repository changed", refundable=False), (True, 6))
+            credit.assert_called_once()
+            self.assertEqual(reserve.call_args.kwargs["status"], "pending")
+
+    def test_denied_callback_queues_worker_stop_instead_of_quarantine(self):
+        from integrations.services import article_generation
+        from . import reconciliation
+        self.deny_before_delivery()
+        job = SimpleNamespace(job_id=self.run.run_id, domain=self.run.domain, request_meta={},
+            billing_status="charged", client_request_id="original-charge", billing_ledger_id=123)
+        with patch.object(reconciliation.transaction, "atomic", return_value=nullcontext()), \
+                patch("organizations.models.Organization.objects.select_for_update"), \
+                patch.object(views.ContentFactoryRun.objects, "filter") as rows, \
+                patch.object(views.ContentFactoryRun.objects, "select_for_update") as locked, \
+                patch("content_factory.billing_lineage.original_article_spend_for_run") as resolve:
+            rows.return_value.first.return_value = self.run
+            locked.return_value.filter.return_value.first.return_value = self.run
+            self.assertEqual(article_generation.maybe_auto_refund_terminal_failure(job,
+                error_code="website_source_changed", error_message="Changed", refundable=False), (False, 0))
+        resolve.assert_not_called()
+        self.assertEqual(self.run.result["article_terminal_refund"]["status"], "stop_required")
+        self.assertTrue(self.run.result["reconciliation_refund_pending"])
+
+    def test_denied_refusal_without_callback_reserves_obligation_and_requires_stop(self):
+        from .article_publication_evidence import exhausted_article_candidate
+        self.deny_before_delivery()
+        self.assertEqual(self.queue_denied(), 1)
+        receipt = self.run.result["article_terminal_refund"]
+        self.assertEqual(receipt["status"], "stop_required")
+        self.assertTrue(receipt["paid_obligation"])
+        self.assertEqual(receipt["error_code"], "WEBSITE_SOURCE_CHANGED")
+        self.assertTrue(self.run.result["reconciliation_refund_pending"])
+        self.assertEqual(self.run.status, "denied")
+        self.assertTrue(exhausted_article_candidate(self.run))
+        # A repeated sweep, or one that loses to a callback, cannot reopen the obligation.
+        self.run.save.reset_mock()
+        self.assertEqual(self.queue_denied(), 0)
+        self.run.save.assert_not_called()
+
+    def test_denied_refusal_with_effect_delivery_other_code_or_no_charge_keeps_charge(self):
+        from .article_publication_evidence import denied_refund_code
+        self.deny_before_delivery()
+        denied = deepcopy({"result": self.run.result, "run_request": self.run.run_request})
+        cases = (
+            ("article", {"publication_evidence_v1": {**self.setup, "purpose": "article", "state": "observed"}}, {}),
+            ("unexplained_pr", {"pr_url": "https://github.com/fixture/site/pull/41"}, {}),
+            ("handoff", {"publish_child_run_id": "publisher-child"}, {}),
+            ("reviewed_preview", {"preview_content_verified": True, "preview_url": "https://preview.fixture.test/a"}, {}),
+            ("draft_body", {"markdown": "Saved reviewable draft"}, {}),
+            ("other_code", {"error_code": "website_connection_required"}, {}),
+            ("unpaid", {}, {"roo_points_cost": None, "roo_points_ledger_id": None, "roo_points_billing_status": "free"}),
+            ("goal_child", {}, {"first_article_goal_operation_id": "prepare-7"}),
+        )
+        for label, result, request in cases:
+            with self.subTest(label):
+                self.run.result = {**deepcopy(denied["result"]), **result}
+                self.run.run_request = {**deepcopy(denied["run_request"]), **request}
+                self.assertIsNone(denied_refund_code(self.run))
+                self.run.save.reset_mock()
+                self.assertEqual(self.queue_denied(), 0)
+                self.run.save.assert_not_called()
+                self.assertNotIn("article_terminal_refund", self.run.result)
+
+    def test_denied_stop_receipt_settles_through_original_spend(self):
+        from . import reconciliation
+        self.deny_before_delivery()
+        self.queue_denied()
+        # The worker's bound stop is the only no-value proof; the same consumer as failed runs.
+        self.test_exhausted_sweep_obtains_real_stop_receipt_before_reserving_credit()
+        self.assertEqual(self.run.result["article_terminal_refund"]["status"], "pending")
+        self.assertTrue(self.run.result["article_terminal_refund"]["paid_obligation"])
+        spend = SimpleNamespace(user=SimpleNamespace(pk=5), idempotency_key="content_factory:charge:original-charge",
+            created_by_slack_id="U-payer")
+        with patch.object(reconciliation.transaction, "atomic", return_value=nullcontext()), \
+                patch("organizations.models.Organization.objects.select_for_update"), \
+                patch.object(views.ContentFactoryRun.objects, "select_for_update") as locked, \
+                patch("content_factory.billing_lineage.original_article_spend_for_run", return_value=spend), \
+                patch("integrations.services.article_generation.refund_content_factory_request_for_user",
+                    return_value=SimpleNamespace(pk=222)) as credit:
+            locked.return_value.filter.return_value.first.return_value = self.run
+            reconciliation._refund_failed_run(self.run, reason="Refused before delivery")
+        credit.assert_called_once()
+        self.assertEqual(credit.call_args.kwargs["article_request"]["client_request_id"], "original-charge")
+        self.assertEqual(self.run.result["article_terminal_refund"]["status"], "refunded")
+        self.assertEqual(self.run.result["article_terminal_refund"]["refund_ledger_id"], "222")
+        self.assertFalse(self.run.result["reconciliation_refund_pending"])
+
+    def test_denied_stop_that_never_seals_quarantines_with_obligation(self):
+        self.deny_before_delivery()
+        self.queue_denied()
+        self.assert_unsealed_stops_quarantine()
+
+    def assert_unsealed_stops_quarantine(self):
+        from . import reconciliation
+        from datetime import timedelta
+        self.run.updated_at, self.run.reconciled_at = timezone.now() - timedelta(hours=1), None
+        rows = Mock()
+        rows.filter.return_value = rows
+        rows.order_by.return_value = rows
+        rows.__getitem__ = Mock(return_value=[self.run])
+        def claim(**changes):
+            self.run.result, self.run.reconciled_at = changes["result"], changes["reconciled_at"]
+            return 1
+        rows.update.side_effect = claim
+        with patch.object(reconciliation.ContentFactoryRun.objects, "filter", return_value=rows) as select, \
+                patch.object(views, "_call_content_factory_run_action", return_value={"status": "unknown"}) as remote:
+            for _ in range(5):
+                reconciliation._settle_exhausted_article_runs(limit=10, now=timezone.now())
+        self.assertIn(self.run.status, select.call_args_list[0].kwargs["status__in"])
+        self.assertEqual(remote.call_count, 3)
+        self.assertEqual(remote.call_args.kwargs["payload"]["reason"], "article_terminal_no_value")
+        self.assertEqual(self.run.result["article_terminal_refund"]["status"], "needs_reconciliation")
+        self.assertTrue(self.run.result["article_terminal_refund"]["paid_obligation"])
+        self.assertTrue(self.run.result["reconciliation_refund_pending"])
+
+    def test_refund_sweep_retries_a_denied_obligation(self):
+        from . import reconciliation
+        self.deny_before_delivery()
+        self.run.result.update(article_terminal_refund={"status": "pending", "paid_obligation": True},
+            reconciliation_refund_pending=True)
+        rows = Mock()
+        rows.filter.return_value = rows
+        rows.__getitem__ = Mock(return_value=[self.run])
+        with patch.object(reconciliation.ContentFactoryRun.objects, "filter", return_value=rows) as select, \
+                patch.object(reconciliation, "_refund_failed_run") as settle:
+            reconciliation._settle_sweep_refunds(limit=10)
+        self.assertIn("denied", select.call_args.kwargs["status__in"])
+        settle.assert_called_once_with(self.run, reason="run_reconciliation_failed")

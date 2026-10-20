@@ -1970,6 +1970,19 @@
     {
       "adapter": "nonfailure_category",
       "allowed_codes_ref": "contracts/failure-codes.json#/codes",
+      "category": "retained financial refund observation for a denied no-value article run; no new causal classification",
+      "expression": "code[:100]",
+      "field": "error_code",
+      "function": "_queue_denied_article_refunds",
+      "owner": "backend.reconciliation",
+      "path": "content_factory/reconciliation.py",
+      "site_sha256": "dc061d5baefced2a5e83d6fdb9b325ed9fe793e4fba7fe2b8fc1570c7edd0882",
+      "source": "retained financial refund observation for a denied no-value article run; no new causal classification",
+      "test": "content_factory.tests_article_publication_evidence_unit.ArticleCancellationSettlementTests.test_denied_refusal_without_callback_reserves_obligation_and_requires_stop"
+    },
+    {
+      "adapter": "nonfailure_category",
+      "allowed_codes_ref": "contracts/failure-codes.json#/codes",
       "category": "owner/company/billing/measurement request schema; not a causal Articles run failure",
       "expression": "'content_factory_refund_pending'",
       "field": "code",
