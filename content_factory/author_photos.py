@@ -227,13 +227,15 @@ def store_author_photos(
     *,
     previous: Iterable[Dict[str, Any]],
     company_id: Any,
+    skipped: Optional[List[AuthorPhotoError]] = None,
 ) -> List[Dict[str, Any]]:
     """Replace each external photo link with an MLAI-stored copy before the profiles are saved.
 
     A link that is new in this save must copy or the save is rejected, so a founder
     learns about a dead link straight away. A link that was already saved (before
     photos were copied) is retried but kept on failure, so one stale photo never
-    blocks editing the other authors.
+    blocks editing the other authors. Each kept link's error is appended to
+    ``skipped`` when a list is passed.
     """
     earlier = {author.get("id"): author.get("avatarUrl", "") for author in previous}
     copies: Dict[str, str] = {}
@@ -249,6 +251,9 @@ def store_author_photos(
             if earlier.get(author.get("id")) == url:
                 logger.info("author_photo_copy_skipped company_id=%s author_id=%s code=%s",
                             company_id, author.get("id"), exc.code)
+                if skipped is not None:
+                    exc.author_id = str(author.get("id") or "")
+                    skipped.append(exc)
                 result.append(author)
                 continue
             raise AuthorPhotoError(
