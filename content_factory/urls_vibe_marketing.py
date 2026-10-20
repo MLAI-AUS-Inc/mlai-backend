@@ -5,7 +5,7 @@ from .article_review_views import VibeMarketingArticleReviewView
 from .website_views import WebsiteConnectionView, WebsiteConnectionActionView, WebsiteConnectionOperationView, WebsiteCostUsageView
 from django.urls import include, path
 
-from .custom_island_views import CustomContentIslandView
+from .custom_island_views import ContentIslandRemoveView, CustomContentIslandView
 from .github_repository_views import VibeMarketingGitHubRepositoryView
 from .island_research_views import ContentIslandResearchView, ContentIslandResearchAdoptView
 
@@ -87,6 +87,8 @@ urlpatterns = [
     path("islands/research/<str:run_id>/adopt", ContentIslandResearchAdoptView.as_view(), name="vibe-marketing-island-research-adopt"),
     path("islands/custom", CustomContentIslandView.as_view(), name="vibe-marketing-custom-island-no-slash"),
     path("islands/custom/", CustomContentIslandView.as_view(), name="vibe-marketing-custom-island"),
+    path("islands/<str:slug>/remove", ContentIslandRemoveView.as_view(), name="vibe-marketing-island-remove-no-slash"),
+    path("islands/<str:slug>/remove/", ContentIslandRemoveView.as_view(), name="vibe-marketing-island-remove"),
     path("editorial-catalog/articles/", EditorialArticlesView.as_view(), name="editorial-articles"),
     path("editorial-catalog/suggest-brief/", EditorialBriefSuggestionView.as_view(), name="editorial-brief-suggestion"),
     path("editorial-catalog", EditorialCatalogView.as_view(), name="vibe-marketing-editorial-catalog-no-slash"),

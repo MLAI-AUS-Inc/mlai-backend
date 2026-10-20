@@ -11,6 +11,7 @@ MARKETING_VIEWS = frozenset(
         "WebsiteConnectionView",
         "WebsiteConnectionActionView",
         "WebsiteConnectionOperationView",
+        "ContentIslandRemoveView",
         "ContentIslandResearchAdoptView",
         "ContentIslandResearchView",
         "CustomContentIslandView",
