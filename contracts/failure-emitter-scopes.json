@@ -2161,6 +2161,58 @@
       "site_sha256": "48bd454beb538a119222f025d1a1d849959da2aba12965afa840df22732e30e6",
       "source": "Confirmation child reuse rejects foreign source/domain and conflicting original payment lineage before returning a replay.",
       "test": "content_factory.tests_failure_contract_unit.ScannerTests.test_article_price_admission_sites_are_exact_financial_denials"
+    },
+    {
+      "adapter": "nonfailure_category",
+      "allowed_codes_ref": "contracts/failure-codes.json#/codes",
+      "category": "author photo link request validation; not a causal Articles run failure",
+      "expression": "code",
+      "field": "code",
+      "function": "__init__",
+      "owner": "backend.author_photos",
+      "path": "content_factory/author_photos.py",
+      "site_sha256": "e930ffbe0e673858cb8b1b8575a56037e816396a19ea5cf10b02defdef575844",
+      "source": "author photo link request validation; not a causal Articles run failure",
+      "test": "content_factory.tests_author_photos_unit.PreviewViewTests.test_preview_rejects_non_links_and_reports_fetch_errors"
+    },
+    {
+      "adapter": "nonfailure_category",
+      "allowed_codes_ref": "contracts/failure-codes.json#/codes",
+      "category": "author photo link request validation; not a causal Articles run failure",
+      "expression": "'author_photo_invalid'",
+      "field": "code",
+      "function": "post",
+      "owner": "backend.vibe_marketing_views",
+      "path": "content_factory/vibe_marketing_views.py",
+      "site_sha256": "b9877b0e301b8bf01803fd0f887d74998d39c6a7171e454240b31c39c9431370",
+      "source": "author photo link request validation; not a causal Articles run failure",
+      "test": "content_factory.tests_author_photos_unit.PreviewViewTests.test_preview_rejects_non_links_and_reports_fetch_errors"
+    },
+    {
+      "adapter": "nonfailure_category",
+      "allowed_codes_ref": "contracts/failure-codes.json#/codes",
+      "category": "author photo link request validation; not a causal Articles run failure",
+      "expression": "exc.code",
+      "field": "code",
+      "function": "post",
+      "owner": "backend.vibe_marketing_views",
+      "path": "content_factory/vibe_marketing_views.py",
+      "site_sha256": "ec8febb82fb2f2005e00866a4f474f84418a7041be671fb59371508fd687af35",
+      "source": "author photo link request validation; not a causal Articles run failure",
+      "test": "content_factory.tests_author_photos_unit.PreviewViewTests.test_preview_rejects_non_links_and_reports_fetch_errors"
+    },
+    {
+      "adapter": "nonfailure_category",
+      "allowed_codes_ref": "contracts/failure-codes.json#/codes",
+      "category": "author photo link request validation; not a causal Articles run failure",
+      "expression": "exc.code",
+      "field": "code",
+      "function": "_authors_with_stored_photos",
+      "owner": "backend.vibe_marketing_views",
+      "path": "content_factory/vibe_marketing_views.py",
+      "site_sha256": "1317f67ba6068cbf291a214d82b1c63153e6993c9d8df4c13f43070c31e658aa",
+      "source": "author photo link request validation; not a causal Articles run failure",
+      "test": "content_factory.tests_author_photos_unit.PreviewViewTests.test_preview_rejects_non_links_and_reports_fetch_errors"
     }
   ],
   "owner": "backend.content_factory",
