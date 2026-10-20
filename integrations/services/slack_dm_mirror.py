@@ -2239,8 +2239,13 @@ def _stage_unknown_slack_event(
     *,
     authorized_user_ids: set[str],
     private_channel: bool = False,
+    kind_hint: str | None = None,
 ) -> int:
-    """Durably retain an unknown-DM event, encrypted, until discovery owns it."""
+    """Durably retain an unknown-DM event, encrypted, until discovery owns it.
+
+    ``kind_hint`` is Slack's own event channel type. It only selects which
+    read scope a targeted discovery probe may use; it never authorizes routing.
+    """
 
     staged = 0
     if not authorized_user_ids:
@@ -2290,6 +2295,11 @@ def _stage_unknown_slack_event(
                         "channel_id": channel_id,
                         "ciphertext": ciphertext,
                         "staged_at": timezone.now().isoformat(),
+                        **(
+                            {"kind": kind_hint}
+                            if kind_hint in {"mpim", "private_channel"}
+                            else {}
+                        ),
                     }
                 )
                 sync_cursor[PENDING_EVENT_CHECKPOINT_KEY] = pending
@@ -2663,6 +2673,21 @@ def _complete_inactive_conversation_history(
         )
 
 
+def _stored_profile_cache(grant: SlackDmMirrorGrant) -> dict[str, dict[str, str]]:
+    """Seed display lookups from this owner's already-confirmed mirrors."""
+
+    profile_cache: dict[str, dict[str, str]] = {}
+    for stored_profiles in grant.conversations.values_list(
+        "participant_profiles", flat=True
+    ):
+        if not isinstance(stored_profiles, dict):
+            continue
+        for slack_user_id, profile in stored_profiles.items():
+            if isinstance(profile, dict):
+                profile_cache.setdefault(str(slack_user_id), profile)
+    return profile_cache
+
+
 def discover_conversations(
     grant: SlackDmMirrorGrant, *, force_backfill: bool = False
 ) -> int:
@@ -2704,6 +2729,13 @@ def discover_conversations(
     from integrations.services.slack_open_requests import process_next_open
 
     if process_next_open(grant, authority):
+        return 1
+    from integrations.services.message_sync.staged_routing import route_staged_events
+
+    # Parked group-DM/private-channel events name their own source. Behind
+    # MESSAGE_SYNC_TARGETED_STAGED_ROUTING, re-check that source now instead of
+    # waiting for the paced directory page to reach it.
+    if route_staged_events(grant, authority, reset_history=identity_repaired):
         return 1
     if getattr(settings, "MESSAGE_SYNC_ENABLED", False):
         from integrations.services.message_sync.device_recovery import fan_out_device_audience, fanout_batch
@@ -2753,15 +2785,7 @@ def discover_conversations(
             grant.pk, exc,
         )
     discovered = 0
-    profile_cache: dict[str, dict[str, str]] = {}
-    for stored_profiles in grant.conversations.values_list(
-        "participant_profiles", flat=True
-    ):
-        if not isinstance(stored_profiles, dict):
-            continue
-        for slack_user_id, profile in stored_profiles.items():
-            if isinstance(profile, dict):
-                profile_cache.setdefault(str(slack_user_id), profile)
+    profile_cache = _stored_profile_cache(grant)
     if getattr(settings, "MESSAGE_SYNC_ENABLED", False):
         from integrations.services.message_sync.device_recovery import recover_recent_conversation
 
@@ -3704,9 +3728,17 @@ def _enqueue_normalized_slack_event_locked(
 def _drain_staged_events_for_conversation(
     authority: _SlackGrantApiAuthority,
     conversation_id: int,
+    *,
+    path: str = "discovery",
 ) -> int:
     """Atomically route and remove staged ciphertext after exact discovery."""
 
+    from integrations.services.message_sync.staged_routing import (
+        log_staged_latency,
+        staged_seconds,
+    )
+
+    routed_staged_at: list[float | None] = []
     with transaction.atomic():
         grant, connection = _lock_slack_grant_api_authority(
             authority,
@@ -3754,13 +3786,16 @@ def _drain_staged_events_for_conversation(
             )
             if result == "enqueued":
                 routed += 1
+                routed_staged_at.append(staged_seconds(item.get("staged_at")))
         if retained:
             sync_cursor[PENDING_EVENT_CHECKPOINT_KEY] = retained
         else:
             sync_cursor.pop(PENDING_EVENT_CHECKPOINT_KEY, None)
         connection.sync_cursor = sync_cursor
         connection.save(update_fields=("sync_cursor", "updated_at"))
-        return routed
+    # Timing only, outside the drain transaction: no channel ID or body.
+    log_staged_latency(path, authority.grant_id, routed_staged_at)
+    return routed
 
 
 def ingest_slack_dm_event(payload: dict[str, Any]) -> dict[str, Any] | None:
@@ -3848,6 +3883,13 @@ def ingest_slack_dm_event(payload: dict[str, Any]) -> dict[str, Any] | None:
             normalized,
             authorized_user_ids=_slack_event_authorized_user_ids(payload),
             private_channel=private_channel,
+            kind_hint=(
+                "private_channel"
+                if private_channel
+                else "mpim"
+                if str(event.get("channel_type") or "").strip().lower() == "mpim"
+                else None
+            ),
         )
         return {"status": "discovery_queued", "staged": staged}
     authorized_user_ids = _slack_event_authorized_user_ids(payload)
