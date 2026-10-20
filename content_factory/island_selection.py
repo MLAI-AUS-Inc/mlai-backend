@@ -199,7 +199,12 @@ def apply_evolution(organization, proposals, captured_on, now):
         islands = list(ContentIsland.objects.filter(organization=organization,
             slug__in=state.get("managed_slugs", []), status="visible").prefetch_related("memberships__keyword"))
         old = [{"slug": i.slug, "keywords": [m.keyword.keyword_normalized for m in i.memberships.all()]} for i in islands]
-        groups = proposed.get("groups") or []
+        # A theme the founder removed stays removed even though its research keywords remain in scope.
+        from .island_removal import removed_island_centroids, suppressed_by_removed_island
+        removed = removed_island_centroids(ContentIsland.objects.filter(
+            organization=organization, removed_at__isnull=False))
+        groups = [group for group in proposed.get("groups") or []
+                  if not suppressed_by_removed_island(group.get("centroid_embedding"), removed)]
         if not old or not groups or len(groups) > 30:
             continue
         # Resolve evidence in this organisation; missing/partial syncs must not retire themes.

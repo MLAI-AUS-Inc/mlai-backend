@@ -111,8 +111,8 @@ def adopt_researched_island(organization, run, proposal, *, merge_evidence=False
         if existing and existing.keyword_count > 0 and not merge_evidence:
             if existing.status != "visible":
                 existing.status, existing.promoted_at = "visible", now
-                existing.archived_at = None
-                existing.save(update_fields=["status", "promoted_at", "archived_at", "updated_at"])
+                existing.archived_at = existing.removed_at = None
+                existing.save(update_fields=["status", "promoted_at", "archived_at", "removed_at", "updated_at"])
             return existing, False
         scope = {**brief, "focus": brief.get("focus") or f"{brief['intent'].capitalize()} search intent"}
         defaults = {
@@ -134,7 +134,7 @@ def adopt_researched_island(organization, run, proposal, *, merge_evidence=False
                 return island, False
             for field in ("status", "promoted_at", "last_matched_at", "last_refreshed_at", "centroid_embedding", *proposal["metrics"]):
                 setattr(island, field, defaults[field])
-            island.archived_at = None
+            island.archived_at = island.removed_at = None
             island.save()
         members = {m["keyword_normalized"]: m for m in proposal["members"]}
         for row in proposal["keywords"]:

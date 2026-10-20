@@ -8217,6 +8217,9 @@ class SEOContentIslandBulkSyncView(APIView):
             taken_slugs = set(existing_by_slug.keys())
             used_color_keys = [island.color_key for island in existing_by_slug.values()]
             touched_slugs = set()
+            from .island_removal import removed_island_centroids, suppressed_by_removed_island
+            removed_centroids = removed_island_centroids(existing_by_slug.values())
+            suppressed = []
 
             for entry in entries:
                 entry_slug = str(_request_value(entry, 'slug', default='') or '').strip()
@@ -8230,6 +8233,13 @@ class SEOContentIslandBulkSyncView(APIView):
                 ).strip()[:ISLAND_PILLAR_KEYWORD_MAX_LENGTH]
                 centroid = _island_centroid_from_entry(entry)
                 matched = bool(_request_value(entry, 'matched', default=bool(island)))
+
+                # The founder removed this theme; neither revive it nor re-create it.
+                if (island is not None and island.removed_at is not None) or (
+                    island is None and suppressed_by_removed_island(centroid, removed_centroids)
+                ):
+                    suppressed.append(entry_slug or name or pillar_keyword)
+                    continue
 
                 if island is None:
                     origin = str(_request_value(entry, 'origin', default='') or '').strip()
@@ -8373,6 +8383,7 @@ class SEOContentIslandBulkSyncView(APIView):
             'archived': archived_slugs,
             'expanded': expanded_applied,
             'skipped_keywords': skipped_keywords,
+            'suppressed': suppressed,
             'evolution': evolution,
             'edges': edge_count,
         }, status=status.HTTP_200_OK)
