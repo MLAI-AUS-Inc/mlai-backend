@@ -13,6 +13,7 @@ from rest_framework.views import APIView
 from core.authentication import CustomJWTAuthentication
 from roo.models import RewardsCatalog, Task, TaskAssignment
 from roo.services import PointsService
+from roo.event_discounts import feature_enabled as event_discounts_enabled
 from integrations.services.community_bridge.coworking import coworking_booking_available
 from integrations.services.slack_roo import public_roo_target
 
@@ -65,7 +66,7 @@ class CommunityHomeView(APIView):
             .order_by("due_date", "id")[:HOME_ITEM_LIMIT]
         )
         rewards = (
-            RewardsCatalog.objects.filter(is_active=True)
+            RewardsCatalog.objects.filter(is_active=True, event_discount_offer__isnull=True)
             .filter(Q(stock_remaining__isnull=True) | Q(stock_remaining__gt=0))
             .order_by("cost_points", "name")[:100]
         )
@@ -147,6 +148,7 @@ class CommunityHomeView(APIView):
                     for reward in rewards
                 ],
                 "feature_flags": {
+                    "event_discounts": event_discounts_enabled() and bool(slack_roo),
                     "coworking_booking": coworking_booking_available(request.user),
                     "link_love": False,
                     "meeting_rooms": bool(

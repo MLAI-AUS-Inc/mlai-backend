@@ -1019,6 +1019,8 @@ ROO_INTERNAL_MENTION_API_KEY = os.getenv('ROO_INTERNAL_MENTION_API_KEY', '').str
 ROO_SIM_PATIENT_KEY = os.getenv('ROO_SIM_PATIENT_KEY', '').strip()
 HEALTH_HACK_API_KEY = os.getenv('HEALTH_HACK_API_KEY', '').strip()
 ROO_API_KEY = os.getenv('ROO_API_KEY', '').strip()
+ROO_EVENT_DISCOUNTS_ENABLED = _env_is_true('ROO_EVENT_DISCOUNTS_ENABLED', False)
+ROO_EVENT_DISCOUNTS_SLACK_TEAM_ID = os.getenv('ROO_EVENT_DISCOUNTS_SLACK_TEAM_ID', '').strip()
 # Additional report-only access for verified Roo requests in one shared chat.
 COWORKING_REPORT_SLACK_TEAM_ID = os.getenv('COWORKING_REPORT_SLACK_TEAM_ID', '').strip()
 COWORKING_REPORT_SLACK_CHANNEL_ID = os.getenv('COWORKING_REPORT_SLACK_CHANNEL_ID', '').strip()

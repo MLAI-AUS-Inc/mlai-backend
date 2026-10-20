@@ -46,7 +46,7 @@ def spend(*, user, amount, source, description, actor, key, reference_type=None,
     account = PointsAccount.objects.select_for_update().get(pk=account.pk)
     PointsService._ensure_microroo_account(account)
     available = max(spendable_balance(account) - PointsService._reserved_microroo(
-        user, exclude_turn_id=allow_reserved_turn_id,
+        user, exclude_turn_id=allow_reserved_turn_id, include_digital=True,
     ), 0)
     if available < amount:
         raise InsufficientBalanceError("Insufficient available digital-service points")

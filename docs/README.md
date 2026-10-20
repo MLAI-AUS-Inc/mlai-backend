@@ -128,6 +128,8 @@ rollout sequence.
 
 ## Roo
 
+- [Roo event discounts](roo-event-discounts.md) — private quotes, general-point holds, one-use Luma coupons and supervised reconciliation.
+
 - [`roo-points-gst.md`](roo-points-gst.md) — inclusive GST checkout, payment evidence and release configuration
 
 - [Roo rate-card reads](roo-rate-card.md) — authentication, active rates, and empty/error responses

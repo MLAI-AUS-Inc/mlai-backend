@@ -101,16 +101,24 @@ class CodingEntitlementView(APIView):
             .first()
         )
         coding_access = user_can_use_coding(request.user)
+        available = max(
+            balance["digital_service_balance_microroo"]
+            - PointsService._reserved_microroo(
+                request.user, exclude_turn_id=active.pk if active else None,
+                include_digital=True,
+            ),
+            0,
+        )
         return Response(
             {
                 # Retained for already-installed desktop clients.
                 "pilot_access": coding_access,
                 "can_start_turn": bool(
-                    coding_access and balance["digital_service_balance_microroo"] > 0 and active is None
+                    coding_access and available > 0 and active is None
                 ),
                 "model": "kimi-k3",
-                "balance_microroo": microroo_string(balance["digital_service_balance_microroo"]),
-                "balance_roo": roo_decimal_string(balance["digital_service_balance_microroo"]),
+                "balance_microroo": microroo_string(available),
+                "balance_roo": roo_decimal_string(available),
                 "active_turn": _turn_payload(active) if active else None,
                 "pricing": pricing_payload(pricing),
                 "runtime": {

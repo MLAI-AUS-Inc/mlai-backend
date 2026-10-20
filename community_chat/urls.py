@@ -35,6 +35,7 @@ from .coding_views import (
     CodingTurnTicketRefreshView,
 )
 from .home_views import CommunityHomeView
+from .event_discount_views import MyEventDiscountsView
 from .insight_views import TokenInsightsView
 from .coworking_views import CoworkingTodayView
 from .meeting_room_views import (
@@ -55,6 +56,7 @@ from .usage_views import (
 
 
 urlpatterns = [
+    path("event-discounts/", MyEventDiscountsView.as_view(), name="community_chat_event_discounts"),
     path("usage/insights/", TokenInsightsView.as_view(), name="community_chat_token_insights"),
     path("account-bans/", AccountBanView.as_view(), name="community_chat_account_bans"),
     path("account-bans/<int:ban_id>/", AccountBanView.as_view(), name="community_chat_account_ban"),
