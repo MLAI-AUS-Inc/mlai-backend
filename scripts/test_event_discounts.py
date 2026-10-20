@@ -45,6 +45,8 @@ def main(labels):
             settings.DATABASES = {"default": {
                 "ENGINE": "django.db.backends.postgresql", "NAME": "postgres",
                 "USER": getpass.getuser(), "HOST": str(socket_dir), "PORT": arguments.postgres_port,
+                # Match CI so thread-session leaks cannot hide behind auto-close.
+                "CONN_MAX_AGE": 600,
                 "TEST": {"NAME": "test_roo_event_discounts_" + uuid.uuid4().hex[:12]},
             }}
         django.setup()

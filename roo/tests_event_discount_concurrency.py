@@ -7,7 +7,7 @@ from unittest import skipUnless
 from unittest.mock import Mock
 from uuid import uuid4
 
-from django.db import close_old_connections, connection
+from django.db import close_old_connections, connection, connections
 from django.test import TransactionTestCase, override_settings
 from django.utils import timezone
 
@@ -68,7 +68,7 @@ class EventDiscountConcurrencyTests(TransactionTestCase):
             except EventDiscountError as exc:
                 return (exc.code, None)
             finally:
-                close_old_connections()
+                connections.close_all()
 
         with ThreadPoolExecutor(max_workers=len(requests)) as pool:
             return list(pool.map(reserve, requests))
@@ -121,7 +121,7 @@ class EventDiscountConcurrencyTests(TransactionTestCase):
             try:
                 return EventDiscountService.process(row.pk, gateway=gateway).status
             finally:
-                close_old_connections()
+                connections.close_all()
 
         with ThreadPoolExecutor(max_workers=2) as pool:
             first = pool.submit(process)
