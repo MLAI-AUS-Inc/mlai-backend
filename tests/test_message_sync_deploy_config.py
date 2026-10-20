@@ -164,7 +164,7 @@ if __name__ == "__main__":
 
 
 class ResponsivenessConfigTests(unittest.TestCase):
-    flags = {"MESSAGE_SYNC_RECENT_HISTORY_ENABLED": "false", "MESSAGE_SYNC_OPEN_PRIORITY_ENABLED": "true", "MESSAGE_SYNC_UNREAD_PREFETCH_ENABLED": "false", "MESSAGE_SYNC_UNREAD_PREFETCH_PER_HOUR": "6", "MESSAGE_SYNC_DEVICE_FANOUT_BATCH": "0"}
+    flags = {"MESSAGE_SYNC_RECENT_HISTORY_ENABLED": "false", "MESSAGE_SYNC_OPEN_PRIORITY_ENABLED": "true", "MESSAGE_SYNC_UNREAD_PREFETCH_ENABLED": "false", "MESSAGE_SYNC_UNREAD_PREFETCH_PER_HOUR": "6", "MESSAGE_SYNC_DEVICE_FANOUT_BATCH": "0", "MESSAGE_SYNC_TARGETED_STAGED_ROUTING": "false"}
 
     def test_flags_are_wired_through_every_configuration_surface(self):
         root = Path(__file__).resolve().parents[1]
@@ -229,3 +229,14 @@ class DeviceFanoutConfigTests(unittest.TestCase):
             validate({**valid, 'MESSAGE_SYNC_DEVICE_FANOUT_BATCH': value})
         with self.assertRaisesRegex(ValueError, 'requires MESSAGE_SYNC_ENABLED=true'):
             validate({'MESSAGE_SYNC_DEVICE_FANOUT_BATCH': '10'})
+
+
+class TargetedStagedRoutingConfigTests(unittest.TestCase):
+    def test_targeted_routing_requires_durable_sync(self):
+        validate({'MESSAGE_SYNC_TARGETED_STAGED_ROUTING': 'false'})
+        with self.assertRaisesRegex(ValueError, 'MESSAGE_SYNC_TARGETED_STAGED_ROUTING requires MESSAGE_SYNC_ENABLED=true'):
+            validate({'MESSAGE_SYNC_TARGETED_STAGED_ROUTING': 'true'})
+        valid = {'MESSAGE_SYNC_ENABLED': 'true', 'COMMUNITY_BRIDGE_PRODUCTION_ENABLED': 'true',
+                 'MESSAGE_SYNC_SLACK_APP_ID': 'ATEST', 'MESSAGE_SYNC_SLACK_BOT_WORKSPACE_ID': 'TTEST',
+                 'SLACK_BRIDGE_WORKSPACE_ID': 'TTEST', 'MESSAGE_SYNC_SLACK_APP_TOKEN': 'xapp-synthetic'}
+        validate({**valid, 'MESSAGE_SYNC_TARGETED_STAGED_ROUTING': 'true'})

@@ -173,7 +173,8 @@ def hourly_snapshot(scopes, *, hours=24, now=None):
             "bucket_seconds": 3600, "observed_hours": observed, "scopes": result}
 
 
-LATENCY_KINDS = ("open_provisioned", "open_presented", "open_ready")
+# staged_routed: a parked group-DM/private-channel event reached the delivery queue.
+LATENCY_KINDS = ("open_provisioned", "open_presented", "open_ready", "staged_routed")
 LATENCY_COUNTERS = ("count", "sum_ms", "over_30s", "over_120s")
 
 
