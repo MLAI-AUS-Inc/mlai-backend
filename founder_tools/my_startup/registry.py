@@ -26,6 +26,7 @@ MARKETING_VIEWS = frozenset(
         "VibeMarketingArticleSystemRevisionsView",
         "VibeMarketingArticleSystemSetupView",
         "VibeMarketingArticleView",
+        "VibeMarketingAuthorPhotoPreviewView",
         "VibeMarketingAutofillView",
         "VibeMarketingBaselineGoogleRefreshView",
         "VibeMarketingBaselineHistoryView",

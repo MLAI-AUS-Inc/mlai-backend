@@ -127,6 +127,10 @@ class AvatarView(MyStartupAccess, marketing.VibeMarketingCompanyAvatarView):
     pass
 
 
+class AuthorPhotoPreviewView(MyStartupAccess, marketing.VibeMarketingAuthorPhotoPreviewView):
+    pass
+
+
 class RepositoryView(MyStartupAccess, VibeMarketingGitHubRepositoryView):
     pass
 
