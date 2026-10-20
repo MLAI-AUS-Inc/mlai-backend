@@ -216,6 +216,21 @@ class DependencyVerdictFlagConfigTests(ResponsivenessConfigTests):
         self.assertEqual(self.flags['COMMUNITY_BRIDGE_DEPENDENCY_VERDICTS_ENABLED'], 'false')
 
 
+class ChannelLifecycleFlagConfigTests(ResponsivenessConfigTests):
+    flags = {'COMMUNITY_BRIDGE_CHANNEL_LIFECYCLE_ENABLED': 'false'}
+
+    def test_invalid_flags_and_unread_prefetch_without_sync_and_inventory_rejected(self):
+        validate({})
+        with self.assertRaises(ValueError):
+            validate({'COMMUNITY_BRIDGE_CHANNEL_LIFECYCLE_ENABLED': 'yes'})
+        with self.assertRaisesRegex(ValueError, 'requires MESSAGE_SYNC_ENABLED=true'):
+            validate({'COMMUNITY_BRIDGE_CHANNEL_LIFECYCLE_ENABLED': 'true'})
+        validate({'MESSAGE_SYNC_ENABLED': 'true', 'COMMUNITY_BRIDGE_PRODUCTION_ENABLED': 'true',
+                  'MESSAGE_SYNC_SLACK_APP_ID': 'ATEST', 'MESSAGE_SYNC_SLACK_BOT_WORKSPACE_ID': 'TTEST',
+                  'SLACK_BRIDGE_WORKSPACE_ID': 'TTEST', 'MESSAGE_SYNC_SLACK_APP_TOKEN': 'xapp-synthetic',
+                  'COMMUNITY_BRIDGE_CHANNEL_LIFECYCLE_ENABLED': 'true'})
+
+
 class DeviceFanoutConfigTests(unittest.TestCase):
     def test_batch_bounds_and_durable_sync_requirement(self):
         for value in ('-1', '51', '1.5', '10\nX=1'):

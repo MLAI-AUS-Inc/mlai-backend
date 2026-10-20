@@ -1,6 +1,7 @@
 from django.contrib import admin
 from .models import (
     CommunityBridgeChannel,
+    CommunityBridgeMirrorDecision,
     CommunityBridgeDeletionRequest,
     CommunityBridgeDelivery,
     CommunityBridgeIdentityLink,
@@ -63,12 +64,16 @@ class CommunityBridgeChannelAdmin(admin.ModelAdmin):
     list_display = (
         "slack_channel_id",
         "slack_channel_name",
+        "mirror_decision",
+        "hold_reason",
         "destination_platform",
         "destination_channel_id",
         "destination_channel_name",
         "enabled",
+        "room_sync_error",
         "updated_at",
     )
+    actions = ("mirror_channels", "hold_channels", "exclude_channels")
     search_fields = (
         "slack_workspace_id",
         "slack_channel_id",
@@ -78,13 +83,39 @@ class CommunityBridgeChannelAdmin(admin.ModelAdmin):
         "destination_workspace_id",
     )
     list_filter = (
+        "mirror_decision",
+        "lifecycle_source",
+        "slack_visibility",
         "destination_platform",
         "enabled",
+        "room_sync_pending",
         "sync_edits",
         "sync_deletes",
         "sync_replies",
         "updated_at",
     )
+
+    @admin.action(description="Mirror selected public channels into MLAI Chat")
+    def mirror_channels(self, request, queryset):
+        from integrations.services.community_bridge.channel_lifecycle import queue_refresh
+
+        # Only public channels can be mirrored; the lifecycle worker creates the
+        # room and imports 30 days once the bot is in the Slack channel.
+        public = queryset.filter(slack_visibility="public", slack_deleted=False)
+        updated = public.update(mirror_decision=CommunityBridgeMirrorDecision.MIRROR, hold_reason="", room_sync_pending=True)
+        for channel in public:
+            queue_refresh(channel.slack_workspace_id, channel.slack_channel_id, reason="admin_mirror")
+        self.message_user(request, f"{updated} channel(s) will mirror within a minute.")
+
+    @admin.action(description="Hold selected channels for review (stop mirroring)")
+    def hold_channels(self, request, queryset):
+        updated = queryset.update(mirror_decision=CommunityBridgeMirrorDecision.HOLD, hold_reason="admin", enabled=False)
+        self.message_user(request, f"{updated} channel(s) held.")
+
+    @admin.action(description="Never mirror selected channels")
+    def exclude_channels(self, request, queryset):
+        updated = queryset.update(mirror_decision=CommunityBridgeMirrorDecision.EXCLUDE, hold_reason="admin", enabled=False)
+        self.message_user(request, f"{updated} channel(s) excluded.")
 
 
 @admin.register(CommunityBridgeIdentityLink)

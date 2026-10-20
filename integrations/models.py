@@ -13,6 +13,18 @@ class CommunityBridgePlatform(models.TextChoices):
     BUZZ = "buzz", "MLAI Chat"
 
 
+class CommunityBridgeMirrorDecision(models.TextChoices):
+    MIRROR = "mirror", "Mirror"
+    HOLD = "hold", "Hold for review"
+    EXCLUDE = "exclude", "Never mirror"
+
+
+class CommunityBridgeChannelSource(models.TextChoices):
+    MANUAL = "", "Manual or manifest"
+    EVENT = "event", "Slack channel event"
+    RECONCILE = "reconcile", "Slack channel reconciliation"
+
+
 class CommunityBridgeDeliveryType(models.TextChoices):
     CREATE = "create", "Create"
     EDIT = "edit", "Edit"
@@ -612,6 +624,32 @@ class CommunityBridgeChannel(models.Model):
     sync_deletes = models.BooleanField(default=True)
     sync_replies = models.BooleanField(default=True)
     pilot_settings = models.JSONField(default=dict, blank=True)
+    # Lifecycle mirroring: the row is the source of truth for whether a Slack
+    # channel is mirrored. `enabled` stays the delivery gate.
+    mirror_decision = models.CharField(
+        max_length=10,
+        choices=CommunityBridgeMirrorDecision.choices,
+        default=CommunityBridgeMirrorDecision.MIRROR,
+        db_index=True,
+    )
+    hold_reason = models.CharField(max_length=40, blank=True, default="")
+    lifecycle_source = models.CharField(
+        max_length=20, choices=CommunityBridgeChannelSource.choices, blank=True, default=""
+    )
+    # Last observed Slack state.
+    slack_visibility = models.CharField(max_length=10, default="public")
+    slack_archived = models.BooleanField(default=False)
+    slack_deleted = models.BooleanField(default=False)
+    slack_bot_member = models.BooleanField(default=False)
+    slack_topic = models.TextField(blank=True, default="")
+    slack_purpose = models.TextField(blank=True, default="")
+    slack_created_at = models.DateTimeField(null=True, blank=True)
+    slack_seen_at = models.DateTimeField(null=True, blank=True)
+    # MLAI Chat room state last applied through the adapter.
+    room_state = models.JSONField(default=dict, blank=True)
+    room_sync_pending = models.BooleanField(default=False, db_index=True)
+    room_sync_error = models.CharField(max_length=100, blank=True, default="")
+    room_synced_at = models.DateTimeField(null=True, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
@@ -642,6 +680,40 @@ class CommunityBridgeChannel(models.Model):
             self.discord_channel_id = self.discord_channel_id or self.destination_channel_id
             self.discord_channel_name = self.discord_channel_name or self.destination_channel_name
         return super().save(*args, **kwargs)
+
+
+class CommunityBridgeChannelRefresh(models.Model):
+    """A public Slack channel whose lifecycle changed and must be re-read."""
+
+    slack_workspace_id = models.CharField(max_length=100)
+    slack_channel_id = models.CharField(max_length=100, unique=True)
+    reason = models.CharField(max_length=40)
+    attempts = models.PositiveIntegerField(default=0)
+    available_at = models.DateTimeField(db_index=True)
+    last_error_code = models.CharField(max_length=100, blank=True, default="")
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = "community_bridge_channel_refresh"
+
+
+class CommunityBridgeLifecycleState(models.Model):
+    """Per-workspace auto-mirror boundary and conversations.list progress."""
+
+    slack_workspace_id = models.CharField(max_length=100, unique=True)
+    # Public channels created at or after this instant mirror automatically;
+    # older unlisted channels arrive as hold rows.
+    auto_mirror_since = models.DateTimeField()
+    reconcile_cursor = models.CharField(max_length=255, blank=True, default="")
+    pass_started_at = models.DateTimeField(null=True, blank=True)
+    last_full_pass_at = models.DateTimeField(null=True, blank=True)
+    lease_expires_at = models.DateTimeField(null=True, blank=True)
+    last_error_code = models.CharField(max_length=100, blank=True, default="")
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = "community_bridge_lifecycle_state"
 
 
 class CommunityBridgeIdentityLink(models.Model):

@@ -17,7 +17,7 @@ def validate(env):
         raise ValueError("SLACK_OWNER_INVENTORY_ENABLED must be true or false")
     if inventory_enabled == "true" and enabled != "true":
         raise ValueError("SLACK_OWNER_INVENTORY_ENABLED requires MESSAGE_SYNC_ENABLED=true")
-    for key, default in (("MESSAGE_SYNC_OPEN_PRIORITY_ENABLED", "true"), ("MESSAGE_SYNC_UNREAD_PREFETCH_ENABLED", "false"), ("MESSAGE_SYNC_RECENT_HISTORY_ENABLED", "false"), ("MESSAGE_SYNC_TARGETED_STAGED_ROUTING", "false")):
+    for key, default in (("MESSAGE_SYNC_OPEN_PRIORITY_ENABLED", "true"), ("MESSAGE_SYNC_UNREAD_PREFETCH_ENABLED", "false"), ("MESSAGE_SYNC_RECENT_HISTORY_ENABLED", "false"), ("MESSAGE_SYNC_TARGETED_STAGED_ROUTING", "false"), ("COMMUNITY_BRIDGE_CHANNEL_LIFECYCLE_ENABLED", "false")):
         if env.get(key, default).lower() not in {"true", "false"}:
             raise ValueError(f"{key} must be true or false")
     cap = env.get("MESSAGE_SYNC_UNREAD_PREFETCH_PER_HOUR", "6")
@@ -25,6 +25,8 @@ def validate(env):
         raise ValueError("MESSAGE_SYNC_UNREAD_PREFETCH_PER_HOUR must be an integer from 1 to 256")
     if env.get("MESSAGE_SYNC_RECENT_HISTORY_ENABLED", "false").lower() == "true" and enabled != "true":
         raise ValueError("MESSAGE_SYNC_RECENT_HISTORY_ENABLED requires MESSAGE_SYNC_ENABLED=true")
+    if env.get("COMMUNITY_BRIDGE_CHANNEL_LIFECYCLE_ENABLED", "false").lower() == "true" and enabled != "true":
+        raise ValueError("COMMUNITY_BRIDGE_CHANNEL_LIFECYCLE_ENABLED requires MESSAGE_SYNC_ENABLED=true")
     if env.get("MESSAGE_SYNC_TARGETED_STAGED_ROUTING", "false").lower() == "true" and enabled != "true":
         raise ValueError("MESSAGE_SYNC_TARGETED_STAGED_ROUTING requires MESSAGE_SYNC_ENABLED=true")
     if env.get("MESSAGE_SYNC_UNREAD_PREFETCH_ENABLED", "false").lower() == "true" and (enabled != "true" or inventory_enabled != "true"):

@@ -266,6 +266,52 @@ class BuzzBridgeClient:
         }
 
     @classmethod
+    def upsert_public_channel(
+        cls,
+        *,
+        slack_workspace_id: str,
+        slack_channel_id: str,
+        name: str,
+        archived: bool,
+        about: str | None = None,
+        topic: str | None = None,
+        channel_id: str = "",
+    ) -> dict:
+        """Create or update the public room mirroring one public Slack channel.
+
+        The adapter derives the room from the Slack IDs unless ``channel_id``
+        names an existing operator-provisioned or re-keyed room. ``about`` and
+        ``topic`` of ``None`` leave those room fields unmanaged. A name already
+        used by another room raises a permanent error with code
+        ``name_conflict``.
+        """
+        payload = {
+            "slack_workspace_id": str(slack_workspace_id or "").strip(),
+            "slack_channel_id": str(slack_channel_id or "").strip(),
+            "name": str(name or "").strip(),
+            "archived": bool(archived),
+        }
+        if channel_id:
+            payload["channel_id"] = str(uuid.UUID(str(channel_id)))
+        if about is not None:
+            payload["about"] = about
+        if topic is not None:
+            payload["topic"] = topic
+        result = cls._post_adapter("v1/public-channels", payload)
+        returned = str(result.get("channel_id") or "").strip()
+        try:
+            returned = str(uuid.UUID(returned))
+        except (ValueError, TypeError) as exc:
+            raise BuzzBridgeError("MLAI Chat adapter returned an invalid public channel") from exc
+        if channel_id and returned != payload["channel_id"]:
+            raise BuzzBridgeError("MLAI Chat adapter returned the wrong public channel")
+        return {
+            "channel_id": returned,
+            "created": bool(result.get("created")),
+            "changed": [str(value) for value in result.get("changed") or []],
+        }
+
+    @classmethod
     def notify_read_state(cls, public_keys: list[str], *, revision: int) -> None:
         """Notify verified devices to fetch their authoritative read snapshot."""
         keys = sorted(set(public_keys))
