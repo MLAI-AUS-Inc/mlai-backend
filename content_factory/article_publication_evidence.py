@@ -16,6 +16,9 @@ URL_FIELDS = ("pr_url", "pull_request_url", "draft_pr_url", "draftPrUrl", "pullR
 NUMBER_FIELDS = ("pr_number", "pull_request_number", "draft_pr_number")
 BRANCH_FIELDS = ("publish_branch", "draft_branch", "pr_branch", "branch_name")
 HANDOFF_FIELDS = ("publish_handoff_pending", "publish_handoff_status", "publish_child_run_id", "promoted_publish_job_id")
+# Terminal states whose paid obligation settles through a bound worker stop.
+# A denied run is an authority refusal and settles like a failure.
+TERMINAL_REFUND_STATUSES = frozenset({"failed", "cancelled", "denied"})
 
 
 def mapping(value):
@@ -225,12 +228,12 @@ def cancellation_result(run, payload):
 
 def exhausted_article_candidate(run):
     """Stop an exhausted blocked run or an existing terminal refund obligation."""
-    if run.workflow not in ARTICLE_WORKFLOWS or run.status not in {"blocked", "failed", "cancelled"}:
+    if run.workflow not in ARTICLE_WORKFLOWS or run.status not in {"blocked", *TERMINAL_REFUND_STATUSES}:
         return False
     if mapping(run.run_request).get("first_article_goal_operation_id"):
         return False  # Its goal's repair budget and terminal refund own the decision.
     result = mapping(run.result)
-    if run.status in {"failed", "cancelled"}:
+    if run.status in TERMINAL_REFUND_STATUSES:
         return (result.get("reconciliation_refund_pending") is True
             and mapping(result.get("article_terminal_refund")).get("status") == "stop_required")
     failure = mapping(result.get("failure"))
@@ -243,11 +246,32 @@ def exhausted_article_candidate(run):
         or mapping(result.get("budget")).get("exhausted") is True)
 
 
+def denied_refund_code(run):
+    """Name the no-value refusal that makes a paid denied article run owe its charge back.
+
+    An authority refusal can end a run as denied while the worker's terminal
+    callback is superseded, so no failure callback reserves the credit. Recorded
+    effects or delivery keep the charge; the credit itself still needs a stop.
+    """
+    from .billing_lineage import paid_article_request
+    from .incident_guards import NO_DELIVERY_REFUND_CODES, delivered_content
+    request = mapping(run.run_request)
+    if (run.workflow not in ARTICLE_WORKFLOWS or run.status != "denied" or not paid_article_request(request)
+            or request.get("first_article_goal_operation_id")):
+        return None
+    result = mapping(run.result)
+    code = str(mapping(result.get("failure")).get("code") or result.get("error_code")
+        or mapping(result.get("authority_denied")).get("code") or "").strip().upper()
+    if code not in NO_DELIVERY_REFUND_CODES or publication_state(run) in {"article", "unknown"}:
+        return None
+    return None if useful_delivery(run) or delivered_content(run) else code
+
+
 def refund_reconciliation_reason(run):
     """Recheck current proof immediately before credit; absence requires a stop."""
     if getattr(run, "workflow", None) not in ARTICLE_WORKFLOWS:
         return None
-    if run.status not in {"failed", "cancelled"} or publication_state(run) in {"article", "unknown"} or useful_delivery(run):
+    if run.status not in TERMINAL_REFUND_STATUSES or publication_state(run) in {"article", "unknown"} or useful_delivery(run):
         return "needs_reconciliation"
     try:
         receipt = cancellation_receipt(run, run.result)

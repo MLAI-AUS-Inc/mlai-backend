@@ -444,8 +444,14 @@ the internal package created before repository rendering is not that consent.
 Verified review previews retain their charge. A terminal no-value candidate with
 no stop proof records `stop_required`; reconciliation obtains the worker receipt
 outside database locks, with at most three attempts before `needs_reconciliation`.
-Explicitly exhausted blocked runs use the same path. Owner review/merge/deploy
-waits and children whose active first-article goal owns the spend are excluded.
+Explicitly exhausted blocked runs use the same path. So do paid runs denied by a
+no-value authority refusal such as `website_source_changed` (a merge moved the
+verified source mid-run) with no recorded effect or delivery: reconciliation
+reserves their obligation even when the worker's terminal callback was superseded.
+Content Factory currently keeps a denied run denied and returns no stop receipt,
+so these reach `needs_reconciliation` until the worker can seal one.
+Owner review/merge/deploy waits and children whose active first-article goal owns
+the spend are excluded.
 
 `article_terminal_refund` and `reconciliation_refund_pending` are backend-owned
 outbox fields. Settlement locks the organization and fresh run, rechecks proof and

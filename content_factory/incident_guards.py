@@ -11,7 +11,8 @@ from .website_contract import WebsiteAuthorityError, evidence_digest, template_v
 NO_DELIVERY_REFUND_CODES = frozenset({
     "INTERNAL_ERROR", "UNCLASSIFIED", "RUN_BUDGET_EXHAUSTED", "ONBOARDING_MODEL_BUDGET_EXHAUSTED",
     "EDITORIAL_REJECTED", "EXPORT_EDITORIAL_REJECTED", "DELIVERY_REVIEW_DRIFT", "SOURCE_CHANGED",
-    "ARTICLE_DIRECTORY_AGENT_PROVIDER_ERROR",
+    # Authority refusal codes arrive lowercase and are matched upper-cased.
+    "WEBSITE_SOURCE_CHANGED", "ARTICLE_DIRECTORY_AGENT_PROVIDER_ERROR",
 })
 
 
