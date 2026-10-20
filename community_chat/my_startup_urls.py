@@ -13,6 +13,7 @@ ROUTES = (
     ("vibe-marketing/settings", views.SettingsView),
     ("vibe-marketing/autofill", views.ResearchView),
     ("vibe-marketing/company/avatar", views.AvatarView),
+    ("vibe-marketing/authors/photo-preview", views.AuthorPhotoPreviewView),
     ("vibe-marketing/github/connect", views.GitHubConnectView),
     ("vibe-marketing/github/repos", views.RepositoriesView),
     ("vibe-marketing/github/repository", views.RepositoryView),
