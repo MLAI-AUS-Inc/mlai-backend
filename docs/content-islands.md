@@ -141,6 +141,30 @@ migration is required. Existing manual islands do not change behavior unless a
 founder selects their measured theme through the batch flow. A theme already
 managed by another research brief is reused without transferring ownership.
 
+## Remove an island
+
+Selecting an island on the map or list offers **Remove island** with a confirm
+step. `POST /api/v1/vibe-marketing/islands/<slug>/remove` (also under
+`/api/v1/my-startup/vibe-marketing/`, with or without a trailing slash) uses the
+authenticated company context, returns `{"removed": "<slug>"}` or 404, and is
+safe to repeat.
+
+Removal archives the island, stamps `ContentIsland.removed_at` (migration
+`content_factory.0047`) and recomputes edges. Memberships, snapshots and article
+history are kept; nothing is deleted. The island is released from its research
+selection: its proposal IDs leave `selected_ids`/`managed_proposal_ids`, its slug
+leaves `managed_slugs`, and the revision increments so an in-flight refresh built
+from the old selection is stale. The researched theme can therefore be chosen
+again from the same results.
+
+Refreshes never receive archived islands, so a removed theme could otherwise be
+born again. Bulk sync skips a birth whose centroid has cosine similarity of at
+least 0.90 with a removed island's centroid, never revives a removed slug, and
+reports these as `suppressed`. Evolution of selected themes drops groups that
+match a removed island the same way. Adding the theme again through research
+adoption or the custom island endpoint clears `removed_at` and makes it visible.
+Declined-topic history is unchanged.
+
 ## Existing manual islands and older clients
 
 The legacy `POST /api/v1/vibe-marketing/islands/custom` endpoint remains compatible

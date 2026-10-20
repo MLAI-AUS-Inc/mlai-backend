@@ -15118,6 +15118,27 @@ class VibeMarketingCompanyAvatarView(APIView):
         return self._save_branding(company, request.user, "")
 
 
+class VibeMarketingAuthorPhotoPreviewView(APIView):
+    """Preview a pasted author photo link as a ``data:`` URL; saving the profile stores the copy."""
+
+    def post(self, request):
+        from content_factory.author_photos import AuthorPhotoError, needs_copy, preview_photo
+
+        if not _company_id_from_request(request):
+            return Response({"detail": "Choose a startup.", "field": "companyId"}, status=400)
+        _profile, _company, error = _resolve_profile_company_or_response(request)
+        if error:
+            return error
+        url = str(request.data.get("url") or "").strip()
+        if len(url) > 2048 or not needs_copy(url):
+            return Response({"detail": "Use a full https:// link to the photo.",
+                             "code": "author_photo_invalid"}, status=400)
+        try:
+            return Response({"previewUrl": preview_photo(url)}, status=200)
+        except AuthorPhotoError as exc:
+            return Response({"detail": str(exc), "code": exc.code}, status=exc.status)
+
+
 class VibeMarketingTopicFeedbackView(APIView):
     def get(self, request):
         context, error_response = _resolve_context_or_response(request, require_domain=True)
@@ -15469,12 +15490,42 @@ class VibeMarketingSettingsView(APIView):
         mode = request.data.get("articleDeliveryMode", request.data.get("article_delivery_mode"))
         if mode is not None and mode not in {"review_draft", "publish_code", "content_only"}:
             raise ValidationError({"articleDeliveryMode": "Choose a supported article delivery mode."})
+        # Copy pasted photo links into MLAI storage before the settings
+        # transaction opens, so remote fetches never hold database locks.
+        self.prepared_authors = None
+        if "authors" in request.data or "authorsData" in request.data:
+            prepared = self._authors_with_stored_photos(request)
+            if isinstance(prepared, Response):
+                return prepared
+            self.prepared_authors = prepared
         saved = self._save_settings(request)
         if isinstance(saved, Response):
             return saved
         # Full bootstrap may reconcile a setup PR through the worker. Commit
         # company/config writes before that worker reauthorizes this same org.
         return Response(_serialize_bootstrap(saved, request=request), status=status.HTTP_200_OK)
+
+    @staticmethod
+    def _authors_with_stored_photos(request):
+        """Submitted authors with every new external photo link replaced by an MLAI-stored copy."""
+        from content_factory.author_photos import AuthorPhotoError, store_author_photos
+
+        _profile, company, error_response = _resolve_profile_company_or_response(request)
+        if error_response:
+            return error_response
+        previous = []
+        if company.organization_id:
+            previous = normalize_authors(OrganizationContentConfig.objects.filter(
+                organization_id=company.organization_id).values_list("authors", flat=True).first())
+        try:
+            return store_author_photos(
+                normalize_authors(request.data.get("authors", request.data.get("authorsData"))),
+                previous=previous,
+                company_id=company.id,
+            )
+        except AuthorPhotoError as exc:
+            return Response({"detail": str(exc), "code": exc.code, "field": "authors",
+                             "authorId": exc.author_id}, status=exc.status)
 
     @transaction.atomic
     def _save_settings(self, request):
@@ -15572,7 +15623,9 @@ class VibeMarketingSettingsView(APIView):
         if request.data.get("default_timezone") or request.data.get("defaultTimezone"):
             config.default_timezone = request.data.get("default_timezone") or request.data.get("defaultTimezone")
         if "authors" in request.data or "authorsData" in request.data:
-            config.authors = normalize_authors(request.data.get("authors", request.data.get("authorsData")))
+            prepared_authors = getattr(self, "prepared_authors", None)
+            config.authors = prepared_authors if prepared_authors is not None else normalize_authors(
+                request.data.get("authors", request.data.get("authorsData")))
         if "default_author_id" in request.data or "defaultAuthorId" in request.data:
             config.default_author_id = str(
                 request.data.get("default_author_id", request.data.get("defaultAuthorId")) or ""
