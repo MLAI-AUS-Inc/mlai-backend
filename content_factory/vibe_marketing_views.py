@@ -18651,6 +18651,9 @@ def control_article_run(*, user, context, run, action, data, run_id=None, goal_o
             return Response(exc.as_dict(), status=exc.status)
 
     if action == "cancel":
+        from .island_research_cancel import is_island_research_run, cancel_island_research
+        if is_island_research_run(run):
+            return cancel_island_research(run=run, context=context, payload=payload)
         if run.workflow in SCAN_WORKFLOWS:
             remote_data = _call_content_factory_run_action(
                 run_id=run_id,
