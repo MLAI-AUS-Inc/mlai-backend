@@ -1685,6 +1685,9 @@ class ContentIsland(models.Model):
     first_seen_at = models.DateTimeField(default=timezone.now)
     promoted_at = models.DateTimeField(null=True, blank=True)
     archived_at = models.DateTimeField(null=True, blank=True)
+    # Set when the founder removes the island. It stays archived, and refreshes
+    # do not re-create a near-identical theme until the founder adds it again.
+    removed_at = models.DateTimeField(null=True, blank=True)
     last_refreshed_at = models.DateTimeField(null=True, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
