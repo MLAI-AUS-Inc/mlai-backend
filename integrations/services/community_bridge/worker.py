@@ -58,6 +58,7 @@ from integrations.services.message_sync.discovery import discovery_poll_seconds
 from integrations.services.message_sync.read_state import refresh_read_state_once
 from integrations.services.message_sync.execution import run_lane
 from integrations.services.slack_workspace_users import warm_workspace_directory_once
+from integrations.services.community_bridge import channel_lifecycle
 
 logger = logging.getLogger(__name__)
 WORKER_ID = f"{socket.gethostname()}:{os.getpid()}"[:100]
@@ -227,6 +228,7 @@ class CommunityBridgeDiscordClient(discord.Client):
     @tasks.loop(seconds=3.0)
     async def slack_user_directory_loop(self) -> None:
         await _warm_workspace_directory_turn()
+        await _channel_lifecycle_turn()
 
     @tasks.loop(seconds=HISTORY_REQUEST_INTERVAL_SECONDS)
     async def slack_dm_history_loop(self) -> None:
@@ -1012,6 +1014,7 @@ async def _run_headless_delivery_worker(client: CommunityBridgeDiscordClient) ->
     async def user_directory_loop():
         while True:
             await _warm_workspace_directory_turn()
+            await _channel_lifecycle_turn()
             await asyncio.sleep(3.0)
 
     async with asyncio.TaskGroup() as group:
@@ -1049,6 +1052,17 @@ async def _warm_workspace_directory_turn() -> None:
         await asyncio.to_thread(warm_workspace_directory_once)
     except Exception as exc:
         logger.warning("slack_user_directory_warm_failed error_code=%s", type(exc).__name__)
+
+
+async def _channel_lifecycle_turn() -> None:
+    """Apply queued Slack channel changes, then advance reconciliation."""
+    if not channel_lifecycle.enabled():
+        return
+    try:
+        await asyncio.to_thread(channel_lifecycle.process_refreshes_once)
+        await asyncio.to_thread(channel_lifecycle.reconcile_once)
+    except Exception as exc:
+        logger.warning("community_bridge_channel_lifecycle_failed error_code=%s", type(exc).__name__)
 
 
 def _maintain_chat_accounts():
