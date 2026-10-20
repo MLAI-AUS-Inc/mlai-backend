@@ -195,7 +195,12 @@ class CommunityHomeTests(APITestCase):
         self.assertFalse(rewards["UNLIMITED"]["can_afford"])
         self.assertEqual(
             response.data["feature_flags"],
-            {"link_love": False, "meeting_rooms": True, "coworking_booking": False},
+            {
+                "link_love": False,
+                "meeting_rooms": True,
+                "coworking_booking": False,
+                "event_discounts": False,
+            },
         )
 
     def test_response_does_not_expose_other_members_or_private_roo_fields(self):
