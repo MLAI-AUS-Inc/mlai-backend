@@ -14,6 +14,7 @@ FULL_POINTS_ADMIN_ROLES = ("admin", "committee", "portfolio_lead")
 COWORKING_REPORT_ROLES = (*FULL_POINTS_ADMIN_ROLES, "partner")
 LUMA_EXPORT_ROLES = ("admin", "committee", "partner")
 COMMITTEE_CANDIDATE_EMAIL_ROLES = ("admin", "committee")
+MEETING_AGENDA_ROLES = ("admin", "committee")
 
 
 def _clean_slack_id(slack_id: str) -> str:
@@ -140,6 +141,15 @@ def can_list_committee_candidate_emails(slack_id: str) -> bool:
         return False
 
     return _active_admin_with_role_exists(slack_id, COMMITTEE_CANDIDATE_EMAIL_ROLES)
+
+
+def can_add_meeting_agenda_items(slack_id: str) -> bool:
+    """Allow active admin and committee roles to add Notion meeting agenda items."""
+    slack_id = _clean_slack_id(slack_id)
+    if not slack_id:
+        return False
+
+    return _active_admin_with_role_exists(slack_id, MEETING_AGENDA_ROLES)
 
 
 def is_points_super_admin(slack_id: str) -> bool:

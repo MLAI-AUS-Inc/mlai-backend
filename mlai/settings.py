@@ -498,6 +498,8 @@ REST_FRAMEWORK = {
         'linear_channel_issue_detail': os.getenv('LINEAR_CHANNEL_ISSUE_DETAIL_RATE', '20/minute'),
         'linear_channel_issue_statuses': os.getenv('LINEAR_CHANNEL_ISSUE_STATUSES_RATE', '30/minute'),
         'linear_channel_issue_write': os.getenv('LINEAR_CHANNEL_ISSUE_WRITE_RATE', '10/minute'),
+        'notion_agenda_write': os.getenv('NOTION_AGENDA_WRITE_RATE', '10/minute'),
+        'notion_agenda_receipt': os.getenv('NOTION_AGENDA_RECEIPT_RATE', '60/minute'),
         # Unauthenticated auth entry points (core.throttles). Bound
         # credential-enumeration and magic-link email spam. Disabled under the
         # test runner so suites that issue many auth calls in a loop aren't
@@ -1576,6 +1578,16 @@ NOTION_OAUTH_REDIRECT_URI = os.environ.get(
     "http://localhost:8000/integrations/callback/notion",
 )
 NOTION_API_VERSION = os.environ.get("NOTION_API_VERSION", "2026-03-11")
+# Roo adding items to Notion Meeting Notes agendas. A dedicated internal
+# integration token, shared only with the Meeting Notes database.
+NOTION_AGENDA_ENABLED = os.environ.get("NOTION_AGENDA_ENABLED", "false").strip().lower() in {"1", "true", "yes", "on"}
+NOTION_AGENDA_API_TOKEN = os.environ.get("NOTION_AGENDA_API_TOKEN", "")
+NOTION_AGENDA_DATA_SOURCE_ID = os.environ.get("NOTION_AGENDA_DATA_SOURCE_ID", "")
+NOTION_AGENDA_TEMPLATE_ID = os.environ.get("NOTION_AGENDA_TEMPLATE_ID", "")
+NOTION_AGENDA_TEMPLATE_POLL_ATTEMPTS = int(os.environ.get("NOTION_AGENDA_TEMPLATE_POLL_ATTEMPTS", "6") or 6)
+NOTION_AGENDA_TEMPLATE_POLL_SECONDS = float(os.environ.get("NOTION_AGENDA_TEMPLATE_POLL_SECONDS", "1") or 1)
+NOTION_AGENDA_LOCK_SECONDS = int(os.environ.get("NOTION_AGENDA_LOCK_SECONDS", "120") or 120)
+NOTION_AGENDA_RECEIPT_TTL_SECONDS = int(os.environ.get("NOTION_AGENDA_RECEIPT_TTL_SECONDS", "86400") or 86400)
 NOTION_SYNC_PAGE_LIMIT = int(os.environ.get("NOTION_SYNC_PAGE_LIMIT", "20") or 20)
 
 GOOGLE_DRIVE_OAUTH_REDIRECT_URI = os.environ.get(

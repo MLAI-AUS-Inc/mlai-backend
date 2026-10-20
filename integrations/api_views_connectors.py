@@ -67,6 +67,9 @@ from integrations.services.linear_meeting_actions import (
     resolve_linear_project,
     write_linear_channel_issue,
 )
+from integrations.services.notion_agenda import AgendaRequestError, get_agenda_receipt, handle_agenda_request
+from integrations.services.notion_agenda_client import NotionAgendaError
+from integrations.services.notion_agenda_page import AgendaPageError
 from startup_updates.data_deletion import disconnect_gmail_for_user
 
 
@@ -938,6 +941,68 @@ class LinearChannelIssueCreateView(APIView):
         ) as exc:
             return _linear_meeting_error_response(exc)
         return Response(payload, status=status.HTTP_201_CREATED)
+
+
+NOTION_AGENDA_ERROR_STATUS = {
+    "notion_agenda_disabled": status.HTTP_403_FORBIDDEN,
+    "agenda_requester_not_allowed": status.HTTP_403_FORBIDDEN,
+    "invalid_request": status.HTTP_400_BAD_REQUEST,
+    "invalid_meeting_date": status.HTTP_400_BAD_REQUEST,
+    "invalid_item": status.HTTP_400_BAD_REQUEST,
+    "invalid_owner": status.HTTP_400_BAD_REQUEST,
+    "meeting_page_mismatch": status.HTTP_400_BAD_REQUEST,
+    "idempotency_key_reused": status.HTTP_409_CONFLICT,
+    "agenda_request_in_progress": status.HTTP_409_CONFLICT,
+    "agenda_busy": status.HTTP_409_CONFLICT,
+    "agenda_section_not_found": status.HTTP_422_UNPROCESSABLE_ENTITY,
+    "agenda_section_ambiguous": status.HTTP_422_UNPROCESSABLE_ENTITY,
+    "agenda_section_unsupported": status.HTTP_422_UNPROCESSABLE_ENTITY,
+    "notion_page_too_large": status.HTTP_422_UNPROCESSABLE_ENTITY,
+    "notion_not_configured": status.HTTP_503_SERVICE_UNAVAILABLE,
+    "notion_rate_limited": status.HTTP_503_SERVICE_UNAVAILABLE,
+}
+
+
+def _notion_agenda_error_response(exc):
+    # Every message comes from our own exceptions, never from Notion's response body.
+    response = Response(
+        {"code": exc.code, "detail": str(exc), "uncertain": bool(getattr(exc, "uncertain", False))},
+        status=NOTION_AGENDA_ERROR_STATUS.get(exc.code, status.HTTP_502_BAD_GATEWAY),
+    )
+    if getattr(exc, "retry_after", None):
+        response["Retry-After"] = str(exc.retry_after)
+    return response
+
+
+class NotionAgendaItemView(APIView):
+    permission_classes = [HasStrictRooApiKey]
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = "notion_agenda_write"
+
+    def post(self, request):
+        try:
+            payload = handle_agenda_request(request.data)
+        except (AgendaRequestError, AgendaPageError, NotionAgendaError) as exc:
+            return _notion_agenda_error_response(exc)
+        if payload["status"] == "added" and not payload["replayed"]:
+            return Response(payload, status=status.HTTP_201_CREATED)
+        if payload["status"] == "template_pending":
+            return Response(payload, status=status.HTTP_202_ACCEPTED)
+        return Response(payload, status=status.HTTP_200_OK)
+
+
+class NotionAgendaReceiptView(APIView):
+    permission_classes = [HasStrictRooApiKey]
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = "notion_agenda_receipt"
+
+    def get(self, request, idempotency_key):
+        try:
+            payload = get_agenda_receipt(idempotency_key)
+        except AgendaRequestError as exc:
+            return _notion_agenda_error_response(exc)
+        response_status = status.HTTP_404_NOT_FOUND if payload["state"] == "not_found" else status.HTTP_200_OK
+        return Response(payload, status=response_status)
 
 
 class LinearProjectResolveView(APIView):

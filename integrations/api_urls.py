@@ -257,6 +257,16 @@ urlpatterns = [
         name='linear_channel_issue_create',
     ),
     path(
+        'notion/agenda-items',
+        api_views_connectors.NotionAgendaItemView.as_view(),
+        name='notion_agenda_item_create',
+    ),
+    path(
+        'notion/agenda-items/receipts/<str:idempotency_key>',
+        api_views_connectors.NotionAgendaReceiptView.as_view(),
+        name='notion_agenda_item_receipt',
+    ),
+    path(
         'linear/projects/resolve',
         api_views_connectors.LinearProjectResolveView.as_view(),
         name='linear_project_resolve',
