@@ -312,14 +312,15 @@ The editor sends `displayConfig.coverImage`: watercolor artwork IDs, minimal mon
 
 Approval credits the approving founder's Roo wallet once per update. Eligible
 Australian startups earn 20 points for their first completed update in each
-Australia/Melbourne calendar month; subsequent updates and startups that cannot
-be verified earn 5 points. Reporting-month selection, later edits and reapproval
+Australia/Melbourne calendar month when approved for public or community sharing;
+private approvals, subsequent updates and startups that cannot be verified earn 5 points. Reporting-month selection, later edits and reapproval
 do not reset the allowance. Existing ledger records prevent duplicate credits,
 including older awards made under company/month keys. Deleted updates retain
 their ledger history and cannot reopen the monthly bonus.
 
-A private or shared approved update qualifies. Saving or generating a draft does
-not. Approval and the wallet credit share one transaction: a wallet failure
+Only an approved public or community revision qualifies for new discounts and
+the 20-point tier. Private approvals earn 5 points and no new discount. Saving or
+generating a draft earns no completion points. Approval and the wallet credit share one transaction: a wallet failure
 returns 503 and leaves approval unsaved so retry is safe. Missing or inconclusive
 registration/website evidence uses the five-point tier without blocking approval.
 
@@ -333,7 +334,8 @@ ledger key even when eligibility checks or the wallet credit cross midnight. `ti
 `verified_monthly` or `standard`. `creditedToCurrentUser` avoids claiming that a
 previous approval credited a different founder's current wallet. Owner archive
 and detail reads include `update.reward`; community/public reads omit it. Reads
-never create awards or contact ABR. No schema or data migration is required.
+never create awards or contact ABR. The sharing-policy change requires the migration described in
+[Shared update benefits](shared-update-benefits.md).
 
 
 The bonus checker performs an authoritative active ABR lookup using ABN or ACN,

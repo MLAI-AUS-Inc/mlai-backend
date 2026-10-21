@@ -53,3 +53,53 @@ def approved_update_at(draft):
         reference_type="MONTHLY_UPDATE_DRAFT", reference_id=str(draft.pk),
     ).first()
     return min(anchor, original.created_at) if original is not None else anchor
+
+
+def approval_is_shared(approval):
+    """Only an exact approved community/public revision proves sharing.
+
+    Working-copy audience changes are not approval and cannot unlock benefits.
+    """
+    revision = approval.revision
+    return (
+        revision.audience in {"community", "public"}
+        and approval.audience_visibility == [revision.audience]
+        and approval.content_hash == revision.content_hash
+    )
+
+
+def published_update_is_shared(draft):
+    """Check the saved publication receipt, never a client or working memo."""
+    from startup_updates.models import MonthlyUpdateApproval
+
+    approval = MonthlyUpdateApproval.objects.filter(
+        revision_id=draft.published_revision_id,
+    ).select_related("revision").first()
+    return approval is not None and approval_is_shared(approval)
+
+
+def discount_approved_update_at(draft):
+    """Retain earned windows, requiring sharing for post-policy approvals.
+
+    Sharing a previously private update can unlock the remainder of its original
+    30 days. Later edits, privacy changes and reapproval never restart the clock.
+    Legacy publications without canonical receipts keep their original window.
+    """
+    from startup_updates.models import MonthlyUpdateApproval
+
+    anchor = approved_update_at(draft)
+    if anchor is None:
+        return None
+    approvals = list(MonthlyUpdateApproval.objects.filter(
+        revision__draft_id=draft.pk,
+    ).select_related("revision"))
+    grandfathered = not approvals or any(not approval.requires_shared_update for approval in approvals)
+    if grandfathered:
+        # A legacy publication's first canonical receipt can be newer than the
+        # benefit it records. Converting it must not restart its old window.
+        legacy_anchor = (getattr(draft, "first_published_at", None)
+            or draft.ready_at or draft.published_at)
+        return min(anchor, legacy_anchor) if legacy_anchor is not None else anchor
+    if any(approval_is_shared(approval) for approval in approvals):
+        return anchor
+    return None

@@ -176,10 +176,10 @@ class CommunityHomeTests(APITestCase):
         )
         self.assertEqual(response.data["earn_actions"][0]["points"], 4)
         self.assertEqual(response.data["earn_actions"][1]["points"], 10)
-        self.assertEqual(
-            response.data["earn_actions"][1]["description"],
-            "Complete and save a ready monthly update for your verified company.",
-        )
+        update_description = response.data["earn_actions"][1]["description"]
+        self.assertIn("10 Roo points if shared publicly or with the MLAI community", update_description)
+        self.assertIn("Private approvals earn 5 Roo points and do not unlock discounts", update_description)
+        self.assertIn("30 days from first approval", update_description)
         self.assertEqual(
             response.data["earn_actions"][4]["command"],
             f"@Roo task claim {visible.task_code}",

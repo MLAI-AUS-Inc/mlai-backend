@@ -86,10 +86,14 @@ class CommunityHomeView(APIView):
             earn_actions.append(
                 {
                     "id": "monthly_update",
-                    "name": "Complete your monthly startup update",
+                    "name": "Approve and share your monthly startup update",
                     "description": (
-                        "Complete and save a ready monthly update for your "
-                        "verified company."
+                        "Private approvals earn 5 Roo points and do not unlock discounts. "
+                        "Your startup's first approved update each Melbourne month can earn "
+                        f"{monthly_update_points} Roo points if shared publicly or with the MLAI community and its "
+                        "registration, name and website are verified; otherwise 5. "
+                        "Shared approvals unlock eligible founder discounts for 30 days "
+                        "from first approval; edits and reapproval do not extend them."
                     ),
                     "points": monthly_update_points,
                 }
