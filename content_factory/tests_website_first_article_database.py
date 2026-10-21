@@ -466,7 +466,7 @@ class FirstArticleProviderChainTests(OneClickBillingFixture,TransactionTestCase)
             self.skipTest("Concurrent row-lock regression requires PostgreSQL")
         from concurrent.futures import ThreadPoolExecutor
         from threading import Barrier
-        from django.db import close_old_connections
+        from django.db import close_old_connections, connections
         op, child, row = self.terminal_parent_child(outcome="no_article_effect")
         barrier = Barrier(2)
         def settle():
@@ -475,7 +475,9 @@ class FirstArticleProviderChainTests(OneClickBillingFixture,TransactionTestCase)
                 barrier.wait(timeout=10)
                 return advance_refund(row.pk)
             finally:
-                close_old_connections()
+                # Healthy persistent sessions survive age-only cleanup and
+                # prevent the test runner from dropping its PostgreSQL database.
+                connections.close_all()
         with ThreadPoolExecutor(max_workers=2) as pool:
             outcomes = list(pool.map(lambda _: settle(), range(2)))
         self.assertCountEqual(outcomes, ["completed", None])
