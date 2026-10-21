@@ -2289,6 +2289,8 @@ def _stage_unknown_slack_event(
                     raise SlackDmMirrorError(
                         "Slack pending-event queue is full; retry the webhook."
                     )
+                from integrations.services.message_sync.event_routing import prune_drained_targets
+                prune_drained_targets(sync_cursor)
                 pending.append(
                     {
                         "key": event_key,
@@ -2303,6 +2305,8 @@ def _stage_unknown_slack_event(
                     }
                 )
                 sync_cursor[PENDING_EVENT_CHECKPOINT_KEY] = pending
+                from integrations.services.message_sync.event_routing import enqueue_locked
+                enqueue_locked(grant, connection, sync_cursor, channel_id, event_key, pending[-1]["staged_at"])
                 connection.sync_cursor = sync_cursor
                 connection.save(update_fields=("sync_cursor", "updated_at"))
                 staged += 1
@@ -2349,6 +2353,8 @@ def _discard_staged_events_locked(
             sync_cursor[PENDING_EVENT_CHECKPOINT_KEY] = pending
         else:
             sync_cursor.pop(PENDING_EVENT_CHECKPOINT_KEY, None)
+    from integrations.services.message_sync.event_routing import prune_drained_targets
+    prune_drained_targets(sync_cursor)
     connection.sync_cursor = sync_cursor
     connection.save(update_fields=("sync_cursor", "updated_at"))
 
@@ -3634,6 +3640,11 @@ def _enqueue_normalized_slack_event_locked(
     author_id = str(normalized.get("source_author_id") or "").strip()
     operation = str(normalized.get("operation") or "").strip()
     metadata = normalized.get("metadata")
+    # Internal timing evidence can only originate in the encrypted staging
+    # envelope. A callback or recovered normalized payload cannot forge it.
+    if isinstance(metadata, dict):
+        from integrations.services.message_sync.event_routing import preserve_delivery_evidence
+        metadata = preserve_delivery_evidence(None, metadata)
     if (
         not author_id
         and operation == CommunityBridgeDeliveryType.DELETE
@@ -3689,6 +3700,7 @@ def _enqueue_normalized_slack_event_locked(
     if created:
         return "enqueued", str(delivery.pk)
     metadata = preserve_delivery_mentions(delivery.metadata or {}, metadata)
+    metadata = preserve_delivery_evidence(delivery.metadata, metadata)
     if (
         delivery.status
         in (
@@ -3780,10 +3792,35 @@ def _drain_staged_events_for_conversation(
                 ) from exc
             if not isinstance(decoded, dict):
                 raise SlackDmMirrorError("A staged private Slack event is malformed.")
-            result, _ = _enqueue_normalized_slack_event_locked(
+            result, delivery_id = _enqueue_normalized_slack_event_locked(
                 conversation,
                 decoded,
             )
+            if result in {"enqueued", "duplicate"}:
+                from integrations.services.message_sync.event_routing import DELIVERY_KEY, enabled as event_routing_enabled
+                parked_at = staged_seconds(item.get("staged_at"))
+                if parked_at is not None and (path == "event" or event_routing_enabled()):
+                    queued = SlackDmMirrorDelivery.objects.select_for_update().filter(
+                        conversation=conversation,
+                        source_platform=CommunityBridgePlatform.SLACK,
+                        source_message_id=str(decoded.get("source_message_id") or "").strip(),
+                        operation=str(decoded.get("operation") or "").strip(),
+                        **({"pk": delivery_id} if delivery_id else {}),
+                    ).first()
+                    if queued is None:
+                        # A disappeared duplicate is not delivery evidence. Keep
+                        # its sole encrypted copy for a later authorized retry.
+                        retained.append(item)
+                        continue
+                    metadata = dict(queued.metadata or {})
+                    # Retries retain their first original server timestamp.
+                    if DELIVERY_KEY not in metadata:
+                        metadata[DELIVERY_KEY] = {"parked_at": parked_at, "key": str(item.get("key") or ""), "path": path}
+                        queued.metadata = metadata
+                        queued.save(update_fields=["metadata", "updated_at"])
+                    if queued.status == CommunityBridgeDeliveryStatus.COMPLETED:
+                        from integrations.services.message_sync.event_routing import record_delivery_completed_locked
+                        record_delivery_completed_locked(queued)
             if result == "enqueued":
                 routed += 1
                 routed_staged_at.append(staged_seconds(item.get("staged_at")))
@@ -3791,6 +3828,8 @@ def _drain_staged_events_for_conversation(
             sync_cursor[PENDING_EVENT_CHECKPOINT_KEY] = retained
         else:
             sync_cursor.pop(PENDING_EVENT_CHECKPOINT_KEY, None)
+        from integrations.services.message_sync.event_routing import prune_drained_targets
+        prune_drained_targets(sync_cursor)
         connection.sync_cursor = sync_cursor
         connection.save(update_fields=("sync_cursor", "updated_at"))
     # Timing only, outside the drain transaction: no channel ID or body.
@@ -6848,6 +6887,8 @@ def _upsert_history_delivery(
     held_until,
 ) -> SlackDmMirrorDelivery:
     from .slack_mentions import queue_delivery_mentions, preserve_delivery_mentions
+    from integrations.services.message_sync.event_routing import preserve_delivery_evidence
+    metadata = preserve_delivery_evidence(None, metadata)
     if operation == CommunityBridgeDeliveryType.CREATE:
         metadata = queue_delivery_mentions(conversation, text, metadata)
     delivery, created = SlackDmMirrorDelivery.objects.get_or_create(
@@ -6865,6 +6906,7 @@ def _upsert_history_delivery(
     if created:
         return delivery
     metadata = preserve_delivery_mentions(delivery.metadata or {}, metadata)
+    metadata = preserve_delivery_evidence(delivery.metadata, metadata)
     if bool((delivery.metadata or {}).get("permanent_failure")):
         from integrations.services.message_sync.reaction_recovery import stage_observed_reaction
         stage_observed_reaction(delivery, author_id=author_id, metadata=metadata)
@@ -7598,6 +7640,8 @@ def _deliver_private_batch(claimed: list[SlackDmMirrorDelivery]) -> None:
                     "updated_at",
                 )
             )
+            from integrations.services.message_sync.event_routing import record_delivery_completed_locked
+            record_delivery_completed_locked(delivery, adapter_confirmed=True)
             event_timestamp = str(
                 source_metadata.get("event_ts") or delivery.source_message_id
             ).strip()
@@ -8356,6 +8400,8 @@ def _deliver_to_mlai(delivery: SlackDmMirrorDelivery) -> None:
             "updated_at",
         )
     )
+    from integrations.services.message_sync.event_routing import record_delivery_completed_locked
+    record_delivery_completed_locked(delivery, adapter_confirmed=True)
     conversation.last_synced_at = now
     event_timestamp = str(source_metadata.get("event_ts") or "").strip()
     if not event_timestamp and delivery.operation == CommunityBridgeDeliveryType.CREATE:

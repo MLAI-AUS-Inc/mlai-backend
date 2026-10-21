@@ -41,6 +41,8 @@ class DiscoveryLease:
     user_id: int
     token: str
     previous_served: float | None = None
+    event_channel_id: str = ""
+    event_generation: str = ""
 
 
 @contextmanager
@@ -57,10 +59,18 @@ def guard_discovery(grant, connection):
     lease = _claim.get()
     if lease is None:
         return
+    if lease.event_channel_id:
+        from .event_routing import enabled
+        if not enabled():
+            raise LeaseLost("event_routing_disabled")
     value = (connection.sync_cursor or {}).get(KEY) or {}
-    if (grant.pk != lease.grant_id or connection.pk != lease.connection_id
+    if not isinstance(value, dict):
+        raise LeaseLost("discovery_lease_lost")
+    expires = value.get("expires")
+    if (type(expires) not in (int, float) or not math.isfinite(expires)
+            or grant.pk != lease.grant_id or connection.pk != lease.connection_id
             or value.get("token") != lease.token
-            or float(value.get("expires") or 0) <= timezone.now().timestamp()):
+            or expires <= timezone.now().timestamp()):
         raise LeaseLost("discovery_lease_lost")
 
 
@@ -122,6 +132,8 @@ def claim_discovery(interval_seconds, *, lease_seconds=120, prefer_opens=False):
                 if connection is None:
                     continue
                 previous = (connection.sync_cursor or {}).get(KEY) or {}
+                if not isinstance(previous, dict):
+                    continue
                 if max(float(previous.get("due") or 0), float(previous.get("expires") or 0)) > clock:
                     continue
                 if grant.last_discovery_at is not None and grant.last_discovery_at >= now - timedelta(seconds=interval_seconds):
@@ -139,7 +151,9 @@ def claim_discovery(interval_seconds, *, lease_seconds=120, prefer_opens=False):
 
 def finish_discovery(lease, *, delay_seconds=DURABLE_POLL_SECONDS, error_code="", return_turn=False):
     """Release only this claim; preserve list cursor and other integration state."""
-    with transaction.atomic(), discovery_context(lease):
+    # Turning off event routing fences provider work immediately, but releasing
+    # this still-current token must not strand the ordinary sweep for 120s.
+    with transaction.atomic(), discovery_context(replace(lease, event_channel_id="")):
         grant, connection = _lock(lease)
         if connection is None:
             return
@@ -213,15 +227,27 @@ class DiscoveryOutcome:
 def discover_once(interval_seconds):
     """Run one resumable discovery page under a durable generation fence."""
     from integrations.services import slack_dm_mirror as dm
-    prefer_opens = getattr(settings, "MESSAGE_SYNC_OPEN_PRIORITY_ENABLED", True) and next(_turns) % 4 != 3
-    lease = claim_discovery(interval_seconds, prefer_opens=prefer_opens)
+    from . import event_routing
+    turn = next(_turns)
+    prefer_opens = getattr(settings, "MESSAGE_SYNC_OPEN_PRIORITY_ENABLED", True) and turn % 4 != 3
+    # Event claims skip the directory interval, not its lease, provider delays
+    # or privacy checks. Reserve the fourth turn for existing opens/sweep work.
+    lease = event_routing.claim_event_routing(interval_seconds) if event_routing.enabled() and turn % 4 != 3 else None
+    if lease is None:
+        lease = claim_discovery(interval_seconds, prefer_opens=prefer_opens)
     if lease is None:
         return None
     delay, error, return_turn = DURABLE_POLL_SECONDS, "", False
     try:
         grant = SlackDmMirrorGrant.objects.select_related("connection").get(pk=lease.grant_id)
         with discovery_context(lease), request_priority(discovery_request_priority(grant.connection)):
-            dm.discover_conversations(grant)
+            if lease.event_channel_id:
+                _, repaired, _ = dm.ensure_owner_identity(grant, allow_preferred_fallback=True)
+                grant = SlackDmMirrorGrant.objects.select_related("connection").get(pk=lease.grant_id)
+                authority = dm._capture_slack_grant_api_authority(grant)
+                event_routing.route_event_claim(grant, authority, lease, reset_history=repaired)
+            else:
+                dm.discover_conversations(grant)
     except LeaseLost:
         return DiscoveryOutcome(error_code="LeaseLost")
     except BudgetDeferred as exc:

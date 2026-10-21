@@ -103,6 +103,7 @@ cookies.txt
 !/docs/org-memory-review-summaries-digests.md
 !/docs/mlai-chat-bridge-contract.md
 !/docs/slack-unfinished-conversation-recovery.md
+!/docs/slack-event-routing-phase8.md
 !/docs/message-sync-schema-proposal.md
 !/docs/community-chat-home.md
 !/docs/community-chat-dependency-signals.md

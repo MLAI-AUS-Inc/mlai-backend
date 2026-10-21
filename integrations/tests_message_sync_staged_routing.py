@@ -104,6 +104,55 @@ class TargetedStagedRoutingTests(SimpleTestCase):
     def retry(self):
         return (self.connection.sync_cursor.get(routing.KEY) or {}).get("channels", {})
 
+    def event_route(self):
+        from integrations.services.message_sync import discovery, event_routing
+
+        self.connection.pk = 8
+        self.connection.sync_cursor[discovery.KEY] = {
+            "token": "event-lease", "expires": self.now + 120,
+        }
+        lease = discovery.DiscoveryLease(7, 8, 9, "event-lease",
+            event_channel_id="GROOM", event_generation=self.connection.sync_cursor[PENDING][0]["key"])
+        with override_settings(MESSAGE_SYNC_EVENT_ROUTING=True, MESSAGE_SYNC_TARGETED_STAGED_ROUTING=False), discovery.discovery_context(lease), patch.object(
+            dm.transaction, "on_commit", side_effect=lambda callback, **_: callback(),
+        ):
+            event_routing.route_event_claim(self.grant, self.authority, lease)
+
+    def test_event_lane_keeps_full_checker_and_event_path_without_old_targeted_flag(self):
+        self.park(parked("GROOM", self.now - 5, kind="mpim"))
+        self.sources["GROOM"] = source("GROOM")
+        self.event_route()
+        self.assertEqual(len(self.provider_calls), 1)
+        self.discover.assert_called_once()
+        self.assertNotIn("latest", self.discover.call_args.args[2])
+        self.drain.assert_called_once()
+        self.assertEqual(self.drain.call_args.kwargs, {"path": "event"})
+        self.assertEqual(self.connection.sync_cursor[PENDING], [])
+
+    def test_event_lane_cannot_bypass_scope_consent_connect_archive_or_membership(self):
+        cases = [
+            ("scope", "mpim", source("GROOM"), False, False),
+            ("consent", "private_channel", source("GROOM", kind="private_channel"), False, False),
+            ("connect", "mpim", source("GROOM", is_ext_shared=True), True, False),
+            ("archive", "mpim", source("GROOM", is_archived=True), True, False),
+            ("left", "mpim", source("GROOM", is_member=False), True, False),
+            ("membership_unknown", "mpim", source("GROOM", is_member=None), True, False),
+            ("provisioning_fence", "mpim", source("GROOM"), True, True),
+        ]
+        for reason, kind, details, requested, provisioned in cases:
+            with self.subTest(reason=reason):
+                self.connection.sync_cursor = {PENDING: [parked("GROOM", self.now - 5, kind=kind)]}
+                self.connection.scopes = sorted(dm.DIRECT_DM_SCOPES) if reason == "scope" else ALL_SCOPES
+                self.private_ok, self.live = reason != "consent", reason != "provisioning_fence"
+                self.sources["GROOM"] = details
+                self.provider_calls.clear()
+                self.discover.reset_mock()
+                self.drain.reset_mock()
+                self.event_route()
+                self.assertEqual(bool(self.provider_calls), requested)
+                self.assertEqual(self.discover.called, provisioned)
+                self.drain.assert_not_called()
+
     def test_flag_and_durable_sync_are_both_required_before_any_io(self):
         self.park(parked("GLIVE", self.now - 5, kind="mpim"))
         for enabled, flag in ((True, False), (False, True)):
@@ -438,6 +487,82 @@ class StagedKindHintTests(SimpleTestCase):
             [item] = connection.sync_cursor[PENDING]
             self.assertEqual(item.get("kind"), expected)
             self.assertEqual(set(item) - {"kind"}, {"key", "channel_id", "ciphertext", "staged_at"})
+
+
+@override_settings(MESSAGE_SYNC_ENABLED=True, MESSAGE_SYNC_EVENT_ROUTING=True,
+                   MESSAGE_SYNC_TARGETED_STAGED_ROUTING=False)
+class EventStageWakeTests(SimpleTestCase):
+    """A callback must durably wake its owner without becoming a plaintext queue."""
+
+    def setUp(self):
+        from integrations.services.message_sync.discovery import KEY
+
+        self.discovery_key = KEY
+        self.now = datetime(2030, 3, 17, 12, tzinfo=timezone.utc)
+        self.connection = SimpleNamespace(sync_cursor={KEY: {
+            "due": self.now.timestamp() + 600, "token": "active-owner-lease",
+            "expires": self.now.timestamp() + 120, "served": 42,
+        }}, save=MagicMock())
+        self.grant = SimpleNamespace(pk=7, connection=self.connection,
+                                     last_discovery_at=self.now, save=MagicMock())
+        stack = ExitStack()
+        self.addCleanup(stack.close)
+        grants = stack.enter_context(patch.object(dm.SlackDmMirrorGrant, "objects"))
+        grants.select_related.return_value.filter.return_value = [self.grant]
+        stack.enter_context(patch.object(dm, "_capture_slack_grant_api_authority",
+                                         return_value=SimpleNamespace(grant_id=7)))
+        stack.enter_context(patch.object(dm, "_lock_slack_grant_api_authority",
+                                         return_value=(self.grant, self.connection)))
+        stack.enter_context(patch.object(dm.transaction, "atomic", side_effect=lambda: nullcontext()))
+        stack.enter_context(patch.object(dm.timezone, "now", return_value=self.now))
+        stack.enter_context(patch.object(dm, "encrypt_credential_value", return_value="sealed-only-copy"))
+
+    def stage(self, source_id="1900000000.000001"):
+        return dm._stage_unknown_slack_event(
+            "TSYNTH", "GROOM", {"source_message_id": source_id, "text": "private-test-body"},
+            authorized_user_ids={"UOWNER"}, kind_hint="mpim",
+        )
+
+    def test_successful_stage_saves_ciphertext_and_wake_together_without_stealing_lease(self):
+        self.assertEqual(self.stage(), 1)
+        cursor = self.connection.sync_cursor
+        self.assertIn("slack_event_routing_v1", cursor)
+        self.assertLessEqual(cursor["slack_event_routing_v1"]["targets"]["GROOM"]["due"], self.now.timestamp())
+        self.assertEqual(cursor[self.discovery_key]["due"], self.now.timestamp() + 600)
+        self.assertEqual(cursor[self.discovery_key]["token"], "active-owner-lease")
+        self.assertEqual(cursor[self.discovery_key]["expires"], self.now.timestamp() + 120)
+        self.assertEqual(cursor[self.discovery_key]["served"], 42)
+        self.assertEqual(len(cursor[PENDING]), 1)
+        self.assertEqual(cursor[PENDING][0]["ciphertext"], "sealed-only-copy")
+        self.assertNotIn("private-test-body", json.dumps(cursor))
+        self.connection.save.assert_called_once()
+
+    def test_duplicate_does_not_retimestamp_or_duplicate_the_encrypted_event(self):
+        self.assertEqual(self.stage(), 1)
+        original = json.loads(json.dumps(self.connection.sync_cursor))
+        self.assertEqual(self.stage(), 0)
+        self.assertEqual(self.connection.sync_cursor, original)
+        self.assertEqual(len(self.connection.sync_cursor[PENDING]), 1)
+
+    def test_event_flag_does_not_authorize_a_second_plaintext_schedule(self):
+        self.stage()
+        cursor = self.connection.sync_cursor
+        schedule = cursor.get("slack_event_routing_v1")
+        self.assertIsInstance(schedule, dict)
+        self.assertNotIn("ciphertext", json.dumps(schedule))
+        self.assertNotIn("private-test-body", json.dumps(schedule))
+        self.assertNotIn("source_message_id", json.dumps(schedule))
+        self.assertEqual([row["ciphertext"] for row in cursor[PENDING]], ["sealed-only-copy"])
+
+    def test_event_wake_requires_durable_sync_and_its_own_flag_only(self):
+        for durable, event in ((False, False), (False, True), (True, False)):
+            with self.subTest(durable=durable, event=event), override_settings(
+                MESSAGE_SYNC_ENABLED=durable, MESSAGE_SYNC_EVENT_ROUTING=event,
+            ):
+                self.connection.sync_cursor = {}
+                self.stage()
+                self.assertNotIn("slack_event_routing_v1", self.connection.sync_cursor)
+                self.assertEqual(len(self.connection.sync_cursor[PENDING]), 1)
 
 
 @override_settings(MESSAGE_SYNC_ENABLED=True, MESSAGE_SYNC_TARGETED_STAGED_ROUTING=True)

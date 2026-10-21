@@ -7,13 +7,15 @@ from datetime import timedelta
 
 from django.conf import settings
 from django.core.management.base import BaseCommand, CommandError
-from django.db.models import Count, Max, Min
+from django.db.models import Count, Max, Min, FloatField
+from django.db.models.functions import Cast
 from django.utils import timezone
 from integrations.models import (
     BridgeApiBudget, BridgeSyncInbox, BridgeSyncJob, BridgeSyncState,
     BridgeWorkerHeartbeat, CommunityBridgeDelivery, SlackDmMirrorDelivery, SlackDmMirrorGrant,
 )
 from integrations.services.message_sync import telemetry
+from integrations.services.message_sync import event_routing
 from integrations.services.message_sync.scheduler import eligible_states, safe_error_code
 from integrations.services.message_sync.discovery import KEY as DISCOVERY_KEY, due_discovery_grants
 from integrations.services.slack_open_requests import KEY as OPEN_KEY
@@ -98,6 +100,23 @@ class Command(BaseCommand):
             heartbeat_age_seconds=age(lane_times.get("discovery")) if lane_times.get("discovery") else None,
             due_grants=due_discovery_grants(300, now=now).count(),
         )
+        event_status = event_routing.summarize(active_grants.values_list("connection__sync_cursor", flat=True), now=now.timestamp())
+        window_seconds = options['window_hours'] * 3600 if options['window_hours'] is not None else options['window_minutes'] * 60
+        event_deliveries = SlackDmMirrorDelivery.objects.filter(metadata__event_routing_v1__isnull=False)
+        outstanding = event_deliveries.exclude(status="completed")
+        oldest_parked = outstanding.aggregate(value=Min(Cast("metadata__event_routing_v1__parked_at", FloatField())))["value"]
+        event_status["delivery"] = event_routing.summarize_deliveries(
+            event_deliveries.filter(status="completed", metadata__event_routing_v1__completed_at__gte=now.timestamp() - window_seconds)
+            .order_by("-completed_at", "-id").values_list("metadata__event_routing_v1", "status")[:5001],
+            now=now.timestamp(),
+            window_seconds=window_seconds,
+            completed_only=True,
+        )
+        event_status["delivery"].update(
+            outstanding_by_status=list(outstanding.values("status").annotate(count=Count("id")).order_by("status")),
+            oldest_outstanding_age_seconds=max(0, int(now.timestamp() - oldest_parked)) if oldest_parked is not None else 0,
+            noop_completed=event_deliveries.filter(status="completed", metadata__event_routing_v1__completed_at__isnull=True).count(),
+        )
         try:
             latency = telemetry.latency_snapshot(minutes=options['window_minutes'], hours=options['window_hours'])
             latency['available'] = True
@@ -120,6 +139,7 @@ class Command(BaseCommand):
             'provider_throughput': throughput,
             'public_dependency': public_dependency,
             'discovery': discovery, 'open_requests': opens, 'open_latency': latency,
+            'event_routing': event_status,
             'inbox_pending': inbox.count(),
             'oldest_inbox_age_seconds': age(inbox.aggregate(value=Min('received_at'))['value']),
             'inbox_retrying': inbox.exclude(last_error_code='').count(),
