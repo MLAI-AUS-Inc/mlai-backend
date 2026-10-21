@@ -222,8 +222,12 @@ def get_or_create_user_for_slack_id(slack_user_id: str) -> User:
         email = profile.get('email') or f"{slack_user_id}@slack.placeholder.com"
         first_name, last_name = split_slack_profile_name(profile, slack_user_id)
 
-        existing_user = User.objects.filter(email=email).first()
+        existing_user = User.objects.resolve_email(email)
         if existing_user:
+            if existing_user.email_aliases.filter(email__iexact=email).exists():
+                if not existing_user.is_active:
+                    raise ValueError('Account is unavailable')
+                return existing_user
             if not existing_user.slack_id:
                 try:
                     existing_user = assign_direct_slack_identity(
@@ -1395,7 +1399,7 @@ class KimiPromptUsageView(APIView):
         email = User.objects.normalize_email(email_value)
         if not email or len(email) > 254 or '@' not in email:
             return email, None
-        return email, User.objects.filter(email__iexact=email, is_active=True).first()
+        return email, User.objects.for_email(email).filter(is_active=True).first()
 
     def get(self, request):
         email, user = self._active_user(request.query_params.get('email'))
