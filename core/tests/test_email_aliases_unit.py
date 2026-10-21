@@ -14,6 +14,30 @@ from core.views import CheckUserView, CreateUserView, SendMagicLinkView
 from core.slack_users import ensure_slack_user
 
 
+class EmailAliasAdminTests(SimpleTestCase):
+    def setUp(self):
+        from django.contrib import admin
+        from core.admin import UserAdmin
+
+        self.request = APIRequestFactory().get('/admin/core/user/add/')
+        self.request.user = User(pk=1, email='operator@example.test',
+            is_active=True, is_staff=True, is_superuser=True)
+        self.model_admin = UserAdmin(User, admin.site)
+
+    def test_add_user_does_not_require_an_alias_inline_formset(self):
+        self.assertEqual(list(self.model_admin.get_formsets_with_inlines(self.request, obj=None)), [])
+
+    def test_existing_user_retains_read_only_alias_history(self):
+        user = User(pk=2, email='existing@example.test')
+        inlines = self.model_admin.get_inline_instances(self.request, obj=user)
+        self.assertEqual(len(inlines), 1)
+        self.assertIs(inlines[0].model, UserEmailAlias)
+        self.assertFalse(inlines[0].has_add_permission(self.request, user))
+        self.assertFalse(inlines[0].can_delete)
+        self.assertEqual(inlines[0].get_readonly_fields(self.request, user),
+            ('email', 'verified_at', 'created_at'))
+
+
 class EmailAliasUnitTests(SimpleTestCase):
     def setUp(self):
         self.user = User(pk=648, email='primary@example.com', is_active=True, slack_id='U1234567890')

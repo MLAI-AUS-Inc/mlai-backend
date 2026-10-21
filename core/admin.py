@@ -28,6 +28,10 @@ class UserAdmin(BaseUserAdmin):
     form = CustomUserChangeForm
     actions = ('ban_mlai_accounts',)
 
+    def get_inlines(self, request, obj=None):
+        """Show read-only alias history only for an existing account."""
+        return super().get_inlines(request, obj) if obj is not None else ()
+
     @admin.action(description='Ban selected MLAI accounts (retain email)')
     def ban_mlai_accounts(self, request, queryset):
         from community_chat.account_bans import ban_account
