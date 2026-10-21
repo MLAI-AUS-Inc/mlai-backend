@@ -147,3 +147,12 @@ class AccountMergeDatabaseTests(TestCase):
         self.assertEqual(devices[1].status, 'revoked')
         self.assertEqual(devices[1].revoked_by_id, self.actor.pk)
         self.assertIsNotNone(sessions[1].revoked_at)
+
+    def test_selected_slack_identity_can_belong_to_a_reviewed_source(self):
+        self.placeholder.slack_id = 'U2222222222'
+        self.placeholder.save(update_fields=['slack_id'])
+        self.merge(commit=True)
+        self.target.refresh_from_db()
+        self.assertEqual(self.target.slack_id, 'U2222222222')
+        self.assertEqual(User.objects.filter(slack_id='U2222222222').count(), 1)
+        self.assertFalse(User.objects.filter(pk__in=self.source_ids).exists())

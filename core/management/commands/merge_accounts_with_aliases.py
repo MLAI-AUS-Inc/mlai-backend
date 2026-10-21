@@ -86,7 +86,7 @@ class Command(BaseCommand):
             raise CommandError('Inactive targets and privileged accounts require a separate review.')
         if any(user_participates_in_slack_founder_link(user) for user in users):
             raise CommandError('Explicit founder links require a separate review.')
-        if User.objects.filter(slack_id=options['slack_id']).exclude(pk=target.pk).exists():
+        if User.objects.filter(slack_id=options['slack_id']).exclude(pk__in=[user.pk for user in users]).exists():
             raise CommandError('Requested Slack identity is owned by another account.')
         if apps.get_model('core', 'AccountBan').objects.filter(user__in=users, revoked_at__isnull=True).exists():
             raise CommandError('Banned accounts cannot be merged.')
