@@ -17,6 +17,10 @@ does not certify Phase 0 or authorize an app-settings change or deployment.
   Channel discovery confirmed public `volunteer` and `tech_volunteers`, and
   private `mlai-tech-team`. Use `volunteer` for the public-channel cases.
   No test messages were sent.
+- The owner authorized the necessary operational work and selected Dr Sam and
+  Shan Yang as staff participants. Read-only backend inspection confirmed their
+  active linked grants have the required read/history/write scopes. Tokens
+  remain in the server environment; no live API validity has yet been asserted.
 
 Use an existing approved channel only for bounded test posts, edits, deletes
 and reactions. Rename, archive and membership-removal checks require a dedicated
@@ -78,7 +82,7 @@ For each case retain only:
 | Gate | Status |
 | --- | --- |
 | Owner-approved workspace selection | MLAI workspace; bounded team-channel checks authorized |
-| Staff A/B identified and linked through the user app | Pending |
+| Staff A/B identified and linked through the user app | Dr Sam and Shan Yang; active scoped grants observed |
 | User-app callback/authorization observation available | Pending |
 | Required subscriptions confirmed without changing settings | Pending |
 | Message/echo/info/history cases executed | Pending |

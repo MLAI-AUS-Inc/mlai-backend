@@ -340,7 +340,12 @@ for _operations_origin in ('https://ops.mlai.au',):
     if _operations_origin not in CSRF_TRUSTED_ORIGINS:
         CSRF_TRUSTED_ORIGINS.append(_operations_origin)
 CORS_ALLOW_CREDENTIALS = True
-CORS_ALLOW_HEADERS = (*default_headers, "x-request-id", "idempotency-key")
+CORS_ALLOW_HEADERS = (
+    *default_headers,
+    "x-request-id",
+    "idempotency-key",
+    "x-mlai-slack-catalog-kinds",
+)
 CORS_EXPOSE_HEADERS = ["X-Request-ID", "Retry-After"]
 
 # Bound request buffering before application-specific parsers run. Larger

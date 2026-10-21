@@ -7,7 +7,7 @@ deployment, migration, Slack app change, or production variable change.
 ## Recorded baseline
 
 - The repository-level GitHub variable
-  `COMMUNITY_BRIDGE_CHANNEL_LIFECYCLE_ENABLED` was read as `true`. No variable
+  `COMMUNITY_BRIDGE_CHANNEL_LIFECYCLE_ENABLED` was initially read as `true`. No variable
   with that name was found in the `production` GitHub environment. The
   workflow reads `${{ vars.COMMUNITY_BRIDGE_CHANNEL_LIFECYCLE_ENABLED }}`;
   inspect both scopes again before the next release.
@@ -20,13 +20,28 @@ deployment, migration, Slack app change, or production variable change.
 - That failure supports the report that #1175 did not replace the runtime.
   It does not prove that no other operation changed the database or relay.
   The count checks below remain outstanding.
-- No production database, Slack token, or private key was read for this
-  baseline. No production setting was changed.
+- After explicit owner authorization, the repository variable was set to
+  `false` and read back as `false` on 21 October 2026 at approximately
+  01:38 UTC. No deployment or worker restart was performed by that change.
+- No production database, Slack token, or private key was read for the initial
+  GitHub baseline. Database and live-spike checks remain separately recorded.
 
-The owner should set the lifecycle flag to `false` before approving the next
-backend release, as required by Phase 0. A repository variable value is release
+Keep the lifecycle flag `false` before approving the next backend release,
+as required by Phase 0. A repository variable value is release
 configuration, not proof of the value currently loaded by a running worker.
 Record the owner-confirmed runtime value separately.
+
+A subsequent authorized read-only inspection found the running backend at
+release `084ab7377898b7652d97a0909e5f1c23475c762f`, with integrations migrations
+applied through `0048_owner_slack_conversation_inventory`. The lifecycle column
+and state table introduced by 0049 are absent, and the lifecycle setting is not
+defined by that runtime. Do not describe the absent-table checks as zero counts.
+The runtime reports message sync and owner inventory enabled, and Slack
+distribution `internal`. Recheck these observations after an approved release.
+
+The Phase 1 capability header also needs this PR's additive browser and Tauri
+CORS allowance deployed before the clients send it. The Tauri allowance is
+restricted to the existing Slack account paths and trusted desktop origins.
 
 ## Owner checks after the next approved backend deployment
 
