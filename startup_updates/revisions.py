@@ -355,9 +355,15 @@ def approve_and_publish(draft, *, actor, revision_id, revision_hash, audience_vi
         reporting_period(draft.month, period.get("timezone") or "UTC", as_of=timezone.now())
     except (ValueError, KeyError) as exc:
         raise ValidationError(str(exc)) from exc
+    # Carry the old benefit through the first revision-aware edit of a legacy
+    # publication. The immutable first-approval anchor still controls expiry.
+    legacy_benefit = bool(draft.published_at) and not MonthlyUpdateApproval.objects.filter(
+        revision__draft=draft,
+    ).exists()
     approval, created = MonthlyUpdateApproval.objects.get_or_create(
         revision=revision,
-        defaults={"actor": actor, "content_hash": revision_hash, "audience_visibility": audience_visibility},
+        defaults={"actor": actor, "content_hash": revision_hash,
+            "audience_visibility": audience_visibility, "requires_shared_update": not legacy_benefit},
     )
     if not created and (approval.content_hash != revision_hash or approval.audience_visibility != audience_visibility):
         raise RevisionConflict("Disclosure changed. Create and review a new revision.")

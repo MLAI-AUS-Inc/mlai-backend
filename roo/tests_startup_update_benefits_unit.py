@@ -88,7 +88,7 @@ class ApprovedUpdateDiscountTests(SimpleTestCase):
             patch("startup_updates.models.UserStartupBinding.objects.filter", return_value=self.bindings),
             patch("founder_tools.models.VibeRaisingCompany.objects.filter", return_value=[self.company]),
             patch("startup_updates.models.MonthlyUpdateDraft.objects.filter", side_effect=matching_drafts),
-            patch("startup_updates.benefits.approved_update_at", side_effect=lambda row: row.ready_at),
+            patch("startup_updates.benefits.discount_approved_update_at", side_effect=lambda row: row.ready_at),
             patch.object(CoworkingService, "get_standard_coworking_cost", return_value=8),
         ):
             return CoworkingService.get_coworking_cost(
@@ -145,6 +145,80 @@ class ApprovedUpdateDiscountTests(SimpleTestCase):
         self.assertEqual(self.discount(), 8)
 
 
+class SharedApprovalBenefitTests(SimpleTestCase):
+    def setUp(self):
+        from startup_updates import benefits
+        self.benefits = benefits
+        self.draft = SimpleNamespace(pk=41, published_revision_id=101, ready_at=None, published_at=None)
+        self.anchor = NOW - timedelta(days=29)
+
+    def approval(self, audience="private", *, legacy=False, visibility=None, digest="reviewed"):
+        return SimpleNamespace(
+            requires_shared_update=not legacy,
+            audience_visibility=visibility if visibility is not None else [audience if audience != "private" else "just_me"],
+            content_hash=digest,
+            revision=SimpleNamespace(audience=audience, content_hash="reviewed"),
+        )
+
+    def anchor_for(self, approvals):
+        with (
+            patch.object(self.benefits, "approved_update_at", return_value=self.anchor),
+            patch("startup_updates.models.MonthlyUpdateApproval.objects.filter") as query,
+        ):
+            query.return_value.select_related.return_value = approvals
+            return self.benefits.discount_approved_update_at(self.draft)
+
+    def test_new_private_approval_does_not_unlock_discount(self):
+        self.assertIsNone(self.anchor_for([self.approval()]))
+
+    def test_public_and_community_approvals_unlock_original_window(self):
+        for audience in ("public", "community"):
+            with self.subTest(audience=audience):
+                self.assertEqual(self.anchor_for([self.approval(audience)]), self.anchor)
+
+    def test_draft_sharing_choice_cannot_replace_approved_private_receipt(self):
+        self.draft.audience_visibility = ["public"]
+        self.assertIsNone(self.anchor_for([self.approval()]))
+
+    def test_invalid_hash_and_mismatched_disclosure_do_not_prove_sharing(self):
+        for approval in (self.approval("public", digest="stale"),
+                         self.approval("public", visibility=["just_me"]),
+                         self.approval("private", visibility=["community"])):
+            with self.subTest(approval=approval):
+                self.assertIsNone(self.anchor_for([approval]))
+
+    def test_sharing_after_private_approval_uses_original_expiry(self):
+        self.assertEqual(self.anchor_for([self.approval(), self.approval("public")]), self.anchor)
+
+    def test_return_to_private_preserves_already_earned_window(self):
+        self.assertEqual(self.anchor_for([self.approval("community"), self.approval()]), self.anchor)
+
+    def test_old_private_approval_keeps_original_window(self):
+        self.assertEqual(self.anchor_for([self.approval(legacy=True), self.approval()]), self.anchor)
+
+    def test_pre_revision_publication_keeps_original_window(self):
+        self.assertEqual(self.anchor_for([]), self.anchor)
+
+    def test_legacy_conversion_cannot_use_newer_canonical_approval_clock(self):
+        original = NOW - timedelta(days=40)
+        self.draft.first_published_at = original
+        self.assertEqual(self.anchor_for([self.approval(legacy=True)]), original)
+
+    def test_absent_human_approval_anchor_cannot_unlock_any_discount(self):
+        self.anchor = None
+        self.assertIsNone(self.anchor_for([self.approval("public")]))
+
+    def test_points_check_only_reads_current_published_receipt(self):
+        with patch("startup_updates.models.MonthlyUpdateApproval.objects.filter") as query:
+            query.return_value.select_related.return_value.first.return_value = self.approval()
+            self.assertFalse(self.benefits.published_update_is_shared(self.draft))
+            query.assert_called_once_with(revision_id=101)
+            query.return_value.select_related.return_value.first.return_value = self.approval("community")
+            self.assertTrue(self.benefits.published_update_is_shared(self.draft))
+            query.return_value.select_related.return_value.first.return_value = None
+            self.assertFalse(self.benefits.published_update_is_shared(self.draft))
+
+
 @override_settings(COMMUNITY_CHAT_VOLUNTEER_ENABLED=False)
 class MonthlyRewardTests(SimpleTestCase):
     def setUp(self):
@@ -160,12 +234,14 @@ class MonthlyRewardTests(SimpleTestCase):
         self.existing = Mock(return_value=None)
         self.has_previous = Mock(return_value=False)
         self.eligibility = Mock(return_value={"eligible": True})
+        self.shared = Mock(return_value=True)
         self.award = Mock(side_effect=self.credit)
         self.org_lock = Mock()
         for replacement in (
             patch.object(rewards, "update_ledger", self.existing),
             patch.object(rewards, "has_monthly_completion", self.has_previous),
             patch("startup_updates.reward_eligibility.startup_reward_eligibility", self.eligibility),
+            patch("startup_updates.benefits.published_update_is_shared", self.shared),
             patch("roo.services.PointsService.award", self.award),
             patch.object(rewards.Organization.objects, "select_for_update", self.org_lock),
         ):
@@ -191,6 +267,29 @@ class MonthlyRewardTests(SimpleTestCase):
         self.assertEqual(self.award.call_args.kwargs["delta"], 20)
         self.assertEqual(self.award.call_args.kwargs["reference_id"], "41")
         self.org_lock.return_value.get.assert_called_once_with(pk=7)
+
+    def test_private_first_approval_gets_five_without_verification_lookup(self):
+        self.shared.return_value = False
+        self.assertEqual(self.complete()["points"], 5)
+        self.eligibility.assert_not_called()
+
+    @override_settings(COMMUNITY_CHAT_VOLUNTEER_ENABLED=True, COMMUNITY_CHAT_VOLUNTEER_AWARDS_ENABLED=True)
+    def test_private_approval_uses_five_point_volunteer_path(self):
+        self.shared.return_value = False
+        self.ledger.delta_microroo = 5000000
+        self.existing.side_effect = [None, self.ledger]
+        with patch("community_chat.volunteer.receipts.award_startup_update", return_value=True) as volunteer:
+            result = self.complete()
+        self.assertEqual(result["points"], 5)
+        self.assertEqual(volunteer.call_args.kwargs["reward_amount"], 5)
+        self.eligibility.assert_not_called()
+
+    def test_sharing_previously_paid_private_update_never_tops_up_points(self):
+        self.ledger.delta_microroo = 5000000
+        self.existing.return_value = self.ledger
+        self.assertEqual(self.complete()["points"], 5)
+        self.shared.assert_not_called()
+        self.award.assert_not_called()
 
     def test_second_new_update_in_month_gets_five(self):
         self.has_previous.return_value = True
@@ -313,14 +412,17 @@ class MonthlyRewardTests(SimpleTestCase):
 
 
 class FirstApprovalClockTests(SimpleTestCase):
-    def publish(self, draft):
+    def publish(self, draft, *, has_receipts=True):
         from startup_updates.revisions import approve_and_publish
         with (
             patch("startup_updates.revisions.MonthlyUpdateDraft.objects.select_for_update") as locked,
-            patch("startup_updates.revisions.MonthlyUpdateApproval.objects.get_or_create", return_value=(Mock(), True)),
+            patch("startup_updates.revisions.MonthlyUpdateApproval.objects.get_or_create", return_value=(Mock(), True)) as approval_create,
+            patch("startup_updates.revisions.MonthlyUpdateApproval.objects.filter") as approvals,
             patch("startup_updates.revisions.timezone.now", return_value=NOW),
         ):
             locked.return_value.get.return_value = draft
+            approvals.return_value.exists.return_value = has_receipts
+            self.approval_create = approval_create
             # Skip only the database transaction wrapper; exercise approval,
             # disclosure checks and timestamp changes in the real function.
             return approve_and_publish.__wrapped__(draft, actor=Mock(), revision_id=101,
@@ -335,6 +437,21 @@ class FirstApprovalClockTests(SimpleTestCase):
             "pk": 41, "month": date(2026, 8, 1), "current_revision": revision, "published_revision_id": None,
             "published_at": None, "first_published_at": None, "ready_at": None, "save": Mock(), **kwargs,
         })
+
+    def test_new_approval_requires_sharing_even_for_preexisting_draft(self):
+        self.publish(self.draft(), has_receipts=False)
+        self.assertTrue(self.approval_create.call_args.kwargs["defaults"]["requires_shared_update"])
+
+    def test_legacy_publication_carries_old_policy_into_first_receipt(self):
+        draft = self.draft(published_at=NOW - timedelta(days=29))
+        self.publish(draft, has_receipts=False)
+        self.assertFalse(self.approval_create.call_args.kwargs["defaults"]["requires_shared_update"])
+        self.assertEqual(draft.first_published_at, NOW - timedelta(days=29))
+
+    def test_later_revision_cannot_claim_legacy_policy(self):
+        draft = self.draft(published_at=NOW - timedelta(days=29))
+        self.publish(draft, has_receipts=True)
+        self.assertTrue(self.approval_create.call_args.kwargs["defaults"]["requires_shared_update"])
 
     def test_first_human_approval_replaces_provisional_generation_clock(self):
         draft = self.draft(ready_at=NOW - timedelta(days=45))

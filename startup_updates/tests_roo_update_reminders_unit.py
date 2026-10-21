@@ -11,7 +11,7 @@ from slack_sdk.errors import SlackApiError
 
 from startup_updates import monthly_update_reminders as reminders
 from startup_updates import roo_update_reminders as chat
-from startup_updates.models import MonthlyUpdateReminderKind
+from startup_updates.models import MonthlyUpdateApproval, MonthlyUpdateReminderKind
 
 UTC = ZoneInfo("UTC")
 MELBOURNE = ZoneInfo("Australia/Melbourne")
@@ -77,7 +77,8 @@ class RooUpdateReminderTests(SimpleTestCase):
         self.assertEqual(message["channel"], "DROO")
         self.assertIn("31 July 2026 at 12:00 PM AEST", message["text"])
         self.assertIn("https://chat.mlai.au/pulse?startup=09ea238a-c6b5-4b66-96d9-80a162ac8e43&startupView=new", message["text"])
-        self.assertIn("20 Roo points once per startup/month", message["text"])
+        self.assertIn("first approved update each Melbourne month can earn 20 Roo points if shared", message["text"])
+        self.assertIn("Private approvals earn 5 Roo points and do not unlock discounts", message["text"])
         self.assertIn("4 points instead of 8", message["text"])
         self.assertEqual(self.delivery.provider_response["roo_chat"]["message_ts"], "100.123")
 
@@ -217,6 +218,12 @@ class ReminderEligibilityUnitTests(SimpleTestCase):
         self.updates.filter.return_value.annotate.return_value.order_by.return_value = [self.update]
         self.history = Mock()
         self.history.exclude.return_value.first.return_value = None
+        self.approvals = Mock()
+        self.approvals.filter.return_value.select_related.return_value = [SimpleNamespace(
+            requires_shared_update=True, content_hash="approved-content",
+            audience_visibility=["community"],
+            revision=SimpleNamespace(audience="community", content_hash="approved-content"),
+        )]
         history_patch = patch("startup_updates.benefits.monthly_reward_history", return_value=self.history)
         history_patch.start()
         self.addCleanup(history_patch.stop)
@@ -224,6 +231,7 @@ class ReminderEligibilityUnitTests(SimpleTestCase):
             (reminders.VibeRaisingCompany, self.companies),
             (reminders.UserStartupBinding, self.bindings),
             (reminders.MonthlyUpdateDraft, self.updates),
+            (MonthlyUpdateApproval, self.approvals),
         ):
             patcher = patch.object(model, "objects", manager)
             patcher.start()
@@ -239,6 +247,17 @@ class ReminderEligibilityUnitTests(SimpleTestCase):
         self.assertNotIn("status", query)
         self.assertEqual(reminders.collect_monthly_update_reminder_targets(date(2026, 7, 29)), [])
         self.assertEqual(reminders.collect_monthly_update_reminder_targets(date(2026, 7, 31)), [])
+
+    def test_only_shared_new_approvals_receive_discount_renewal_reminders(self):
+        for audience in ("private", "community", "public"):
+            with self.subTest(audience=audience):
+                self.approvals.filter.return_value.select_related.return_value = [SimpleNamespace(
+                    requires_shared_update=True, content_hash="approved-content",
+                    audience_visibility=["just_me" if audience == "private" else audience],
+                    revision=SimpleNamespace(audience=audience, content_hash="approved-content"),
+                )]
+                result = reminders.collect_monthly_update_reminder_targets(date(2026, 7, 30))
+                self.assertEqual(len(result), 0 if audience == "private" else 1)
 
     def test_melbourne_date_and_dst_use_exact_elapsed_thirty_days(self):
         self.update.ready_at = datetime(2026, 9, 10, 15, tzinfo=UTC)

@@ -168,5 +168,6 @@ identified as current by a maintained architecture document.
 - [Startup Progress dashboard and chart disclosure](startup-progress.md)
 
 - [Chat startup updates](community-chat-startup-updates.md): founder setup, draft, review, approval and community API.
+- [Shared update benefits](shared-update-benefits.md): sharing requirements, grandfathered discounts, points and rollout dependencies.
 
 - [Website connection lifecycle and repository consent](website-connections.md) — schema, API, revocation, reviewed cleanup, and local verification.

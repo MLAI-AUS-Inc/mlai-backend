@@ -1258,12 +1258,25 @@ class StartupUpdateRewardServiceTests(TestCase):
         self.eligibility = self.eligibility_patch.start()
         self.addCleanup(self.eligibility_patch.stop)
 
-    def draft(self, month=None):
-        from startup_updates.models import MonthlyUpdateDraft
+    def draft(self, month=None, *, audience="community"):
+        from startup_updates.models import (
+            MonthlyUpdateApproval, MonthlyUpdateDraft, MonthlyUpdateRevision, MonthlyEvidenceSnapshot,
+        )
         from uuid import uuid4
         now = timezone.now()
-        return MonthlyUpdateDraft.objects.create(organization=self.org, month=month or self.month,
+        draft = MonthlyUpdateDraft.objects.create(organization=self.org, month=month or self.month,
             published_at=now, first_published_at=now, ready_at=now, creation_key=str(uuid4()))
+        digest = uuid4().hex * 2
+        visibility = ["just_me" if audience == "private" else audience]
+        snapshot = MonthlyEvidenceSnapshot.objects.create(organization=self.org, month=draft.month,
+            content_hash=digest, payload={})
+        revision = MonthlyUpdateRevision.objects.create(draft=draft, snapshot=snapshot, number=1,
+            audience=audience, content_hash=digest, structured_memo={"_audience_visibility": visibility})
+        MonthlyUpdateApproval.objects.create(revision=revision, actor=self.user,
+            content_hash=digest, audience_visibility=visibility)
+        draft.current_revision = draft.published_revision = revision
+        draft.save(update_fields=["current_revision", "published_revision"])
+        return draft
 
     def award(self, draft):
         return StartupUpdateRewardService.award_monthly_update_completion(
@@ -1276,6 +1289,16 @@ class StartupUpdateRewardServiceTests(TestCase):
     def test_first_completion_awards_twenty(self):
         self.assertTrue(self.award(self.draft()))
         self.assertEqual(self._balance(), 20)
+
+    def test_private_first_completion_awards_five(self):
+        self.assertTrue(self.award(self.draft(audience="private")))
+        self.assertEqual(self._balance(), 5)
+        self.eligibility.assert_not_called()
+
+    def test_private_completion_keeps_existing_monthly_allowance_rule(self):
+        self.award(self.draft(audience="private"))
+        self.award(self.draft())
+        self.assertEqual(self._balance(), 10)
 
     def test_same_update_retry_is_idempotent(self):
         draft = self.draft()
