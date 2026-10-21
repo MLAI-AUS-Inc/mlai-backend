@@ -788,12 +788,25 @@ class VolunteerTests(TestCase):
         )
 
     def complete_startup(self, company, month):
-        from startup_updates.models import MonthlyUpdateDraft
+        from startup_updates.models import (
+            MonthlyUpdateApproval, MonthlyUpdateDraft, MonthlyUpdateRevision, MonthlyEvidenceSnapshot,
+        )
         from roo.services import StartupUpdateRewardService
         from unittest.mock import patch
+        from uuid import uuid4
         now = timezone.now()
         draft, created = MonthlyUpdateDraft.objects.get_or_create(organization=company.organization,
             month=month, defaults={"published_at": now, "first_published_at": now, "ready_at": now})
+        if created:
+            digest = uuid4().hex * 2
+            snapshot = MonthlyEvidenceSnapshot.objects.create(organization=company.organization,
+                month=month, content_hash=digest, payload={})
+            revision = MonthlyUpdateRevision.objects.create(draft=draft, snapshot=snapshot,
+                number=1, audience="community", content_hash=digest)
+            MonthlyUpdateApproval.objects.create(revision=revision, actor=self.member,
+                content_hash=digest, audience_visibility=["community"])
+            draft.current_revision = draft.published_revision = revision
+            draft.save(update_fields=["current_revision", "published_revision"])
         with patch("startup_updates.reward_eligibility.startup_reward_eligibility", return_value={"eligible": True}):
             return StartupUpdateRewardService.award_monthly_update_completion(
                 self.member, company, month, draft, newly_approved=created, strict=True)
