@@ -137,6 +137,7 @@ def ensure_slack_user(
             update_fields = []
             if (
                 user.email.lower() != normalized_email
+                and not user.email_aliases.filter(email__iexact=normalized_email).exists()
                 and not user_participates_in_slack_founder_link(user)
             ):
                 user.email = normalized_email
@@ -158,7 +159,11 @@ def ensure_slack_user(
                 linked=False,
             )
 
-    user = User.objects.filter(email__iexact=normalized_email).first()
+    user = User.objects.resolve_email(normalized_email)
+    if user and user.email_aliases.filter(email__iexact=normalized_email).exists():
+        # An operator has already merged this email. Keep the selected primary
+        # Slack identity instead of manufacturing another placeholder account.
+        return SlackUserRegistrationResult(user=user, created=False, linked=True)
     if user and user.slack_id != slack_id:
         try:
             user = assign_direct_slack_identity(user, slack_id)
@@ -261,14 +266,16 @@ def resolve_existing_user_from_profile(
             return already_linked
 
         user = (
-            User.objects.select_for_update()
-            .filter(email__iexact=normalized_email, is_active=True)
+            User.objects.for_email(normalized_email).select_for_update(of=("self",))
+            .filter(is_active=True)
             .first()
         )
         if not user:
             return None
 
         existing_slack_id = str(user.slack_id or "").strip()
+        if user.email_aliases.filter(email__iexact=normalized_email, verified_at__isnull=False).exists():
+            return user
         if existing_slack_id and existing_slack_id != requested_slack_id:
             if raise_link_conflict:
                 ensure_user_can_accept_direct_slack_identity(user)

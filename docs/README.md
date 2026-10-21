@@ -18,6 +18,8 @@ subsystem-specific contracts and runbooks.
 
 ## Production API
 
+- [Alternate sign-in emails and account repairs](email-aliases.md) — identity resolution, delivery policy, and reviewed merges
+
 - [Backend API web handoff](backend-api-web-handoff.md) — verified ingress,
   first adoption, code-only route flips, rollback, and migration limits
 

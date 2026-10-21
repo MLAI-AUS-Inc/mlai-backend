@@ -44,7 +44,7 @@ class RegisterSerializer(serializers.ModelSerializer):
         email = validated_data['email']
         first_name = validated_data.get('first_name', '')
         last_name = validated_data.get('last_name', '')
-        user, created = User.objects.get_or_create(email=email)
+        user, created = User.objects.get_or_create_for_email(email)
         if created:
             user.first_name = first_name
             user.last_name = last_name
