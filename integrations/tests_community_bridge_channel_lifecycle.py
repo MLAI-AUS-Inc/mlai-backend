@@ -385,6 +385,7 @@ class BuzzBridgePublicChannelClientTests(TestCase):
         self.assertTrue(post.call_args.args[0].endswith("/v1/public-channels"))
         self.assertEqual(post.call_args.kwargs["json"], {
             "slack_workspace_id": WORKSPACE, "slack_channel_id": CHANNEL, "name": "demo-day",
+            "audience": "community",
             "archived": False, "topic": "Friday",
         })
 

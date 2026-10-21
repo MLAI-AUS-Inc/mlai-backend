@@ -284,10 +284,14 @@ class BuzzBridgeClient:
         ``topic`` of ``None`` leave those room fields unmanaged. A name already
         used by another room raises a permanent error with code
         ``name_conflict``.
+
+        This lifecycle path retains the community audience of public mirrors;
+        the adapter requires the immutable access policy on every request.
         """
         payload = {
             "slack_workspace_id": str(slack_workspace_id or "").strip(),
             "slack_channel_id": str(slack_channel_id or "").strip(),
+            "audience": "community",
             "name": str(name or "").strip(),
             "archived": bool(archived),
         }

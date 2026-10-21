@@ -17,6 +17,11 @@ The community bridge provides a live, bidirectional view of selected public
 Slack channels inside MLAI Chat. Slack remains usable throughout the rollout;
 MLAI Chat is another client surface, not a one-time data migration.
 
+Public-channel lifecycle requests to `POST /v1/public-channels` explicitly send
+`audience: "community"`. The adapter requires this immutable access policy;
+omitting it rejects room creation and metadata updates with HTTP 422. This
+path does not provision or change membership-restricted room audiences.
+
 ## MVP scope
 
 - Operators explicitly map a public Slack channel to one MLAI Chat channel.
