@@ -32,3 +32,25 @@ regressions use the separately approved, hash-pinned 367-migration inventory in
 The 21 October rollout is based on the running `f5491f5581e2` release because newer
 main releases had rolled back. Its image layers must use the actual running image
 IDs, not the mutable latest tags, and include no unrelated main migrations.
+
+
+## 21 October validation and release evidence
+
+The complete targeted account/auth suite passed 92 tests. An additional 111
+Slack and Chat email-code tests passed; the broader historical migration replay
+selection was stopped after its current test, so that entire selection is not
+claimed complete. The final nine alias/merge database tests passed, including
+selected Slack ownership on a reviewed source. Django checks and migration drift
+checks passed. All database tests used the approved disposable PostgreSQL inventory.
+
+Authentication runtime commit: `084ab7377898`. The maintenance command additionally
+uses `848d5bc` to permit the selected Slack ID on one of the explicitly enumerated
+merge sources, which is deleted before assignment. An unrelated owner still blocks.
+
+The origin retains the captured service configuration, exact prior image IDs,
+source patch, migration log, account recovery snapshot, and merge/verification
+logs under a private account-repair directory. Current web/worker images layer
+only the alias runtime files on the previously running release. Before the next
+main deployment, integrate `codex/user-email-alias`; a newer main release must not
+overwrite this deployed authentication fix. The unrelated newer-main migrations
+were not applied by this release.
