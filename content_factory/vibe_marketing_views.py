@@ -759,8 +759,8 @@ def _quoted_price_response(request, *, cost_points, require_quote=False):
     return None
 
 
-def _reserve_article_start_connection(context, payload):
-    """Validate and persist the original operation before billing or delivery."""
+def _reserve_article_start_connection(context, payload, *, reserve_operation=True):
+    """Bind the original snapshot; reserve its operation with the debit transaction."""
     if payload.get("delivery_mode") != "content_only":
         try:
             config = _get_config(context.organization)
@@ -776,8 +776,9 @@ def _reserve_article_start_connection(context, payload):
             if payload.get("expected_source_sha") not in (None, "", website.verified_sha):
                 raise WebsiteAuthorityError("website_source_changed", "The verified website source changed before admission.")
             payload.update(contract_for(website), connection_target_id=selected, expected_source_sha=website.verified_sha)
-            from .website_operations import reserve_workflow_operation
-            reserve_workflow_operation(website, workflow="article_generation", payload=payload)
+            if reserve_operation:
+                from .website_operations import reserve_workflow_operation
+                reserve_workflow_operation(website, workflow="article_generation", payload=payload)
         except WebsiteAuthorityError as exc:
             return Response(exc.as_dict(), status=exc.status)
     return None
@@ -875,6 +876,11 @@ def _charge_roo_points_for_article(request, *, context, payload: dict, goal_oper
         or f"vibe-article:{context.organization.id}:{uuid.uuid4().hex}"
     ).strip()
     payload["client_request_id"] = client_request_id
+    from .article_request_identity import stabilize_article_request_metadata
+    try:
+        stabilize_article_request_metadata(payload, organization=context.organization, user=request.user)
+    except WebsiteAuthorityError as exc:
+        return None, None, None, Response(exc.as_dict(), status=exc.status)
     actor_id = founder_actor_id_for_user(request.user)
     article_request = {
         **payload,
@@ -884,7 +890,7 @@ def _charge_roo_points_for_article(request, *, context, payload: dict, goal_oper
         "user_last_name": getattr(request.user, "last_name", ""),
         "user_avatar_url": getattr(request.user, "avatar_url", ""),
     }
-    connection_error = _reserve_article_start_connection(context, payload)
+    connection_error = _reserve_article_start_connection(context, payload, reserve_operation=False)
     if connection_error is not None:
         return None, None, None, connection_error
     article_request.update(payload)
@@ -892,8 +898,14 @@ def _charge_roo_points_for_article(request, *, context, payload: dict, goal_oper
         _validate_article_start_admission(context, request.user, actor_id, article_request)
     except (ArticleGenerationError, WebsiteAuthorityError) as exc:
         return None, None, None, Response({"detail": str(exc), "code": getattr(exc, "code", "article_admission_required")}, status=409)
-    with transaction.atomic():
-        try:
+    try:
+        with transaction.atomic():
+            # Admission may call providers; it stays outside this transaction.
+            # A failed debit must roll back its provisional operation as well.
+            connection_error = _reserve_article_start_connection(context, payload)
+            if connection_error is not None:
+                return None, None, None, connection_error
+            article_request.update(payload)
             _validate_article_start_reservation(context, payload)
             if goal_operation_id is not None:
                 from .website_first_article_billing import consume
@@ -908,38 +920,38 @@ def _charge_roo_points_for_article(request, *, context, payload: dict, goal_oper
                     resolved_domain=domain,
                     prevalidated_admission=True,
                 )
-        except InsufficientRooPointsError as exc:
-            return None, None, None, Response(
-                getattr(exc, "payload", None) or build_roo_points_payload(
+            payload.update(
+                build_roo_points_authorization_payload(
                     domain=domain,
-                    action="article_generation",
-                    current_balance=_roo_points_balance_for_user(request.user),
-                    required_points=get_content_factory_article_cost_points(domain, user=request.user),
-                    cost_points=get_content_factory_article_cost_points(domain, user=request.user),
-                ),
-                status=status.HTTP_402_PAYMENT_REQUIRED,
+                    action=CONTENT_FACTORY_ACTION_ARTICLE_GENERATION,
+                    cost_points=charge_amount,
+                    required_points=charge_amount,
+                    current_balance=_roo_points_balance_for_user(charged_user),
+                    billing_status="charged" if charge_amount > 0 else "free",
+                    ledger_id=getattr(charge_ledger, "id", None),
+                )
             )
-
-        except (ArticleGenerationError, WebsiteAuthorityError) as exc:
-            return None, None, None, Response({"detail": str(exc), "code": getattr(exc, "code", "company_billing_founder_unavailable")}, status=409)
-
-        payload.update(
-            build_roo_points_authorization_payload(
+            payload.update(roo_points_requested_by_user_id=request.user.pk, roo_points_billing_user_id=charged_user.pk)
+            from content_factory.dispatch_outbox import reserve_dispatch
+            payload["dispatch_outbox_reserved"] = True
+            reserve_dispatch(organization=context.organization, payload=payload,
+                billing_user_id=charged_user.pk, actor_id=actor_id)
+    except InsufficientRooPointsError as exc:
+        return None, None, None, Response(
+            getattr(exc, "payload", None) or build_roo_points_payload(
                 domain=domain,
-                action=CONTENT_FACTORY_ACTION_ARTICLE_GENERATION,
-                cost_points=charge_amount,
-                required_points=charge_amount,
-                current_balance=_roo_points_balance_for_user(charged_user),
-                billing_status="charged" if charge_amount > 0 else "free",
-                ledger_id=getattr(charge_ledger, "id", None),
-            )
+                action="article_generation",
+                current_balance=_roo_points_balance_for_user(request.user),
+                required_points=get_content_factory_article_cost_points(domain, user=request.user),
+                cost_points=get_content_factory_article_cost_points(domain, user=request.user),
+            ),
+            status=status.HTTP_402_PAYMENT_REQUIRED,
         )
-        payload.update(roo_points_requested_by_user_id=request.user.pk, roo_points_billing_user_id=charged_user.pk)
-        from content_factory.dispatch_outbox import reserve_dispatch
-        payload["dispatch_outbox_reserved"] = True
-        reserve_dispatch(organization=context.organization, payload=payload,
-            billing_user_id=charged_user.pk, actor_id=actor_id)
-        return charged_user, charge_ledger, article_request, None
+
+    except (ArticleGenerationError, WebsiteAuthorityError) as exc:
+        return None, None, None, Response({"detail": str(exc), "code": getattr(exc, "code", "company_billing_founder_unavailable")}, status=409)
+
+    return charged_user, charge_ledger, article_request, None
 
 
 def _charge_roo_points_for_content_island_topic_generation(request, *, context, payload: dict, scope_request_id=True):

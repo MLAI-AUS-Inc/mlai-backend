@@ -152,7 +152,7 @@ jobs:
         python scripts/test_without_database.py \
           community_chat.tests.test_startup_connections_unit \
           content_factory.tests_activation_unit \
-          content_factory.tests_article_pricing_unit \
+          content_factory.tests_article_pricing_unit content_factory.tests_article_request_identity_unit \
           content_factory.tests_research_automation_billing_unit \
           community_chat.tests.test_startup_activity_defaults \
           startup_updates.tests_linear_reconnect_unit \
@@ -383,6 +383,7 @@ jobs:
           core.tests.test_auth_session \
           core.tests.test_password_api \
           core.tests.test_email_aliases_database \
+          content_factory.tests_article_retry_transaction_database \
           founder_tools.tests \
           founder_tools.tests_domain_change \
           founder_tools.tests_offboarding \
