@@ -96,7 +96,7 @@ def has_monthly_completion(draft, start, end):
 
 @transaction.atomic
 def award_completion(user, company, draft, *, newly_approved=False):
-    """Credit the approver once: 20 for an eligible first update, otherwise 5.
+    """Credit once: 20 for an eligible, shared first update, otherwise 5.
 
     The organisation lock serializes different drafts and founder accounts. The
     existing unique ledger key survives edits and retries without a migration.
@@ -104,6 +104,7 @@ def award_completion(user, company, draft, *, newly_approved=False):
     """
     from roo.services import PointsService
     from startup_updates.reward_eligibility import startup_reward_eligibility
+    from startup_updates.benefits import published_update_is_shared
 
     if user is None or company is None or draft is None or not company.organization_id:
         raise ValueError("An owned, approved startup update is required for rewards.")
@@ -127,7 +128,8 @@ def award_completion(user, company, draft, *, newly_approved=False):
     first_approval = draft.first_published_at or draft.ready_at or draft.published_at
     start, end = reward_month_bounds(first_approval)
     first_this_month = not has_monthly_completion(draft, start, end)
-    eligible = first_this_month and startup_reward_eligibility(company).get("eligible") is True
+    eligible = (first_this_month and published_update_is_shared(draft)
+        and startup_reward_eligibility(company).get("eligible") is True)
     amount = MONTHLY_POINTS if eligible else STANDARD_POINTS
     key = reward_key(draft, start)
     if (getattr(settings, "COMMUNITY_CHAT_VOLUNTEER_ENABLED", False)

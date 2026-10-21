@@ -48,9 +48,12 @@ def _message(targets) -> str:
             f"<{_chat_url(target.company_id)}|Write your next monthly update>."
         )
     lines.append(
-        "Approve your next monthly update to earn 20 Roo points once per startup/month "
-        "and renew 30 days of coworking at 4 points instead of 8, while your Australian "
-        "startup has a verified active ABN."
+        "Approve a new monthly update and share it publicly or with the MLAI community "
+        "to renew 30 days of coworking at 4 points instead of 8, while your Australian "
+        "startup has a verified active ABN. Your startup’s first approved update each "
+        "Melbourne month can earn 20 Roo points if shared and its registration, name "
+        "and website are verified; otherwise 5. Private approvals earn 5 Roo points "
+        "and do not unlock discounts. Edits and reapproval do not extend the discount."
     )
     return "\n\n".join(lines)
 

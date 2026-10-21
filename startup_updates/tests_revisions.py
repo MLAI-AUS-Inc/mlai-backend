@@ -1,12 +1,61 @@
 """Database integration tests. Run only after the repository's migration approval."""
-from datetime import date
+from datetime import date, timedelta
+from unittest.mock import patch
 from django.contrib.auth import get_user_model
-from django.test import TestCase
+from django.test import TestCase, TransactionTestCase, override_settings
+from django.utils import timezone
 from rest_framework.exceptions import ValidationError
 from organizations.models import Organization
 from startup_updates.models import MonthlyEvidenceSnapshot, MonthlyUpdateDraft, MonthlyUpdateApproval
 from startup_updates.evidence_contract import content_hash
 from startup_updates.revisions import save_revision, approve_and_publish, frozen_memo, RevisionConflict
+
+
+class SharedBenefitMigrationTests(TransactionTestCase):
+    """The policy upgrade preserves old receipts and defaults new ones safely."""
+
+    def test_existing_approvals_keep_old_policy_and_new_approvals_require_sharing(self):
+        from django.db import connection
+        from django.db.migrations.executor import MigrationExecutor
+
+        executor = MigrationExecutor(connection)
+        latest = executor.loader.graph.leaf_nodes()
+        before = [("startup_updates", "0025_sourceextractionreceipt")]
+        after = [("startup_updates", "0026_shared_update_benefits")]
+        try:
+            executor.migrate(before)
+            apps = executor.loader.project_state(before).apps
+            organization = apps.get_model("organizations", "Organization").objects.create(
+                name="Synthetic migration startup", domain="migration.example.invalid",
+            )
+            month = date(2026, 1, 1)
+            snapshot = apps.get_model("startup_updates", "MonthlyEvidenceSnapshot").objects.create(
+                organization_id=organization.pk, month=month, content_hash="synthetic-snapshot", payload={},
+            )
+            draft = apps.get_model("startup_updates", "MonthlyUpdateDraft").objects.create(
+                organization_id=organization.pk, month=month,
+            )
+            revisions = apps.get_model("startup_updates", "MonthlyUpdateRevision")
+            first = revisions.objects.create(draft_id=draft.pk, snapshot_id=snapshot.pk,
+                number=1, audience="private", content_hash="synthetic-first")
+            original = apps.get_model("startup_updates", "MonthlyUpdateApproval").objects.create(
+                revision_id=first.pk, content_hash=first.content_hash, audience_visibility=["just_me"],
+            )
+            executor = MigrationExecutor(connection)
+            executor.migrate(after)
+            approvals = executor.loader.project_state(after).apps.get_model("startup_updates", "MonthlyUpdateApproval")
+            preserved = approvals.objects.get(pk=original.pk)
+            self.assertFalse(preserved.requires_shared_update)
+            self.assertEqual(preserved.approved_at, original.approved_at)
+            self.assertEqual(preserved.content_hash, original.content_hash)
+            self.assertEqual(preserved.audience_visibility, ["just_me"])
+            second = revisions.objects.create(draft_id=draft.pk, snapshot_id=snapshot.pk,
+                number=2, audience="private", content_hash="synthetic-second")
+            created = approvals.objects.create(revision_id=second.pk,
+                content_hash=second.content_hash, audience_visibility=["just_me"])
+            self.assertTrue(created.requires_shared_update)
+        finally:
+            MigrationExecutor(connection).migrate(latest)
 
 
 class MonthlyRevisionTests(TestCase):
@@ -80,6 +129,131 @@ class MonthlyRevisionTests(TestCase):
         type(revision).objects.filter(pk=revision.pk).update(validation={"groundedness_status": "pending"})
         with self.assertRaises(ValidationError):
             self.publish(revision)
+
+    def benefit_company(self):
+        from founder_tools.models import VibeRaisingCompany, VibeRaisingProfile
+        from startup_updates.models import UserStartupBinding
+        profile = VibeRaisingProfile.objects.create(user=self.actor, role="founder")
+        UserStartupBinding.objects.create(user=self.actor, organization=self.organization, role="founder")
+        return VibeRaisingCompany.objects.create(
+            profile=profile, organization=self.organization, name="Example", registered=True,
+            abn="89000000019", entity_type_code="OIE", abr_verified_at=timezone.now(),
+        )
+
+    def benefit_prices(self):
+        from content_factory.billing import get_content_factory_article_cost_points
+        from roo.services import CoworkingService
+        from zoneinfo import ZoneInfo
+        return (
+            CoworkingService.get_coworking_cost(self.actor, timezone.localdate(timezone=ZoneInfo("Australia/Melbourne"))),
+            get_content_factory_article_cost_points(self.organization.domain, user=self.actor),
+        )
+
+    def boost_price(self):
+        from roo.services import BoostPostAdmissionService, PointsService
+        self.actor.slack_id = "USYNTHETIC"
+        self.actor.save(update_fields=["slack_id"])
+        PointsService.award(user=self.actor, delta=20, source="MANUAL",
+            description="Synthetic boost test funds", created_by_slack_id="system",
+            idempotency_key="synthetic-boost-funds")
+        admission, _ = BoostPostAdmissionService.admit(
+            submission_key="boost-post:TTEST:CTEST:1796170000.000100",
+            workspace_id="TTEST", channel_id="CTEST", root_message_ts="1796170000.000100",
+            poster_slack_id=self.actor.slack_id, root_text="Synthetic post", social_post_url="",
+        )
+        self.assertEqual(admission.status, "approved")
+        return admission.charged_points, admission.discount_applied
+
+    @override_settings(COMMUNITY_CHAT_VOLUNTEER_ENABLED=False)
+    def test_private_approval_earns_five_and_leaves_all_prices_standard(self):
+        from startup_updates.rewards import award_completion
+        company = self.benefit_company()
+        draft = self.publish(self.save())
+        with patch("startup_updates.reward_eligibility.startup_reward_eligibility") as verify:
+            receipt = award_completion(self.actor, company, draft, newly_approved=True)
+        verify.assert_not_called()
+        self.assertEqual(receipt["points"], 5)
+        self.assertEqual(self.benefit_prices(), (8, 12))
+        self.assertEqual(self.boost_price(), (8, False))
+        self.assertTrue(draft.published_revision.approval.requires_shared_update)
+
+    def shared_completion(self, audience):
+        from startup_updates.rewards import award_completion
+        company = self.benefit_company()
+        revision = self.save(audience=audience)
+        draft = self.publish(revision, [audience])
+        with patch("startup_updates.reward_eligibility.startup_reward_eligibility", return_value={"eligible": True}):
+            receipt = award_completion(self.actor, company, draft, newly_approved=True)
+        self.assertEqual(receipt["points"], 20)
+        self.assertEqual(self.benefit_prices(), (4, 6))
+        self.assertEqual(self.boost_price(), (4, True))
+
+    @override_settings(COMMUNITY_CHAT_VOLUNTEER_ENABLED=False)
+    def test_community_approval_earns_twenty_and_shared_prices(self):
+        self.shared_completion("community")
+
+    @override_settings(COMMUNITY_CHAT_VOLUNTEER_ENABLED=False)
+    def test_public_approval_earns_twenty_and_shared_prices(self):
+        self.shared_completion("public")
+
+    @override_settings(COMMUNITY_CHAT_VOLUNTEER_ENABLED=False)
+    def test_sharing_paid_private_update_unlocks_remaining_window_without_extra_points(self):
+        from roo.models import Ledger
+        from startup_updates.benefits import approved_update_at, discount_approved_update_at
+        from startup_updates.rewards import award_completion
+        company = self.benefit_company()
+        first = self.save()
+        draft = self.publish(first)
+        self.assertEqual(award_completion(self.actor, company, draft, newly_approved=True)["points"], 5)
+        anchor = approved_update_at(draft)
+        shared = self.save(audience="community", expected_revision=first.pk)
+        self.assertEqual(self.benefit_prices(), (8, 12))  # draft sharing is insufficient
+        draft = self.publish(shared, ["community"])
+        self.assertEqual(award_completion(self.actor, company, draft)["points"], 5)
+        self.assertEqual(discount_approved_update_at(draft), anchor)
+        self.assertEqual(self.benefit_prices(), (4, 6))
+        self.assertEqual(Ledger.objects.filter(source="STARTUP_UPDATE", kind="EARN").count(), 1)
+        with patch("django.utils.timezone.now", return_value=anchor + timedelta(days=30)):
+            self.assertEqual(self.benefit_prices(), (8, 12))
+
+    def test_earned_shared_discount_survives_private_revision_until_original_expiry(self):
+        from startup_updates.benefits import approved_update_at, discount_approved_update_at
+        self.benefit_company()
+        shared = self.save(audience="public")
+        draft = self.publish(shared, ["public"])
+        anchor = approved_update_at(draft)
+        private = self.save(expected_revision=shared.pk)
+        draft = self.publish(private)
+        self.assertEqual(discount_approved_update_at(draft), anchor)
+        self.assertEqual(self.benefit_prices(), (4, 6))
+        with patch("django.utils.timezone.now", return_value=anchor + timedelta(days=30)):
+            self.assertEqual(self.benefit_prices(), (8, 12))
+
+    def test_old_private_policy_survives_new_revision_and_then_expires(self):
+        from startup_updates.benefits import approved_update_at
+        self.benefit_company()
+        first = self.save()
+        draft = self.publish(first)
+        MonthlyUpdateApproval.objects.filter(revision=first).update(requires_shared_update=False)
+        anchor = approved_update_at(draft)
+        newer = self.save({"highlights": ["Edited private update."]}, expected_revision=first.pk)
+        self.publish(newer)
+        self.assertEqual(self.benefit_prices(), (4, 6))
+        with patch("django.utils.timezone.now", return_value=anchor + timedelta(days=30)):
+            self.assertEqual(self.benefit_prices(), (8, 12))
+
+    def test_legacy_publication_conversion_cannot_restart_expired_window(self):
+        from startup_updates.benefits import discount_approved_update_at
+        self.benefit_company()
+        original = timezone.now() - timedelta(days=40)
+        MonthlyUpdateDraft.objects.filter(pk=self.draft.pk).update(
+            published_at=original, first_published_at=original, ready_at=original,
+        )
+        revision = self.save()
+        draft = self.publish(revision)
+        self.assertFalse(revision.approval.requires_shared_update)
+        self.assertEqual(discount_approved_update_at(draft), original)
+        self.assertEqual(self.benefit_prices(), (8, 12))
 
 
 from integrations.tests_startup_updates import StartupUpdateApiTestCase
