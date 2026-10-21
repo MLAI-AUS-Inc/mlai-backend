@@ -29,8 +29,8 @@ Before running, inspect the exact migration plan and obtain approval for
 regressions use the separately approved, hash-pinned 367-migration inventory in
 `email-alias-test-migrations-2026-10-21.json`; production credentials/data are excluded.
 
-The 21 October rollout is based on the running `f5491f5581e2` release because newer
-main releases had rolled back. Its image layers must use the actual running image
+The 21 October rollout is based on the running `f5491f5581e2` release; newer main
+was not active. Its image layers must use the actual running image
 IDs, not the mutable latest tags, and include no unrelated main migrations.
 
 
@@ -54,3 +54,17 @@ only the alias runtime files on the previously running release. Before the next
 main deployment, integrate `codex/user-email-alias`; a newer main release must not
 overwrite this deployed authentication fix. The unrelated newer-main migrations
 were not applied by this release.
+
+## Main-release reconciliation
+
+The subsequent preservation PR retains the alias runtime and reviewed command
+on main. Read-only GitHub Actions evidence shows that main `8ed420b` passed its
+validation jobs, then stopped at the specific migration approval gate without
+replacing the runtime. Two earlier releases stopped at the stale-main guard;
+an older validation run failed during test-database teardown. These observations
+do not establish a health-triggered rollback.
+
+Before deploying main, also preserve the coordinated article retry fix
+`eebebfb07a4c4a85141e85e6d57a2344905dc23c`, await its production handoff, and
+recheck the exact pending migration plan. No account-repair command is part of
+this release integration.
