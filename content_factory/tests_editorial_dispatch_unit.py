@@ -149,11 +149,13 @@ class ArticleDispatchControlFlowTests(unittest.TestCase):
             seam = patch.object(dispatch_outbox, target, value); seam.start(); self.addCleanup(seam.stop)
         model_seam = patch.object(dispatch_models, "ContentFactoryDispatchOutbox", SimpleNamespace(objects=Mock()))
         model_seam.start(); self.addCleanup(model_seam.stop)
+        from content_factory.article_request_identity import ContentFactoryDispatchOutbox
+        self.enterContext(patch.object(ContentFactoryDispatchOutbox.objects, "filter", return_value=SimpleNamespace(first=lambda: None)))
         self.ns = {"__name__": "content_factory.vibe_marketing_views", "__package__": "content_factory",
             "transaction": SimpleNamespace(atomic=nullcontext),
             "Organization": SimpleNamespace(objects=SimpleNamespace(select_for_update=lambda: SimpleNamespace(get=lambda **kw: self.org))),
             "ContentFactoryRun": SimpleNamespace(objects=SimpleNamespace(select_for_update=lambda: SimpleNamespace(get=lambda **kw: self.run))),
-            "_reserve_article_start_connection": lambda *args: None,
+            "_reserve_article_start_connection": lambda *args, **kwargs: None,
             "_validate_article_start_admission": lambda *args: None,
             "_validate_article_start_reservation": lambda *args: None,
 
