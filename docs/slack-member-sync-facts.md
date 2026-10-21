@@ -1,8 +1,10 @@
 # Slack member-sync evidence
 
-Updated 21 October 2026. **The live behaviour spike has not run.** This file
+Updated 21 October 2026. **Live event behaviour checks remain outstanding.** This file
 separates Slack's documented contract from observations of the MLAI apps. It
-does not certify Phase 0 or authorize an app-settings change or deployment.
+does not certify event delivery or authorize an app-settings change. The owner
+approved moving the event spike to the Phase 4 pre-enable canary, allowing
+client/relay work after the Phase 0 diagnostic release.
 
 ## Owner decisions
 
@@ -20,7 +22,15 @@ does not certify Phase 0 or authorize an app-settings change or deployment.
 - The owner authorized the necessary operational work and selected Dr Sam and
   Shan Yang as staff participants. Read-only backend inspection confirmed their
   active linked grants have the required read/history/write scopes. Tokens
-  remain in the server environment; no live API validity has yet been asserted.
+  remain in the server environment. Both official user tokens subsequently
+  passed `auth.test`, public `volunteer` membership/type/sharing checks, and a
+  one-message history read. Only IDs, flags, success codes and counts were
+  retained; no message body or token left the server. Both staff are members,
+  so this does not establish nonmember-token behaviour.
+- Browser inspection of app `A0B0NDG6VL0` confirmed Events are on and the backend
+  request URL is verified. User subscriptions are `message.groups`, `message.im`,
+  `message.mpim`, `reaction_added`, and `reaction_removed`. Public-message and
+  lifecycle subscriptions are absent. No settings were changed.
 
 Use an existing approved channel only for bounded test posts, edits, deletes
 and reactions. Rename, archive and membership-removal checks require a dedicated
@@ -84,10 +94,12 @@ For each case retain only:
 | Owner-approved workspace selection | MLAI workspace; bounded team-channel checks authorized |
 | Staff A/B identified and linked through the user app | Dr Sam and Shan Yang; active scoped grants observed |
 | User-app callback/authorization observation available | Pending |
-| Required subscriptions confirmed without changing settings | Pending |
+| Current subscriptions inspected without changing settings | Existing private/reaction subscriptions confirmed; public/lifecycle additions deferred |
 | Message/echo/info/history cases executed | Pending |
 | Dedicated lifecycle/membership canary identified | Pending |
 | Observations reviewed and recorded | Pending |
 
-Phase 0 remains incomplete until the live observations and the operational
-checks in [the Phase 0 runbook](slack-member-phase0-operations.md) are recorded.
+The owner approved deferring live event observations until the Phase 4
+pre-enable canary. They remain a hard gate before enabling member sync.
+Phase 0 diagnostic release and the operational baseline checks remain in
+[the Phase 0 runbook](slack-member-phase0-operations.md).

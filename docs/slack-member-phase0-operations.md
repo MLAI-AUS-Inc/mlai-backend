@@ -164,6 +164,9 @@ not replace the seven-day comparison window or the canary.
   staff accounts represented by synthetic labels, and no message bodies or
   credentials. See [the Slack facts record](slack-member-sync-facts.md).
 
-Do not mark Phase 0 complete until these owner observations and the required
-behavior-test results exist. Source inspection and passing fixture tests
-cannot stand in for them.
+The owner approved moving the live event spike to the Phase 4 pre-enable
+canary because testing now would require changing production user-app intake
+before the new router exists. Phase 0 may close after the diagnostic release,
+coverage execution and backend/relay baseline checks. Live event results
+remain mandatory before member sync is enabled; source inspection and fixture
+tests cannot stand in for those observations.
