@@ -299,6 +299,13 @@ class MemberAccessDatabaseTests(MemberAccessFixture, TestCase):
 class PostingIdentityLockTests(MemberAccessFixture, TransactionTestCase):
     @skipUnlessDBFeature("has_select_for_update")
     def test_link_only_revocation_waits_for_the_inflight_member_write(self):
+        self.assert_direct_revocation_is_fenced(self.link, {"revoked_at": timezone.now()})
+
+    @skipUnlessDBFeature("has_select_for_update")
+    def test_device_admin_revocation_waits_for_the_inflight_member_write(self):
+        self.assert_direct_revocation_is_fenced(self.device, {"status": "revoked", "revoked_at": timezone.now()})
+
+    def assert_direct_revocation_is_fenced(self, identity, changes):
         self.join(self.grant)
         selected = self.poster()
         provider_entered, release_provider, revoke_started = (threading.Event() for _ in range(3))
@@ -319,15 +326,15 @@ class PostingIdentityLockTests(MemberAccessFixture, TransactionTestCase):
             finally:
                 connection.close()
 
-        def revoke_link():
+        def revoke_identity():
             close_old_connections()
             try:
                 with connection.cursor() as cursor:
                     cursor.execute("SELECT pg_backend_pid()")
                     revoke_pid.append(cursor.fetchone()[0])
                 revoke_started.set()
-                # Match the existing management command's link-only writer.
-                CommunityBridgeIdentityLink.objects.filter(pk=self.link.pk).update(revoked_at=timezone.now())
+                # Direct admin/management writers do not acquire the user lock.
+                type(identity).objects.filter(pk=identity.pk).update(**changes)
             except BaseException as error:
                 errors.append(error)
             finally:
@@ -335,7 +342,7 @@ class PostingIdentityLockTests(MemberAccessFixture, TransactionTestCase):
 
         self.provider.side_effect = provider
         writer = threading.Thread(target=write)
-        revoker = threading.Thread(target=revoke_link)
+        revoker = threading.Thread(target=revoke_identity)
         writer.start()
         try:
             self.assertTrue(provider_entered.wait(10))
@@ -349,7 +356,7 @@ class PostingIdentityLockTests(MemberAccessFixture, TransactionTestCase):
                 if blocked:
                     break
                 time.sleep(0.02)
-            self.assertTrue(blocked, "Link revocation must wait for the posting identity row fence")
+            self.assertTrue(blocked, "Direct revocation must wait for the posting identity row fence")
         finally:
             release_provider.set()
             writer.join(10)
@@ -358,8 +365,9 @@ class PostingIdentityLockTests(MemberAccessFixture, TransactionTestCase):
         self.assertFalse(writer.is_alive())
         self.assertFalse(revoker.is_alive())
         self.assertEqual(errors, [])
-        self.link.refresh_from_db()
-        self.assertIsNotNone(self.link.revoked_at)
+        identity.refresh_from_db()
+        for field, expected in changes.items():
+            self.assertEqual(getattr(identity, field), expected)
         self.provider.reset_mock()
         self.assertIsNone(self.poster())
         with self.assertRaises(access.MemberAccessDenied):

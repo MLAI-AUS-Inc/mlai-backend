@@ -6,7 +6,7 @@ from unittest.mock import patch
 from django.test import SimpleTestCase, override_settings
 from django.utils import timezone
 
-from integrations.services.community_bridge import member_channels as channels
+from integrations.services.community_bridge import member_channels as channels, store
 from integrations.services.community_bridge.buzz import (
     BuzzBridgeClient,
     BuzzBridgeError,
@@ -100,6 +100,47 @@ class MemberChannelStateTests(SimpleTestCase):
             with self.subTest(workspace=workspace, channel=channel):
                 with self.assertRaisesMessage(ValueError, "invalid_slack_channel_identity"):
                     channels.queue_refresh(workspace, channel, reason="event")
+
+
+class InactiveLifecycleIngressTests(SimpleTestCase):
+    def test_lifecycle_events_never_enter_message_normalization_or_receipts(self):
+        channel = {"id": CHANNEL, "name": "synthetic-channel-" + "x" * 150}
+        events = [
+            {"type": kind, "channel": channel}
+            for kind in ("channel_created", "channel_rename")
+        ] + [
+            {"type": kind, "channel": CHANNEL}
+            for kind in ("channel_archive", "channel_unarchive", "channel_deleted")
+        ] + [{"type": "channel_id_changed", "old_channel_id": CHANNEL, "new_channel_id": "CNEW"}]
+        for durable in (False, True):
+            for event in events:
+                with self.subTest(durable=durable, event=event["type"]), override_settings(
+                    MESSAGE_SYNC_ENABLED=durable,
+                ), patch.object(store, "_normalize_slack_event") as normalize, patch.object(
+                    store, "ingest_inbound_event",
+                ) as receipt:
+                    result = store.ingest_slack_event({"event_id": "EvSYNTHETIC", "event": event})
+                    self.assertEqual(result, {"status": "ignored", "reason": "channel_lifecycle_inactive"})
+                    normalize.assert_not_called()
+                    receipt.assert_not_called()
+
+    def test_messages_and_reactions_keep_the_existing_ingestion_route(self):
+        for kind in ("message", "reaction_added", "reaction_removed"):
+            event = {"type": kind}
+            if kind == "message":
+                event["channel"] = CHANNEL
+            normalized = {"source_channel_id": CHANNEL, "source_message_id": "1.0"}
+            with self.subTest(event=kind), patch.object(
+                store, "_normalize_slack_event", return_value=normalized,
+            ) as normalize, patch.object(
+                store, "ingest_inbound_event", return_value={"status": "accepted"},
+            ) as receipt:
+                payload = {"event_id": "EvSYNTHETIC", "event": event}
+                self.assertEqual(store.ingest_slack_event(payload), {"status": "accepted"})
+                normalize.assert_called_once_with(payload)
+                self.assertEqual(receipt.call_args.kwargs["source_channel_id"], CHANNEL)
+                self.assertEqual(receipt.call_args.kwargs["event_type"], kind)
+                self.assertEqual(receipt.call_args.kwargs["normalized_event"], normalized)
 
 
 class MemberChannelAdapterContractTests(SimpleTestCase):

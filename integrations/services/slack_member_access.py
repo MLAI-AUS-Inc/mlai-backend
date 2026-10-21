@@ -234,10 +234,10 @@ def record_reader_failure(grant, error, *, channel_id, authority, purpose="histo
 
 
 def _poster_identity_current(grant, public_key):
-    return CommunityChatDevice.objects.filter(
+    return CommunityChatDevice.objects.select_for_update().filter(
         user_id=grant.user_id, public_key=public_key, status="verified",
         revoked_at__isnull=True, user__is_active=True,
-    ).exists() and CommunityBridgeIdentityLink.objects.select_for_update().filter(
+    ).only("pk").first() is not None and CommunityBridgeIdentityLink.objects.select_for_update().filter(
         user_id=grant.user_id, slack_workspace_id=grant.slack_workspace_id,
         slack_user_id=grant.slack_user_id, revoked_at__isnull=True,
     ).only("pk").first() is not None

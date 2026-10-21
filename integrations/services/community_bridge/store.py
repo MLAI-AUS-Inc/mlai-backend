@@ -45,10 +45,19 @@ PARENT_DEPENDENCY_RETRY_SECONDS = (10, 30, 120, 300, 900)
 # operator has created its CommunityBridgeChannel mapping and pointed it at a
 # private MLAI Chat channel — the mapping, not this set, is the access control.
 BRIDGEABLE_SLACK_CHANNEL_TYPES = frozenset({"channel", "group"})
+INACTIVE_CHANNEL_LIFECYCLE_EVENTS = frozenset({
+    "channel_created", "channel_rename", "channel_archive", "channel_unarchive",
+    "channel_deleted", "channel_id_changed",
+})
 
 
 def ingest_slack_event(payload: dict) -> dict:
     event = dict(payload.get("event") or {})
+    # The bot lifecycle lane is retired. Keep its callbacks out of message
+    # receipts: create/rename carry a conversation object, not a channel ID.
+    # Both inline callbacks and durable inbox processing share this boundary.
+    if event.get("type") in INACTIVE_CHANNEL_LIFECYCLE_EVENTS:
+        return {"status": "ignored", "reason": "channel_lifecycle_inactive"}
     normalized = _normalize_slack_event(payload)
     normalized_payload = normalized or {}
     raw_ts, ignore_detail = _slack_ignored_message_evidence(payload) if normalized is None else ("", "")
