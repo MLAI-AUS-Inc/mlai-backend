@@ -4,6 +4,8 @@ Start with the repository [`README`](../README.md) and
 [`ARCHITECTURE`](../ARCHITECTURE.md). Use this index to find current
 subsystem-specific contracts and runbooks.
 
+- [Private Studio report source](studio-report-source.md) — scoped hours/invoice/payment refresh and missing-data barriers
+
 ## Backend maintenance
 
 - [26 September release integration](backend-refactor-release-2026-09-26.md) — current-main fixes, validation and pending migration approval

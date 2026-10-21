@@ -2528,6 +2528,28 @@ def _xero_required_token(connection: ExternalServiceConnection) -> str:
 
 
 def _refresh_xero_connection(connection: ExternalServiceConnection) -> str:
+    # Refresh tokens rotate. All backend readers share this row lock, including
+    # the private Studio collector, so concurrent jobs cannot reuse an old one.
+    error = None
+    with transaction.atomic():
+        locked = ExternalServiceConnection.objects.select_for_update().get(pk=connection.pk)
+        try:
+            if (locked.access_token and (locked.token_expires_at is None
+                    or locked.token_expires_at > timezone.now() + timedelta(minutes=2))):
+                token = locked.access_token
+            else:
+                token = _refresh_xero_connection_unlocked(locked)
+        except ConnectorOAuthError as exc:
+            # Keep the durable reauthorisation status written by the owner;
+            # raising inside this atomic block would roll that update back.
+            error = exc
+        connection.refresh_from_db()
+    if error is not None:
+        raise error
+    return token
+
+
+def _refresh_xero_connection_unlocked(connection: ExternalServiceConnection) -> str:
     if not connection.refresh_token:
         connection.status = ExternalServiceConnectionStatus.ERROR
         connection.last_error = "Xero connection needs to be reauthorised."
