@@ -1285,10 +1285,12 @@ COMMUNITY_BRIDGE_WORKER_POLL_SECONDS = float(
     os.getenv('COMMUNITY_BRIDGE_WORKER_POLL_SECONDS', '1')
 )
 COMMUNITY_BRIDGE_DEPENDENCY_VERDICTS_ENABLED = _env_is_true('COMMUNITY_BRIDGE_DEPENDENCY_VERDICTS_ENABLED', False)
-# Mirror public Slack channel lifecycle (create, rename, archive, delete) into
-# MLAI Chat. Enable only after integrations.0049, the MLAI Chat adapter's
-# /v1/public-channels route and the Slack bot channel_* event subscriptions.
-COMMUNITY_BRIDGE_CHANNEL_LIFECYCLE_ENABLED = _env_is_true('COMMUNITY_BRIDGE_CHANNEL_LIFECYCLE_ENABLED', False)
+# Inactive foundations: enable only after the member-channel implementation,
+# compatible clients and exact approved schema are deployed and canary checked.
+SLACK_MEMBER_CHANNELS_ENABLED = _env_is_true('SLACK_MEMBER_CHANNELS_ENABLED', False)
+SLACK_COMMUNITY_SEND_AS_MEMBER = _env_is_true('SLACK_COMMUNITY_SEND_AS_MEMBER', False)
+SLACK_COMMUNITY_SOURCE = os.getenv('SLACK_COMMUNITY_SOURCE', 'bot')
+MESSAGE_SYNC_EVENT_ROUTING = _env_is_true('MESSAGE_SYNC_EVENT_ROUTING', False)
 COMMUNITY_BRIDGE_DEPENDENCY_VERDICT_MIN_AGE_SECONDS = int(os.getenv('COMMUNITY_BRIDGE_DEPENDENCY_VERDICT_MIN_AGE_SECONDS', '3600'))
 COMMUNITY_BRIDGE_PARENT_DEPENDENCY_MAX_AGE_SECONDS = int(
     os.getenv('COMMUNITY_BRIDGE_PARENT_DEPENDENCY_MAX_AGE_SECONDS', '3600')

@@ -278,43 +278,52 @@ grant only `channels:history`, `channels:read`, `chat:write`, `files:read`,
 `SLACK_BRIDGE_BOT_USER_ID` so its messages and reactions are discarded for loop
 prevention.
 
-### Public channel lifecycle (`COMMUNITY_BRIDGE_CHANNEL_LIFECYCLE_ENABLED`)
+### Member-channel foundations (inactive)
 
-Live mirroring of public channel lifecycle needs these additions to the same
-bot app, which a workspace admin must approve and reinstall:
+The former bot-only channel lifecycle lane is retired. Its enablement flag,
+`conversations.list` reconciliation, bot `conversations.info` reader and
+automatic `conversations.join` path are removed. Worker and callback intake no
+longer invoke that lane. This source change does not change Slack app settings
+or enable member-channel processing.
 
-- Bot events: `channel_created`, `channel_rename`, `channel_archive`,
-  `channel_unarchive`, `channel_deleted` and `channel_id_changed`. All are
-  covered by the existing `channels:read` scope.
-- Bot scope `channels:join`, so the bot can join a newly mirrored channel.
-  Slack only sends a channel's messages and history to the bot once it is a
-  member. Without this scope the room is not created until someone invites the
-  bot; the ten-minute reconciliation then picks it up.
+`community_bridge/member_channels.py` retains the channel refresh queue, Slack
+metadata observations, managed-text policy and adapter room synchronization as
+foundations for the separately gated member-authorized lane. No reader or
+router calls them automatically yet. Queued admin intent remains pending;
+metadata synchronization alone never enables message delivery or claims a
+reader or synchronized audience. The new flags stay at their defaults:
+`SLACK_MEMBER_CHANNELS_ENABLED=false`, `SLACK_COMMUNITY_SEND_AS_MEMBER=false`,
+`SLACK_COMMUNITY_SOURCE=bot` and `MESSAGE_SYNC_EVENT_ROUTING=false`.
 
-No user-app change is needed: private conversations are outside this path.
+Every adapter room request explicitly states `audience: community|members`.
+Community rooms retain their existing identities and access policy; Members
+rooms require the Phase 2 private-stream and bridge-managed membership contract.
+A registered room's audience, bridge ownership, Slack identity and room UUID
+are immutable. Adapter synchronization cannot widen an existing Members room
+into a Community room. Slack archive/deletion, private conversion and Slack
+Connect observations stop the delivery gate. Slack Connect channels remain
+unsupported.
 
-Each lifecycle event only queues a refresh (`community_bridge_channel_refresh`).
-The bridge worker re-reads the channel with `conversations.info` and applies
-that state, and every ten minutes a `conversations.list` pass catches missed
-events. `CommunityBridgeChannel.mirror_decision` is authoritative:
+The refresh queue coalesces events by channel. Claims lease due rows without
+reading Slack. Completion, retry and exhausted-attempt cleanup compare the
+claimed row version, preserving a newer event queued during processing.
+Adapter failures also compare the captured policy and metadata, so an older
+name conflict cannot replace a newer administrator exclusion or rename.
+Operator room descriptions/topics remain unmanaged until Slack changes the
+adopted baseline; bridge-discovered rooms follow Slack metadata.
 
-- `mirror`: the bot joins and the adapter's `POST /v1/public-channels` creates
-  or updates the room (kind 9007 with a room ID derived from the Slack IDs, then
-  kind 9002 for name, purpose, topic and archive state). The row is then
-  enabled, and the existing history seeder imports the last 30 days.
-- `hold`: a human decides in Django admin ("Mirror selected public channels").
-  Public channels that already existed when the flag was first switched on
-  (`community_bridge_lifecycle_state.auto_mirror_since`), Slack Connect
-  channels, name collisions with a native MLAI Chat room, and channels
-  converted to private all land here.
-- `exclude`: never mirrored. Migration `integrations.0049` seeds the reviewed
-  hold/no rows from MLAI Chat's `deploy/mlai/bridge-channels.conf`.
+A Slack channel ID change can rekey an **unmapped** row and its history source.
+For a mapped row, the helper preserves the original source ID, destination UUID
+and adapter identity, records `rekey_requires_room_migration`, and queues that
+original identity for review. It does not retarget the registered room or
+fabricate an older Slack identity. The ID-change router must not be enabled
+until an explicit room migration/archive-and-recreate contract is implemented.
 
-Renames, topic and purpose changes, archiving and unarchiving follow Slack. A
-deleted channel, or one that becomes private or invisible to the bot, has its
-room archived and its mapping disabled; content is never deleted. Operator
-rooms keep their MLAI Chat description and topic until Slack's purpose or topic
-next changes.
+Migration 0050 adds audience and member-authority state, removes the obsolete
+workspace lifecycle cursor and bot-membership flag, and removes only the exact
+unmapped private manifest rows seeded by 0049. Its rollout still requires the
+owner's exact production migration-plan approval; source/test approval does
+not authorize applying it in production.
 
 The public-channel normalizer continues to ignore direct messages, private
 channels, and payloads marked as shared/external. A separate consent-gated DM

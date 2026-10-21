@@ -10,7 +10,6 @@ from rest_framework.views import APIView
 from integrations.services.message_sync.inbox import enabled as message_sync_enabled, enqueue_slack_callback
 from integrations.models import CommunityBridgePlatform
 from integrations.services.community_bridge.buzz import BuzzBridgeClient
-from integrations.services.community_bridge.channel_lifecycle import record_lifecycle_event
 from integrations.services.community_bridge.slack import SlackBridgeClient
 from integrations.services.community_bridge.store import ingest_inbound_event, ingest_slack_event
 from integrations.services.slack_dm_mirror import ingest_mlai_dm_event, ingest_slack_dm_event
@@ -70,8 +69,7 @@ class SlackCommunityBridgeEventView(APIView):
                 return Response({"error": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
         else:
             result = (
-                record_lifecycle_event(payload)
-                or ingest_slack_dm_event(payload)
+                ingest_slack_dm_event(payload)
                 or ingest_slack_event(payload)
             )
         logger.info(

@@ -2,6 +2,7 @@ from django.contrib import admin
 from .models import (
     CommunityBridgeChannel,
     CommunityBridgeMirrorDecision,
+    CommunityBridgePlatform,
     CommunityBridgeDeletionRequest,
     CommunityBridgeDelivery,
     CommunityBridgeIdentityLink,
@@ -64,6 +65,7 @@ class CommunityBridgeChannelAdmin(admin.ModelAdmin):
     list_display = (
         "slack_channel_id",
         "slack_channel_name",
+        "audience",
         "mirror_decision",
         "hold_reason",
         "destination_platform",
@@ -83,6 +85,7 @@ class CommunityBridgeChannelAdmin(admin.ModelAdmin):
         "destination_workspace_id",
     )
     list_filter = (
+        "audience",
         "mirror_decision",
         "lifecycle_source",
         "slack_visibility",
@@ -97,15 +100,26 @@ class CommunityBridgeChannelAdmin(admin.ModelAdmin):
 
     @admin.action(description="Mirror selected public channels into MLAI Chat")
     def mirror_channels(self, request, queryset):
-        from integrations.services.community_bridge.channel_lifecycle import queue_refresh
+        from integrations.services.community_bridge.member_channels import queue_refresh, valid_slack_channel_identity
 
-        # Only public channels can be mirrored; the lifecycle worker creates the
-        # room and imports 30 days once the bot is in the Slack channel.
-        public = queryset.filter(slack_visibility="public", slack_deleted=False)
+        # This records intent only. Member-authorized processing is introduced
+        # separately; an admin action never creates or widens a room audience.
+        public = queryset.filter(
+            destination_platform=CommunityBridgePlatform.BUZZ,
+            slack_visibility="public", slack_deleted=False,
+        )
+        public = public.filter(pk__in=[
+            channel.pk for channel in public
+            if valid_slack_channel_identity(channel.slack_workspace_id, channel.slack_channel_id)
+        ])
         updated = public.update(mirror_decision=CommunityBridgeMirrorDecision.MIRROR, hold_reason="", room_sync_pending=True)
         for channel in public:
             queue_refresh(channel.slack_workspace_id, channel.slack_channel_id, reason="admin_mirror")
-        self.message_user(request, f"{updated} channel(s) will mirror within a minute.")
+        self.message_user(request, f"{updated} channel(s) queued for authorized channel processing.")
+
+    def get_readonly_fields(self, request, obj=None):
+        fields = super().get_readonly_fields(request, obj)
+        return (*fields, "audience") if obj and obj.destination_channel_id else fields
 
     @admin.action(description="Hold selected channels for review (stop mirroring)")
     def hold_channels(self, request, queryset):

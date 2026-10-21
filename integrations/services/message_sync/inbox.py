@@ -83,7 +83,6 @@ def process_inbox_once():
                 row.lease_expires_at = None
                 row.save()
                 return 0
-            from integrations.services.community_bridge.channel_lifecycle import record_lifecycle_event
             from integrations.services.community_bridge.store import ingest_slack_event
             from integrations.services.slack_dm_mirror import ingest_slack_dm_event
             from .read_activity import record_public_event
@@ -97,9 +96,7 @@ def process_inbox_once():
             # for its owner, inverting the order used by consent, discovery
             # and inventory transactions and deadlocking against them.
             invalidate_event(payload)
-            # Channel lifecycle events queue a refresh and never reach message
-            # ingestion, whose receipts expect a channel ID, not an object.
-            record_lifecycle_event(payload) or ingest_slack_dm_event(payload) or ingest_slack_event(payload)
+            ingest_slack_dm_event(payload) or ingest_slack_event(payload)
             if row.lease_expires_at <= timezone.now():
                 raise LeaseLost("inbox_lease_expired")
             row.status = "completed"

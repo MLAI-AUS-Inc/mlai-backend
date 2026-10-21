@@ -271,23 +271,28 @@ class BuzzBridgeClient:
         *,
         slack_workspace_id: str,
         slack_channel_id: str,
+        audience: str,
         name: str,
         archived: bool,
         about: str | None = None,
         topic: str | None = None,
         channel_id: str = "",
     ) -> dict:
-        """Create or update the public room mirroring one public Slack channel.
+        """Create or update a room mirroring one public Slack channel.
 
-        The adapter derives the room from the Slack IDs unless ``channel_id``
-        names an existing operator-provisioned or re-keyed room. ``about`` and
+        Audience and registered Slack identity are immutable. The adapter
+        derives the room from the Slack IDs unless ``channel_id`` names an
+        explicitly adopted Community room. ``about`` and
         ``topic`` of ``None`` leave those room fields unmanaged. A name already
         used by another room raises a permanent error with code
         ``name_conflict``.
         """
+        if audience not in {"community", "members"}:
+            raise BuzzBridgePermanentError("Public channel room requires an explicit valid audience")
         payload = {
             "slack_workspace_id": str(slack_workspace_id or "").strip(),
             "slack_channel_id": str(slack_channel_id or "").strip(),
+            "audience": audience,
             "name": str(name or "").strip(),
             "archived": bool(archived),
         }

@@ -43,12 +43,15 @@ The Phase 1 capability header also needs this PR's additive browser and Tauri
 CORS allowance deployed before the clients send it. The Tauri allowance is
 restricted to the existing Slack account paths and trusted desktop origins.
 
-## Owner checks after the next approved backend deployment
+## Historical Phase 0 owner checks (0049 schema, before 0050)
 
 Run the following counts against the intended backend database using the
 owner's established read-only connection. Do not copy credentials into this
 document, a shell transcript, or a pull request. These queries need the schema
-containing migration 0049. If a table or column is absent, report that result;
+containing migration 0049 before 0050. These record the completed Phase 0 baseline.
+Migration 0050 removes the lifecycle table; after that change use the recorded
+Phase 0 receipt rather than rerunning its lifecycle-table query. If another
+expected table or column is absent, report that result;
 do not apply a migration to make the inspection pass.
 
 ```sql
@@ -67,11 +70,11 @@ blank `lifecycle_source`; their existence alone does not show that the bot
 lifecycle lane ran. Report an unexpected nonzero count to the owner before
 continuing. Do not delete or reconcile rows during verification.
 
-For a Django-level equivalent, the owner can evaluate only:
+The surviving channel baseline has this Django-level equivalent (the removed
+lifecycle model must not be imported after 0050):
 
 ```python
 CommunityBridgeChannel.objects.exclude(lifecycle_source="").count()
-CommunityBridgeLifecycleState.objects.count()
 ```
 
 On the relay database, inspect the intended community and configured bridge
