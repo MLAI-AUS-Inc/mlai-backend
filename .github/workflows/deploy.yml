@@ -141,6 +141,7 @@ jobs:
           integrations.tests_slack_recent_history \
           integrations.tests_message_sync_telemetry \
           integrations.tests_message_sync_capacity \
+          integrations.tests_slack_member_coverage_unit \
           integrations.tests_message_sync_staged_routing
 
     - name: Check startup facade, profile drafts and sparse settings without database access
@@ -461,6 +462,7 @@ jobs:
           community_chat.tests.test_preview_image_negotiation \
           community_chat.tests.test_slack_read_state \
           community_chat.tests.test_slack_owner_inventory \
+          integrations.tests_slack_member_coverage \
           community_chat.tests.test_slack_open_requests \
           community_chat.tests.test_slack_channel_refresh \
           community_chat.tests.test_token_usage \
@@ -672,6 +674,7 @@ jobs:
           integrations.tests_message_sync_unit \
           integrations.tests_message_sync_throughput \
           integrations.tests_message_sync_capacity \
+          integrations.tests_slack_member_coverage \
           integrations.tests_message_sync_configuration \
           integrations.tests_message_sync_transactions \
           integrations.tests_community_bridge_dependency_cleanup \
