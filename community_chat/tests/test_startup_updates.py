@@ -151,12 +151,39 @@ class StartupFacadeTests(SimpleTestCase):
 
     def test_owner_keeps_metrics_and_private_source_evidence(self):
         dto = {'metrics': {'venue_invoice': 'AUD 960'}, 'metricEvidence': {}, 'evidenceSnapshot': {'private': 960}}
-        revision = Obj(structured_memo={}, validation={'groundedness_status': 'passed'}, snapshot=Obj(payload={}))
+        revision = Obj(structured_memo={}, validation={'groundedness_status': 'passed'}, snapshot=Obj(payload={'private': 960}))
         draft = Obj(current_revision=revision, current_revision_id=1, published_revision_id=None, organization=Obj(name='Acme'))
         with patch('community_chat.startups.presentation._serialize_monthly_update', return_value=dto):
             result = update_payload(draft)
         self.assertEqual(result['metrics'], {'venue_invoice': 'AUD 960'})
         self.assertEqual(result['evidenceSnapshot'], {'private': 960})
+
+    def test_owner_published_read_keeps_approved_private_financial_evidence(self):
+        snapshot = {'metrics': [{'key': 'revenue', 'display_value': 'AUD 4000',
+            'quality': 'source_reported', 'unit': 'AUD'}]}
+        approved = Obj(structured_memo={'kpi_snapshot': [],
+            'display_config': {'full_metric_keys': []}},
+            validation={'groundedness_status': 'passed'}, snapshot=Obj(payload=snapshot))
+        draft = Obj(published_revision=approved, published_revision_id=2,
+            current_revision_id=3, organization=Obj(name='Acme'))
+        dto = {'metrics': {}, 'metricEvidence': {}, 'evidenceSnapshot': None}
+        with patch('community_chat.startups.presentation._serialize_monthly_update', return_value=dto):
+            result = update_payload(draft, published=True)
+        self.assertEqual(result['metrics'], {})
+        self.assertEqual(result['evidenceSnapshot'], snapshot)
+        self.assertTrue(result['hasNewerDraft'])
+        result['evidenceSnapshot']['metrics'][0]['display_value'] = 'AUD 9999'
+        self.assertEqual(snapshot['metrics'][0]['display_value'], 'AUD 4000')
+
+    def test_approved_private_evidence_never_enters_community_projection(self):
+        snapshot = {'metrics': [{'key': 'revenue', 'display_value': 'AUD 4000'}]}
+        approved = Obj(structured_memo={'kpi_snapshot': []}, snapshot=Obj(payload=snapshot))
+        draft = Obj(published_revision=approved, organization=Obj(name='Acme'))
+        dto = {'metrics': {}, 'metricEvidence': {}, 'evidenceSnapshot': None}
+        with patch('community_chat.startups.presentation._serialize_monthly_update', return_value=dto):
+            result = update_payload(draft, published=True, community=True)
+        self.assertNotIn('evidenceSnapshot', result)
+        self.assertNotIn('4000', json.dumps(result))
 
     def test_shared_founder_serializer_does_not_return_amounts(self):
         memo = {'_audience_visibility': ['community'], 'highlights': ['We launched.', 'Venue invoice: AUD 960.'],
