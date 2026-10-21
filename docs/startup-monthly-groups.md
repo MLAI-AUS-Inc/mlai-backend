@@ -44,8 +44,10 @@ writes and retries continue to use that identity when another same-month copy
 exists. Approval is still bound to exact revision ID/hash and audience. Unapproved
 edits leave approved publications unchanged; raw memo upserts cannot overwrite
 revision-backed updates. Completion rewards are idempotent per approved update. The first completed update
-in a Melbourne calendar month earns 20 Roo points when the startup passes ABR,
-name and website checks; all other new updates earn 5. Editing or approving the
+in a Melbourne calendar month earns 20 Roo points when approved for public or
+community sharing and the startup passes ABR, name and website checks; all other
+new updates, including private approvals, earn 5. New discounts require an
+approved public or community revision; see [Shared update benefits](shared-update-benefits.md). Editing or approving the
 same update again never earns more. Reporting months do not choose reward months.
 
 Connector narrative evidence uses the represented calendar month in the

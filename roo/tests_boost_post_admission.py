@@ -62,7 +62,7 @@ class BoostPostAdmissionAPITests(APITestCase):
         )
         self.assertEqual(PointsAccount.objects.get(user=self.user).balance, 12)
 
-    def test_approved_update_for_verified_australian_startup_gets_half_price(self):
+    def test_shared_approved_update_for_verified_australian_startup_gets_half_price(self):
         from founder_tools.models import VibeRaisingCompany, VibeRaisingProfile
         from organizations.models import Organization
         from startup_updates.models import (
@@ -102,9 +102,9 @@ class BoostPostAdmissionAPITests(APITestCase):
         snapshot = MonthlyEvidenceSnapshot.objects.create(organization=organization,
             month=draft.month, content_hash='a' * 64, payload={})
         revision = MonthlyUpdateRevision.objects.create(draft=draft, snapshot=snapshot,
-            number=1, content_hash='b' * 64, audience='private')
+            number=1, content_hash='b' * 64, audience='community')
         approval = MonthlyUpdateApproval.objects.create(revision=revision, actor=self.user,
-            content_hash=revision.content_hash, audience_visibility=['just_me'])
+            content_hash=revision.content_hash, audience_visibility=['community'])
         draft.current_revision = draft.published_revision = revision
         draft.published_at = draft.first_published_at = draft.ready_at = approval.approved_at
         draft.save(update_fields=['current_revision', 'published_revision', 'published_at', 'first_published_at', 'ready_at'])
