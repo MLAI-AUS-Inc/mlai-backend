@@ -15,6 +15,7 @@ from integrations.models import (
 )
 
 
+BEFORE_LIFECYCLE = ("integrations", "0048_owner_slack_conversation_inventory")
 OLD = ("integrations", "0049_community_bridge_channel_lifecycle")
 NEW = ("integrations", "0050_slack_member_channels")
 SEEDS = import_module("integrations.migrations.0049_community_bridge_channel_lifecycle")
@@ -50,6 +51,14 @@ class MemberChannelMigrationTests(TransactionTestCase):
         self.assertEqual(old.objects.get(slack_channel_id=PRIVATE_IDS[0]).slack_channel_name, "operator-choice")
         self.assertFalse(old.objects.filter(slack_channel_id__in=PRIVATE_IDS, enabled=True).exists())
         self.assertTrue(old.objects.filter(slack_channel_id=PUBLIC_EXCLUSION).exists())
+
+    def test_rewinding_past_0049_after_restored_seeds_is_safe(self):
+        self.migrate(NEW)
+        # 0050's reverse restores the private seeds, then 0049's reverse deletes
+        # them and alters the same table inside one transaction.
+        Channel = self.migrate(BEFORE_LIFECYCLE).get_model("integrations", "CommunityBridgeChannel")
+        manifest_ids = [item[0] for item in SEEDS.MANIFEST_DECISIONS]
+        self.assertFalse(Channel.objects.filter(slack_channel_id__in=manifest_ids).exists())
 
     def test_operator_changes_to_each_seed_are_preserved(self):
         now = timezone.now()
