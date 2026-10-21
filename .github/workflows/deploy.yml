@@ -222,7 +222,7 @@ jobs:
       run: python scripts/test_without_database.py content_factory.tests_island_refresh_domain_unit content_factory.tests_island_research_unit content_factory.tests_island_research_cancel_unit content_factory.tests_island_removal_unit content_factory.tests_custom_islands_unit content_factory.tests_editorial_catalog_unit
 
     - name: Run formerly unassigned database-free suites
-      run: python scripts/test_without_database.py content_factory.tests_preserve_publish_targets content_factory.tests_scaffold_accept core.tests.test_observability generic_hackathons.tests_smart_home integrations.tests_valley_harness tests.test_article_system_registry tests.test_customerio_template_docs tests.test_github_app_credentials_command tests.test_jobs_public_pages tests.test_jobs_sources tests.test_jobs_startup_boards tests.test_scan_force_refresh vibe_raising.tests_acn_validators
+      run: python scripts/test_without_database.py content_factory.tests_preserve_publish_targets content_factory.tests_scaffold_accept core.tests.test_observability core.tests.test_email_aliases_unit generic_hackathons.tests_smart_home integrations.tests_valley_harness tests.test_article_system_registry tests.test_customerio_template_docs tests.test_github_app_credentials_command tests.test_jobs_public_pages tests.test_jobs_sources tests.test_jobs_startup_boards tests.test_scan_force_refresh vibe_raising.tests_acn_validators
 
     - name: Scan tracked source for credentials
       run: python scripts/check_secrets.py
@@ -391,6 +391,7 @@ jobs:
           core.tests.test_auth_contract \
           core.tests.test_auth_session \
           core.tests.test_password_api \
+          core.tests.test_email_aliases_database \
           founder_tools.tests \
           founder_tools.tests_domain_change \
           founder_tools.tests_offboarding \

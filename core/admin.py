@@ -7,11 +7,23 @@ from .models import (
     PasswordResetChallenge,
     PasswordResetEmailDelivery,
     User,
+    UserEmailAlias,
 )
 from .forms import CustomUserCreationForm, CustomUserChangeForm
 
 
+class UserEmailAliasInline(admin.TabularInline):
+    model = UserEmailAlias
+    extra = 0
+    can_delete = False
+    readonly_fields = ('email', 'verified_at', 'created_at')
+
+    def has_add_permission(self, request, obj=None):
+        return False
+
+
 class UserAdmin(BaseUserAdmin):
+    inlines = (UserEmailAliasInline,)
     add_form = CustomUserCreationForm
     form = CustomUserChangeForm
     actions = ('ban_mlai_accounts',)
@@ -30,7 +42,7 @@ class UserAdmin(BaseUserAdmin):
     model = User
     list_display = ('email', 'first_name', 'last_name', 'slack_id', 'is_staff', 'email_verified_at', 'date_joined', 'updated', 'avatar_preview')
     list_filter = ('is_staff', 'is_superuser', 'is_active', 'groups')
-    search_fields = ('email', 'first_name', 'last_name', 'slack_id')
+    search_fields = ('email', 'email_aliases__email', 'first_name', 'last_name', 'slack_id')
     ordering = ('email',)
     
     fieldsets = (

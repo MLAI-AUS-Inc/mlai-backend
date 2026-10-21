@@ -32,14 +32,14 @@ def authenticate_account(request, email, password):
     """Authenticate without a cheap, account-enumerable failure path."""
 
     canonical_email = normalize_account_email(email)
-    candidate = User.objects.filter(email=canonical_email).first()
+    candidate = User.objects.resolve_email(canonical_email)
     if candidate is None or not candidate.has_usable_password():
         check_password(password, _DUMMY_PASSWORD_HASH)
         return None
     if not candidate.is_active:
         candidate.check_password(password)
         return None
-    return authenticate(request=request, email=canonical_email, password=password)
+    return authenticate(request=request, email=candidate.email, password=password)
 
 
 def _hash_secret(secret):
@@ -63,8 +63,8 @@ def issue_password_reset(email, *, requested_ip_hash=''):
     # Always perform one password-hash verification so missing/ineligible users
     # do not take the conspicuously cheap path.
     check_password('invalid-request', _DUMMY_PASSWORD_HASH)
-    user = User.objects.filter(email=canonical_email, is_active=True).first()
-    if user is None or _is_placeholder_email(user.email):
+    user = User.objects.resolve_email(canonical_email)
+    if user is None or not user.is_active or _is_placeholder_email(user.email):
         return False
 
     now = timezone.now()
