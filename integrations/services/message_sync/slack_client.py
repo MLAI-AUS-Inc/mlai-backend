@@ -1,5 +1,7 @@
 """Apply one app/workspace/method budget to public and owner-token Slack calls."""
 import time
+import hashlib
+from collections.abc import Mapping
 from django.conf import settings
 from slack_sdk.errors import SlackApiError
 
@@ -8,8 +10,30 @@ from .scheduler import BudgetDeferred
 from .request_priority import current_priority
 from . import telemetry
 
+POSTING_METHODS = frozenset({
+    "chat.postMessage", "chat.update", "chat.delete", "reactions.add", "reactions.remove",
+})
+
+
+def channel_budget_method(method, kwargs):
+    """Resolve the SDK's channel argument without using message text or tokens."""
+    if method not in POSTING_METHODS:
+        return None
+    for key in ("json", "data", "params"):
+        arguments = kwargs.get(key)
+        channel = arguments.get("channel") if isinstance(arguments, Mapping) else None
+        if isinstance(channel, str) and channel.strip():
+            channel = channel.strip()
+            key = f"{method}:{channel}"
+            # The persisted method column is bounded to 100 characters, while
+            # source IDs can independently be 100. Preserve separate gates.
+            return key if len(key) <= 100 else f"{method}:sha256:{hashlib.sha256(channel.encode()).hexdigest()}"
+    return None
+
 
 def provider_interval(method):
+    if method.partition(":")[0] in POSTING_METHODS and ":" in method:
+        return 1.0
     if method in {"conversations.history", "conversations.replies"}:
         # Restricted distribution is the safe default; the release manifest
         # must verify internal/Marketplace status before raising this budget.
@@ -35,12 +59,18 @@ def budgeted_client(client, *, workspace_id, app_id=None):
 
     def api_call(api_method, **kwargs):
         scope = dict(app_id=app_id, workspace_id=workspace_id, method=api_method)
+        channel_method = channel_budget_method(api_method, kwargs)
+        channel_scope = {**scope, "method": channel_method} if channel_method else None
         metric_scope = telemetry.scope_key(app_id, workspace_id, api_method) if api_method in telemetry.METHODS else None
         def record(counter, amount=1):
             if metric_scope:
                 telemetry.record(metric_scope, counter, amount)
         try:
             admit_request(**scope, interval_seconds=provider_interval(api_method), priority=current_priority())
+            if channel_scope:
+                # Retain the existing method-wide floor and add the channel
+                # allowance; token rotation cannot multiply either budget.
+                admit_request(**channel_scope, interval_seconds=1.0, priority=current_priority())
         except BudgetDeferred:
             record("deferred")
             raise
@@ -58,6 +88,8 @@ def budgeted_client(client, *, workspace_id, app_id=None):
                 except (TypeError, ValueError):
                     seconds = 60
                 record_cooldown(**scope, retry_after=seconds)
+                if channel_scope:
+                    record_cooldown(**channel_scope, retry_after=seconds)
                 raise BudgetDeferred(seconds) from exc
             record("failed")
             raise

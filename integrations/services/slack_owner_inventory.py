@@ -383,8 +383,9 @@ def collect_public_page(authority) -> None:
     )
 
     with transaction.atomic():
-        _, connection = _lock_slack_grant_api_authority(authority, required_scopes={"im:read"})
-        if not has_metadata_consent(connection, authority):
+        required = set() if getattr(settings, "SLACK_MEMBER_CHANNELS_ENABLED", False) else {"im:read"}
+        grant, connection = _lock_slack_grant_api_authority(authority, required_scopes=required)
+        if not public_inventory_allowed(grant, connection, authority):
             return
         state = state_for(connection, authority)
         if "channels:read" not in authority.scopes:
@@ -420,7 +421,7 @@ def collect_public_page(authority) -> None:
         raise ValueError("Slack public inventory pagination made no progress.")
     with transaction.atomic():
         grant, connection = _lock_slack_grant_api_authority(authority, required_scopes={"channels:read"})
-        if not has_metadata_consent(connection, authority):
+        if not public_inventory_allowed(grant, connection, authority):
             return
         state = state_for(connection, authority)
         if str(state.get("public_cursor") or "") != cursor:
@@ -439,6 +440,17 @@ def collect_public_page(authority) -> None:
             if all(value == "complete" for value in coverage.values()):
                 state["last_full_sweep_at"] = timezone.now().isoformat()
         _save_state(connection, state)
+
+
+def public_inventory_allowed(grant, connection, authority) -> bool:
+    """Keep existing metadata consent; add only the enabled public-source lane."""
+    if has_metadata_consent(connection, authority):
+        return True
+    if not getattr(settings, "SLACK_MEMBER_CHANNELS_ENABLED", False):
+        return False
+    from integrations.services.slack_chat_catalog import public_channels_enabled
+
+    return public_channels_enabled(grant, authority=authority)
 
 
 def source_read_targets(grant, authority, existing_targets, *, include_routed=False):

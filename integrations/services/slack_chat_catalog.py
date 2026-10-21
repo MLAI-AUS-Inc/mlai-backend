@@ -19,6 +19,7 @@ PRIVATE_CHANNEL_CONSENT = "slack-chat-v4-private-channels"
 ALL_HISTORY_CONSENT = "slack-chat-v5-all-available-history"
 PRIVATE_CHANNEL_CONSENTS = frozenset({PRIVATE_CHANNEL_CONSENT, ALL_HISTORY_CONSENT})
 PRIVATE_CHANNEL_SCOPES = {"groups:read", "groups:history"}
+PUBLIC_CHANNEL_SCOPES = frozenset({"channels:read", "channels:history", "chat:write"})
 OWNER_OPENED_KEY = "owner_opened_v1"
 
 
@@ -61,6 +62,39 @@ def private_channels_enabled(grant):
         grant.consent_version in PRIVATE_CHANNEL_CONSENTS
         and PRIVATE_CHANNEL_SCOPES.issubset(set(grant.connection.scopes or []))
     )
+
+
+def public_channels_enabled(grant, *, authority=None):
+    """Use existing mirror consent and exact OAuth authority for public sources.
+
+    This is an eligibility snapshot, not a lease. Every provider call must
+    revalidate the captured authority under the existing user consent lock.
+    No token refresh or Slack request is performed by this predicate.
+    """
+    from integrations.models import SlackDmMirrorGrant
+    from integrations.services.slack_dm_mirror import (
+        SlackDmMirrorError, _capture_slack_grant_api_authority,
+        _slack_grant_api_authority_is_current,
+    )
+    from integrations.services.slack_oauth_authority import current_slack_oauth_generation
+
+    try:
+        scopes = grant.connection.scopes
+        if (
+            grant.consent_version not in PRIVATE_CHANNEL_CONSENTS | {SlackDmMirrorGrant.CONSENT_VERSION}
+            or grant.consented_at is None
+            or not grant.user.is_active
+            or not isinstance(scopes, (list, tuple, set, frozenset))
+            or not all(isinstance(scope, str) for scope in scopes)
+            or not PUBLIC_CHANNEL_SCOPES.issubset({scope.strip() for scope in scopes})
+        ):
+            return False
+        authority = authority or _capture_slack_grant_api_authority(grant, refresh_token=False)
+        return current_slack_oauth_generation(grant.user_id) == authority.oauth_generation and _slack_grant_api_authority_is_current(
+            grant, grant.connection, authority, required_scopes=PUBLIC_CHANNEL_SCOPES,
+        )
+    except (AttributeError, TypeError, ValueError, SlackDmMirrorError):
+        return False
 
 
 def catalog_conversations(conversations):

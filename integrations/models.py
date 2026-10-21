@@ -19,6 +19,23 @@ class CommunityBridgeMirrorDecision(models.TextChoices):
     EXCLUDE = "exclude", "Never mirror"
 
 
+class CommunityBridgeChannelAudience(models.TextChoices):
+    COMMUNITY = "community", "Community"
+    MEMBERS = "members", "Slack channel members"
+
+
+class SlackChannelMembershipState(models.TextChoices):
+    JOINED = "joined", "Joined"
+    LEFT = "left", "Left"
+
+
+class SlackChannelMembershipSource(models.TextChoices):
+    EVENT = "event", "Slack event"
+    INVENTORY = "inventory", "Owner inventory"
+    MESSAGE = "message", "Slack message"
+    PROBE = "probe", "Membership probe"
+
+
 class CommunityBridgeChannelSource(models.TextChoices):
     MANUAL = "", "Manual or manifest"
     EVENT = "event", "Slack channel event"
@@ -239,6 +256,37 @@ class SlackDmMirrorGrant(models.Model):
 
     def __str__(self):
         return f"{self.slack_workspace_id}:{self.slack_user_id} ({self.status})"
+
+
+class SlackChannelMembership(models.Model):
+    """Last observed public-channel membership of one consenting Slack grant."""
+
+    grant = models.ForeignKey(
+        SlackDmMirrorGrant,
+        on_delete=models.CASCADE,
+        related_name="public_channel_memberships",
+    )
+    slack_workspace_id = models.CharField(max_length=100)
+    slack_channel_id = models.CharField(max_length=100)
+    state = models.CharField(max_length=10, choices=SlackChannelMembershipState.choices)
+    source = models.CharField(max_length=16, choices=SlackChannelMembershipSource.choices)
+    observed_at = models.DateTimeField()
+    left_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        db_table = "slack_channel_membership"
+        constraints = [
+            models.UniqueConstraint(
+                fields=("grant", "slack_channel_id"),
+                name="slack_chan_grant_channel_uq",
+            ),
+        ]
+        indexes = [
+            models.Index(
+                fields=("slack_workspace_id", "slack_channel_id", "state"),
+                name="slack_channel_ws_state_idx",
+            ),
+        ]
 
 
 class SlackOwnerConversationInventory(models.Model):
@@ -624,6 +672,33 @@ class CommunityBridgeChannel(models.Model):
     sync_deletes = models.BooleanField(default=True)
     sync_replies = models.BooleanField(default=True)
     pilot_settings = models.JSONField(default=dict, blank=True)
+    audience = models.CharField(
+        max_length=10,
+        choices=CommunityBridgeChannelAudience.choices,
+        default=CommunityBridgeChannelAudience.MEMBERS,
+        db_index=True,
+    )
+    audience_generation = models.UUIDField(null=True, blank=True)
+    audience_hash = models.CharField(
+        max_length=64,
+        blank=True,
+        default="",
+        validators=[RegexValidator(regex=r"^[0-9a-f]{64}$")],
+    )
+    audience_sync_pending = models.BooleanField(default=False, db_index=True)
+    reader_grant = models.ForeignKey(
+        SlackDmMirrorGrant,
+        on_delete=models.SET_NULL,
+        related_name="public_channel_reader_roles",
+        null=True,
+        blank=True,
+    )
+    sync_paused_reason = models.CharField(
+        max_length=20,
+        choices=[("", "Not paused"), ("no_reader", "No consenting reader")],
+        blank=True,
+        default="",
+    )
     # Lifecycle mirroring: the row is the source of truth for whether a Slack
     # channel is mirrored. `enabled` stays the delivery gate.
     mirror_decision = models.CharField(
@@ -640,7 +715,6 @@ class CommunityBridgeChannel(models.Model):
     slack_visibility = models.CharField(max_length=10, default="public")
     slack_archived = models.BooleanField(default=False)
     slack_deleted = models.BooleanField(default=False)
-    slack_bot_member = models.BooleanField(default=False)
     slack_topic = models.TextField(blank=True, default="")
     slack_purpose = models.TextField(blank=True, default="")
     slack_created_at = models.DateTimeField(null=True, blank=True)
@@ -696,24 +770,6 @@ class CommunityBridgeChannelRefresh(models.Model):
 
     class Meta:
         db_table = "community_bridge_channel_refresh"
-
-
-class CommunityBridgeLifecycleState(models.Model):
-    """Per-workspace auto-mirror boundary and conversations.list progress."""
-
-    slack_workspace_id = models.CharField(max_length=100, unique=True)
-    # Public channels created at or after this instant mirror automatically;
-    # older unlisted channels arrive as hold rows.
-    auto_mirror_since = models.DateTimeField()
-    reconcile_cursor = models.CharField(max_length=255, blank=True, default="")
-    pass_started_at = models.DateTimeField(null=True, blank=True)
-    last_full_pass_at = models.DateTimeField(null=True, blank=True)
-    lease_expires_at = models.DateTimeField(null=True, blank=True)
-    last_error_code = models.CharField(max_length=100, blank=True, default="")
-    updated_at = models.DateTimeField(auto_now=True)
-
-    class Meta:
-        db_table = "community_bridge_lifecycle_state"
 
 
 class CommunityBridgeIdentityLink(models.Model):

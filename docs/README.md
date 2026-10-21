@@ -99,6 +99,7 @@ state when using those operational documents.
 
 - [`mlai-chat-bridge-contract.md`](mlai-chat-bridge-contract.md)
 - [Slack member migration: Phase 0 operations](slack-member-phase0-operations.md) — read-only coverage command and owner baseline checks
+- [Slack member migration: Phase 3 foundations](slack-member-phase3-operations.md) — disabled configuration, exact migration proposal and rollout gates
 - [Slack member-sync evidence](slack-member-sync-facts.md) — owner decisions, documented contracts and outstanding live observations
 - [`slack-unfinished-conversation-recovery.md`](slack-unfinished-conversation-recovery.md) — reviewed recovery of existing unfinished private mirrors
 - [`mlai-chat-bridge-staging.md`](mlai-chat-bridge-staging.md)

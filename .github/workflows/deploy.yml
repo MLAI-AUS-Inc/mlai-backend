@@ -500,7 +500,12 @@ jobs:
           roo.tests_api.FirstChannelPostAwardViewTests \
           integrations.tests_slack_emoji \
           integrations.tests_community_bridge \
-          integrations.tests_community_bridge_channel_lifecycle \
+          integrations.tests_community_bridge_member_channels_unit \
+          integrations.tests_community_bridge_member_channels \
+          integrations.tests_slack_member_channels_migration \
+          integrations.tests_slack_member_access_unit \
+          integrations.tests_slack_member_access \
+          integrations.tests_message_sync_member_budgets \
           integrations.tests_coworking_handoff \
           integrations.tests_public_bridge_consent \
           integrations.tests_community_bridge_avatar_backfill \
@@ -694,7 +699,12 @@ jobs:
           integrations.tests_slack_private_target_boundaries \
           integrations.tests_slack_import_readiness \
           integrations.tests_message_sync_public_repair \
-          integrations.tests_community_bridge_channel_lifecycle \
+          integrations.tests_community_bridge_member_channels_unit \
+          integrations.tests_community_bridge_member_channels \
+          integrations.tests_slack_member_channels_migration \
+          integrations.tests_slack_member_access_unit \
+          integrations.tests_slack_member_access \
+          integrations.tests_message_sync_member_budgets \
           --verbosity 2
 
     - name: Run meeting-room PostgreSQL tests
@@ -990,7 +1000,10 @@ jobs:
         COMMUNITY_BRIDGE_DEPENDENCY_VERDICTS_ENABLED: ${{ vars.COMMUNITY_BRIDGE_DEPENDENCY_VERDICTS_ENABLED || 'false' }}
         MESSAGE_SYNC_ENABLED: ${{ vars.MESSAGE_SYNC_ENABLED || 'false' }}
         MESSAGE_SYNC_RECENT_HISTORY_ENABLED: ${{ vars.MESSAGE_SYNC_RECENT_HISTORY_ENABLED || 'false' }}
-        COMMUNITY_BRIDGE_CHANNEL_LIFECYCLE_ENABLED: ${{ vars.COMMUNITY_BRIDGE_CHANNEL_LIFECYCLE_ENABLED || 'false' }}
+        SLACK_MEMBER_CHANNELS_ENABLED: ${{ vars.SLACK_MEMBER_CHANNELS_ENABLED || 'false' }}
+        SLACK_COMMUNITY_SEND_AS_MEMBER: ${{ vars.SLACK_COMMUNITY_SEND_AS_MEMBER || 'false' }}
+        SLACK_COMMUNITY_SOURCE: ${{ vars.SLACK_COMMUNITY_SOURCE || 'bot' }}
+        MESSAGE_SYNC_EVENT_ROUTING: ${{ vars.MESSAGE_SYNC_EVENT_ROUTING || 'false' }}
         MESSAGE_SYNC_QUIET_HEAD_BACKOFF_ENABLED: ${{ vars.MESSAGE_SYNC_QUIET_HEAD_BACKOFF_ENABLED || 'false' }}
         COMMUNITY_CHAT_MEMBER_ACCOUNTS_ENABLED: ${{ vars.COMMUNITY_CHAT_MEMBER_ACCOUNTS_ENABLED || 'false' }}
         COMMUNITY_CHAT_INBOX_ERASURE_ENABLED: ${{ vars.COMMUNITY_CHAT_INBOX_ERASURE_ENABLED || 'false' }}
