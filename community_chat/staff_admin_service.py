@@ -1,9 +1,10 @@
 """Read-only database projections. Every response uses an explicit field allowlist."""
 from datetime import timedelta
 
+from django.conf import settings
 from django.contrib.auth import get_user_model
 from django.core.paginator import Paginator
-from django.db.models import Count, Exists, OuterRef, Q, Subquery
+from django.db.models import BigIntegerField, Case, Count, Exists, F, OuterRef, Q, Subquery, When
 from django.utils import timezone
 
 from integrations.models import ExternalServiceConnection
@@ -114,7 +115,12 @@ def roo(params):
     if status and tab not in ('requests', 'redemptions'):
         raise MentoringError('invalid_filter', 'Status applies to requests or redemptions.', 400)
     if tab == 'balances':
-        query = PointsAccount.objects.select_related('user').order_by('-balance_microroo', 'pk')
+        query = PointsAccount.objects.select_related('user').annotate(
+            _effective_balance_microroo=Case(
+                When(microroo_initialized=True, then=F('balance_microroo')),
+                default=F('balance') * 1_000_000, output_field=BigIntegerField(),
+            ),
+        ).order_by('-_effective_balance_microroo', 'pk')
         serialize = lambda row: {'user': person(row.user), 'balance': row.balance,
                                 'balance_microroo': row.balance_microroo, 'microroo_initialized': row.microroo_initialized}
     elif tab == 'ledger':
@@ -189,7 +195,7 @@ def overview(sections):
             attention.append({'section': section, 'label': label, 'count': count})
     if 'members' in sections:
         counts['members'] = get_user_model().objects.count()
-    if 'mentoring' in sections:
+    if 'mentoring' in sections and getattr(settings, 'MENTOR_BOOKING_ENABLED', False):
         counts['active_mentors'] = MentorProfile.objects.filter(is_active=True).count()
         add('mentoring', 'mentoring_problems', 'Mentoring sessions needing attention', mentoring_attention())
         add('mentoring', 'mentor_applications', 'Waiting mentor applications', _applications_query().filter(rejected_at__isnull=True).count())
@@ -198,5 +204,6 @@ def overview(sections):
         add('roo', 'pending_redemptions', 'Reward redemptions to fulfil', RewardRedemption.objects.filter(status__in=('requested', 'approved')).count())
     if 'startups' in sections:
         add('startups', 'startups_missing_update', 'Startups without a ready update this month', startup_query({'updated': 'false'}).count())
-    badges = {section: sum(item['count'] for item in attention if item['section'] == section) for section in sections}
+    badges = {section: sum(item['count'] for item in attention if item['section'] == section) for section in sections
+              if section != 'mentoring' or getattr(settings, 'MENTOR_BOOKING_ENABLED', False)}
     return {'counts': counts, 'attention': attention, 'badges': badges, 'as_of': timezone.now().isoformat()}

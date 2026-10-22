@@ -70,7 +70,8 @@ account directory, without relay-only members or live presence. Active means
 is_active. Emails remain masked on detail too; no reveal flow is introduced.
 
 Roo uses PointsAccount, Ledger, PointsRequest, RewardRedemption and catalog
-names. Microroo takes precedence when initialized; legacy ledger deltas remain
+names. Balances sort by initialized microroo or legacy balance converted to microroo
+before pagination, matching the client display. Microroo takes precedence when initialized; legacy ledger deltas remain
 supported. Requests have Slack identities, so rows identify request numbers.
 Approvals stay in Slack. No purchases, checkout URLs, acceptance details,
 request reasons, redemption notes or tokens are serialized.
@@ -84,7 +85,9 @@ or financial figures are read. The inspected Vibe Raising staff API uses these
 models, but exposes private update detail and a broader PointsAdmin policy; the
 pilot therefore uses a narrower projection.
 
-Overview queries only permitted sections. It counts each problematic mentoring
+Overview queries only permitted sections. Mentoring counts, attention entries
+and badges are omitted without querying mentoring when MENTOR_BOOKING_ENABLED
+is false. It counts each problematic mentoring
 session once, pending mentor applications, pending Roo requests, unfulfilled
 redemptions and startups lacking a ready update. Other sections are role-filtered
 coming-soon descriptions. Moderation stays at the private admin host; no relay

@@ -265,6 +265,7 @@ class ProjectionTests(TestCase):
         for tab, model, obj, keys in cases:
             with self.subTest(tab=tab), patch.object(model.objects, 'select_related') as related, patch.object(model.objects, 'order_by') as ordered:
                 related.return_value.order_by.return_value = [obj]
+                related.return_value.annotate.return_value.order_by.return_value = [obj]
                 ordered.return_value = [obj]
                 data = service.roo({'tab': tab})
                 self.assertEqual(set(data['results'][0]), keys)
@@ -306,6 +307,73 @@ class ProjectionTests(TestCase):
             self.assertEqual(set(data['counts']), {'pending_roo_requests', 'pending_redemptions'})
             users.assert_not_called(); mentors.objects.filter.assert_not_called()
             startups.assert_not_called(); problems.assert_not_called()
+
+    @override_settings(MENTOR_BOOKING_ENABLED=False)
+    def test_overview_skips_all_mentoring_queries_counts_attention_and_badges_when_disabled(self):
+        with patch.object(service, 'MentorProfile') as mentors, \
+             patch.object(service, 'MentorSession') as sessions, \
+             patch.object(service, 'mentoring_attention') as problems, \
+             patch.object(service, '_applications_query') as applications:
+            data = service.overview({'overview': 'view', 'mentoring': 'edit'})
+            self.assertEqual(data['counts'], {})
+            self.assertEqual(data['attention'], [])
+            self.assertNotIn('mentoring', data['badges'])
+            self.assertEqual(mentors.mock_calls, [])
+            self.assertEqual(sessions.mock_calls, [])
+            problems.assert_not_called()
+            applications.assert_not_called()
+
+    @override_settings(MENTOR_BOOKING_ENABLED=True)
+    def test_overview_includes_mentoring_counts_and_badges_when_enabled(self):
+        with patch.object(service, 'MentorProfile') as mentors, \
+             patch.object(service, 'mentoring_attention', return_value=2), \
+             patch.object(service, '_applications_query') as applications:
+            mentors.objects.filter.return_value.count.return_value = 3
+            applications.return_value.filter.return_value.count.return_value = 4
+            data = service.overview({'overview': 'view', 'mentoring': 'edit'})
+            self.assertEqual(data['counts'], {'active_mentors': 3, 'mentoring_problems': 2, 'mentor_applications': 4})
+            self.assertEqual(data['badges']['mentoring'], 6)
+            self.assertEqual([item['section'] for item in data['attention']], ['mentoring', 'mentoring'])
+
+    def test_roo_sorts_by_displayed_effective_balance_before_pagination(self):
+        from django.db.backends.sqlite3.base import DatabaseWrapper
+        connection = DatabaseWrapper({'ENGINE': 'django.db.backends.sqlite3', 'NAME': ':memory:', 'TIME_ZONE': None})
+        with patch.object(service, 'paginate', return_value={}) as paginate:
+            service.roo({'tab': 'balances', 'page_size': 1})
+        query = paginate.call_args.args[0]
+        self.assertEqual(query.query.order_by, ('-_effective_balance_microroo', 'pk'))
+        sql, params = query.query.get_compiler(connection=connection).as_sql()
+        self.assertIn('CASE WHEN', sql)
+        self.assertIn('microroo_initialized', sql)
+        self.assertIn('balance_microroo', sql)
+        self.assertIn(1_000_000, params)
+        # Evaluate the actual ORM expression against mixed legacy and initialized
+        # records, without executing SQL or connecting to a database.
+        from django.db.models import Case, Value
+        from django.db.models.expressions import Col, CombinedExpression
+        expression = query.query.annotations['_effective_balance_microroo']
+        condition = expression.cases[0].condition.children[0]
+        self.assertEqual(condition.lhs.target.name, 'microroo_initialized')
+        self.assertIs(condition.rhs, True)
+        def evaluate(node, row):
+            if isinstance(node, Case):
+                return evaluate(node.cases[0].result if row.microroo_initialized else node.default, row)
+            if isinstance(node, Col):
+                return getattr(row, node.target.name)
+            if isinstance(node, Value):
+                return node.value
+            self.assertIsInstance(node, CombinedExpression)
+            self.assertEqual(node.connector, '*')
+            return evaluate(node.lhs, row) * evaluate(node.rhs, row)
+        rows = [PointsAccount(pk=1, balance=500, balance_microroo=0, microroo_initialized=False),
+                PointsAccount(pk=2, balance=999, balance_microroo=2_500_000, microroo_initialized=True),
+                PointsAccount(pk=3, balance=0, balance_microroo=3_000_000, microroo_initialized=True),
+                PointsAccount(pk=4, balance=-1, balance_microroo=0, microroo_initialized=False)]
+        ordered = sorted(rows, key=lambda row: (-evaluate(expression, row), row.pk))
+        self.assertEqual([row.pk for row in ordered], [1, 3, 2, 4])
+        page = service.paginate(ordered, {'page_size': 1}, lambda row: row.pk)
+        self.assertEqual(page['results'], [1])
+        self.assertTrue(page['has_next'])
 
     def test_missing_member_is_404(self):
         with patch.object(service, 'with_roles') as query:
