@@ -307,13 +307,19 @@ class HeadRepairPageIntegrationTests(SimpleTestCase):
         with patch.object(history.time, "time", return_value=self.now), patch.object(history.transaction, "atomic", side_effect=nullcontext), patch.object(
             history, "locked_job", return_value=(state, None)
         ), patch.object(history.CommunityBridgeChannel.objects, "select_for_update") as channel_lock, patch.object(
+            history.SlackDmMirrorConversation.objects, "filter"
+        ) as private_owner, patch.object(
             history.SlackBridgeClient, "get_client", return_value=client
         ), patch.object(history, "finish_job") as finish:
             channel_lock.return_value.get.return_value = channel
+            private_owner.return_value.exists.return_value = False
             history.public_page(lease, state)
             self.assertEqual(state.head_cursor["completed_upper"], f"{self.now}.999999")
             self.assertEqual(finish.call_args.kwargs["delay_seconds"], 120)
             history.public_page(lease, state)
+        private_owner.assert_called_with(slack_workspace_id="T1", slack_conversation_id="C1")
+        self.assertEqual(private_owner.call_count, 2)
+        self.assertEqual(private_owner.return_value.exists.call_count, 2)
         self.assertEqual(client.conversations_history.call_args.kwargs["oldest"], f"{self.now - 300}.000000")
 
     def test_private_head_keeps_authority_fences_and_incremental_watermark(self):

@@ -170,6 +170,7 @@ class RecentPublicWorkerTests(SimpleTestCase):
                 ('integrations.services.message_sync.history.transaction.atomic', {'side_effect': nullcontext}),
                 ('integrations.services.message_sync.history.locked_job', {'return_value': (state, Mock())}),
                 ('integrations.services.message_sync.history.CommunityBridgeChannel.objects.select_for_update', {}),
+                ('integrations.services.message_sync.history.SlackDmMirrorConversation.objects.filter', {}),
                 ('integrations.services.message_sync.history.SlackBridgeClient.get_client', {'return_value': client}),
                 ('integrations.services.message_sync.history.ingest_slack_event', {}),
                 ('integrations.services.message_sync.public_repair.repair_observed_message', {}),
@@ -180,10 +181,16 @@ class RecentPublicWorkerTests(SimpleTestCase):
                 mock = stack.enter_context(patch(target, **options))
                 if target.endswith('select_for_update'):
                     mock.return_value.get.return_value = channel
+                elif target.endswith('SlackDmMirrorConversation.objects.filter'):
+                    private_owner = mock
+                    private_owner.return_value.exists.return_value = False
             for _ in responses:
                 history.public_page(lease, state)
             # The idle tick must preserve progress and perform no provider I/O.
             history.public_page(lease, state)
+        private_owner.assert_called_with(slack_workspace_id='T1', slack_conversation_id='C1')
+        self.assertEqual(private_owner.call_count, len(responses))
+        self.assertEqual(private_owner.return_value.exists.call_count, len(responses))
         return lease, client, state, calls
 
     def test_preload_stops_at_fifty_with_cursor_and_incomplete_archive_proof(self):
