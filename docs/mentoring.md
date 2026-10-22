@@ -63,6 +63,27 @@ Everything returns 404 `mentor_booking_disabled` while the flag is off.
 | POST `mentor/sessions/<uuid>/cancel/` | Founder or mentor, only before the start time (refund if charged); 409 `session_started` once it has started |
 | POST `mentor/sessions/<uuid>/complete/` | Mentor marks done, only once the session has ended (payout) |
 
+### Staff-only Mentoring admin
+
+Under `mentor/admin/`, same flag, authentication and throttles. Allowed callers are a
+Chat owner or admin on a verified device, or an active Django staff or superuser
+account; anyone else gets 403 `mentoring_admin_required`. `mentor/admin/access/` is
+open to every signed-in member and returns `{"is_admin": bool}` so the client knows
+whether to show the tab.
+
+| Method and path | Purpose |
+| --- | --- |
+| GET `access/` | `{is_admin}` for the caller |
+| GET `members/?q=` | Active members by name or email (2+ characters, 10 results) |
+| GET, POST `invites/` | List (`?status=pending\|used\|expired\|revoked`) or create `{user_id}`; the create response carries `link` once, only its hash is stored |
+| POST `invites/<id>/revoke/` | Revoke an unused invite (records `revoked_by`); 409 `invite_used` if used |
+| GET `applications/?state=pending\|rejected` | Inactive profiles that came from a used invite and were never approved or paused |
+| GET `applications/<profile_id>/` | The full application |
+| POST `applications/<profile_id>/approve/`, `.../reject/` | Approve sets `is_active` and `approved_at`; reject keeps it inactive and sets `rejected_at`. Both record `reviewed_by`. 409 `not_an_application` otherwise |
+| GET `mentors/` | Active or paused mentors with price, length, location and sessions count |
+| POST `mentors/<profile_id>/pause/`, `.../unpause/` | Toggle `is_active` (sets or clears `paused_at`); existing sessions are untouched |
+| GET `sessions/?status=&problem=` | All sessions, newest first (200 max). `problem` is `meeting_failed`, `stale_pending` or `notification_failed`; each row has a `flags` list |
+
 A missing or non-integer `expected_price` returns 400 `expected_price_required`; a
 mismatch with the mentor's current price returns 400 `price_changed`. A boolean or
 non-integer `mentor_id` returns 400 `invalid_mentor_id`. When the flag is off the

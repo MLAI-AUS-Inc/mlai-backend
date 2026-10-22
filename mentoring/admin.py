@@ -1,15 +1,11 @@
 from datetime import timedelta
 
-from django.conf import settings
 from django.contrib import admin, messages
 from django.utils import timezone
 
-from .models import INVITE_TTL_DAYS, MentorAvailabilityRule, MentorInvite, MentorProfile, MentorSession
-
-
-def invite_link(token):
-    base = str(getattr(settings, 'COMMUNITY_CHAT_FRONTEND_URL', '')).rstrip('/')
-    return f'{base}/mentoring/apply?invite={token}'
+from .models import (  # noqa: F401  (invite_link is re-exported for callers of this module)
+    INVITE_TTL_DAYS, MentorAvailabilityRule, MentorInvite, MentorProfile, MentorSession, invite_link,
+)
 
 
 class AvailabilityInline(admin.TabularInline):
@@ -75,7 +71,9 @@ class MentorInviteAdmin(admin.ModelAdmin):
 
     @admin.action(description='Revoke selected unused invites')
     def revoke_invites(self, request, queryset):
-        count = queryset.filter(used_at__isnull=True, revoked_at__isnull=True).update(revoked_at=timezone.now())
+        count = queryset.filter(used_at__isnull=True, revoked_at__isnull=True).update(
+            revoked_at=timezone.now(), revoked_by=request.user,
+        )
         self.message_user(request, f'{count} invite(s) revoked.')
 
 

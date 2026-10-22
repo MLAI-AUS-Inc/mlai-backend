@@ -761,7 +761,10 @@ class MentoringService:
                 profile = MentorProfile(user=user)
             for field, value in clean.items():
                 setattr(profile, field, value)
-            profile.is_active = False  # staff approve by ticking is_active in admin
+            profile.is_active = False  # staff approve in the Mentoring admin screen
+            # A new application starts a fresh review.
+            profile.approved_at = profile.rejected_at = profile.paused_at = None
+            profile.reviewed_by = None
             profile.save()
             profile.availability_rules.all().delete()
             MentorAvailabilityRule.objects.bulk_create([

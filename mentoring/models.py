@@ -64,6 +64,15 @@ class MentorProfile(models.Model):
             'four questions.'
         ),
     )
+    # Staff review trail, written by the Mentoring admin screen. An application is
+    # pending while none of approved_at, rejected_at and paused_at is set.
+    approved_at = models.DateTimeField(null=True, blank=True, editable=False)
+    rejected_at = models.DateTimeField(null=True, blank=True, editable=False)
+    paused_at = models.DateTimeField(null=True, blank=True, editable=False)
+    reviewed_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL, null=True, blank=True,
+        on_delete=models.SET_NULL, related_name='+', editable=False,
+    )
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
@@ -75,6 +84,11 @@ class MentorProfile(models.Model):
 
 
 INVITE_TTL_DAYS = 14
+
+
+def invite_link(token):
+    base = str(getattr(settings, 'COMMUNITY_CHAT_FRONTEND_URL', '')).rstrip('/')
+    return f'{base}/mentoring/apply?invite={token}'
 
 
 def hash_invite_token(token):
@@ -100,6 +114,10 @@ class MentorInvite(models.Model):
     expires_at = models.DateTimeField()
     used_at = models.DateTimeField(null=True, blank=True)
     revoked_at = models.DateTimeField(null=True, blank=True)
+    revoked_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL, null=True, blank=True,
+        on_delete=models.SET_NULL, related_name='+', editable=False,
+    )
 
     class Meta:
         ordering = ('-created_at', '-pk')

@@ -37,7 +37,9 @@ class MigrationTests(unittest.TestCase):
         self.assertIn(('AddField', 'mentorsession', 'brief_answers'), ops)
         self.assertIn(('AddField', 'mentorsession', 'meeting_claimed_at'), ops)
         self.assertIn(('CreateModel', 'MentorInvite', 'MentorInvite'), ops)
-        self.assertEqual(len(mod.Migration.operations), 4)
+        for name in ('approved_at', 'rejected_at', 'paused_at', 'reviewed_by'):
+            self.assertIn(('AddField', 'mentorprofile', name), ops)
+        self.assertEqual(len(mod.Migration.operations), 8)
 
     def test_0001_still_has_none_of_the_followup_schema(self):
         text = (Path(__file__).resolve().parents[1] / 'migrations' / '0001_initial.py').read_text()
@@ -137,6 +139,18 @@ class InviteLifecycleTests(InviteFixture):
         self.assertEqual(self.invite.used_at, NOW)
         self.rules.objects.bulk_create.assert_called_once()
 
+    def test_resubmitting_starts_a_fresh_review(self):
+        self.profile.rejected_at = NOW
+        self.profile.approved_at = NOW
+        self.profile.paused_at = NOW
+        self.profile.reviewed_by = object()
+        self.profiles.objects.select_for_update.return_value.filter.return_value.first.return_value = self.profile
+        MentoringService.submit_application(self.user, form())
+        self.assertIsNone(self.profile.rejected_at)
+        self.assertIsNone(self.profile.approved_at)
+        self.assertIsNone(self.profile.paused_at)
+        self.assertIsNone(self.profile.reviewed_by)
+
     def test_price_defaults_to_40(self):
         body = form()
         del body['price_roo']
@@ -191,7 +205,7 @@ class AdminTests(unittest.TestCase):
         self.assertTrue(link.endswith('/mentoring/apply?invite=abc'))
 
     def settings_patch(self):
-        return patch.object(mentoring_admin.settings, 'COMMUNITY_CHAT_FRONTEND_URL', 'https://chat.example/', create=True)
+        return patch.object(service.settings, 'COMMUNITY_CHAT_FRONTEND_URL', 'https://chat.example/', create=True)
 
 
 class BriefQuestionTests(unittest.TestCase):

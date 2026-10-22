@@ -28,6 +28,26 @@ class Migration(migrations.Migration):
             name='meeting_claimed_at',
             field=models.DateTimeField(blank=True, null=True),
         ),
+        migrations.AddField(
+            model_name='mentorprofile',
+            name='approved_at',
+            field=models.DateTimeField(blank=True, editable=False, null=True),
+        ),
+        migrations.AddField(
+            model_name='mentorprofile',
+            name='rejected_at',
+            field=models.DateTimeField(blank=True, editable=False, null=True),
+        ),
+        migrations.AddField(
+            model_name='mentorprofile',
+            name='paused_at',
+            field=models.DateTimeField(blank=True, editable=False, null=True),
+        ),
+        migrations.AddField(
+            model_name='mentorprofile',
+            name='reviewed_by',
+            field=models.ForeignKey(blank=True, editable=False, null=True, on_delete=django.db.models.deletion.SET_NULL, related_name='+', to=settings.AUTH_USER_MODEL),
+        ),
         migrations.CreateModel(
             name='MentorInvite',
             fields=[
@@ -37,6 +57,7 @@ class Migration(migrations.Migration):
                 ('expires_at', models.DateTimeField()),
                 ('used_at', models.DateTimeField(blank=True, null=True)),
                 ('revoked_at', models.DateTimeField(blank=True, null=True)),
+                ('revoked_by', models.ForeignKey(blank=True, editable=False, null=True, on_delete=django.db.models.deletion.SET_NULL, related_name='+', to=settings.AUTH_USER_MODEL)),
                 ('created_by', models.ForeignKey(blank=True, editable=False, null=True, on_delete=django.db.models.deletion.SET_NULL, related_name='+', to=settings.AUTH_USER_MODEL)),
                 ('user', models.ForeignKey(on_delete=django.db.models.deletion.CASCADE, related_name='mentor_invites', to=settings.AUTH_USER_MODEL)),
             ],

@@ -13,10 +13,12 @@ from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
+from mentoring.admin_service import MentoringAdminService
 from mentoring.models import MentorSession
 from mentoring.service import MentoringError, MentoringService, serialize_session
 
 from .authentication import CommunityChatAccountAuthentication
+from .permissions import account_chat_role, is_chat_admin
 from .throttles import CommunityChatScopedThrottle
 
 
@@ -157,3 +159,101 @@ class MentorSessionCompleteView(MentorSessionActionView):
 
 class MentorSessionMeetingRetryView(MentorSessionActionView):
     action = 'retry_meeting'
+
+
+# ----------------------------------------------------------- staff-only admin
+
+def is_mentoring_admin(request):
+    """Staff by the rules the backend already uses: a Chat owner or admin on this
+    verified device, or an active Django staff or superuser account."""
+    user = request.user
+    if not getattr(user, 'is_authenticated', False) or not getattr(user, 'is_active', False):
+        return False
+    if getattr(user, 'is_staff', False) or getattr(user, 'is_superuser', False):
+        return True
+    role = account_chat_role(
+        user,
+        getattr(request, 'community_chat_public_key', None),
+        getattr(request, 'community_chat_installation_id', None),
+    )
+    return is_chat_admin(role)
+
+
+class MentoringAdminView(MentoringBaseView):
+    """Every method needs staff; anyone else gets 403 after the flag and auth checks."""
+
+    def initial(self, request, *args, **kwargs):
+        super().initial(request, *args, **kwargs)
+        if not is_mentoring_admin(request):
+            raise MentoringError('mentoring_admin_required', 'Mentoring admin is for MLAI staff.', 403)
+
+
+class MentoringAdminAccessView(MentoringBaseView):
+    """Tells the client whether to show the Mentoring admin tab. Never an error for members."""
+
+    def get(self, request):
+        return Response({'is_admin': is_mentoring_admin(request)})
+
+
+class MentoringAdminMembersView(MentoringAdminView):
+    def get(self, request):
+        return Response({'members': MentoringAdminService.search_members(request.query_params.get('q', ''))})
+
+
+class MentoringAdminInvitesView(MentoringAdminView):
+    def get(self, request):
+        status = request.query_params.get('status') or None
+        return Response({'invites': MentoringAdminService.list_invites(status)})
+
+    def post(self, request):
+        return Response(MentoringAdminService.create_invite(request.user, _body(request).get('user_id')), status=201)
+
+
+class MentoringAdminInviteRevokeView(MentoringAdminView):
+    def post(self, request, invite_id):
+        return Response(MentoringAdminService.revoke_invite(request.user, invite_id))
+
+
+class MentoringAdminApplicationsView(MentoringAdminView):
+    def get(self, request):
+        state = request.query_params.get('state') or None
+        return Response({'applications': MentoringAdminService.list_applications(state)})
+
+
+class MentoringAdminApplicationView(MentoringAdminView):
+    def get(self, request, profile_id):
+        return Response(MentoringAdminService.get_application(profile_id))
+
+
+class MentoringAdminApplicationApproveView(MentoringAdminView):
+    def post(self, request, profile_id):
+        return Response(MentoringAdminService.approve_application(request.user, profile_id))
+
+
+class MentoringAdminApplicationRejectView(MentoringAdminView):
+    def post(self, request, profile_id):
+        return Response(MentoringAdminService.reject_application(request.user, profile_id))
+
+
+class MentoringAdminMentorsView(MentoringAdminView):
+    def get(self, request):
+        return Response({'mentors': MentoringAdminService.list_mentors()})
+
+
+class MentoringAdminMentorPauseView(MentoringAdminView):
+    paused = True
+
+    def post(self, request, profile_id):
+        return Response(MentoringAdminService.set_paused(request.user, profile_id, self.paused))
+
+
+class MentoringAdminMentorUnpauseView(MentoringAdminMentorPauseView):
+    paused = False
+
+
+class MentoringAdminSessionsView(MentoringAdminView):
+    def get(self, request):
+        return Response({'sessions': MentoringAdminService.list_sessions(
+            request.query_params.get('status') or None,
+            request.query_params.get('problem') or None,
+        )})
