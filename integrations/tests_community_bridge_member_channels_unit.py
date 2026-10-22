@@ -102,6 +102,42 @@ class MemberChannelStateTests(SimpleTestCase):
                     channels.queue_refresh(workspace, channel, reason="event")
 
 
+@override_settings(MESSAGE_SYNC_SLACK_BOT_WORKSPACE_ID=WORKSPACE)
+class MemberChannelScopeTests(SimpleTestCase):
+    def test_empty_cohort_still_requires_exact_configured_workspace_and_identity(self):
+        with override_settings(SLACK_MEMBER_CHANNEL_ALLOWED_IDS=""):
+            self.assertTrue(channels.member_channel_in_scope(WORKSPACE, CHANNEL))
+            self.assertFalse(channels.member_channel_in_scope("TOTHER", CHANNEL))
+            self.assertFalse(channels.member_channel_in_scope(WORKSPACE, "DPRIVATE"))
+
+    def test_canary_cohort_does_not_admit_other_public_channels(self):
+        with override_settings(SLACK_MEMBER_CHANNEL_ALLOWED_IDS="C0CAPNW3QLT, CSECOND"):
+            self.assertTrue(channels.member_channel_in_scope(WORKSPACE, "C0CAPNW3QLT"))
+            self.assertTrue(channels.member_channel_in_scope(WORKSPACE, "CSECOND"))
+            self.assertFalse(channels.member_channel_in_scope(WORKSPACE, CHANNEL))
+
+    def test_malformed_or_unbounded_explicit_cohort_denies_expansion(self):
+        for cohort in [None, [], " ", ",", CHANNEL + ",", "DPRIVATE", CHANNEL + ",invalid",
+                       CHANNEL + "\n", CHANNEL + "\r", CHANNEL + "\x00", CHANNEL + "\u2028",
+                       ",".join([CHANNEL] * 1001), "C" * 25001]:
+            with self.subTest(cohort_type=type(cohort).__name__), override_settings(
+                SLACK_MEMBER_CHANNEL_ALLOWED_IDS=cohort,
+            ):
+                self.assertFalse(channels.member_channel_in_scope(WORKSPACE, CHANNEL))
+
+    def test_deploy_validation_rejects_malformed_cohort_before_host_writes(self):
+        from scripts.validate_message_sync_deploy_config import validate
+
+        for cohort in [None, " ", ",", "DPRIVATE", CHANNEL + ",", CHANNEL + "\n", CHANNEL + "\u2028",
+                       ",".join([CHANNEL] * 1001)]:
+            with self.subTest(cohort_type=type(cohort).__name__):
+                with self.assertRaisesMessage(ValueError, "SLACK_MEMBER_CHANNEL_ALLOWED_IDS"):
+                    validate({"SLACK_MEMBER_CHANNEL_ALLOWED_IDS": cohort})
+        for cohort in ["", CHANNEL, CHANNEL + ", C0CAPNW3QLT"]:
+            with self.subTest(cohort=cohort):
+                validate({"SLACK_MEMBER_CHANNEL_ALLOWED_IDS": cohort})
+
+
 class InactiveLifecycleIngressTests(SimpleTestCase):
     def test_lifecycle_events_never_enter_message_normalization_or_receipts(self):
         channel = {"id": CHANNEL, "name": "synthetic-channel-" + "x" * 150}

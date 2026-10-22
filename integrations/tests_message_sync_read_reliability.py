@@ -264,6 +264,8 @@ class PublicReadActivityTests(SimpleTestCase):
             inbox.transaction, "atomic", side_effect=nullcontext
         ), patch.object(inbox.BridgeSyncInbox.objects, "select_for_update") as receipt, patch.object(
             inbox, "expand_authorization_page", return_value=(payload, True)
+        ), patch("integrations.services.message_sync.member_callback_authority.callback_user_fence",
+                 side_effect=lambda _: (order.append("users") or nullcontext())
         ), patch.object(read_activity, "record_public_event", side_effect=lambda _: order.append("activity")), patch(
             "integrations.services.slack_dm_mirror.ingest_slack_dm_event", side_effect=lambda _: order.append("private")
         ), patch("integrations.services.community_bridge.store.ingest_slack_event",
@@ -272,7 +274,7 @@ class PublicReadActivityTests(SimpleTestCase):
         ):
             receipt.return_value.filter.return_value.first.return_value = row
             self.assertEqual(inbox.process_inbox_once(), 1)
-        self.assertEqual(order, ["activity", "hint", "private", "public"])
+        self.assertEqual(order, ["users", "hint", "activity", "private", "public"])
         self.assertEqual(row.encrypted_payload, "")
 
     def test_verified_mapped_bot_event_records_only_timestamp_under_history_lock_order(self):

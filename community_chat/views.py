@@ -1999,6 +1999,11 @@ class ConfirmView(APIView):
                     )
                 )
                 schedule_enrollment_recovery(recovery_grants, device)
+                from integrations.services.community_bridge.member_channels import schedule_member_authority_change
+
+                # A new preferred device may also displace the previous eighth
+                # key. Wake both removal and later flagged addition after commit.
+                schedule_member_authority_change(locked_user.pk, reason="device_verified", reduction=True)
                 CommunityChatInviteAudit.objects.filter(
                     device=device,
                     confirmed_at__isnull=True,

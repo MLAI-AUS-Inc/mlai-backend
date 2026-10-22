@@ -1,4 +1,7 @@
 from django.contrib import admin
+from django.core.exceptions import ValidationError
+from django.db import transaction
+from community_chat.admin_authority import MemberAudienceAuthorityAdminMixin
 from .models import (
     CommunityBridgeChannel,
     CommunityBridgeMirrorDecision,
@@ -24,11 +27,28 @@ from .models import (
 
 
 @admin.register(SlackDmMirrorGrant)
-class SlackDmMirrorGrantAdmin(admin.ModelAdmin):
+class SlackDmMirrorGrantAdmin(MemberAudienceAuthorityAdminMixin, admin.ModelAdmin):
     list_display = ("user", "slack_workspace_id", "slack_user_id", "status", "last_synced_at")
     search_fields = ("user__email", "slack_workspace_id", "slack_user_id")
     list_filter = ("status", "consent_version")
-    readonly_fields = ("consented_at", "created_at", "updated_at")
+    readonly_fields = (
+        "user", "connection", "slack_workspace_id", "slack_user_id", "status",
+        "consent_version", "history_days", "consented_at", "paused_at", "revoked_at",
+        "created_at", "updated_at",
+    )
+
+    actions = ("pause_slack_mirroring",)
+
+    @admin.action(description="Pause selected Slack mirrors")
+    def pause_slack_mirroring(self, request, queryset):
+        from integrations.services.slack_dm_mirror import pause_grant
+
+        for grant in queryset.order_by("user_id", "id"):
+            pause_grant(grant)
+
+    def has_add_permission(self, request):
+        """Slack consent is granted by its owner through the linking flow."""
+        return False
 
 
 @admin.register(SlackDmMirrorConversation)
@@ -121,14 +141,65 @@ class CommunityBridgeChannelAdmin(admin.ModelAdmin):
         fields = super().get_readonly_fields(request, obj)
         return (*fields, "audience") if obj and obj.destination_channel_id else fields
 
+    def has_delete_permission(self, request, obj=None):
+        if obj is not None and obj.destination_platform == CommunityBridgePlatform.BUZZ:
+            return False
+        return super().has_delete_permission(request, obj)
+
+    def delete_model(self, request, obj):
+        if obj.destination_platform == CommunityBridgePlatform.BUZZ:
+            raise ValidationError("Retain MLAI Chat source identities; hold or exclude this channel instead.")
+        super().delete_model(request, obj)
+
+    def delete_queryset(self, request, queryset):
+        if queryset.filter(destination_platform=CommunityBridgePlatform.BUZZ).exists():
+            raise ValidationError("Retain MLAI Chat source identities; hold or exclude these channels instead.")
+        super().delete_queryset(request, queryset)
+
+    def save_model(self, request, obj, form, change):
+        from integrations.services.community_bridge.member_channels import _members_mapping, _schedule_audience_reductions
+
+        with transaction.atomic():
+            if not isinstance(obj.room_state, dict):
+                raise ValidationError("Bridge operational state must be a JSON object.")
+            if change:
+                previous = CommunityBridgeChannel.objects.select_for_update().get(pk=obj.pk)
+                if previous.destination_channel_id and any(getattr(previous, field) != getattr(obj, field) for field in (
+                    "audience", "slack_workspace_id", "slack_channel_id", "destination_platform", "destination_channel_id",
+                )):
+                    raise ValidationError("A mapped bridge room's source, destination and audience are immutable.")
+            if _members_mapping(obj):
+                obj.audience_sync_pending = True
+                obj.enabled = False
+            super().save_model(request, obj, form, change)
+            if _members_mapping(obj):
+                _schedule_audience_reductions([obj.pk])
+
+    def _stop_channels(self, queryset, *, decision):
+        from integrations.services.community_bridge.member_channels import _members_mapping, _schedule_audience_reductions
+
+        with transaction.atomic():
+            rows = list(queryset.select_for_update().order_by("pk"))
+            targets = []
+            for row in rows:
+                row.mirror_decision = decision
+                row.hold_reason = "admin"
+                row.enabled = False
+                if _members_mapping(row):
+                    row.audience_sync_pending = True
+                    targets.append(row.pk)
+                row.save(update_fields=("mirror_decision", "hold_reason", "enabled", "audience_sync_pending", "updated_at"))
+            _schedule_audience_reductions(targets)
+            return len(rows)
+
     @admin.action(description="Hold selected channels for review (stop mirroring)")
     def hold_channels(self, request, queryset):
-        updated = queryset.update(mirror_decision=CommunityBridgeMirrorDecision.HOLD, hold_reason="admin", enabled=False)
+        updated = self._stop_channels(queryset, decision=CommunityBridgeMirrorDecision.HOLD)
         self.message_user(request, f"{updated} channel(s) held.")
 
     @admin.action(description="Never mirror selected channels")
     def exclude_channels(self, request, queryset):
-        updated = queryset.update(mirror_decision=CommunityBridgeMirrorDecision.EXCLUDE, hold_reason="admin", enabled=False)
+        updated = self._stop_channels(queryset, decision=CommunityBridgeMirrorDecision.EXCLUDE)
         self.message_user(request, f"{updated} channel(s) excluded.")
 
 
@@ -243,11 +314,18 @@ class GoogleConnectionAdmin(admin.ModelAdmin):
 
 
 @admin.register(ExternalServiceConnection)
-class ExternalServiceConnectionAdmin(admin.ModelAdmin):
+class ExternalServiceConnectionAdmin(MemberAudienceAuthorityAdminMixin, admin.ModelAdmin):
     list_display = ("provider", "user", "organization", "account_label", "status", "last_synced_at", "updated_at")
     search_fields = ("user__email", "organization__domain", "external_account_id", "account_label")
     list_filter = ("provider", "status", "updated_at")
     readonly_fields = ("created_at", "updated_at", "last_synced_at")
+
+    def get_readonly_fields(self, request, obj=None):
+        fields = super().get_readonly_fields(request, obj)
+        if obj is not None and (obj.provider == "slack" or SlackDmMirrorGrant.objects.filter(connection_id=obj.pk).exists()):
+            return (*fields, "user", "provider", "external_account_id", "scopes", "provider_metadata",
+                    "sync_cursor", "access_token", "refresh_token")
+        return fields
 
 
 @admin.register(FinancialAccount)

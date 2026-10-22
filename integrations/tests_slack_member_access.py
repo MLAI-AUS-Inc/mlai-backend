@@ -73,6 +73,7 @@ class MemberAccessFixture:
 @override_settings(
     MESSAGE_SYNC_ENABLED=True, SLACK_MEMBER_CHANNELS_ENABLED=True,
     SLACK_OWNER_INVENTORY_ENABLED=True,
+    MESSAGE_SYNC_SLACK_BOT_WORKSPACE_ID="TTEST", SLACK_MEMBER_CHANNEL_ALLOWED_IDS="",
     CACHES={"default": {"BACKEND": "django.core.cache.backends.locmem.LocMemCache"}},
 )
 class MemberAccessDatabaseTests(MemberAccessFixture, TestCase):
@@ -294,6 +295,7 @@ class MemberAccessDatabaseTests(MemberAccessFixture, TestCase):
 @override_settings(
     MESSAGE_SYNC_ENABLED=True, SLACK_MEMBER_CHANNELS_ENABLED=True,
     SLACK_OWNER_INVENTORY_ENABLED=True,
+    MESSAGE_SYNC_SLACK_BOT_WORKSPACE_ID="TTEST", SLACK_MEMBER_CHANNEL_ALLOWED_IDS="",
     CACHES={"default": {"BACKEND": "django.core.cache.backends.locmem.LocMemCache"}},
 )
 class PostingIdentityLockTests(MemberAccessFixture, TransactionTestCase):
@@ -378,6 +380,7 @@ class PostingIdentityLockTests(MemberAccessFixture, TransactionTestCase):
 @override_settings(
     MESSAGE_SYNC_ENABLED=True, SLACK_MEMBER_CHANNELS_ENABLED=True,
     SLACK_OWNER_INVENTORY_ENABLED=True,
+    MESSAGE_SYNC_SLACK_BOT_WORKSPACE_ID="TTEST", SLACK_MEMBER_CHANNEL_ALLOWED_IDS="",
     CACHES={"default": {"BACKEND": "django.core.cache.backends.locmem.LocMemCache"}},
 )
 class PublicInventoryConsentDatabaseTests(MemberAccessFixture, TestCase):
@@ -392,7 +395,7 @@ class PublicInventoryConsentDatabaseTests(MemberAccessFixture, TestCase):
     def test_enabled_member_lane_uses_existing_consent_without_metadata_opt_in(self):
         self.collect()
         self.assertTrue(SlackOwnerConversationInventory.objects.filter(grant=self.grant, kind="public_channel").exists())
-        self.assertFalse(SlackChannelMembership.objects.filter(grant=self.grant).exists())
+        self.assertEqual(SlackChannelMembership.objects.get(grant=self.grant).state, "joined")
         self.assertEqual(self.provider.call_args.args[1], "users_conversations")
         self.assertEqual(self.provider.call_args.kwargs["required_scopes"], {"channels:read"})
 

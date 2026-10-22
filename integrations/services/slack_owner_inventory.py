@@ -23,6 +23,9 @@ CONSENT_KEY = "slack_owner_inventory_metadata_consent_v1"
 KINDS = ("im", "mpim", "private_channel", "public_channel")
 READ_FRESH_SECONDS = 120
 SOURCE_ID = re.compile(r"^[A-Z0-9]{2,100}$")
+PUBLIC_PAGE_SIZE = 200
+PUBLIC_PAGES_PER_TURN = 3
+PUBLIC_MEMBERSHIP_IDS_LIMIT = 10000
 
 
 def enabled() -> bool:
@@ -92,6 +95,7 @@ def _new_state(authority) -> dict:
         "directory_private_enabled": False,
         "public_sweep": "",
         "public_cursor": "",
+        "public_started_at": None,
         "last_full_sweep_at": None,
     }
 
@@ -111,6 +115,14 @@ def needs_private_sweep(connection, authority) -> bool:
     return isinstance(coverage, dict) and any(
         coverage.get(kind) == "pending" for kind in KINDS[:3]
     )
+
+
+def needs_public_sweep(connection, authority) -> bool:
+    """Continue an unfinished authorized public inventory without history I/O."""
+    if not enabled() or not public_inventory_allowed(None, connection, authority):
+        return False
+    state = state_for(connection, authority)
+    return bool(state.get("public_cursor") or state.get("public_sweep"))
 
 
 def _save_state(connection, state) -> None:
@@ -134,6 +146,7 @@ def rotate_epoch_locked(connection) -> None:
     state.update(
         private_sweep="", directory_private_sweep="", directory_private_cursor="",
         directory_private_enabled=False, public_sweep="", public_cursor="",
+        public_started_at=None, public_membership_ids=[], public_membership_complete=False,
         last_full_sweep_at=None,
     )
     cursor[KEY] = state
@@ -374,19 +387,49 @@ def collect_private_page(authority) -> None:
 
 
 def collect_public_page(authority) -> None:
-    """Fetch at most one owner-membership page; never changes bridge mappings."""
+    """Advance a bounded public directory turn; never creates a relay room."""
     if not enabled():
         return
+    from integrations.services import slack_member_access as access
+
+    for _ in range(PUBLIC_PAGES_PER_TURN if access.enabled() else 1):
+        if not _collect_public_page_once(authority):
+            break
+
+
+def _public_membership_evidence(rows):
+    """Return proven joined IDs and whether absence may prove a departure."""
+    from integrations.services.slack_member_access import _public_channel_response
+
+    seen = set()
+    complete = True
+    for raw in rows:
+        source_id = str(raw.get("id") or "") if isinstance(raw, dict) else ""
+        if (not isinstance(raw, dict) or not _public_channel_response({"channel": raw}, source_id)
+                or _eligibility(raw) != "eligible"
+                or raw.get("is_im") or raw.get("is_mpim")
+                or type(raw.get("is_member")) is not bool):
+            complete = False
+            continue
+        if raw["is_member"]:
+            seen.add(source_id)
+    return seen, complete
+
+
+def _collect_public_page_once(authority) -> bool:
+    """Persist sweep identity before I/O, then accept only that exact page."""
     from integrations.services.slack_dm_mirror import (
         _call_slack_with_grant_authority,
         _lock_slack_grant_api_authority,
     )
+    from integrations.services import slack_member_access as access
+    from integrations.services.slack_chat_catalog import public_channels_enabled
 
     with transaction.atomic():
         required = set() if getattr(settings, "SLACK_MEMBER_CHANNELS_ENABLED", False) else {"im:read"}
         grant, connection = _lock_slack_grant_api_authority(authority, required_scopes=required)
         if not public_inventory_allowed(grant, connection, authority):
-            return
+            return False
         state = state_for(connection, authority)
         if "channels:read" not in authority.scopes:
             coverage = dict(state["coverage"])
@@ -399,19 +442,32 @@ def collect_public_page(authority) -> None:
             if changed or updated:
                 state["revision"] = int(state["revision"]) + 1
             _save_state(connection, state)
-            return
+            return False
         last_public = state.get("last_public_at")
         if state["coverage"].get("public_channel") == "complete" and last_public:
             try:
                 if timezone.now() - timezone.datetime.fromisoformat(last_public) < timedelta(minutes=5):
-                    return
+                    return False
             except (ValueError, TypeError):
                 pass
         cursor = str(state.get("public_cursor") or "")
-        sweep_id = state.get("public_sweep") or uuid.uuid4().hex
+        membership_enabled = access.enabled() and public_channels_enabled(grant, authority=authority)
+        if (not state.get("public_sweep") or not state.get("public_started_at")
+                or membership_enabled != bool(state.get("public_membership_enabled"))):
+            cursor = ""
+            state.update(
+                public_sweep=uuid.uuid4().hex, public_cursor="",
+                public_started_at=timezone.now().isoformat(), public_membership_ids=[],
+                public_membership_complete=True, public_membership_enabled=membership_enabled,
+            )
+            state["revision"] = int(state["revision"]) + 1
+            _save_state(connection, state)
+        sweep_id = state["public_sweep"]
+        started_at = state["public_started_at"]
     response = _call_slack_with_grant_authority(
         authority, "users_conversations", required_scopes={"channels:read"},
-        types="public_channel", exclude_archived=False, limit=20, cursor=cursor,
+        types="public_channel", exclude_archived=False,
+        limit=PUBLIC_PAGE_SIZE if access.enabled() else 20, cursor=cursor,
     )
     rows = response.get("channels")
     if not isinstance(rows, list):
@@ -422,13 +478,24 @@ def collect_public_page(authority) -> None:
     with transaction.atomic():
         grant, connection = _lock_slack_grant_api_authority(authority, required_scopes={"channels:read"})
         if not public_inventory_allowed(grant, connection, authority):
-            return
+            return False
         state = state_for(connection, authority)
-        if str(state.get("public_cursor") or "") != cursor:
-            return
+        if (str(state.get("public_cursor") or "") != cursor
+                or state.get("public_sweep") != sweep_id or state.get("public_started_at") != started_at):
+            return False
         _upsert_rows(grant, rows, uuid.UUID(sweep_id), expected_kinds={"public_channel"})
+        if membership_enabled:
+            seen, complete = _public_membership_evidence(rows)
+            seen.update(state.get("public_membership_ids") or [])
+            evidence_complete = bool(state.get("public_membership_complete")) and complete
+            if len(seen) > PUBLIC_MEMBERSHIP_IDS_LIMIT:
+                seen = set()
+                evidence_complete = False
+            state.update(public_membership_ids=sorted(seen), public_membership_complete=evidence_complete)
         state.update(public_sweep=sweep_id, public_cursor=next_cursor, revision=int(state["revision"]) + 1)
         if not next_cursor:
+            if membership_enabled:
+                _reconcile_public_memberships(grant, authority, state)
             SlackOwnerConversationInventory.objects.filter(grant=grant, kind="public_channel").exclude(
                 last_seen_sweep_id=uuid.UUID(sweep_id),
             ).delete()
@@ -436,10 +503,44 @@ def collect_public_page(authority) -> None:
             coverage["public_channel"] = "complete"
             state["coverage"] = coverage
             state["public_sweep"] = ""
+            state["public_started_at"] = None
+            state["public_membership_ids"] = []
             state["last_public_at"] = timezone.now().isoformat()
             if all(value == "complete" for value in coverage.values()):
                 state["last_full_sweep_at"] = timezone.now().isoformat()
         _save_state(connection, state)
+        return bool(next_cursor)
+
+
+def _reconcile_public_memberships(grant, authority, state):
+    from integrations.models import CommunityBridgeChannel, SlackChannelMembership
+    from integrations.services import slack_channel_membership as membership
+    from integrations.services import slack_member_access as access
+    from integrations.services.community_bridge.member_channels import member_channel_in_scope, queue_refresh
+
+    if not access.enabled() or not state.get("public_membership_complete"):
+        return
+    try:
+        started = timezone.datetime.fromisoformat(state["public_started_at"])
+    except (TypeError, ValueError, KeyError):
+        return
+    seen = set(state.get("public_membership_ids") or [])
+    membership.reconcile_from_inventory(grant, seen, True, started_at=started, authority=authority)
+    from integrations.services.slack_member_membership_epoch import membership_floor
+
+    floor = membership_floor(grant)
+    if floor is None:
+        return
+    current = SlackChannelMembership.objects.filter(
+        grant=grant, slack_workspace_id=grant.slack_workspace_id,
+        slack_channel_id__in=seen, state="joined", observed_at__gte=floor,
+    ).values_list("slack_channel_id", flat=True)
+    known = set(CommunityBridgeChannel.objects.filter(
+        slack_workspace_id=grant.slack_workspace_id, slack_channel_id__in=seen,
+    ).values_list("slack_channel_id", flat=True))
+    for channel_id in current:
+        if channel_id not in known and member_channel_in_scope(grant.slack_workspace_id, channel_id):
+            queue_refresh(grant.slack_workspace_id, channel_id, reason="inventory_membership")
 
 
 def public_inventory_allowed(grant, connection, authority) -> bool:
@@ -450,7 +551,10 @@ def public_inventory_allowed(grant, connection, authority) -> bool:
         return False
     from integrations.services.slack_chat_catalog import public_channels_enabled
 
-    return public_channels_enabled(grant, authority=authority)
+    if grant is None:
+        from integrations.models import SlackDmMirrorGrant
+        grant = SlackDmMirrorGrant.objects.select_related("user", "connection").filter(pk=authority.grant_id).first()
+    return grant is not None and public_channels_enabled(grant, authority=authority)
 
 
 def source_read_targets(grant, authority, existing_targets, *, include_routed=False):

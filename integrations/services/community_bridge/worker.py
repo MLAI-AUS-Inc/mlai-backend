@@ -102,9 +102,13 @@ class CommunityBridgeDiscordClient(discord.Client):
         self._delivery_loop_started = False
         self._slack_dm_maintenance_started = False
         self._slack_user_directory_started = False
+        self._member_channel_maintenance_started = False
 
     async def setup_hook(self) -> None:
         await asyncio.to_thread(reset_stale_processing_deliveries)
+        if not self._member_channel_maintenance_started:
+            self.member_channel_maintenance_loop.start()
+            self._member_channel_maintenance_started = True
         if not self._delivery_loop_started:
             self.delivery_loop.start()
             self._delivery_loop_started = True
@@ -131,6 +135,7 @@ class CommunityBridgeDiscordClient(discord.Client):
                      self.slack_dm_discovery_loop, self.slack_dm_history_loop, self.sync_inbox_loop, self.slack_read_state_loop,
                      self.slack_user_directory_loop):
             loop.cancel()
+        self.member_channel_maintenance_loop.cancel()
         await super().close()
 
     async def on_message(self, message: discord.Message) -> None:
@@ -230,6 +235,10 @@ class CommunityBridgeDiscordClient(discord.Client):
             await _run_discovery_loop()
             return
         await asyncio.to_thread(_maintain_chat_accounts)
+
+    @tasks.loop(seconds=5.0)
+    async def member_channel_maintenance_loop(self) -> None:
+        await _member_channel_maintenance_turn()
 
     @tasks.loop(seconds=3.0)
     async def slack_user_directory_loop(self) -> None:
@@ -1021,6 +1030,11 @@ async def _run_headless_delivery_worker(client: CommunityBridgeDiscordClient) ->
             await _warm_workspace_directory_turn()
             await asyncio.sleep(3.0)
 
+    async def member_channel_loop():
+        while True:
+            await _member_channel_maintenance_turn()
+            await asyncio.sleep(5.0)
+
     async with asyncio.TaskGroup() as group:
         group.create_task(inbox_loop())
         group.create_task(read_state_loop())
@@ -1029,6 +1043,7 @@ async def _run_headless_delivery_worker(client: CommunityBridgeDiscordClient) ->
         group.create_task(delivery_loop())
         group.create_task(private_delivery_loop())
         group.create_task(user_directory_loop())
+        group.create_task(member_channel_loop())
 
 
 async def _run_history_workers():
@@ -1063,6 +1078,18 @@ async def _warm_workspace_directory_turn() -> None:
         await asyncio.to_thread(warm_workspace_directory_once)
     except Exception as exc:
         logger.warning("slack_user_directory_warm_failed error_code=%s", type(exc).__name__)
+
+
+async def _member_channel_maintenance_turn() -> None:
+    """Keep existing-room reductions alive before gated source expansion."""
+    from .member_channels import process_refreshes_once, process_room_reductions_once, sync_audiences_once
+
+    try:
+        await asyncio.to_thread(sync_audiences_once, 5)
+        await asyncio.to_thread(process_room_reductions_once, 5)
+        await asyncio.to_thread(process_refreshes_once, 5)
+    except Exception as exc:
+        logger.warning("member_channel_maintenance_failed error_code=%s", type(exc).__name__)
 
 
 def _maintain_chat_accounts():
