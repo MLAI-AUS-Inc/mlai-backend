@@ -83,22 +83,38 @@ def process_inbox_once():
                 row.lease_expires_at = None
                 row.save()
                 return 0
-            from integrations.services.community_bridge.store import ingest_slack_event
-            from integrations.services.slack_dm_mirror import ingest_slack_dm_event
+            from integrations.services.community_bridge.member_channel_events import dispatch_slack_callback
             from .read_activity import record_public_event
             from .read_priority import invalidate_event
-            # Public ingestion locks the channel. Take state -> channel first,
-            # matching the history worker, in this same receipt transaction.
-            record_public_event(payload)
-            # Read hints take each recipient owner's user -> all grants ->
-            # connection locks. Private ingestion then locks grant ->
-            # conversation. Hinting after ingestion held a grant while waiting
-            # for its owner, inverting the order used by consent, discovery
-            # and inventory transactions and deadlocking against them.
-            invalidate_event(payload)
-            ingest_slack_dm_event(payload) or ingest_slack_event(payload)
+            from .member_callback_authority import callback_user_fence
+            # The audience worker takes all relevant Users before Channel.
+            # Lock both recipients and the signed actor in one sorted cohort;
+            # no later intake path may discover a new lower-order User.
+            with callback_user_fence(payload):
+                invalidate_event(payload)
+                # Keep the history worker's State -> Channel order internally,
+                # after every possible callback User has already been locked.
+                record_public_event(payload)
+                result = dispatch_slack_callback(payload)
             if row.lease_expires_at <= timezone.now():
                 raise LeaseLost("inbox_lease_expired")
+            waiting_member = isinstance(result, dict) and (
+                result.get("status") == "member_audience_pending"
+                or (row.last_error_code == "member_audience_pending"
+                    and result.get("status") == "ignored"
+                    and result.get("reason") == "member_channels_disabled_or_out_of_scope")
+            )
+            if waiting_member:
+                # Commit membership/order/pending wakes without acknowledging
+                # this content as delivered or erasing its encrypted receipt.
+                row.encrypted_payload = json.dumps(payload, separators=(",", ":"))
+                row.status = "pending"
+                row.available_at = timezone.now() + timedelta(seconds=5)
+                row.lease_token = None
+                row.lease_expires_at = None
+                row.last_error_code = "member_audience_pending"
+                row.save()
+                return 0
             row.status = "completed"
             row.completed_at = timezone.now()
             row.lease_token = None

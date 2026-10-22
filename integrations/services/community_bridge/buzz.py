@@ -47,6 +47,30 @@ class BuzzBridgePermanentError(BuzzBridgeError):
     permanent = True
 
 
+class BuzzAudienceConflict(BuzzBridgeError):
+    """Only an exact Members audience update rejected by the relay CAS."""
+
+
+def _audience_uuid(value, *, optional=False):
+    if optional and value is None:
+        return None
+    try:
+        parsed = uuid.UUID(str(value))
+    except (ValueError, TypeError, AttributeError) as exc:
+        raise BuzzBridgeError("Invalid Members audience identifier") from exc
+    if parsed.int == 0 or str(parsed) != str(value):
+        raise BuzzBridgeError("Invalid Members audience identifier")
+    return str(parsed)
+
+
+def _audience_keys(values):
+    if (not isinstance(values, (list, tuple)) or len(values) > 1000
+            or any(not isinstance(key, str) or not EVENT_ID_RE.fullmatch(key) for key in values)
+            or len(set(values)) != len(values)):
+        raise BuzzBridgeError("Invalid Members audience keys")
+    return sorted(values)
+
+
 class BuzzBridgeClient:
     _private_batch_disabled_until = 0.0
     _private_batch_fallback_seconds = 300
@@ -329,6 +353,44 @@ class BuzzBridgeClient:
             raise BuzzBridgeError("MLAI Chat adapter did not accept the read notification")
 
     @classmethod
+    def inspect_member_audience(cls, channel_id, *, generation):
+        """Inspect exact registered Members authority; no implicit update/rebase."""
+        channel = _audience_uuid(channel_id)
+        result = cls._post_adapter(f"v1/public-channels/{channel}/audience", {
+            "action": "inspect", "channel_id": channel, "previous_pubkeys": [],
+            "participant_pubkeys": [], "expected_generation": None,
+            "generation": _audience_uuid(generation),
+        })
+        if not isinstance(result, dict) or set(result) != {"channel_id", "generation", "participant_pubkeys"}:
+            raise BuzzBridgeError("Invalid Members audience inspection")
+        if _audience_uuid(result["channel_id"]) != channel:
+            raise BuzzBridgeError("Members audience channel mismatch")
+        current = _audience_uuid(result["generation"], optional=True)
+        keys = _audience_keys(result["participant_pubkeys"])
+        if current is None and keys:
+            raise BuzzBridgeError("Unfenced Members audience inspection")
+        return {"channel_id": channel, "generation": current, "participant_pubkeys": keys}
+
+    @classmethod
+    def update_member_audience(cls, channel_id, *, previous_pubkeys, participant_pubkeys,
+                               expected_generation, generation):
+        """Send one fixed CAS command; caller durably prepares its UUID first."""
+        channel = _audience_uuid(channel_id)
+        command = _audience_uuid(generation)
+        result = cls._post_adapter(f"v1/public-channels/{channel}/audience", {
+            "action": "update", "channel_id": channel,
+            "previous_pubkeys": _audience_keys(previous_pubkeys),
+            "participant_pubkeys": _audience_keys(participant_pubkeys),
+            "expected_generation": _audience_uuid(expected_generation, optional=True),
+            "generation": command,
+        })
+        if (not isinstance(result, dict) or set(result) != {"channel_id", "generation"}
+                or _audience_uuid(result["channel_id"]) != channel
+                or _audience_uuid(result["generation"]) != command):
+            raise BuzzBridgeError("Members audience acknowledgement mismatch")
+        return {"channel_id": channel, "generation": command}
+
+    @classmethod
     def inbox_export_frontier(cls, *, community_id, account_key, channel_id, consented_at):
         """Recover a signed, scope-checked pre-consent permanent give-up frontier."""
         payload = {'account_key': account_key, 'channel_id': str(uuid.UUID(str(channel_id))),
@@ -557,6 +619,10 @@ class BuzzBridgeClient:
             raise BuzzBridgeError(f"MLAI Chat adapter request failed: {exc.__class__.__name__}") from exc
         if 400 <= response.status_code < 500 and response.status_code not in {408, 429}:
             detail = _adapter_error_detail(response)
+            if (response.status_code == 409 and detail == "audience_conflict"
+                    and re.fullmatch(r"v1/public-channels/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/audience", path)
+                    and payload.get("action") == "update"):
+                raise BuzzAudienceConflict("Members audience changed", adapter_error="audience_conflict")
             raise BuzzBridgePermanentError(
                 _with_detail(f"MLAI Chat adapter rejected request with HTTP {response.status_code}", detail),
                 adapter_error=detail,

@@ -51,7 +51,89 @@ INACTIVE_CHANNEL_LIFECYCLE_EVENTS = frozenset({
 })
 
 
-def ingest_slack_event(payload: dict) -> dict:
+_SLACK_RECEIPT_ID = re.compile(r"^[A-Z][A-Z0-9]{1,23}$")
+_SLACK_RECEIPT_TS = re.compile(r"^[0-9]{1,20}\.[0-9]{1,9}$")
+_SLACK_RECEIPT_REACTION = re.compile(r"^[a-z0-9_+\-]{1,64}$")
+
+
+def _public_slack_receipt_key(payload, normalized):
+    """A bounded source identity shared by bot/member app copies of an event.
+
+    Callback event IDs identify one installation's envelope. Revision and event
+    timestamps preserve later edits and reaction remove/re-add transitions.
+    Bodies, actor names and client-provided dedupe hints never enter this key.
+    """
+    event = payload.get("event")
+    if not isinstance(event, dict) or not normalized:
+        return None
+    workspace, channel = payload.get("team_id"), normalized.get("source_channel_id")
+    if (not all(isinstance(value, str) and _SLACK_RECEIPT_ID.fullmatch(value) for value in (workspace, channel))
+            or not workspace.startswith("T") or not channel.startswith("C")):
+        return None
+    operation = normalized.get("delivery_type")
+    message_id = normalized.get("source_message_id")
+    if operation in {CommunityBridgeDeliveryType.REACTION_ADD, CommunityBridgeDeliveryType.REACTION_REMOVE}:
+        item = event.get("item") if isinstance(event.get("item"), dict) else {}
+        target, revision = item.get("ts"), event.get("event_ts")
+        reaction, user = event.get("reaction"), event.get("user")
+        if (not all(isinstance(value, str) and _SLACK_RECEIPT_TS.fullmatch(value) for value in (target, revision))
+                or not isinstance(reaction, str) or not _SLACK_RECEIPT_REACTION.fullmatch(reaction)
+                or not isinstance(user, str) or not _SLACK_RECEIPT_ID.fullmatch(user) or user[0] not in {"U", "W"}):
+            return None
+        verb = "add" if operation == CommunityBridgeDeliveryType.REACTION_ADD else "remove"
+        return f"slack:{workspace}:{channel}:{target}:reaction:{reaction}:{user}:{verb}:{revision}"
+    if operation not in {CommunityBridgeDeliveryType.CREATE, CommunityBridgeDeliveryType.EDIT,
+                         CommunityBridgeDeliveryType.DELETE}:
+        return None
+    if not isinstance(message_id, str) or not _SLACK_RECEIPT_TS.fullmatch(message_id):
+        return None
+    if operation == CommunityBridgeDeliveryType.CREATE:
+        revision = message_id
+        verb = "broadcast" if event.get("subtype") == "thread_broadcast" else "create"
+    else:
+        message = event.get("message") if isinstance(event.get("message"), dict) else {}
+        edited = message.get("edited") if isinstance(message.get("edited"), dict) else {}
+        revision = edited.get("ts") if operation == CommunityBridgeDeliveryType.EDIT else None
+        revision = revision or event.get("event_ts") or event.get("ts")
+        verb = str(operation)
+    if not isinstance(revision, str) or not _SLACK_RECEIPT_TS.fullmatch(revision):
+        return None
+    return f"slack:{workspace}:{channel}:{message_id}:{verb}:{revision}"
+
+
+def _public_receipt_identity_enabled(payload, normalized, *, public_source_verified):
+    from integrations.services import slack_member_access
+    from .member_channels import member_channel_in_scope
+
+    event = payload.get("event") or {}
+    app_ids = {value for value in (getattr(settings, "MESSAGE_SYNC_SLACK_APP_ID", ""),
+                                   getattr(settings, "MESSAGE_SYNC_SLACK_USER_APP_ID", "")) if value}
+    if (not normalized or not slack_member_access.enabled() or not isinstance(payload.get("api_app_id"), str)
+            or payload.get("api_app_id") not in app_ids
+            or not member_channel_in_scope(payload.get("team_id"), normalized.get("source_channel_id"))):
+        return False
+    item = event.get("item") if isinstance(event.get("item"), dict) else {}
+    objects = (payload, event, item)
+    if any(raw.get(key) for raw in objects for key in
+           ("is_ext_shared_channel", "is_ext_shared", "is_ext_ws_shared", "is_external_shared", "is_shared",
+            "is_org_shared", "is_pending_ext_shared", "pending_shared", "is_private", "is_mpim", "is_im")):
+        return False
+    if any(isinstance(raw.get("channel_type"), str) and raw["channel_type"] in {"group", "mpim", "im"}
+           for raw in (event, item)):
+        return False
+    if public_source_verified is True or any(raw.get("channel_type") == "channel" for raw in (event, item)):
+        return True
+    # Reactions omit a conversation type in some documented envelopes. Only an
+    # exact positively observed public mapping can supply that missing proof.
+    return CommunityBridgeChannel.objects.filter(
+        slack_workspace_id=payload.get("team_id"), slack_channel_id=normalized.get("source_channel_id"),
+        destination_platform=CommunityBridgePlatform.BUZZ, slack_visibility="public",
+        slack_seen_at__isnull=False, slack_archived=False, slack_deleted=False,
+        mirror_decision="mirror", hold_reason="",
+    ).exists()
+
+
+def ingest_slack_event(payload: dict, *, public_source_verified=False) -> dict:
     event = dict(payload.get("event") or {})
     # The bot lifecycle lane is retired. Keep its callbacks out of message
     # receipts: create/rename carry a conversation object, not a channel ID.
@@ -62,6 +144,8 @@ def ingest_slack_event(payload: dict) -> dict:
     normalized_payload = normalized or {}
     raw_ts, ignore_detail = _slack_ignored_message_evidence(payload) if normalized is None else ("", "")
     receipt_key = str(payload.get("event_id") or "").strip()
+    if _public_receipt_identity_enabled(payload, normalized, public_source_verified=public_source_verified):
+        receipt_key = _public_slack_receipt_key(payload, normalized) or receipt_key
     source_channel_id = str(event.get("channel") or normalized_payload.get("source_channel_id") or "").strip()
     event_type = str(event.get("subtype") or event.get("type") or "").strip() or "message"
     return ingest_inbound_event(

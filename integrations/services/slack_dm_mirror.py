@@ -36,6 +36,9 @@ from integrations.services.message_sync.slack_client import budgeted_client
 from integrations.services.message_sync.discovery import discovery_poll_seconds
 from integrations.services.message_sync.configuration import user_app_id
 from integrations.services.message_sync.scheduler import BudgetDeferred, LeaseLost
+from integrations.services.message_sync.member_callback_authority import (
+    assert_callback_grant_locked, assert_callback_user_locked,
+)
 from integrations.services.message_sync.private_delivery import fair_private_candidate, guard_private_delivery
 from integrations.services.slack_discovery_progress import (
     KEY as DIRECTORY_PROGRESS_KEY, conversation_progress, current_progress,
@@ -315,6 +318,7 @@ def _capture_slack_grant_api_authority(
 ) -> _SlackGrantApiAuthority:
     """Capture exact values that every subsequent Slack page must revalidate."""
 
+    assert_callback_user_locked(grant.user_id)
     if refresh_token:
         grant = _refresh_slack_grant_token_if_due(grant)
     connection = grant.connection
@@ -544,6 +548,7 @@ def _lock_slack_grant_api_authority(
 ) -> tuple[SlackDmMirrorGrant, ExternalServiceConnection]:
     """Lock and revalidate one exact authority in the global privacy order."""
 
+    assert_callback_user_locked(authority.user_id)
     user = get_user_model().objects.select_for_update().get(pk=authority.user_id)
     if not user.is_active:
         raise SlackDmMirrorAuthorizationError("This account is unavailable.")
@@ -1058,7 +1063,7 @@ def open_slack_dm(
 
 
 def status_payload(
-    user, *, authenticated_public_key: str | None = None
+    user, *, authenticated_public_key: str | None = None, catalog_kinds=None
 ) -> dict[str, Any]:
     grants = SlackDmMirrorGrant.objects.filter(user=user).select_related("connection")
     grant = (
@@ -1238,6 +1243,12 @@ def status_payload(
     channel_catalog.extend(retired_catalog_payload(
         user, catalog_key, {entry["channel_id"] for entry in channel_catalog},
     ))
+    if selected_grant_connected:
+        from .slack_chat_catalog import member_channel_catalog_payload
+
+        channel_catalog.extend(member_channel_catalog_payload(
+            grant, catalog_key, catalog_kinds=catalog_kinds,
+        ))
     history_days = _grant_history_days(grant) if grant else _bounded_history_days(30)
     return {
         "connected": connection is not None,
@@ -1419,6 +1430,8 @@ def activate_connection(
             from integrations.services.slack_owner_inventory import rotate_epoch_locked
             rotate_epoch_locked(locked_connection)
             current.refresh_from_db()
+            from .community_bridge.member_channels import schedule_member_authority_change
+            schedule_member_authority_change(current.user_id, reason="slack_consent_changed", reduction=True)
         return current
     if existing_grant is not None:
         _complete_registration_cleanup_before_activation(
@@ -1544,6 +1557,9 @@ def activate_connection(
                     )
                 else:
                     _restart_incomplete_history_scans_locked(conversations)
+        if activation_error is None:
+            from .community_bridge.member_channels import schedule_member_authority_change
+            schedule_member_authority_change(grant.user_id, reason="slack_consent_renewed", reduction=True)
     if activation_error is not None:
         raise activation_error
     ensure_owner_identity(
@@ -1572,12 +1588,15 @@ def pause_grant(grant: SlackDmMirrorGrant) -> None:
             status=SlackDmMirrorConversationStatus.LIVE,
         ).update(status=SlackDmMirrorConversationStatus.PAUSED, updated_at=now)
         rotate_epoch_locked(connection)
+        from .community_bridge.member_channels import schedule_member_authority_change
+        schedule_member_authority_change(grant.user_id, reason="slack_grant_paused", reduction=True)
 
 
 def resume_grant(grant: SlackDmMirrorGrant) -> None:
     _complete_registration_cleanup_before_activation(grant.pk)
     resume_error: SlackDmMirrorError | None = None
     with transaction.atomic():
+        get_user_model().objects.select_for_update().get(pk=grant.user_id)
         grant = SlackDmMirrorGrant.objects.select_for_update().get(pk=grant.pk)
         connection = (
             ExternalServiceConnection.objects.select_for_update(of=("self",))
@@ -1627,6 +1646,8 @@ def resume_grant(grant: SlackDmMirrorGrant) -> None:
             from integrations.services.slack_owner_inventory import rotate_epoch_locked
             rotate_epoch_locked(connection)
             _normalize_grant_history_window_locked(grant)
+            from .community_bridge.member_channels import schedule_member_authority_change
+            schedule_member_authority_change(grant.user_id, reason="slack_grant_resumed")
     if resume_error is not None:
         raise resume_error
 
@@ -1640,6 +1661,7 @@ def backfill_grant(
 ) -> int:
     """Mark owner mirrors for a paced, idempotent history re-scan."""
 
+    get_user_model().objects.select_for_update().get(pk=grant.user_id)
     grant = SlackDmMirrorGrant.objects.select_for_update().get(pk=grant.pk)
     if grant.status != SlackDmMirrorGrantStatus.ACTIVE or grant.revoked_at is not None:
         raise SlackDmMirrorError("Resume Slack mirroring before starting a backfill.")
@@ -1705,6 +1727,8 @@ def _schedule_automatic_history_reconciliation(
 ) -> int:
     """Queue current-state scans without clearing explicit recovery fences."""
 
+    assert_callback_user_locked(grant.user_id)
+    get_user_model().objects.select_for_update().get(pk=grant.user_id)
     grant = SlackDmMirrorGrant.objects.select_for_update().get(pk=grant.pk)
     if grant.status != SlackDmMirrorGrantStatus.ACTIVE or grant.revoked_at is not None:
         return 0
@@ -1855,7 +1879,11 @@ def _revoke_grant_locally_locked(
         last_error="Consent revoked",
         updated_at=now,
     )
-    return connection, _clear_slack_connection_locked(connection)
+    token = _clear_slack_connection_locked(connection)
+    from .community_bridge.member_channels import schedule_member_authority_change
+
+    schedule_member_authority_change(grant.user_id, reason="slack_consent_revoked", reduction=True)
+    return connection, token
 
 
 def _revoke_remote_token(connection_id: int, access_token: str) -> None:
@@ -1990,6 +2018,7 @@ def _retire_ineligible_conversation(
     if not channel_id:
         return False
     retirement_reason = str(reason or "Slack conversation is not eligible")[:2000]
+    assert_callback_grant_locked(grant_id)
     with transaction.atomic():
         grant = (
             SlackDmMirrorGrant.objects.select_for_update().filter(pk=grant_id).first()
@@ -3060,6 +3089,9 @@ def discover_conversations(
             from .slack_open_requests import has_pending_opens
 
             needs_followup = needs_followup or has_pending_opens(locked_connection.sync_cursor)
+            from .slack_owner_inventory import needs_public_sweep
+
+            needs_followup = needs_followup or needs_public_sweep(locked_connection, authority)
             raw_pending = (locked_connection.sync_cursor or {}).get(
                 PENDING_EVENT_CHECKPOINT_KEY,
                 [],
@@ -3992,6 +4024,7 @@ def ingest_slack_dm_event(payload: dict[str, Any]) -> dict[str, Any] | None:
     duplicates = 0
     echoes = 0
     for candidate in conversations:
+        assert_callback_user_locked(candidate.grant.user_id)
         with transaction.atomic():
             grant = (
                 SlackDmMirrorGrant.objects.select_for_update()

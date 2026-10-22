@@ -402,4 +402,7 @@ def revoke_device_authority(
             updated_at=now,
         )
         device.registration_cleanup_grant_ids = tuple(sorted(touched_grants))
+        from integrations.services.community_bridge.member_channels import schedule_member_authority_change
+
+        schedule_member_authority_change(user.pk, reason="device_revoked", reduction=True)
         return device

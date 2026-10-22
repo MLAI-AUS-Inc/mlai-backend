@@ -121,6 +121,7 @@ class DiscoveryWorkerCadenceTests(IsolatedAsyncioTestCase):
                     _delivery_loop_started=False,
                     _slack_dm_maintenance_started=False,
                     _slack_user_directory_started=False,
+                    _member_channel_maintenance_started=False,
                     delivery_loop=Mock(),
                     slack_dm_discovery_loop=Mock(),
                     slack_dm_history_loop=Mock(),
@@ -128,6 +129,7 @@ class DiscoveryWorkerCadenceTests(IsolatedAsyncioTestCase):
                     sync_inbox_loop=Mock(),
                     slack_read_state_loop=Mock(),
                     slack_user_directory_loop=Mock(),
+                    member_channel_maintenance_loop=Mock(),
                 )
                 with patch.object(worker.asyncio, "to_thread", new=AsyncMock()):
                     await worker.CommunityBridgeDiscordClient.setup_hook(client)
@@ -135,6 +137,7 @@ class DiscoveryWorkerCadenceTests(IsolatedAsyncioTestCase):
                 client.slack_dm_discovery_loop.change_interval.assert_called_once_with(seconds=expected)
                 client.slack_dm_discovery_loop.start.assert_called_once()
                 client.slack_user_directory_loop.start.assert_called_once()
+                client.member_channel_maintenance_loop.start.assert_called_once()
 
 
 class DiscoveryHealthTests(IsolatedAsyncioTestCase):

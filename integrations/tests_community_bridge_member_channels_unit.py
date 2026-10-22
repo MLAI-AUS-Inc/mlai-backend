@@ -1,5 +1,6 @@
 """Database-free tests for the inactive member-channel foundations."""
 
+from datetime import datetime, timedelta, timezone as dt_timezone
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -100,6 +101,134 @@ class MemberChannelStateTests(SimpleTestCase):
             with self.subTest(workspace=workspace, channel=channel):
                 with self.assertRaisesMessage(ValueError, "invalid_slack_channel_identity"):
                     channels.queue_refresh(workspace, channel, reason="event")
+
+
+class MemberChannelInfoReaderHintTests(SimpleTestCase):
+    def setUp(self):
+        self.now = datetime(2026, 10, 22, 3, 25, tzinfo=dt_timezone.utc)
+        clock = patch.object(channels.timezone, "now", return_value=self.now)
+        clock.start()
+        self.addCleanup(clock.stop)
+        self.observed = datetime(2000, 1, 1, 0, 0, 0, 1, tzinfo=dt_timezone.utc)
+
+    def hint(self, grant_id=10, observed_at=None):
+        return channels.info_reader_hint_reason(grant_id, observed_at or self.observed)
+
+    def test_codec_preserves_exact_integer_utc_microseconds(self):
+        encoded = self.hint()
+        self.assertEqual(encoded, f"i:a:{946684800000001:x}")
+        decoded = channels.info_reader_hint(encoded)
+        self.assertEqual((decoded.grant_id, decoded.observed_at), (10, self.observed))
+        self.assertEqual(decoded.observed_at.utcoffset(), timedelta(0))
+        self.assertEqual(self.hint(1, datetime(1970, 1, 1, 0, 0, 0, 1, tzinfo=dt_timezone.utc)), "i:1:1")
+
+    def test_timezone_offset_canonicalizes_the_same_instant(self):
+        offset = dt_timezone(timedelta(hours=11))
+        local = datetime(2000, 1, 1, 11, 0, 0, 1, tzinfo=offset)
+        self.assertEqual(self.hint(observed_at=local), self.hint())
+        self.assertEqual(channels.info_reader_hint(self.hint(observed_at=local)).observed_at, self.observed)
+
+    def test_encoder_bounds_positive_signed_64_bit_grant_ids_and_reason_length(self):
+        largest = (1 << 63) - 1
+        encoded = self.hint(largest)
+        self.assertLessEqual(len(encoded), 40)
+        self.assertEqual(channels.info_reader_hint(encoded).grant_id, largest)
+        for grant_id in (None, True, False, 0, -1, 1.0, "1", 1 << 63):
+            with self.subTest(grant_id=grant_id):
+                self.assertIsNone(self.hint(grant_id))
+
+    def test_encoder_requires_aware_positive_bounded_observation(self):
+        epoch = datetime(1970, 1, 1, tzinfo=dt_timezone.utc)
+        for observed in (None, True, 1, "2000-01-01", self.observed.replace(tzinfo=None),
+                         epoch, epoch - timedelta(microseconds=1),
+                         self.now + timedelta(minutes=5, microseconds=1),
+                         datetime.max.replace(tzinfo=dt_timezone.utc)):
+            with self.subTest(observed=observed):
+                self.assertIsNone(channels.info_reader_hint_reason(1, observed))
+        edge = self.now + timedelta(minutes=5)
+        self.assertEqual(channels.info_reader_hint(self.hint(1, edge)).observed_at, edge)
+
+    def test_decoder_rejects_noncanonical_malformed_or_overlong_reason(self):
+        stamp = f"{946684800000001:x}"
+        for reason in (None, True, 1, {}, "", "topic", "I:a:1", "i:A:1", "i:a:ABC",
+                       "i:0:1", "i:-1:1", "i:+1:1", "i:01:1", "i:1:01", "i:1:0",
+                       "i:1:-1", "i:1:+1", "i:1:1:1", "i:1:1\n", " i:1:1",
+                       f"i:0a:{stamp}", f"i:a:0{stamp}", "i:8000000000000000:1",
+                       "i:1:ffffffffffffffff", "i:1:" + "1" * 37):
+            with self.subTest(reason=reason):
+                self.assertIsNone(channels.info_reader_hint(reason))
+
+    def test_decoder_rechecks_future_limit_independently_of_encoder(self):
+        encoded = self.hint(1, self.now + timedelta(minutes=5))
+        with patch.object(channels.timezone, "now", return_value=self.now - timedelta(microseconds=1)):
+            self.assertIsNone(channels.info_reader_hint(encoded))
+
+    def test_generic_refresh_keeps_explicit_reader_hint(self):
+        explicit = self.hint()
+        for incoming in ("metadata_audit", "owner_open_priority", "topic" * 20):
+            with self.subTest(incoming=incoming):
+                self.assertEqual(channels._refresh_reason(explicit, incoming), explicit)
+        self.assertEqual(channels._refresh_reason("metadata_audit", explicit), explicit)
+
+    def test_only_newer_explicit_observation_replaces_existing_hint(self):
+        previous = self.hint(10)
+        older = self.hint(11, self.observed - timedelta(microseconds=1))
+        equal = self.hint(11)
+        newer = self.hint(11, self.observed + timedelta(microseconds=1))
+        self.assertEqual(channels._refresh_reason(previous, older), previous)
+        self.assertEqual(channels._refresh_reason(previous, equal), previous)
+        self.assertEqual(channels._refresh_reason(previous, newer), newer)
+
+    def test_invalid_encoded_input_is_generic_and_cannot_displace_valid_hint(self):
+        explicit = self.hint()
+        malformed = ("i:8000000000000000:1", "i:01:1", "i:1:1" + " " * 50)
+        for incoming in malformed:
+            with self.subTest(incoming=incoming):
+                self.assertEqual(channels._refresh_reason(explicit, incoming), explicit)
+                generic = channels._refresh_reason("metadata_audit", incoming)
+                self.assertEqual(generic, "public_source_unverified")
+                self.assertIsNone(channels.info_reader_hint(generic))
+        self.assertEqual(channels._refresh_reason(malformed[0], explicit), explicit)
+
+    def test_generic_reasons_keep_latest_text_with_existing_field_bound(self):
+        self.assertEqual(channels._refresh_reason("rename", "topic"), "topic")
+        self.assertEqual(channels._refresh_reason("rename", "topic" * 20), ("topic" * 20)[:40])
+
+
+@override_settings(MESSAGE_SYNC_SLACK_BOT_WORKSPACE_ID=WORKSPACE)
+class MemberChannelScopeTests(SimpleTestCase):
+    def test_empty_cohort_still_requires_exact_configured_workspace_and_identity(self):
+        with override_settings(SLACK_MEMBER_CHANNEL_ALLOWED_IDS=""):
+            self.assertTrue(channels.member_channel_in_scope(WORKSPACE, CHANNEL))
+            self.assertFalse(channels.member_channel_in_scope("TOTHER", CHANNEL))
+            self.assertFalse(channels.member_channel_in_scope(WORKSPACE, "DPRIVATE"))
+
+    def test_canary_cohort_does_not_admit_other_public_channels(self):
+        with override_settings(SLACK_MEMBER_CHANNEL_ALLOWED_IDS="C0CAPNW3QLT, CSECOND"):
+            self.assertTrue(channels.member_channel_in_scope(WORKSPACE, "C0CAPNW3QLT"))
+            self.assertTrue(channels.member_channel_in_scope(WORKSPACE, "CSECOND"))
+            self.assertFalse(channels.member_channel_in_scope(WORKSPACE, CHANNEL))
+
+    def test_malformed_or_unbounded_explicit_cohort_denies_expansion(self):
+        for cohort in [None, [], " ", ",", CHANNEL + ",", "DPRIVATE", CHANNEL + ",invalid",
+                       CHANNEL + "\n", CHANNEL + "\r", CHANNEL + "\x00", CHANNEL + "\u2028",
+                       ",".join([CHANNEL] * 1001), "C" * 25001]:
+            with self.subTest(cohort_type=type(cohort).__name__), override_settings(
+                SLACK_MEMBER_CHANNEL_ALLOWED_IDS=cohort,
+            ):
+                self.assertFalse(channels.member_channel_in_scope(WORKSPACE, CHANNEL))
+
+    def test_deploy_validation_rejects_malformed_cohort_before_host_writes(self):
+        from scripts.validate_message_sync_deploy_config import validate
+
+        for cohort in [None, " ", ",", "DPRIVATE", CHANNEL + ",", CHANNEL + "\n", CHANNEL + "\u2028",
+                       ",".join([CHANNEL] * 1001)]:
+            with self.subTest(cohort_type=type(cohort).__name__):
+                with self.assertRaisesMessage(ValueError, "SLACK_MEMBER_CHANNEL_ALLOWED_IDS"):
+                    validate({"SLACK_MEMBER_CHANNEL_ALLOWED_IDS": cohort})
+        for cohort in ["", CHANNEL, CHANNEL + ", C0CAPNW3QLT"]:
+            with self.subTest(cohort=cohort):
+                validate({"SLACK_MEMBER_CHANNEL_ALLOWED_IDS": cohort})
 
 
 class InactiveLifecycleIngressTests(SimpleTestCase):

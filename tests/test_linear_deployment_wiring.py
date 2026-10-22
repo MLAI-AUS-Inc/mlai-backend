@@ -262,6 +262,7 @@ class LinearDeploymentWiringTests(unittest.TestCase):
             "MESSAGE_SYNC_TARGETED_STAGED_ROUTING": "false",
             "COMMUNITY_BRIDGE_DEPENDENCY_VERDICTS_ENABLED": "false",
             "SLACK_MEMBER_CHANNELS_ENABLED": "false",
+            "SLACK_MEMBER_CHANNEL_ALLOWED_IDS": "",
             "SLACK_COMMUNITY_SEND_AS_MEMBER": "false",
             "SLACK_COMMUNITY_SOURCE": "bot",
             "MESSAGE_SYNC_EVENT_ROUTING": "false",
@@ -292,7 +293,8 @@ class LinearDeploymentWiringTests(unittest.TestCase):
                 root = Path(directory)
                 (root / "scripts").mkdir()
                 for name in ("upsert_env_value_from_stdin.sh", "validate_linear_channel_issue_deploy_config.py",
-                             "validate_valley_mcp_deploy_config.py", "validate_website_deploy_config.py"):
+                             "validate_valley_mcp_deploy_config.py", "validate_website_deploy_config.py",
+                             "validate_message_sync_deploy_config.py"):
                     shutil.copy(REPO_ROOT / "scripts" / name, root / "scripts")
                 (root / ".env").write_text("KEEP_ME=yes\n")
                 result = subprocess.run(
@@ -303,6 +305,44 @@ class LinearDeploymentWiringTests(unittest.TestCase):
                 self.assertEqual((root / ".env").read_text(), f"KEEP_ME=yes\n{key}={value}\n")
                 self.assertEqual((root / ".env").stat().st_mode & 0o777, 0o600)
 
+
+    def test_managed_value_helper_bounds_public_channel_cohort_before_env_write(self):
+        key = "SLACK_MEMBER_CHANNEL_ALLOWED_IDS"
+        max_ids = ",".join(["C" + "A" * 23] * 1000)
+        cases = [
+            ("", True), ("CAA", True), ("C0CAPNW3QLT", True),
+            (" CAA,\tCBB ", True), ("CAA,CAA", True),
+            (max_ids, True), (" " + max_ids, True),
+            ("  " + max_ids, False), (",".join(["CAA"] * 1001), False),
+            ("C1", False), ("C" + "A" * 24, False),
+            ("DAA", False), ("GAA", False), ("TAA", False), ("Caa", False),
+            ("CAA,", False), (",CAA", False), ("CAA,,CBB", False),
+            (" \t", False), ("CAA\n", False), ("CAA\r", False),
+            ("CAA\x00", False), ("CAA\x0b", False), ("CAA\x0c", False),
+            ("CAA\x1b", False), ("CAA\u0085", False),
+            ("CAA;unexpected", False), ("$(unexpected)", False),
+        ]
+        for index, (value, accepted) in enumerate(cases):
+            with self.subTest(case=index, accepted=accepted), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                (root / "scripts").mkdir()
+                for name in ("upsert_env_value_from_stdin.sh", "validate_message_sync_deploy_config.py"):
+                    shutil.copy(REPO_ROOT / "scripts" / name, root / "scripts")
+                before = "KEEP_ME=yes\nSLACK_MEMBER_CHANNEL_ALLOWED_IDS=COLD\n"
+                (root / ".env").write_text(before)
+                result = subprocess.run(
+                    ["bash", "scripts/upsert_env_value_from_stdin.sh", key],
+                    cwd=root, input=value, text=True, capture_output=True,
+                    env={"PATH": os.environ["PATH"], "PYTHONDONTWRITEBYTECODE": "1"},
+                )
+                if accepted:
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    self.assertEqual((root / ".env").read_text(), f"KEEP_ME=yes\n{key}={value}\n")
+                    self.assertEqual((root / ".env").stat().st_mode & 0o777, 0o600)
+                else:
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertEqual((root / ".env").read_text(), before)
+                self.assertEqual(list(root.glob(".env.managed-value.*")), [])
 
     def test_deployment_probe_does_not_consume_remote_script_stdin(self):
         deploy = (REPO_ROOT / "deploy.sh").read_text()

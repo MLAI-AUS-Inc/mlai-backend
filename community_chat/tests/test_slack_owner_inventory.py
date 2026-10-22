@@ -281,6 +281,7 @@ class SlackOwnerInventoryTests(SlackDmIoAuthorityFixture, TransactionTestCase):
         channel_id = uuid.uuid4()
         CommunityBridgeChannel.objects.create(
             slack_workspace_id="TIOAUTH", slack_channel_id="CJOINED",
+            audience="community",
             destination_platform=CommunityBridgePlatform.BUZZ,
             destination_channel_id=str(channel_id), enabled=True,
         )
@@ -482,6 +483,7 @@ class SlackOwnerInventoryTests(SlackDmIoAuthorityFixture, TransactionTestCase):
         CommunityBridgeChannel.objects.create(
             slack_workspace_id="TIOAUTH", slack_channel_id="CJOINED",
             destination_platform=CommunityBridgePlatform.BUZZ,
+            audience="community",
             destination_channel_id=str(channel_id), enabled=True,
         )
         mapped = conversation_page(self.user, public_key=self.owner_key)["items"][0]

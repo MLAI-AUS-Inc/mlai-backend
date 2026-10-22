@@ -19,6 +19,31 @@ ROOM = "5f0c4b1e-8a35-5d55-9d2e-0b6f4b8c2a11"
 
 
 class MemberChannelQueueTests(TestCase):
+    def test_reader_hint_coalesces_by_observation_and_survives_generic_and_stale_claim(self):
+        observed = timezone.now() - timedelta(seconds=1)
+        first = channels.info_reader_hint_reason(10, observed)
+        newer = channels.info_reader_hint_reason(11, observed + timedelta(microseconds=1))
+        older = channels.info_reader_hint_reason(12, observed - timedelta(microseconds=1))
+        channels.queue_refresh(WORKSPACE, CHANNEL, reason=first)
+        claimed = channels.claim_refreshes()[0]
+        channels.queue_refresh(WORKSPACE, CHANNEL, reason="metadata_audit")
+        self.assertEqual(CommunityBridgeChannelRefresh.objects.get().reason, first)
+        channels.queue_refresh(WORKSPACE, CHANNEL, reason=newer)
+        channels.queue_refresh(WORKSPACE, CHANNEL, reason=older)
+        self.assertFalse(channels.complete_refresh(claimed))
+        channels._retry_refresh(claimed, seconds=60, code="old_error")
+        row = CommunityBridgeChannelRefresh.objects.get()
+        self.assertEqual((row.reason, row.attempts, row.last_error_code), (newer, 0, ""))
+
+    def test_malformed_hint_cannot_be_truncated_into_authority_or_replace_valid_hint(self):
+        valid = channels.info_reader_hint_reason(10, timezone.now())
+        channels.queue_refresh(WORKSPACE, CHANNEL, reason=valid)
+        channels.queue_refresh(WORKSPACE, CHANNEL, reason="i:1:1" + " " * 50)
+        self.assertEqual(CommunityBridgeChannelRefresh.objects.get().reason, valid)
+        CommunityBridgeChannelRefresh.objects.all().delete()
+        channels.queue_refresh(WORKSPACE, CHANNEL, reason="i:1:1" + " " * 50)
+        self.assertEqual(CommunityBridgeChannelRefresh.objects.get().reason, "public_source_unverified")
+
     def test_queue_coalesces_and_claim_is_a_lease_without_reader_io(self):
         channels.queue_refresh(WORKSPACE, CHANNEL, reason="rename")
         channels.queue_refresh(WORKSPACE, CHANNEL, reason="topic")

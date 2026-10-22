@@ -256,6 +256,7 @@ class SlackOwnerConversationView(SlackOwnerInventoryApiView):
                 limit=request.query_params.get("limit", "50"),
                 cursor=request.query_params.get("cursor", ""),
                 unread_only=unread == "1",
+                catalog_kinds=request.headers.get("X-MLAI-Slack-Catalog-Kinds"),
             )
         except InventoryError as exc:
             response = self.inventory_error_response(exc)
@@ -284,6 +285,7 @@ class SlackOwnerConversationOpenView(SlackOwnerInventoryApiView):
                 request.user,
                 public_key=getattr(request, "community_chat_public_key", None),
                 slack_conversation_id=request.data.get("slack_conversation_id"),
+                catalog_kinds=request.headers.get("X-MLAI-Slack-Catalog-Kinds"),
             )
             response = Response(payload, status=status_code)
         except InventoryError as exc:
@@ -357,6 +359,7 @@ class SlackDmMirrorView(SlackDmMirrorApiView):
                 authenticated_public_key=getattr(
                     request, "community_chat_public_key", None
                 ),
+                catalog_kinds=request.headers.get("X-MLAI-Slack-Catalog-Kinds"),
             )
         )
 

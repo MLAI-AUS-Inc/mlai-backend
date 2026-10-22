@@ -1,6 +1,7 @@
 from django.contrib import admin
 from django.contrib.auth.admin import UserAdmin as BaseUserAdmin
 from django.utils.html import format_html
+from community_chat.admin_authority import MemberAudienceAuthorityAdminMixin
 from .models import (
     AccountBan,
     GlobalSettings,
@@ -22,7 +23,7 @@ class UserEmailAliasInline(admin.TabularInline):
         return False
 
 
-class UserAdmin(BaseUserAdmin):
+class UserAdmin(MemberAudienceAuthorityAdminMixin, BaseUserAdmin):
     inlines = (UserEmailAliasInline,)
     add_form = CustomUserCreationForm
     form = CustomUserChangeForm

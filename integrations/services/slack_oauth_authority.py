@@ -94,4 +94,7 @@ def advance_slack_oauth_generation_locked(
             generation,
         )
         connection.save(update_fields=("provider_metadata", "updated_at"))
+    from .community_bridge.member_channels import schedule_member_authority_change
+
+    schedule_member_authority_change(user.pk, reason="slack_oauth_generation_changed", reduction=True)
     return generation

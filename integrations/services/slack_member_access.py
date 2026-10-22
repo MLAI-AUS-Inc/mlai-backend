@@ -7,7 +7,7 @@ remain inside the existing grant-authority call path and never enter errors.
 
 from __future__ import annotations
 
-from datetime import timedelta
+from datetime import datetime, timedelta
 import hashlib
 import re
 
@@ -78,7 +78,10 @@ def _membership(grant, channel_id, *, locked=False):
 
 
 def _membership_state(grant, row):
-    if row is None or row.observed_at is None or row.observed_at < grant.consented_at:
+    from .slack_member_membership_epoch import membership_floor
+
+    floor = membership_floor(grant)
+    if row is None or row.observed_at is None or floor is None or row.observed_at < floor:
         return None
     if row.source == "probe":
         if row.observed_at < timezone.now() - timedelta(seconds=PROBE_SECONDS):
@@ -114,10 +117,13 @@ class MemberSlackClient:
         if not enabled() or scopes is None or not scopes.issubset(self._authority.scopes):
             raise MemberAccessDenied("The Slack operation lacks current permission.")
         channel_id = kwargs.get("channel")
+        from .community_bridge.member_channels import member_channel_in_scope
         if (not WORKSPACE_ID.fullmatch(self._authority.workspace_id)
-                or not CHANNEL_ID.fullmatch(str(channel_id or ""))):
+                or not CHANNEL_ID.fullmatch(str(channel_id or ""))
+                or not member_channel_in_scope(self._authority.workspace_id, channel_id)):
             raise MemberAccessDenied("A valid Slack channel is required.")
         grant = None
+        started_at = None
         try:
             with transaction.atomic():
                 grant, connection = dm._lock_slack_grant_api_authority(
@@ -135,6 +141,7 @@ class MemberSlackClient:
                     grant, _membership(grant, channel_id, locked=True),
                 ) != "joined":
                     raise MemberAccessDenied("Current channel membership is required.")
+                started_at = timezone.now()
                 response = dm._call_slack_with_grant_authority(
                     self._authority, method, required_scopes=scopes, **kwargs,
                 )
@@ -146,6 +153,7 @@ class MemberSlackClient:
                 purpose = "history" if method in HISTORY_METHODS else "info" if method in INFO_METHODS else "write"
                 record_reader_failure(
                     grant, error, channel_id=channel_id, purpose=purpose, authority=self._authority,
+                    observed_at=started_at,
                 )
             raise
 
@@ -155,7 +163,39 @@ def member_client(grant) -> MemberSlackClient:
     return MemberSlackClient(grant)
 
 
-def reader_for_channel(workspace_id, channel_id, *, purpose="history", exclude_grant_ids=()):
+def _current_info_hint(grant, hint):
+    """A callback hint may schedule INFO only within the current consent epoch."""
+    from .community_bridge.member_channels import InfoReaderHint, info_reader_hint_reason
+    from .slack_member_membership_epoch import membership_floor
+
+    if (not isinstance(hint, InfoReaderHint) or grant.pk != hint.grant_id
+            or info_reader_hint_reason(hint.grant_id, hint.observed_at) is None):
+        return False
+    floor = membership_floor(grant)
+    return bool(floor is not None and floor <= hint.observed_at <= timezone.now() + timedelta(minutes=5))
+
+
+def hinted_info_reader(workspace_id, channel_id, hint):
+    """Resolve one untrusted INFO preference before any lower-order room lock."""
+    from .community_bridge.member_channels import InfoReaderHint, member_channel_in_scope
+
+    if not isinstance(hint, InfoReaderHint) or not enabled() or not member_channel_in_scope(workspace_id, channel_id):
+        return None
+    grant = SlackDmMirrorGrant.objects.filter(
+        pk=hint.grant_id, slack_workspace_id=workspace_id, status="active", revoked_at__isnull=True,
+        user__is_active=True,
+    ).select_related("user", "connection").first()
+    if grant is None or not _current_info_hint(grant, hint) or not public_channels_enabled(grant):
+        return None
+    return grant
+
+
+def info_reader_deferred(grant, channel_id):
+    """Inspect temporary INFO scheduling state before taking a room lock."""
+    return bool(cache.get(_key(grant, channel_id, "info")))
+
+
+def reader_for_channel(workspace_id, channel_id, *, purpose="history", exclude_grant_ids=(), info_reader_hint=None):
     """Select a reader; only public info may fall back to an unjoined grant.
 
     member_client records provider failures using its pre-request authority.
@@ -165,7 +205,8 @@ def reader_for_channel(workspace_id, channel_id, *, purpose="history", exclude_g
     """
     if purpose not in {"history", "info"}:
         raise ValueError("Reader purpose must be history or info")
-    if not enabled() or not WORKSPACE_ID.fullmatch(str(workspace_id or "")) or not CHANNEL_ID.fullmatch(str(channel_id or "")):
+    from .community_bridge.member_channels import member_channel_in_scope
+    if not enabled() or not member_channel_in_scope(workspace_id, channel_id):
         return None
     excluded = set(exclude_grant_ids)
     grants = SlackDmMirrorGrant.objects.filter(
@@ -183,6 +224,9 @@ def reader_for_channel(workspace_id, channel_id, *, purpose="history", exclude_g
     ).values_list("reader_grant_id", flat=True).first()
     preferred = ([pointer] if pointer in joined else []) + [row.grant_id for row in memberships]
     if purpose == "info":
+        hinted = by_id.get(getattr(info_reader_hint, "grant_id", None))
+        if hinted is not None and _current_info_hint(hinted, info_reader_hint):
+            preferred.append(hinted.pk)
         preferred += sorted(by_id)
     seen = set()
     for grant_id in preferred:
@@ -198,7 +242,7 @@ def reader_for_channel(workspace_id, channel_id, *, purpose="history", exclude_g
     return None
 
 
-def record_reader_failure(grant, error, *, channel_id, authority, purpose="history"):
+def record_reader_failure(grant, error, *, channel_id, authority, purpose="history", observed_at=None):
     """Record content-free failure/exclusion; revoke rejected auth durably.
 
     A transport error must not cause an unacknowledged write to switch actors.
@@ -222,6 +266,22 @@ def record_reader_failure(grant, error, *, channel_id, authority, purpose="histo
             return
         raw = str(error.response.get("error") or "") if isinstance(error, dm.SlackApiError) else ""
         code = raw if raw in SAFE_PROVIDER_ERRORS else "request_failed"
+        if (code == "not_in_channel" and isinstance(observed_at, datetime)
+                and timezone.is_aware(observed_at)):
+            row = _membership(current, channel_id, locked=True)
+            if row is not None:
+                # This request predates a newer observation. Its negative
+                # result cannot overwrite that join or its reader diagnostics.
+                if row.observed_at > observed_at:
+                    return
+                from .slack_channel_membership import mark_left
+
+                if mark_left(current, channel_id, observed_at=observed_at,
+                             source="probe", authority=authority):
+                    # Bind the negative probe to exact OAuth/consent authority
+                    # before its after-commit audience reduction runs.
+                    cache.set(_key(current, channel_id, "membership"), "left",
+                              timeout=PROBE_SECONDS)
         if purpose in {"history", "info"}:
             cache.set(_key(current, channel_id, purpose), True, timeout=60)
         SlackDmMirrorGrant.objects.filter(pk=current.pk, status="active").update(
@@ -251,6 +311,7 @@ def _public_channel_response(response, channel_id):
     return bool(
         isinstance(raw, dict) and raw.get("id") == channel_id
         and raw.get("is_private") is False and raw.get("is_channel") is True
+        and not any(raw.get(key) for key in ("is_im", "is_mpim", "is_group"))
         and not any(raw.get(key) for key in (
             "is_shared", "is_ext_shared", "is_org_shared", "is_pending_ext_shared", "pending_shared",
         ))
@@ -275,12 +336,16 @@ def _probe_membership(grant, channel_id, public_key):
         row = _membership(current, channel_id, locked=True)
         if row is not None and row.observed_at >= started:
             return _membership_state(current, row)
-        now = timezone.now()
-        SlackChannelMembership.objects.update_or_create(
-            grant=current, slack_workspace_id=current.slack_workspace_id, slack_channel_id=channel_id,
-            defaults={"state": state, "source": "probe", "observed_at": now,
-                      "left_at": now if state == "left" else None},
+        from .slack_channel_membership import mark_joined, mark_left
+
+        # The request's start, rather than response time, cannot defeat a
+        # newer signed leave. The service persists the matching audience wake.
+        changed = (mark_joined if state == "joined" else mark_left)(
+            current, channel_id, observed_at=started, source="probe",
+            authority=authority, public_verified=True,
         )
+        if not changed:
+            return _membership_state(current, _membership(current, channel_id, locked=True))
         cache.set(_key(current, channel_id, "membership"), state, timeout=PROBE_SECONDS)
     return state
 
@@ -288,7 +353,8 @@ def _probe_membership(grant, channel_id, public_key):
 def _poster_for_author(pubkey, workspace_id, channel_id):
     """Resolve a verified author's own grant; unknown membership gets one probe."""
     key = str(pubkey or "").strip().lower()
-    if not enabled() or not PUBLIC_KEY.fullmatch(key) or not WORKSPACE_ID.fullmatch(str(workspace_id or "")) or not CHANNEL_ID.fullmatch(str(channel_id or "")):
+    from .community_bridge.member_channels import member_channel_in_scope
+    if not enabled() or not PUBLIC_KEY.fullmatch(key) or not member_channel_in_scope(workspace_id, channel_id):
         return None
     device = CommunityChatDevice.objects.filter(
         public_key=key, status="verified", revoked_at__isnull=True, user__is_active=True,

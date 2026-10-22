@@ -25,6 +25,13 @@ def validate(env):
         if value == "true" and enabled != "true":
             raise ValueError(f"{key} requires MESSAGE_SYNC_ENABLED=true")
     member_enabled = env.get("SLACK_MEMBER_CHANNELS_ENABLED", "false") == "true"
+    member_ids = env.get("SLACK_MEMBER_CHANNEL_ALLOWED_IDS", "")
+    if (not isinstance(member_ids, str) or len(member_ids) > 25000
+            or re.fullmatch(r"[A-Z0-9, \t]*", member_ids) is None
+            or member_ids and (len(member_ids.split(",")) > 1000 or not all(
+                re.fullmatch(r"C[A-Z0-9]{2,23}", value.strip()) for value in member_ids.split(",")
+            ))):
+        raise ValueError("SLACK_MEMBER_CHANNEL_ALLOWED_IDS must be empty or a bounded comma-separated channel list")
     source = env.get("SLACK_COMMUNITY_SOURCE", "bot")
     if source not in {"bot", "both", "members"}:
         raise ValueError("SLACK_COMMUNITY_SOURCE must be bot, both or members")
