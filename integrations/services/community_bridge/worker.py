@@ -5,6 +5,7 @@ import time
 import logging
 import uuid
 from typing import Optional
+from threading import Lock
 from urllib.parse import quote, urlencode
 
 import discord
@@ -56,7 +57,7 @@ from integrations.services.message_sync.runner import process_history_once
 from integrations.services.message_sync.history import seed_states
 from integrations.services.message_sync.discovery import discovery_poll_seconds
 from integrations.services.message_sync.read_state import refresh_read_state_once
-from integrations.services.message_sync.execution import run_lane
+from integrations.services.message_sync.execution import run_lane, run_slots
 from integrations.services.slack_workspace_users import warm_workspace_directory_once
 
 logger = logging.getLogger(__name__)
@@ -65,6 +66,8 @@ _discovery_heartbeat_at = 0.0
 _discovery_completed = 0
 _discovery_failed = 0
 _discovery_error = ""
+_discovery_heartbeat_lock = Lock()
+_discovery_heartbeat_inflight = False
 
 
 class ParentMappingPending(Exception):
@@ -222,6 +225,10 @@ class CommunityBridgeDiscordClient(discord.Client):
 
     @tasks.loop(seconds=5.0)
     async def slack_dm_discovery_loop(self) -> None:
+        from integrations.services.message_sync.event_routing import enabled as event_routing_enabled
+        if event_routing_enabled():
+            await _run_discovery_loop()
+            return
         await asyncio.to_thread(_maintain_chat_accounts)
 
     @tasks.loop(seconds=3.0)
@@ -1039,6 +1046,13 @@ async def _run_read_state_workers():
 
 async def _run_discovery_loop() -> None:
     """Poll once per configured turn even with no work; never spin on deferral."""
+    from integrations.services.message_sync.event_routing import enabled as event_routing_enabled
+    if event_routing_enabled():
+        # One slow owner's directory/provider work cannot occupy every event
+        # slot. Both slots still acquire the same durable owner lease, respect
+        # the global poll cap and run authority reduction before each claim.
+        await run_slots(lambda _: _maintain_chat_accounts(), slots=2, idle_seconds=1.0)
+        return
     while True:
         await asyncio.to_thread(_maintain_chat_accounts)
         await asyncio.sleep(discovery_poll_seconds())
@@ -1062,16 +1076,32 @@ def _maintain_chat_accounts():
 def _record_discovery_heartbeat(outcome):
     """Aggregate turns from either entrypoint and write no more than every 5 s."""
     global _discovery_heartbeat_at, _discovery_completed, _discovery_failed, _discovery_error
+    global _discovery_heartbeat_inflight
     if not message_sync_enabled():
         return
-    if outcome is not None:
-        _discovery_completed += outcome.completed
-        _discovery_failed += outcome.failed
-        _discovery_error = outcome.error_code
-    now = time.monotonic()
-    if now - _discovery_heartbeat_at >= 5:
-        heartbeat(WORKER_ID, "discovery", completed=_discovery_completed,
-                  failed=_discovery_failed, error_code=_discovery_error)
+    with _discovery_heartbeat_lock:
+        if outcome is not None:
+            _discovery_completed += outcome.completed
+            _discovery_failed += outcome.failed
+            _discovery_error = outcome.error_code
+        now = time.monotonic()
+        if _discovery_heartbeat_inflight or now - _discovery_heartbeat_at < 5:
+            return
+        snapshot = (_discovery_completed, _discovery_failed, _discovery_error)
+        _discovery_heartbeat_inflight = True
         _discovery_heartbeat_at = now
         _discovery_completed = _discovery_failed = 0
         _discovery_error = ""
+    try:
+        heartbeat(WORKER_ID, "discovery", completed=snapshot[0],
+                  failed=snapshot[1], error_code=snapshot[2])
+    except Exception:
+        with _discovery_heartbeat_lock:
+            _discovery_completed += snapshot[0]
+            _discovery_failed += snapshot[1]
+            _discovery_error = _discovery_error or snapshot[2]
+            _discovery_heartbeat_at = 0.0
+        raise
+    finally:
+        with _discovery_heartbeat_lock:
+            _discovery_heartbeat_inflight = False

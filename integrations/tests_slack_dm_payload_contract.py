@@ -6,6 +6,7 @@ opening any database connection fails the test.
 
 import os
 import unittest
+from datetime import datetime, timezone
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
@@ -165,3 +166,75 @@ class SlackPrivatePayloadContractTests(unittest.TestCase):
         with self.assertRaises(self.service.SlackDmMirrorAuthorizationError):
             self.service._deliver_to_mlai(delivery)
         self.adapter.assert_not_called()
+
+    def event_delivery(self):
+        delivery = self.delivery("create", "1788650002.000789")
+        delivery.metadata["event_routing_v1"] = {
+            "parked_at": 100.0, "key": "opaque-private-event-key", "path": "event",
+        }
+        return delivery
+
+    def test_event_latency_waits_for_adapter_ack_and_transaction_commit(self):
+        from integrations.services.message_sync import telemetry
+
+        delivery = self.event_delivery()
+        clock = [101.0]
+        committed = []
+
+        def acknowledge(**payload):
+            clock[0] = 116.0  # Adapter time is part of parked-to-delivered latency.
+            return {"message_id": "d" * 64}
+
+        self.adapter.side_effect = acknowledge
+        with patch.object(self.service.timezone, "now", side_effect=lambda: datetime.fromtimestamp(clock[0], timezone.utc)), patch.object(
+            self.service.transaction, "on_commit", side_effect=lambda callback, **_: committed.append(callback),
+        ), patch.object(telemetry, "record_latency") as latency:
+            self.service._deliver_to_mlai(delivery)
+            self.assertEqual(delivery.status, "completed")
+            self.assertEqual(delivery.encrypted_text, "")
+            latency.assert_not_called()
+            self.assertTrue(committed)
+            for callback in committed:
+                callback()
+        self.assertIn(unittest.mock.call("staged_delivered", 16000), latency.call_args_list)
+        self.assertEqual(sum(call.args[0] == "staged_delivered" for call in latency.call_args_list), 1)
+
+    def test_event_retry_keeps_original_parked_time_and_records_only_success(self):
+        from integrations.services.message_sync import telemetry
+
+        delivery = self.event_delivery()
+        clock = [105.0]
+        committed = []
+        self.adapter.side_effect = TimeoutError("synthetic adapter delay")
+        with patch.object(self.service.timezone, "now", side_effect=lambda: datetime.fromtimestamp(clock[0], timezone.utc)), patch.object(
+            self.service.transaction, "on_commit", side_effect=lambda callback, **_: committed.append(callback),
+        ), patch.object(telemetry, "record_latency") as latency:
+            with self.assertRaises(TimeoutError):
+                self.service._deliver_to_mlai(delivery)
+            self.assertEqual(delivery.metadata["event_routing_v1"]["parked_at"], 100.0)
+            self.assertEqual(committed, [])
+            latency.assert_not_called()
+            clock[0] = 121.0
+            self.adapter.side_effect = self.accept_adapter_payload
+            self.service._deliver_to_mlai(delivery)
+            for callback in committed:
+                callback()
+        self.assertIn(unittest.mock.call("staged_delivered", 21000), latency.call_args_list)
+        self.assertEqual(sum(call.args[0] == "staged_delivered" for call in latency.call_args_list), 1)
+
+    def test_superseded_or_post_ack_unauthorized_event_cannot_count_as_delivered(self):
+        from integrations.services.message_sync import telemetry
+
+        with patch.object(telemetry, "record_latency") as latency, patch.object(
+            self.service.transaction, "on_commit",
+        ) as commit:
+            delivery = self.event_delivery()
+            with patch.object(self.service, "_supersede_stale_slack_mutation_locked", return_value=True):
+                self.service._deliver_to_mlai(delivery)
+            self.adapter.assert_not_called()
+            self.authority.side_effect = self.service.SlackDmMirrorAuthorizationError("synthetic revoked fence")
+            with self.assertRaises(self.service.SlackDmMirrorAuthorizationError):
+                self.service._deliver_to_mlai(self.event_delivery())
+            self.adapter.assert_called_once()
+            latency.assert_not_called()
+            commit.assert_not_called()

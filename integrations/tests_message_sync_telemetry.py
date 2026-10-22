@@ -165,12 +165,32 @@ class OpenLatencyTests(SimpleTestCase):
         telemetry._write_batch(queued)
         result = telemetry.latency_snapshot(minutes=1, now=3720)
         self.assertEqual(result["kinds"]["open_presented"], {
-            "count": 2, "sum_ms": 150001, "over_30s": 1, "over_120s": 1,
+            "count": 2, "sum_ms": 150001, "at_least_15s": 2, "over_30s": 1, "over_120s": 1,
         })
         hourly = telemetry.latency_snapshot(hours=1, now=7200)
         self.assertEqual(hourly["kinds"], result["kinds"])
         self.assertIsNone(result["kinds"]["open_ready"])
         self.assertIsNone(telemetry.latency_snapshot(minutes=1, now=3661)["kinds"]["open_presented"])
+
+    def test_exact_fifteen_seconds_is_not_counted_under_the_delivery_target(self):
+        queued = []
+        with patch.object(telemetry, "time", return_value=3661), patch.object(
+            telemetry, "_enqueue", side_effect=queued.append,
+        ):
+            telemetry.record_latency("staged_delivered_event", 14999)
+            telemetry._write_batch(queued)
+            result = telemetry.latency_snapshot(minutes=1, now=3720)
+            self.assertEqual(result["kinds"]["staged_delivered_event"], {
+                "count": 1, "sum_ms": 14999, "at_least_15s": 0, "over_30s": 0, "over_120s": 0,
+            })
+            queued.clear()
+            telemetry.record_latency("staged_delivered_event", 15000)
+            telemetry._write_batch(queued)
+        result = telemetry.latency_snapshot(minutes=1, now=3720)
+        self.assertEqual(result["kinds"]["staged_delivered_event"], {
+            "count": 2, "sum_ms": 29999, "at_least_15s": 1, "over_30s": 0, "over_120s": 0,
+        })
+        self.assertEqual(telemetry.latency_snapshot(hours=1, now=7200)["kinds"], result["kinds"])
 
     def test_latency_rejects_unknown_kind_and_sink_failure_never_stalls(self):
         with self.assertRaises(ValueError):
