@@ -162,7 +162,7 @@ jobs:
       run: python manage.py makemigrations --check --dry-run
 
     - name: Run mentoring service and endpoint checks without database access
-      run: python scripts/test_without_database.py mentoring.tests.test_scheduling_unit mentoring.tests.test_google_unit mentoring.tests.test_service_unit mentoring.tests.test_dst_unit mentoring.tests.test_followup_unit community_chat.tests.test_mentoring_views_unit mentoring.tests.test_admin_unit community_chat.tests.test_mentoring_admin_views_unit
+      run: python scripts/test_without_database.py mentoring.tests.test_scheduling_unit mentoring.tests.test_google_unit mentoring.tests.test_service_unit mentoring.tests.test_dst_unit mentoring.tests.test_followup_unit community_chat.tests.test_mentoring_views_unit mentoring.tests.test_admin_unit community_chat.tests.test_mentoring_admin_views_unit community_chat.tests.test_staff_admin_unit
 
     - name: Run coworking account booking contract checks
       run: python -m unittest community_chat.tests.test_coworking_unit tests.test_article_notification_policy_unit
