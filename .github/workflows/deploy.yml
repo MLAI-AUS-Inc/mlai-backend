@@ -159,6 +159,7 @@ jobs:
           content_factory.tests_baseline_ai_evidence_unit \
           content_factory.tests_startup_profile_draft_unit \
           content_factory.tests_startup_settings_unit \
+          content_factory.tests_article_voice_unit \
           content_factory.tests_author_photos_unit \
           content_factory.tests_copy_author_photos_unit \
           content_factory.tests_article_website_preview_unit \
