@@ -120,7 +120,9 @@ class CallbackAccountChannelConcurrencyTests(TransactionTestCase):
                 actor_ready.set()
                 CommunityBridgeChannel.objects.select_for_update().get(pk=self.channel.pk)
 
-        def dispatch(_):
+        def dispatch(_, *, private_ingest=None, public_ingest=None):
+            self.assertIsNone(private_ingest)
+            self.assertIsNone(public_ingest)
             CommunityBridgeReceipt.objects.create(platform='slack', receipt_key='atomic-rollback-proof')
             grant = SlackDmMirrorGrant.objects.get(slack_workspace_id='TTESTCALLBACK', slack_user_id='UACTOR')
             dm._capture_slack_grant_api_authority(grant)  # Must reject before refreshing or locking User.

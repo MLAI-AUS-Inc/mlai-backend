@@ -42,7 +42,7 @@ def _locked(grant, authority, *, joined):
     to the original user/connection/Slack identity while taking the same lock
     order, without requiring a still-usable token or new provider permission.
     """
-    from . import slack_dm_mirror as dm
+    from . import slack_dm_mirror as dm, slack_member_access as access
     from .message_sync.member_callback_authority import assert_callback_user_locked
 
     assert_callback_user_locked(grant.user_id)
@@ -55,7 +55,7 @@ def _locked(grant, authority, *, joined):
                 grant.slack_workspace_id, grant.slack_user_id):
             return None, None
         current, connection = dm._lock_slack_grant_api_authority(
-            authority, required_scopes=PUBLIC_CHANNEL_SCOPES if joined else set(),
+            authority, required_scopes=access.PUBLIC_READER_SCOPES if joined else set(),
         )
         current.connection = connection
         return current, authority
@@ -111,7 +111,7 @@ def _apply(grant, channel_id, *, observed_at, source, state, authority=None, pub
                 floor = membership_floor(current)
                 if floor is None or observed_at < floor:
                     return False
-            if joined and not public_channels_enabled(current, authority=captured):
+            if joined and not access.public_reader_enabled(current, authority=captured):
                 return False
             row = SlackChannelMembership.objects.select_for_update().filter(
                 grant=current, slack_channel_id=channel_id,
@@ -131,7 +131,7 @@ def _apply(grant, channel_id, *, observed_at, source, state, authority=None, pub
                 # arbitrary unknown sources while expansion is disabled.
                 if (public_verified is not True or not access.enabled()
                         or not member_channel_in_scope(current.slack_workspace_id, channel_id)
-                        or not public_channels_enabled(current, authority=captured)):
+                        or not access.public_reader_enabled(current, authority=captured)):
                     return False
             # A newer message orders future leave/join observations, but does
             # not change an already-current audience. An expired probe or an
@@ -193,7 +193,7 @@ def reconcile_from_inventory(grant, seen_ids, complete, *, started_at, authority
     try:
         with transaction.atomic():
             current, captured = _locked(grant, authority, joined=True)
-            if current is None or started_at < current.consented_at or not public_channels_enabled(current, authority=captured):
+            if current is None or started_at < current.consented_at or not access.public_reader_enabled(current, authority=captured):
                 return counts
             from .slack_member_membership_epoch import membership_floor
 

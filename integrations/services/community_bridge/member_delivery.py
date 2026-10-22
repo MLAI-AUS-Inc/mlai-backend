@@ -58,6 +58,7 @@ RESERVED = frozenset(
         "_community_enqueue_v1",
         "_community_identity_v1",
         "_community_delivery_v1",
+        "community_source_compare_v1",
     }
 )
 TS = re.compile(r"^[0-9]{1,20}\.[0-9]{1,9}$")

@@ -1,3 +1,5 @@
+import hashlib
+import json
 import logging
 import re
 from datetime import timedelta
@@ -133,7 +135,9 @@ def _public_receipt_identity_enabled(payload, normalized, *, public_source_verif
     ).exists()
 
 
-def ingest_slack_event(payload: dict, *, public_source_verified=False) -> dict:
+def ingest_slack_event(payload: dict, *, public_source_verified=False, retired_bot_source=False) -> dict:
+    from . import community_source
+    payload = community_source.strip_untrusted(payload)
     event = dict(payload.get("event") or {})
     # The bot lifecycle lane is retired. Keep its callbacks out of message
     # receipts: create/rename carry a conversation object, not a channel ID.
@@ -146,6 +150,11 @@ def ingest_slack_event(payload: dict, *, public_source_verified=False) -> dict:
     receipt_key = str(payload.get("event_id") or "").strip()
     if _public_receipt_identity_enabled(payload, normalized, public_source_verified=public_source_verified):
         receipt_key = _public_slack_receipt_key(payload, normalized) or receipt_key
+    if retired_bot_source:
+        # This policy receipt cannot reserve the shared public content key.
+        receipt_key = "source-retired:" + hashlib.sha256(json.dumps([
+            payload.get("team_id"), payload.get("api_app_id"), payload.get("event_id"), receipt_key,
+        ], separators=(",", ":")).encode()).hexdigest()
     source_channel_id = str(event.get("channel") or normalized_payload.get("source_channel_id") or "").strip()
     event_type = str(event.get("subtype") or event.get("type") or "").strip() or "message"
     return ingest_inbound_event(
@@ -155,6 +164,7 @@ def ingest_slack_event(payload: dict, *, public_source_verified=False) -> dict:
         event_type=event_type,
         normalized_event=normalized_payload or None,
         raw_payload=payload, raw_source_message_id=raw_ts, ignore_detail=ignore_detail,
+        retired_bot_source=retired_bot_source,
     )
 
 
@@ -219,13 +229,30 @@ def ingest_inbound_event(
     raw_payload: dict,
     raw_source_message_id: str = "",
     ignore_detail: str = "",
+    retired_bot_source: bool = False,
 ) -> dict:
+    from .community_source import strip_untrusted
+    raw_payload = strip_untrusted(raw_payload or {})
     normalized_receipt_key = str(receipt_key or "").strip()
     if not normalized_receipt_key:
         return {"status": "ignored", "reason": "missing_receipt_key"}
 
     normalized_channel_id = str(source_channel_id or "").strip()
     channel = _get_enabled_channel(source_platform=source_platform, channel_id=normalized_channel_id)
+    if channel is None and source_platform == "slack":
+        from .community_source import unavailable_mapping
+        unavailable_mapping(raw_payload, normalized_channel_id)
+
+    if source_platform == "slack":
+        from .community_source import retirement_policy
+        policy = retirement_policy(channel, raw_payload)
+        # Source retirement is decided twice under the ordered callback fence,
+        # including after this Channel lock and any inferred JOIN. The internal
+        # argument never grants authority or reserves an active source's key.
+        if policy == "hold" or (retired_bot_source and policy != "retire"):
+            return {"status": "community_source_pending"}
+        if policy == "retire" and not retired_bot_source:
+            return {"status": "community_source_pending"}
 
     if normalized_event:
         try:
@@ -258,6 +285,7 @@ def ingest_inbound_event(
             ),
         }
 
+    duplicate = False
     try:
         with transaction.atomic():
             receipt = CommunityBridgeReceipt.objects.create(
@@ -292,24 +320,35 @@ def ingest_inbound_event(
             # Enqueued/completed/ignored receipts remain ordinary duplicates.
             receipt = existing
         else:
-            return {
-                "status": "duplicate",
-                "receipt_id": existing.id if existing else None,
-                "receipt_key": normalized_receipt_key,
-            }
+            receipt = existing
+            duplicate = True
+
+    source_echo = source_superseded = False
+    if channel is not None and source_platform == CommunityBridgePlatform.SLACK:
+        from . import community_source
+        if normalized_event:
+            from .public_echo import is_public_slack_echo, newer_reaction_observed
+            source_superseded = newer_reaction_observed(channel, raw_payload or {})
+            source_echo = is_public_slack_echo(channel, normalized_event, raw_payload or {})
+        if receipt is not None:
+            community_source.observe(receipt, channel, raw_payload or {}, normalized_event, own_send=source_echo)
+    if duplicate:
+        return {"status": "duplicate", "receipt_id": receipt.id if receipt else None,
+                "receipt_key": normalized_receipt_key}
 
     if channel is None:
         return _mark_receipt_ignored(receipt, reason="unmapped_channel")
 
+    if retired_bot_source:
+        return _mark_receipt_ignored(receipt, reason=(
+            "bot_source_retired" if raw_payload.get("api_app_id") == getattr(settings, "MESSAGE_SYNC_SLACK_APP_ID", "")
+            else "member_source_no_reader"))
     if not normalized_event:
         return _mark_receipt_ignored(receipt, reason="unsupported_or_ignored_event", detail=ignore_detail)
-
-    if source_platform == CommunityBridgePlatform.SLACK:
-        from .public_echo import is_public_slack_echo, newer_reaction_observed
-        if newer_reaction_observed(channel, raw_payload or {}):
-            return _mark_receipt_ignored(receipt, reason="superseded_member_reaction")
-        if is_public_slack_echo(channel, normalized_event, raw_payload or {}):
-            return _mark_receipt_ignored(receipt, reason="member_slack_echo")
+    if source_superseded:
+        return _mark_receipt_ignored(receipt, reason="superseded_member_reaction")
+    if source_echo:
+        return _mark_receipt_ignored(receipt, reason="member_slack_echo")
 
     if (
         normalized_event["delivery_type"] == CommunityBridgeDeliveryType.EDIT
