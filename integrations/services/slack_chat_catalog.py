@@ -59,7 +59,7 @@ def _member_room_acknowledged(bridge, current_hash):
 def member_channel_room_id(grant, public_key, bridge, *, catalog_kinds=None):
     """Read-only capability/authority snapshot for one acknowledged Members room.
 
-    Re-derive the complete key hash so a new device or changed top-eight subset
+    Re-derive the complete key hash so any newly verified or revoked device
     cannot inherit an older audience acknowledgement. This snapshot grants no
     provider or relay authority; those boundaries recheck their own fences.
     """
@@ -67,7 +67,7 @@ def member_channel_room_id(grant, public_key, bridge, *, catalog_kinds=None):
     from integrations.services import slack_channel_membership as membership
     from integrations.services.community_bridge.member_audiences import audience_hash, current_audience_keys
     from integrations.services.community_bridge.member_channels import member_channel_in_scope
-    from integrations.services.slack_dm_mirror import _owner_device_pubkeys
+    from integrations.services.slack_member_devices import member_device_key_allowed
 
     key = str(public_key or "").strip().lower()
     try:
@@ -81,7 +81,7 @@ def member_channel_room_id(grant, public_key, bridge, *, catalog_kinds=None):
             or not 0 <= source_age <= 300
             or not member_channel_in_scope(bridge.slack_workspace_id, bridge.slack_channel_id)
             or not public_channels_enabled(grant) or not re.fullmatch(r"[0-9a-f]{64}", key)
-            or key not in _owner_device_pubkeys(grant.user_id, limit=8)):
+            or not member_device_key_allowed(grant.user_id, key)):
         return None
     members = membership.consenting_members(bridge.slack_workspace_id, bridge.slack_channel_id)
     if not any(member.pk == grant.pk and member.user_id == grant.user_id for member in members):

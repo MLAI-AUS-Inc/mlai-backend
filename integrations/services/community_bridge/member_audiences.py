@@ -45,17 +45,9 @@ def audience_hash(pubkeys):
 
 
 def _device_key_result(user_ids):
-    from integrations.services.slack_dm_mirror import _owner_device_pubkeys
+    from integrations.services.slack_member_devices import device_key_result
 
-    keys = set()
-    for user_id in sorted(user_ids):
-        values = _owner_device_pubkeys(user_id, limit=8)
-        if any(not EVENT_ID_RE.fullmatch(value) for value in values):
-            return None, "audience_authority_unavailable"
-        keys.update(values)
-        if len(keys) > MAX_KEYS:
-            return None, "audience_too_large"
-    return keys, ""
+    return device_key_result(user_ids)
 
 
 def _device_keys(user_ids):

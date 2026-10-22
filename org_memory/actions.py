@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from .slack_privacy import claims_have_members, members_source_ids
+
 import hashlib
 import json
 import re
@@ -179,6 +181,9 @@ def _validate_evidence(
     source_ids: list[str],
 ) -> tuple[list[str], list[str]]:
     allowed = set(allowed_memory_classifications(authorization))
+    if (claims_have_members(MemoryClaim.objects.filter(organization=organization, pk__in=claim_ids))
+            or members_source_ids().filter(organization=organization, pk__in=source_ids).exists()):
+        raise AgentActionError("Members Slack evidence is unavailable for actions.")
     claims = list(
         MemoryClaim.objects.filter(
             organization=organization,
@@ -681,7 +686,7 @@ def execute_action_proposal(
     snapshot, snapshot_hash = refresh_action_preconditions(proposal)
     stale = False
     with transaction.atomic():
-        locked = AgentActionProposal.objects.select_for_update().select_related(
+        locked = AgentActionProposal.objects.select_for_update(of=("self",)).select_related(
             "configuration",
             "configuration__external_connection",
             "configuration__google_connection",
@@ -848,7 +853,7 @@ def reverse_action_proposal(
     except ActionAdapterError as exc:
         raise AgentActionError(str(exc)) from exc
     with transaction.atomic():
-        locked = AgentActionProposal.objects.select_for_update().select_related(
+        locked = AgentActionProposal.objects.select_for_update(of=("self",)).select_related(
             "configuration",
             "configuration__external_connection",
             "configuration__google_connection",

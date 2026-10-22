@@ -55,7 +55,8 @@ def resolve_roo_actor(*, workspace_id, channel_id, message_id, thread_ts, bridge
     # Never acknowledge that race as a permanently handled mention.
     if link is None:
         raise BridgeActorError("bridge_delivery_pending", 409)
-    if (not link.channel.enabled or link.source_deleted_at or link.destination_deleted_at
+    if (not link.channel.enabled or link.channel.audience != "community"
+            or link.source_deleted_at or link.destination_deleted_at
             or link.source_channel_id != link.channel.destination_channel_id
             or thread_ts != (link.destination_parent_message_id or link.destination_message_id)
             or not re.fullmatch(r"[0-9a-f]{64}", link.source_message_id)):

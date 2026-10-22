@@ -96,6 +96,7 @@ class SlackMessageActionView(APIView):
         ).first()
         public = CommunityBridgeChannel.objects.filter(
             enabled=True,
+            audience="community",
             slack_workspace_id=fields["workspace_id"],
             slack_channel_id=fields["channel_id"],
             destination_platform="buzz",

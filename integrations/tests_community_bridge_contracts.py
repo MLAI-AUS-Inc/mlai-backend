@@ -42,7 +42,7 @@ class SlackChatAttributionTests(SimpleTestCase):
                     "payload": {"text": "Hello from MLAI Chat"},
                 }
                 with (
-                    patch(f"{worker}.send_with_ai_consent", side_effect=lambda delivery, send, **kwargs: send(**kwargs)),
+                    patch(f"{worker}.legacy_send", side_effect=lambda delivery, send, *args, require_ai=False, **kwargs: send(*args, **kwargs)),
                     patch(f"{worker}.SlackBridgeClient.post_message", return_value={}) as post,
                     patch(f"{worker}.SlackBridgeClient.update_message") as update,
                     patch(f"{worker}.complete_create_delivery"),

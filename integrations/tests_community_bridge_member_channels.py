@@ -226,7 +226,7 @@ class MemberChannelRoomTests(TestCase):
                 row.delete()
 
     def test_unmapped_rekey_updates_source_and_queue_without_creating_a_room(self):
-        row = self.row()
+        row = self.row(audience="community")
         state = BridgeSyncState.objects.create(public_channel=row, workspace_id=WORKSPACE, source_channel_id=CHANNEL)
         channels.queue_refresh(WORKSPACE, CHANNEL, reason="old")
         self.assertTrue(channels.rekey_channel(CHANNEL, "CNEWIDENTITY"))

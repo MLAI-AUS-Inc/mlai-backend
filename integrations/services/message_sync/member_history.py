@@ -344,12 +344,13 @@ def request_history(user, mapping, public_key, request_key, progress):
     """Metadata-only scroll demand with the same current member authority scope.
 
     Members requesters must themselves hold a current joined grant and one of
-    their admitted top-eight keys. Community demand retains community access.
+    their current verified keys. Community demand retains community access.
     No token refresh/provider request occurs in this HTTP path.
     """
     from community_chat.models import CommunityChatDevice
     from integrations.models import BridgeSyncState
     from integrations.services.slack_owner_inventory_api import InventoryError
+    from integrations.services.slack_member_devices import member_device_key_allowed
     from .history import ensure_state
     from .head_repair import head_scope
     from .scheduler import schedule_job
@@ -384,7 +385,7 @@ def request_history(user, mapping, public_key, request_key, progress):
             raise InventoryError("device_unverified", 403)
         eligible = audiences._eligible_grants(locked, mapping.slack_workspace_id)
         if mapping.audience == "members" and (user.pk not in {g.user_id for g in eligible}
-                or public_key not in dm._owner_device_pubkeys(user.pk, limit=8)):
+                or not member_device_key_allowed(user.pk, public_key)):
             raise InventoryError("inventory_conversation_unavailable", 404)
         state = BridgeSyncState.objects.select_for_update().get(pk=initial_state.pk)
         job = state.jobs.select_for_update().get(pk=schedule_job(state,"archive").pk)

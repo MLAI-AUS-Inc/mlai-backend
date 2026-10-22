@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from .slack_privacy import exclude_members_claims, exclude_members_evidence
+
 import hashlib
 
 from django.conf import settings
@@ -162,7 +164,7 @@ def _query_log_is_currently_authorized(query_log, authorization) -> bool:
     chunk_ids = {str(value) for value in query_log.selected_chunk_ids or ()}
     allowed_claim_ids = {
         str(value)
-        for value in MemoryClaim.objects.filter(
+        for value in exclude_members_claims(MemoryClaim.objects.filter(
             pk__in=claim_ids,
             organization=query_log.organization,
             classification__in=classifications,
@@ -171,11 +173,11 @@ def _query_log_is_currently_authorized(query_log, authorization) -> bool:
             evidence__source_version__tombstoned_at__isnull=True,
             evidence__source_version__acl_snapshot__is_accessible=True,
             evidence__source_version__acl_snapshot__revoked_at__isnull=True,
-        ).values_list("pk", flat=True)
+        )).values_list("pk", flat=True)
     }
     allowed_chunk_ids = {
         str(value)
-        for value in MemoryChunk.objects.filter(
+        for value in exclude_members_evidence(MemoryChunk.objects.filter(
             pk__in=chunk_ids,
             source_version__source__organization=query_log.organization,
             classification__in=classifications,
@@ -184,7 +186,7 @@ def _query_log_is_currently_authorized(query_log, authorization) -> bool:
             source_version__tombstoned_at__isnull=True,
             source_version__acl_snapshot__is_accessible=True,
             source_version__acl_snapshot__revoked_at__isnull=True,
-        ).values_list("pk", flat=True)
+        ), source_path='source_version__source').values_list("pk", flat=True)
     }
     citation_pairs = {
         (str(item.get("source_id") or ""), str(item.get("source_version_id") or ""))
@@ -193,7 +195,7 @@ def _query_log_is_currently_authorized(query_log, authorization) -> bool:
     }
     allowed_citation_pairs = {
         (str(source_id), str(version_id))
-        for source_id, version_id in MemorySourceVersion.objects.filter(
+        for source_id, version_id in exclude_members_evidence(MemorySourceVersion.objects.filter(
             pk__in={version_id for _source_id, version_id in citation_pairs},
             source__organization=query_log.organization,
             source__lifecycle_state=MemorySourceLifecycle.ACTIVE,
@@ -201,7 +203,7 @@ def _query_log_is_currently_authorized(query_log, authorization) -> bool:
             tombstoned_at__isnull=True,
             acl_snapshot__is_accessible=True,
             acl_snapshot__revoked_at__isnull=True,
-        ).values_list("source_id", "pk")
+        ), source_path='source').values_list("source_id", "pk")
     }
     return (
         claim_ids == allowed_claim_ids
@@ -329,7 +331,8 @@ class OrgMemoryTimelineView(OrgMemoryQueryView):
             evidence__source_version__tombstoned_at__isnull=True,
             evidence__source_version__acl_snapshot__is_accessible=True,
             evidence__source_version__acl_snapshot__revoked_at__isnull=True,
-        ).distinct()[:200]
+        ).distinct()
+        claims = exclude_members_claims(claims)[:200]
         rows = []
         for claim in claims:
             evidence = claim.evidence.filter(
@@ -484,10 +487,10 @@ class OrgMemoryFeedbackView(OrgMemoryQueryView):
                     {"detail": "claim_id was not selected for this query."},
                     status=status.HTTP_400_BAD_REQUEST,
                 )
-            claim = MemoryClaim.objects.filter(
+            claim = exclude_members_claims(MemoryClaim.objects.filter(
                 pk=claim_id,
                 organization=actor.organization,
-            ).first()
+            )).first()
             if claim is None:
                 return Response(
                     {"detail": "claim_id was not found."},

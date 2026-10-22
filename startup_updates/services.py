@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from integrations.services.slack_source_privacy import slack_source_queryset
+
 from startup_updates.evidence_contract import customer_receipt
 
 import logging
@@ -2141,7 +2143,7 @@ def build_slack_run_context(
             "selected_channels": [],
             "warnings": ["Slack was selected but no exact connection is available."],
         }
-    queryset = SlackChannelSelection.objects.filter(
+    queryset = slack_source_queryset(SlackChannelSelection).filter(
         organization=organization,
         connection=connection,
     )
@@ -2268,14 +2270,14 @@ def pin_startup_update_run_slack_authority(
 
         request_payload = pin_slack_run_authority(request_payload, authority)
         channel_ids = list(
-            SlackChannelSelection.objects.filter(
+            slack_source_queryset(SlackChannelSelection).filter(
                 connection=connection,
                 selected=True,
             ).values_list("channel_id", flat=True)
         )
         if "automatic_source_scope" in request_payload:
             requested_ids = request_payload["automatic_source_scope"].get("slack", [])
-            channel_ids = list(SlackChannelSelection.objects.filter(
+            channel_ids = list(slack_source_queryset(SlackChannelSelection).filter(
                 connection=connection, channel_id__in=requested_ids,
             ).values_list("channel_id", flat=True))
         request_payload["slack_channel_ids"] = channel_ids

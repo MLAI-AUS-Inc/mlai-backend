@@ -16,6 +16,7 @@ from slack_sdk.errors import SlackApiError
 from integrations.models import CommunityBridgeDeliveryType, CommunityBridgePlatform
 from integrations.services.community_bridge.buzz import BuzzBridgeClient
 from integrations.services.community_bridge.ai_consent import send_with_ai_consent
+from integrations.services.community_bridge.member_delivery import legacy_send
 from integrations.services.community_bridge.coworking import is_coworking_request, deliver_coworking_request
 from integrations.services.community_bridge.formatting import (
     build_mirrored_text,
@@ -399,6 +400,10 @@ class CommunityBridgeDiscordClient(discord.Client):
                 )
 
     async def _process_delivery(self, delivery: dict) -> None:
+        from .member_delivery import required, execute
+        if delivery.get("target_platform") in {CommunityBridgePlatform.SLACK, CommunityBridgePlatform.BUZZ} and await asyncio.to_thread(required, delivery):
+            await asyncio.to_thread(execute, delivery)
+            return
         if delivery["target_platform"] == CommunityBridgePlatform.DISCORD:
             await self._deliver_to_discord(delivery)
             return
@@ -418,12 +423,12 @@ class CommunityBridgeDiscordClient(discord.Client):
         payload = dict(delivery["payload"] or {})
         author_display_name = await self._resolve_author_display_name(
             payload,
-            source_platform=delivery["source_platform"],
+            source_platform=delivery["source_platform"], delivery=delivery,
             channel=delivery.get("channel"),
         )
         body = await self._resolve_message_body(
             payload,
-            source_platform=delivery["source_platform"],
+            source_platform=delivery["source_platform"], delivery=delivery,
         )
         content = build_mirrored_text(
             destination_platform=CommunityBridgePlatform.DISCORD,
@@ -503,7 +508,7 @@ class CommunityBridgeDiscordClient(discord.Client):
             return
         author_display_name = await self._resolve_author_display_name(
             payload,
-            source_platform=delivery["source_platform"],
+            source_platform=delivery["source_platform"], delivery=delivery,
             channel=delivery.get("channel"),
         )
         from integrations.services.slack_channel_mentions import render_slack_mentions
@@ -512,10 +517,10 @@ class CommunityBridgeDiscordClient(discord.Client):
             str(payload.get("text") or ""), (payload.get("metadata") or {}).get("slack_mention_tags") or [],
         )
         if mention_ids:
-            await asyncio.to_thread(validate_mention_users, SlackBridgeClient.get_client(), mention_ids,
+            await asyncio.to_thread(legacy_send, delivery, validate_mention_users, SlackBridgeClient.get_client(), mention_ids,
                                     (delivery.get("channel") or {}).get("slack_workspace_id", ""), scope="public-bot")
         from integrations.services.community_bridge.broadcast_mentions import prepare_slack_broadcasts
-        body = await asyncio.to_thread(prepare_slack_broadcasts, delivery, body)
+        body = await asyncio.to_thread(legacy_send, delivery, prepare_slack_broadcasts, delivery, body)
         text = build_mirrored_text(
             destination_platform=CommunityBridgePlatform.SLACK,
             source_platform=delivery["source_platform"],
@@ -537,9 +542,10 @@ class CommunityBridgeDiscordClient(discord.Client):
                 await deliver_coworking_request(delivery, text, thread_ts)
                 return
             response = await asyncio.to_thread(
-                send_with_ai_consent,
+                legacy_send,
                 delivery,
                 SlackBridgeClient.post_message,
+                require_ai=True,
                 channel_id=delivery["target_channel_id"],
                 text=text,
                 thread_ts=thread_ts,
@@ -574,9 +580,10 @@ class CommunityBridgeDiscordClient(discord.Client):
         if delivery["delivery_type"] == CommunityBridgeDeliveryType.EDIT:
             try:
                 await asyncio.to_thread(
-                    send_with_ai_consent,
+                    legacy_send,
                     delivery,
                     SlackBridgeClient.update_message,
+                    require_ai=True,
                     channel_id=link["destination_channel_id"],
                     message_id=link["destination_message_id"],
                     text=text,
@@ -592,7 +599,7 @@ class CommunityBridgeDiscordClient(discord.Client):
         if delivery["delivery_type"] == CommunityBridgeDeliveryType.DELETE:
             try:
                 await asyncio.to_thread(
-                    SlackBridgeClient.delete_message,
+                    legacy_send, delivery, SlackBridgeClient.delete_message,
                     channel_id=link["destination_channel_id"],
                     message_id=link["destination_message_id"],
                 )
@@ -622,9 +629,10 @@ class CommunityBridgeDiscordClient(discord.Client):
                 return
             try:
                 await asyncio.to_thread(
-                    send_with_ai_consent,
+                    legacy_send,
                     delivery,
                     SlackBridgeClient.add_reaction,
+                    require_ai=True,
                     channel_id=delivery["target_channel_id"],
                     message_id=target_message_id,
                     reaction=reaction,
@@ -664,7 +672,7 @@ class CommunityBridgeDiscordClient(discord.Client):
         destination = dict(link.get("destination_payload") or {})
         try:
             await asyncio.to_thread(
-                SlackBridgeClient.remove_reaction,
+                legacy_send, delivery, SlackBridgeClient.remove_reaction,
                 channel_id=str(destination.get("channel_id") or link["destination_channel_id"]),
                 message_id=str(destination.get("message_id") or ""),
                 reaction=str(destination.get("reaction") or reaction),
@@ -716,7 +724,7 @@ class CommunityBridgeDiscordClient(discord.Client):
             and (not author_display_name or not author_avatar_url)
         ):
             slack_profile = await asyncio.to_thread(
-                SlackBridgeClient.get_user_profile,
+                legacy_send, delivery, SlackBridgeClient.get_user_profile,
                 source_author_id,
             )
             author_display_name = author_display_name or str(
@@ -753,12 +761,12 @@ class CommunityBridgeDiscordClient(discord.Client):
             if not author_display_name:
                 author_display_name = await self._resolve_author_display_name(
                     payload,
-                    source_platform=delivery["source_platform"],
+                    source_platform=delivery["source_platform"], delivery=delivery,
                     channel=channel,
                 )
             body = await self._resolve_message_body(
                 payload,
-                source_platform=delivery["source_platform"],
+                source_platform=delivery["source_platform"], delivery=delivery,
             )
             text = build_mirrored_text(
                 destination_platform=CommunityBridgePlatform.BUZZ,
@@ -851,7 +859,7 @@ class CommunityBridgeDiscordClient(discord.Client):
         await self._send_frozen_buzz_delivery(delivery, frozen)
 
     async def _send_frozen_buzz_delivery(self, delivery: dict, envelope: dict) -> None:
-        response = await asyncio.to_thread(BuzzBridgeClient.deliver, **envelope)
+        response = await asyncio.to_thread(legacy_send, delivery, BuzzBridgeClient.deliver, **envelope)
         operation = delivery["delivery_type"]
         if operation in {
             CommunityBridgeDeliveryType.CREATE,
@@ -916,6 +924,7 @@ class CommunityBridgeDiscordClient(discord.Client):
         *,
         source_platform: str,
         channel: Optional[dict] = None,
+        delivery: Optional[dict] = None,
     ) -> str:
         display_name = str(payload.get("source_author_display_name") or "").strip()
         if display_name:
@@ -931,12 +940,11 @@ class CommunityBridgeDiscordClient(discord.Client):
                 return str(identity.get("display_name") or user_id)
         if source_platform == CommunityBridgePlatform.SLACK and user_id:
             return await asyncio.to_thread(
-                SlackBridgeClient.get_user_display_name,
-                user_id,
+                legacy_send, delivery, SlackBridgeClient.get_user_display_name, user_id,
             )
         return user_id or "Unknown user"
 
-    async def _resolve_message_body(self, payload: dict, *, source_platform: str) -> str:
+    async def _resolve_message_body(self, payload: dict, *, source_platform: str, delivery: Optional[dict] = None) -> str:
         body = str(payload.get("text") or "")
         if source_platform != CommunityBridgePlatform.SLACK:
             return body
@@ -944,12 +952,12 @@ class CommunityBridgeDiscordClient(discord.Client):
         display_markdown = metadata.get("slack_display_markdown")
         if isinstance(display_markdown, str):
             return await asyncio.to_thread(
-                SlackBridgeClient.resolve_markdown_entities, display_markdown
+                legacy_send, delivery, SlackBridgeClient.resolve_markdown_entities, display_markdown
             )
         raw_text = str(metadata.get("slack_raw_text") or "")
         if not raw_text:
             return body
-        return await asyncio.to_thread(SlackBridgeClient.resolve_message_text, raw_text)
+        return await asyncio.to_thread(legacy_send, delivery, SlackBridgeClient.resolve_message_text, raw_text)
 
     def _should_process_message(self, message: discord.Message) -> bool:
         if message.guild is None:

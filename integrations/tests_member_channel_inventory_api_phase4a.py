@@ -75,14 +75,15 @@ class MemberPublicOpenTests(SimpleTestCase):
 
 
 class MemberPublicOpenAuthorityTests(SimpleTestCase):
-    def test_capability_flags_scope_consent_exact_grant_and_top8_are_required(self):
+    def test_capability_flags_scope_consent_exact_grant_device_and_capacity_are_required(self):
         grant = SimpleNamespace(pk=4, user_id=8, slack_workspace_id='TTESTMEMBERS')
         with ExitStack() as stack:
             flag = stack.enter_context(patch('integrations.services.slack_member_access.enabled', return_value=True))
             scope = stack.enter_context(patch('integrations.services.community_bridge.member_channels.member_channel_in_scope', return_value=True))
             consent = stack.enter_context(patch.object(api, 'public_channels_enabled', return_value=True))
-            devices = stack.enter_context(patch('integrations.services.slack_dm_mirror._owner_device_pubkeys', return_value=[KEY]))
+            devices = stack.enter_context(patch('integrations.services.slack_member_devices.member_device_key_allowed', return_value=True))
             members = stack.enter_context(patch('integrations.services.slack_channel_membership.consenting_members', return_value=[grant]))
+            keys = stack.enter_context(patch('integrations.services.community_bridge.member_audiences.current_audience_keys', return_value={KEY}))
             def allowed(kinds='public_channel'):
                 return api._member_public_open_allowed(grant, KEY, SOURCE, catalog_kinds=kinds)
             self.assertTrue(allowed())
@@ -91,12 +92,15 @@ class MemberPublicOpenAuthorityTests(SimpleTestCase):
                 gate.return_value = False
                 self.assertFalse(allowed())
                 gate.return_value = True
-            devices.return_value = ['22' * 32]
+            devices.return_value = False
             self.assertFalse(allowed())
-            devices.return_value = [KEY]
+            devices.return_value = True
             members.return_value = [SimpleNamespace(pk=44, user_id=8)]
             self.assertFalse(allowed())
-            devices.assert_called_with(grant.user_id, limit=8)
+            devices.assert_called_with(grant.user_id, KEY)
+            members.return_value = [grant]
+            keys.return_value = None
+            self.assertFalse(allowed())
 
 
 class MemberCatalogHeaderTests(SimpleTestCase):

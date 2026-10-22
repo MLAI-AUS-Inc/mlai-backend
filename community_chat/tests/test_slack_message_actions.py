@@ -130,6 +130,21 @@ class SlackMessageActionsTests(SimpleTestCase):
         self.assertEqual(self.invoke().status_code, 403)
         self.post.assert_not_called()
 
+    def test_members_mapping_is_not_a_public_roo_action_scope(self):
+        self.private.return_value.first.return_value = None
+        # Model the actual predicate: the mapping exists, but only for Members.
+        self.public.side_effect = lambda **filters: SimpleNamespace(
+            exists=lambda: filters.get("audience") != "community"
+        )
+        response = self.invoke(channel_id="CMEMBERS")
+        self.assertEqual(response.status_code, 403)
+        self.post.assert_not_called()
+
+    def test_community_mapping_still_allows_roo_action(self):
+        self.private.return_value.first.return_value = None
+        self.public.return_value.exists.return_value = True
+        self.assertEqual(self.invoke(channel_id="CCOMMUNITY").status_code, 200)
+
     def test_malformed_or_unsupported_actions_do_not_dispatch(self):
         for changes in (
             {"action_id": "admin_delete"},

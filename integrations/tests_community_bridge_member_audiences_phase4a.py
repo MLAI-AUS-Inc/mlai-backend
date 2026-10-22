@@ -84,19 +84,23 @@ class AudienceKeySnapshotTests(SimpleTestCase):
         self.addCleanup(cohort.stop)
 
     @override_settings(MESSAGE_SYNC_ENABLED=False, SLACK_MEMBER_CHANNELS_ENABLED=False, SLACK_OWNER_INVENTORY_ENABLED=False)
-    def test_snapshot_uses_existing_consent_device_union_even_flags_off(self):
+    def test_snapshot_uses_complete_existing_consent_union_even_flags_off(self):
         grants = [SimpleNamespace(user_id=1), SimpleNamespace(user_id=2)]
         with patch.object(membership, "consenting_members", return_value=grants), patch(
-            "integrations.services.slack_dm_mirror._owner_device_pubkeys", side_effect=[["a" * 64], ["a" * 64, "b" * 64]],
+            "integrations.services.slack_member_devices.device_key_result",
+            return_value=({"a" * 64, "b" * 64}, ""),
         ) as devices:
             self.assertEqual(audiences.current_audience_keys("TTEST", "CROOM"), {"a" * 64, "b" * 64})
-            self.assertTrue(all(call.kwargs == {"limit": 8} for call in devices.call_args_list))
+            devices.assert_called_once_with({1, 2})
 
     def test_invalid_or_overflow_snapshot_never_returns_a_truncated_set(self):
-        with patch.object(membership, "consenting_members", return_value=[SimpleNamespace(user_id=1)]), patch(
-            "integrations.services.slack_dm_mirror._owner_device_pubkeys", return_value=["A" * 64],
-        ):
-            self.assertIsNone(audiences.current_audience_keys("TTEST", "CROOM"))
+        for reason in ("audience_authority_unavailable", "audience_too_large"):
+            with self.subTest(reason=reason), patch.object(
+                membership, "consenting_members", return_value=[SimpleNamespace(user_id=1)],
+            ), patch(
+                "integrations.services.slack_member_devices.device_key_result", return_value=(None, reason),
+            ):
+                self.assertIsNone(audiences.current_audience_keys("TTEST", "CROOM"))
 
     def test_unbounded_cohort_does_not_load_unbounded_eligibility_snapshot(self):
         with patch.object(audiences, "_cohort", return_value=set(range(audiences.MAX_AUTHORITY_USERS + 1))), patch.object(
@@ -104,11 +108,6 @@ class AudienceKeySnapshotTests(SimpleTestCase):
         ) as members:
             self.assertIsNone(audiences.current_audience_keys("TTEST", "CROOM"))
             members.assert_not_called()
-        grants = [SimpleNamespace(user_id=number) for number in range(1001)]
-        with patch.object(membership, "consenting_members", return_value=grants), patch(
-            "integrations.services.slack_dm_mirror._owner_device_pubkeys", side_effect=lambda user_id, **kwargs: [f"{user_id:064x}"],
-        ):
-            self.assertIsNone(audiences.current_audience_keys("TTEST", "CROOM"))
 
 
 class _Adapter:

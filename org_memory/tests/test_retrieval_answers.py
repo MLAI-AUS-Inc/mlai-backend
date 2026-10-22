@@ -1161,6 +1161,24 @@ class MemoryQueryApiTests(TestCase):
 
         self.assertEqual(trace_response.status_code, 403, trace_response.data)
 
+    def test_retained_mixed_members_answer_cannot_be_recovered_from_trace(self):
+        from integrations.models import CommunityBridgeChannel
+        from integrations.tests_members_source_privacy_phase4c import add_retained_member_evidence
+        claim = self.make_claim(external_id="MEMBERS-TRACE", statement="Pilot status is green.", object_value="green")
+        add_retained_member_evidence(claim)
+        response = self.client.post(
+            "/api/v1/org-memory/search", {"query": "Pilot status green", "max_context_tokens": 6000},
+            format="json", **self.headers(),
+        )
+        self.assertEqual(response.status_code, 200, response.data)
+        query_id = response.data["query_id"]
+        CommunityBridgeChannel.objects.create(
+            slack_workspace_id="TPRIMARY", slack_channel_id="CEXCLUDED", audience="members", enabled=False,
+        )
+        trace = self.client.get(f"/api/v1/org-memory/queries/{query_id}/trace", **self.headers())
+        self.assertEqual(trace.status_code, 403, trace.data)
+        self.assertTrue(MemoryQueryLog.objects.filter(pk=query_id).exists())
+
     @override_settings(ORG_MEMORY_QUERY_API_ENABLED=False)
     def test_query_api_feature_flag_defaults_fail_closed(self):
         response = self.client.post(

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from .slack_privacy import exclude_members_public_items
+
 import hashlib
 import json
 import logging
@@ -40,7 +42,7 @@ class PublicKnowledgeHit:
 
 
 def active_public_knowledge(*, organization_id=None, organization_domain=None):
-    rows = PublicKnowledgeItem.objects.filter(status=PublicKnowledgeStatus.ACTIVE)
+    rows = exclude_members_public_items(PublicKnowledgeItem.objects.filter(status=PublicKnowledgeStatus.ACTIVE))
     if organization_id is not None:
         rows = rows.filter(organization_id=organization_id)
     elif organization_domain:
@@ -216,6 +218,8 @@ def embed_public_knowledge_item(
 
     from .embeddings import configured_embedding_target, generate_embedding
 
+    if not exclude_members_public_items(PublicKnowledgeItem.objects.filter(pk=item.pk)).exists():
+        raise PublicKnowledgeError("Members Slack evidence cannot be embedded for public knowledge.")
     target = configured_embedding_target(model=model, version=version)
     text = public_embedding_text(item)
     if not text:

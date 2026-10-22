@@ -169,6 +169,7 @@ class SlackBridgeClientProfileTests(TestCase):
 class RecentSlackBridgeReconciliationCommandTests(TestCase):
     def setUp(self):
         CommunityBridgeChannel.objects.create(
+            audience="community",
             slack_workspace_id="T123",
             slack_channel_id="C123",
             slack_channel_name="general",
@@ -279,6 +280,7 @@ class SlackCommunityBridgeEventViewTests(TestCase):
         self.client = APIClient()
         self.url = reverse("community_bridge_slack_events")
         self.channel = CommunityBridgeChannel.objects.create(
+            audience="community",
             slack_channel_id="C-SLACK-1",
             slack_channel_name="community",
             discord_channel_id="222",
@@ -885,6 +887,7 @@ class CommunityBridgeSetupCommandTests(TestCase):
 
     def test_command_updates_existing_mapping(self):
         CommunityBridgeChannel.objects.create(
+            audience="community",
             slack_channel_id="C-SLACK-PILOT",
             slack_channel_name="old-name",
             discord_guild_id="1492063515987410957",
@@ -921,6 +924,7 @@ class CommunityBridgeSetupCommandTests(TestCase):
 
     def test_command_rejects_conflicting_discord_channel_mapping(self):
         CommunityBridgeChannel.objects.create(
+            audience="community",
             slack_channel_id="C-SLACK-ONE",
             discord_guild_id="1492063515987410957",
             discord_channel_id="1492063517191180340",
@@ -940,6 +944,7 @@ class CommunityBridgeSetupCommandTests(TestCase):
 class GenericCommunityBridgeRoutingTests(TestCase):
     def setUp(self):
         self.channel = CommunityBridgeChannel.objects.create(
+            audience="community",
             slack_workspace_id="T-MLAI",
             slack_channel_id="C-MLAI-CHAT",
             slack_channel_name="community",
@@ -1048,6 +1053,7 @@ class BuzzCommunityBridgeEventViewTests(TestCase):
         self.client = APIClient()
         self.url = reverse("community_bridge_buzz_events")
         self.channel = CommunityBridgeChannel.objects.create(
+            audience="community",
             slack_workspace_id="T-MLAI",
             slack_channel_id="C-MLAI-CHAT",
             slack_channel_name="community",
@@ -1377,6 +1383,7 @@ class BuzzBridgeClientTests(TestCase):
 class CommunityBridgeDeadLetterReplayTests(TestCase):
     def setUp(self):
         self.channel = CommunityBridgeChannel.objects.create(
+            audience="community",
             slack_workspace_id="TMLAI",
             slack_channel_id="CMLAICHAT",
             destination_platform=CommunityBridgePlatform.BUZZ,
@@ -1486,6 +1493,7 @@ class CommunityBridgeDeadLetterReplayTests(TestCase):
 class CommunityBridgeStagingVerificationTests(TestCase):
     def setUp(self):
         self.channel = CommunityBridgeChannel.objects.create(
+            audience="community",
             slack_workspace_id="TMLAI",
             slack_channel_id="CMLAICHAT",
             destination_platform=CommunityBridgePlatform.BUZZ,
@@ -1584,6 +1592,7 @@ class CommunityBridgeStagingVerificationTests(TestCase):
 class CommunityBridgeInspectionTests(TestCase):
     def setUp(self):
         self.channel = CommunityBridgeChannel.objects.create(
+            audience="community",
             slack_workspace_id="TMLAI",
             slack_channel_id="CGENERAL",
             slack_channel_name="general",
@@ -1822,6 +1831,7 @@ class BuzzCommunityBridgeWorkerTests(TransactionTestCase):
             verified_at=timezone.now(),
         )
         self.channel = CommunityBridgeChannel.objects.create(
+            audience="community",
             slack_workspace_id="T-MLAI",
             slack_channel_id="C-MLAI-CHAT",
             slack_channel_name="community",
@@ -2573,6 +2583,7 @@ class CommunityBridgePayloadRetentionTests(TestCase):
 class CommunityBridgeWorkerTests(TransactionTestCase):
     def setUp(self):
         self.channel = CommunityBridgeChannel.objects.create(
+            audience="community",
             slack_channel_id="C-SLACK-1",
             slack_channel_name="community",
             discord_channel_id="222",

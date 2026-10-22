@@ -279,14 +279,18 @@ def _member_public_open_allowed(grant, public_key, source_id, *, catalog_kinds=N
     from integrations.services import slack_member_access as access
     from integrations.services.slack_channel_membership import consenting_members
     from integrations.services.community_bridge.member_channels import member_channel_in_scope
-    from integrations.services.slack_dm_mirror import _owner_device_pubkeys
+    from integrations.services.community_bridge.member_audiences import current_audience_keys
+    from integrations.services.slack_member_devices import member_device_key_allowed
 
-    return bool("public_channel" in supported_catalog_kinds(catalog_kinds) and access.enabled()
-                and member_channel_in_scope(grant.slack_workspace_id, source_id)
-                and public_channels_enabled(grant)
-                and public_key in _owner_device_pubkeys(grant.user_id, limit=8)
-                and any(member.pk == grant.pk and member.user_id == grant.user_id
-                        for member in consenting_members(grant.slack_workspace_id, source_id)))
+    if not ("public_channel" in supported_catalog_kinds(catalog_kinds) and access.enabled()
+            and member_channel_in_scope(grant.slack_workspace_id, source_id)
+            and public_channels_enabled(grant)
+            and member_device_key_allowed(grant.user_id, public_key)
+            and any(member.pk == grant.pk and member.user_id == grant.user_id
+                    for member in consenting_members(grant.slack_workspace_id, source_id))):
+        return False
+    keys = current_audience_keys(grant.slack_workspace_id, source_id)
+    return keys is not None and public_key in keys
 
 
 def conversation_page(user, *, public_key, limit=50, cursor="", unread_only=False, catalog_kinds=None):

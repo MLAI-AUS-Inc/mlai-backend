@@ -521,6 +521,9 @@ jobs:
           integrations.tests_member_public_receipts_database_phase4a \
           integrations.tests_member_pending_intake_phase4a \
           integrations.tests_message_sync_member_history_phase4b \
+          integrations.tests_member_delivery_phase4c \
+          integrations.tests_slack_member_all_devices \
+          integrations.tests_members_source_privacy_phase4c \
           integrations.tests_member_callback_authority_phase4a \
           integrations.tests_member_callback_authority_concurrency_phase4a \
           integrations.tests_message_sync_member_budgets \
@@ -737,6 +740,12 @@ jobs:
           integrations.tests_member_public_receipts_database_phase4a \
           integrations.tests_member_pending_intake_phase4a \
           integrations.tests_message_sync_member_history_phase4b \
+          integrations.tests_member_delivery_phase4c \
+          integrations.tests_slack_member_all_devices \
+          integrations.tests_members_source_privacy_phase4c \
+          org_memory.tests.test_retrieval_answers.MemoryQueryApiTests.test_retained_mixed_members_answer_cannot_be_recovered_from_trace \
+          org_memory.tests.test_review_summaries.ReviewSummaryDigestTests.test_retained_mixed_members_summary_and_digest_reads_are_denied \
+          org_memory.tests.test_publication.PublicKnowledgePublicationTests.test_retained_members_lineage_filters_current_public_reads_without_unpublishing \
           integrations.tests_member_callback_authority_phase4a \
           integrations.tests_member_callback_authority_concurrency_phase4a \
           integrations.tests_message_sync_member_budgets \

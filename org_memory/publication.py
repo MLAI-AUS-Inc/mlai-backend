@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from .slack_privacy import claims_have_members
+
 import hashlib
 import json
 import re
@@ -206,6 +208,8 @@ def _assert_source_publishable(*, source, organization, authorization) -> None:
     claims = list(publication_source_claims(source))
     if not claims:
         raise PublicationError("Publication source has no claim lineage.")
+    if claims_have_members(publication_source_claims(source)):
+        raise PublicationError("Members Slack evidence cannot be published.")
     if any(
         claim.status != MemoryClaimStatus.ACTIVE
         or claim.classification not in allowed
@@ -499,7 +503,7 @@ def submit_publication_for_review(
     confirm_redacted: bool,
 ) -> tuple[MemoryPublication, bool]:
     publication = (
-        MemoryPublication.objects.select_for_update()
+        MemoryPublication.objects.select_for_update(of=("self",))
         .select_related("review_item")
         .get(pk=publication.pk)
     )
@@ -577,7 +581,7 @@ def approve_publication(
     actor,
 ) -> PublicKnowledgeItem:
     publication = (
-        MemoryPublication.objects.select_for_update()
+        MemoryPublication.objects.select_for_update(of=("self",))
         .select_related("review_item", "proposed_by")
         .get(pk=publication.pk)
     )
@@ -763,7 +767,7 @@ def revoke_publication(
     if not PUBLICATION_IDEMPOTENCY_PATTERN.fullmatch(key):
         raise PublicationError("A valid Idempotency-Key header is required.")
     publication = (
-        MemoryPublication.objects.select_for_update()
+        MemoryPublication.objects.select_for_update(of=("self",))
         .select_related("review_item", "published_item")
         .get(pk=publication.pk)
     )
