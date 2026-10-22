@@ -386,6 +386,11 @@ class CommunityBridgeDiscordClient(discord.Client):
                     parent_message_id=exc.parent_message_id,
                 )
             except Exception as exc:
+                from .public_echo import PublicReactionSuperseded
+
+                if isinstance(exc, PublicReactionSuperseded):
+                    await asyncio.to_thread(complete_delivery, delivery_id=delivery["id"])
+                    return
                 logger.exception(
                     "community_bridge_delivery_failed delivery_id=%s target_platform=%s adapter_error=%s",
                     delivery["id"],
@@ -404,6 +409,12 @@ class CommunityBridgeDiscordClient(discord.Client):
         if delivery.get("target_platform") in {CommunityBridgePlatform.SLACK, CommunityBridgePlatform.BUZZ} and await asyncio.to_thread(required, delivery):
             await asyncio.to_thread(execute, delivery)
             return
+        if delivery.get("target_platform") == CommunityBridgePlatform.SLACK:
+            from .community_delivery import required as community_required, execute as community_execute
+
+            if await asyncio.to_thread(community_required, delivery):
+                await asyncio.to_thread(community_execute, delivery)
+                return
         if delivery["target_platform"] == CommunityBridgePlatform.DISCORD:
             await self._deliver_to_discord(delivery)
             return

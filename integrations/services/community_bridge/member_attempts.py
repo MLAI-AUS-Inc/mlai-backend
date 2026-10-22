@@ -40,8 +40,8 @@ def command_hash(command):
     ).hexdigest()
 
 
-def arm(delivery, original, command):
-    m = _module()
+def arm(delivery, original, command, *, implementation=None):
+    m = implementation or _module()
     with transaction.atomic():
         _, channel, row = m._suffix(delivery["id"], m._identity(original))
         if (row.payload or {}).get(m.MEMBER_STAMP) != command:
@@ -71,9 +71,9 @@ def arm(delivery, original, command):
         return attempt, False
 
 
-def record(delivery_id, command, attempt, status, receipt=None):
+def record(delivery_id, command, attempt, status, receipt=None, *, implementation=None):
     """Evidence-only CAS; a late response cannot overwrite a newer result."""
-    m = _module()
+    m = implementation or _module()
     if status not in {"not_sent", "uncertain", "acknowledged"}:
         raise ValueError("invalid_attempt_status")
     with transaction.atomic():
@@ -126,7 +126,11 @@ def actor_proven(message, actor, response=None):
     """A legitimate API user post may carry its originating app's markers."""
     if not isinstance(message, dict) or message.get("user") != actor["slack_user_id"]:
         return False
-    expected = str(getattr(settings, "MESSAGE_SYNC_SLACK_USER_APP_ID", "") or "")
+    bot = actor.get("kind") == "bot"
+    expected = str(getattr(settings, "MESSAGE_SYNC_SLACK_APP_ID" if bot else "MESSAGE_SYNC_SLACK_USER_APP_ID", "") or "")
+    if bot and (actor.get("slack_user_id") != getattr(settings, "SLACK_BRIDGE_BOT_USER_ID", "")
+                or not any(key in message for key in ("bot_id", "bot_profile"))):
+        return False
     fields = []
     marked = False
     for item in (message, response):

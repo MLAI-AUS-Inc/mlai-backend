@@ -55,6 +55,9 @@ RESERVED = frozenset(
         "_buzz_envelope_v1",
         "_member_network_attempt_v1",
         "_member_network_conflicts_v1",
+        "_community_enqueue_v1",
+        "_community_identity_v1",
+        "_community_delivery_v1",
     }
 )
 TS = re.compile(r"^[0-9]{1,20}\.[0-9]{1,9}$")
@@ -674,7 +677,7 @@ def _target(row, source_id):
     return destination
 
 
-def _wire(row, channel, actor, client, info):
+def _wire(row, channel, actor, client, info, *, identity_key=SLACK_STAMP):
     payload = row.payload or {}
     operation = row.delivery_type
     target = ""
@@ -751,7 +754,7 @@ def _wire(row, channel, actor, client, info):
             raise MemberDeliveryUnavailable("invalid_reaction_target")
         kwargs = {"channel": channel.slack_channel_id}
         if operation == "create":
-            kwargs["client_msg_id"] = row.payload[SLACK_STAMP]["client_msg_id"]
+            kwargs["client_msg_id"] = row.payload[identity_key]["client_msg_id"]
             if parent:
                 kwargs["thread_ts"] = parent
         elif operation in {"edit", "delete"}:
@@ -1233,9 +1236,9 @@ def execute(delivery):
             attempts.record(delivery["id"], command, attempt, status, receipt)
 
 
-def _finish_slack(row, channel, actor, wire, response, *, outcome="accepted"):
+def _finish_slack(row, channel, actor, wire, response, *, outcome="accepted", verified_receipt=None):
     from .store import complete_create_delivery, complete_delivery, mark_link_deleted
-    from .member_attempts import actor_proven
+    from .member_attempts import actor_proven, response_from_receipt, command_hash, ATTEMPT_KEY
 
     if outcome == "accepted" and (
         not hasattr(response, "get") or response.get("ok") is not True
@@ -1253,10 +1256,25 @@ def _finish_slack(row, channel, actor, wire, response, *, outcome="accepted"):
             raise MemberDeliveryUnavailable("invalid_slack_ack")
         if operation == "create":
             message = response.get("message")
+            recorded = response_from_receipt(verified_receipt, actor, wire, operation)
+            community_command = (row.payload or {}).get("_community_delivery_v1")
+            recorded_attempt = (row.payload or {}).get(ATTEMPT_KEY)
+            recorded_actor = bool(
+                channel.audience == "community" and actor.get("kind") == "bot"
+                and isinstance(community_command, dict)
+                and community_command.get("actor") == actor
+                and community_command.get("wire") == wire
+                and isinstance(recorded_attempt, dict)
+                and recorded_attempt.get("status") == "acknowledged"
+                and recorded_attempt.get("command_hash") == command_hash(community_command)
+                and recorded_attempt.get("receipt") == verified_receipt
+                and recorded is not None and recorded.get("channel") == response.get("channel")
+                and recorded.get("ts") == target
+            )
             if (
                 not isinstance(message, dict)
                 or message.get("user") != actor["slack_user_id"]
-                or not actor_proven(message, actor, response)
+                or not (actor_proven(message, actor, response) or recorded_actor)
                 or message.get("client_msg_id")
                 not in (None, "", kwargs["client_msg_id"])
             ):
@@ -1361,10 +1379,28 @@ def legacy_send(delivery, send, *args, require_ai=False, **kwargs):
             )
             guard_delivery(row)
             hint = delivery.get("channel") or {}
+            from .community_delivery import admitted as community_admitted, ordinary
+
+            current = {
+                "source_platform": row.source_platform, "target_platform": row.target_platform,
+                "delivery_type": row.delivery_type, "source_channel_id": row.source_channel_id,
+                "source_parent_message_id": row.source_parent_message_id, "payload": row.payload,
+                "channel": {"destination_channel_id": channel.destination_channel_id},
+            }
+            poster = None
+            if row.target_platform == "slack" and row.source_platform == "buzz" and row.delivery_type in {"edit", "delete", "reaction_remove"}:
+                link = CommunityBridgeMessageLink.objects.select_for_update().filter(
+                    channel=channel, source_platform="buzz", destination_platform="slack",
+                    source_channel_id=row.source_channel_id, source_message_id=row.source_message_id,
+                ).first()
+                poster = (link.destination_payload or {}).get("poster") if link else None
             if (
                 not channel.enabled
                 or channel.audience != "community"
                 or (row.payload or {}).get(MEMBER_STAMP) is not None
+                or (row.payload or {}).get("_community_delivery_v1") is not None
+                or community_admitted(channel) and ordinary(current)
+                or isinstance(poster, dict) and (poster.get("kind") == "member" or poster.get("user_id") is not None)
                 or row.channel_id != channel.pk
                 or any(
                     hint.get(key, current) != current
@@ -1378,6 +1414,11 @@ def legacy_send(delivery, send, *args, require_ai=False, **kwargs):
                 )
             ):
                 raise MemberDeliveryDeferred(5)
+            if row.source_platform == "slack" and row.target_platform == "buzz" and row.delivery_type in {"reaction_add", "reaction_remove"} and row.receipt_id:
+                from .public_echo import newer_reaction_observed, PublicReactionSuperseded
+
+                if newer_reaction_observed(channel, row.receipt.payload):
+                    raise PublicReactionSuperseded()
             from integrations.services.message_sync.delivery import (
                 legacy_provider_fence,
             )

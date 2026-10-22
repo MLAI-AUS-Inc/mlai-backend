@@ -105,6 +105,7 @@ state when using those operational documents.
 - [Slack member migration: Phase 4a operations](slack-member-phase4a-operations.md) — feature-off release, scoped public intake, membership epochs and audience reduction gates
 - [Phase 4b member-token history](slack-member-phase4b-operations.md) — current reader/source/audience fences, pagination scope and feature-off rollout holds.
 - [Phase 4c Members delivery](slack-member-phase4c-operations.md) — immutable Slack actors/requests, current audience fences and combined Chat release gates.
+- [Phase 5 Community posting](slack-community-phase5-operations.md) — scoped member selection, verified-account bot fallback and immutable original-poster retries.
 - [Private Slack first-event routing: Phase 8](slack-event-routing-phase8.md) — owner leases, disabled rollout and confirmed-delivery latency evidence
 - [Slack member-sync evidence](slack-member-sync-facts.md) — owner decisions, documented contracts and outstanding live observations
 - [`slack-unfinished-conversation-recovery.md`](slack-unfinished-conversation-recovery.md) — reviewed recovery of existing unfinished private mirrors

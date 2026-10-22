@@ -28,7 +28,7 @@ DELIVERY = {
     "id": 1, "source_platform": "buzz", "target_platform": "slack",
     "delivery_type": "create", "source_message_id": "ab" * 32,
     "source_channel_id": "synthetic-chat", "target_channel_id": "CPUBLIC",
-    "channel": {"slack_workspace_id": "TTEST"},
+    "channel": {"slack_workspace_id": "TTEST", "slack_channel_id": "CPUBLIC"},
     "payload": {"source_author_id": "cd" * 32, "text": "A normal untagged message",
                 "attachments": [{"url": "https://example.com/synthetic.png"}]},
 }
@@ -124,6 +124,55 @@ class PublicBridgeConsentTests(TestCase):
     def test_foreign_workspace_identity_is_not_used(self):
         grant_test_ai_consent(self.member)
         self.assert_blocked({**DELIVERY, "channel": {"slack_workspace_id": "TOTHER"}})
+
+
+@override_settings(**CONFIG, SLACK_COMMUNITY_SEND_AS_MEMBER=True,
+                   MESSAGE_SYNC_SLACK_BOT_WORKSPACE_ID="TTEST")
+class PublicBridgeUnlinkedConsentTests(PublicBridgeConsentTests):
+    """D2 has an explicit rollout gate and exact account/device authority."""
+
+    def test_active_unlinked_account_and_ninth_device_can_use_bot(self):
+        grant_test_ai_consent(self.member)
+        self.link.delete()
+        for index in range(9):
+            CommunityChatDevice.objects.create(user=self.member, public_key=f"{index + 1:064x}",
+                status="verified", verified_at=timezone.now())
+        send = Mock(return_value="recorded")
+        self.assertEqual(ai_consent.send_with_ai_consent(DELIVERY, send), "recorded")
+        send.assert_called_once()
+
+    def test_link_revocation_does_not_revoke_current_bot_authority(self):
+        grant_test_ai_consent(self.member)
+        self.link.revoked_at = timezone.now()
+        self.link.save()
+        ai_consent.send_with_ai_consent(DELIVERY, Mock())
+
+    @override_settings(COMMUNITY_CHAT_AI_CONSENT_REQUIRED=False)
+    def test_new_unlinked_permission_never_inherits_legacy_ai_bypass(self):
+        self.link.delete()
+        self.assert_blocked()
+        grant_test_ai_consent(self.member)
+        ai_consent.send_with_ai_consent(DELIVERY, Mock())
+
+    def test_revoked_device_link_and_inactive_account_are_rejected(self):
+        # D2 deliberately removes link revocation from bot authority, retaining
+        # exact device/account checks. The inherited old link-negative is not
+        # the Phase5 product rule.
+        grant_test_ai_consent(self.member)
+        self.device.revoked_at = timezone.now()
+        self.device.save()
+        self.assert_blocked()
+        self.device.revoked_at = None
+        self.device.save()
+        self.member.is_active = False
+        self.member.save()
+        self.assert_blocked()
+
+    def test_identity_is_rechecked_under_the_account_lock(self):
+        grant_test_ai_consent(self.member)
+        current = ai_consent.community_account_for_key(slack_workspace_id="TTEST", buzz_pubkey=self.device.public_key)
+        with patch.object(ai_consent, "community_account_for_key", side_effect=[current, None]):
+            self.assert_blocked()
 
 
 @override_settings(**CONFIG)
