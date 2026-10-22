@@ -605,27 +605,36 @@ def _call_slack_with_grant_authority(
     lease, so a disconnect that wins between pages prevents the next request.
     """
 
+    with transaction.atomic():
+        _, connection = _lock_slack_grant_api_authority(authority, required_scopes=required_scopes)
+        return _invoke_slack_with_locked_connection(authority, connection, method, before_request=None, **kwargs)
+
+
+def _invoke_slack_with_locked_connection(authority, connection, method, *, before_request=None, **kwargs):
+    """Low-level transport only; caller owns the current User/connection fence.
+
+    Member history locks its entire authority cohort before State/Job/Channel,
+    so it must not re-enter the single-owner lock acquisition below those rows.
+    Normal private/member callers retain _call_slack_with_grant_authority.
+    """
+    if not transaction.get_connection().in_atomic_block:
+        raise transaction.TransactionManagementError("Slack transport requires an authority transaction")
     cooldown_key = f"slack-chat-rate:{authority.workspace_id}:{method}"
     if float(cache.get(cooldown_key) or 0) > time.time():
-        raise SlackDmMirrorRateLimited(
-            "Slack is limiting requests; import will resume automatically."
-        )
-    with transaction.atomic():
-        _, connection = _lock_slack_grant_api_authority(
-            authority,
-            required_scopes=required_scopes,
-        )
-        client = budgeted_client(WebClient(
-            token=str(connection.access_token or "").strip(),
-            timeout=_slack_sdk_timeout_seconds(),
-        ), workspace_id=authority.workspace_id, app_id=user_app_id())
-        try:
-            return getattr(client, method)(**kwargs)
-        except SlackApiError as exc:
-            retry_after = _slack_retry_after_seconds(exc)
-            if retry_after:
-                cache.set(cooldown_key, time.time() + retry_after, timeout=retry_after)
-            raise
+        raise SlackDmMirrorRateLimited("Slack is limiting requests; import will resume automatically.")
+    budget_options = {"workspace_id": authority.workspace_id, "app_id": user_app_id()}
+    if before_request is not None:
+        budget_options["before_request"] = before_request
+    client = budgeted_client(WebClient(
+        token=str(connection.access_token or "").strip(), timeout=_slack_sdk_timeout_seconds(),
+    ), **budget_options)
+    try:
+        return getattr(client, method)(**kwargs)
+    except SlackApiError as exc:
+        retry_after = _slack_retry_after_seconds(exc)
+        if retry_after:
+            cache.set(cooldown_key, time.time() + retry_after, timeout=retry_after)
+        raise
 
 
 def slack_connection_for_user(user) -> ExternalServiceConnection | None:

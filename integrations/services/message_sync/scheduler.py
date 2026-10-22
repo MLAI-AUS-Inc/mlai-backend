@@ -24,7 +24,7 @@ CHECKPOINT_KEYS = frozenset({
     "cursor", "latest", "oldest", "thread_ts", "next_latest", "scan_id",
     "upper_bound", "lower_bound", "authority_generation", "has_more", "phase",
     "observed_messages", "source_limited", "head_latest_activity",
-    "recent_messages", "requested_messages", "demand_targets", "frontier", "timeline_complete",
+    "recent_messages", "requested_messages", "demand_targets", "frontier", "timeline_complete", "member_authority",
 })
 
 

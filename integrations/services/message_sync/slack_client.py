@@ -48,9 +48,18 @@ def provider_interval(method):
     return 3.0  # conservative tier-2 baseline; Retry-After always wins
 
 
-def budgeted_client(client, *, workspace_id, app_id=None):
-    """Wrap a concrete SDK instance while preserving existing mocked clients."""
+def budgeted_client(client, *, workspace_id, app_id=None, before_request=None):
+    """Wrap one concrete SDK instance; an optional fence is server-owned.
+
+    A member page supplies its current lease check for this newly constructed
+    instance/attempt only. It runs after quota admission, directly before SDK
+    I/O. No callback or authority is stored in provider kwargs or global state.
+    """
+    if before_request is not None and not callable(before_request):
+        raise TypeError("invalid_slack_request_fence")
     if not getattr(settings, "MESSAGE_SYNC_ENABLED", False):
+        if before_request is not None:
+            raise ValueError("fenced_slack_request_requires_durable_sync")
         return client
     app_id = app_id or str(getattr(settings, "MESSAGE_SYNC_SLACK_APP_ID", "") or "")
     if not app_id or not workspace_id:
@@ -77,6 +86,8 @@ def budgeted_client(client, *, workspace_id, app_id=None):
         record("admitted")
         started = time.monotonic()
         try:
+            if before_request is not None:
+                before_request()
             return original(api_method, **kwargs)
         except SlackApiError as exc:
             headers = getattr(exc.response, "headers", {}) or {}

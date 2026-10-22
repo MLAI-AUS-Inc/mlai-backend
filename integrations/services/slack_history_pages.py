@@ -26,14 +26,16 @@ def _wake(job):
         job.save(update_fields=["due_at"])
 
 
-def _public_progress(state, key):
-    job = schedule_job(state, "archive")
-    job = state.jobs.select_for_update().get(pk=job.pk)
+def _public_progress(state, key, *, scope=None, member_authority=None, job=None):
+    if job is None:
+        job = schedule_job(state, "archive")
+        job = state.jobs.select_for_update().get(pk=job.pk)
     from integrations.services.message_sync.head_repair import head_scope
     progress = dict(job.checkpoint or {})
-    scope = head_scope(state)
+    scope = scope or head_scope(state)
     if progress.get("authority_generation") != scope:
-        progress = {"authority_generation": scope}
+        progress = {"authority_generation": scope,
+                    **({"member_authority": member_authority} if member_authority else {})}
     complete = bool(progress.get("timeline_complete"))
     updated = recent_history.request_batch(progress, key, complete=complete)
     if updated != job.checkpoint:
@@ -110,10 +112,13 @@ def request_history_page(user, *, public_key, channel_id, request_key):
         destination_platform="buzz", destination_channel_id=channel_id,
     ).first()
     if mapping is not None:
+        from integrations.services.message_sync import member_history
+        if member_history.required(mapping):
+            return member_history.request_history(user, mapping, key, request_key, _public_progress)
         # A public bridge is already approved to import this shared source.
         # This hint grants no room access and returns no content or names. It
         # also works for community members who have not linked personal Slack.
-        # Public inbox routing locks state before account/device authority.
+        # Member sources above take User authority before State/Job/Channel.
         with transaction.atomic():
             state = ensure_state(mapping)
             state = BridgeSyncState.objects.select_for_update().get(pk=state.pk)

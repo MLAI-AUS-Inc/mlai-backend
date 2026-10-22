@@ -153,7 +153,7 @@ class RecentPublicWorkerTests(SimpleTestCase):
 
     def dispatch(self, responses, *, checkpoint=None):
         checkpoint = dict(checkpoint or {})
-        channel = SimpleNamespace(pk=1, enabled=True, slack_workspace_id='T1', slack_channel_id='C1',
+        channel = SimpleNamespace(pk=1, audience="community", enabled=True, slack_workspace_id='T1', slack_channel_id='C1',
                                   destination_workspace_id='community', destination_channel_id='room')
         state = SimpleNamespace(public_channel=channel, authority_generation=1, verified_ranges={}, save=Mock())
         lease = SimpleNamespace(kind='archive', checkpoint=checkpoint)
@@ -318,7 +318,7 @@ class RecentHistoryAccessTests(SimpleTestCase):
 
     def test_shared_public_bridge_does_not_require_personal_slack_oauth(self):
         from django.db.models.query import QuerySet
-        mapping = SimpleNamespace(pk=1, enabled=True, destination_platform='buzz', destination_channel_id=self.channel,
+        mapping = SimpleNamespace(pk=1, audience="community", enabled=True, destination_platform='buzz', destination_channel_id=self.channel,
                                   destination_workspace_id='community', slack_workspace_id='T1', slack_channel_id='C1')
         state = SimpleNamespace(pk=2, status='current', workspace_id='T1', source_channel_id='C1')
         with patch('community_chat.onboarding.require_community_access'), patch.object(

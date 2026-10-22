@@ -142,6 +142,8 @@ class SlackBridgeClient:
     def get_thread_messages(cls, *, channel_id: str, root_message_id: str) -> list[dict]:
         """Return one complete Slack thread, failing closed on partial pagination."""
 
+        from integrations.services.message_sync.member_history import reject_legacy_bot_read
+        reject_legacy_bot_read(channel_id)
         messages: list[dict] = []
         cursor = ""
         while True:
@@ -179,6 +181,8 @@ class SlackBridgeClient:
     ) -> list[dict]:
         """Return paginated Slack channel history for bounded reconciliation."""
 
+        from integrations.services.message_sync.member_history import reject_legacy_bot_read
+        reject_legacy_bot_read(channel_id)
         maximum = max(1, min(int(maximum_messages), 50_000))
         messages: list[dict] = []
         cursor = ""

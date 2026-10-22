@@ -102,10 +102,21 @@ def next_checkpoint(checkpoint, response, *, thread=False):
 
 
 def public_page(lease, state):
+    from . import member_history
+    if member_history.required(state.public_channel):
+        return member_history.run_page(lease, state, _public_page)
+    # Switching Community back to bot/both cannot carry a member's cursor.
+    if "member_authority" in lease.checkpoint:
+        from dataclasses import replace
+        lease = replace(lease, checkpoint={})
+    return _public_page(lease, state)
+
+
+def _public_page(lease, state, *, client=None, member_authority=None):
     channel = state.public_channel
     checkpoint = dict(lease.checkpoint)
+    scope = head_scope(state) + (":" + member_authority if member_authority else "")
     if lease.kind == "archive" and recent_history.enabled():
-        scope = head_scope(state)
         if checkpoint.get("authority_generation") not in (None, scope):
             checkpoint = {}
         checkpoint["authority_generation"] = scope
@@ -115,19 +126,22 @@ def public_page(lease, state):
     upper_seconds = timestamp(checkpoint["upper_bound"])[0]
     scan_floor = max(0, upper_seconds - PUBLIC_HISTORY_DAYS * 86400)
     if lease.kind == "head":
-        imported = recent_history.imported_floor(state, scan_floor)
+        imported = recent_history.imported_floor(state, scan_floor, scope=scope)
         if imported is None:
             finish_job(lease, checkpoint=lease.checkpoint, delay_seconds=60)
             return
         scan_floor = imported
         checkpoint = prepare_head(state, checkpoint, now=time.time(), consent_floor=scan_floor,
-                                  scope=head_scope(state))
+                                  scope=scope)
+    if member_authority:
+        checkpoint["member_authority"] = member_authority
     checkpoint.setdefault("oldest", f"{scan_floor}.000000")
     if timestamp(checkpoint["oldest"])[0] < scan_floor:
         # Old deployments saved unbounded public archive cursors. Restart that
         # query with the supported window instead of following it into years of
         # history. An already bounded cursor remains stable as time passes.
-        checkpoint = {"upper_bound": checkpoint["upper_bound"], "oldest": f"{scan_floor}.000000"}
+        checkpoint = {"upper_bound": checkpoint["upper_bound"], "oldest": f"{scan_floor}.000000",
+                      **({"member_authority": member_authority} if member_authority else {})}
     floor = max(timestamp(checkpoint["oldest"])[0], int(time.time()) - PUBLIC_HISTORY_DAYS * 86400)
     limit = history_page_limit()
     if lease.kind == "archive" and recent_history.enabled():
@@ -143,7 +157,7 @@ def public_page(lease, state):
         kwargs["oldest"] = checkpoint["oldest"]
     if checkpoint.get("cursor"):
         kwargs["cursor"] = checkpoint["cursor"]
-    client = SlackBridgeClient.get_client()
+    client = client if client is not None else SlackBridgeClient.get_client()
     read_started_at = timezone.now()
     if lease.kind == "thread":
         kwargs["ts"] = lease.source_object_key
@@ -229,7 +243,7 @@ def public_page(lease, state):
         delay = {"head": 60, "thread": 3600, "archive": 86400}[lease.kind]
         if lease.kind == "head":
             updated = observe_head(updated, observed)
-            delay = finish_head(current, updated, complete=complete, now=time.time(), scope=head_scope(current))
+            delay = finish_head(current, updated, complete=complete, now=time.time(), scope=scope)
         if lease.kind == "thread" and timestamp(lease.source_object_key)[0] < floor and not updated["observed_messages"]:
             delay = 86400
         progressive = lease.kind == "archive" and recent_history.enabled()
