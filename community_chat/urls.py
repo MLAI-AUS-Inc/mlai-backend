@@ -37,6 +37,8 @@ from .home_views import CommunityHomeView
 from .insight_views import TokenInsightsView
 from .coworking_views import CoworkingTodayView
 from .mentoring_views import (
+    MentorApplicationCheckView,
+    MentorApplicationView,
     MentorAvailabilityView,
     MentorListView,
     MentorSessionAcceptView,
@@ -46,6 +48,18 @@ from .mentoring_views import (
     MentorSessionMeetingRetryView,
     MentorSessionsView,
     MyMentorProfileView,
+    MentoringAdminAccessView,
+    MentoringAdminApplicationApproveView,
+    MentoringAdminApplicationRejectView,
+    MentoringAdminApplicationView,
+    MentoringAdminApplicationsView,
+    MentoringAdminInviteRevokeView,
+    MentoringAdminInvitesView,
+    MentoringAdminMembersView,
+    MentoringAdminMentorPauseView,
+    MentoringAdminMentorUnpauseView,
+    MentoringAdminMentorsView,
+    MentoringAdminSessionsView,
 )
 from .slack_action_views import SlackMessageActionView
 from .slack_views import SlackDmMirrorView, SlackDmStartView, SlackOwnerConversationOpenView, SlackOwnerConversationView, SlackUserDirectoryView
@@ -57,7 +71,19 @@ from .usage_views import (
 )
 
 
+from .staff_admin_views import (
+    StaffAdminAccessView, StaffAdminOverviewView, StaffAdminMembersView,
+    StaffAdminMemberView, StaffAdminRooView, StaffAdminStartupsView, StaffAdminRolesView,
+)
+
 urlpatterns = [
+    path('admin/access/', StaffAdminAccessView.as_view()),
+    path('admin/overview/', StaffAdminOverviewView.as_view()),
+    path('admin/members/', StaffAdminMembersView.as_view()),
+    path('admin/members/<int:member_id>/', StaffAdminMemberView.as_view()),
+    path('admin/roo/', StaffAdminRooView.as_view()),
+    path('admin/startups/', StaffAdminStartupsView.as_view()),
+    path('admin/roles/', StaffAdminRolesView.as_view()),
     path("federation/", include("community_chat.federation_urls")),
     path("usage/insights/", TokenInsightsView.as_view(), name="community_chat_token_insights"),
     path("account-bans/", AccountBanView.as_view(), name="community_chat_account_bans"),
@@ -81,12 +107,26 @@ urlpatterns = [
     path("mentors/", MentorListView.as_view(), name="community_chat_mentors"),
     path("mentors/<int:mentor_id>/availability/", MentorAvailabilityView.as_view(), name="community_chat_mentor_availability"),
     path("mentor/profile/", MyMentorProfileView.as_view(), name="community_chat_mentor_profile"),
+    path("mentor/application/check/", MentorApplicationCheckView.as_view(), name="community_chat_mentor_application_check"),
+    path("mentor/application/", MentorApplicationView.as_view(), name="community_chat_mentor_application"),
     path("mentor/sessions/", MentorSessionsView.as_view(), name="community_chat_mentor_sessions"),
     path("mentor/sessions/<uuid:session_id>/accept/", MentorSessionAcceptView.as_view(), name="community_chat_mentor_session_accept"),
     path("mentor/sessions/<uuid:session_id>/decline/", MentorSessionDeclineView.as_view(), name="community_chat_mentor_session_decline"),
     path("mentor/sessions/<uuid:session_id>/cancel/", MentorSessionCancelView.as_view(), name="community_chat_mentor_session_cancel"),
     path("mentor/sessions/<uuid:session_id>/meeting/retry/", MentorSessionMeetingRetryView.as_view(), name="community_chat_mentor_session_meeting_retry"),
     path("mentor/sessions/<uuid:session_id>/complete/", MentorSessionCompleteView.as_view(), name="community_chat_mentor_session_complete"),
+    path("mentor/admin/access/", MentoringAdminAccessView.as_view(), name="community_chat_mentor_admin_access"),
+    path("mentor/admin/members/", MentoringAdminMembersView.as_view(), name="community_chat_mentor_admin_members"),
+    path("mentor/admin/invites/", MentoringAdminInvitesView.as_view(), name="community_chat_mentor_admin_invites"),
+    path("mentor/admin/invites/<int:invite_id>/revoke/", MentoringAdminInviteRevokeView.as_view(), name="community_chat_mentor_admin_invite_revoke"),
+    path("mentor/admin/applications/", MentoringAdminApplicationsView.as_view(), name="community_chat_mentor_admin_applications"),
+    path("mentor/admin/applications/<int:profile_id>/", MentoringAdminApplicationView.as_view(), name="community_chat_mentor_admin_application"),
+    path("mentor/admin/applications/<int:profile_id>/approve/", MentoringAdminApplicationApproveView.as_view(), name="community_chat_mentor_admin_application_approve"),
+    path("mentor/admin/applications/<int:profile_id>/reject/", MentoringAdminApplicationRejectView.as_view(), name="community_chat_mentor_admin_application_reject"),
+    path("mentor/admin/mentors/", MentoringAdminMentorsView.as_view(), name="community_chat_mentor_admin_mentors"),
+    path("mentor/admin/mentors/<int:profile_id>/pause/", MentoringAdminMentorPauseView.as_view(), name="community_chat_mentor_admin_mentor_pause"),
+    path("mentor/admin/mentors/<int:profile_id>/unpause/", MentoringAdminMentorUnpauseView.as_view(), name="community_chat_mentor_admin_mentor_unpause"),
+    path("mentor/admin/sessions/", MentoringAdminSessionsView.as_view(), name="community_chat_mentor_admin_sessions"),
     path("slack/message/", SlackMessageActionView.as_view(), name="community_chat_slack_message"),
     path("slack/", SlackDmMirrorView.as_view(), name="community_chat_slack"),
     path("slack/conversations/", SlackOwnerConversationView.as_view(), name="community_chat_slack_conversations"),

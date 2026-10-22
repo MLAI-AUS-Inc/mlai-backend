@@ -16,6 +16,7 @@ SESSION = SimpleNamespace(
     mentor=SimpleNamespace(user=SimpleNamespace(email='mia@example.com')),
     founder=SimpleNamespace(email='fi@example.com'),
 )
+EVENT_ID = google.event_id_for(SESSION)
 CONFIG = dict(
     MENTORING_GOOGLE_ENABLED=True, MENTORING_GOOGLE_CLIENT_ID='cid',
     MENTORING_GOOGLE_CLIENT_SECRET='csecret', MENTORING_GOOGLE_REFRESH_TOKEN='rtoken',
@@ -52,6 +53,10 @@ class FakeGoogle:
         return [c for c in self.calls if fragment in c[1]]
 
 
+def posts(fake):
+    return [c for c in fake.to('/events') if c[0] == 'POST']
+
+
 class GoogleClientTests(unittest.TestCase):
     def setUp(self):
         override = override_settings(**CONFIG)
@@ -64,6 +69,7 @@ class GoogleClientTests(unittest.TestCase):
 
     def run_with(self, routes):
         routes.setdefault(('POST', 'oauth2.googleapis.com'), [reply(200, {'access_token': 't', 'expires_in': 3600})])
+        routes.setdefault(('GET', '/events/' + EVENT_ID), [reply(404, {})])  # no event from an earlier attempt
         fake = FakeGoogle(routes)
         patch.object(google.requests, 'request', fake).start()
         return fake
@@ -93,7 +99,7 @@ class GoogleClientTests(unittest.TestCase):
         self.assertEqual(out, {'meet_link': 'https://meet.google.com/abc', 'calendar_event_id': 'ev1',
                                'path': 'meet_api', 'error': ''})
         self.assertEqual(fake.to('v2/spaces')[0][2]['json'], {'config': {'accessType': 'OPEN'}})
-        _, _, kw = fake.to('/events')[0]
+        kw = posts(fake)[0][2]
         self.assertEqual(kw['params'], {'sendUpdates': 'all'})
         self.assertEqual(kw['json']['location'], 'https://meet.google.com/abc')
         self.assertIn('https://meet.google.com/abc', kw['json']['description'])
@@ -118,7 +124,7 @@ class GoogleClientTests(unittest.TestCase):
         out = google.create_meeting(SESSION)
         self.assertEqual((out['path'], out['meet_link'], out['calendar_event_id']),
                          ('calendar', 'https://meet.google.com/zzz', 'ev2'))
-        kw = fake.to('/events')[0][2]
+        kw = posts(fake)[0][2]
         self.assertEqual(kw['params'], {'conferenceDataVersion': 1, 'sendUpdates': 'all'})
         create = kw['json']['conferenceData']['createRequest']
         self.assertEqual(create['requestId'], str(SESSION.pk))
@@ -148,7 +154,7 @@ class GoogleClientTests(unittest.TestCase):
         with self.assertRaises(google.GoogleError) as ctx:
             google.create_meeting(SESSION)
         self.assertEqual(ctx.exception.code, 'google_unavailable')
-        self.assertEqual(fake.to('/events'), [])
+        self.assertEqual(posts(fake), [])
 
     def test_requests_errors_become_a_network_code(self):
         self.run_with({('POST', 'v2/spaces'): [google.requests.ConnectionError('down')]})
@@ -168,6 +174,63 @@ class GoogleClientTests(unittest.TestCase):
         google.create_meeting(SESSION)
         google.create_meeting(SESSION)
         self.assertEqual(len(fake.to('oauth2')), 1)
+
+    def test_event_id_is_deterministic_and_valid_for_google(self):
+        eid = google.event_id_for(SESSION)
+        self.assertEqual(eid, google.event_id_for(SESSION))
+        self.assertRegex(eid, r'^[a-v0-9]{5,1024}$')
+
+    def test_event_is_inserted_under_the_fixed_id_and_announced_first(self):
+        fake = self.run_with({
+            ('POST', 'v2/spaces'): [reply(200, {'meetingUri': 'https://meet.google.com/abc'})],
+            ('POST', '/events'): [reply(200, {'id': EVENT_ID})],
+        })
+        seen = []
+        out = google.create_meeting(SESSION, on_event=seen.append)
+        self.assertEqual(seen, [EVENT_ID])
+        self.assertEqual(out['calendar_event_id'], EVENT_ID)
+        self.assertEqual(posts(fake)[0][2]['json']['id'], EVENT_ID)
+
+    def test_retry_after_a_lost_insert_reuses_the_event_and_inserts_nothing(self):
+        existing = {'id': EVENT_ID, 'location': 'https://meet.google.com/first'}
+        fake = self.run_with({('GET', '/events/' + EVENT_ID): [reply(200, existing)]})
+        out = google.create_meeting(SESSION)
+        self.assertEqual((out['meet_link'], out['calendar_event_id'], out['path']),
+                         ('https://meet.google.com/first', EVENT_ID, 'meet_api'))
+        self.assertEqual(posts(fake), [])
+        self.assertEqual(fake.to('v2/spaces'), [])
+
+    def test_retry_reuses_a_calendar_event_whose_link_arrived_later(self):
+        existing = {'id': EVENT_ID, 'hangoutLink': 'https://meet.google.com/late'}
+        fake = self.run_with({('GET', '/events/' + EVENT_ID): [reply(200, existing)]})
+        out = google.create_meeting(SESSION)
+        self.assertEqual((out['meet_link'], out['path']), ('https://meet.google.com/late', 'calendar'))
+        self.assertEqual(posts(fake), [])
+
+    def test_pending_event_keeps_its_id_and_the_retry_does_not_insert_again(self):
+        pending = {'id': EVENT_ID, 'conferenceData': {'createRequest': {'status': {'statusCode': 'pending'}}}}
+        fake = self.run_with({
+            ('POST', 'v2/spaces'): [reply(403, {})],
+            ('GET', '/events/' + EVENT_ID): [reply(404, {}), reply(200, pending), reply(200, pending),
+                                             reply(200, {'id': EVENT_ID, 'hangoutLink': 'https://meet.google.com/ok'})],
+            ('POST', '/events'): [reply(200, pending)],
+        })
+        seen = []
+        with self.assertRaises(google.GoogleError) as ctx:
+            google.create_meeting(SESSION, on_event=seen.append)
+        self.assertEqual((ctx.exception.code, seen), ('meet_pending', [EVENT_ID]))
+        out = google.create_meeting(SESSION)  # the retry: finds the event, polls, gets the link
+        self.assertEqual(out['meet_link'], 'https://meet.google.com/ok')
+        self.assertEqual(len(posts(fake)), 1)
+
+    def test_insert_conflict_falls_back_to_the_existing_event(self):
+        existing = {'id': EVENT_ID, 'location': 'https://meet.google.com/won'}
+        self.run_with({
+            ('POST', 'v2/spaces'): [reply(200, {'meetingUri': 'https://meet.google.com/mine'})],
+            ('POST', '/events'): [reply(409, {})],
+            ('GET', '/events/' + EVENT_ID): [reply(404, {}), reply(200, existing)],
+        })
+        self.assertEqual(google.create_meeting(SESSION)['meet_link'], 'https://meet.google.com/won')
 
     def test_delete_event_ignores_missing_events(self):
         fake = self.run_with({('DELETE', '/events/ev1'): [reply(410, None)]})
