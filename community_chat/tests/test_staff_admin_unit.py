@@ -167,9 +167,54 @@ class ViewTests(SimpleTestCase):
                     with patch.object(cls, method, return_value=views.Response({})) as handler:
                         response = self.call(cls, method=method, **kwargs)
                         level = permissions.sections_for(role).get('mentoring')
-                        allowed = level == 'edit' or (level == 'view' and method == 'get')
+                        allowed = level == 'edit' or (level == 'view' and method == 'get' and cls is not mentoring_views.MentoringAdminMembersView)
                         self.assertEqual(response.status_code, 200 if allowed else 403)
                         self.assertEqual(handler.call_count, 1 if allowed else 0)
+
+
+    def test_readonly_mentoring_roles_cannot_search_members(self):
+        for role in ('marketing', 'tech'):
+            for method in ('get', 'head', 'options'):
+                with self.subTest(role=role, method=method), \
+                     patch.object(permissions, 'viewer_role', return_value=role), \
+                     patch.object(mentoring_views, 'MentoringAdminService') as api:
+                    response = self.call(mentoring_views.MentoringAdminMembersView, method=method)
+                    self.assertEqual(response.status_code, 403)
+                    self.assertEqual(api.mock_calls, [])
+
+    def test_readonly_mentoring_responses_redact_private_data_for_every_resource(self):
+        from mentoring.admin_service import serialize_application
+        from mentoring.models import MentorProfile
+        member = User(pk=1, email='private@example.test', first_name='Ada')
+        profile = MentorProfile(pk=1, user=member, busy_calendar_email='calendar-private@example.test', space_notes='private door code')
+        profile._prefetched_objects_cache = {'availability_rules': []}
+        application = serialize_application(profile, detail=True)
+        identity = {'id': 1, 'name': 'Ada', 'email': member.email}
+        row = {'id': 1, 'user': identity, 'created_by': identity, 'revoked_by': identity,
+               'reviewed_by': identity, 'founder': identity, 'mentor': identity,
+               'meeting_error': 'private@example.test private meeting URL', 'unexpected_private': 'private'}
+        cases = [
+            (mentoring_views.MentoringAdminInvitesView, 'list_invites', [row], {}),
+            (mentoring_views.MentoringAdminApplicationsView, 'list_applications', [application], {}),
+            (mentoring_views.MentoringAdminApplicationView, 'get_application', application, {'profile_id': 1}),
+            (mentoring_views.MentoringAdminMentorsView, 'list_mentors', [row], {}),
+            (mentoring_views.MentoringAdminSessionsView, 'list_sessions', [row], {}),
+        ]
+        for role in ('marketing', 'tech', 'community', 'admin', 'superadmin'):
+            for cls, method, data, kwargs in cases:
+                with self.subTest(role=role, endpoint=cls.__name__), \
+                     patch.object(permissions, 'viewer_role', return_value=role), \
+                     patch.object(mentoring_views.MentoringAdminService, method, return_value=data):
+                    response = self.call(cls, **kwargs)
+                    self.assertEqual(response.status_code, 200)
+                    if role in ('marketing', 'tech'):
+                        self.assertNotIn('private', str(response.data))
+                        self.assertNotIn('busy_calendar_email', str(response.data))
+                        self.assertNotIn('space_notes', str(response.data))
+                        self.assertNotIn('meeting_error', str(response.data))
+                    else:
+                        self.assertIn('private', str(response.data))
+        self.assertEqual(application['profile']['space_notes'], 'private door code')
 
 
 class ProjectionTests(TestCase):

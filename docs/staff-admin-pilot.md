@@ -36,7 +36,10 @@ and Django staff flags are unchanged.
 
 The fixed permission matrix matches the approved mockup. All new pages are read
 only, even where future policy says Edit. Mentoring writes require Superadmin,
-Admin or Community; Marketing and Tech can read only. The original mentoring
+Admin or Community; Marketing and Tech can read only. Member search for invites
+requires mentoring edit access. Read-only mentoring responses use explicit
+allowlists with no person emails, private calendar email, space notes or provider
+error text. Editors retain the existing private mentoring contract. The original mentoring
 staff policy remains when this panel flag is false. Its old tab and endpoints
 continue under MENTOR_BOOKING_ENABLED.
 

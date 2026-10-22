@@ -19,6 +19,7 @@ from mentoring.service import MentoringError, MentoringService, serialize_sessio
 
 from .authentication import CommunityChatAccountAuthentication
 from .permissions import account_chat_role, is_chat_admin
+from . import mentoring_admin_redaction as redacted
 from .throttles import CommunityChatScopedThrottle
 
 
@@ -163,33 +164,45 @@ class MentorSessionMeetingRetryView(MentorSessionActionView):
 
 # ----------------------------------------------------------- staff-only admin
 
-def is_mentoring_admin(request):
+def mentoring_admin_level(request):
     """Staff by the rules the backend already uses: a Chat owner or admin on this
     verified device, or an active Django staff or superuser account."""
     if getattr(settings, 'STAFF_ADMIN_PANEL_ENABLED', False):
         from .staff_admin_permissions import viewer_role, sections_for
         level = sections_for(viewer_role(request)).get('mentoring')
-        return level == 'edit' or (level == 'view' and request.method in ('GET', 'HEAD', 'OPTIONS'))
+        return level
     user = request.user
     if not getattr(user, 'is_authenticated', False) or not getattr(user, 'is_active', False):
-        return False
+        return None
     if getattr(user, 'is_staff', False) or getattr(user, 'is_superuser', False):
-        return True
+        return 'edit'
     role = account_chat_role(
         user,
         getattr(request, 'community_chat_public_key', None),
         getattr(request, 'community_chat_installation_id', None),
     )
-    return is_chat_admin(role)
+    return 'edit' if is_chat_admin(role) else None
+
+
+def is_mentoring_admin(request):
+    level = mentoring_admin_level(request)
+    return level == 'edit' or (level == 'view' and request.method in ('GET', 'HEAD', 'OPTIONS'))
 
 
 class MentoringAdminView(MentoringBaseView):
     """Every method needs staff; anyone else gets 403 after the flag and auth checks."""
 
+    requires_editor = False
+
     def initial(self, request, *args, **kwargs):
         super().initial(request, *args, **kwargs)
-        if not is_mentoring_admin(request):
+        self.mentoring_level = mentoring_admin_level(request)
+        editor_only = self.requires_editor or request.method not in ('GET', 'HEAD', 'OPTIONS')
+        if self.mentoring_level is None or (editor_only and self.mentoring_level != 'edit'):
             raise MentoringError('mentoring_admin_required', 'Mentoring admin is for MLAI staff.', 403)
+
+    def read_data(self, data, serializer):
+        return serializer(data) if self.mentoring_level == 'view' else data
 
 
 class MentoringAdminAccessView(MentoringBaseView):
@@ -200,6 +213,8 @@ class MentoringAdminAccessView(MentoringBaseView):
 
 
 class MentoringAdminMembersView(MentoringAdminView):
+    requires_editor = True
+
     def get(self, request):
         return Response({'members': MentoringAdminService.search_members(request.query_params.get('q', ''))})
 
@@ -207,7 +222,8 @@ class MentoringAdminMembersView(MentoringAdminView):
 class MentoringAdminInvitesView(MentoringAdminView):
     def get(self, request):
         status = request.query_params.get('status') or None
-        return Response({'invites': MentoringAdminService.list_invites(status)})
+        return Response({'invites': [self.read_data(row, redacted.invite)
+                                     for row in MentoringAdminService.list_invites(status)]})
 
     def post(self, request):
         return Response(MentoringAdminService.create_invite(request.user, _body(request).get('user_id')), status=201)
@@ -221,12 +237,13 @@ class MentoringAdminInviteRevokeView(MentoringAdminView):
 class MentoringAdminApplicationsView(MentoringAdminView):
     def get(self, request):
         state = request.query_params.get('state') or None
-        return Response({'applications': MentoringAdminService.list_applications(state)})
+        return Response({'applications': [self.read_data(row, redacted.application)
+                                          for row in MentoringAdminService.list_applications(state)]})
 
 
 class MentoringAdminApplicationView(MentoringAdminView):
     def get(self, request, profile_id):
-        return Response(MentoringAdminService.get_application(profile_id))
+        return Response(self.read_data(MentoringAdminService.get_application(profile_id), redacted.application))
 
 
 class MentoringAdminApplicationApproveView(MentoringAdminView):
@@ -241,7 +258,8 @@ class MentoringAdminApplicationRejectView(MentoringAdminView):
 
 class MentoringAdminMentorsView(MentoringAdminView):
     def get(self, request):
-        return Response({'mentors': MentoringAdminService.list_mentors()})
+        return Response({'mentors': [self.read_data(row, redacted.mentor)
+                                     for row in MentoringAdminService.list_mentors()]})
 
 
 class MentoringAdminMentorPauseView(MentoringAdminView):
@@ -257,7 +275,7 @@ class MentoringAdminMentorUnpauseView(MentoringAdminMentorPauseView):
 
 class MentoringAdminSessionsView(MentoringAdminView):
     def get(self, request):
-        return Response({'sessions': MentoringAdminService.list_sessions(
+        return Response({'sessions': [self.read_data(row, redacted.session) for row in MentoringAdminService.list_sessions(
             request.query_params.get('status') or None,
             request.query_params.get('problem') or None,
-        )})
+        )]})
