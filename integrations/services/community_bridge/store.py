@@ -325,6 +325,8 @@ def ingest_inbound_event(
 
     source_echo = source_superseded = False
     if channel is not None and source_platform == CommunityBridgePlatform.SLACK:
+        from .observability import public_route
+        public_route(channel)
         from . import community_source
         if normalized_event:
             from .public_echo import is_public_slack_echo, newer_reaction_observed
@@ -348,7 +350,10 @@ def ingest_inbound_event(
     if source_superseded:
         return _mark_receipt_ignored(receipt, reason="superseded_member_reaction")
     if source_echo:
-        return _mark_receipt_ignored(receipt, reason="member_slack_echo")
+        result = _mark_receipt_ignored(receipt, reason="member_slack_echo")
+        from .observability import echo
+        echo(channel, receipt.id, normalized_event.get("delivery_type"))
+        return result
 
     if (
         normalized_event["delivery_type"] == CommunityBridgeDeliveryType.EDIT

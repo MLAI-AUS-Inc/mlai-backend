@@ -451,6 +451,11 @@ def observe(receipt, channel, payload, normalized, *, own_send=False):
     if merged != previous:
         receipt.payload = {**old_payload, codec.KEY: merged}
         receipt.save(update_fields=("payload", "updated_at"))
+        from .observability import compare
+        source_roles = set(merged["sources"])
+        compare(channel, kind="observation", population=merged["kind"], outcome=(
+            "both" if source_roles == {"bot", "members"}
+            else "only_bot" if source_roles == {"bot"} else "only_members"))
         if value["report"]:
             value["report"]["invalidated"] = True
             _save(channel, value)
@@ -624,6 +629,11 @@ def status(*, cutoff_ns=None, finalize=False):
                         value["report"] = saved
                         _save(row, value)
                 result["report_receipt"] = saved
+            from .observability import compare
+            for row, counts in zip(current_rows, result["rooms"]):
+                if row.pk == counts["room_id"]:
+                    compare(row, kind="report", outcome=result["status"],
+                            **{key: counts[key] for key in ("only_bot", "only_members", "both", "N", "M")})
             return result
 
 

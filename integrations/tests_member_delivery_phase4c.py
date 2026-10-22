@@ -134,7 +134,13 @@ class MemberDeliveryFixture(Fixture):
 class MemberDeliveryTests(MemberDeliveryFixture, TransactionTestCase):
     def test_member_create_uses_author_without_bot_header_and_persists_actor(self):
         row = self.delivery()
-        self.send(row)
+        with patch("integrations.services.community_bridge.observability.logger.info") as logger:
+            self.send(row)
+        sends = [call for call in logger.call_args_list if call.args[1] == "slack_member_send"]
+        self.assertEqual(len(sends), 1)
+        self.assertIn("poster=member", sends[0].args[2])
+        self.assertIn(f"delivery_id={row.pk}", sends[0].args[2])
+        self.assertIn("outcome=settled", sends[0].args[2])
         self.assertEqual(row.status, "completed")
         actor = row.payload[member.MEMBER_STAMP]["actor"]
         self.assertEqual(actor["grant_id"], self.a.pk)

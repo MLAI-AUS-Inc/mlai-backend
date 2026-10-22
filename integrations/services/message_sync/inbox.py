@@ -105,7 +105,9 @@ def process_inbox_once():
                 row.available_at = timezone.now() + timedelta(seconds=5)
                 row.lease_token = None
                 row.lease_expires_at = None
-                row.last_error_code = result.get("status", "member_audience_pending")
+                row.last_error_code = ("community_source_pending"
+                                       if result.get("status") == "community_source_pending"
+                                       else "member_audience_pending")
                 row.save()
                 return 0
             row.status = "completed"

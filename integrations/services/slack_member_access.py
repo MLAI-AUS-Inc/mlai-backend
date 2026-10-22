@@ -432,6 +432,11 @@ def record_community_reader_state(row, assessment, *, continuity=None):
     }
     row.room_state = state
     row.save(update_fields=("room_state", "updated_at"))
+    if not unchanged:
+        from .community_bridge.observability import compare
+        compare(row, kind="fallback", outcome=(
+            "no_reader" if assessment.complete and assessment.fallback_reason == "no_reader"
+            else assessment.effective_source if assessment.complete else "hold"))
     if continuity is None:
         # History/callback fallback between monitor ticks must invalidate the
         # prospective stability window immediately. The typed heartbeat owns

@@ -104,7 +104,14 @@ class CommunityDeliveryTests(CommunityFixture, TransactionTestCase):
         row = self.delivery()
         row.payload["source_author_display_name"] = "forged display"
         row.save()
-        self.send(row)
+        with patch("integrations.services.community_bridge.observability.logger.info") as logger:
+            self.send(row)
+        sends = [call for call in logger.call_args_list if call.args[1] == "slack_member_send"]
+        self.assertEqual(len(sends), 1)
+        self.assertIn("poster=bot", sends[0].args[2])
+        self.assertIn(f"delivery_id={row.pk}", sends[0].args[2])
+        self.assertNotIn("Current MLAI profile", str(logger.call_args_list))
+        self.assertNotIn("forged display", str(logger.call_args_list))
         command = row.payload[community.MEMBER_STAMP]
         self.assertEqual(command["actor"]["kind"], "bot")
         self.assertIn("Current MLAI profile", command["wire"]["kwargs"]["text"])

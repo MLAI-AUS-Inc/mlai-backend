@@ -190,6 +190,9 @@ def route_member_public_event(payload):
     if not access.enabled() or not channels.member_channel_in_scope(workspace, source):
         return {'status': 'ignored', 'reason': 'member_channels_disabled_or_out_of_scope'} if event_type in _CONTENT else None
     verified = _public_verified(row, event)
+    if verified:
+        from .observability import public_route
+        public_route(row)
     if event_type in _LIFECYCLE:
         channels.queue_refresh(workspace, source, reason=event_type)
         return {'status': 'member_refresh_queued'} if verified else None
@@ -295,7 +298,7 @@ def dispatch_slack_callback(payload, *, private_ingest=None, public_ingest=None)
 def dispatch_authenticated_slack_callback(payload, *, app_id, received_at, inbox_id=None,
                                          source_event_id=None, private_ingest=None, public_ingest=None):
     """The only callback authority context, outside all provider JSON fields."""
-    from . import community_source
+    from . import community_source, observability
     from integrations.services.message_sync.member_callback_authority import callback_user_fence
     from integrations.services.message_sync.read_activity import record_public_event
     from integrations.services.message_sync.read_priority import invalidate_event
@@ -308,7 +311,10 @@ def dispatch_authenticated_slack_callback(payload, *, app_id, received_at, inbox
                     community_source.wake_source_revalidation(payload)
                     invalidate_event(payload)
                     record_public_event(payload)
-                    result = dispatch_slack_callback(payload, private_ingest=private_ingest,
-                                                     public_ingest=public_ingest)
+                    with observability.capture_route() as route:
+                        result = dispatch_slack_callback(payload, private_ingest=private_ingest,
+                                                         public_ingest=public_ingest)
+                        if community_source.authenticated_role(payload) is not None:
+                            observability.event(route, result)
                     community_source.rate_limited(payload)
                     return result

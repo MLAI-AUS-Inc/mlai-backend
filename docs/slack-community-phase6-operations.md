@@ -44,6 +44,30 @@ Rollback is the existing `SLACK_COMMUNITY_SOURCE=bot`, using the normal approved
 
 The seven-day and fourteen-day gates are elapsed observation requirements. Green tests or deployment health do not satisfy them. Phase 7 cleanup and optional Phase 9 work remain separate.
 
+## Closed operational logs
+
+The `slack_member_event`, `slack_member_channel`, `slack_member_send`,
+`slack_public_echo` and `slack_community_source compare` families contain
+validated primitive mapping/source/room/delivery/receipt IDs, fixed outcomes
+and already-derived comparison counts. Authenticated public routes use the
+owned public bridge mapping, not a payload prefix as privacy proof. Personal
+DM/MPIM mirrors do not enter these families. Lifecycle holds for formerly
+public rooms retain only their existing mapping IDs after archive or privacy
+conversion. Send logs never contain the profile header, body or token.
+
+Successful database outcomes are emitted after the enclosing transaction
+commits. Logging failures cannot change synchronization. Logging never opens
+a database connection; closed connections and uncommitted manual transactions
+are skipped. Rollback drops scheduled success logs. Existing status and
+durable receipts remain authoritative when operational logs are unavailable.
+
+Comparison observation lines describe a merged sighting transition and identify
+message, own-send or diagnostic population; they are not additive counters.
+Only report lines contain the existing report's per-room `only_bot`,
+`only_members`, `both`, `N` and `M` values. Fallback lines record persisted
+source-policy transitions, including complete-zero `no_reader`, without
+inventing a new observation window or performing another measurement query.
+
 ## Validation ownership
 
 The owning labels are `integrations.tests_community_source_phase6`, `integrations.tests_community_source_codec_phase6` and `integrations.tests_community_reader_phase6` in the canonical SQLite and durable PostgreSQL jobs. Preserve the Phase 4 privacy/authority/history tests and Phase 5 immutable send/echo and PostgreSQL revocation/settlement regressions. Database tests use only the specifically approved existing disposable migration inventory; this document grants no migration permission and records no test result.

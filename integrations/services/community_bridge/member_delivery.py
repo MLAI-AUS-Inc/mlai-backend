@@ -1167,6 +1167,8 @@ def execute(delivery):
             else:
                 raise MemberDeliveryUnavailable("unsupported_member_destination")
         succeeded = True
+        from .observability import send
+        send(original, actor, delivery["id"], "settled", reconciled=reconcile)
     except _SourceClosed as error:
         from .member_channels import mark_source_reduction
 
@@ -1235,6 +1237,10 @@ def execute(delivery):
             if reconcile and attempt["status"] != "not_sent":
                 status = "uncertain"
             attempts.record(delivery["id"], command, attempt, status, receipt)
+        if not succeeded:
+            import sys
+            from .observability import send_failure
+            send_failure(original, actor, delivery["id"], sys.exc_info()[1])
 
 
 def _finish_slack(row, channel, actor, wire, response, *, outcome="accepted", verified_receipt=None):

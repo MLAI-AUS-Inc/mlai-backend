@@ -99,6 +99,109 @@ class SourceFixture:
 
 @override_settings(**CONFIG)
 class CommunitySourceTests(SourceFixture, TransactionTestCase):
+    def test_observation_logs_commit_and_rollback_with_real_transaction(self):
+        from integrations.services.community_bridge import observability
+        with patch.object(observability.logger, "info") as logger:
+            with transaction.atomic():
+                observability.room(self.row, "room_updated")
+                logger.assert_not_called()
+            self.assertEqual(logger.call_count, 1)
+            try:
+                with transaction.atomic():
+                    observability.room(self.row, "held")
+                    raise ValueError("synthetic rollback")
+            except ValueError:
+                pass
+            self.assertEqual(logger.call_count, 1)
+
+    def test_authenticated_public_route_and_compare_logs_never_include_body(self):
+        from integrations.services.community_bridge import observability
+        payload = self.callback(app="AUSER")
+        payload["event"]["text"] = "synthetic body must not enter logs"
+        inbox = self.inbox(payload, completed=False)
+        with patch.object(observability.logger, "info") as logger:
+            result = dispatch_authenticated_slack_callback(payload, app_id=inbox.app_id,
+                received_at=inbox.received_at, inbox_id=inbox.pk,
+                source_event_id=inbox.source_event_id, private_ingest=lambda _: None)
+        self.assertEqual(result["status"], "enqueued")
+        receipt = CommunityBridgeReceipt.objects.get(pk=result["receipt_id"])
+        evidence = codec.marker(receipt.payload.get(codec.KEY))
+        self.assertIsNotNone(evidence)
+        self.assertEqual(evidence["sources"], {"members": codec.stamp(inbox.received_at)})
+        self.assertEqual(evidence["epoch"], self.epoch()["id"])
+        self.assertEqual(evidence["room"], source.room_identity(self.row))
+        families = [call.args[1] for call in logger.call_args_list]
+        self.assertIn("slack_member_event", families)
+        self.assertIn("slack_community_source compare", families)
+        self.assertNotIn(payload["event"]["text"], str(logger.call_args_list))
+
+    def test_real_callback_commit_survives_logging_handler_failure(self):
+        from integrations.services.community_bridge import observability
+        payload = self.callback(app="AUSER")
+        with patch.object(observability.logger, "info", side_effect=RuntimeError("synthetic secret")):
+            result = dispatch_authenticated_slack_callback(payload, app_id="AUSER",
+                received_at=timezone.now(), private_ingest=lambda _: None)
+        self.assertEqual(result["status"], "enqueued")
+        self.assertEqual(CommunityBridgeDelivery.objects.filter(receipt_id=result["receipt_id"]).count(), 1)
+
+    def test_room_update_archive_and_hold_logs_follow_persisted_outcomes(self):
+        from integrations.services.community_bridge import observability, member_channels
+        self.row.room_sync_pending = True
+        self.row.save(update_fields=["room_sync_pending"])
+        response = {"channel_id": self.row.destination_channel_id, "changed": ["name"]}
+        with patch.object(observability.logger, "info") as logger, patch.object(
+            member_channels.BuzzBridgeClient, "upsert_public_channel", return_value=response,
+        ):
+            self.assertEqual(member_channels.sync_room(self.row.pk), "synced")
+            self.row.refresh_from_db()
+            self.assertIsNotNone(self.row.room_synced_at)
+            self.assertIn("outcome=room_updated", logger.call_args.args[2])
+            self.row.slack_archived = True
+            self.row.room_sync_pending = True
+            self.row.save(update_fields=["slack_archived", "room_sync_pending"])
+            self.assertEqual(member_channels.sync_room(self.row.pk), "synced")
+            self.row.refresh_from_db()
+            self.assertFalse(self.row.enabled)
+            self.assertIn("outcome=archived", logger.call_args.args[2])
+            self.row.room_sync_error = "rekey_requires_room_migration"
+            self.row.save(update_fields=["room_sync_error"])
+            self.assertEqual(member_channels.sync_room(self.row.pk), "held")
+            self.assertIn("outcome=held", logger.call_args.args[2])
+
+    def test_echo_log_occurs_at_ignored_receipt_settlement_not_predicate(self):
+        from integrations.services.community_bridge import observability
+        from integrations.services.community_bridge import public_echo
+        with patch.object(observability.logger, "info") as logger, patch.object(
+            public_echo, "is_public_slack_echo", return_value=True,
+        ):
+            result, receipt = self.ingest(self.callback())
+        self.assertEqual(result["reason"], "member_slack_echo")
+        self.assertEqual(receipt.status, "ignored")
+        echo = [call for call in logger.call_args_list if call.args[1] == "slack_public_echo"]
+        self.assertEqual(len(echo), 1)
+        self.assertIn(f"receipt_id={receipt.pk}", echo[0].args[2])
+        self.assertIn("kind=create", echo[0].args[2])
+
+    def test_report_logs_reuse_exact_derived_counts_and_fallback_only_on_change(self):
+        from integrations.services.community_bridge import observability
+        from integrations.services import slack_member_access as access
+        from types import SimpleNamespace
+        self.ingest(self.callback())
+        with patch.object(observability.logger, "info") as logger:
+            report = source.status()
+        reports = [call for call in logger.call_args_list if call.args[1] == "slack_community_source compare"]
+        self.assertEqual(len(reports), 15)
+        first = report["rooms"][0]
+        self.assertIn(f"N={first['N']}", reports[0].args[2])
+        self.assertIn(f"M={first['M']}", reports[0].args[2])
+        assessment = SimpleNamespace(eligible_count=0, unknown_count=0, complete=True,
+            effective_source="bot", fallback_reason="no_reader", fingerprint="a"*64)
+        with patch.object(observability.logger, "info") as logger:
+            access.record_community_reader_state(self.row, assessment)
+            access.record_community_reader_state(self.row, assessment)
+        self.assertEqual(logger.call_count, 1)
+        self.assertIn("outcome=no_reader", logger.call_args.args[2])
+
     def test_both_apps_one_outbox_and_minimum_original_ingress_survive_duplicates(self):
         bot, member = self.callback(), self.callback(app='AUSER')
         first, receipt = self.ingest(bot)
