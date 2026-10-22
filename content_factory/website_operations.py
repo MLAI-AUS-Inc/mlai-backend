@@ -143,9 +143,12 @@ def validate_operation(connection, payload, *, worker_cleanup=False, restoration
             incoming_status = normalize_run_status(incoming_status)
         event = payload.get("event_type") or payload.get("event")
         # Scan callbacks use "success" after the durable snapshot has already
-        # completed the operation. This is the same terminal outcome, not a
-        # request to reopen it; other events and states keep their strict fence.
-        if event == "scan_complete" and incoming_status == "success":
+        # completed the operation. A setup that finished without a pull request
+        # (an adopted site registry or an already-ready setup) finalizes its run
+        # before sending scaffold_complete the same way (La Vie, 22 Oct). This is
+        # the same terminal outcome, not a request to reopen it; other events and
+        # states keep their strict fence.
+        if event in {"scan_complete", "scaffold_complete"} and incoming_status == "success":
             incoming_status = "completed"
         terminal_events = {
             "completed": {"article_complete", "generation_pr_opened", "publish_bundle_ready", "scan_complete", "article_system_setup_complete", "article_system_setup_completed", "scaffold_complete", "article_review_ready", "content_ready"},

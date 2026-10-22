@@ -237,6 +237,56 @@ class IncidentAuthorityReplays(SimpleTestCase):
                 operations.validate_operation(website, payload)
             self.assertEqual(error.exception.code, "website_operation_cancelled")
 
+    def test_completed_setup_without_pull_request_accepts_its_success_callback(self):
+        # La Vie, 22 Oct: an adopted-registry setup finalizes its run, then sends
+        # scaffold_complete with status "success"; it was refused as terminal.
+        from . import website_operations as operations
+        from workflow_runs.models import ContentFactoryRun
+        identifier = uuid.uuid4()
+        binding = {"operation_id": str(identifier), "operation_attempt": 26, "deletion_epoch": 0}
+        run = SimpleNamespace(run_id="adopted-setup", workflow="article_system_setup", organization_id=30,
+            status="completed", run_request=binding, result={})
+        op = SimpleNamespace(pk=identifier, state="completed", payload={"attempt": 26}, generation=3)
+        manager = Mock(); manager.filter.return_value.first.return_value = op
+        website = SimpleNamespace(organization_id=30, operations=manager, blockers=[], generation=3)
+        with patch.object(ContentFactoryRun.objects, "filter") as runs:
+            runs.return_value.first.return_value = run
+            for event_key, status in [("event_type", "success"), ("event", "success"), ("event", "completed")]:
+                with self.subTest(event_key=event_key, status=status):
+                    self.assertIs(operations.validate_operation(website, {
+                        **binding, "run_id": run.run_id, event_key: "scaffold_complete", "status": status,
+                    }), op)
+                    self.assertEqual((op.state, run.status), ("completed", "completed"))
+
+    def test_setup_success_alias_cannot_revive_a_failed_or_fenced_setup(self):
+        from . import website_operations as operations
+        from workflow_runs.models import ContentFactoryRun
+        identifier = uuid.uuid4()
+        binding = {"operation_id": str(identifier), "operation_attempt": 26, "deletion_epoch": 0}
+        run = SimpleNamespace(run_id="adopted-setup", workflow="article_system_setup", organization_id=30,
+            status="completed", run_request=binding, result={})
+        op = SimpleNamespace(pk=identifier, state="completed", payload={"attempt": 26}, generation=3)
+        manager = Mock(); manager.filter.return_value.first.return_value = op
+        website = SimpleNamespace(organization_id=30, operations=manager, blockers=[], generation=3)
+        payload = {**binding, "run_id": run.run_id, "event": "scaffold_complete", "status": "success"}
+        cases = [
+            ("failed", {}, "website_operation_terminal"),
+            ("blocked", {}, "website_operation_terminal"),
+            ("cancelled", {}, "website_operation_cancelled"),
+            ("completed", {"operation_attempt": 25}, "website_operation_changed"),
+            ("completed", {"event": "article_system_setup_progress"}, "website_operation_terminal"),
+            ("completed", {"status": "running"}, "website_operation_terminal"),
+            ("completed", {"status": "failed"}, "website_operation_terminal"),
+        ]
+        with patch.object(ContentFactoryRun.objects, "filter") as runs:
+            runs.return_value.first.return_value = run
+            for state, changes, expected in cases:
+                with self.subTest(state=state, changes=changes):
+                    op.state = state
+                    with self.assertRaises(WebsiteAuthorityError) as error:
+                        operations.validate_operation(website, {**payload, **changes})
+                    self.assertEqual(error.exception.code, expected)
+
     def test_verified_target_survives_empty_scan_and_weaker_same_key(self):
         for candidate in ({"target_id": "featured"}, {**self.target, "verification": {}},
                 {**self.target, "delivery_adapter": "bundle_only"}):
