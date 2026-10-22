@@ -37,6 +37,13 @@ All paths are under `/api/v1/community-chat/startups/`. Except the signed browse
 
 The facade delegates domain behavior to the existing services rather than duplicating startup state. Generation uses the existing active-run deduplication; clients disable duplicate submission. It does not introduce a new durable idempotency-key protocol. Polling backs off from 2.5 to 15 seconds, stops on terminal status, and pauses in background. Completed drafts refresh the archive. Failed status reads offer retry.
 
+Owner archive/detail responses include the selected revision's private
+`evidenceSnapshot`, including when `version=published` selects an older approved
+revision. Dashboard financial reporting uses that frozen snapshot independently
+of the metrics selected for sharing. Community and public projections never
+include the snapshot. Refreshing historical reporting evidence creates a separate
+private approved update, preserving shared revisions and approval receipts.
+
 ## Connection tiles and lifecycle additions — 26 September 2026
 
 The source catalog contains `gmail`, `stripe`, `humanitix`, `xero`, `bank_feed`, `notion`, `google_drive`, `slack`, `linear`, `google_analytics`, and `luma`. Existing fields are preserved; each source adds `connectMode` (`oauth` or `api_key`), `canConnect`, `canDisconnect`, and `usableForUpdates`. Chat discovers accessible Analytics properties automatically when a draft starts. The separate `connect/google/` handoff requests website/Search Console consent; it is not a Valley input. GitHub remains a separate publishing connection.

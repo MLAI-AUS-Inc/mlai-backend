@@ -548,6 +548,7 @@ jobs:
           community_chat.tests.test_startup_updates \
           community_chat.tests.test_startup_updates_database \
           startup_updates.tests_evidence_contract \
+          startup_updates.tests_dashboard_financial_refresh \
           startup_updates.tests_source_evidence \
           startup_updates.tests_reporting_canaries \
           startup_updates.tests_revisions \
