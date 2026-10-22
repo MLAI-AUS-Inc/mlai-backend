@@ -88,6 +88,8 @@ def budgeted_client(client, *, workspace_id, app_id=None, before_request=None):
         try:
             if before_request is not None:
                 before_request()
+            from .delivery import guard_legacy_provider_request
+            guard_legacy_provider_request()
             return original(api_method, **kwargs)
         except SlackApiError as exc:
             headers = getattr(exc.response, "headers", {}) or {}

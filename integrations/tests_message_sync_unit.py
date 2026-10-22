@@ -15,6 +15,8 @@ WORKER = "integrations.services.community_bridge.worker"
 
 class MessageSyncWorkerUnitTests(IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
+        guard = patch(f"{WORKER}.legacy_send",side_effect=lambda delivery,send,*args,require_ai=False,**kwargs:send(*args,**kwargs))
+        guard.start();self.addCleanup(guard.stop)
         self.client = CommunityBridgeDiscordClient()
         self.addAsyncCleanup(self.client.close)
         self.delivery = {

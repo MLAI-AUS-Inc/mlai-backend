@@ -30,7 +30,7 @@ CONFIG = dict(
     COMMUNITY_CHAT_AI_DISCLOSURE_VERSION="test-v1",
 )
 DELIVERY = {
-    "id": 1, "created_at": int(datetime(2026, 9, 8, 15, tzinfo=dt_timezone.utc).timestamp()),
+    "id": 1, "channel_id": 1, "created_at": int(datetime(2026, 9, 8, 15, tzinfo=dt_timezone.utc).timestamp()),
     "source_platform": "buzz", "delivery_type": "create", "source_message_id": "ab" * 32,
     "source_channel_id": coworking.COWORKING_CHANNEL_ID, "target_channel_id": "CCOWORK",
     "channel": {"slack_workspace_id": "TMLAI", "destination_channel_id": coworking.COWORKING_CHANNEL_ID},
@@ -45,6 +45,7 @@ class CoworkingAvailabilityTests(TestCase):
         other = get_user_model().objects.create_user(email="other@example.test")
         grant_test_ai_consent(member)
         channel = CommunityBridgeChannel.objects.create(
+            audience="community",
             slack_workspace_id="TMLAI", slack_channel_id="CCOWORK",
             destination_platform="buzz", destination_channel_id=coworking.COWORKING_CHANNEL_ID,
         )
@@ -69,6 +70,13 @@ class CoworkingAvailabilityTests(TestCase):
 
 @override_settings(**CONFIG)
 class CoworkingHandoffTests(SimpleTestCase):
+    def setUp(self):
+        from integrations.services.community_bridge import member_delivery, worker
+        passthrough = lambda delivery, send, *args, **kwargs: send(*args, **kwargs)
+        for module in (member_delivery,worker):
+            guard = patch.object(module,"legacy_send",side_effect=passthrough)
+            guard.start();self.addCleanup(guard.stop)
+
     def test_bridge_worker_routes_the_signed_command_to_roo_without_a_second_slack_post(self):
         from integrations.services.community_bridge import worker
 
@@ -146,6 +154,14 @@ class CoworkingHandoffTests(SimpleTestCase):
 @override_settings(**CONFIG)
 class CoworkingConsentTests(TestCase):
     def setUp(self):
+        channel, _ = CommunityBridgeChannel.objects.update_or_create(
+            pk=1, defaults={"audience": "community", "enabled": True,
+                "slack_workspace_id": "TMLAI", "slack_channel_id": "CCOWORK",
+                "destination_platform": "buzz", "destination_channel_id": coworking.COWORKING_CHANNEL_ID},
+        )
+        CommunityBridgeDelivery.objects.create(pk=1,channel=channel,source_platform="buzz",target_platform="slack",
+            source_channel_id=coworking.COWORKING_CHANNEL_ID,source_message_id=DELIVERY["source_message_id"],
+            target_channel_id="CCOWORK",delivery_type="create",status="processing",payload=DELIVERY["payload"],available_at=timezone.now())
         self.member = get_user_model().objects.create_user(email="consent@example.test")
         self.device = CommunityChatDevice.objects.create(
             user=self.member, public_key=DELIVERY["payload"]["source_author_id"],
@@ -314,6 +330,7 @@ class CoworkingCheckpointTests(TestCase):
         from integrations.services.community_bridge.store import complete_create_delivery, complete_delivery
 
         channel = CommunityBridgeChannel.objects.create(
+            audience="community",
             slack_workspace_id="TMLAI", slack_channel_id="CCOWORK",
             destination_platform="buzz", destination_channel_id=coworking.COWORKING_CHANNEL_ID,
         )

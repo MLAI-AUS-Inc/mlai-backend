@@ -244,6 +244,20 @@ def ingest_inbound_event(
             )
             normalized_event = None
 
+    if (channel is not None and channel.audience == "members" and source_platform == "slack"
+            and normalized_event and normalized_event["delivery_type"] in {"reaction_add", "reaction_remove"}):
+        # Only new Members source identities use canonical approved spelling.
+        # The Channel lock is held; raw callback/receipt evidence stays intact,
+        # and no existing frozen command or Community/private ID is rewritten.
+        normalized_event = {
+            **normalized_event,
+            "source_message_id": reaction_object_id(
+                message_id=normalized_event["source_parent_message_id"],
+                reaction=emoji_to_slack_reaction(normalized_event["text"]),
+                author_id=normalized_event["source_author_id"],
+            ),
+        }
+
     try:
         with transaction.atomic():
             receipt = CommunityBridgeReceipt.objects.create(
@@ -252,8 +266,14 @@ def ingest_inbound_event(
                 receipt_key=normalized_receipt_key,
                 event_type=str(event_type or "").strip(),
                 source_channel_id=normalized_channel_id,
-                source_message_id=str((normalized_event or {}).get("source_message_id") or raw_source_message_id or "").strip()[:100],
-                source_parent_message_id=str((normalized_event or {}).get("source_parent_message_id") or "").strip(),
+                source_message_id=str(
+                    (normalized_event or {}).get("source_message_id")
+                    or raw_source_message_id
+                    or ""
+                ).strip()[:100],
+                source_parent_message_id=str(
+                    (normalized_event or {}).get("source_parent_message_id") or ""
+                ).strip(),
                 status=CommunityBridgeReceiptStatus.ACCEPTED,
                 payload=raw_payload or {},
             )
@@ -283,6 +303,13 @@ def ingest_inbound_event(
 
     if not normalized_event:
         return _mark_receipt_ignored(receipt, reason="unsupported_or_ignored_event", detail=ignore_detail)
+
+    if source_platform == CommunityBridgePlatform.SLACK:
+        from .public_echo import is_public_slack_echo, newer_reaction_observed
+        if newer_reaction_observed(channel, raw_payload or {}):
+            return _mark_receipt_ignored(receipt, reason="superseded_member_reaction")
+        if is_public_slack_echo(channel, normalized_event, raw_payload or {}):
+            return _mark_receipt_ignored(receipt, reason="member_slack_echo")
 
     if (
         normalized_event["delivery_type"] == CommunityBridgeDeliveryType.EDIT
@@ -493,6 +520,45 @@ def complete_create_delivery(
         delivery = CommunityBridgeDelivery.objects.select_for_update(of=("self",)).select_related("channel").get(id=delivery_id)
         guard_delivery(delivery)
         payload = dict(delivery.payload or {})
+        destination_payload = dict(destination_payload or {})
+        existing_link = (
+            CommunityBridgeMessageLink.objects.select_for_update()
+            .filter(
+                source_platform=delivery.source_platform,
+                source_channel_id=delivery.source_channel_id,
+                source_message_id=delivery.source_message_id,
+                destination_platform=delivery.target_platform,
+            )
+            .first()
+        )
+        if delivery.target_platform == CommunityBridgePlatform.SLACK:
+            from .member_delivery import MEMBER_STAMP
+
+            command = payload.get(MEMBER_STAMP)
+            expected_poster = (
+                command.get("actor") if isinstance(command, dict) else {"kind": "bot"}
+            )
+            if delivery.channel.audience == "members" and (
+                not isinstance(expected_poster, dict)
+                or expected_poster.get("kind") != "member"
+            ):
+                raise ValueError("Missing Members poster evidence")
+            supplied = destination_payload.get("poster", expected_poster)
+            if supplied != expected_poster:
+                raise ValueError("Conflicting Slack poster evidence")
+            destination_payload["poster"] = supplied
+            previous = (
+                (existing_link.destination_payload or {}).get("poster")
+                if existing_link
+                else None
+            )
+            if previous is not None and previous != supplied:
+                raise ValueError("Conflicting Slack poster evidence")
+            if existing_link is not None and (
+                existing_link.destination_message_id != str(destination_message_id)
+                or existing_link.destination_channel_id != str(destination_channel_id)
+            ):
+                raise ValueError("Conflicting Slack destination evidence")
         CommunityBridgeMessageLink.objects.update_or_create(
             source_platform=delivery.source_platform,
             source_channel_id=delivery.source_channel_id,
@@ -504,7 +570,9 @@ def complete_create_delivery(
                 "source_author_id": str(payload.get("source_author_id") or "").strip(),
                 "destination_channel_id": str(destination_channel_id or "").strip(),
                 "destination_message_id": str(destination_message_id or "").strip(),
-                "destination_parent_message_id": str(destination_parent_message_id or "").strip(),
+                "destination_parent_message_id": str(
+                    destination_parent_message_id or ""
+                ).strip(),
                 "source_payload": payload,
                 "destination_payload": destination_payload or {},
                 "source_deleted_at": None,
@@ -620,6 +688,22 @@ def mark_delivery_waiting_for_parent(
     guard_delivery(delivery)
 
     now = timezone.now()
+    if (delivery.source_platform == 'slack' and delivery.target_platform == 'buzz'
+            and delivery.delivery_type in {'edit','delete','reaction_remove'}
+            and str(parent_message_id) == delivery.source_message_id
+            and not CommunityBridgeMessageLink.objects.filter(source_platform='slack',
+                source_channel_id=delivery.source_channel_id,source_message_id=delivery.source_message_id,
+                destination_platform='buzz').exists()
+            and CommunityBridgeMessageLink.objects.filter(channel_id=delivery.channel_id,source_platform='buzz',
+                destination_platform='slack',destination_channel_id=delivery.source_channel_id,
+                destination_message_id=delivery.source_message_id).exists()):
+        delivery.status = CommunityBridgeDeliveryStatus.DEAD
+        delivery.lease_token = None
+        delivery.lease_expires_at = None
+        delivery.locked_at = None
+        delivery.last_error = 'reverse_origin_mutation_unsupported'
+        delivery.save(update_fields=('status','lease_token','lease_expires_at','locked_at','last_error','updated_at'))
+        return
     # The worker's lookup happened before this row lock. Parent completion may
     # already have skipped the still-processing child, so recheck before parking.
     parent_link = resolve_mapped_message(
@@ -817,6 +901,7 @@ def _normalize_slack_event(payload: dict) -> Optional[dict]:
                 "broadcast": subtype == "thread_broadcast"
                 or bool(event.get("reply_broadcast")),
                 "slack_created_at": _slack_timestamp_seconds(source_message_id),
+                "slack_client_msg_id": str(event.get("client_msg_id") or ""),
                 "slack_raw_text": raw_text,
                 "slack_display_markdown": sanitize_slack_message(
                     event,
@@ -853,6 +938,7 @@ def _normalize_slack_event(payload: dict) -> Optional[dict]:
                 == "thread_broadcast"
                 or bool(message.get("reply_broadcast")),
                 "slack_created_at": _slack_timestamp_seconds(source_message_id),
+                "slack_client_msg_id": str(message.get("client_msg_id") or ""),
                 "slack_raw_text": raw_text,
                 "slack_display_markdown": sanitize_slack_message(
                     message,
@@ -1000,6 +1086,7 @@ def _canonicalize_event(
     source_channel_id: str,
     normalized_event: dict,
 ) -> dict:
+    from .member_delivery import clean_metadata
     delivery_type = str(normalized_event.get("delivery_type") or "")
     if delivery_type in {
         CommunityBridgeDeliveryType.REACTION_ADD,
@@ -1025,7 +1112,7 @@ def _canonicalize_event(
         delivery_type=delivery_type,
         text=str(normalized_event.get("text") or ""),
         attachments=attachments,
-        metadata=normalized_event.get("metadata") or {},
+        metadata=clean_metadata(normalized_event.get("metadata")),
     )
     return event.normalized_payload()
 
@@ -1081,6 +1168,7 @@ def _serialize_delivery(delivery: CommunityBridgeDelivery) -> dict:
         "attempts": int(delivery.attempts or 0),
         "max_attempts": int(delivery.max_attempts or 0),
         "channel": {
+            "audience": delivery.channel.audience,
             "slack_workspace_id": delivery.channel.slack_workspace_id,
             "slack_channel_id": delivery.channel.slack_channel_id,
             "destination_platform": delivery.channel.destination_platform,

@@ -135,6 +135,11 @@ class PublicBridgeWorkerConsentTests(SimpleTestCase):
             delivery["payload"]["text"] = "👍"
         client = worker.CommunityBridgeDiscordClient()
         with ExitStack() as stack:
+            def legacy_unit_boundary(delivery,send,*args,require_ai=False,**kwargs):
+                if require_ai:
+                    return ai_consent.send_with_ai_consent(delivery,send,**kwargs)
+                return send(*args,**kwargs)
+            stack.enter_context(patch.object(worker,"legacy_send",side_effect=legacy_unit_boundary))
             stack.enter_context(patch.object(client, "_resolve_author_display_name", new=AsyncMock(return_value="Synthetic")))
             stack.enter_context(patch.object(client, "_resolve_parent_destination_message", new=AsyncMock(return_value="123.456")))
             stack.enter_context(patch.object(worker, "resolve_message_link", return_value={

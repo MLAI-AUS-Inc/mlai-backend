@@ -71,6 +71,22 @@ def _audience_keys(values):
     return sorted(values)
 
 
+def validate_member_scope(value):
+    """Closed scope schema; this is server authority, never provider metadata."""
+    fields={'channel_id','slack_workspace_id','slack_channel_id','audience',
+            'expected_generation','expected_audience_hash'}
+    if not isinstance(value,dict) or set(value)!=fields or value.get('audience')!='members':
+        raise BuzzBridgeError('Invalid Members delivery scope')
+    result=dict(value)
+    for name in ('channel_id','expected_generation'):
+        result[name]=_audience_uuid(value[name])
+    if (not isinstance(value['slack_workspace_id'],str) or not re.fullmatch(r'T[A-Z0-9]{1,99}',value['slack_workspace_id'])
+            or not isinstance(value['slack_channel_id'],str) or not re.fullmatch(r'C[A-Z0-9]{1,99}',value['slack_channel_id'])
+            or not isinstance(value['expected_audience_hash'],str) or not EVENT_ID_RE.fullmatch(value['expected_audience_hash'])):
+        raise BuzzBridgeError('Invalid Members delivery scope')
+    return result
+
+
 class BuzzBridgeClient:
     _private_batch_disabled_until = 0.0
     _private_batch_fallback_seconds = 300
@@ -121,6 +137,7 @@ class BuzzBridgeClient:
         source_created_at: int = 0,
         broadcast: bool = False,
         mention_pubkeys: list[str] | None = None,
+        member_scope: dict | None = None,
     ) -> dict:
         adapter_url = cls._validated_adapter_url()
         api_token = cls._api_token()
@@ -145,6 +162,12 @@ class BuzzBridgeClient:
             "source_created_at": int(source_created_at or 0) or None,
             "broadcast": bool(broadcast),
         }
+        if member_scope is not None:
+            payload['member_scope'] = validate_member_scope(member_scope)
+            if (payload['member_scope']['channel_id'] != payload['channel_id']
+                    or payload['member_scope']['slack_workspace_id'] != payload['source_workspace_id']
+                    or payload['member_scope']['slack_channel_id'] != payload['source_channel_id']):
+                raise BuzzBridgeError('Members delivery scope does not match source')
         if mention_pubkeys:
             payload['mention_pubkeys'] = cls._mention_keys(mention_pubkeys)
         timeout = max(1, min(int(getattr(settings, "BUZZ_BRIDGE_ADAPTER_TIMEOUT_SECONDS", 15)), 60))

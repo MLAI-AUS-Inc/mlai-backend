@@ -12,12 +12,37 @@ from integrations.models import BridgeSyncState, CommunityBridgeChannel, Communi
 from .scheduler import LeaseLost
 
 _current_delivery = ContextVar("message_sync_delivery", default=None)
+_legacy_provider_guard = ContextVar("message_sync_legacy_provider_guard", default=None)
+
+
+@contextmanager
+def legacy_provider_fence(callback):
+    if not callable(callback):
+        raise TypeError("invalid_legacy_provider_fence")
+    token = _legacy_provider_guard.set(callback)
+    try:
+        yield
+    finally:
+        _legacy_provider_guard.reset(token)
+
+
+def guard_legacy_provider_request():
+    callback = _legacy_provider_guard.get()
+    if callback is not None:
+        callback()
 
 
 @contextmanager
 def delivery_context(delivery):
-    token = _current_delivery.set((delivery["id"], delivery.get("lease_token"),
-        delivery.get("_sync_state_id"), delivery.get("_previous_state_turn"), delivery.get("_claimed_state_turn")))
+    token = _current_delivery.set(
+        (
+            delivery["id"],
+            delivery.get("lease_token"),
+            delivery.get("_sync_state_id"),
+            delivery.get("_previous_state_turn"),
+            delivery.get("_claimed_state_turn"),
+        )
+    )
     try:
         yield
     finally:
