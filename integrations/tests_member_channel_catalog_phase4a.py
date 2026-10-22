@@ -65,7 +65,7 @@ class MemberCatalogProofTests(SimpleTestCase):
         self.enabled = self.stack.enter_context(patch('integrations.services.slack_member_access.enabled', return_value=True))
         self.scope = self.stack.enter_context(patch('integrations.services.community_bridge.member_channels.member_channel_in_scope', return_value=True))
         self.eligible = self.stack.enter_context(patch.object(catalog, 'public_channels_enabled', return_value=True))
-        self.devices = self.stack.enter_context(patch('integrations.services.slack_dm_mirror._owner_device_pubkeys', return_value=[KEY]))
+        self.devices = self.stack.enter_context(patch('integrations.services.slack_member_devices.member_device_key_allowed', return_value=True))
         self.members = self.stack.enter_context(patch('integrations.services.slack_channel_membership.consenting_members', return_value=[self.grant]))
         self.keys = self.stack.enter_context(patch('integrations.services.community_bridge.member_audiences.current_audience_keys', return_value={KEY}))
         self.hash = self.stack.enter_context(patch('integrations.services.community_bridge.member_audiences.audience_hash', return_value=HASH))
@@ -76,11 +76,11 @@ class MemberCatalogProofTests(SimpleTestCase):
 
     def test_current_exact_grant_owner_device_and_complete_ack_can_open(self):
         self.assertEqual(self.room(), ROOM)
-        self.devices.assert_called_once_with(self.grant.user_id, limit=8)
+        self.devices.assert_called_once_with(self.grant.user_id, KEY)
         self.hash.assert_called_once_with({KEY})
 
-    def test_ninth_verified_device_cannot_use_older_audience_receipt(self):
-        self.devices.return_value = [OTHER]
+    def test_revoked_device_cannot_use_older_audience_receipt(self):
+        self.devices.return_value = False
         self.assertIsNone(self.room())
         self.keys.assert_not_called()
 

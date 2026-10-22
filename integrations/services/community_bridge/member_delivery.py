@@ -16,6 +16,7 @@ from django.db import transaction
 from django.utils import timezone
 
 from community_chat.models import CommunityChatDevice, ChatRole, Moderator
+from integrations.services.slack_member_devices import member_device_key_allowed
 from community_chat.privacy import has_ai_consent
 from integrations.models import (
     BridgeSyncState,
@@ -375,8 +376,7 @@ def _choose(delivery, channel, saved):
                         ),
                     )
                     != "joined"
-                    or public_key
-                    not in dm._owner_device_pubkeys(authority.user_id, limit=8)
+                    or not member_device_key_allowed(authority.user_id, public_key)
                     or not access._poster_identity_current(current, public_key)
                 ):
                     raise MemberDeliveryUnavailable("poster_unavailable")
@@ -449,7 +449,7 @@ def _fence(delivery, original, authority, actor, *, read_reconcile=False):
                     status="verified",
                     revoked_at__isnull=True,
                 ).exists()
-                or key not in dm._owner_device_pubkeys(user.pk, limit=8)
+                or not member_device_key_allowed(user.pk, key)
                 or not any(
                     l.user_id == user.pk
                     and l.slack_workspace_id == authority.workspace_id

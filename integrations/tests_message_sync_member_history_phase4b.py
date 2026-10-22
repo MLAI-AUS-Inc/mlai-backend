@@ -396,7 +396,7 @@ class MemberHistoryTests(Fixture, TransactionTestCase):
         self.run_page()
         self.assertEqual(self.calls[-2][2]['cursor'],'current-page')
 
-    def test_scroll_membership_and_top_eight_key_are_required(self):
+    def test_scroll_current_membership_and_verified_key_are_required(self):
         from integrations.services.slack_owner_inventory_api import InventoryError
         from integrations.services.slack_history_pages import _public_progress
         outsider=self.grant(3)
@@ -417,19 +417,19 @@ class MemberHistoryTests(Fixture, TransactionTestCase):
         self.assertFalse(SlackDmMirrorGrant.objects.filter(user=requester).exists())
         self.assertEqual(self.calls,[])
 
-    def test_ninth_verified_device_cannot_schedule_members_history(self):
+    def test_ninth_verified_device_requires_full_new_audience_before_history(self):
         from integrations.services.slack_owner_inventory_api import InventoryError
         from integrations.services.slack_history_pages import _public_progress
+        key = f"{39:064x}"
         for number in range(8):
-            CommunityChatDevice.objects.create(user=self.a.user,public_key=f'{number+32:064x}',
-                status='verified',verified_at=timezone.now())
-        keys=set(CommunityChatDevice.objects.filter(user=self.a.user).values_list('public_key',flat=True))
-        excluded=keys-set(dm._owner_device_pubkeys(self.a.user_id,limit=8))
-        self.assertEqual(len(excluded),1)
-        self.ack()
+            CommunityChatDevice.objects.create(user=self.a.user, public_key=f"{number + 32:064x}",
+                status="verified", verified_at=timezone.now())
         with self.assertRaises(InventoryError):
-            member.request_history(self.a.user,self.channel,excluded.pop(),'a'*64,_public_progress)
-        self.assertEqual(self.calls,[])
+            member.request_history(self.a.user, self.channel, key, 'a' * 64, _public_progress)
+        self.ack()
+        result = member.request_history(self.a.user, self.channel, key, 'a' * 64, _public_progress)
+        self.assertTrue(result['pending'])
+        self.assertEqual(self.calls, [])
 
     def test_info_explicit_false_records_departure_without_history(self):
         def no_longer_member(authority,conn,method,**kwargs):

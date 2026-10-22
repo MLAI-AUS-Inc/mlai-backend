@@ -85,8 +85,9 @@ The Slack status, owner-inventory and open endpoints accept this header. Missing
 or malformed capability never exposes a Members room ID as a new chat type.
 Existing Community mappings retain their legacy presentation. A Members room
 is ready only when the requester has a current joined grant and the requesting
-key is in the exact `_owner_device_pubkeys(user_id, limit=8)` selection. Any
-ninth verified device must wait for an acknowledged audience containing it.
+key is currently verified and unrevoked for the active account. Members rooms
+include all such devices; the separately limited private-room helper is unchanged.
+Every new device must wait for a full acknowledged audience containing it.
 
 Readiness also requires a public source observation no older than five minutes,
 no hold or pending room/audience synchronization, and an exact adapter
@@ -143,8 +144,13 @@ it is not evidence that dual-source observation has begun.
 
 New rooms start empty and disabled. Existing Community room IDs and their
 applied audience remain immutable. Members audience synchronization derives the
-union of the current top eight verified device keys for each consenting joined
-account, capped at 1,000 keys. Its canonical hash matches the relay protocol.
+union of all current verified, unrevoked device keys for each active consenting
+joined account. There is no per-account device cap. At most 1,001 distinct
+canonical keys are read to prove the complete room-wide 1,000-key boundary.
+Overflow returns no usable set, holds the room as `audience_too_large`, empties
+the remote audience through the normal CAS lane and denies every content/read
+gate. It never truncates a desired audience or hashes overflow as an empty
+valid audience. Its canonical hash matches the relay protocol.
 
 Each execution UUID is committed before its first adapter attempt. The worker
 then locks current Users, grants, connections, devices and memberships before
@@ -220,7 +226,8 @@ SQLite/PostgreSQL jobs in `.github/workflows/deploy.yml` must also run
 `integrations.tests_member_public_receipts_database_phase4a` and
 `integrations.tests_member_callback_authority_concurrency_phase4a`, plus
 `integrations.tests_member_pending_intake_phase4a`, together
-with the existing bridge/privacy/owner-authority suites. The callback
+with `integrations.tests_slack_member_all_devices` and the existing
+bridge/privacy/owner-authority suites. The callback
 concurrency regressions require real PostgreSQL row locks. Model drift checks
 must show no new migration. Record actual run results separately; these labels
 are not a passing-CI claim.
