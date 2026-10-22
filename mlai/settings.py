@@ -513,6 +513,7 @@ REST_FRAMEWORK = {
         'community_chat_slack_read_receipt': os.getenv('COMMUNITY_CHAT_SLACK_READ_RECEIPT_RATE', '60/minute'),
         'community_chat_home': os.getenv('COMMUNITY_CHAT_HOME_RATE', '60/minute'),
         'community_chat_staff_admin': os.getenv('COMMUNITY_CHAT_STAFF_ADMIN_RATE', '30/minute'),
+        'community_chat_staff_admin_access': os.getenv('COMMUNITY_CHAT_STAFF_ADMIN_ACCESS_RATE', '60/minute'),
         'community_chat_mentoring': os.getenv('COMMUNITY_CHAT_MENTORING_RATE', '60/minute'),
         'community_chat_mentoring_write': os.getenv('COMMUNITY_CHAT_MENTORING_WRITE_RATE', '20/minute'),
         'my_startup_bootstrap': os.getenv('MY_STARTUP_BOOTSTRAP_RATE', '120/minute'),

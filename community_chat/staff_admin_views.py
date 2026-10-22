@@ -25,6 +25,8 @@ class StaffAdminView(MentoringBaseView):
 
 
 class StaffAdminAccessView(StaffAdminView):
+    community_chat_throttle_scope = 'community_chat_staff_admin_access'
+
     def get(self, request):
         index = ROLES.index(self.admin_role)
         return Response({'role': self.admin_role, 'label': ROLE_LABELS[index],

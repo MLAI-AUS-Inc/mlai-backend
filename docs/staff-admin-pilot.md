@@ -11,7 +11,8 @@ a successful access response. Disabled returns 404; denied roles return 403.
 An active authenticated account receives the first matching role below. There
 is no permission union. Only active PointsAdmin records linked by user FK count;
 Slack-only appointments grant nothing. Portfolio grants require appointment role
-committee, portfolio_lead or admin; partner and unknown roles grant nothing. Inactive accounts receive no role.
+committee, portfolio_lead or admin; partner and unknown roles grant nothing.
+Inactive accounts receive no role.
 
 | Priority | Panel role and committee title | Existing model condition |
 | --- | --- | --- |
@@ -39,14 +40,18 @@ only, even where future policy says Edit. Mentoring writes require Superadmin,
 Admin or Community; Marketing and Tech can read only. Member search for invites
 requires mentoring edit access. Read-only mentoring responses use explicit
 allowlists with no person emails, private calendar email, space notes or provider
-error text. Editors retain the existing private mentoring contract. The original mentoring
-staff policy remains when this panel flag is false. Its old tab and endpoints
+error text. Editors retain the existing private mentoring contract. The original
+mentoring staff policy remains when this panel flag is false. Its old tab and endpoints
 continue under MENTOR_BOOKING_ENABLED.
 
 ## API
 
 All new routes are GET beneath /api/v1/community-chat/admin/, with existing Chat
-account auth, private no-store responses and a 30/minute scoped throttle.
+account auth and private no-store responses. Data reads share a 30/minute
+account throttle (COMMUNITY_CHAT_STAFF_ADMIN_RATE). Access checks use a separate
+60/minute account throttle (COMMUNITY_CHAT_STAFF_ADMIN_ACCESS_RATE), so list
+search exhaustion cannot hide the panel on access refresh. Member and startup
+searches submit explicitly with Search or Enter instead of sending each edit.
 
 | Route | Response and filters |
 | --- | --- |
@@ -70,9 +75,9 @@ account directory, without relay-only members or live presence. Active means
 is_active. Emails remain masked on detail too; no reveal flow is introduced.
 
 Roo uses PointsAccount, Ledger, PointsRequest, RewardRedemption and catalog
-names. Balances sort by initialized microroo or legacy balance converted to microroo
-before pagination, matching the client display. Microroo takes precedence when initialized; legacy ledger deltas remain
-supported. Requests have Slack identities, so rows identify request numbers.
+names. Balances sort by initialized microroo or legacy balance converted to
+microroo before pagination, matching the client display. Microroo takes
+precedence when initialized; legacy ledger deltas remain supported. Requests have Slack identities, so rows identify request numbers.
 Approvals stay in Slack. No purchases, checkout URLs, acceptance details,
 request reasons, redemption notes or tokens are serialized.
 
@@ -87,8 +92,7 @@ pilot therefore uses a narrower projection.
 
 Overview queries only permitted sections. Mentoring counts, attention entries
 and badges are omitted without querying mentoring when MENTOR_BOOKING_ENABLED
-is false. It counts each problematic mentoring
-session once, pending mentor applications, pending Roo requests, unfulfilled
+is false. It counts each problematic mentoring session once, pending mentor applications, pending Roo requests, unfulfilled
 redemptions and startups lacking a ready update. Other sections are role-filtered
 coming-soon descriptions. Moderation stays at the private admin host; no relay
 /api/admin/v1 route or ingress boundary changes.

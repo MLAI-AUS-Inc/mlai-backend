@@ -172,6 +172,30 @@ class ViewTests(SimpleTestCase):
                         self.assertEqual(handler.call_count, 1 if allowed else 0)
 
 
+    @override_settings(CACHES={'default': {'BACKEND': 'django.core.cache.backends.locmem.LocMemCache', 'LOCATION': 'staff-admin-throttle-regression'}})
+    def test_search_throttling_does_not_exhaust_access_refresh_budget(self):
+        from django.core.cache import cache
+        from community_chat.throttles import CommunityChatScopedThrottle
+        cache.clear()
+        self.addCleanup(cache.clear)
+        def request(cls, account_id=1):
+            actor = user(); actor.pk = account_id
+            req = APIRequestFactory().get('/x/', {'q': 'Ada'})
+            force_authenticate(req, user=actor)
+            return cls.as_view()(req)
+        with patch.object(views, 'viewer_role', return_value='admin'), \
+             patch.object(service, 'members', return_value={'results': []}), \
+             patch.object(CommunityChatScopedThrottle, 'get_rate', return_value='2/minute'):
+            self.assertEqual(request(views.StaffAdminMembersView).status_code, 200)
+            self.assertEqual(request(views.StaffAdminMembersView).status_code, 200)
+            self.assertEqual(request(views.StaffAdminMembersView).status_code, 429)
+            self.assertEqual(request(views.StaffAdminStartupsView).status_code, 429)
+            self.assertEqual(request(views.StaffAdminAccessView).status_code, 200)
+            self.assertEqual(request(views.StaffAdminAccessView).status_code, 200)
+            self.assertEqual(request(views.StaffAdminAccessView).status_code, 429)
+            self.assertEqual(request(views.StaffAdminAccessView, account_id=2).status_code, 200)
+            self.assertEqual(request(views.StaffAdminMembersView, account_id=2).status_code, 200)
+
     def test_readonly_mentoring_roles_cannot_search_members(self):
         for role in ('marketing', 'tech'):
             for method in ('get', 'head', 'options'):
