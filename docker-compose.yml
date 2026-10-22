@@ -50,6 +50,8 @@ services:
       - "127.0.0.1:8001:8000"
     env_file:
       - .env
+    volumes:
+      - ${STUDIO_REPORT_SOURCE_DIR:-./data/studio-report-source}:/app/studio-report-source
     depends_on:
       - db
     restart: unless-stopped
@@ -80,6 +82,8 @@ services:
       - "127.0.0.1:8002:8000"
     env_file:
       - .env
+    volumes:
+      - ${STUDIO_REPORT_SOURCE_DIR:-./data/studio-report-source}:/app/studio-report-source
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; req=urllib.request.Request('http://127.0.0.1:8000/healthz/live', headers={'Connection':'close','X-Forwarded-Proto':'https'}); resp=urllib.request.urlopen(req, timeout=5); body=resp.read(); resp.close(); raise SystemExit(0 if body else 1)"]

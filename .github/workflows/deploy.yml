@@ -100,6 +100,9 @@ jobs:
     - name: Check test-module assignment
       run: python scripts/check_test_assignment.py
 
+    - name: Test private Studio source preparation without database access
+      run: python scripts/test_without_database.py integrations.tests_studio_report_source
+
     - name: Run isolated refactor checks without database access
       run: python scripts/test_without_database.py content_factory.tests_run_sync_authority_unit content_factory.tests_pulse_sync_unit startup_updates.tests_source_throughput_unit content_factory.tests_current_connection_unit tests.test_refactor_unit tests.test_refactor_django_unit tests.test_refactor_migration_inventory roo.test_event_ticket_price
 
