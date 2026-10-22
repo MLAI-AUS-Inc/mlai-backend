@@ -26,7 +26,7 @@ CONTEXT = dict(workspace_id="TMLAI", channel_id="CMEMES", message_id="1790416956
 class BridgeRooActorTests(SimpleTestCase):
     def setUp(self):
         self.link = SimpleNamespace(
-            channel=SimpleNamespace(enabled=True, destination_channel_id="chat-channel"),
+            channel=SimpleNamespace(enabled=True, audience="community", destination_channel_id="chat-channel"),
             source_channel_id="chat-channel", source_message_id="e6" * 32,
             source_author_id="bc" * 32, source_deleted_at=None, destination_deleted_at=None,
             destination_parent_message_id=CONTEXT["thread_ts"], destination_message_id=CONTEXT["message_id"],
@@ -68,6 +68,12 @@ class BridgeRooActorTests(SimpleTestCase):
         self.assert_rejected("unknown_bridge_sender", 404, bridge_user_id="UOTHERBOT")
         self.assert_rejected("unknown_bridge_sender", 404, workspace_id="TOTHER")
         self.manager.select_related.assert_not_called()
+
+    def test_members_source_never_returns_text_or_resolves_roo_identity(self):
+        self.link.channel.audience = "members"
+        self.assert_rejected("bridge_context_revoked")
+        self.resolve.assert_not_called()
+        self.consent.assert_not_called()
 
     def test_missing_committed_delivery_is_retryable(self):
         self.manager.select_related.return_value.filter.return_value.first.return_value = None

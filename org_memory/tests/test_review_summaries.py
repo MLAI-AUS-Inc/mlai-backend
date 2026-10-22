@@ -436,6 +436,32 @@ class ReviewSummaryDigestTests(TestCase):
             {weekly_evidence.pk},
         )
 
+    def test_retained_mixed_members_summary_and_digest_reads_are_denied(self):
+        from integrations.models import CommunityBridgeChannel
+        from integrations.tests_members_source_privacy_phase4c import add_retained_member_evidence
+        from org_memory.review_views import _digest_currently_authorized, _summary_currently_authorized
+        claim, _, _ = self._claim(
+            external_id="members-derived", statement="Project One needs an owner.",
+            kind=MemoryClaimKind.OPEN_LOOP, observed_at=self.day_start + timedelta(hours=2),
+            source_type="slack_thread", subject_entity=self.project,
+        )
+        add_retained_member_evidence(claim)
+        report = self._report()
+        run_post_reconciliation_artifacts(report=report, force_weekly=True)
+        summary = MemorySummary.objects.filter(claim_links__claim=claim).first()
+        digest = MemoryDigest.objects.filter(items__claim=claim).first()
+        self.assertIsNotNone(summary)
+        self.assertIsNotNone(digest)
+        self.assertTrue(_summary_currently_authorized(summary))
+        self.assertTrue(_digest_currently_authorized(digest))
+        CommunityBridgeChannel.objects.create(
+            slack_workspace_id="TPRIMARY", slack_channel_id="CEXCLUDED", audience="members", enabled=False,
+        )
+        self.assertFalse(_summary_currently_authorized(summary))
+        self.assertFalse(_digest_currently_authorized(digest))
+        self.assertTrue(MemorySummary.objects.filter(pk=summary.pk).exists())
+        self.assertTrue(MemoryDigest.objects.filter(pk=digest.pk).exists())
+
     def test_unhealthy_snapshot_blocks_digest_without_source_content(self):
         claim, _evidence, _source = self._claim(
             external_id="restricted-open",

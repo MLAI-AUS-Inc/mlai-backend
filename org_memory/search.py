@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from .slack_privacy import exclude_members_evidence
+
 import re
 from dataclasses import dataclass
 from typing import Iterable, Optional, Sequence
@@ -63,7 +65,7 @@ def eligible_memory_chunks(
     )
     if MemoryClassification.NO_AGENT in allowed:
         allowed = tuple(value for value in allowed if value != MemoryClassification.NO_AGENT)
-    return MemoryChunk.objects.filter(
+    return exclude_members_evidence(MemoryChunk.objects.filter(
         source_version__source__organization=organization,
         active_for_retrieval=True,
         classification__in=allowed,
@@ -73,7 +75,7 @@ def eligible_memory_chunks(
         source_version__source__access_revoked_at__isnull=True,
         source_version__acl_snapshot__is_accessible=True,
         source_version__acl_snapshot__revoked_at__isnull=True,
-    )
+    ), source_path='source_version__source')
 
 
 def refresh_search_vectors(*, chunk_ids: Optional[Iterable] = None) -> int:
@@ -81,7 +83,7 @@ def refresh_search_vectors(*, chunk_ids: Optional[Iterable] = None) -> int:
 
     if connection.vendor != "postgresql":
         return 0
-    chunks = MemoryChunk.objects.all()
+    chunks = exclude_members_evidence(MemoryChunk.objects.all(), source_path='source_version__source')
     if chunk_ids is not None:
         chunks = chunks.filter(pk__in=tuple(chunk_ids))
     return chunks.update(search_vector=SearchVector("text", config="english"))

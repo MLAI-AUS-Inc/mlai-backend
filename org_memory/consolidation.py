@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from .slack_privacy import exclude_members_claims
+
 import json
 from dataclasses import dataclass
 from datetime import timedelta
@@ -1005,7 +1007,7 @@ def eligible_claims_as_of(*, organization, as_of=None, known_at=None, historical
     )
     if known_at:
         query = query.filter(recorded_at__lte=known_at)
-    return query.filter(
+    return exclude_members_claims(query).filter(
         evidence__source__lifecycle_state=MemorySourceLifecycle.ACTIVE,
         evidence__source__access_revoked_at__isnull=True,
         evidence__source_version__acl_snapshot__is_accessible=True,

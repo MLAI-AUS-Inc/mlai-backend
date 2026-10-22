@@ -331,7 +331,7 @@ def rekey_channel(old_id: str, new_id: str) -> bool:
             return False
         if old_id == new_id:
             return True
-        if row.destination_channel_id:
+        if row.destination_channel_id or row.audience == "members":
             row.room_sync_error = "rekey_requires_room_migration"
             row.save(update_fields=["room_sync_error", "updated_at"])
             if _WORKSPACE_ID_RE.fullmatch(row.slack_workspace_id):

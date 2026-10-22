@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from .slack_privacy import action_has_members
+
 from django.conf import settings
 from rest_framework import status
 from rest_framework.response import Response
@@ -20,6 +22,12 @@ from .permissions import HasOrgMemoryCapability, HasOrgMemoryServiceScope
 
 
 def _action_payload(proposal, *, include_content=False, include_events=False):
+    if action_has_members(proposal):
+        return {
+            "id": str(proposal.pk), "action_type": proposal.action_type,
+            "status": proposal.status, "reversal_supported": proposal.reversal_supported,
+            "created_at": proposal.created_at, "updated_at": proposal.updated_at,
+        }
     payload = {
         "id": str(proposal.pk),
         "action_type": proposal.action_type,

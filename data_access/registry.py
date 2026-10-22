@@ -36,6 +36,12 @@ from startup_updates import models as su_models
 from workflow_runs.models import ContentFactoryRun, ContentFactoryRunStep, ContentFactoryRunStepAttempt
 
 from .resolvers import Actor, FieldSpec, ModelResolver, Policy, Resource, ServiceResolver
+from integrations.services.slack_source_privacy import exclude_members_sources
+
+
+class SlackArtifactResolver(ModelResolver):
+    def _scoped_queryset(self, resource, actor, operation):
+        return exclude_members_sources(super()._scoped_queryset(resource, actor, operation))
 
 
 SENSITIVE_FIELD_MARKERS = (
@@ -99,7 +105,9 @@ def model_resource(
     return Resource(
         key=key,
         description=description,
-        resolver=ModelResolver(model, default_order_by=default_order_by),
+        resolver=(SlackArtifactResolver if model in (
+            su_models.SlackChannelSelection, su_models.SlackMessageArtifact, su_models.SlackThreadArtifact,
+        ) else ModelResolver)(model, default_order_by=default_order_by),
         fields=fields,
         policies=policies,
         default_limit=default_limit,

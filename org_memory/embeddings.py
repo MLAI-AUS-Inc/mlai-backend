@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from .slack_privacy import exclude_members_evidence
+
 import hashlib
 import json
 import math
@@ -109,7 +111,7 @@ def vector_digest(vector: Sequence[float]) -> str:
 
 
 def _eligible_chunk_queryset():
-    return MemoryChunk.objects.filter(
+    return exclude_members_evidence(MemoryChunk.objects.filter(
         active_for_retrieval=True,
         classification__in=[
             value
@@ -122,7 +124,7 @@ def _eligible_chunk_queryset():
         source_version__source__access_revoked_at__isnull=True,
         source_version__acl_snapshot__is_accessible=True,
         source_version__acl_snapshot__revoked_at__isnull=True,
-    )
+    ), source_path='source_version__source')
 
 
 @transaction.atomic
@@ -169,7 +171,7 @@ def store_chunk_embedding(
             ).exclude(pk=existing.pk).update(is_current=False)
             existing.is_current = True
             existing.save(update_fields=("is_current", "updated_at"))
-        MemoryChunk.objects.filter(pk=locked_chunk.pk).update(
+        exclude_members_evidence(MemoryChunk.objects.filter(pk=locked_chunk.pk), source_path='source_version__source').update(
             embedding_model=target.model,
             embedding_version=target.version,
         )
@@ -191,7 +193,7 @@ def store_chunk_embedding(
     )
     embedding.full_clean()
     embedding.save()
-    MemoryChunk.objects.filter(pk=locked_chunk.pk).update(
+    exclude_members_evidence(MemoryChunk.objects.filter(pk=locked_chunk.pk), source_path='source_version__source').update(
         embedding_model=target.model,
         embedding_version=target.version,
     )
