@@ -71,7 +71,19 @@ from .usage_views import (
 )
 
 
+from .staff_admin_views import (
+    StaffAdminAccessView, StaffAdminOverviewView, StaffAdminMembersView,
+    StaffAdminMemberView, StaffAdminRooView, StaffAdminStartupsView, StaffAdminRolesView,
+)
+
 urlpatterns = [
+    path('admin/access/', StaffAdminAccessView.as_view()),
+    path('admin/overview/', StaffAdminOverviewView.as_view()),
+    path('admin/members/', StaffAdminMembersView.as_view()),
+    path('admin/members/<int:member_id>/', StaffAdminMemberView.as_view()),
+    path('admin/roo/', StaffAdminRooView.as_view()),
+    path('admin/startups/', StaffAdminStartupsView.as_view()),
+    path('admin/roles/', StaffAdminRolesView.as_view()),
     path("federation/", include("community_chat.federation_urls")),
     path("usage/insights/", TokenInsightsView.as_view(), name="community_chat_token_insights"),
     path("account-bans/", AccountBanView.as_view(), name="community_chat_account_bans"),

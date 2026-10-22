@@ -512,6 +512,7 @@ REST_FRAMEWORK = {
         'community_chat_slack_open': os.getenv('COMMUNITY_CHAT_SLACK_OPEN_RATE', '60/minute'),
         'community_chat_slack_read_receipt': os.getenv('COMMUNITY_CHAT_SLACK_READ_RECEIPT_RATE', '60/minute'),
         'community_chat_home': os.getenv('COMMUNITY_CHAT_HOME_RATE', '60/minute'),
+        'community_chat_staff_admin': os.getenv('COMMUNITY_CHAT_STAFF_ADMIN_RATE', '30/minute'),
         'community_chat_mentoring': os.getenv('COMMUNITY_CHAT_MENTORING_RATE', '60/minute'),
         'community_chat_mentoring_write': os.getenv('COMMUNITY_CHAT_MENTORING_WRITE_RATE', '20/minute'),
         'my_startup_bootstrap': os.getenv('MY_STARTUP_BOOTSTRAP_RATE', '120/minute'),
@@ -679,6 +680,7 @@ MEETING_ROOM_BOOKING_ENABLED = _env_is_true(
     False,
 )
 # Vibe Mentoring pilot. Off by default; see docs/mentoring.md.
+STAFF_ADMIN_PANEL_ENABLED = _env_is_true('STAFF_ADMIN_PANEL_ENABLED', False)
 MENTOR_BOOKING_ENABLED = _env_is_true('MENTOR_BOOKING_ENABLED', False)
 MENTOR_REQUEST_TTL_HOURS = int(os.getenv('MENTOR_REQUEST_TTL_HOURS', '48'))
 MENTOR_AUTO_COMPLETE_HOURS = int(os.getenv('MENTOR_AUTO_COMPLETE_HOURS', '24'))

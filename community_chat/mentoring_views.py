@@ -166,6 +166,10 @@ class MentorSessionMeetingRetryView(MentorSessionActionView):
 def is_mentoring_admin(request):
     """Staff by the rules the backend already uses: a Chat owner or admin on this
     verified device, or an active Django staff or superuser account."""
+    if getattr(settings, 'STAFF_ADMIN_PANEL_ENABLED', False):
+        from .staff_admin_permissions import viewer_role, sections_for
+        level = sections_for(viewer_role(request)).get('mentoring')
+        return level == 'edit' or (level == 'view' and request.method in ('GET', 'HEAD', 'OPTIONS'))
     user = request.user
     if not getattr(user, 'is_authenticated', False) or not getattr(user, 'is_active', False):
         return False

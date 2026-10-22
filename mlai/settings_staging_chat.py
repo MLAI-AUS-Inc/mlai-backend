@@ -54,6 +54,7 @@ EMAIL_BACKEND='django.core.mail.backends.locmem.EmailBackend'
 MEETING_ROOM_BOOKING_ENABLED=True
 # Synthetic mentoring uses the isolated staging database and normal account roles.
 MENTOR_BOOKING_ENABLED=True
+STAFF_ADMIN_PANEL_ENABLED=True
 MENTORING_GOOGLE_ENABLED=False
 MENTORING_GOOGLE_CLIENT_ID=''
 MENTORING_GOOGLE_CLIENT_SECRET=''
