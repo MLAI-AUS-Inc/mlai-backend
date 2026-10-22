@@ -5,6 +5,7 @@ from django.conf import settings
 from django.contrib.auth import get_user_model
 from django.core.paginator import Paginator
 from django.db.models import BigIntegerField, Case, Count, Exists, F, OuterRef, Q, Subquery, When
+from django.db.models.functions import Cast
 from django.utils import timezone
 
 from integrations.models import ExternalServiceConnection
@@ -118,7 +119,7 @@ def roo(params):
         query = PointsAccount.objects.select_related('user').annotate(
             _effective_balance_microroo=Case(
                 When(microroo_initialized=True, then=F('balance_microroo')),
-                default=F('balance') * 1_000_000, output_field=BigIntegerField(),
+                default=Cast('balance', BigIntegerField()) * 1_000_000, output_field=BigIntegerField(),
             ),
         ).order_by('-_effective_balance_microroo', 'pk')
         serialize = lambda row: {'user': person(row.user), 'balance': row.balance,

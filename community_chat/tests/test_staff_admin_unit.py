@@ -368,6 +368,7 @@ class ProjectionTests(TestCase):
         self.assertEqual(query.query.order_by, ('-_effective_balance_microroo', 'pk'))
         sql, params = query.query.get_compiler(connection=connection).as_sql()
         self.assertIn('CASE WHEN', sql)
+        self.assertIn(' AS bigint)', sql)
         self.assertIn('microroo_initialized', sql)
         self.assertIn('balance_microroo', sql)
         self.assertIn(1_000_000, params)
@@ -375,13 +376,17 @@ class ProjectionTests(TestCase):
         # records, without executing SQL or connecting to a database.
         from django.db.models import Case, Value
         from django.db.models.expressions import Col, CombinedExpression
+        from django.db.models.functions import Cast
         expression = query.query.annotations['_effective_balance_microroo']
+        self.assertIsInstance(expression.default.lhs, Cast)
         condition = expression.cases[0].condition.children[0]
         self.assertEqual(condition.lhs.target.name, 'microroo_initialized')
         self.assertIs(condition.rhs, True)
         def evaluate(node, row):
             if isinstance(node, Case):
                 return evaluate(node.cases[0].result if row.microroo_initialized else node.default, row)
+            if isinstance(node, Cast):
+                return evaluate(node.get_source_expressions()[0], row)
             if isinstance(node, Col):
                 return getattr(row, node.target.name)
             if isinstance(node, Value):
@@ -389,7 +394,7 @@ class ProjectionTests(TestCase):
             self.assertIsInstance(node, CombinedExpression)
             self.assertEqual(node.connector, '*')
             return evaluate(node.lhs, row) * evaluate(node.rhs, row)
-        rows = [PointsAccount(pk=1, balance=500, balance_microroo=0, microroo_initialized=False),
+        rows = [PointsAccount(pk=1, balance=5000, balance_microroo=0, microroo_initialized=False),
                 PointsAccount(pk=2, balance=999, balance_microroo=2_500_000, microroo_initialized=True),
                 PointsAccount(pk=3, balance=0, balance_microroo=3_000_000, microroo_initialized=True),
                 PointsAccount(pk=4, balance=-1, balance_microroo=0, microroo_initialized=False)]
