@@ -93,7 +93,8 @@ class MemberEventRouterTests(SimpleTestCase):
         self.join.reset_mock()
         self.assertEqual(router.route_member_public_event(payload(event))['status'], 'member_audience_pending')
         self.join.assert_not_called()
-        self.refresh.assert_called_with(WORKSPACE, CHANNEL, reason='public_source_unverified')
+        hint = router.channels.info_reader_hint(self.refresh.call_args.kwargs['reason'])
+        self.assertEqual((hint.grant_id, hint.observed_at), (3, router._observed_at(payload(event), event)))
 
     def test_legacy_mapping_hint_only_proves_ordinary_public_create(self):
         self.query.return_value.first.return_value = public_row(slack_seen_at=None, audience='community')
@@ -119,7 +120,12 @@ class MemberEventRouterTests(SimpleTestCase):
             for event in events:
                 with self.subTest(observed=observed, event=event):
                     self.assertEqual(router.route_member_public_event(payload(event))['status'], 'member_audience_pending')
-                    self.refresh.assert_called_with(WORKSPACE, CHANNEL, reason='public_source_unverified')
+                    hint = router.channels.info_reader_hint(self.refresh.call_args.kwargs['reason'])
+                    if event['type'] == 'member_joined_channel' or router._ordinary_create(event):
+                        self.assertEqual(hint.grant_id, 3)
+                    else:
+                        self.assertIsNone(hint)
+                        self.assertEqual(self.refresh.call_args.kwargs['reason'], 'public_source_unverified')
         self.ingest.assert_not_called()
         self.join.assert_not_called()
 
@@ -225,9 +231,50 @@ class MemberEventRouterTests(SimpleTestCase):
     def test_unknown_and_unverified_sources_refresh_without_join_or_content(self):
         self.query.return_value.first.return_value = None
         self.assertIsNone(router.route_member_public_event(payload({'type': 'message', 'channel': CHANNEL, 'channel_type': 'channel', 'user': 'UACTOR'})))
-        self.refresh.assert_called_once_with(WORKSPACE, CHANNEL, reason='public_source_unverified')
+        self.refresh.assert_called_once()
+        self.assertEqual(router.channels.info_reader_hint(self.refresh.call_args.kwargs['reason']).grant_id, 3)
         self.join.assert_not_called()
         self.ingest.assert_not_called()
+
+    def test_unknown_probe_hint_uses_only_ordinary_nonbot_actor_or_join_subject(self):
+        self.query.return_value.first.return_value = None
+        events = [
+            ({'type': 'message', 'user': 'UACTOR'}, True),
+            ({'type': 'message', 'user': 'UACTOR', 'subtype': 'thread_broadcast'}, True),
+            ({'type': 'member_joined_channel', 'user': 'USUBJECT'}, True),
+            ({'type': 'message', 'user': 'UACTOR', 'bot_id': 'BBOT'}, False),
+            ({'type': 'message', 'user': 'UACTOR', 'bot_profile': {'id': 'BBOT'}}, False),
+            ({'type': 'message', 'subtype': 'message_changed', 'user': 'UOUTER'}, False),
+            ({'type': 'message', 'subtype': 'message_deleted', 'user': 'UOUTER'}, False),
+            ({'type': 'reaction_added', 'user': 'UREACTOR', 'item_user': 'UITEM',
+              'item': {'channel': CHANNEL, 'type': 'message'}}, False),
+        ]
+        for event, expected in events:
+            event = {'channel': CHANNEL, **event}
+            self.refresh.reset_mock()
+            self.grants.reset_mock()
+            with self.subTest(event=event):
+                router.route_member_public_event(payload(event, authorizations=[{'user_id': 'URECIPIENT'}]))
+                hint = router.channels.info_reader_hint(self.refresh.call_args.kwargs['reason'])
+                self.assertEqual(hint is not None, expected)
+                if expected:
+                    self.grants.assert_called_once_with(WORKSPACE, event['user'])
+                    self.assertEqual(hint.grant_id, 3)
+                else:
+                    self.grants.assert_not_called()
+        self.join.assert_not_called()
+        self.ingest.assert_not_called()
+
+    def test_unknown_probe_hint_requires_usable_subject_and_observation(self):
+        self.query.return_value.first.return_value = None
+        for changes in ({'event_ts': True}, {'event_ts': 'NaN'}, {'event_ts': '-1'}):
+            self.grants.reset_mock()
+            router.route_member_public_event(payload({'type': 'message', 'channel': CHANNEL, 'user': 'UACTOR', **changes}))
+            self.assertEqual(self.refresh.call_args.kwargs['reason'], 'public_source_unverified')
+            self.grants.assert_not_called()
+        self.grants.return_value = []
+        router.route_member_public_event(payload({'type': 'message', 'channel': CHANNEL, 'user': 'UNLINKED'}))
+        self.assertEqual(self.refresh.call_args.kwargs['reason'], 'public_source_unverified')
 
     def test_flag_and_scope_gate_only_new_content(self):
         for flag, scope in [(False, True), (True, False)]:

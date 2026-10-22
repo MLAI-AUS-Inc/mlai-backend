@@ -163,7 +163,39 @@ def member_client(grant) -> MemberSlackClient:
     return MemberSlackClient(grant)
 
 
-def reader_for_channel(workspace_id, channel_id, *, purpose="history", exclude_grant_ids=()):
+def _current_info_hint(grant, hint):
+    """A callback hint may schedule INFO only within the current consent epoch."""
+    from .community_bridge.member_channels import InfoReaderHint, info_reader_hint_reason
+    from .slack_member_membership_epoch import membership_floor
+
+    if (not isinstance(hint, InfoReaderHint) or grant.pk != hint.grant_id
+            or info_reader_hint_reason(hint.grant_id, hint.observed_at) is None):
+        return False
+    floor = membership_floor(grant)
+    return bool(floor is not None and floor <= hint.observed_at <= timezone.now() + timedelta(minutes=5))
+
+
+def hinted_info_reader(workspace_id, channel_id, hint):
+    """Resolve one untrusted INFO preference before any lower-order room lock."""
+    from .community_bridge.member_channels import InfoReaderHint, member_channel_in_scope
+
+    if not isinstance(hint, InfoReaderHint) or not enabled() or not member_channel_in_scope(workspace_id, channel_id):
+        return None
+    grant = SlackDmMirrorGrant.objects.filter(
+        pk=hint.grant_id, slack_workspace_id=workspace_id, status="active", revoked_at__isnull=True,
+        user__is_active=True,
+    ).select_related("user", "connection").first()
+    if grant is None or not _current_info_hint(grant, hint) or not public_channels_enabled(grant):
+        return None
+    return grant
+
+
+def info_reader_deferred(grant, channel_id):
+    """Inspect temporary INFO scheduling state before taking a room lock."""
+    return bool(cache.get(_key(grant, channel_id, "info")))
+
+
+def reader_for_channel(workspace_id, channel_id, *, purpose="history", exclude_grant_ids=(), info_reader_hint=None):
     """Select a reader; only public info may fall back to an unjoined grant.
 
     member_client records provider failures using its pre-request authority.
@@ -192,6 +224,9 @@ def reader_for_channel(workspace_id, channel_id, *, purpose="history", exclude_g
     ).values_list("reader_grant_id", flat=True).first()
     preferred = ([pointer] if pointer in joined else []) + [row.grant_id for row in memberships]
     if purpose == "info":
+        hinted = by_id.get(getattr(info_reader_hint, "grant_id", None))
+        if hinted is not None and _current_info_hint(hinted, info_reader_hint):
+            preferred.append(hinted.pk)
         preferred += sorted(by_id)
     seen = set()
     for grant_id in preferred:

@@ -11,8 +11,11 @@ from django.utils import timezone
 from community_chat.admin_authority import MemberAudienceAuthorityAdminMixin
 from integrations.models import CommunityBridgeChannel, CommunityBridgeChannelRefresh, SlackChannelMembership
 from integrations.services import slack_dm_mirror as dm
+from integrations.services import slack_member_access as access
 from integrations.services.community_bridge import member_channels as channels
+from integrations.services.community_bridge import member_channel_events as router
 from integrations.services.community_bridge.buzz import BuzzBridgeError
+from integrations.services.message_sync.scheduler import BudgetDeferred
 from integrations.tests_slack_member_access import MemberAccessFixture
 
 
@@ -30,11 +33,137 @@ class MemberChannelMaintenanceTests(MemberAccessFixture, TestCase):
 
     def refresh(self, channel_id="CROOM"):
         channels.queue_refresh("TTEST", channel_id, reason="test")
+        return self.process_queued()
+
+    def process_queued(self):
         with patch.object(channels, "sync_room", return_value="synced") as room, patch(
             "integrations.services.community_bridge.member_audiences.sync_audience", return_value="applied",
         ) as audience:
             result = channels.process_refreshes_once()
         return result, room, audience
+
+    def queue_actor(self, channel_id, *, event_type="message", grant=None):
+        grant = grant or self.other
+        observed = timezone.now()
+        with override_settings(MESSAGE_SYNC_SLACK_USER_APP_ID="AUSER"):
+            result = router.route_member_public_event({
+                "type": "event_callback", "api_app_id": "AUSER", "team_id": "TTEST",
+                "event_time": int(observed.timestamp()), "event": {
+                    "type": event_type, "channel": channel_id, "user": grant.slack_user_id,
+                    "event_ts": f"{int(observed.timestamp())}.{observed.microsecond:06d}",
+                },
+            })
+        self.assertIsNone(result)
+        return CommunityBridgeChannelRefresh.objects.get(slack_channel_id=channel_id)
+
+    def test_unknown_live_actor_converges_without_unrelated_reader_or_inventory(self):
+        self.assertLess(self.grant.pk, self.other.pk)
+        for kind, channel_id in (("message", "CMESSAGE"), ("member_joined_channel", "CJOIN")):
+            with self.subTest(kind=kind):
+                queued = self.queue_actor(channel_id, event_type=kind)
+                self.assertEqual(channels.info_reader_hint(queued.reason).grant_id, self.other.pk)
+                self.assertFalse(SlackChannelMembership.objects.filter(slack_channel_id=channel_id).exists())
+                self.provider.reset_mock()
+                self.provider.side_effect = lambda authority, method, **kwargs: self.info(
+                    member=authority.grant_id == self.other.pk, id=channel_id,
+                )
+                completed, room, audience = self.refresh(channel_id)
+                self.assertEqual(completed, 1)
+                self.assertEqual([call.args[0].grant_id for call in self.provider.call_args_list], [self.other.pk])
+                row = CommunityBridgeChannel.objects.get(slack_channel_id=channel_id)
+                self.assertEqual((row.reader_grant_id, row.enabled, row.destination_channel_id),
+                                 (self.other.pk, False, ""))
+                self.assertTrue(row.audience_sync_pending)
+                self.assertEqual(SlackChannelMembership.objects.get(slack_channel_id=channel_id).grant_id, self.other.pk)
+                self.assertFalse(CommunityBridgeChannelRefresh.objects.filter(slack_channel_id=channel_id).exists())
+                room.assert_called_once_with(row.pk)
+                audience.assert_called_once_with(row.pk)
+
+    def test_known_reader_keeps_priority_but_cannot_consume_untried_actor_hint(self):
+        for a_member, channel_id in ((False, "CSTALE"), (True, "CKNOWN")):
+            with self.subTest(a_member=a_member):
+                self.join(self.grant, slack_channel_id=channel_id)
+                self.queue_actor(channel_id)
+                self.provider.reset_mock()
+                self.provider.side_effect = lambda authority, method, **kwargs: self.info(
+                    member=a_member if authority.grant_id == self.grant.pk else True, id=channel_id,
+                )
+                completed, _, _ = self.process_queued()
+                self.assertEqual(completed, 1)
+                self.assertEqual([call.args[0].grant_id for call in self.provider.call_args_list],
+                                 [self.grant.pk, self.other.pk])
+                self.assertEqual(SlackChannelMembership.objects.get(grant=self.grant, slack_channel_id=channel_id).state,
+                                 "joined" if a_member else "left")
+                self.assertEqual(SlackChannelMembership.objects.get(grant=self.other, slack_channel_id=channel_id).state, "joined")
+                self.assertFalse(CommunityBridgeChannelRefresh.objects.filter(slack_channel_id=channel_id).exists())
+
+    def test_cooling_actor_hint_is_durable_and_does_not_probe_arbitrary_reader(self):
+        queued = self.queue_actor("CCOOLING")
+        with patch.object(access, "info_reader_deferred", return_value=True):
+            completed, room, audience = self.process_queued()
+        self.assertEqual(completed, 0)
+        queued.refresh_from_db()
+        self.assertEqual((queued.reason, queued.attempts, queued.last_error_code),
+                         (channels.info_reader_hint_reason(self.other.pk, channels.info_reader_hint(queued.reason).observed_at),
+                          0, "info_reader_deferred"))
+        self.provider.assert_not_called()
+        room.assert_not_called()
+        audience.assert_not_called()
+
+    def test_budget_or_transient_failure_retains_exact_hint_without_abandonment(self):
+        for error, channel_id in ((BudgetDeferred(90), "CBUDGET"),
+                                  (dm.SlackApiError("synthetic", {"error": "request_timeout"}), "CTRANSIENT")):
+            with self.subTest(error=type(error).__name__):
+                queued = self.queue_actor(channel_id)
+                original = queued.reason
+                queued.attempts = channels.REFRESH_MAX_ATTEMPTS - 1
+                queued.save(update_fields=("attempts",))
+                self.provider.side_effect = error
+                self.assertEqual(self.process_queued()[0], 0)
+                queued.refresh_from_db()
+                self.assertEqual((queued.reason, queued.attempts), (original, channels.REFRESH_MAX_ATTEMPTS - 1))
+                self.assertGreater(queued.available_at, timezone.now())
+                self.assertFalse(SlackChannelMembership.objects.filter(slack_channel_id=channel_id).exists())
+
+    def test_paused_stale_or_malformed_hint_falls_back_without_inventing_membership(self):
+        for mode, channel_id in (("paused", "CPAUSED"), ("stale", "COLDEPOCH"), ("malformed", "CMALFORMED")):
+            with self.subTest(mode=mode):
+                reason = channels.info_reader_hint_reason(self.other.pk, timezone.now())
+                if mode == "paused":
+                    self.other.status = "paused"
+                    self.other.save(update_fields=("status",))
+                elif mode == "stale":
+                    reason = channels.info_reader_hint_reason(self.other.pk, self.other.consented_at - timedelta(microseconds=1))
+                else:
+                    reason = "i:01:1"
+                channels.queue_refresh("TTEST", channel_id, reason=reason)
+                self.provider.reset_mock()
+                self.provider.side_effect = None
+                self.provider.return_value = self.info(member=False, id=channel_id)
+                self.assertEqual(self.process_queued()[0], 0)
+                self.assertEqual([call.args[0].grant_id for call in self.provider.call_args_list], [self.grant.pk])
+                self.assertFalse(CommunityBridgeChannel.objects.filter(slack_channel_id=channel_id).exists())
+                self.assertFalse(SlackChannelMembership.objects.filter(grant=self.other, slack_channel_id=channel_id).exists())
+                self.other.status = "active"
+                self.other.save(update_fields=("status",))
+
+    def test_hinted_private_or_shared_info_never_creates_public_room(self):
+        for changes, channel_id in (({"is_private": True}, "CPRIVATE"), ({"is_shared": True}, "CSHARED")):
+            with self.subTest(changes=changes):
+                self.queue_actor(channel_id)
+                self.provider.side_effect = None
+                self.provider.return_value = self.info(id=channel_id, **changes)
+                self.assertEqual(self.process_queued()[0], 1)
+                self.assertFalse(CommunityBridgeChannel.objects.filter(slack_channel_id=channel_id).exists())
+                self.assertFalse(SlackChannelMembership.objects.filter(slack_channel_id=channel_id).exists())
+
+    def test_hint_does_not_bypass_disabled_flag_or_canary_scope(self):
+        queued = self.queue_actor("CHINTSCOPE")
+        for settings in ({"SLACK_MEMBER_CHANNELS_ENABLED": False}, {"SLACK_MEMBER_CHANNEL_ALLOWED_IDS": "COTHER"}):
+            with override_settings(**settings):
+                self.assertEqual(self.process_queued()[0], 0)
+        self.provider.assert_not_called()
+        self.assertFalse(SlackChannelMembership.objects.filter(slack_channel_id="CHINTSCOPE").exists())
 
     def test_refresh_uses_only_fenced_user_info_and_records_proven_membership(self):
         completed, room, audience = self.refresh()

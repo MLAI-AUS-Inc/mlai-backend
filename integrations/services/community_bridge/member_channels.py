@@ -37,6 +37,55 @@ REFRESH_MAX_ATTEMPTS = 8
 _CHANNEL_ID_RE = re.compile(r"^C[A-Z0-9]{2,23}$")
 _WORKSPACE_ID_RE = re.compile(r"^T[A-Z0-9]{2,23}$")
 _AUDIENCES = frozenset(CommunityBridgeChannelAudience.values)
+_INFO_HINT = re.compile(r"i:([1-9a-f][0-9a-f]{0,15}):([1-9a-f][0-9a-f]{0,14})")
+_EPOCH = datetime(1970, 1, 1, tzinfo=dt_timezone.utc)
+
+
+@dataclass(frozen=True)
+class InfoReaderHint:
+    """A scheduling preference, never public privacy or membership evidence."""
+
+    grant_id: int
+    observed_at: datetime
+
+
+def info_reader_hint_reason(grant_id, observed_at):
+    """Encode a bounded server grant identity without storing a Slack subject."""
+    if (type(grant_id) is not int or not 0 < grant_id <= 2**63 - 1
+            or not isinstance(observed_at, datetime) or timezone.is_naive(observed_at)
+            or not _EPOCH < observed_at <= timezone.now() + timedelta(minutes=5)):
+        return None
+    delta = observed_at.astimezone(dt_timezone.utc) - _EPOCH
+    micros = (delta.days * 86400 + delta.seconds) * 1_000_000 + delta.microseconds
+    return f"i:{grant_id:x}:{micros:x}"
+
+
+def info_reader_hint(reason):
+    """Strictly parse the existing queue field; malformed hints confer nothing."""
+    if not isinstance(reason, str) or len(reason) > 40:
+        return None
+    match = _INFO_HINT.fullmatch(reason)
+    if match is None:
+        return None
+    grant_id, micros = (int(value, 16) for value in match.groups())
+    try:
+        observed_at = _EPOCH + timedelta(microseconds=micros)
+    except OverflowError:
+        return None
+    if info_reader_hint_reason(grant_id, observed_at) != reason:
+        return None
+    return InfoReaderHint(grant_id, observed_at)
+
+
+def _refresh_reason(previous, incoming):
+    """Coalesce scalar hints under the queue lock, without authority lookups."""
+    old, new = info_reader_hint(previous), info_reader_hint(incoming)
+    if old is not None and (new is None or old.observed_at >= new.observed_at):
+        return previous
+    # Never truncate an invalid encoded value into a different valid grant.
+    if new is None and isinstance(incoming, str) and incoming.startswith("i:"):
+        return "public_source_unverified"
+    return incoming[:40]
 
 
 def valid_slack_channel_identity(workspace_id: str, channel_id: str) -> bool:
@@ -256,16 +305,18 @@ def queue_refresh(workspace_id: str, channel_id: str, *, reason: str, delay_seco
     """Coalesce one channel refresh without starting a Slack reader."""
     if not valid_slack_channel_identity(workspace_id, channel_id):
         raise ValueError("invalid_slack_channel_identity")
-    CommunityBridgeChannelRefresh.objects.update_or_create(
-        slack_channel_id=channel_id,
-        defaults={
-            "slack_workspace_id": workspace_id,
-            "reason": reason[:40],
-            "available_at": timezone.now() + timedelta(seconds=delay_seconds),
-            "attempts": 0,
-            "last_error_code": "",
-        },
-    )
+    with transaction.atomic():
+        row, _ = CommunityBridgeChannelRefresh.objects.select_for_update().get_or_create(
+            slack_channel_id=channel_id,
+            defaults={"slack_workspace_id": workspace_id, "reason": "",
+                      "available_at": timezone.now()},
+        )
+        row.slack_workspace_id = workspace_id
+        row.reason = _refresh_reason(row.reason, reason)
+        row.available_at = timezone.now() + timedelta(seconds=delay_seconds)
+        row.attempts = 0
+        row.last_error_code = ""
+        row.save()
 
 
 def rekey_channel(old_id: str, new_id: str) -> bool:
@@ -579,6 +630,7 @@ def process_refreshes_once(limit: int = REFRESH_BATCH) -> int:
     from integrations.services.slack_channel_membership import consenting_members, mark_joined, mark_left
     from integrations.services.slack_chat_catalog import PUBLIC_CHANNEL_SCOPES, public_channels_enabled
     from .member_audiences import sync_audience
+    from integrations.services.message_sync.scheduler import BudgetDeferred
 
     if not access.enabled():
         return 0
@@ -606,96 +658,120 @@ def process_refreshes_once(limit: int = REFRESH_BATCH) -> int:
         ).exists():
             complete_refresh(refresh)
             continue
-        reader = access.reader_for_channel(workspace_id, channel_id, purpose="info")
+        hint = info_reader_hint(refresh.reason)
+        # Resolve all selection/cache authority before taking any Channel lock.
+        hinted_reader = access.hinted_info_reader(workspace_id, channel_id, hint)
+        if hinted_reader is not None and access.info_reader_deferred(hinted_reader, channel_id):
+            _retry_refresh(refresh, seconds=60, code="info_reader_deferred", count_attempt=False)
+            continue
+        reader = access.reader_for_channel(workspace_id, channel_id, purpose="info", info_reader_hint=hint)
         if reader is None:
             _retry_refresh(refresh, seconds=60, code="no_reader", count_attempt=False)
             continue
-        authority = None
-        started_at = timezone.now()
-        try:
-            authority = dm._capture_slack_grant_api_authority(reader)
-            # Unlike a content call, an info inspection must retain a private
-            # or Connect response long enough to close its known old mapping.
-            with transaction.atomic():
-                current, connection = dm._lock_slack_grant_api_authority(
-                    authority, required_scopes=PUBLIC_CHANNEL_SCOPES,
-                )
-                current.connection = connection
-                if not public_channels_enabled(current, authority=authority):
-                    raise access.MemberAccessDenied("Current Slack consent is required.")
-                response = dm._call_slack_with_grant_authority(
-                    authority, "conversations_info", required_scopes={"channels:read"}, channel=channel_id,
-                )
-            raw = response.get("channel")
-            if not isinstance(raw, dict) or raw.get("id") != channel_id:
-                raise ValueError("invalid_channel_info")
-            if not access._public_channel_response(response, channel_id):
-                private = any(raw.get(key) is True for key in ("is_private", "is_group", "is_im", "is_mpim"))
-                shared = any(raw.get(key) for key in (
-                    "is_shared", "is_ext_shared", "is_org_shared", "is_pending_ext_shared", "pending_shared",
-                ))
-                if private or shared:
-                    with transaction.atomic():
-                        dm._lock_slack_grant_api_authority(authority, required_scopes=PUBLIC_CHANNEL_SCOPES)
-                        mark_source_reduction(workspace_id, channel_id,
-                                              reason="converted_to_private" if private else "slack_connect",
-                                              event_observed_at=started_at)
-                    known = CommunityBridgeChannel.objects.filter(slack_workspace_id=workspace_id,
-                                                                  slack_channel_id=channel_id).first()
-                    if known is not None:
-                        sync_audience(known.pk, reduction_only=True)
-                        sync_room(known.pk)
+        readers = [reader]
+        if hinted_reader is not None and hinted_reader.pk != reader.pk:
+            readers.append(hinted_reader)
+        # Preserve known-reader priority, then prove the actor's own membership.
+        # At most two bounded INFO probes; no selector or token refresh runs
+        # while the prior reader's User/Channel transaction is held.
+        for index, reader in enumerate(readers):
+            final_reader = index == len(readers) - 1
+            authority = None
+            started_at = timezone.now()
+            try:
+                authority = dm._capture_slack_grant_api_authority(reader)
+                # Unlike a content call, an info inspection must retain a private
+                # or Connect response long enough to close its known old mapping.
+                with transaction.atomic():
+                    current, connection = dm._lock_slack_grant_api_authority(
+                        authority, required_scopes=PUBLIC_CHANNEL_SCOPES,
+                    )
+                    current.connection = connection
+                    if not public_channels_enabled(current, authority=authority):
+                        raise access.MemberAccessDenied("Current Slack consent is required.")
+                    response = dm._call_slack_with_grant_authority(
+                        authority, "conversations_info", required_scopes={"channels:read"}, channel=channel_id,
+                    )
+                raw = response.get("channel")
+                if not isinstance(raw, dict) or raw.get("id") != channel_id:
+                    raise ValueError("invalid_channel_info")
+                if not access._public_channel_response(response, channel_id):
+                    private = any(raw.get(key) is True for key in ("is_private", "is_group", "is_im", "is_mpim"))
+                    shared = any(raw.get(key) for key in (
+                        "is_shared", "is_ext_shared", "is_org_shared", "is_pending_ext_shared", "pending_shared",
+                    ))
+                    if private or shared:
+                        with transaction.atomic():
+                            dm._lock_slack_grant_api_authority(authority, required_scopes=PUBLIC_CHANNEL_SCOPES)
+                            mark_source_reduction(workspace_id, channel_id,
+                                                  reason="converted_to_private" if private else "slack_connect",
+                                                  event_observed_at=started_at)
+                        known = CommunityBridgeChannel.objects.filter(slack_workspace_id=workspace_id,
+                                                                      slack_channel_id=channel_id).first()
+                        if known is not None:
+                            sync_audience(known.pk, reduction_only=True)
+                            sync_room(known.pk)
+                        complete_refresh(refresh)
+                        completed += 1
+                        break
+                    raise ValueError("unproven_public_channel")
+                state = SlackChannelState.from_slack(raw)
+                with transaction.atomic():
+                    current, connection = dm._lock_slack_grant_api_authority(
+                        authority, required_scopes=PUBLIC_CHANNEL_SCOPES,
+                    )
+                    current.connection = connection
+                    if raw.get("is_member") is True:
+                        mark_joined(current, channel_id, observed_at=started_at, source="inventory",
+                                    authority=authority, public_verified=True)
+                    elif raw.get("is_member") is False:
+                        mark_left(current, channel_id, observed_at=started_at, source="inventory",
+                                  authority=authority, public_verified=True)
+                    members = consenting_members(workspace_id, channel_id)
+                    row = CommunityBridgeChannel.objects.select_for_update().filter(
+                        slack_channel_id=channel_id, slack_workspace_id=workspace_id,
+                    ).first()
+                    if row is None:
+                        if not members or state.is_archived:
+                            if final_reader or state.is_archived:
+                                complete_refresh(refresh)
+                            if state.is_archived:
+                                break
+                            continue
+                        row = CommunityBridgeChannel.objects.create(
+                            slack_workspace_id=workspace_id, slack_channel_id=channel_id,
+                            audience="members", destination_platform="buzz", enabled=False,
+                            lifecycle_source="reconcile", mirror_decision="mirror",
+                            room_sync_pending=True, audience_sync_pending=True,
+                        )
+                    if row.slack_seen_at is None or row.slack_seen_at <= started_at:
+                        _observe(row, state, started_at)
+                        row.reader_grant = next((grant for grant in members if grant.pk == current.pk),
+                                                members[0] if members else None)
+                        row.sync_paused_reason = "" if row.reader_grant_id else "no_reader"
+                        if _members_mapping(row):
+                            row.room_sync_pending = _room_out_of_date(row)
+                            row.audience_sync_pending = True
+                        row.save()
+                    pk = row.pk
+                sync_room(pk)
+                sync_audience(pk)
+                if final_reader:
                     complete_refresh(refresh)
                     completed += 1
-                    continue
-                raise ValueError("unproven_public_channel")
-            state = SlackChannelState.from_slack(raw)
-            with transaction.atomic():
-                current, connection = dm._lock_slack_grant_api_authority(
-                    authority, required_scopes=PUBLIC_CHANNEL_SCOPES,
-                )
-                current.connection = connection
-                if raw.get("is_member") is True:
-                    mark_joined(current, channel_id, observed_at=started_at, source="inventory",
-                                authority=authority, public_verified=True)
-                elif raw.get("is_member") is False:
-                    mark_left(current, channel_id, observed_at=started_at, source="inventory",
-                              authority=authority, public_verified=True)
-                members = consenting_members(workspace_id, channel_id)
-                row = CommunityBridgeChannel.objects.select_for_update().filter(
-                    slack_channel_id=channel_id, slack_workspace_id=workspace_id,
-                ).first()
-                if row is None:
-                    if not members or state.is_archived:
-                        complete_refresh(refresh)
-                        continue
-                    row = CommunityBridgeChannel.objects.create(
-                        slack_workspace_id=workspace_id, slack_channel_id=channel_id,
-                        audience="members", destination_platform="buzz", enabled=False,
-                        lifecycle_source="reconcile", mirror_decision="mirror",
-                        room_sync_pending=True, audience_sync_pending=True,
-                    )
-                if row.slack_seen_at is None or row.slack_seen_at <= started_at:
-                    _observe(row, state, started_at)
-                    row.reader_grant = next((grant for grant in members if grant.pk == current.pk),
-                                            members[0] if members else None)
-                    row.sync_paused_reason = "" if row.reader_grant_id else "no_reader"
-                    if _members_mapping(row):
-                        row.room_sync_pending = _room_out_of_date(row)
-                        row.audience_sync_pending = True
-                    row.save()
-                pk = row.pk
-            sync_room(pk)
-            sync_audience(pk)
-            complete_refresh(refresh)
-            completed += 1
-        except Exception as exc:
-            if isinstance(exc, dm.SlackApiError) and authority is not None:
-                access.record_reader_failure(reader, exc, channel_id=channel_id,
-                                             authority=authority, purpose="info",
-                                             observed_at=started_at)
-            _retry_refresh(refresh, seconds=60, code=type(exc).__name__)
-            logger.warning("member_channel_refresh_failed error_code=%s", type(exc).__name__)
+            except Exception as exc:
+                if isinstance(exc, dm.SlackApiError) and authority is not None:
+                    access.record_reader_failure(reader, exc, channel_id=channel_id,
+                                                 authority=authority, purpose="info",
+                                                 observed_at=started_at)
+                deferred = isinstance(exc, (BudgetDeferred, dm.SlackDmMirrorRateLimited))
+                # A live actor's discovery must survive scheduling and transient
+                # failures. A hint never changes the provider's authority checks.
+                preserve_hint = hint is not None
+                _retry_refresh(refresh, seconds=max(60, getattr(exc, "retry_after", 0)),
+                               code=type(exc).__name__, count_attempt=not (deferred or preserve_hint))
+                logger.warning("member_channel_refresh_failed error_code=%s", type(exc).__name__)
+                break
     return completed
 
 

@@ -1,6 +1,7 @@
 """No-I/O public-consent, scope and failover boundaries."""
 
-from contextlib import nullcontext
+from contextlib import ExitStack, nullcontext
+from datetime import timedelta
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
@@ -12,6 +13,7 @@ from integrations.models import SlackDmMirrorGrant
 from integrations.services import slack_dm_mirror as dm
 from integrations.services import slack_member_access as access
 from integrations.services import slack_owner_inventory as inventory
+from integrations.services.community_bridge import member_channels as channels
 from integrations.services.message_sync.scheduler import BudgetDeferred
 from integrations.services.slack_chat_catalog import (
     ALL_HISTORY_CONSENT, PRIVATE_CHANNEL_CONSENT, PUBLIC_CHANNEL_SCOPES,
@@ -91,6 +93,135 @@ class PublicMemberConsentTests(SimpleTestCase):
             inventory, "has_metadata_consent", return_value=True,
         ):
             self.assertTrue(inventory.public_inventory_allowed(self.grant, self.grant.connection, authority))
+
+
+class MemberInfoReaderHintSelectionTests(SimpleTestCase):
+    def setUp(self):
+        self.stack = ExitStack()
+        self.addCleanup(self.stack.close)
+        self.now = timezone.now()
+        self.observed = self.now - timedelta(seconds=30)
+        self.grants = [grant_fixture() for _ in range(3)]
+        for pk, grant in enumerate(self.grants, 1):
+            grant.pk = pk
+            grant.consented_at = self.now - timedelta(minutes=1)
+        self.arbitrary, self.hinted, self.joined = self.grants
+        self.hint = channels.InfoReaderHint(self.hinted.pk, self.observed)
+
+        self.grant_query = MagicMock()
+        self.grant_query.select_related.return_value = self.grant_query
+        self.grant_query.__iter__.side_effect = lambda: iter(self.grants)
+        self.grant_query.first.return_value = self.hinted
+        self.grant_filter = self.stack.enter_context(patch.object(
+            access.SlackDmMirrorGrant.objects, "filter", return_value=self.grant_query,
+        ))
+        self.member_query = MagicMock()
+        self.member_query.order_by.return_value = []
+        self.stack.enter_context(patch.object(
+            access.SlackChannelMembership.objects, "filter", return_value=self.member_query,
+        ))
+        self.channel_query = MagicMock()
+        self.channel_query.values_list.return_value.first.return_value = None
+        self.stack.enter_context(patch.object(
+            access.CommunityBridgeChannel.objects, "filter", return_value=self.channel_query,
+        ))
+        self.stack.enter_context(patch.object(access, "enabled", return_value=True))
+        self.scope = self.stack.enter_context(patch.object(channels, "member_channel_in_scope", return_value=True))
+        self.eligible = self.stack.enter_context(patch.object(access, "public_channels_enabled", return_value=True))
+        self.floor = self.stack.enter_context(patch(
+            "integrations.services.slack_member_membership_epoch.membership_floor",
+            return_value=self.now - timedelta(minutes=1),
+        ))
+        self.stack.enter_context(patch.object(access, "_key", side_effect=lambda grant, channel, purpose: (
+            grant.pk, channel, purpose,
+        )))
+        self.cached = self.stack.enter_context(patch.object(access.cache, "get", return_value=None))
+        self.stack.enter_context(patch.object(access, "_membership_state", side_effect=lambda grant, row: (
+            row.state if row is not None else None
+        )))
+        self.provider = self.stack.enter_context(patch.object(dm, "_call_slack_with_grant_authority"))
+        self.authority_lock = self.stack.enter_context(patch.object(dm, "_lock_slack_grant_api_authority"))
+
+    def tearDown(self):
+        self.provider.assert_not_called()
+        self.authority_lock.assert_not_called()
+
+    def select(self, **kwargs):
+        return access.reader_for_channel("TTEST", "CTEST", purpose="info", info_reader_hint=self.hint, **kwargs)
+
+    def test_unknown_channel_hint_beats_arbitrary_lower_id_without_joining(self):
+        self.assertIs(self.select(), self.hinted)
+        self.member_query.order_by.assert_called_once_with("-observed_at", "grant_id")
+
+    def test_current_joined_pointer_and_observations_keep_priority_over_hint(self):
+        self.member_query.order_by.return_value = [
+            SimpleNamespace(grant_id=self.joined.pk, state="joined", observed_at=self.now),
+            SimpleNamespace(grant_id=self.arbitrary.pk, state="joined", observed_at=self.observed),
+        ]
+        self.channel_query.values_list.return_value.first.return_value = self.arbitrary.pk
+        self.assertIs(self.select(), self.arbitrary)
+        self.channel_query.values_list.return_value.first.return_value = None
+        self.assertIs(self.select(), self.joined)
+        self.assertIs(self.select(exclude_grant_ids={self.joined.pk, self.arbitrary.pk}), self.hinted)
+
+    def test_history_ignores_hint_and_requires_its_own_joined_observation(self):
+        with patch.object(access, "_current_info_hint", side_effect=AssertionError("INFO hints cannot authorize history")):
+            self.assertIsNone(access.reader_for_channel("TTEST", "CTEST", purpose="history", info_reader_hint=self.hint))
+            self.member_query.order_by.return_value = [
+                SimpleNamespace(grant_id=self.joined.pk, state="joined", observed_at=self.now),
+            ]
+            self.assertIs(access.reader_for_channel(
+                "TTEST", "CTEST", purpose="history", info_reader_hint=self.hint,
+            ), self.joined)
+
+    def test_stale_missing_ineligible_and_excluded_hints_fall_back_to_current_reader(self):
+        self.floor.return_value = self.observed + timedelta(microseconds=1)
+        self.assertIs(self.select(), self.arbitrary)
+        self.floor.return_value = self.now - timedelta(minutes=1)
+        self.eligible.side_effect = lambda grant: grant.pk != self.hinted.pk
+        self.assertIs(self.select(), self.arbitrary)
+        self.eligible.side_effect = None
+        self.assertIs(self.select(exclude_grant_ids={self.hinted.pk}), self.arbitrary)
+        self.grants.remove(self.hinted)
+        self.assertIs(self.select(), self.arbitrary)
+
+    def test_separate_hint_resolution_binds_current_workspace_and_grant_eligibility(self):
+        self.assertIs(access.hinted_info_reader("TTEST", "CTEST", self.hint), self.hinted)
+        self.grant_filter.assert_called_once_with(
+            pk=self.hinted.pk, slack_workspace_id="TTEST", status="active", revoked_at__isnull=True,
+            user__is_active=True,
+        )
+        self.eligible.return_value = False
+        self.assertIsNone(access.hinted_info_reader("TTEST", "CTEST", self.hint))
+        self.eligible.return_value = True
+        self.grant_query.first.return_value = None
+        self.assertIsNone(access.hinted_info_reader("TTEST", "CTEST", self.hint))
+
+    def test_separate_hint_resolution_rejects_stale_or_out_of_scope_authority(self):
+        self.floor.return_value = self.observed + timedelta(microseconds=1)
+        self.assertIsNone(access.hinted_info_reader("TTEST", "CTEST", self.hint))
+        self.floor.return_value = None
+        self.assertIsNone(access.hinted_info_reader("TTEST", "CTEST", self.hint))
+        self.scope.return_value = False
+        self.grant_filter.reset_mock()
+        self.assertIsNone(access.hinted_info_reader("TTEST", "CTEST", self.hint))
+        self.grant_filter.assert_not_called()
+
+    def test_forged_or_malformed_hints_do_not_become_current_preferences(self):
+        for hint in (None, SimpleNamespace(grant_id=self.hinted.pk, observed_at=self.observed),
+                     channels.InfoReaderHint(self.arbitrary.pk, self.observed),
+                     channels.InfoReaderHint(self.hinted.pk, None),
+                     channels.InfoReaderHint(self.hinted.pk, "not-a-timestamp"),
+                     channels.InfoReaderHint(self.hinted.pk, self.observed.replace(tzinfo=None)),
+                     channels.InfoReaderHint(self.hinted.pk, self.now + timedelta(minutes=6))):
+            with self.subTest(hint=hint):
+                self.assertFalse(access._current_info_hint(self.hinted, hint))
+
+    def test_cooling_hint_can_be_detected_without_provider_or_authority_locks(self):
+        key = (self.hinted.pk, "CTEST", "info")
+        self.cached.side_effect = lambda candidate: candidate == key
+        self.assertTrue(access.info_reader_deferred(self.hinted, "CTEST"))
+        self.assertFalse(access.info_reader_deferred(self.arbitrary, "CTEST"))
 
 
 @override_settings(SLACK_MEMBER_CHANNELS_ENABLED=True, MESSAGE_SYNC_ENABLED=True, SLACK_OWNER_INVENTORY_ENABLED=True)

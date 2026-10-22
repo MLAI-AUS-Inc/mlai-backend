@@ -194,7 +194,14 @@ def route_member_public_event(payload):
         channels.queue_refresh(workspace, source, reason=event_type)
         return {'status': 'member_refresh_queued'} if verified else None
     if not verified:
-        channels.queue_refresh(workspace, source, reason='public_source_unverified')
+        # The signed actor identifies a useful INFO reader, not a member. Only
+        # that reader's fresh public is_member response may expand authority.
+        reason = 'public_source_unverified'
+        if observed is not None and (event_type == 'member_joined_channel' or _ordinary_create(event)):
+            for grant in _subject_grants(workspace, event.get('user')):
+                reason = channels.info_reader_hint_reason(grant.pk, observed) or reason
+                break
+        channels.queue_refresh(workspace, source, reason=reason)
         if row is not None and row.audience == 'members' and _public_mapping(row):
             return {'status': 'member_audience_pending'}
         return None
