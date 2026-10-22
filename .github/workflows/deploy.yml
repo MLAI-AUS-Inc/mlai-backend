@@ -522,6 +522,7 @@ jobs:
           integrations.tests_member_pending_intake_phase4a \
           integrations.tests_message_sync_member_history_phase4b \
           integrations.tests_member_delivery_phase4c \
+          integrations.tests_community_member_send_phase5 \
           integrations.tests_slack_member_all_devices \
           integrations.tests_members_source_privacy_phase4c \
           integrations.tests_member_callback_authority_phase4a \
@@ -741,6 +742,7 @@ jobs:
           integrations.tests_member_pending_intake_phase4a \
           integrations.tests_message_sync_member_history_phase4b \
           integrations.tests_member_delivery_phase4c \
+          integrations.tests_community_member_send_phase5 \
           integrations.tests_slack_member_all_devices \
           integrations.tests_members_source_privacy_phase4c \
           org_memory.tests.test_retrieval_answers.MemoryQueryApiTests.test_retained_mixed_members_answer_cannot_be_recovered_from_trace \

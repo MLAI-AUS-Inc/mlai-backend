@@ -6,6 +6,32 @@ from community_chat.models import CommunityChatDevice, DeviceBindingStatus
 from integrations.models import CommunityBridgeIdentityLink
 
 
+def community_account_for_key(*, slack_workspace_id: str, buzz_pubkey: str) -> Optional[dict]:
+    """Resolve a Community signer without requiring a Slack link or key rank."""
+    from django.conf import settings
+    import re
+
+    key = str(buzz_pubkey or "").strip().lower()
+    workspace = str(slack_workspace_id or "").strip()
+    if (not re.fullmatch(r"[0-9a-f]{64}", key)
+            or not workspace
+            or workspace != getattr(settings, "MESSAGE_SYNC_SLACK_BOT_WORKSPACE_ID", "")):
+        return None
+    device = CommunityChatDevice.objects.select_related("user").filter(
+        public_key=key, status=DeviceBindingStatus.VERIFIED,
+        revoked_at__isnull=True, user__is_active=True,
+    ).first()
+    if device is None:
+        return None
+    return {
+        "user_id": device.user_id,
+        "device_id": device.pk,
+        "public_key": key,
+        "user_profile_id": str(device.user.community_chat_profile_id),
+        "display_name": device.user.full_name or "MLAI member",
+    }
+
+
 def verified_identity_for_slack(
     *,
     slack_workspace_id: str,

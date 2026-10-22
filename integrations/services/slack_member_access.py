@@ -350,7 +350,7 @@ def _probe_membership(grant, channel_id, public_key):
     return state
 
 
-def _poster_for_author(pubkey, workspace_id, channel_id):
+def _poster_for_author(pubkey, workspace_id, channel_id, *, required_scopes=None, strict_membership=False):
     """Resolve a verified author's own grant; unknown membership gets one probe."""
     key = str(pubkey or "").strip().lower()
     from .community_bridge.member_channels import member_channel_in_scope
@@ -370,23 +370,27 @@ def _poster_for_author(pubkey, workspace_id, channel_id):
         user_id=device.user_id, slack_workspace_id=workspace_id,
         slack_user_id=link.slack_user_id, status="active", revoked_at__isnull=True,
     ).select_related("user", "connection").first()
-    if grant is None or not public_channels_enabled(grant):
+    additional_scopes = set(required_scopes or ())
+    if (grant is None or not public_channels_enabled(grant)
+            or not additional_scopes.issubset(set(grant.connection.scopes or []))):
         return None
     authority = dm._capture_slack_grant_api_authority(grant)
     with transaction.atomic():
-        current, connection = dm._lock_slack_grant_api_authority(authority, required_scopes={"chat:write"})
+        current, connection = dm._lock_slack_grant_api_authority(authority, required_scopes={"chat:write"} | additional_scopes)
         current.connection = connection
         if not public_channels_enabled(current, authority=authority) or not _poster_identity_current(current, key):
             return None
         state = _membership_state(current, _membership(current, channel_id, locked=True))
     if state is None:
         state = _probe_membership(current, channel_id, key)
+        if state is None and strict_membership:
+            raise BudgetDeferred(60)
     if state != "joined":
         return None
     # Probes and cached positives remain subject to a final current-device,
     # consent and membership fence. The eventual write checks membership again.
     with transaction.atomic():
-        current, connection = dm._lock_slack_grant_api_authority(authority, required_scopes={"chat:write"})
+        current, connection = dm._lock_slack_grant_api_authority(authority, required_scopes={"chat:write"} | additional_scopes)
         current.connection = connection
         if (not public_channels_enabled(current, authority=authority)
                 or not _poster_identity_current(current, key)
@@ -396,13 +400,22 @@ def _poster_for_author(pubkey, workspace_id, channel_id):
         return current
 
 
-def poster_for_author(pubkey, workspace_id, channel_id):
+def poster_for_author(pubkey, workspace_id, channel_id, *, required_scopes=None, strict_membership=False):
     """Return current posting authority, or None after a consent/device race.
 
     Provider failures and budget deferrals propagate: callers must not silently
     switch the actor of a write after an uncertain upstream result.
     """
     try:
-        return _poster_for_author(pubkey, workspace_id, channel_id)
+        return _poster_for_author(pubkey, workspace_id, channel_id, required_scopes=required_scopes,
+                                  strict_membership=strict_membership)
+    except dm.SlackDmMirrorCredentialError:
+        if strict_membership:
+            raise
+        return None
     except dm.SlackDmMirrorAuthorizationError:
+        if strict_membership:
+            # Once a grant was selected, a denied/malformed provider proof or
+            # authority race is not definitive evidence for changing actors.
+            raise
         return None

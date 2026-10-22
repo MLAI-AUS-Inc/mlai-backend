@@ -12,6 +12,21 @@ from .member_attempts import ATTEMPT_KEY, command_hash
 from integrations.models import CommunityBridgeDelivery, CommunityBridgeMessageLink
 from .member_delivery import MEMBER_STAMP, text_hash
 
+COMMUNITY_STAMP = "_community_delivery_v1"
+
+
+class PublicReactionSuperseded(RuntimeError):
+    """A newer signed observation makes this queued reaction effect obsolete."""
+
+
+def _command(payload):
+    return (payload or {}).get(MEMBER_STAMP) or (payload or {}).get(COMMUNITY_STAMP)
+
+
+def _command_lookup(suffix, value):
+    return (Q(**{f"payload__{MEMBER_STAMP}__{suffix}": value})
+            | Q(**{f"payload__{COMMUNITY_STAMP}__{suffix}": value}))
+
 
 def is_public_slack_echo(channel, event, raw):
     if not isinstance(event, dict) or channel.slack_visibility != "public":
@@ -55,23 +70,18 @@ def is_public_slack_echo(channel, event, raw):
         source_platform="buzz",
         target_platform="slack",
         delivery_type=operation,
-        payload___members_delivery_v1__actor__slack_user_id=actor,
-    )
+    ).filter(_command_lookup("actor__slack_user_id", actor))
     if operation == "create":
         client_id = metadata.get("slack_client_msg_id")
         if not isinstance(client_id, str) or not client_id:
             return False
-        rows = rows.filter(payload___slack_send_v1__client_msg_id=client_id)
+        rows = rows.filter(_command_lookup("wire__kwargs__client_msg_id", client_id))
     else:
-        rows = rows.filter(
-            payload___members_delivery_v1__wire__kwargs__channel=channel.slack_channel_id
-        )
+        rows = rows.filter(_command_lookup("wire__kwargs__channel", channel.slack_channel_id))
         if operation in {"edit", "delete"}:
-            rows = rows.filter(payload___members_delivery_v1__wire__kwargs__ts=target)
+            rows = rows.filter(_command_lookup("wire__kwargs__ts", target))
         else:
-            rows = rows.filter(
-                payload___members_delivery_v1__wire__kwargs__timestamp=target
-            )
+            rows = rows.filter(_command_lookup("wire__kwargs__timestamp", target))
     if operation != "create":
         rows = rows.filter(
             ~Q(status="completed")
@@ -85,7 +95,7 @@ def is_public_slack_echo(channel, event, raw):
             "acknowledged",
         }:
             continue
-        command = (row.payload or {}).get(MEMBER_STAMP)
+        command = _command(row.payload)
         if not isinstance(command, dict):
             continue
         if attempt.get("command_hash") != command_hash(command):
@@ -187,12 +197,11 @@ def _reaction_effect_current(row, wire, actor, raw):
         source_platform="buzz",
         target_platform="slack",
         delivery_type=opposite,
-        payload___members_delivery_v1__actor__slack_user_id=actor,
-        payload___members_delivery_v1__wire__kwargs__timestamp=target,
         created_at__gt=row.created_at,
-    )
+    ).filter(_command_lookup("actor__slack_user_id", actor),
+             _command_lookup("wire__kwargs__timestamp", target))
     for candidate in later.iterator(chunk_size=100):
-        command = (candidate.payload or {}).get(MEMBER_STAMP) or {}
+        command = _command(candidate.payload) or {}
         later_attempt = (candidate.payload or {}).get(ATTEMPT_KEY) or {}
         other = (command.get("wire") or {}).get("kwargs") or {}
         if (
@@ -232,7 +241,11 @@ def _reaction_observation(channel, raw):
         slack_reaction_to_emoji,
     )
 
-    if not isinstance(raw, dict) or channel.audience != "members":
+    if not isinstance(raw, dict) or channel.audience not in {"members", "community"}:
+        return None
+    if channel.audience == "community" and not CommunityBridgeDelivery.objects.filter(
+        channel=channel, payload___community_delivery_v1__actor__kind="member",
+    ).exists():
         return None
     event = raw.get("event")
     if not isinstance(event, dict) or event.get("type") not in {
@@ -312,12 +325,16 @@ def newer_reaction_observed(channel, raw):
         channel=channel,
         platform="slack",
         source_channel_id=channel.slack_channel_id,
-        receipt_key__startswith=f"slack:{channel.slack_workspace_id}:{channel.slack_channel_id}:{target}:reaction:",
         event_type__in=("reaction_added", "reaction_removed"),
         payload__team_id=channel.slack_workspace_id,
         payload__event__user=actor,
         payload__event__item__ts=target,
     )
+    if channel.audience == "members":
+        rows = rows.filter(receipt_key__startswith=f"slack:{channel.slack_workspace_id}:{channel.slack_channel_id}:{target}:reaction:")
+    # Community's retained bot lane uses event-ID keys after rollout narrowing.
+    # Exact app/T/C/U/target/canonical-reaction evidence below remains mandatory;
+    # a legacy key must not erase newer source causality during rollback.
     for receipt in rows.iterator(chunk_size=100):
         observation = _reaction_observation(channel, receipt.payload)
         if (

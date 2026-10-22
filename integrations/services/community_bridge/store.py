@@ -333,6 +333,12 @@ def ingest_inbound_event(
         return _mark_receipt_ignored(receipt, reason="reply_sync_disabled")
 
     target_platform = _target_platform(channel=channel, source_platform=source_platform)
+    if source_platform == "buzz" and target_platform == "slack":
+        from .community_delivery import ENQUEUE, enqueue_marker
+
+        marker = enqueue_marker(channel, normalized_event)
+        if marker is not None:
+            normalized_event = {**normalized_event, ENQUEUE: marker}
     if (
         source_platform == CommunityBridgePlatform.SLACK
         and target_platform == CommunityBridgePlatform.BUZZ
@@ -534,7 +540,16 @@ def complete_create_delivery(
         if delivery.target_platform == CommunityBridgePlatform.SLACK:
             from .member_delivery import MEMBER_STAMP
 
+            from .community_delivery import MEMBER_STAMP as COMMUNITY_STAMP
+
             command = payload.get(MEMBER_STAMP)
+            community_command = payload.get(COMMUNITY_STAMP)
+            if command is not None and community_command is not None:
+                raise ValueError("Conflicting bridge poster evidence")
+            if community_command is not None:
+                if delivery.channel.audience != "community":
+                    raise ValueError("Community command cannot authorize Members")
+                command = community_command
             expected_poster = (
                 command.get("actor") if isinstance(command, dict) else {"kind": "bot"}
             )
