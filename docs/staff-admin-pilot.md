@@ -10,20 +10,25 @@ a successful access response. Disabled returns 404; denied roles return 403.
 
 An active authenticated account receives the first matching role below. There
 is no permission union. Only active PointsAdmin records linked by user FK count;
-Slack-only appointments grant nothing. Inactive accounts receive no role.
+Slack-only appointments grant nothing. Portfolio grants require appointment role
+committee, portfolio_lead or admin; partner and unknown roles grant nothing. Inactive accounts receive no role.
 
 | Priority | Panel role and committee title | Existing model condition |
 | --- | --- | --- |
 | 1 | Superadmin / President | Verified-session ChatRole owner, or Django is_superuser |
 | 2 | Admin / Vice President | Verified-session ChatRole admin |
-| 3 | Community / Community Manager | Active Moderator, or PointsAdmin portfolio ops |
+| 3 | Community / Community Manager | Active Moderator, or approved staff PointsAdmin portfolio ops |
 | 4 | Marketing and Partnerships | PointsAdmin role portfolio_lead, portfolio marketing or sales |
-| 5 | Tech / Tech Lead | PointsAdmin portfolio tech |
-| 6 | Finance / Treasurer | PointsAdmin role committee, portfolio empty or null |
+| 5 | Tech / Tech Lead | Approved staff PointsAdmin portfolio tech |
+| 6 | Finance / Treasurer | Unassigned until an explicit operator-approved mapping exists |
 | 7 | Tech / Tech Lead | Remaining Django is_staff accounts |
 
-Finance is an approximation: no existing field distinguishes Treasurer from
-other committee members without a portfolio. No finance flag is invented.
+Open operator question: which explicit existing appointment mapping identifies
+the Treasurer? No existing field distinguishes that office from ordinary
+committee appointments, including the default created by Points Admin. Empty
+or null portfolios grant no Finance access. Add an approved mapping to
+compute_role and the member-query role filter together before assigning Finance.
+The Finance permission matrix remains defined for that future mapping.
 Member lists display stored ChatRole appointments directly. Viewer owner/admin
 authority still requires the session's verified device, as in staff check
 03088c6. Moderator and PointsAdmin grants are account based. Relay permissions

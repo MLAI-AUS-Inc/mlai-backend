@@ -12,7 +12,7 @@ from mentoring.models import MentorProfile, MentorSession, LOCATION_VIDEO
 from mentoring.service import MEETING_CLAIM_TIMEOUT_SECONDS, MentoringError
 from roo.models import PointsAccount, Ledger, PointsRequest, RewardRedemption
 from startup_updates.models import StartupProfile, MonthlyUpdateDraft, MonthlyUpdateReminderDelivery
-from .staff_admin_permissions import ROLES, user_role, with_roles
+from .staff_admin_permissions import ROLES, STAFF_APPOINTMENT_ROLES, user_role, with_roles
 
 
 def iso(value):
@@ -77,13 +77,12 @@ def member_query(params):
         from django.db.models import Case, When, Value, CharField
         from .models import Moderator
         from roo.models import PointsAdmin
-        points = PointsAdmin.objects.filter(user_id=OuterRef('pk'), is_active=True)
+        points = PointsAdmin.objects.filter(user_id=OuterRef('pk'), is_active=True, role__in=STAFF_APPOINTMENT_ROLES)
         query = query.annotate(
             _community=Exists(Moderator.objects.filter(user_id=OuterRef('pk'), is_active=True)),
             _ops=Exists(points.filter(portfolio='ops')),
             _marketing=Exists(points.filter(role='portfolio_lead', portfolio__in=('marketing', 'sales'))),
             _tech=Exists(points.filter(portfolio='tech')),
-            _finance=Exists(points.filter(role='committee').filter(Q(portfolio__isnull=True) | Q(portfolio=''))),
         ).annotate(_admin_role=Case(
             When(is_active=False, then=Value('member')),
             When(Q(chat_role_appointment__role='owner') | Q(is_superuser=True), then=Value('superadmin')),
@@ -91,7 +90,6 @@ def member_query(params):
             When(Q(_community=True) | Q(_ops=True), then=Value('community')),
             When(_marketing=True, then=Value('marketing')),
             When(_tech=True, then=Value('tech')),
-            When(_finance=True, then=Value('finance')),
             When(is_staff=True, then=Value('tech')),
             default=Value('member'), output_field=CharField(),
         )).filter(_admin_role=role)

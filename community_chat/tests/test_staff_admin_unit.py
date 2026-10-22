@@ -35,9 +35,9 @@ ENDPOINTS = (
 
 
 class RoleTests(TestCase):
-    def test_existing_appointments_resolve_six_roles(self):
+    def test_existing_appointments_resolve_approved_roles(self):
         cases = [('owner', False, [], 'superadmin'), ('admin', False, [], 'admin'),
-                 ('member', False, [appointment()], 'finance'),
+                 ('member', False, [appointment()], None),
                  ('member', True, [], 'community'), ('member', False, [appointment(portfolio='ops')], 'community'),
                  ('member', False, [appointment('portfolio_lead', 'marketing')], 'marketing'),
                  ('member', False, [appointment('portfolio_lead', 'sales')], 'marketing'),
@@ -60,6 +60,34 @@ class RoleTests(TestCase):
         self.assertEqual(permissions.sections_for('finance').get('members'), None)
         self.assertEqual(permissions.sections_for('marketing').get('mentoring'), 'view')
         self.assertEqual(permissions.sections_for('tech').get('mentoring'), 'view')
+
+    def test_partners_and_unknown_appointments_never_grant_portfolio_access(self):
+        for portfolio in ('ops', 'tech', 'marketing', 'sales', None):
+            for role in ('partner', 'unknown'):
+                with self.subTest(role=role, portfolio=portfolio):
+                    actual = permissions.compute_role(user(), 'member', False, [appointment(role, portfolio)])
+                    self.assertIsNone(actual)
+                    self.assertEqual(permissions.sections_for(actual), {})
+        for role in permissions.STAFF_APPOINTMENT_ROLES:
+            for portfolio, expected in (('ops', 'community'), ('tech', 'tech')):
+                self.assertEqual(permissions.compute_role(user(), 'member', False, [appointment(role, portfolio)]), expected)
+
+    def test_member_role_filters_require_the_same_approved_appointment_roles(self):
+        for role in ('community', 'tech', 'member'):
+            query = service.member_query({'role': role})
+            for annotation in ('_ops', '_marketing', '_tech'):
+                conditions = query.query.annotations[annotation].query.where.children
+                grants = [condition for condition in conditions if getattr(condition.lhs.target, 'name', '') == 'role']
+                approved = [condition.rhs for condition in grants if condition.lookup_name == 'in']
+                self.assertEqual(approved, [list(permissions.STAFF_APPOINTMENT_ROLES)])
+
+    def test_ambiguous_committee_appointments_never_become_finance(self):
+        for portfolio in (None, ''):
+            self.assertIsNone(permissions.compute_role(user(), 'member', False, [appointment(portfolio=portfolio)]))
+        query = service.member_query({'role': 'finance'})
+        expression = query.query.annotations['_admin_role']
+        self.assertNotIn('finance', [case.result.value for case in expression.cases])
+        self.assertNotIn('_finance', query.query.annotations)
 
     def test_viewer_chat_role_uses_verified_session(self):
         request = NS(user=user(), community_chat_public_key='synthetic', community_chat_installation_id='installation')

@@ -4,6 +4,9 @@ from roo.models import PointsAdmin
 from .models import Moderator
 from .permissions import account_chat_role
 
+# Partners are external collaborators, not staff appointments.
+STAFF_APPOINTMENT_ROLES = ('committee', 'portfolio_lead', 'admin')
+
 ROLES = ('superadmin', 'admin', 'finance', 'community', 'marketing', 'tech')
 ROLE_LABELS = ('Superadmin', 'Admin', 'Finance', 'Community', 'Marketing and Partnerships', 'Tech')
 ROLE_TITLES = ('President', 'Vice President', 'Treasurer', 'Community Manager', 'Marketing and Partnerships', 'Tech Lead')
@@ -25,15 +28,15 @@ def compute_role(user, chat_role, moderator, appointments):
         return 'superadmin'
     if chat_role == 'admin':
         return 'admin'
-    active = [p for p in appointments if p.is_active]
+    active = [p for p in appointments if p.is_active and p.role in STAFF_APPOINTMENT_ROLES]
     if moderator or any(p.portfolio == 'ops' for p in active):
         return 'community'
     if any(p.role == 'portfolio_lead' and p.portfolio in ('marketing', 'sales') for p in active):
         return 'marketing'
     if any(p.portfolio == 'tech' for p in active):
         return 'tech'
-    if any(p.role == 'committee' and not p.portfolio for p in active):
-        return 'finance'
+    # Finance needs an operator-approved Treasurer mapping. No existing field
+    # distinguishes that office from an ordinary committee appointment.
     if getattr(user, 'is_staff', False):
         return 'tech'
     return None
