@@ -78,6 +78,8 @@ def relevant_user_ids(payload):
         users.update(_bounded_ids(SlackDmMirrorGrant.objects.filter(
             slack_workspace_id=workspace, status='active', revoked_at__isnull=True,
         ).order_by('user_id').values_list('user_id', flat=True).distinct()))
+    from integrations.services.slack_member_access import community_reader_user_ids
+    users.update(community_reader_user_ids(payload))
     if len(users) > MAX_CALLBACK_USERS:
         raise CallbackAuthorityChanged('callback_owner_cohort_too_large')
     return users

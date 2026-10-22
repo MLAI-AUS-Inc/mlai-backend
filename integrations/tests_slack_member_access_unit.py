@@ -42,6 +42,11 @@ class PublicMemberConsentTests(SimpleTestCase):
         epoch = patch("integrations.services.slack_oauth_authority.current_slack_oauth_generation", return_value=0)
         self.epoch = epoch.start()
         self.addCleanup(epoch.stop)
+        # The read-only policy resolves the same current OAuth epoch through
+        # slack_dm_mirror's imported alias. Keep both real DB seams forbidden.
+        alias = patch.object(dm, "current_slack_oauth_generation", self.epoch)
+        alias.start()
+        self.addCleanup(alias.stop)
 
     def test_existing_accepted_consents_need_no_new_version_or_refresh(self):
         with patch.object(dm, "_refresh_slack_grant_token_if_due", side_effect=AssertionError("No refresh")):
@@ -127,7 +132,7 @@ class MemberInfoReaderHintSelectionTests(SimpleTestCase):
         ))
         self.stack.enter_context(patch.object(access, "enabled", return_value=True))
         self.scope = self.stack.enter_context(patch.object(channels, "member_channel_in_scope", return_value=True))
-        self.eligible = self.stack.enter_context(patch.object(access, "public_channels_enabled", return_value=True))
+        self.eligible = self.stack.enter_context(patch.object(access, "public_reader_enabled", return_value=True))
         self.floor = self.stack.enter_context(patch(
             "integrations.services.slack_member_membership_epoch.membership_floor",
             return_value=self.now - timedelta(minutes=1),
@@ -178,7 +183,7 @@ class MemberInfoReaderHintSelectionTests(SimpleTestCase):
         self.floor.return_value = self.observed + timedelta(microseconds=1)
         self.assertIs(self.select(), self.arbitrary)
         self.floor.return_value = self.now - timedelta(minutes=1)
-        self.eligible.side_effect = lambda grant: grant.pk != self.hinted.pk
+        self.eligible.side_effect = lambda grant, **kwargs: grant.pk != self.hinted.pk
         self.assertIs(self.select(), self.arbitrary)
         self.eligible.side_effect = None
         self.assertIs(self.select(exclude_grant_ids={self.hinted.pk}), self.arbitrary)

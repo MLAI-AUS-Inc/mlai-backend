@@ -2,6 +2,7 @@ import json
 import logging
 
 from django.db import DatabaseError
+from django.utils import timezone
 from rest_framework import status
 from rest_framework.permissions import AllowAny
 from rest_framework.response import Response
@@ -11,7 +12,7 @@ from integrations.services.message_sync.inbox import enabled as message_sync_ena
 from integrations.models import CommunityBridgePlatform
 from integrations.services.community_bridge.buzz import BuzzBridgeClient
 from integrations.services.community_bridge.slack import SlackBridgeClient
-from integrations.services.community_bridge.member_channel_events import dispatch_slack_callback
+from integrations.services.community_bridge.member_channel_events import dispatch_authenticated_slack_callback
 from integrations.services.community_bridge.store import ingest_inbound_event, ingest_slack_event
 from integrations.services.slack_dm_mirror import ingest_mlai_dm_event, ingest_slack_dm_event
 from community_chat.adapter import MembershipAdapterUnavailable
@@ -69,8 +70,12 @@ class SlackCommunityBridgeEventView(APIView):
             except ValueError as exc:
                 return Response({"error": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
         else:
-            result = dispatch_slack_callback(payload, private_ingest=ingest_slack_dm_event,
-                                             public_ingest=ingest_slack_event)
+            result = dispatch_authenticated_slack_callback(
+                payload, app_id=str(payload.get("api_app_id") or ""), received_at=timezone.now(),
+                private_ingest=ingest_slack_dm_event, public_ingest=ingest_slack_event,
+            )
+        if result.get("status") == "community_source_pending" and not message_sync_enabled():
+            return Response({"error": "community_source_pending"}, status=status.HTTP_503_SERVICE_UNAVAILABLE)
         logger.info(
             "community_bridge_slack_event status=%s receipt_id=%s delivery_ids=%s",
             result.get("status"),

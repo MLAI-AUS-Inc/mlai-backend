@@ -6,6 +6,7 @@ from django.db import transaction
 from django.utils import timezone
 
 from integrations.models import CommunityBridgeReceipt
+from integrations.services.community_bridge.community_source import retained_payload
 
 
 class Command(BaseCommand):
@@ -33,21 +34,33 @@ class Command(BaseCommand):
         queryset = CommunityBridgeReceipt.objects.filter(
             created_at__lt=cutoff,
         ).exclude(payload={})
-        eligible = queryset.count()
+        # Keyset progress visits metadata-only rows once, so retained evidence
+        # cannot make a batch loop forever. Lock and reread every payload after
+        # selection; a concurrent authenticated role merge must survive purge.
+        cleared = 0
+        last_id = 0
+        while True:
+            ids = list(queryset.filter(id__gt=last_id).order_by("id")
+                       .values_list("id", flat=True)[:batch_size])
+            if not ids:
+                break
+            last_id = ids[-1]
+            with transaction.atomic():
+                rows = (CommunityBridgeReceipt.objects.filter(id__in=ids)
+                        .select_for_update(of=("self",)).select_related("channel").order_by("id"))
+                for receipt in rows:
+                    kept = retained_payload(receipt)
+                    if receipt.payload != kept:
+                        cleared += 1
+                        if not options["dry_run"]:
+                            receipt.payload = kept
+                            receipt.save(update_fields=("payload", "updated_at"))
 
         if options["dry_run"]:
             self.stdout.write(
-                f"Would clear {eligible} community bridge payload(s) older than {days} day(s)."
+                f"Would clear {cleared} community bridge payload(s) older than {days} day(s)."
             )
             return
-
-        cleared = 0
-        while True:
-            ids = list(queryset.order_by("id").values_list("id", flat=True)[:batch_size])
-            if not ids:
-                break
-            with transaction.atomic():
-                cleared += CommunityBridgeReceipt.objects.filter(id__in=ids).update(payload={})
 
         self.stdout.write(
             self.style.SUCCESS(

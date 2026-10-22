@@ -105,7 +105,18 @@ def public_page(lease, state):
     from . import member_history
     if member_history.required(state.public_channel):
         return member_history.run_page(lease, state, _public_page)
-    # Switching Community back to bot/both cannot carry a member's cursor.
+    # The approved checkpoint key also holds bot strategy authority. Bind bot
+    # vs both explicitly so no source change transplants an old page cursor.
+    if (state.public_channel.audience == "community"
+            and getattr(member_history.settings, "SLACK_COMMUNITY_SOURCE", "bot") == "both"
+            and member_history.access.enabled()
+            and member_history.member_channel_in_scope(state.public_channel.slack_workspace_id,
+                                                       state.public_channel.slack_channel_id)):
+        from dataclasses import replace
+        scope = member_history.community_bot_scope(state.public_channel, state.authority_generation)
+        checkpoint = dict(lease.checkpoint) if lease.checkpoint.get("member_authority") == scope else {}
+        checkpoint["member_authority"] = scope
+        return _public_page(replace(lease, checkpoint=checkpoint), state, member_authority=scope)
     if "member_authority" in lease.checkpoint:
         from dataclasses import replace
         lease = replace(lease, checkpoint={})
@@ -114,6 +125,8 @@ def public_page(lease, state):
 
 def _public_page(lease, state, *, client=None, member_authority=None):
     channel = state.public_channel
+    from django.conf import settings
+    source_mode = getattr(settings, "SLACK_COMMUNITY_SOURCE", "bot")
     checkpoint = dict(lease.checkpoint)
     scope = head_scope(state) + (":" + member_authority if member_authority else "")
     if lease.kind == "archive" and recent_history.enabled():
@@ -185,7 +198,11 @@ def _public_page(lease, state, *, client=None, member_authority=None):
         if (not mapped.enabled or mapped.slack_channel_id != channel.slack_channel_id
                 or mapped.slack_workspace_id != channel.slack_workspace_id
                 or mapped.destination_channel_id != channel.destination_channel_id
-                or mapped.destination_workspace_id != channel.destination_workspace_id):
+                or mapped.destination_workspace_id != channel.destination_workspace_id
+                or mapped.audience != channel.audience
+                or channel.audience == "community" and (source_mode != getattr(settings, "SLACK_COMMUNITY_SOURCE", "bot")
+                    or SlackDmMirrorConversation.objects.filter(slack_workspace_id=mapped.slack_workspace_id,
+                        slack_conversation_id=mapped.slack_channel_id).exists())):
             raise RuntimeError("sync_mapping_changed")
         floor = max(floor, int(time.time()) - PUBLIC_HISTORY_DAYS * 86400)
         observed = []

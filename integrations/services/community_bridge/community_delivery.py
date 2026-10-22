@@ -502,7 +502,8 @@ def execute(delivery):
             member._finish_slack(row, channel, actor, wire, response, outcome=outcome,
                                  verified_receipt=receipt)
         succeeded = True
-        logger.info("slack_member_send poster=%s reason=recorded_strategy", actor["kind"])
+        from .observability import send
+        send(original, actor, delivery["id"], "settled", reconciled=reconcile)
     except member._SourceClosed as error:
         from .member_channels import mark_source_reduction
         if error.observed_at is not None:
@@ -530,3 +531,6 @@ def execute(delivery):
             if reconcile and attempt["status"] != "not_sent":
                 status = "uncertain"
             attempts.record(delivery["id"], command, attempt, status, receipt, implementation=implementation)
+        if not succeeded:
+            from .observability import send_failure
+            send_failure(original, actor, delivery["id"], sys.exc_info()[1])

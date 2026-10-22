@@ -278,6 +278,12 @@ grant only `channels:history`, `channels:read`, `chat:write`, `files:read`,
 `SLACK_BRIDGE_BOT_USER_ID` so its messages and reactions are discarded for loop
 prevention.
 
+### Community member-source rollout
+
+The existing `SLACK_COMMUNITY_SOURCE` setting selects `bot`, `both` or `members` behind the member-channel prerequisites. `both` compares authenticated receiving-app observations while retaining bot history. During the transition, `members` uses member readers and permits Community-only bot fallback only after a complete current zero-reader assessment; transient selection failures cannot authorize fallback. This does not change Members/private audiences or Phase 5's recorded send actors.
+
+[Phase 6 operations](slack-community-phase6-operations.md) defines durable comparison/retention, the seven-full-day bot-reference miss gate, two actual readers per existing Community room, and fourteen stable member-source days without fallback before bot-subscription retirement and later Phase 7 deletion. These are separately approved live observation gates; source defaults remain off/bot and this contract records no activation or elapsed window.
+
 ### Member-channel foundations (inactive)
 
 The former bot-only channel lifecycle lane is retired. Its enablement flag,

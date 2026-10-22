@@ -260,6 +260,8 @@ def mark_source_reduction(workspace_id, channel_id, *, reason,
             row.audience_sync_pending = True
         row.room_state = state
         row.save()
+        from .observability import room
+        room(row, "held")
         if _members_mapping(row):
             _schedule_audience_reductions([row.pk])
         return True
@@ -441,6 +443,8 @@ def sync_room(pk: int, *, reduction_only=False) -> str:
     with transaction.atomic():
         row = CommunityBridgeChannel.objects.select_for_update().get(pk=pk)
         if row.room_sync_error == "rekey_requires_room_migration":
+            from .observability import room
+            room(row, "held")
             return "held"
         if not row.room_sync_pending:
             return "unchanged"
@@ -472,6 +476,8 @@ def sync_room(pk: int, *, reduction_only=False) -> str:
         if destination and previous_audience and previous_audience != audience:
             row.room_sync_error = "immutable_room_audience"
             row.save(update_fields=["room_sync_error", "updated_at"])
+            from .observability import room
+            room(row, "held")
             return "failed"
         request_state = {
             "slack_workspace_id": slack_workspace_id,
@@ -520,7 +526,11 @@ def sync_room(pk: int, *, reduction_only=False) -> str:
                 changes.update(
                     mirror_decision=CommunityBridgeMirrorDecision.HOLD, hold_reason="name_conflict",
                 )
-            return "held" if _record_sync_failure(pk, "name_conflict", request_state=request_state, **changes) else "retry"
+            recorded = _record_sync_failure(pk, "name_conflict", request_state=request_state, **changes)
+            if recorded:
+                from .observability import room
+                room(row, "held")
+            return "held" if recorded else "retry"
         if not _record_sync_failure(pk, code, request_state=request_state):
             return "retry"
         return "failed" if exc.permanent else "retry"
@@ -563,6 +573,8 @@ def sync_room(pk: int, *, reduction_only=False) -> str:
             if reduction_only else _room_out_of_date(row)
         )
         row.save()
+        from .observability import room
+        room(row, "archived" if desired["archived"] else "room_created" if not destination else "room_updated")
     if result["changed"]:
         logger.info(
             "community_bridge_channel_room_synced channel=%s room=%s changed=%s",

@@ -21,7 +21,8 @@ def enabled():
 
 def enqueue_slack_callback(payload):
     """Persist verified callback once; signature validation remains at the view."""
-    payload = {key: value for key, value in payload.items() if not key.startswith("_sync_")}
+    from integrations.services.community_bridge.community_source import strip_untrusted
+    payload = strip_untrusted({key: value for key, value in payload.items() if not key.startswith("_sync_")})
     app_id = str(payload.get("api_app_id") or "").strip()
     workspace_id = str(payload.get("team_id") or "").strip()
     source_id = str(payload.get("event_id") or "").strip()
@@ -83,23 +84,15 @@ def process_inbox_once():
                 row.lease_expires_at = None
                 row.save()
                 return 0
-            from integrations.services.community_bridge.member_channel_events import dispatch_slack_callback
-            from .read_activity import record_public_event
-            from .read_priority import invalidate_event
-            from .member_callback_authority import callback_user_fence
-            # The audience worker takes all relevant Users before Channel.
-            # Lock both recipients and the signed actor in one sorted cohort;
-            # no later intake path may discover a new lower-order User.
-            with callback_user_fence(payload):
-                invalidate_event(payload)
-                # Keep the history worker's State -> Channel order internally,
-                # after every possible callback User has already been locked.
-                record_public_event(payload)
-                result = dispatch_slack_callback(payload)
+            from integrations.services.community_bridge.member_channel_events import dispatch_authenticated_slack_callback
+            result = dispatch_authenticated_slack_callback(
+                payload, app_id=row.app_id, received_at=row.received_at, inbox_id=row.pk,
+                source_event_id=row.source_event_id,
+            )
             if row.lease_expires_at <= timezone.now():
                 raise LeaseLost("inbox_lease_expired")
             waiting_member = isinstance(result, dict) and (
-                result.get("status") == "member_audience_pending"
+                result.get("status") in {"member_audience_pending", "community_source_pending"}
                 or (row.last_error_code == "member_audience_pending"
                     and result.get("status") == "ignored"
                     and result.get("reason") == "member_channels_disabled_or_out_of_scope")
@@ -112,7 +105,9 @@ def process_inbox_once():
                 row.available_at = timezone.now() + timedelta(seconds=5)
                 row.lease_token = None
                 row.lease_expires_at = None
-                row.last_error_code = "member_audience_pending"
+                row.last_error_code = ("community_source_pending"
+                                       if result.get("status") == "community_source_pending"
+                                       else "member_audience_pending")
                 row.save()
                 return 0
             row.status = "completed"

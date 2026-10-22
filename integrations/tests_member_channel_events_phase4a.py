@@ -102,10 +102,19 @@ class MemberEventRouterTests(SimpleTestCase):
             self.assertIsNone(router.route_member_public_event(payload({
                 'type': 'message', 'channel': CHANNEL, 'channel_type': 'channel', 'subtype': subtype,
             })))
-        with override_settings(SLACK_COMMUNITY_SOURCE='members'):
+        with override_settings(SLACK_COMMUNITY_SOURCE='both'):
             self.assertEqual(router.route_member_public_event(payload({
                 'type': 'message', 'channel': CHANNEL, 'channel_type': 'channel', 'user': 'UACTOR',
             })), {'status': 'accepted'})
+
+    def test_members_source_without_server_reader_policy_keeps_public_content_pending(self):
+        self.query.return_value.first.return_value = public_row(slack_seen_at=None, audience='community')
+        with override_settings(SLACK_COMMUNITY_SOURCE='members'):
+            result = router.route_member_public_event(payload({
+                'type': 'message', 'channel': CHANNEL, 'channel_type': 'channel', 'user': 'UACTOR',
+            }))
+        self.assertEqual(result, {'status': 'community_source_pending'})
+        self.ingest.assert_not_called()
 
     def test_stale_or_missing_members_public_proof_queues_refresh_for_all_activity(self):
         events = [

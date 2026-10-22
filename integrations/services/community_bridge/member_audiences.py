@@ -168,6 +168,9 @@ def _save_attempt(row, status, *, pending=True):
     if status in {"conflict", "retry"}:
         row.enabled = False
     row.save(update_fields=("room_state", "audience_sync_pending", "enabled", "updated_at"))
+    if status in {"conflict", "retry", "cohort_changed"}:
+        from .observability import room
+        room(row, "held")
 
 
 def _execute(pk, prepared, *, reduction_only):
@@ -236,6 +239,8 @@ def _execute(pk, prepared, *, reduction_only):
         row.save(update_fields=("audience_generation", "audience_hash", "room_state",
                                 "enabled", "hold_reason", "updated_at"))
         _save_attempt(row, "applied", pending=bool(hold))
+        from .observability import room
+        room(row, "held" if hold else "audience_updated")
         return "held" if hold else "applied"
 
 

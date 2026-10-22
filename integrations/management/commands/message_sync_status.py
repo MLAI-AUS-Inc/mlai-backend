@@ -20,6 +20,9 @@ from integrations.services.message_sync.scheduler import eligible_states, safe_e
 from integrations.services.message_sync.discovery import KEY as DISCOVERY_KEY, due_discovery_grants
 from integrations.services.slack_open_requests import KEY as OPEN_KEY
 from integrations.services.message_sync.slack_client import provider_interval
+from integrations.services.community_bridge import community_source
+from integrations.services.community_bridge.community_source_codec import stamp
+from django.utils.dateparse import parse_datetime
 
 
 class Command(BaseCommand):
@@ -34,6 +37,11 @@ class Command(BaseCommand):
         parser.add_argument('--window-hours', type=int, default=None,
                             help='Use retained completed hour buckets instead (1–168).')
 
+        parser.add_argument("--community-source-cutoff", default=None,
+                            help="Explicit aware UTC cutoff for Community source observations.")
+        parser.add_argument("--finalize-community-source", action="store_true",
+                            help="Save a versioned source report receipt; changes no rollout flag.")
+
     def handle(self, *args, **options):
         enabled = bool(getattr(settings, 'MESSAGE_SYNC_ENABLED', False))
         if options['max_heartbeat_age'] < 1:
@@ -45,6 +53,15 @@ class Command(BaseCommand):
         if options['check'] and not enabled:
             self.stdout.write(json.dumps({'enabled': False}))
             return
+        cutoff_ns = None
+        if options["community_source_cutoff"] is not None:
+            try:
+                cutoff = parse_datetime(options["community_source_cutoff"])
+                cutoff_ns = stamp(cutoff)
+            except (TypeError, ValueError, OverflowError):
+                raise CommandError("--community-source-cutoff requires an aware ISO timestamp") from None
+        if options["finalize_community_source"] and cutoff_ns is None:
+            raise CommandError("--finalize-community-source requires an explicit cutoff")
         now = timezone.now()
         workers = BridgeWorkerHeartbeat.objects.all()
         if options['local_worker']:
@@ -136,6 +153,8 @@ class Command(BaseCommand):
             }
         result = {
             'enabled': enabled, 'checked_at': now.isoformat(), 'stale_lanes': stale,
+            'community_source': community_source.status(
+                cutoff_ns=cutoff_ns, finalize=options['finalize_community_source']),
             'provider_throughput': throughput,
             'public_dependency': public_dependency,
             'discovery': discovery, 'open_requests': opens, 'open_latency': latency,

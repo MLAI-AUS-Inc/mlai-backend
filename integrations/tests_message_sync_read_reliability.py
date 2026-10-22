@@ -2,6 +2,7 @@
 from contextlib import nullcontext
 from datetime import timedelta
 import json
+import uuid
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
@@ -257,14 +258,21 @@ class PublicReadActivityTests(SimpleTestCase):
         advance.assert_not_called()
 
     def test_inbox_takes_activity_state_lock_before_public_ingestion_channel_lock(self):
-        payload = {"team_id": "T1", "event": {"type": "message", "channel": "C1"}}
-        row = SimpleNamespace(encrypted_payload=json.dumps(payload), lease_expires_at=timezone.now() + timedelta(seconds=60), save=Mock())
+        from integrations.services.community_bridge import community_source
+        payload = {"api_app_id": "A1", "event_id": "Ev1", "team_id": "T1",
+                   "event": {"type": "message", "channel": "C1"}}
+        received_at, token = timezone.now(), uuid.uuid4()
+        row = SimpleNamespace(pk=1, app_id="A1", received_at=received_at, source_event_id="Ev1",
+                              encrypted_payload=json.dumps(payload),
+                              lease_expires_at=received_at + timedelta(seconds=60), save=Mock())
         order = []
-        with patch.object(inbox, "claim_inbox", return_value=(1, "lease")), patch.object(
+        with patch.object(inbox, "claim_inbox", return_value=(row.pk, token)), patch.object(
             inbox.transaction, "atomic", side_effect=nullcontext
         ), patch.object(inbox.BridgeSyncInbox.objects, "select_for_update") as receipt, patch.object(
             inbox, "expand_authorization_page", return_value=(payload, True)
-        ), patch("integrations.services.message_sync.member_callback_authority.callback_user_fence",
+        ), patch.object(community_source, "authenticated_callback",
+                        wraps=community_source.authenticated_callback) as authenticated, patch(
+            "integrations.services.message_sync.member_callback_authority.callback_user_fence",
                  side_effect=lambda _: (order.append("users") or nullcontext())
         ), patch.object(read_activity, "record_public_event", side_effect=lambda _: order.append("activity")), patch(
             "integrations.services.slack_dm_mirror.ingest_slack_dm_event", side_effect=lambda _: order.append("private")
@@ -274,6 +282,8 @@ class PublicReadActivityTests(SimpleTestCase):
         ):
             receipt.return_value.filter.return_value.first.return_value = row
             self.assertEqual(inbox.process_inbox_once(), 1)
+        authenticated.assert_called_once_with(payload, app_id=row.app_id, received_at=received_at,
+                                              inbox_id=row.pk, source_event_id=row.source_event_id)
         self.assertEqual(order, ["users", "hint", "activity", "private", "public"])
         self.assertEqual(row.encrypted_payload, "")
 

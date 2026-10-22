@@ -141,6 +141,12 @@ class PendingMemberCallbackDatabaseTests(MemberAccessFixture, TestCase):
         row = BridgeSyncInbox.objects.get()
         self.assertEqual((row.status, row.last_error_code), ('pending', 'member_audience_pending'))
         self.assertTrue(row.encrypted_payload)
+        self.due()
+        with override_settings(SLACK_MEMBER_CHANNELS_ENABLED=False):
+            self.assertEqual(inbox.process_inbox_once(), 0)
+        row.refresh_from_db()
+        self.assertEqual((row.status, row.last_error_code), ('pending', 'member_audience_pending'))
+        self.assertTrue(row.encrypted_payload)
         self.channel.slack_seen_at = timezone.now() - timedelta(seconds=301)
         self.channel.save(update_fields=('slack_seen_at',))
         self.due()
