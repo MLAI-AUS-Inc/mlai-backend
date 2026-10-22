@@ -8,7 +8,7 @@ from integrations.services.message_sync.public_repair import repair_observed_mes
 
 class PublicRepairTests(TransactionTestCase):
     def setUp(self):
-        self.channel = CommunityBridgeChannel.objects.create(slack_workspace_id="T1", slack_channel_id="C1",
+        self.channel = CommunityBridgeChannel.objects.create(audience="community", slack_workspace_id="T1", slack_channel_id="C1",
             destination_platform="buzz", destination_workspace_id="test.invalid", destination_channel_id="fixture")
         self.message = {"ts": "1700000000.000001", "user": "U1", "text": "original"}
         ingest_slack_event({"team_id": "T1", "event_id": "original", "event": {

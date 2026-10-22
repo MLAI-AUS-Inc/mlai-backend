@@ -520,6 +520,7 @@ jobs:
           integrations.tests_member_channel_maintenance_phase4a \
           integrations.tests_member_public_receipts_database_phase4a \
           integrations.tests_member_pending_intake_phase4a \
+          integrations.tests_message_sync_member_history_phase4b \
           integrations.tests_member_callback_authority_phase4a \
           integrations.tests_member_callback_authority_concurrency_phase4a \
           integrations.tests_message_sync_member_budgets \
@@ -735,6 +736,7 @@ jobs:
           integrations.tests_member_channel_maintenance_phase4a \
           integrations.tests_member_public_receipts_database_phase4a \
           integrations.tests_member_pending_intake_phase4a \
+          integrations.tests_message_sync_member_history_phase4b \
           integrations.tests_member_callback_authority_phase4a \
           integrations.tests_member_callback_authority_concurrency_phase4a \
           integrations.tests_message_sync_member_budgets \

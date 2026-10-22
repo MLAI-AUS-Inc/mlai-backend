@@ -23,7 +23,7 @@ from integrations.models import (
 )
 class CommunityBridgeThreadReconciliationTests(TestCase):
     def setUp(self):
-        self.channel = CommunityBridgeChannel.objects.create(
+        self.channel = CommunityBridgeChannel.objects.create(audience="community",
             slack_workspace_id="TMLAI",
             slack_channel_id="CGENERAL",
             slack_channel_name="general",

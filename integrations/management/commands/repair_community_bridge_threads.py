@@ -90,6 +90,9 @@ class Command(BaseCommand):
         )
         candidate_count = queryset.count()
         links = list(queryset[:limit])
+        from integrations.services.message_sync.member_history import reject_legacy_repair
+        for link in links:
+            reject_legacy_repair(link.channel)
         parent_destinations = self._parent_destinations(links)
         report = {
             "after_link_id": after_link_id,

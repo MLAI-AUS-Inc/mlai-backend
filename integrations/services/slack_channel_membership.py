@@ -80,6 +80,9 @@ def _locked(grant, authority, *, joined):
 def _pending(grant, channel_id, *, reduction):
     from .community_bridge.member_channels import mark_member_channels_pending
 
+    if reduction:
+        from .message_sync.member_history import invalidate_channel_history
+        invalidate_channel_history(grant.slack_workspace_id, channel_id)
     mark_member_channels_pending(
         grant.user_id, reason="membership_left" if reduction else "membership_joined",
         channel_ids=[channel_id], reduction=reduction,

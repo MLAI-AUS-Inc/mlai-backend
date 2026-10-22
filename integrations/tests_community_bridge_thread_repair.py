@@ -29,7 +29,7 @@ DELETE_EVENT = "44" * 32
 )
 class RepairCommunityBridgeThreadsTests(TestCase):
     def setUp(self):
-        self.channel = CommunityBridgeChannel.objects.create(
+        self.channel = CommunityBridgeChannel.objects.create(audience="community",
             slack_workspace_id="T123",
             slack_channel_id="C123",
             slack_channel_name="general",

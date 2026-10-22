@@ -133,6 +133,9 @@ class Command(BaseCommand):
         if not channels.exists():
             raise CommandError("No enabled MLAI Chat mappings matched the request")
 
+        from integrations.services.message_sync.member_history import reject_legacy_repair
+        for channel in channels:
+            reject_legacy_repair(channel)
         report = self._empty_report(apply_changes=apply_changes)
         remaining_roots = max_roots
         for channel in channels:

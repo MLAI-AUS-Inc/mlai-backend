@@ -22,7 +22,7 @@ class PublicHistoryTests(TransactionTestCase):
         self.addCleanup(clock.stop)
 
     def state(self, channel):
-        return ensure_state(CommunityBridgeChannel.objects.create(
+        return ensure_state(CommunityBridgeChannel.objects.create(audience="community",
             slack_workspace_id="T1", slack_channel_id=channel, destination_platform="buzz",
             destination_workspace_id="test.invalid", destination_channel_id=f"fixture-{channel}",
         ))

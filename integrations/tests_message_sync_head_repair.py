@@ -296,7 +296,7 @@ class HeadRepairPageIntegrationTests(SimpleTestCase):
     now = 1_800_000_000
 
     def test_public_head_persists_only_completed_upper_and_reuses_it_next_pass(self):
-        channel = SimpleNamespace(pk=1, slack_workspace_id="T1", slack_channel_id="C1",
+        channel = SimpleNamespace(pk=1, audience="community", slack_workspace_id="T1", slack_channel_id="C1",
                                   destination_platform="buzz", destination_workspace_id="relay", destination_channel_id="room",
                                   enabled=True)
         state = SimpleNamespace(public_channel=channel, public_channel_id=1, private_conversation_id=None,

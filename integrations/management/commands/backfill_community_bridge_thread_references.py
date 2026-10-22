@@ -55,6 +55,8 @@ class Command(BaseCommand):
             raise CommandError(
                 "An enabled, mapped public channel with edit synchronization is required"
             )
+        from integrations.services.message_sync.member_history import reject_legacy_repair
+        reject_legacy_repair(channel)
         started = timezone.now()
         messages = SlackBridgeClient.get_channel_history(
             channel_id=channel.slack_channel_id,

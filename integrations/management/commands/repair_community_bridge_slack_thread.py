@@ -77,6 +77,8 @@ class Command(BaseCommand):
             )
         except CommunityBridgeChannel.DoesNotExist as exc:
             raise CommandError("An enabled MLAI Chat mapping was not found") from exc
+        from integrations.services.message_sync.member_history import reject_legacy_repair
+        reject_legacy_repair(channel)
         if not channel.sync_replies or not channel.sync_deletes:
             raise CommandError("The mapping must enable reply and delete synchronization")
 

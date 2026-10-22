@@ -4,6 +4,7 @@ from django.test import SimpleTestCase, TestCase
 from django.contrib.auth import get_user_model
 from integrations.models import (
     CommunityBridgeChannel,
+    CommunityBridgeChannelAudience,
     CommunityBridgeMessageLink,
     CommunityBridgePlatform,
 )
@@ -83,6 +84,7 @@ class MessageReferenceAccessTests(TestCase):
         self.user = get_user_model().objects.create_user(email="reference@example.com")
         self.channel = CommunityBridgeChannel.objects.create(
             slack_channel_id="CREF",
+            audience=CommunityBridgeChannelAudience.COMMUNITY,
             destination_platform=CommunityBridgePlatform.BUZZ,
             destination_channel_id=CHANNEL_ID,
         )
