@@ -13,7 +13,7 @@ DISCORD_CHANNEL_URL_RE = re.compile(
 
 
 class Command(BaseCommand):
-    help = "Create or update a Slack community bridge destination mapping."
+    help = "Create or update a Slack-to-Discord mapping; MLAI Chat rooms use member sync."
 
     def add_arguments(self, parser):
         parser.add_argument("--slack-channel-id", required=True)
@@ -21,7 +21,7 @@ class Command(BaseCommand):
         parser.add_argument("--slack-workspace-id", default="")
         parser.add_argument(
             "--destination-platform",
-            choices=(CommunityBridgePlatform.DISCORD, CommunityBridgePlatform.BUZZ),
+            choices=(CommunityBridgePlatform.DISCORD,),
             default=CommunityBridgePlatform.DISCORD,
         )
         parser.add_argument("--destination-workspace-id", default="")
@@ -41,8 +41,12 @@ class Command(BaseCommand):
         slack_channel_name = str(options["slack_channel_name"] or "").strip()
         slack_workspace_id = str(options["slack_workspace_id"] or "").strip()
         destination = self._resolve_destination(options)
-        if destination["platform"] == CommunityBridgePlatform.BUZZ and not slack_workspace_id:
-            raise CommandError("--slack-workspace-id is required for MLAI Chat mappings.")
+        # call_command can bypass argparse choices; enforce the boundary here too.
+        if destination["platform"] != CommunityBridgePlatform.DISCORD:
+            raise CommandError("MLAI Chat mappings are managed by member sync and the channel admin actions.")
+        existing = CommunityBridgeChannel.objects.filter(slack_channel_id=slack_channel_id).first()
+        if existing is not None and existing.destination_platform != CommunityBridgePlatform.DISCORD:
+            raise CommandError("An existing MLAI Chat mapping cannot be replaced with Discord.")
 
         conflict = (
             CommunityBridgeChannel.objects.filter(
@@ -59,7 +63,9 @@ class Command(BaseCommand):
                 f"{conflict.slack_channel_id}."
             )
 
-        channel, created = CommunityBridgeChannel.objects.update_or_create(
+        channel, created = CommunityBridgeChannel.objects.filter(
+            destination_platform=CommunityBridgePlatform.DISCORD,
+        ).update_or_create(
             slack_channel_id=slack_channel_id,
             defaults={
                 "slack_workspace_id": slack_workspace_id,
