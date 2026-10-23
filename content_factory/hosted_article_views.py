@@ -58,7 +58,7 @@ class HostedArticlePublicationServiceView(APIView):
         return Response(hosted.publication_payload(publication))
 
 
-def _dispatch_hosted_publish(publication: HostedArticlePublication) -> dict:
+def _dispatch_hosted_publish(publication: HostedArticlePublication, reviewed_revision: str) -> dict:
     """Ask Content Factory to render, upload and live-check the site with this article."""
     remote = views._content_factory_remote_config()
     if not remote["enabled"]:
@@ -67,7 +67,8 @@ def _dispatch_hosted_publish(publication: HostedArticlePublication) -> dict:
     try:
         response = http_client.post(
             f"{remote['base_url']}/api/runs/{publication.run_id}/hosted-publish",
-            json={"domain": site.domain, "base_path": site.base_path, "publication_id": str(publication.pk)},
+            json={"domain": site.domain, "base_path": site.base_path, "publication_id": str(publication.pk),
+                  "reviewed_revision": reviewed_revision},
             headers=views._content_factory_headers(),
             timeout=(3, 15),
         )
@@ -104,16 +105,32 @@ class HostedArticlePublishView(APIView):
         return Response(hosted.publication_payload(publication))
 
     def post(self, request, run_id):
+        """Approve the reviewed revision exactly as the repository flow does, then publish it."""
+        from .article_review_views import check_approval_comments, record_review_approval, remote_review
+        from .portable_drafts import original_portable_run
         context, run, site, error = self._resolve(request, run_id)
         if error:
             return error
-        if run.workflow not in views.ARTICLE_WORKFLOWS:
-            return Response({"code": "not_an_article", "detail": "Only articles can be published."}, status=400)
+        if run.workflow not in views.ARTICLE_WORKFLOWS or not original_portable_run(run):
+            return Response({"code": "not_a_hosted_article", "detail": "Only articles written for your hosted blog can be published there."}, status=400)
+        if views._latest_review_ready_component_revision(run, context) is not None:
+            return Response({"code": "newer_revision", "detail": "A newer draft is ready. Open that revision before publishing."}, status=409)
+        data = request.data if isinstance(request.data, dict) else {}
+        review = remote_review(run)
+        if isinstance(review, Response):
+            return review
+        reviewed = str(data.get("reviewedRevision") or "")
+        if not reviewed or reviewed != str(review.get("revision") or "") or review.get("previewPending"):
+            return Response({"code": "review_changed", "detail": "The article changed since you reviewed it. Review it again before publishing."}, status=409)
+        blocked = check_approval_comments(run, data)
+        if blocked is not None:
+            return blocked
         try:
             publication = hosted.request_publication(site=site, run=run, user=getattr(context.profile, "user", None))
         except hosted.HostedPublishError as exc:
             return _error(exc)
-        dispatch = _dispatch_hosted_publish(publication)
+        record_review_approval(run, context, data)
+        dispatch = _dispatch_hosted_publish(publication, reviewed)
         if not dispatch["queued"]:
             hosted.record_progress(domain=site.domain, run_id=run.run_id,
                                    data={"status": "failed", "error_code": "hosted_dispatch_failed", "error": dispatch["error"]})

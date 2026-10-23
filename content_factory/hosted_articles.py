@@ -50,8 +50,13 @@ def normalized_domain(value) -> str:
     return domain[4:] if domain.startswith("www.") else domain
 
 
+def enabled() -> bool:
+    from django.conf import settings
+    return getattr(settings, "ARTICLES_HOSTED_SITES_ENABLED", False) is True
+
+
 def active_site(organization) -> Optional[HostedArticleSite]:
-    if organization is None:
+    if organization is None or not enabled():
         return None
     return HostedArticleSite.objects.filter(organization=organization, state=HostedArticleSite.State.ACTIVE).first()
 
@@ -224,3 +229,39 @@ def record_site_deployment(*, domain: str, data: dict) -> HostedArticleSite:
             fields.add("proxy_verified_at")
         site.save(update_fields=sorted(fields))
     return site
+
+
+def hosted_site_active(config) -> bool:
+    """True when this company's articles are published to an MLAI-hosted site, not its repository."""
+    return config is not None and active_site(getattr(config, "organization", None)) is not None
+
+
+def hosted_capabilities(config) -> dict:
+    """Hosted publishing fields for the capability projection; none while the rollout is off."""
+    if not enabled():
+        return {}
+    site = active_site(getattr(config, "organization", None)) if config is not None else None
+    if site is None:
+        return {"canPublishHostedArticle": False, "hostedSite": None}
+    return {"canPublishHostedArticle": True,
+            "hostedSite": {"state": site.state, "baseUrl": f"https://{site.domain}{site.base_path}",
+                           "proxyVerified": site.proxy_verified_at is not None}}
+
+
+def hosted_publish_step(run, config):
+    """The article run's publish step on a hosted site, or None for repository publishing."""
+    from .portable_drafts import original_portable_run
+    site = active_site(getattr(config, "organization", None)) if config is not None else None
+    if site is None or run is None or not original_portable_run(run):
+        return None
+    publication = site.publications.filter(run_id=run.run_id).first()
+    planned = f"https://{site.domain}{site.base_path}"
+    if publication is not None and publication.status == Status.LIVE:
+        url = publication_payload(publication)["liveUrl"]
+        return {"status": "complete", "label": "Open live article", "href": url, "intent": "", "summary": f"Live at {url}"}
+    if publication is not None and publication.status in {Status.PENDING, Status.RENDERING, Status.DEPLOYED}:
+        waiting = "Uploaded. Waiting for your blog to serve it." if publication.status == Status.DEPLOYED else "Publishing to your blog."
+        return {"status": "running", "label": "", "href": "", "intent": "", "summary": waiting}
+    failed = publication is not None and publication.status == Status.FAILED
+    return {"status": "ready", "label": "Retry publishing" if failed else "Publish article", "href": "", "intent": "hosted-publish",
+            "summary": (publication.error or "Publishing did not finish.") if failed else f"Publish it to your blog at {planned}"}
