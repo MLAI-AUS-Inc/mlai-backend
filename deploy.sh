@@ -1901,6 +1901,11 @@ if slugs != expected:
         unset meeting_room_api_key meeting_rooms_body
     fi
 
+    if [ "\$bridge_worker_enabled" = "1" ]; then
+        echo "🌉 Verifying durable worker before retiring the duplicate reconciler..."
+        python3 scripts/retire-bridge-reconciler.py
+    fi
+
     echo "🛠️ Verifying external Django admin assets..."
     admin_login_ok=0
     for attempt in \$(seq 1 12); do

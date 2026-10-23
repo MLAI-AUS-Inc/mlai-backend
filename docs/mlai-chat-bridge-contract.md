@@ -631,6 +631,19 @@ The separate Discord integration retains `upsert_discord_bridge_channel` with
 the existing Discord URL/ID arguments. It cannot create a MLAI Chat mapping or
 replace an existing Chat room with a Discord destination.
 
+The durable `bridge-worker` maintains history discovery and recovery itself.
+Its bounded history lane seeds at startup and every five seconds; a failed
+seeding turn is retried independently of history page progress. Deployment
+verifies the new container's enabled durable lanes with
+`message_sync_status --check --local-worker` before retiring the duplicate
+`bridge-reconciler`. An unproven or disabled worker prevents retirement.
+
+For this transition release, the retired service definition remains in the
+migration pause and rollback inventory, but is excluded from normal startup.
+Remove its definition and legacy command only after production confirms that
+no reconciler container remains and current worker health is good. This avoids
+leaving an orphan process behind when its Compose definition is deleted.
+
 After investigating an exhausted delivery, replay it without changing its
 idempotency identity:
 
