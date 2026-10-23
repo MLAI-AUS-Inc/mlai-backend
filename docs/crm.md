@@ -79,6 +79,58 @@ python manage.py crm_import_contacts PATH --consent granted|none [--consent-sour
 - **Counts reported:** `created`, `updated`, `unchanged`, `invalid`, `duplicate`, `suppressed` and `consent_granted`.
 - **Safe to re-run:** importing the same file twice changes nothing.
 
+## Blasts by SMS and WhatsApp
+
+Steps B6 and B7 of `mlai-chat/docs/mlai/CONTACTS_UI_PLAN_2026-10-23.md`. Event blasts can go out by SMS and WhatsApp through Twilio. Both channels are off until `CRM_SMS_ENABLED` / `CRM_WHATSAPP_ENABLED` are set.
+
+### Twilio setup (operator)
+
+1. In the Twilio console, confirm the WhatsApp-linked number can send SMS. If it can't, buy an Australian mobile number for SMS. Send from the numeric mobile number; use an alphanumeric "MLAI" sender only after registering it through Twilio.
+2. Create a Messaging Service and add the number. Turn on **Advanced Opt-Out** (the default keywords plus `PAUSE`). Set the service's incoming-message URL to `https://api.mlai.au/api/v1/crm/webhooks/twilio/sms-inbound/`. Put its `MG…` SID in `TWILIO_MESSAGING_SERVICE_SID`.
+3. Leave the WhatsApp sender's incoming-message URL on `…/api/content-factory/notification-webhooks/whatsapp/`. That handler keeps its research-automation behaviour and then passes every message to `crm.inbound`.
+4. Submit WhatsApp **Utility** templates in the Content Template Builder, with fixed wording around the variables and "Reply STOP to opt out." in the copy. Starters are in the plan.
+5. Run `python manage.py crm_sync_whatsapp_templates`. It upserts `MessageTemplate` rows by Content SID, refreshing name, body, category and approval, and never enables a template. New templates get every `{{n}}` slot as custom text.
+6. In Django admin, map each slot of an approved template to `first_name`, `display_name`, `event_name`, `event_start_local`, `event_url` or `custom`, then tick `enabled`. Re-running the sync keeps those mappings.
+7. Set `CRM_SMS_COST_PER_SEGMENT_AUD` and `CRM_WHATSAPP_COST_PER_MESSAGE_AUD` from current Twilio and Meta pricing, and adjust `CRM_SMS_DAILY_LIMIT` / `CRM_WHATSAPP_DAILY_LIMIT` (500 each by default) if needed.
+
+Status callbacks need no console setting: every message carries `StatusCallback=<DEFAULT_BACKEND_URL>/api/v1/crm/webhooks/twilio/status/`.
+
+### Sending (`crm/messaging.py`, `crm/twilio.py`)
+
+- The blast dispatcher creates `queued` `BlastDelivery` rows (with `address` in E.164) and calls `deliver_twilio_deliveries(blast, limit=…)` outside a transaction, `limit` being at most `CRM_TWILIO_SENDS_PER_TICK`.
+- Each row is claimed with `select_for_update(skip_locked=True)`, marked `submitting` and committed before the HTTP call.
+- The contact's `sms_status` or WhatsApp opt-in is re-read just before each call, so a STOP that arrived after queueing still wins (the row becomes `unsubscribed`). SMS also needs a number matching `CRM_SMS_ALLOWED_PREFIXES` (default `+614`).
+- **SMS body:** merge tags are rendered per person (`crm/merge_tags.py`), then `crm/sms.py` adds `MLAI: ` and `Reply STOP to opt out` and counts GSM-7 or UCS-2 segments into `segments`.
+- **WhatsApp:** sends only an approved, enabled template. Its slots are filled from merge-tag sources or the blast's custom text.
+- **Outcomes:**
+
+  | Twilio answer | Delivery status |
+  | --- | --- |
+  | 2xx with a SID | `sent`, SID in `provider_id` |
+  | 4xx | `failed`, Twilio's `code` in `error_code` |
+  | timeout, connection error or 5xx | `unknown` |
+
+  Nothing is retried. The Messages API has no idempotency key, so a retry could text someone twice. A person decides about `unknown` rows. A row left `submitting` for 15 minutes (a dispatcher that died mid-call) also becomes `unknown`.
+- **Caps:** `remaining_today(channel)` counts rows queued in the last 24 hours that may have reached Twilio. Rows over the cap, or on a disabled or unconfigured channel, stay `queued`.
+
+### Webhooks (`/api/v1/crm/webhooks/`)
+
+Both endpoints check `X-Twilio-Signature` against the URL rebuilt from `DEFAULT_BACKEND_URL`. An unsigned request gets 403; anything handled or ignored gets 200.
+
+| Path | Handles |
+| --- | --- |
+| `twilio/status/` | Updates the delivery by `MessageSid`. Order: queued < submitting < sent < delivered < read. `failed` and `undelivered` override `sent`, never `delivered` or `read`, and are final. Replays and unknown SIDs change nothing. |
+| `twilio/sms-inbound/` | SMS replies and keywords, answered with empty TwiML |
+
+### Replies and opt-outs (`crm/inbound.py`)
+
+- **Opt-out keywords:** the whole message, trimmed and case-insensitive: `STOP`, `STOPALL`, `UNSUBSCRIBE`, `CANCEL`, `END`, `QUIT` and `PAUSE`. Twilio's `OptOutType=STOP` counts too. Every contact with that `phone_e164` is opted out of that channel only (`sms_status=opted_out` or `whatsapp_opt_in=withdrawn`), with a `ContactConsentEvent` per contact.
+- **Opting back in:** `START` / `UNSTOP` turn back on only the channel they arrived on. SMS returns to `active` only for a textable number; WhatsApp becomes `granted` with source `whatsapp:inbound`. `JOIN` on WhatsApp also grants opt-in.
+- **Replies:** any other text becomes an `InboundMessage`, idempotent on the Twilio SID. It is linked to the contact and to the latest blast that reached them on that channel within 7 days. Messages from numbers no contact has are not kept.
+- WhatsApp's research-automation STOP handling is unchanged. A crm failure is logged and never changes that webhook's result.
+
+Tests: `crm.tests.test_messaging_unit` runs without a database; `crm.tests.test_messaging_database` runs in the CI PostgreSQL job.
+
 ## Migration
 
 `crm.0001_initial` is additive. It creates the twelve tables above and touches no existing table. Like every migration it needs explicit approval and the `APPROVED_MIGRATION_PLAN_SHA256` cycle before deployment (see `README.md`). Tests:

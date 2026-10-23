@@ -112,6 +112,9 @@ jobs:
     - name: Check event discount provider and worker boundaries without database access
       run: python scripts/test_without_database.py tests.test_luma_event_discounts_unit tests.test_event_discount_worker
 
+    - name: Check CRM messaging rules without database access
+      run: python scripts/test_without_database.py crm.tests.test_messaging_unit
+
     - name: Check CRM Luma guest parsing and CSV import rules without database access
       run: python scripts/test_without_database.py crm.tests.test_luma_guests_unit crm.tests.test_contact_import_unit crm.tests.test_phones_unit
 
@@ -663,6 +666,9 @@ jobs:
 
     - name: Run Pulse source cache and Linear cursor PostgreSQL tests
       run: python manage.py test startup_updates.tests_source_cache_database --verbosity 2
+
+    - name: Verify CRM messaging on PostgreSQL
+      run: python manage.py test crm.tests.test_messaging_database --verbosity 2
 
     - name: Verify CRM Luma guest sync and contact import on PostgreSQL
       run: python manage.py test crm.tests.test_contact_store_database --verbosity 2

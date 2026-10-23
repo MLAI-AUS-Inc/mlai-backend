@@ -1182,6 +1182,30 @@ TWILIO_WHATSAPP_TOPIC_ANALYTICS_CONTENT_SID = os.getenv('TWILIO_WHATSAPP_TOPIC_A
 # {{1}} title, {{2}} domain, {{3}} expanded founder-tools review URL). The fixed
 # template copy must include "Reply STOP to opt out.".
 TWILIO_WHATSAPP_REVIEW_CONTENT_SID = os.getenv('TWILIO_WHATSAPP_REVIEW_CONTENT_SID', '')
+# Contacts blasts by SMS and WhatsApp (crm app); both channels stay off until
+# enabled. SMS goes through a Messaging Service (MG..., Advanced Opt-Out on)
+# that holds MLAI's Twilio number. WhatsApp reuses TWILIO_WHATSAPP_FROM and
+# sends approved Content templates only.
+TWILIO_MESSAGING_SERVICE_SID = os.getenv('TWILIO_MESSAGING_SERVICE_SID', '').strip()
+CRM_SMS_ENABLED = _env_is_true('CRM_SMS_ENABLED', False)
+CRM_WHATSAPP_ENABLED = _env_is_true('CRM_WHATSAPP_ENABLED', False)
+# Comma-separated E.164 prefixes SMS may go to; +614 is Australian mobiles.
+CRM_SMS_ALLOWED_PREFIXES = [
+    prefix.strip()
+    for prefix in os.getenv('CRM_SMS_ALLOWED_PREFIXES', '+614').split(',')
+    if prefix.strip()
+]
+# Composer cost estimates in AUD, as decimal strings. Check current Twilio
+# and Meta pricing; it changes.
+CRM_SMS_COST_PER_SEGMENT_AUD = os.getenv('CRM_SMS_COST_PER_SEGMENT_AUD', '0').strip() or '0'
+CRM_WHATSAPP_COST_PER_MESSAGE_AUD = (
+    os.getenv('CRM_WHATSAPP_COST_PER_MESSAGE_AUD', '0').strip() or '0'
+)
+# Safety caps per channel over a rolling 24 hours, and Twilio sends per
+# blast dispatch tick.
+CRM_SMS_DAILY_LIMIT = max(0, int(os.getenv('CRM_SMS_DAILY_LIMIT', '500')))
+CRM_WHATSAPP_DAILY_LIMIT = max(0, int(os.getenv('CRM_WHATSAPP_DAILY_LIMIT', '500')))
+CRM_TWILIO_SENDS_PER_TICK = max(1, int(os.getenv('CRM_TWILIO_SENDS_PER_TICK', '200')))
 NOTIFICATION_CHANNEL_VERIFY_MAX_AGE_SECONDS = int(
     os.getenv('NOTIFICATION_CHANNEL_VERIFY_MAX_AGE_SECONDS', str(3 * 24 * 60 * 60))
 )
