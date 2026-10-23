@@ -133,7 +133,7 @@ class HostedArticlePublishView(APIView):
         dispatch = _dispatch_hosted_publish(publication, reviewed)
         if not dispatch["queued"]:
             hosted.record_progress(domain=site.domain, run_id=run.run_id,
-                                   data={"status": "failed", "error_code": "hosted_dispatch_failed", "error": dispatch["error"]})
+                                   data={"status": "failed", "failure_reason": "hosted_dispatch_failed", "error": dispatch["error"]})
             publication.refresh_from_db()
             logger.warning("hosted_publish_dispatch_failed run_id=%s", run.run_id)
             return Response(hosted.publication_payload(publication), status=status.HTTP_503_SERVICE_UNAVAILABLE)

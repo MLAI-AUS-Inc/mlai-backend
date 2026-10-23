@@ -64,7 +64,7 @@ class HostedArticlePublication(models.Model):
     article = models.JSONField(default=dict, blank=True)
     written_article = models.ForeignKey("content_factory.WrittenArticle", null=True, blank=True, on_delete=models.SET_NULL, related_name="hosted_publications")
     requested_by = models.ForeignKey(settings.AUTH_USER_MODEL, null=True, blank=True, on_delete=models.SET_NULL, related_name="hosted_article_publications")
-    error_code = models.CharField(max_length=100, blank=True, default="")
+    failure_reason = models.CharField(max_length=100, blank=True, default="")
     error = models.CharField(max_length=500, blank=True, default="")
     deployed_at = models.DateTimeField(null=True, blank=True)
     live_verified_at = models.DateTimeField(null=True, blank=True)

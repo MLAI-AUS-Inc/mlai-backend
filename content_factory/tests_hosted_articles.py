@@ -90,7 +90,7 @@ class HostedArticleTests(TestCase):
         response, _ = self.publish(dispatch_status=500)
         self.assertEqual(response.status_code, 503)
         self.assertEqual(response.data["status"], "failed")
-        self.assertEqual(response.data["errorCode"], "hosted_dispatch_failed")
+        self.assertEqual(response.data["failureReason"], "hosted_dispatch_failed")
 
     def test_unfinished_articles_and_sites_without_hosting_cannot_publish(self):
         self.run.status = "running"
@@ -151,7 +151,7 @@ class HostedArticleTests(TestCase):
         hosted.request_publication(site=self.site, run=self.run, user=self.user)
         self.assertEqual([row["status"] for row in hosted.site_render_state(self.site)["publications"]], ["pending"])
         self.progress(status="rendering")
-        self.progress(status="failed", error_code="cloudflare_refused")
+        self.progress(status="failed", failure_reason="cloudflare_refused")
         self.assertEqual(len(hosted.site_render_state(self.site)["publications"]), 1)
 
     def test_service_endpoints_need_the_service_key(self):

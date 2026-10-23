@@ -73,7 +73,7 @@ def publication_payload(publication: HostedArticlePublication) -> dict:
         "liveUrl": live_url if publication.status == Status.LIVE else "",
         "plannedUrl": live_url,
         "revisionDigest": publication.revision_digest,
-        "errorCode": publication.error_code,
+        "failureReason": publication.failure_reason,
         "error": publication.error,
         "deployedAt": publication.deployed_at.isoformat() if publication.deployed_at else None,
         "liveVerifiedAt": publication.live_verified_at.isoformat() if publication.live_verified_at else None,
@@ -114,8 +114,8 @@ def request_publication(*, site: HostedArticleSite, run, user) -> HostedArticleP
             raise HostedPublishError("hosted_publication_withdrawn", "This article was taken down. Publish a new revision instead.")
         publication.status = Status.PENDING
         publication.requested_by = user
-        publication.error_code = publication.error = ""
-        publication.save(update_fields=["status", "requested_by", "error_code", "error", "updated_at"])
+        publication.failure_reason = publication.error = ""
+        publication.save(update_fields=["status", "requested_by", "failure_reason", "error", "updated_at"])
     return publication
 
 
@@ -178,12 +178,12 @@ def record_progress(*, domain: str, run_id: str, data: dict) -> HostedArticlePub
             fields |= {"article", "slug", "revision_digest"}
         publication.status = target
         if target == Status.FAILED:
-            publication.error_code = str(data.get("error_code") or "hosted_publish_failed")[:100]
+            publication.failure_reason = str(data.get("failure_reason") or "hosted_publish_failed")[:100]
             publication.error = str(data.get("error") or "Publishing did not finish.")[:500]
-            fields |= {"error_code", "error"}
+            fields |= {"failure_reason", "error"}
         elif target in {Status.RENDERING, Status.DEPLOYED, Status.LIVE}:
-            publication.error_code = publication.error = ""
-            fields |= {"error_code", "error"}
+            publication.failure_reason = publication.error = ""
+            fields |= {"failure_reason", "error"}
         if target in {Status.DEPLOYED, Status.LIVE} and not publication.slug:
             raise HostedPublishError("hosted_article_invalid", "A deployed publication needs its rendered article.", status=400)
         if target in {Status.DEPLOYED, Status.LIVE}:
