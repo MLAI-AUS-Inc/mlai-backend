@@ -75,8 +75,8 @@ class DiscoveryWorkerCadenceTests(IsolatedAsyncioTestCase):
         run.assert_awaited_once()
         legacy.assert_not_awaited()
 
-    async def test_headless_loop_always_sleeps_even_when_no_grant_is_due(self):
-        for enabled, expected in ((True, 1.0), (False, 5.0)):
+    async def test_paused_headless_loop_keeps_bounded_reduction_cadence(self):
+        for enabled, expected in ((False, 5.0),):
             with self.subTest(enabled=enabled), override_settings(MESSAGE_SYNC_ENABLED=enabled):
                 events = []
 
@@ -99,6 +99,7 @@ class DiscoveryWorkerCadenceTests(IsolatedAsyncioTestCase):
                     await worker._run_discovery_loop()
                 self.assertEqual(events, ["revoke", "claim", expected] * 3)
 
+    @override_settings(MESSAGE_SYNC_ENABLED=False)
     async def test_discord_maintenance_retries_bans_before_discovery(self):
         events = []
 

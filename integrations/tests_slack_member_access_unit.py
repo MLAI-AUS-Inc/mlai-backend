@@ -84,17 +84,17 @@ class PublicMemberConsentTests(SimpleTestCase):
         self.grant.consent_version = PRIVATE_CHANNEL_CONSENT
         self.assertFalse(public_channels_enabled(self.grant, authority=authority))
 
-    def test_inventory_extension_is_flag_gated_and_preserves_old_metadata_consent(self):
+    def test_inventory_extension_obeys_processing_pause_and_preserves_metadata_consent(self):
         authority = object()
         with patch.object(inventory, "has_metadata_consent", return_value=False), patch(
             "integrations.services.slack_chat_catalog.public_channels_enabled", return_value=True,
         ) as eligibility:
-            with override_settings(SLACK_MEMBER_CHANNELS_ENABLED=False):
+            with override_settings(MESSAGE_SYNC_ENABLED=False):
                 self.assertFalse(inventory.public_inventory_allowed(self.grant, self.grant.connection, authority))
                 eligibility.assert_not_called()
-            with override_settings(SLACK_MEMBER_CHANNELS_ENABLED=True):
+            with override_settings(MESSAGE_SYNC_ENABLED=True, SLACK_OWNER_INVENTORY_ENABLED=True):
                 self.assertTrue(inventory.public_inventory_allowed(self.grant, self.grant.connection, authority))
-        with override_settings(SLACK_MEMBER_CHANNELS_ENABLED=False), patch.object(
+        with override_settings(MESSAGE_SYNC_ENABLED=False), patch.object(
             inventory, "has_metadata_consent", return_value=True,
         ):
             self.assertTrue(inventory.public_inventory_allowed(self.grant, self.grant.connection, authority))
@@ -333,7 +333,7 @@ class MemberClientScopeTests(SimpleTestCase):
         with self.assertRaises(access.MemberAccessDenied):
             access.member_client(self.grant)
 
-    @override_settings(SLACK_MEMBER_CHANNELS_ENABLED=False)
+    @override_settings(MESSAGE_SYNC_ENABLED=False)
     def test_disabled_lane_never_selects_or_creates_a_client(self):
         self.assertIsNone(access.reader_for_channel("TTEST", "CTEST"))
         self.assertIsNone(access.poster_for_author("a" * 64, "TTEST", "CTEST"))

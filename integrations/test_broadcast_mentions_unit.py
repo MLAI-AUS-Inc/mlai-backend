@@ -84,8 +84,9 @@ class BroadcastDeliveryTests(unittest.TestCase):
             "channel": {"slack_workspace_id": "TMLAI"},
         }
         self.role = self.enterContext(patch("community_chat.permissions.device_chat_role", return_value="member"))
-        self.client = self.enterContext(patch("integrations.services.community_bridge.slack.SlackBridgeClient.get_client"))
-        self.client.return_value.conversations_info.return_value = {
+        self.bot = self.enterContext(patch("integrations.services.community_bridge.slack.SlackBridgeClient.get_client", side_effect=AssertionError("No bot read")))
+        self.client = Mock()
+        self.client.conversations_info.return_value = {
             "ok": True, "channel": {"id": "CGENERAL", "is_general": True, "num_members": 5},
         }
         self.identity = self.enterContext(patch(
@@ -93,55 +94,62 @@ class BroadcastDeliveryTests(unittest.TestCase):
         ))
 
     def test_sender_metadata_cannot_grant_admin_override(self):
-        self.client.return_value.conversations_info.return_value["channel"]["is_general"] = False
+        self.client.conversations_info.return_value["channel"]["is_general"] = False
         with self.assertRaises(BroadcastPermissionDenied):
-            prepare_slack_broadcasts(self.delivery, "@everyone")
+            prepare_slack_broadcasts(self.delivery, "@everyone", client=self.client)
         self.role.assert_called_once_with("ab" * 32)
 
     def test_general_identity_comes_from_slack_not_a_client_label(self):
         self.delivery["channel"]["slack_channel_name"] = "renamed-general"
-        self.assertEqual(prepare_slack_broadcasts(self.delivery, "@everyone"), "<!everyone>")
-        self.client.return_value.conversations_info.assert_called_once_with(channel="CGENERAL", include_num_members=True)
+        self.assertEqual(prepare_slack_broadcasts(self.delivery, "@everyone", client=self.client), "<!everyone>")
+        self.client.conversations_info.assert_called_once_with(channel="CGENERAL", include_num_members=True)
 
     def test_live_admin_can_notify_any_channel(self):
         self.role.return_value = "admin"
-        self.client.return_value.conversations_info.return_value["channel"]["is_general"] = False
-        self.assertEqual(prepare_slack_broadcasts(self.delivery, "@everyone @here"), "<!channel> <!here>")
+        self.client.conversations_info.return_value["channel"]["is_general"] = False
+        self.assertEqual(prepare_slack_broadcasts(self.delivery, "@everyone @here", client=self.client), "<!channel> <!here>")
 
     def test_linked_slack_guest_cannot_everyone(self):
         self.identity.return_value = {"slack_user_id": "UGUEST"}
-        self.client.return_value.users_info.return_value = {
+        self.client.users_info.return_value = {
             "ok": True, "user": {"id": "UGUEST", "is_restricted": True},
         }
         with self.assertRaises(BroadcastPermissionDenied):
-            prepare_slack_broadcasts(self.delivery, "@everyone")
+            prepare_slack_broadcasts(self.delivery, "@everyone", client=self.client)
 
     def test_wrong_channel_response_fails_closed(self):
-        self.client.return_value.conversations_info.return_value["channel"]["id"] = "COTHER"
+        self.client.conversations_info.return_value["channel"]["id"] = "COTHER"
         with self.assertRaises(RuntimeError):
-            prepare_slack_broadcasts(self.delivery, "@channel")
+            prepare_slack_broadcasts(self.delivery, "@channel", client=self.client)
 
     def test_reply_and_edit_markup_never_broadcasts_or_queries_permissions(self):
         self.delivery["source_parent_message_id"] = "thread-id"
-        self.assertEqual(prepare_slack_broadcasts(self.delivery, "<!channel>"), "@channel")
+        self.assertEqual(prepare_slack_broadcasts(self.delivery, "<!channel>", client=self.client), "@channel")
         self.delivery["source_parent_message_id"] = ""
         self.delivery["delivery_type"] = "edit"
-        self.assertEqual(prepare_slack_broadcasts(self.delivery, "<!everyone>"), "@everyone")
+        self.assertEqual(prepare_slack_broadcasts(self.delivery, "<!everyone>", client=self.client), "@everyone")
         self.role.assert_not_called()
-        self.client.assert_not_called()
+        self.assertEqual(self.client.mock_calls, [])
+        self.bot.assert_not_called()
 
     def test_literals_and_non_chat_origins_do_not_query_account_authority(self):
-        self.assertEqual(prepare_slack_broadcasts(self.delivery, "`@channel`"), "`@channel`")
+        self.assertEqual(prepare_slack_broadcasts(self.delivery, "`@channel`", client=self.client), "`@channel`")
         self.delivery["source_platform"] = "slack"
-        self.assertEqual(prepare_slack_broadcasts(self.delivery, "@channel"), "@channel")
+        self.assertEqual(prepare_slack_broadcasts(self.delivery, "@channel", client=self.client), "@channel")
         self.role.assert_not_called()
-        self.client.assert_not_called()
+        self.assertEqual(self.client.mock_calls, [])
+        self.bot.assert_not_called()
 
     def test_member_capability_advertises_slack_default(self):
         from community_chat.permissions import role_capabilities
         capabilities = role_capabilities("member")
         self.assertTrue(capabilities["can_mention_channel"])
         self.assertFalse(capabilities["can_manage_channels"])
+
+    def test_broadcast_cannot_implicitly_acquire_bot_client(self):
+        with self.assertRaisesRegex(RuntimeError, "current member reader"):
+            prepare_slack_broadcasts(self.delivery, "@channel")
+        self.bot.assert_not_called()
 
 
 class BroadcastWireLiteralTests(unittest.TestCase):

@@ -1,3 +1,6 @@
+> Historical rollout document. The permanent implementation supersedes its
+> bot/both switches and comparison finalizer; see [current operations](slack-member-permanent-operations.md).
+
 # Phase 6: Community source comparison and reader fallback
 
 This implements the existing `SLACK_COMMUNITY_SOURCE` modes without adding a migration, consent version, Slack scope or configuration switch. It does not change production settings, certify a live canary, start an observation window or authorize bot retirement. Release and activation require the owner's separate approvals.

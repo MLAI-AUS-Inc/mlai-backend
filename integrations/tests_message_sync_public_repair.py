@@ -1,22 +1,43 @@
 """Source-state repair preserves newer callbacks and partial-list uncertainty."""
-from django.test import TransactionTestCase
+from django.test import TransactionTestCase, override_settings
 from django.utils import timezone
 from integrations.models import CommunityBridgeChannel, CommunityBridgeDelivery
 from integrations.services.community_bridge.store import ingest_slack_event
 from integrations.services.message_sync.public_repair import repair_observed_message
 
 
-class PublicRepairTests(TransactionTestCase):
+from integrations.tests_message_sync_member_history_phase4b import Fixture, SETTINGS
+from integrations.services.message_sync import member_history
+from integrations.services.message_sync.scheduler import schedule_job, claim_job, finish_job
+from integrations.services import slack_dm_mirror as dm
+
+
+@override_settings(**SETTINGS)
+class PublicRepairTests(Fixture, TransactionTestCase):
     def setUp(self):
-        self.channel = CommunityBridgeChannel.objects.create(audience="community", slack_workspace_id="T1", slack_channel_id="C1",
-            destination_platform="buzz", destination_workspace_id="test.invalid", destination_channel_id="fixture")
+        super().setUp()
+        self.channel.audience = "community"
+        self.channel.save()
+        self.state.public_channel = self.channel
+        self.repair_number = 0
         self.message = {"ts": "1700000000.000001", "user": "U1", "text": "original"}
-        ingest_slack_event({"team_id": "T1", "event_id": "original", "event": {
-            **self.message, "type": "message", "channel": "C1", "channel_type": "channel",
+        ingest_slack_event({"team_id": "TTEST", "event_id": "original", "event": {
+            **self.message, "type": "message", "channel": "CROOM", "channel_type": "channel",
         }})
 
     def repair(self, **values):
-        repair_observed_message(self.channel, {**self.message, **values}, read_started_at=timezone.now())
+        self.fenced_repair({**self.message, **values}, timezone.now())
+
+    def fenced_repair(self, message, started):
+        self.repair_number += 1
+        schedule_job(self.state, "thread", source_object_key=str(self.repair_number))
+        lease = claim_job(kinds=["thread"])
+        self.assertIsNotNone(lease)
+        def page(bound, state, **kwargs):
+            repair_observed_message(state.public_channel, message, read_started_at=started)
+            finish_job(bound, checkpoint=bound.checkpoint, complete=True)
+        member_history._community_attempt(lease, self.state, page,
+            dm._capture_slack_grant_api_authority(self.a, refresh_token=False))
 
     def test_changed_content_without_edited_timestamp_repairs_once_and_can_change_back(self):
         self.repair(text="updated")
@@ -27,11 +48,11 @@ class PublicRepairTests(TransactionTestCase):
 
     def test_callback_newer_than_source_read_wins(self):
         started = timezone.now()
-        ingest_slack_event({"team_id": "T1", "event_id": "newer-callback", "event": {
-            "type": "message", "subtype": "message_changed", "channel": "C1", "channel_type": "channel",
+        ingest_slack_event({"team_id": "TTEST", "event_id": "newer-callback", "event": {
+            "type": "message", "subtype": "message_changed", "channel": "CROOM", "channel_type": "channel",
             "message": {**self.message, "text": "newer"}, "event_ts": "1700000001.000001",
         }})
-        repair_observed_message(self.channel, self.message, read_started_at=started)
+        self.fenced_repair(self.message, started)
         self.assertEqual(CommunityBridgeDelivery.objects.filter(delivery_type="edit").count(), 1)
 
     def test_partial_reaction_users_add_known_users_without_removing_omitted_users(self):

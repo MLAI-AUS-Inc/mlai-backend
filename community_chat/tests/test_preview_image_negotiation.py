@@ -144,8 +144,16 @@ class PreviewImageNegotiationTests(SimpleTestCase):
             self.assertEqual(response["Cache-Control"], "private, no-store")
 
 
-@override_settings(SLACK_BRIDGE_BOT_TOKEN="synthetic-test-token")
 class SlackFileBudgetTests(SimpleTestCase):
+    def setUp(self):
+        from unittest.mock import Mock
+        cache.clear()
+        self.addCleanup(cache.clear)
+        self.read = Mock(return_value={"ok": True, "file": {"id": "F123"}})
+
+    def info(self):
+        return _slack_file_info("F123", read=self.read, cache_scope="current-member")
+
     def test_wait_reason_is_fixed_and_survives_cached_transport_failure(self):
         from community_chat import slack_file_previews as previews
         for reason in ("private URL or token", {"untrusted": "value"}, ["transport"], None):
@@ -158,87 +166,42 @@ class SlackFileBudgetTests(SimpleTestCase):
 
     def test_provider_rate_limit_reason_is_retained_on_cache_hit(self):
         from slack_sdk.errors import SlackApiError
-        with patch("community_chat.slack_file_previews.SlackBridgeClient.get_client") as client:
-            client.return_value.files_info.side_effect = SlackApiError("synthetic", response={"error": "ratelimited"})
-            for _ in range(2):
-                with self.assertRaises(SlackFilePreviewDeferred) as caught:
-                    _slack_file_info("F123")
-                self.assertEqual(caught.exception.reason, "upstream_rate_limit")
-            self.assertEqual(client.return_value.files_info.call_count, 1)
+        self.read.side_effect = SlackApiError("synthetic", response={"error": "ratelimited"})
+        for _ in range(2):
+            with self.assertRaises(SlackFilePreviewDeferred) as caught:
+                self.info()
+            self.assertEqual(caught.exception.reason, "upstream_rate_limit")
+        self.assertEqual(self.read.call_count, 1)
 
-    def setUp(self):
-        cache.clear()
-
-    def tearDown(self):
-        cache.clear()
-
-    def test_files_info_uses_documented_shared_tier_four_budget(self):
+    def test_files_info_uses_shared_tier_four_budget(self):
         self.assertEqual(provider_interval("files.info"), 0.6)
 
-    def test_budget_deferral_is_not_permission_failure_or_token_fallback(self):
-        with patch(
-            "community_chat.slack_file_previews.SlackBridgeClient.get_client"
-        ) as client, patch(
-            "community_chat.slack_file_previews._authorized_private_file"
-        ) as private:
-            client.return_value.files_info.side_effect = BudgetDeferred(3)
-            with self.assertRaises(SlackFilePreviewDeferred) as error:
-                _authorized_file("F123")
-            self.assertEqual(error.exception.retry_after, 3)
-            self.assertEqual(error.exception.reason, "shared_budget")
-            private.assert_not_called()
-
     def test_deferred_metadata_is_not_cached_and_recovers(self):
-        with patch(
-            "community_chat.slack_file_previews.SlackBridgeClient.get_client"
-        ) as client:
-            client.return_value.files_info.side_effect = [
-                BudgetDeferred(1),
-                {"ok": True, "file": {"id": "F123"}},
-            ]
-            with self.assertRaises(SlackFilePreviewDeferred):
-                _slack_file_info("F123")
-            self.assertEqual(_slack_file_info("F123")["id"], "F123")
-            self.assertEqual(_slack_file_info("F123")["id"], "F123")
-            self.assertEqual(client.return_value.files_info.call_count, 2)
+        self.read.side_effect = [BudgetDeferred(3), {"ok": True, "file": {"id": "F123"}}]
+        with self.assertRaises(SlackFilePreviewDeferred) as caught:
+            self.info()
+        self.assertEqual(caught.exception.reason, "shared_budget")
+        self.assertEqual(caught.exception.retry_after, 3)
+        self.assertEqual(self.info()["id"], "F123")
+        self.assertEqual(self.info()["id"], "F123")
+        self.assertEqual(self.read.call_count, 2)
 
     def test_overlapping_metadata_reads_wait_for_one_provider_call(self):
-        with patch("community_chat.slack_file_previews.SlackBridgeClient.get_client") as client:
-            def read(**kwargs):
-                with self.assertRaises(SlackFilePreviewDeferred):
-                    _slack_file_info("F123")
-                return {"ok": True, "file": {"id": "F123"}}
-            client.return_value.files_info.side_effect = read
-            self.assertEqual(_slack_file_info("F123")["id"], "F123")
-            self.assertEqual(client.return_value.files_info.call_count, 1)
-
-    def test_network_timeout_is_retriable_and_releases_metadata_lock_after_cooldown(self):
-        with patch("time.time", return_value=1000) as clock, patch("community_chat.slack_file_previews.SlackBridgeClient.get_client") as client:
-            client.return_value.files_info.side_effect = [TimeoutError(), {"ok": True, "file": {"id": "F123"}}]
+        def read(**kwargs):
             with self.assertRaises(SlackFilePreviewDeferred):
-                _slack_file_info("F123")
-            clock.return_value = 1016
-            self.assertEqual(_slack_file_info("F123")["id"], "F123")
+                self.info()
+            return {"ok": True, "file": {"id": "F123"}}
+        self.read.side_effect = read
+        self.assertEqual(self.info()["id"], "F123")
+        self.assertEqual(self.read.call_count, 1)
 
-    def test_owner_metadata_participates_in_user_app_workspace_budget(self):
-        with patch(
-            "community_chat.slack_file_previews.budgeted_client"
-        ) as budget, patch(
-            "community_chat.slack_file_previews.user_app_id", return_value="APRIVATE"
-        ):
-            budget.return_value.files_info.return_value = {
-                "ok": True,
-                "file": {"id": "F123"},
-            }
-            _slack_file_info(
-                "F123",
-                access_token="synthetic-user-token",
-                workspace_id="T123",
-                cache_scope="user:123",
-            )
-            self.assertEqual(
-                budget.call_args.kwargs, {"workspace_id": "T123", "app_id": "APRIVATE"}
-            )
+    def test_network_timeout_releases_metadata_lock_after_cooldown(self):
+        self.read.side_effect = [TimeoutError(), {"ok": True, "file": {"id": "F123"}}]
+        with patch("time.time", return_value=1000) as clock:
+            with self.assertRaises(SlackFilePreviewDeferred):
+                self.info()
+            clock.return_value = 1016
+            self.assertEqual(self.info()["id"], "F123")
 
 
 class SlackImageRenditionTests(SimpleTestCase):

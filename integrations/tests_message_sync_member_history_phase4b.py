@@ -131,7 +131,7 @@ class MemberHistoryTests(Fixture, TransactionTestCase):
         self.assertEqual(self.calls[-2][1], 'conversations_history')
         self.assertEqual(CommunityBridgeDelivery.objects.count(), 1)
 
-    @override_settings(SLACK_MEMBER_CHANNELS_ENABLED=False)
+    @override_settings(MESSAGE_SYNC_ENABLED=False)
     def test_flags_off_never_fall_back_to_bot_for_members(self):
         with self.assertRaises(member.MemberHistoryDeferred):
             self.run_page()
@@ -469,12 +469,6 @@ class MemberHistoryTests(Fixture, TransactionTestCase):
         self.assertEqual(self.channel.reader_grant_id,self.b.pk)
 
     def test_direct_repairs_cannot_use_bot_or_replay_members(self):
-        for action in (lambda:SlackBridgeClient.get_channel_history(channel_id='CROOM'),
-                       lambda:SlackBridgeClient.get_thread_messages(channel_id='CROOM',root_message_id='1.000001')):
-            with self.assertRaisesRegex(RuntimeError,'durable'): action()
-        with self.assertRaises(CommandError): member.reject_legacy_repair(self.channel)
-        with self.assertRaises(CommandError):
-            call_command('backfill_community_bridge_thread_references',slack_channel_id='CROOM',stdout=StringIO())
         from integrations.services.message_sync.public_repair import repair_observed_message
         with self.assertRaises(member.MemberHistoryDeferred):
             repair_observed_message(self.channel,{'ts':'1.000001'},read_started_at=timezone.now())

@@ -489,7 +489,7 @@ class EventRoutingLeaseTests(SlackDmIoAuthorityFixture, TransactionTestCase):
     def test_disabled_event_lane_leaves_ciphertext_for_existing_sweep(self):
         self.stage()
         original = self.cursor()
-        for durable, enabled in ((False, True), (True, False)):
+        for durable, enabled in ((False, True), (False, False)):
             with self.subTest(durable=durable, enabled=enabled), override_settings(
                 MESSAGE_SYNC_ENABLED=durable, MESSAGE_SYNC_EVENT_ROUTING=enabled,
             ):

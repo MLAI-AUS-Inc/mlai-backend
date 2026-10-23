@@ -780,12 +780,13 @@ def _wire(row, channel, actor, client, info, *, identity_key=SLACK_STAMP):
                 (payload.get("metadata") or {}).get("slack_mention_tags") or [],
             )
             if ids:
-                from integrations.services.slack_mentions import validate_mention_users
+                from integrations.services.slack_mentions import validate_mention_users, _key as mention_key
+
+                if "users:read" not in client.authority.scopes:
+                    raise MemberDeliveryUnavailable("mention_scope_unavailable")
 
                 class Mentions:
                     def users_info(self, **options):
-                        if "users:read" not in client.authority.scopes:
-                            raise MemberDeliveryUnavailable("mention_scope_unavailable")
                         # users.info has no channel argument. Transport remains
                         # in this exact current channel/lease authority.
                         return dm._invoke_slack_with_locked_connection(
@@ -797,7 +798,7 @@ def _wire(row, channel, actor, client, info, *, identity_key=SLACK_STAMP):
                         )
 
                 validate_mention_users(
-                    Mentions(), ids, channel.slack_workspace_id, scope="member"
+                    Mentions(), ids, channel.slack_workspace_id, scope=mention_key(client.authority, "member-write-validation", "")
                 )
             role = device_chat_role(actor["public_key"])
             if (

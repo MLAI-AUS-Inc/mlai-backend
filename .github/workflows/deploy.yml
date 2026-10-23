@@ -73,7 +73,7 @@ jobs:
         python -m pip install --only-binary=:all: --require-hashes -r .github/requirements-ci.lock
 
     - name: Test deployment failure handling and live contract
-      run: python -m unittest tests.test_deploy_runtime_checks tests.test_message_sync_deploy_config tests.test_community_bridge_dependency_review_workflow tests.test_valley_mcp_deploy_config tests.test_native_agent_deploy_config tests.test_slack_owner_inventory_deploy_config tests.test_member_room_provisioning_contract tests.test_bridge_reconciler_retirement -v
+      run: python -m unittest tests.test_deploy_runtime_checks tests.test_message_sync_deploy_config tests.test_community_bridge_dependency_review_workflow tests.test_valley_mcp_deploy_config tests.test_native_agent_deploy_config tests.test_slack_owner_inventory_deploy_config tests.test_member_room_provisioning_contract -v
 
     - name: Check jobs delivery contracts without database access
       run: python -m unittest tests.test_jobs_delivery_unit -v
@@ -523,7 +523,7 @@ jobs:
           integrations.tests_member_pending_intake_phase4a \
           integrations.tests_message_sync_member_history_phase4b \
           integrations.tests_member_delivery_phase4c \
-          integrations.tests_community_member_send_phase5 \
+          integrations.tests_community_member_send_phase5 integrations.tests_slack_member_directory integrations.tests_slack_member_files integrations.tests_message_sync_repair \
           integrations.tests_community_source_phase6 \
           integrations.tests_community_source_codec_phase6 \
           integrations.tests_community_reader_phase6 \
@@ -535,8 +535,6 @@ jobs:
           integrations.tests_message_sync_event_routing \
           integrations.tests_coworking_handoff \
           integrations.tests_public_bridge_consent \
-          integrations.tests_community_bridge_avatar_backfill \
-          integrations.tests_community_bridge_mention_backfill \
           integrations.tests_community_bridge_contracts \
           core.tests.test_auth_contract \
           core.tests.test_account_ban_guards \
@@ -746,7 +744,7 @@ jobs:
           integrations.tests_member_pending_intake_phase4a \
           integrations.tests_message_sync_member_history_phase4b \
           integrations.tests_member_delivery_phase4c \
-          integrations.tests_community_member_send_phase5 \
+          integrations.tests_community_member_send_phase5 integrations.tests_slack_member_directory integrations.tests_slack_member_files integrations.tests_message_sync_repair \
           integrations.tests_community_source_phase6 \
           integrations.tests_community_source_codec_phase6 \
           integrations.tests_community_reader_phase6 \
@@ -881,8 +879,6 @@ jobs:
           integrations.test_luma_cover \
           integrations.tests \
           integrations.tests_article \
-          integrations.tests_community_bridge_thread_reconciliation \
-          integrations.tests_community_bridge_thread_repair \
           integrations.tests_connection_org_scoping \
           integrations.tests_connector_company_scoping \
           integrations.tests_github_callback \
@@ -1053,11 +1049,7 @@ jobs:
         COMMUNITY_BRIDGE_DEPENDENCY_VERDICTS_ENABLED: ${{ vars.COMMUNITY_BRIDGE_DEPENDENCY_VERDICTS_ENABLED || 'false' }}
         MESSAGE_SYNC_ENABLED: ${{ vars.MESSAGE_SYNC_ENABLED || 'false' }}
         MESSAGE_SYNC_RECENT_HISTORY_ENABLED: ${{ vars.MESSAGE_SYNC_RECENT_HISTORY_ENABLED || 'false' }}
-        SLACK_MEMBER_CHANNELS_ENABLED: ${{ vars.SLACK_MEMBER_CHANNELS_ENABLED || 'false' }}
         SLACK_MEMBER_CHANNEL_ALLOWED_IDS: ${{ vars.SLACK_MEMBER_CHANNEL_ALLOWED_IDS || '' }}
-        SLACK_COMMUNITY_SEND_AS_MEMBER: ${{ vars.SLACK_COMMUNITY_SEND_AS_MEMBER || 'false' }}
-        SLACK_COMMUNITY_SOURCE: ${{ vars.SLACK_COMMUNITY_SOURCE || 'bot' }}
-        MESSAGE_SYNC_EVENT_ROUTING: ${{ vars.MESSAGE_SYNC_EVENT_ROUTING || 'false' }}
         MESSAGE_SYNC_QUIET_HEAD_BACKOFF_ENABLED: ${{ vars.MESSAGE_SYNC_QUIET_HEAD_BACKOFF_ENABLED || 'false' }}
         COMMUNITY_CHAT_MEMBER_ACCOUNTS_ENABLED: ${{ vars.COMMUNITY_CHAT_MEMBER_ACCOUNTS_ENABLED || 'false' }}
         COMMUNITY_CHAT_INBOX_ERASURE_ENABLED: ${{ vars.COMMUNITY_CHAT_INBOX_ERASURE_ENABLED || 'false' }}

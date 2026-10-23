@@ -274,6 +274,7 @@ def _search_directory(
     cache_key,
     validate,
     membership_unknown=False,
+    snapshot_reader=None,
 ):
     """Shared pagination; callers supply distinct public or owner credentials."""
     query = str(query or "").strip().casefold()
@@ -298,7 +299,7 @@ def _search_directory(
         snapshot_version = version
         snapshot_start += int(start)
     snapshot = (
-        cached_workspace_snapshot(workspace, version=snapshot_version)
+        (snapshot_reader or (lambda version: cached_workspace_snapshot(workspace, version=version)))(snapshot_version)
         if not slack_cursor or snapshot_version
         else None
     )

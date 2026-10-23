@@ -64,7 +64,6 @@ from integrations.services.slack_workspace_users import warm_workspace_directory
 logger = logging.getLogger(__name__)
 WORKER_ID = f"{socket.gethostname()}:{os.getpid()}"[:100]
 # Host/PID can repeat after a container process restart. Coverage cannot.
-SOURCE_MONITOR_ID = f"{WORKER_ID}:{uuid.uuid4()}"
 _discovery_heartbeat_at = 0.0
 _discovery_completed = 0
 _discovery_failed = 0
@@ -290,8 +289,6 @@ class CommunityBridgeDiscordClient(discord.Client):
         try:
             self._sync_completed_count += await asyncio.to_thread(process_inbox_once)
             if time.monotonic() - self._sync_heartbeat_at >= 10:
-                from .community_source import heartbeat as source_heartbeat
-                await asyncio.to_thread(source_heartbeat, SOURCE_MONITOR_ID)
                 await asyncio.to_thread(heartbeat, WORKER_ID, "inbox", completed=self._sync_completed_count)
                 self._sync_completed_count = 0
                 self._sync_heartbeat_at = time.monotonic()
@@ -527,15 +524,11 @@ class CommunityBridgeDiscordClient(discord.Client):
             channel=delivery.get("channel"),
         )
         from integrations.services.slack_channel_mentions import render_slack_mentions
-        from integrations.services.slack_mentions import validate_mention_users
+        from .member_metadata import prepare_legacy_text
         body, mention_ids = render_slack_mentions(
             str(payload.get("text") or ""), (payload.get("metadata") or {}).get("slack_mention_tags") or [],
         )
-        if mention_ids:
-            await asyncio.to_thread(legacy_send, delivery, validate_mention_users, SlackBridgeClient.get_client(), mention_ids,
-                                    (delivery.get("channel") or {}).get("slack_workspace_id", ""), scope="public-bot")
-        from integrations.services.community_bridge.broadcast_mentions import prepare_slack_broadcasts
-        body = await asyncio.to_thread(legacy_send, delivery, prepare_slack_broadcasts, delivery, body)
+        body = await asyncio.to_thread(prepare_legacy_text, delivery, body, mention_ids)
         text = build_mirrored_text(
             destination_platform=CommunityBridgePlatform.SLACK,
             source_platform=delivery["source_platform"],
@@ -739,8 +732,7 @@ class CommunityBridgeDiscordClient(discord.Client):
             and (not author_display_name or not author_avatar_url)
         ):
             slack_profile = await asyncio.to_thread(
-                legacy_send, delivery, SlackBridgeClient.get_user_profile,
-                source_author_id,
+                SlackBridgeClient.get_user_profile, source_author_id, workspace_id=slack_workspace_id,
             )
             author_display_name = author_display_name or str(
                 slack_profile.get("display_name") or ""
@@ -955,7 +947,8 @@ class CommunityBridgeDiscordClient(discord.Client):
                 return str(identity.get("display_name") or user_id)
         if source_platform == CommunityBridgePlatform.SLACK and user_id:
             return await asyncio.to_thread(
-                legacy_send, delivery, SlackBridgeClient.get_user_display_name, user_id,
+                SlackBridgeClient.get_user_display_name, user_id,
+                workspace_id=str((channel or {}).get("slack_workspace_id") or ""),
             )
         return user_id or "Unknown user"
 
@@ -967,12 +960,14 @@ class CommunityBridgeDiscordClient(discord.Client):
         display_markdown = metadata.get("slack_display_markdown")
         if isinstance(display_markdown, str):
             return await asyncio.to_thread(
-                legacy_send, delivery, SlackBridgeClient.resolve_markdown_entities, display_markdown
+                SlackBridgeClient.resolve_markdown_entities, display_markdown,
+                workspace_id=str(((delivery or {}).get("channel") or {}).get("slack_workspace_id") or ""),
             )
         raw_text = str(metadata.get("slack_raw_text") or "")
         if not raw_text:
             return body
-        return await asyncio.to_thread(legacy_send, delivery, SlackBridgeClient.resolve_message_text, raw_text)
+        return await asyncio.to_thread(SlackBridgeClient.resolve_message_text, raw_text,
+            workspace_id=str(((delivery or {}).get("channel") or {}).get("slack_workspace_id") or ""))
 
     def _should_process_message(self, message: discord.Message) -> bool:
         if message.guild is None:

@@ -1290,13 +1290,9 @@ COMMUNITY_BRIDGE_WORKER_POLL_SECONDS = float(
 COMMUNITY_BRIDGE_DEPENDENCY_VERDICTS_ENABLED = _env_is_true('COMMUNITY_BRIDGE_DEPENDENCY_VERDICTS_ENABLED', False)
 # Inactive foundations: enable only after the member-channel implementation,
 # compatible clients and exact approved schema are deployed and canary checked.
-SLACK_MEMBER_CHANNELS_ENABLED = _env_is_true('SLACK_MEMBER_CHANNELS_ENABLED', False)
 # Optional channel cohort for the first Members canary; empty permits the
 # normal rollout only when the separate member-channel switch is enabled.
 SLACK_MEMBER_CHANNEL_ALLOWED_IDS = os.getenv('SLACK_MEMBER_CHANNEL_ALLOWED_IDS', '')
-SLACK_COMMUNITY_SEND_AS_MEMBER = _env_is_true('SLACK_COMMUNITY_SEND_AS_MEMBER', False)
-SLACK_COMMUNITY_SOURCE = os.getenv('SLACK_COMMUNITY_SOURCE', 'bot')
-MESSAGE_SYNC_EVENT_ROUTING = _env_is_true('MESSAGE_SYNC_EVENT_ROUTING', False)
 COMMUNITY_BRIDGE_DEPENDENCY_VERDICT_MIN_AGE_SECONDS = int(os.getenv('COMMUNITY_BRIDGE_DEPENDENCY_VERDICT_MIN_AGE_SECONDS', '3600'))
 COMMUNITY_BRIDGE_PARENT_DEPENDENCY_MAX_AGE_SECONDS = int(
     os.getenv('COMMUNITY_BRIDGE_PARENT_DEPENDENCY_MAX_AGE_SECONDS', '3600')

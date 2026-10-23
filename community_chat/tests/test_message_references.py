@@ -190,78 +190,20 @@ class MessageReferenceAccessTests(TestCase):
         with self.assertRaises(SlackMessageReferenceError):
             resolve_slack_message_reference(URL, user=self.user)
 
-    def test_historical_repair_is_dry_by_default_and_only_enqueues_one_edit(self):
+    def test_retired_reference_backfill_rejects_dry_and_apply_without_reads_or_edits(self):
         from io import StringIO
         from django.core.management import call_command
+        from django.core.management.base import CommandError
         from integrations.models import CommunityBridgeDelivery
-
-        message = {
-            "ts": self.link.source_message_id,
-            "user": "UAUTHOR",
-            "text": "Reminder",
-            "attachments": [{"from_url": URL.replace("CREF", "COTHER")}],
-        }
-        with patch(
-            "integrations.services.community_bridge.slack.SlackBridgeClient.get_channel_history",
-            return_value=[message],
-        ), patch(
-            "integrations.services.community_bridge.slack.SlackBridgeClient.resolve_message_text",
-            side_effect=lambda value: value,
-        ):
-            call_command(
-                "backfill_community_bridge_thread_references",
-                slack_channel_id="CREF",
-                stdout=StringIO(),
-            )
-            self.assertEqual(CommunityBridgeDelivery.objects.count(), 0)
-            for _ in range(2):
-                call_command(
-                    "backfill_community_bridge_thread_references",
-                    slack_channel_id="CREF",
-                    apply=True,
-                    confirm_historical_edits=True,
-                    stdout=StringIO(),
-                )
-        delivery = CommunityBridgeDelivery.objects.get()
-        self.assertEqual(delivery.delivery_type, "edit")
-        self.assertEqual(delivery.source_message_id, self.link.source_message_id)
-        self.assertEqual(delivery.payload["metadata"]["slack_created_at"], 1789000000)
-        self.assertEqual(
-            delivery.payload["attachments"],
-            [{"title": "Thread", "url": URL.replace("CREF", "COTHER")}],
-        )
-
-    def test_historical_repair_skips_newer_edits(self):
-        from io import StringIO
-        from django.core.management import call_command
-        from integrations.models import CommunityBridgeDelivery
-
-        def history(**kwargs):
-            self.link.save()  # A normal delivery updated the link after the read began.
-            return [
-                {
-                    "ts": self.link.source_message_id,
-                    "user": "UAUTHOR",
-                    "text": "Older snapshot",
-                    "attachments": [{"from_url": URL}],
-                }
-            ]
-
-        with patch(
-            "integrations.services.community_bridge.slack.SlackBridgeClient.get_channel_history",
-            side_effect=history,
-        ), patch(
-            "integrations.services.community_bridge.slack.SlackBridgeClient.resolve_message_text",
-            side_effect=lambda value: value,
-        ):
-            call_command(
-                "backfill_community_bridge_thread_references",
-                slack_channel_id="CREF",
-                apply=True,
-                confirm_historical_edits=True,
-                stdout=StringIO(),
-            )
+        with patch("integrations.services.community_bridge.slack.SlackBridgeClient.get_client") as history:
+            for apply in (False, True):
+                with self.subTest(apply=apply), self.assertRaisesMessage(CommandError, "Unknown command"):
+                    call_command("backfill_community_bridge_thread_references", slack_channel_id="CREF",
+                        apply=apply, confirm_historical_edits=apply, stdout=StringIO())
+            history.assert_not_called()
         self.assertEqual(CommunityBridgeDelivery.objects.count(), 0)
+
+
 
     def test_endpoint_never_scrapes_unavailable_slack_threads(self):
         from rest_framework.test import APIClient

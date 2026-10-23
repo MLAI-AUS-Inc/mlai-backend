@@ -70,6 +70,8 @@ class CommunityFixture(MemberDeliveryFixture):
         row.refresh_from_db()
 
     def bot_transport(self, client, method, **kwargs):
+        if method in community._BotClient.READ_SCOPES:
+            return REAL_BOT_CALL(client, method, **kwargs)
         guard_delivery(client.row)
         if client.read_only and method in member.WRITES.values():
             raise AssertionError("reconciliation made a new mutation")
@@ -77,10 +79,6 @@ class CommunityFixture(MemberDeliveryFixture):
         self.bot_calls.append((method, kwargs))
         if method == "auth_test":
             return {"ok": True, "team_id": "TTEST", "user_id": "UBOT", "bot_id": "BBOT", "app_id": "ABOT"}
-        if method == "conversations_info":
-            return {"ok": True, "channel": {"id": "CROOM", "is_private": False, "is_channel": True, "is_member": True, "num_members": 2}}
-        if method in {"conversations_history", "conversations_replies"}:
-            return {"ok": True, "messages": self.history_messages}
         client.mutation_started = True
         return {"ok": True, "channel": "CROOM", "ts": kwargs.get("ts") or kwargs.get("timestamp") or f"{self.now}.{1000 + len(self.bot_calls):06d}",
                 "message": {"user": "UBOT", "bot_id": "BBOT", "app_id": "ABOT", "client_msg_id": kwargs.get("client_msg_id"), "text": kwargs.get("text", "")}}
@@ -118,6 +116,126 @@ class CommunityDeliveryTests(CommunityFixture, TransactionTestCase):
         self.assertNotIn("forged display", command["wire"]["kwargs"]["text"])
         self.assertTrue(command["wire"]["kwargs"]["unfurl_links"])
         self.assertEqual(self.mutations, [])
+
+    def test_bot_writes_use_another_members_reader_without_changing_actor(self):
+        CommunityBridgeIdentityLink.objects.filter(user=self.a.user).delete()
+        type(self.a).objects.filter(pk=self.a.pk).update(status="paused")
+        row = self.delivery()
+        self.send(row)
+        self.assertEqual(row.payload[community.MEMBER_STAMP]["actor"]["user_id"], self.a.user_id)
+        self.assertEqual(row.payload[community.MEMBER_STAMP]["actor"]["kind"], "bot")
+        self.assertEqual({call[0] for call in self.calls}, {self.b.pk})
+        self.assertEqual({call[1] for call in self.calls}, {"conversations_info"})
+        self.assertEqual({method for method, _ in self.bot_calls}, {"auth_test", "chat_postMessage"})
+        self.assertEqual(self.mutations, [])
+
+    def test_no_current_reader_holds_bot_fallback_before_any_provider_call(self):
+        from integrations.models import SlackChannelMembership
+
+        CommunityBridgeIdentityLink.objects.filter(user=self.a.user).delete()
+        SlackChannelMembership.objects.update(state="left")
+        row = self.delivery()
+        with self.assertRaises(member.MemberDeliveryDeferred):
+            self.send(row)
+        self.assertEqual(self.calls + self.bot_calls, [])
+        row.refresh_from_db()
+        self.assertNotIn(community.MEMBER_STAMP, row.payload)
+
+    def test_reader_revoked_after_selection_is_rechecked_before_bot_identity(self):
+        CommunityBridgeIdentityLink.objects.filter(user=self.a.user).delete()
+        select = community._bot_reader
+        def revoke(channel):
+            authority = select(channel)
+            type(self.a).objects.filter(pk=authority.grant_id).update(status="paused")
+            return authority
+        with patch.object(community, "_bot_reader", side_effect=revoke):
+            with self.assertRaises(member.MemberDeliveryDeferred):
+                self.send(self.delivery())
+        self.assertEqual(self.calls + self.bot_calls, [])
+
+    def test_reader_provider_failure_changes_reader_on_retry_not_bot_actor(self):
+        CommunityBridgeIdentityLink.objects.filter(user=self.a.user).delete()
+        row = self.delivery()
+        self.channel.reader_grant = self.b
+        self.channel.save()
+        def denied(authority, conn, method, **kwargs):
+            self.assertEqual(authority.grant_id, self.b.pk)
+            kwargs["before_request"]()
+            raise dm.SlackApiError("synthetic", response={"ok": False, "error": "not_in_channel"})
+        with patch.object(dm, "_invoke_slack_with_locked_connection", side_effect=denied):
+            with self.assertRaises(member.MemberDeliveryRetry):
+                self.send(row)
+        self.assertFalse(any(method in member.WRITES.values() for method, _ in self.bot_calls))
+        self.retry(row)
+        self.send(row)
+        self.assertEqual(row.payload[community.MEMBER_STAMP]["actor"]["kind"], "bot")
+        self.assertEqual({call[0] for call in self.calls}, {self.a.pk})
+
+    def test_ambiguous_bot_post_reconciles_with_member_history_without_resending(self):
+        CommunityBridgeIdentityLink.objects.filter(user=self.a.user).delete()
+        row = self.delivery()
+        original = self.bot_transport
+        def uncertain(client, method, **kwargs):
+            response = original(client, method, **kwargs)
+            if method == "chat_postMessage":
+                self.history_messages = [{**response["message"], "ts": response["ts"]}]
+                raise TimeoutError("synthetic ambiguous bot write")
+            return response
+        with patch.object(community._BotClient, "call", new=uncertain):
+            with self.assertRaises(TimeoutError):
+                self.send(row)
+        self.retry(row)
+        self.bot_calls.clear()
+        self.calls.clear()
+        self.send(row)
+        self.assertEqual(row.status, "completed")
+        self.assertIn("conversations_history", {call[1] for call in self.calls})
+        self.assertFalse(any(method in member.WRITES.values() for method, _ in self.bot_calls))
+        self.assertEqual(row.payload[community.MEMBER_STAMP]["actor"]["kind"], "bot")
+
+    def _mention_transport(self, authority, conn, method, **kwargs):
+        if method == "users_info":
+            kwargs["before_request"]()
+            self.calls.append((authority.grant_id, method, kwargs))
+            return {"ok": True, "user": {"id": "UMENTION", "team_id": "TTEST"}}
+        return self.transport(authority, conn, method, **kwargs)
+
+    def _mention_delivery(self, source_id="a" * 64):
+        row = self.delivery(source_id=source_id)
+        row.payload["text"] = "hello @Person"
+        row.payload["metadata"]["slack_mention_tags"] = [["slack-mention", "UMENTION", "Person"]]
+        row.save()
+        return row
+
+    def test_bot_mentions_use_member_read_and_new_reader_cannot_reuse_validation(self):
+        CommunityBridgeIdentityLink.objects.filter(user=self.a.user).delete()
+        with patch.object(dm, "_invoke_slack_with_locked_connection", side_effect=self._mention_transport):
+            self.send(self._mention_delivery())
+            type(self.a).objects.filter(pk=self.a.pk).update(status="paused")
+            self.send(self._mention_delivery("b" * 64))
+        self.assertEqual([call[0] for call in self.calls if call[1] == "users_info"], [self.a.pk, self.b.pk])
+        self.assertFalse(any(method in community._BotClient.READ_SCOPES for method, _ in self.bot_calls))
+
+    def test_cached_mention_never_bypasses_current_member_scope(self):
+        with patch.object(dm, "_invoke_slack_with_locked_connection", side_effect=self._mention_transport):
+            self.send(self._mention_delivery())
+            self.a.connection.scopes.remove("users:read")
+            self.a.connection.save()
+            with self.assertRaisesRegex(member.MemberDeliveryUnavailable, "mention_scope_unavailable"):
+                self.send(self._mention_delivery("b" * 64))
+        self.assertEqual(len([call for call in self.calls if call[1] == "users_info"]), 1)
+        self.assertEqual(len(self.mutations), 1)
+
+    def test_cached_mention_never_bypasses_bot_reader_scope(self):
+        CommunityBridgeIdentityLink.objects.filter(user=self.a.user).delete()
+        with patch.object(dm, "_invoke_slack_with_locked_connection", side_effect=self._mention_transport):
+            self.send(self._mention_delivery())
+            self.a.connection.scopes.remove("users:read")
+            self.a.connection.save()
+            with self.assertRaisesRegex(member.MemberDeliveryUnavailable, "mention_scope_unavailable"):
+                self.send(self._mention_delivery("b" * 64))
+        self.assertEqual(len([call for call in self.calls if call[1] == "users_info"]), 1)
+        self.assertEqual(len([method for method, _ in self.bot_calls if method in member.WRITES.values()]), 1)
 
     def test_ninth_older_key_is_valid_community_member_and_bot_authority(self):
         for n in range(3, 12):
@@ -263,7 +381,7 @@ class CommunityDeliveryTests(CommunityFixture, TransactionTestCase):
     def test_member_create_flag_off_never_becomes_bot_and_cleanup_uses_original(self):
         row = self.delivery()
         self.send(row)
-        with override_settings(SLACK_COMMUNITY_SEND_AS_MEMBER=False):
+        with override_settings(SLACK_MEMBER_CHANNEL_ALLOWED_IDS="COTHER"):
             edit = self.delivery(op="edit", source_id=row.source_message_id)
             with self.assertRaises(BudgetDeferred):
                 self.send(edit)
@@ -373,7 +491,7 @@ class CommunityDeliveryTests(CommunityFixture, TransactionTestCase):
         row = CommunityBridgeDelivery.objects.get(pk=result["delivery_id"])
         self.assertEqual(row.payload[community.ENQUEUE], {"version": 1, "mapping": member._identity(self.channel)})
         self.assertNotIn(community.MEMBER_STAMP, row.payload["metadata"])
-        with override_settings(SLACK_COMMUNITY_SEND_AS_MEMBER=False):
+        with override_settings(MESSAGE_SYNC_ENABLED=False):
             self.assertIsNone(community.enqueue_marker(self.channel, event))
 
     def test_new_flag_off_cleanup_still_gets_the_recorded_actor_fence(self):
@@ -571,6 +689,12 @@ class CommunityAuthorityConcurrencyTests(CommunityFixture, TransactionTestCase):
     def test_member_grant_revocation_waits_through_community_send_and_settlement(self):
         self._interleave("grant")
 
+    @skipUnlessDBFeature("has_select_for_update")
+    def test_reader_revocation_waits_through_bot_send_and_settlement(self):
+        self.channel.reader_grant = self.b
+        self.channel.save()
+        self._interleave("reader")
+
     def _interleave(self, kind):
         grant_test_ai_consent(self.a.user)
         if kind != "grant":
@@ -617,8 +741,10 @@ class CommunityAuthorityConcurrencyTests(CommunityFixture, TransactionTestCase):
                     cursor.execute("SELECT pg_backend_pid()")
                     pids.put(cursor.fetchone()[0])
                 with transaction.atomic():
-                    get_user_model().objects.select_for_update().get(pk=self.a.user_id)
-                    if kind == "device":
+                    get_user_model().objects.select_for_update().get(pk=self.b.user_id if kind == "reader" else self.a.user_id)
+                    if kind == "reader":
+                        type(self.b).objects.filter(pk=self.b.pk).update(status="paused")
+                    elif kind == "device":
                         CommunityChatDevice.objects.filter(user=self.a.user).update(status="revoked", revoked_at=timezone.now())
                     elif kind == "grant":
                         type(self.a).objects.filter(pk=self.a.pk).update(status="paused")
@@ -665,5 +791,11 @@ class CommunityAuthorityConcurrencyTests(CommunityFixture, TransactionTestCase):
             # recorded original member mutations still cannot switch actors.
             next_row = self.delivery(op="delete", source_id=row.source_message_id)
             CommunityBridgeDelivery.objects.filter(source_message_id="e" * 64).delete()
-        with self.assertRaises((member.MemberDeliveryUnavailable, PublicBridgeConsentRequired)):
+        if kind == "reader":
+            self.calls.clear()
             self.send(next_row)
+            self.assertEqual(next_row.status, "completed")
+            self.assertEqual({call[0] for call in self.calls}, {self.a.pk})
+        else:
+            with self.assertRaises((member.MemberDeliveryUnavailable, PublicBridgeConsentRequired)):
+                self.send(next_row)

@@ -171,7 +171,7 @@ class RecentPublicWorkerTests(SimpleTestCase):
                 ('integrations.services.message_sync.history.locked_job', {'return_value': (state, Mock())}),
                 ('integrations.services.message_sync.history.CommunityBridgeChannel.objects.select_for_update', {}),
                 ('integrations.services.message_sync.history.SlackDmMirrorConversation.objects.filter', {}),
-                ('integrations.services.message_sync.history.SlackBridgeClient.get_client', {'return_value': client}),
+                ('integrations.services.message_sync.member_history.guard_page', {}),
                 ('integrations.services.message_sync.history.ingest_slack_event', {}),
                 ('integrations.services.message_sync.public_repair.repair_observed_message', {}),
                 ('integrations.services.message_sync.read_activity.advance_public_activity', {}),
@@ -185,9 +185,9 @@ class RecentPublicWorkerTests(SimpleTestCase):
                     private_owner = mock
                     private_owner.return_value.exists.return_value = False
             for _ in responses:
-                history.public_page(lease, state)
+                history._public_page(lease, state, client=client, member_authority="synthetic-member-scope")
             # The idle tick must preserve progress and perform no provider I/O.
-            history.public_page(lease, state)
+            history._public_page(lease, state, client=client, member_authority="synthetic-member-scope")
         private_owner.assert_called_with(slack_workspace_id='T1', slack_conversation_id='C1')
         self.assertEqual(private_owner.call_count, len(responses))
         self.assertEqual(private_owner.return_value.exists.call_count, len(responses))
@@ -322,27 +322,6 @@ class RecentHistoryAccessTests(SimpleTestCase):
             with self.assertRaises(NotFound):
                 api.request_history_page(self.user(), public_key='a' * 64, channel_id=self.channel, request_key='b' * 64)
         state.assert_not_called()
-
-    def test_shared_public_bridge_does_not_require_personal_slack_oauth(self):
-        from django.db.models.query import QuerySet
-        mapping = SimpleNamespace(pk=1, audience="community", enabled=True, destination_platform='buzz', destination_channel_id=self.channel,
-                                  destination_workspace_id='community', slack_workspace_id='T1', slack_channel_id='C1')
-        state = SimpleNamespace(pk=2, status='current', workspace_id='T1', source_channel_id='C1')
-        with patch('community_chat.onboarding.require_community_access'), patch.object(
-            QuerySet, 'exists', return_value=True
-        ), patch.object(QuerySet, 'first', return_value=mapping), patch.object(
-            api.transaction, 'atomic', side_effect=nullcontext
-        ), patch.object(api, 'ensure_state', return_value=state), patch.object(
-            api.BridgeSyncState.objects, 'select_for_update'
-        ) as states, patch.object(api.CommunityBridgeChannel.objects, 'select_for_update') as maps, patch.object(
-            api, '_public_progress', return_value={'has_more': True, 'pending': True}
-        ) as progress, patch.object(dm, '_capture_slack_grant_api_authority') as oauth:
-            states.return_value.get.return_value = state
-            maps.return_value.get.return_value = mapping
-            result = api.request_history_page(self.user(), public_key='a' * 64, channel_id=self.channel, request_key='b' * 64)
-        progress.assert_called_once_with(state, 'b' * 64)
-        oauth.assert_not_called()
-        self.assertEqual(result, {'has_more': True, 'pending': True})
 
     def test_stale_audience_count_cannot_pause_a_replacement_private_room(self):
         marker = SimpleNamespace(metadata={'participant_hash': 'old', 'mlai_channel_id': 'old-room',
