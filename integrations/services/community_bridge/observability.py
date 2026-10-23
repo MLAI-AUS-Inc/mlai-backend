@@ -29,14 +29,9 @@ _SCHEMAS = {
         "reason": {"recorded_strategy", "reconciled", "authority_or_provider_hold"},
     },
     "slack_public_echo": {"kind": {"create", "edit", "delete", "reaction_add", "reaction_remove"}},
-    "slack_community_source compare": {
-        "kind": {"observation", "report", "fallback"},
-        "population": {"message", "own_send", "diagnostic"},
-        "outcome": {"only_bot", "only_members", "both", "pass", "fail", "inconclusive",
-                    "no_reader", "members", "bot", "hold"},
-    },
+
 }
-_NUMBERS = frozenset({"mapping_id", "delivery_id", "receipt_id", "only_bot", "only_members", "both", "N", "M"})
+_NUMBERS = frozenset({"mapping_id", "delivery_id", "receipt_id"})
 _IDENTITIES = frozenset({"workspace_id", "channel_id", "room_id"})
 
 
@@ -171,9 +166,3 @@ def echo(row, receipt_id, kind):
     snapshot = room_snapshot(row)
     if snapshot is not None:
         emit("slack_public_echo", **snapshot, receipt_id=receipt_id, kind=kind)
-
-
-def compare(row, *, kind, outcome, **counts):
-    snapshot = room_snapshot(row)
-    if snapshot is not None and row.audience == "community":
-        emit("slack_community_source compare", **snapshot, kind=kind, outcome=outcome, **counts)

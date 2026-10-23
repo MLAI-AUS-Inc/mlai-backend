@@ -214,16 +214,6 @@ class SlackBridgeClientProfileTests(MemberFixture, TransactionTestCase):
         self.assertEqual(self.calls, [])
 
 
-class RecentSlackBridgeReconciliationCommandTests(TestCase):
-    def test_compatibility_command_only_seeds_enabled_durable_worker(self):
-        with patch("integrations.services.message_sync.history.seed_states") as seed:
-            for enabled in (False, True):
-                with self.subTest(enabled=enabled), override_settings(MESSAGE_SYNC_ENABLED=enabled):
-                    output = StringIO()
-                    call_command("reconcile_recent_community_bridge_slack", stdout=output)
-                    self.assertEqual(json.loads(output.getvalue()),
-                        {"scheduler": "durable", "enabled": enabled, "legacy_scan_skipped": True})
-            seed.assert_called_once_with()
 
 
 class _FakeSentMessage:

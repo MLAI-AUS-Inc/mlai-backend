@@ -650,15 +650,16 @@ replace an existing Chat room with a Discord destination.
 The durable `bridge-worker` maintains history discovery and recovery itself.
 Its bounded history lane seeds at startup and every five seconds; a failed
 seeding turn is retried independently of history page progress. Deployment
-verifies the new container's enabled durable lanes with
-`message_sync_status --check --local-worker` before retiring the duplicate
-`bridge-reconciler`. An unproven or disabled worker prevents retirement.
+verifies the new container's durable lanes with
+`message_sync_status --check --local-worker`. The duplicate `bridge-reconciler`
+service and old polling command are removed. Deployment of this removal requires
+recorded confirmation that the prior container has been retired; do not leave an
+orphan process when withdrawing its Compose definition. The normal worker also
+owns bounded repair jobs; see [member-authorized repair](slack-member-repair.md).
 
-For this transition release, the retired service definition remains in the
-migration pause and rollback inventory, but is excluded from normal startup.
-Remove its definition and legacy command only after production confirms that
-no reconciler container remains and current worker health is good. This avoids
-leaving an orphan process behind when its Compose definition is deleted.
+A failed code-only release restores the previous runtime's owner-inventory
+setting along with its image. An incomplete schema transition still keeps all
+writers stopped; this cleanup changes no schema.
 
 After investigating an exhausted delivery, replay it without changing its
 idempotency identity:

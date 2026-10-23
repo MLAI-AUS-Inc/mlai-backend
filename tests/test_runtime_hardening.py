@@ -541,11 +541,11 @@ with patch('dotenv.load_dotenv', return_value=False), \
         self.assertNotIn("upsert_community_bridge_channel", deploy)
         self.assertNotIn("upsert_discord_bridge_channel", deploy)
         self.assertIn(
-            "docker compose stop bridge-worker bridge-reconciler bridge-retention || true",
+            "docker compose stop bridge-worker bridge-retention || true",
             deploy,
         )
         self.assertIn(
-            "docker compose rm -f bridge-worker bridge-reconciler bridge-retention || true",
+            "docker compose rm -f bridge-worker bridge-retention || true",
             deploy,
         )
         self.assertLess(
@@ -696,22 +696,12 @@ rm -f "$rollback_manifest" "$docker_log"
             workflow,
         )
 
-    def test_bridge_reconciler_multiline_command_keeps_shell_continuations(self):
-        continued_fragments = (
-            "python manage.py reconcile_recent_community_bridge_slack",
-            "--lookback-seconds",
-            "--max-roots-per-channel",
-            "--maximum-history-messages",
-        )
-        for filename in ("docker-compose.yml", "docker-compose.local.yml"):
-            lines = (ROOT / filename).read_text().splitlines()
-            for fragment in continued_fragments:
-                matching = [line for line in lines if fragment in line]
-                self.assertEqual(len(matching), 1, f"{fragment} in {filename}")
-                self.assertTrue(
-                    matching[0].rstrip().endswith("\\"),
-                    f"{fragment} must continue in {filename}",
-                )
+    def test_member_worker_health_remains_a_deployment_gate_after_reconciler_retirement(self):
+        for filename in ("docker-compose.yml", "docker-compose.local.yml", "scripts/runtime-services.sh"):
+            self.assertNotIn("bridge-reconciler", (ROOT / filename).read_text())
+        deploy = (ROOT / "deploy.sh").read_text()
+        self.assertIn("docker compose exec -T bridge-worker python manage.py message_sync_status --check --local-worker", deploy)
+        self.assertLess(deploy.index("message_sync_status --check --local-worker"), deploy.index("trap - ERR EXIT"))
 
     def test_meeting_room_feature_flag_is_deployment_managed_and_smoke_tested(self):
         workflow = (ROOT / ".github" / "workflows" / "deploy.yml").read_text()

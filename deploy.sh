@@ -861,6 +861,10 @@ ssh "$DEPLOY_SSH_TARGET" <<EOF
     # .env may retain a failed release's marker even when the old container
     # never changed. Use the serving container as rollback truth.
     previous_app_release=\$(docker compose exec -T web sh -lc 'printf "%s" "\$APP_RELEASE"' </dev/null 2>/dev/null || read_env_value APP_RELEASE)
+    # The staging .env may already be false; capture the running contract so a
+    # code-only rollback does not silently disable established member discovery.
+    previous_owner_inventory_enabled=\$(docker compose exec -T web sh -lc 'printf "%s" "\$SLACK_OWNER_INVENTORY_ENABLED"' </dev/null 2>/dev/null || printf false)
+    case "\$previous_owner_inventory_enabled" in true|false) ;; *) echo "Invalid previous owner inventory state" >&2; exit 1 ;; esac
     upsert_env_value APP_RELEASE "$APP_RELEASE"
     upsert_env_value HEALTH_HACK_AI_BUDGET_MODE "enforce"
     # Keep the atomic worst-case reservation aligned with Roo's enforced model
@@ -1389,8 +1393,14 @@ ssh "$DEPLOY_SSH_TARGET" <<EOF
             fi
         fi
 
-        echo "⚠️ Deployment failed after runtime services were paused; disabling Slack owner inventory for recovery."
-        upsert_env_value SLACK_OWNER_INVENTORY_ENABLED "false" || true
+        # Incomplete schema transitions returned above with all writers stopped.
+        # A compatible old-image rollback restores its actual enabled state;
+        # completed schema transitions use the reviewed new runtime setting.
+        recovery_inventory_enabled="\${slack_owner_inventory_enabled:-false}"
+        if [ "\$migration_started" != "1" ]; then
+            recovery_inventory_enabled="\${previous_owner_inventory_enabled:-false}"
+        fi
+        upsert_env_value SLACK_OWNER_INVENTORY_ENABLED "\$recovery_inventory_enabled" || return
         if [ "\$migration_started" != "1" ]; then
             # No schema changed, so the previous image is the last known-good
             # release even if a replacement container has already started.
@@ -1770,8 +1780,8 @@ PY
 
     if [ "\$bridge_worker_enabled" != "1" ]; then
         echo "🧹 Stopping disabled community bridge services..."
-        docker compose stop bridge-worker bridge-reconciler bridge-retention || true
-        docker compose rm -f bridge-worker bridge-reconciler bridge-retention || true
+        docker compose stop bridge-worker bridge-retention || true
+        docker compose rm -f bridge-worker bridge-retention || true
     fi
 
     if [ "\$analytics_sync_enabled" != "1" ]; then
@@ -1889,8 +1899,8 @@ if slugs != expected:
     fi
 
     if [ "\$bridge_worker_enabled" = "1" ]; then
-        echo "🌉 Verifying durable worker before retiring the duplicate reconciler..."
-        python3 scripts/retire-bridge-reconciler.py
+        echo "🌉 Verifying the current member sync worker..."
+        docker compose exec -T bridge-worker python manage.py message_sync_status --check --local-worker
     fi
 
     echo "🛠️ Verifying external Django admin assets..."

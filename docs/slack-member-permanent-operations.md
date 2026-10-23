@@ -63,8 +63,16 @@ seven-day comparison and fourteen-day stability gates were superseded, not passe
 Full relevant tests, exact-source release verification, registry preservation,
 worker health and control continuity still supply the operational evidence.
 
-Remaining read-helper/operator conversion and Slack bot subscription review are
-tracked separately. Do not claim the whole cleanup complete until those changes
-are deployed, the obsolete reconciler is absent, and the matching code/config
-consumers have been removed. Keep independent Roo/co-working consumers and bot
-posting credentials.
+Content, directory, display metadata, file previews and retained co-working
+mention enrichment now use current member authority. Legacy thread/avatar/mention
+replay commands are removed; [bounded repair](slack-member-repair.md) queues work
+for the same durable worker. The duplicate reconciler service, comparison writer,
+comparison reports and rollout choices are removed. The closed historical receipt
+decoder remains for retention and privacy purge.
+
+Deployment completion still requires a coordinated backend/relay/adapter backup,
+recorded restore verification, the obsolete reconciler's absence, healthy current
+workers and removal of obsolete environment inputs after all consumers upgrade.
+Audit Slack bot subscriptions separately against remaining consumers. Keep
+independent Roo/co-working consumers, app-level authorization metadata and bot
+posting credentials. These are supported features, not legacy content readers.

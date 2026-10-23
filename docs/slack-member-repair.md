@@ -34,10 +34,8 @@ references and supported reactions. Missing history alone never authorizes a
 delete. Historical cosmetic rewrites and delete/recreate orphan phases are
 retired; this command does not promise those destructive replay operations.
 
-The old `reconcile_recent_community_bridge_slack` entry point temporarily accepts
-the previous container arguments but only seeds normal durable work when sync
-is enabled. Its legacy scan is removed. Remove this compatibility entry point
-with the retired service definition after production retirement is verified.
+The duplicate reconciler service and its old CLI are removed. The normal bridge
+worker owns bounded seeding, callback processing and member history recovery.
 
 Release gate: this removal requires the tested replacement, full hosted CI and
 a coordinated backend/relay/adapter backup with isolated restore evidence.

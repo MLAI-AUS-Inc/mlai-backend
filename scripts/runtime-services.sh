@@ -3,8 +3,6 @@
 # every optional writer still participates in shutdown and rollback discovery.
 required_runtime_services=(web scheduler jobs-worker memory-worker memory-scheduler password-email-worker community-email-worker)
 bridge_runtime_services=(bridge-worker bridge-retention)
-# Kept in pause/rollback discovery for one release while its old container retires.
-retiring_runtime_services=(bridge-reconciler)
 analytics_runtime_services=(analytics-sync)
 native_agent_runtime_services=(native-agent-worker)
 community_agent_runtime_services=(community-agent-worker)
@@ -14,7 +12,6 @@ handoff_runtime_services=(web-candidate)
 all_runtime_writer_services=(
     "${required_runtime_services[@]}"
     "${bridge_runtime_services[@]}"
-    "${retiring_runtime_services[@]}"
     "${analytics_runtime_services[@]}"
     "${handoff_runtime_services[@]}"
     "${native_agent_runtime_services[@]}"

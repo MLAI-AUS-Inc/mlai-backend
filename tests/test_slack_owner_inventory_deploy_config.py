@@ -38,13 +38,18 @@ class SlackOwnerInventoryDeployConfigTests(unittest.TestCase):
         self.assertLess(postmigrate, activated)
         self.assertLess(activated, runtime_start)
 
-    def test_failed_deployment_stages_inventory_off_before_recovery(self):
+    def test_failed_deployment_preserves_compatible_inventory_before_recovery(self):
         recovery = DEPLOY.split("restore_runtime_on_error() {", 1)[1].split(
             'echo "⏸️ Pausing all runtime writers', 1
         )[0]
-        self.assertIn('upsert_env_value SLACK_OWNER_INVENTORY_ENABLED "false" || true', recovery)
+        setting = 'upsert_env_value SLACK_OWNER_INVENTORY_ENABLED "\\$recovery_inventory_enabled" || return'
+        self.assertIn(setting, recovery)
+        self.assertIn('recovery_inventory_enabled="\\${previous_owner_inventory_enabled:-false}"', recovery)
+        self.assertIn('recovery_inventory_enabled="\\${slack_owner_inventory_enabled:-false}"', recovery)
+        self.assertIn('previous_owner_inventory_enabled=\\$(docker compose exec -T web', DEPLOY)
+        self.assertNotIn('upsert_env_value SLACK_OWNER_INVENTORY_ENABLED "false"', recovery)
         self.assertLess(
-            recovery.index('upsert_env_value SLACK_OWNER_INVENTORY_ENABLED "false" || true'),
+            recovery.index(setting),
             recovery.index('if docker compose up -d --no-deps --force-recreate "\\${runtime_services[@]}"'),
         )
         self.assertNotIn('docker compose up -d --no-deps --force-recreate "\\${runtime_services[@]}" || true', recovery)
