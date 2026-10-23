@@ -112,6 +112,18 @@ jobs:
     - name: Check event discount provider and worker boundaries without database access
       run: python scripts/test_without_database.py tests.test_luma_event_discounts_unit tests.test_event_discount_worker
 
+    - name: Check CRM messaging rules without database access
+      run: python scripts/test_without_database.py crm.tests.test_messaging_unit
+
+    - name: Check CRM Luma guest parsing and CSV import rules without database access
+      run: python scripts/test_without_database.py crm.tests.test_luma_guests_unit crm.tests.test_contact_import_unit crm.tests.test_phones_unit
+
+    - name: Check CRM API and segment rules without database access
+      run: python scripts/test_without_database.py crm.tests.test_api_unit crm.tests.test_segments_unit
+
+    - name: Check CRM blasts and the listmonk client without database access
+      run: python scripts/test_without_database.py crm.tests.test_blasts_unit crm.tests.test_listmonk_unit
+
     - name: Verify event discounts against disposable migration state
       run: python scripts/test_event_discounts.py roo.tests_event_discounts roo.tests_event_discount_api roo.tests_event_discount_concurrency
 
@@ -661,6 +673,18 @@ jobs:
 
     - name: Run Pulse source cache and Linear cursor PostgreSQL tests
       run: python manage.py test startup_updates.tests_source_cache_database --verbosity 2
+
+    - name: Verify CRM messaging on PostgreSQL
+      run: python manage.py test crm.tests.test_messaging_database --verbosity 2
+
+    - name: Verify CRM Luma guest sync and contact import on PostgreSQL
+      run: python manage.py test crm.tests.test_contact_store_database --verbosity 2
+
+    - name: Verify CRM API and segments on PostgreSQL
+      run: python manage.py test crm.tests.test_api_database crm.tests.test_segments_database --verbosity 2
+
+    - name: Verify CRM blasts and listmonk feedback on PostgreSQL
+      run: python manage.py test crm.tests.test_blasts_database --verbosity 2
 
     - name: Verify PostgreSQL search infrastructure
       run: |

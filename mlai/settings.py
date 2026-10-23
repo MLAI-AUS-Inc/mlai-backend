@@ -269,6 +269,7 @@ INSTALLED_APPS = [
     "roo",
 
     "integrations",
+    "crm",
 ]
 
 MIDDLEWARE = [
@@ -517,6 +518,7 @@ REST_FRAMEWORK = {
         'community_chat_slack_read_receipt': os.getenv('COMMUNITY_CHAT_SLACK_READ_RECEIPT_RATE', '60/minute'),
         'community_chat_slack_directory': os.getenv('COMMUNITY_CHAT_SLACK_DIRECTORY_RATE', '120/minute'),
         'community_chat_home': os.getenv('COMMUNITY_CHAT_HOME_RATE', '60/minute'),
+        'community_chat_crm': os.getenv('COMMUNITY_CHAT_CRM_RATE', '240/minute'),
         'my_startup_bootstrap': os.getenv('MY_STARTUP_BOOTSTRAP_RATE', '120/minute'),
         'my_startup_read': os.getenv('MY_STARTUP_READ_RATE', '120/minute'),
         'my_startup_poll': os.getenv('MY_STARTUP_POLL_RATE', '120/minute'),
@@ -532,6 +534,7 @@ REST_FRAMEWORK = {
         'token_usage_leaderboard': os.getenv('TOKEN_USAGE_LEADERBOARD_RATE', '60/minute'),
         'token_usage_insights': os.getenv('TOKEN_USAGE_INSIGHTS_RATE', '120/minute'),
         'community_chat_home': os.getenv('COMMUNITY_CHAT_HOME_RATE', '60/minute'),
+        'community_chat_crm': os.getenv('COMMUNITY_CHAT_CRM_RATE', '240/minute'),
         'community_chat_slack_delete': os.getenv(
             'COMMUNITY_CHAT_SLACK_DELETE_RATE', '20/minute'
         ),
@@ -1181,6 +1184,30 @@ TWILIO_WHATSAPP_TOPIC_ANALYTICS_CONTENT_SID = os.getenv('TWILIO_WHATSAPP_TOPIC_A
 # {{1}} title, {{2}} domain, {{3}} expanded founder-tools review URL). The fixed
 # template copy must include "Reply STOP to opt out.".
 TWILIO_WHATSAPP_REVIEW_CONTENT_SID = os.getenv('TWILIO_WHATSAPP_REVIEW_CONTENT_SID', '')
+# Contacts blasts by SMS and WhatsApp (crm app); both channels stay off until
+# enabled. SMS goes through a Messaging Service (MG..., Advanced Opt-Out on)
+# that holds MLAI's Twilio number. WhatsApp reuses TWILIO_WHATSAPP_FROM and
+# sends approved Content templates only.
+TWILIO_MESSAGING_SERVICE_SID = os.getenv('TWILIO_MESSAGING_SERVICE_SID', '').strip()
+CRM_SMS_ENABLED = _env_is_true('CRM_SMS_ENABLED', False)
+CRM_WHATSAPP_ENABLED = _env_is_true('CRM_WHATSAPP_ENABLED', False)
+# Comma-separated E.164 prefixes SMS may go to; +614 is Australian mobiles.
+CRM_SMS_ALLOWED_PREFIXES = [
+    prefix.strip()
+    for prefix in os.getenv('CRM_SMS_ALLOWED_PREFIXES', '+614').split(',')
+    if prefix.strip()
+]
+# Composer cost estimates in AUD, as decimal strings. Check current Twilio
+# and Meta pricing; it changes.
+CRM_SMS_COST_PER_SEGMENT_AUD = os.getenv('CRM_SMS_COST_PER_SEGMENT_AUD', '0').strip() or '0'
+CRM_WHATSAPP_COST_PER_MESSAGE_AUD = (
+    os.getenv('CRM_WHATSAPP_COST_PER_MESSAGE_AUD', '0').strip() or '0'
+)
+# Safety caps per channel over a rolling 24 hours, and Twilio sends per
+# blast dispatch tick.
+CRM_SMS_DAILY_LIMIT = max(0, int(os.getenv('CRM_SMS_DAILY_LIMIT', '500')))
+CRM_WHATSAPP_DAILY_LIMIT = max(0, int(os.getenv('CRM_WHATSAPP_DAILY_LIMIT', '500')))
+CRM_TWILIO_SENDS_PER_TICK = max(1, int(os.getenv('CRM_TWILIO_SENDS_PER_TICK', '200')))
 NOTIFICATION_CHANNEL_VERIFY_MAX_AGE_SECONDS = int(
     os.getenv('NOTIFICATION_CHANNEL_VERIFY_MAX_AGE_SECONDS', str(3 * 24 * 60 * 60))
 )
@@ -2189,6 +2216,62 @@ LUMA_API_TIMEOUT_SECONDS = max(
 LUMA_UPCOMING_EVENTS_CACHE_SECONDS = max(
     0,
     int(os.environ.get('LUMA_UPCOMING_EVENTS_CACHE_SECONDS', '300')),
+)
+
+# Contacts store (crm app). The scheduled Luma guest sync stays off until an
+# operator enables it; the backfill and import commands work regardless.
+CRM_LUMA_SYNC_ENABLED = _env_is_true('CRM_LUMA_SYNC_ENABLED', False)
+CRM_LUMA_SYNC_INTERVAL_SECONDS = max(
+    300,
+    int(os.environ.get('CRM_LUMA_SYNC_INTERVAL_SECONDS', '1800')),
+)
+CRM_LUMA_SYNC_RECENT_DAYS = max(0, int(os.environ.get('CRM_LUMA_SYNC_RECENT_DAYS', '14')))
+CRM_LUMA_SYNC_MAX_EVENTS_PER_RUN = max(
+    1,
+    int(os.environ.get('CRM_LUMA_SYNC_MAX_EVENTS_PER_RUN', '25')),
+)
+# Chat Home, Volunteer and Roo share the calendar key's 200/minute budget.
+CRM_LUMA_REQUESTS_PER_MINUTE = max(
+    1,
+    min(200, int(os.environ.get('CRM_LUMA_REQUESTS_PER_MINUTE', '100'))),
+)
+# Pipe-separated Luma registration question labels whose "yes" grants
+# marketing consent, e.g. "Keep me updated about MLAI events".
+CRM_LUMA_CONSENT_QUESTION_LABELS = [
+    label.strip()
+    for label in os.environ.get('CRM_LUMA_CONSENT_QUESTION_LABELS', '').split('|')
+    if label.strip()
+]
+# Same format: labels whose "yes" answer is WhatsApp opt-in. A phone number
+# on its own never is.
+CRM_LUMA_WHATSAPP_QUESTION_LABELS = [
+    label.strip()
+    for label in os.environ.get('CRM_LUMA_WHATSAPP_QUESTION_LABELS', '').split('|')
+    if label.strip()
+]
+# Contacts API for Chat owners and admins (/api/v1/community-chat/crm/).
+# Off by default; the API answers 404 crm_disabled until an operator enables it.
+COMMUNITY_CHAT_CRM_ENABLED = _env_is_true('COMMUNITY_CHAT_CRM_ENABLED', False)
+# Email blasts go through a self-hosted listmonk (v6.2) reached on the
+# mlai-shared network, e.g. LISTMONK_BASE_URL=http://listmonk:9000, as a
+# listmonk API user. CRM_SENDING_ENABLED is the email kill switch; SMTP
+# credentials live only in listmonk. See docs/crm.md.
+CRM_SENDING_ENABLED = _env_is_true('CRM_SENDING_ENABLED', False)
+LISTMONK_BASE_URL = os.environ.get('LISTMONK_BASE_URL', '').strip().rstrip('/')
+LISTMONK_API_USER = os.environ.get('LISTMONK_API_USER', '').strip()
+LISTMONK_API_TOKEN = os.environ.get('LISTMONK_API_TOKEN', '').strip()
+# The MLAI campaign template's numeric id in listmonk; blank uses listmonk's default.
+_LISTMONK_TEMPLATE_ID = os.environ.get('LISTMONK_TEMPLATE_ID', '').strip()
+LISTMONK_TEMPLATE_ID = int(_LISTMONK_TEMPLATE_ID) if _LISTMONK_TEMPLATE_ID.isdigit() else None
+# The blast dispatcher and the listmonk feedback sync are scheduler runners,
+# each cache-throttled to one pass per interval.
+CRM_BLAST_DISPATCH_INTERVAL_SECONDS = max(
+    10,
+    int(os.environ.get('CRM_BLAST_DISPATCH_INTERVAL_SECONDS', '60')),
+)
+CRM_LISTMONK_SYNC_INTERVAL_SECONDS = max(
+    60,
+    int(os.environ.get('CRM_LISTMONK_SYNC_INTERVAL_SECONDS', '300')),
 )
 HUMANITIX_API_BASE_URL = os.environ.get(
     'HUMANITIX_API_BASE_URL',

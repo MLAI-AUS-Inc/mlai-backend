@@ -74,6 +74,7 @@ urlpatterns = [
     path("moderators/<str:public_key>/", ChatModeratorView.as_view(), name="community_chat_moderator"),
     path("relay-roles/<str:public_key>/", RelayChatRoleView.as_view(), name="community_chat_relay_role"),
     path("volunteer/", include("community_chat.volunteer.urls")),
+    path("crm/", include("community_chat.crm.urls")),
     path("home/", CommunityHomeView.as_view(), name="community_chat_home"),
     path("coworking/today/", CoworkingTodayView.as_view(), name="community_chat_coworking_today"),
     path("meeting-rooms/rooms/", MeetingRoomListView.as_view(), name="community_chat_meeting_room_list"),

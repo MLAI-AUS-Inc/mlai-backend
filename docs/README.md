@@ -5,6 +5,7 @@ Start with the repository [`README`](../README.md) and
 subsystem-specific contracts and runbooks.
 
 - [Private Studio report source](studio-report-source.md) — scoped hours/invoice/payment refresh and missing-data barriers
+- [Contacts store](crm.md) — MLAI Luma guest sync, CSV opt-in import, consent rules and the `crm` migration
 
 ## Backend maintenance
 
