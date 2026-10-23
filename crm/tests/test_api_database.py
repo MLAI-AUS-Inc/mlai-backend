@@ -717,4 +717,49 @@ class UploadImportDatabaseTests(CrmApiMixin, TestCase):
         self.assertEqual(create({"Email": "email", "Notes": "attributes.Notes"}), "unknown_target")
         self.assertFalse(ContactImport.objects.exists())
         plan = self.client.post(PREFIX + "imports/plan/", {"headers": ["Name", "Company"]}, format="json")
-        self.assertEqual(plan.json()["error"], "no_email_column")
+        self.assertEqual(plan.status_code, 200)
+        self.assertFalse(plan.json()["has_email"])
+        self.assertEqual(
+            plan.json()["columns"],
+            [{"header": "Name", "target": "display_name"}, {"header": "Company", "target": "company"}],
+        )
+
+    def test_a_stopped_upload_is_closed_and_takes_no_more_rows(self):
+        record = self.client.post(
+            PREFIX + "imports/",
+            {"file_name": "a.csv", "consent": "none", "mapping": {"Email": "email"}, "row_count": 2},
+            format="json",
+        ).json()
+        self.client.post(
+            PREFIX + f"imports/{record['id']}/rows/",
+            {"start_row": 0, "rows": [{"Email": "one@example.com"}]},
+            format="json",
+        )
+
+        stopped = self.client.post(PREFIX + f"imports/{record['id']}/cancel/")
+        again = self.client.post(PREFIX + f"imports/{record['id']}/cancel/")
+        late = self.client.post(
+            PREFIX + f"imports/{record['id']}/rows/",
+            {"start_row": 1, "rows": [{"Email": "two@example.com"}]},
+            format="json",
+        )
+
+        self.assertEqual(stopped.json()["status"], "failed")
+        self.assertEqual(stopped.json()["error_sample"][-1], {"reason": "stopped"})
+        self.assertEqual(again.json()["status"], "failed")
+        self.assertEqual(late.json()["error"], "import_not_running")
+        self.assertTrue(Contact.objects.filter(email="one@example.com").exists())
+        self.assertFalse(Contact.objects.filter(email="two@example.com").exists())
+
+    def test_abandoned_uploads_expire_after_an_hour(self):
+        record = self.client.post(
+            PREFIX + "imports/",
+            {"file_name": "a.csv", "consent": "none", "mapping": {"Email": "email"}, "dry_run": True},
+            format="json",
+        ).json()
+        ContactImport.objects.filter(pk=record["id"]).update(updated_at=timezone.now() - timedelta(hours=2))
+
+        listed = self.client.get(PREFIX + "imports/").json()["results"]
+
+        self.assertEqual(listed[0]["status"], "failed")
+        self.assertEqual(listed[0]["error_sample"][-1], {"reason": "expired"})

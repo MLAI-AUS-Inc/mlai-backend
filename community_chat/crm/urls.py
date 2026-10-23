@@ -39,6 +39,11 @@ urlpatterns = [
         views.ImportFinishView.as_view(),
         name="community_chat_crm_import_finish",
     ),
+    path(
+        "imports/<uuid:import_id>/cancel/",
+        views.ImportCancelView.as_view(),
+        name="community_chat_crm_import_cancel",
+    ),
     path("segments/", views.SegmentsView.as_view(), name="community_chat_crm_segments"),
     path(
         "segments/preview/",

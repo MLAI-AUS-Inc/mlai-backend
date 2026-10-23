@@ -16,7 +16,7 @@ import csv
 import re
 from collections import Counter
 from dataclasses import dataclass, field
-from datetime import datetime, timezone as dt_timezone
+from datetime import datetime, timedelta, timezone as dt_timezone
 from typing import Iterable, Iterator, Optional
 
 from django.db import transaction
@@ -79,6 +79,7 @@ COLUMN_ALIASES = {
 }
 MAX_TAGS = 50
 MAX_ATTRIBUTE_KEYS = 50
+STALE_UPLOAD_AFTER = timedelta(hours=1)
 CHUNK_SIZE = 1000
 BULK_BATCH_SIZE = 250
 ERROR_SAMPLE_LIMIT = 20
@@ -149,8 +150,14 @@ def normalize_header(value: str) -> str:
     return " ".join(re.sub(r"[_\-]+", " ", str(value or "")).casefold().split())
 
 
-def plan_columns(headers: Iterable[str], overrides: Optional[dict] = None) -> dict:
-    """Map each CSV header to a contact field, ``attributes.<key>`` or ``ignore``."""
+def plan_columns(
+    headers: Iterable[str], overrides: Optional[dict] = None, *, require_email: bool = True
+) -> dict:
+    """Map each CSV header to a contact field, ``attributes.<key>`` or ``ignore``.
+
+    With ``require_email=False`` a plan without an email column is still
+    returned, so the upload screen can show it and let a person pick one.
+    """
 
     overrides = {normalize_header(key): value for key, value in (overrides or {}).items()}
     aliases = {
@@ -177,7 +184,7 @@ def plan_columns(headers: Iterable[str], overrides: Optional[dict] = None) -> di
         if target not in ("ignore",) and not target.startswith("attributes."):
             used.add(target)
         plan[header] = target
-    if "email" not in plan.values():
+    if require_email and "email" not in plan.values():
         raise ImportFileError(
             "The file has no email column; name one with --map HEADER=email.", "no_email_column"
         )
@@ -348,6 +355,7 @@ def start_upload_import(
 
     plan = validate_column_plan(column_plan)
     default_source, extra_tags = _import_options(file_name, consent, consent_source, tags)
+    expire_stale_uploads()
     with transaction.atomic():
         record = ContactImport.objects.create(
             file_name=file_name[:255],
@@ -423,6 +431,45 @@ def finish_upload_import(import_id, *, actor=None) -> ContactImport:
         record.save(update_fields=["status", "finished_at", "updated_at"])
         _audit_upload(record, actor, "finish")
     return record
+
+
+def cancel_upload_import(import_id, *, actor=None) -> ContactImport:
+    """Stop an upload that is still running. A finished upload is returned unchanged.
+
+    Rows already applied stay applied; a dry run never wrote any.
+    """
+
+    with transaction.atomic():
+        record = ContactImport.objects.select_for_update().get(pk=import_id)
+        if record.status != ContactImport.Status.RUNNING or record.origin != ContactImport.Origin.UPLOAD:
+            return record
+        _close_upload(record, reason="stopped")
+        _audit_upload(record, actor, "cancel")
+    return record
+
+
+def expire_stale_uploads(now: Optional[datetime] = None) -> int:
+    """Close uploads abandoned mid-stream: no chunk for ``STALE_UPLOAD_AFTER``."""
+
+    now = now or timezone.now()
+    stale = ContactImport.objects.filter(
+        status=ContactImport.Status.RUNNING,
+        origin=ContactImport.Origin.UPLOAD,
+        updated_at__lt=now - STALE_UPLOAD_AFTER,
+    )
+    expired = 0
+    with transaction.atomic():
+        for record in stale.select_for_update(skip_locked=True):
+            _close_upload(record, reason="expired")
+            expired += 1
+    return expired
+
+
+def _close_upload(record: ContactImport, *, reason: str) -> None:
+    record.status = ContactImport.Status.FAILED
+    record.finished_at = timezone.now()
+    record.error_sample = [*record.error_sample, {"reason": reason}][-ERROR_SAMPLE_LIMIT:]
+    record.save(update_fields=["status", "finished_at", "error_sample", "updated_at"])
 
 
 def _audit_upload(record: ContactImport, actor, operation: str) -> None:

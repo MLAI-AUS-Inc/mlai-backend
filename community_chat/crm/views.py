@@ -27,6 +27,8 @@ from crm.contact_import import (
     ImportChunkError,
     ImportFileError,
     apply_upload_chunk,
+    cancel_upload_import,
+    expire_stale_uploads,
     finish_upload_import,
     plan_columns,
     start_upload_import,
@@ -334,17 +336,19 @@ class TagsView(CrmView):
 class ImportPlanView(CrmView):
     def post(self, request):
         headers = validated(wire.ImportPlanInput, request)["headers"]
-        plan = plan_columns(headers)
+        plan = plan_columns(headers, require_email=False)
         return Response(
             {
                 "columns": [{"header": header, "target": plan[header]} for header in headers],
                 "targets": list(TARGETS),
+                "has_email": "email" in plan.values(),
             }
         )
 
 
 class ImportsView(CrmView):
     def get(self, request, import_id=None):
+        expire_stale_uploads()
         if import_id is not None:
             return Response(wire.import_record(get_object_or_404(ContactImport, pk=import_id)))
         records = ContactImport.objects.order_by("-created_at", "-pk")
@@ -380,6 +384,12 @@ class ImportRowsView(CrmView):
 class ImportFinishView(CrmView):
     def post(self, request, import_id):
         return Response(wire.import_record(finish_upload_import(import_id, actor=request.user)))
+
+
+class ImportCancelView(CrmView):
+    def post(self, request, import_id):
+        get_object_or_404(ContactImport, pk=import_id)
+        return Response(wire.import_record(cancel_upload_import(import_id, actor=request.user)))
 
 
 class SegmentsView(CrmView):

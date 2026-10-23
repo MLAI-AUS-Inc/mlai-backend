@@ -38,6 +38,10 @@ class ColumnPlanTests(SimpleTestCase):
         with self.assertRaises(ImportFileError):
             plan_columns(["Name", "Company"])
 
+    def test_the_upload_screen_can_still_see_a_plan_without_email(self):
+        plan = plan_columns(["Name", "Company"], require_email=False)
+        self.assertEqual(plan, {"Name": "display_name", "Company": "company"})
+
     def test_a_second_column_for_the_same_field_becomes_an_attribute(self):
         plan = plan_columns(["email", "e-mail"])
         self.assertEqual(plan, {"email": "email", "e-mail": "attributes.e_mail"})

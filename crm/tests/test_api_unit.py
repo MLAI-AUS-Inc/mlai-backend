@@ -216,13 +216,6 @@ class GateTests(SimpleTestCase):
                 400,
                 "invalid_definition",
             ),
-            (
-                views.ImportPlanView,
-                signed_in("post", data={"headers": ["Name", "Company"]}),
-                {},
-                400,
-                "no_email_column",
-            ),
         ]
         with patch("crm.access.account_chat_role", return_value="admin"):
             for view, request, kwargs, status, code in cases:
@@ -247,6 +240,15 @@ class GateTests(SimpleTestCase):
                 "reason": "required",
             },
         )
+
+    @override_settings(COMMUNITY_CHAT_CRM_ENABLED=True)
+    def test_import_plan_without_email_still_shows_the_columns(self, _throttle):
+        request = signed_in("post", data={"headers": ["Name", "Company"]})
+        with patch("crm.access.account_chat_role", return_value="admin"):
+            response = self.call(views.ImportPlanView, request)
+        self.assertEqual(response.status_code, 200)
+        self.assertFalse(response.data["has_email"])
+        self.assertEqual([column["target"] for column in response.data["columns"]], ["display_name", "company"])
 
     @override_settings(COMMUNITY_CHAT_CRM_ENABLED=True)
     def test_import_plan_maps_headers_in_order(self, _throttle):

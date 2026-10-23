@@ -115,10 +115,11 @@ access rules are in `crm/queries.py`, `crm/segments.py` and `crm/access.py`.
 | `GET`, `PATCH contacts/{id}/` | Contact detail; edit profile fields, phone, tags and attributes |
 | `POST contacts/{id}/stop-messaging/` | Opt out of email, SMS or WhatsApp. One-way |
 | `GET tags/` | Tags in use, with counts |
-| `POST imports/plan/` | Map CSV headers to fields (no row data is sent) |
+| `POST imports/plan/` | Map CSV headers to fields (no row data is sent). Always 200, with `has_email: false` when no column maps to email, so the screen can still show the mapping |
 | `GET`, `POST imports/`; `GET imports/{id}/` | Upload imports: start one, list them, read one |
 | `POST imports/{id}/rows/` | Apply one chunk of up to 1,000 rows |
 | `POST imports/{id}/finish/` | Close an upload |
+| `POST imports/{id}/cancel/` | Stop a running upload (status `failed`, reason `stopped`). Rows already applied stay. Uploads with no chunk for an hour expire the same way (reason `expired`) |
 | `GET`, `POST segments/`; `GET`, `PATCH`, `DELETE segments/{id}/` | Saved segments |
 | `POST segments/preview/` | Count, a sample of 20 and exclusion counts for a definition |
 | `GET segments/catalog/` | Rule types, fields, attribute keys, registration questions and tags for the builder |
