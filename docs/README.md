@@ -100,6 +100,7 @@ release evidence may describe earlier deployment stages; verify current runtime
 state when using those operational documents.
 
 - [`mlai-chat-bridge-contract.md`](mlai-chat-bridge-contract.md)
+- [Permanent Slack member operations](slack-member-permanent-operations.md) — member-only strategy, processing pause, reader holds and recovery
 - [Slack member migration: Phase 0 operations](slack-member-phase0-operations.md) — read-only coverage command and owner baseline checks
 - [Slack member migration: Phase 3 foundations](slack-member-phase3-operations.md) — disabled configuration, exact migration proposal and rollout gates
 - [Slack member migration: Phase 4a operations](slack-member-phase4a-operations.md) — feature-off release, scoped public intake, membership epochs and audience reduction gates

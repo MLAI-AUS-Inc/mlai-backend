@@ -202,7 +202,7 @@ class MemberDeliveryTests(MemberDeliveryFixture, TransactionTestCase):
         self.assertEqual(self.mutations, [])
         self.bot.assert_not_called()
 
-    @override_settings(SLACK_MEMBER_CHANNELS_ENABLED=False)
+    @override_settings(MESSAGE_SYNC_ENABLED=False)
     def test_flag_off_member_never_uses_bot_or_provider(self):
         row = self.delivery()
         with self.assertRaises(member.MemberDeliveryDeferred):
@@ -1105,7 +1105,7 @@ class MemberDeliveryTests(MemberDeliveryFixture, TransactionTestCase):
             guard_legacy_provider_request,
         )
 
-        row = self.delivery()
+        row = self.delivery(source="slack")
         self.channel.audience = "community"
         self.channel.save()
         claimed = claim_ready_deliveries(1)[0]
@@ -1214,7 +1214,7 @@ class MemberDeliveryConcurrencyTests(MemberDeliveryFixture, TransactionTestCase)
         self._interleave("legacy")
 
     def _interleave(self, kind):
-        row = self.delivery()
+        row = self.delivery(source="slack" if kind == "legacy" else "buzz")
         claimed = claim_ready_deliveries(1)[0]
         entered, release, attempting, changed = [threading.Event() for _ in range(4)]
         errors = []

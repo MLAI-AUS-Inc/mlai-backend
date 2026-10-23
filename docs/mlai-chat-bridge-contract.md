@@ -278,28 +278,44 @@ grant only `channels:history`, `channels:read`, `chat:write`, `files:read`,
 `SLACK_BRIDGE_BOT_USER_ID` so its messages and reactions are discarded for loop
 prevention.
 
-### Community member-source rollout
+### Permanent member source
 
-The existing `SLACK_COMMUNITY_SOURCE` setting selects `bot`, `both` or `members` behind the member-channel prerequisites. `both` compares authenticated receiving-app observations while retaining bot history. In `members` mode, content history and intake require an authorized member reader. A complete zero-reader assessment records `sync_paused_reason=no_reader`, preserves durable checkpoints and retries after 60 seconds. Unknown membership also holds work. Bot callbacks receive a separate retired-source receipt and cannot reserve the member content key. Pending member callbacks retain their encrypted payload until reader authority recovers. A Community scroll request reports retryable `slack_history_unavailable` while no reader is available; it cannot create bot authority. A reconnect or join resumes the normal durable worker, with a fresh cursor if the reader authority changed. This does not change Members/private audiences or Phase 5's recorded send actors.
+Community and Members content history and intake require a current authorized
+member reader. There is no bot/both source selector. A complete zero-reader
+assessment records `sync_paused_reason=no_reader`, preserves durable checkpoints
+and retries after 60 seconds. Unknown membership also holds work. Bot callbacks
+receive a separate retired-source receipt and cannot reserve the member content
+key. Pending member callbacks keep their encrypted payload until authority
+recovers. Scrolling reports retryable `slack_history_unavailable` while no reader
+is available; it cannot create bot authority. Reconnecting or joining resumes the
+normal worker, with a fresh cursor when the reader's authority changes.
 
-[Phase 6 operations](slack-community-phase6-operations.md) defines durable comparison/retention, the seven-full-day bot-reference miss gate, two actual readers per existing Community room, and fourteen stable member-source days without fallback before bot-subscription retirement and later Phase 7 deletion. These are separately approved live observation gates; source defaults remain off/bot and this contract records no activation or elapsed window.
+Member posting, member-channel discovery and private event routing are permanent
+paths. The four former rollout settings are removed from settings and deployment:
+`SLACK_MEMBER_CHANNELS_ENABLED`, `SLACK_COMMUNITY_SEND_AS_MEMBER`,
+`SLACK_COMMUNITY_SOURCE` and `MESSAGE_SYNC_EVENT_ROUTING`. A stale value cannot
+select the former implementation. The shared `MESSAGE_SYNC_ENABLED` processing
+pause, owner-inventory prerequisite and optional channel restriction remain.
+Reductions and revocations continue while expansion is paused.
 
-### Member-channel foundations (inactive)
+The bot may still post for an approved unlinked account. Mutations retain the
+original posting actor; deleting a reader strategy never relabels an existing
+command or receipt. Historical comparison markers remain decodable for retained
+queues and privacy erasure, but there is no live comparison writer or finalizer.
+Status reports current reader availability, without inventing an elapsed window.
 
-The former bot-only channel lifecycle lane is retired. Its enablement flag,
-`conversations.list` reconciliation, bot `conversations.info` reader and
-automatic `conversations.join` path are removed. Worker and callback intake no
-longer invoke that lane. This source change does not change Slack app settings
-or enable member-channel processing.
+The owner requested expedited cleanup on 23 October 2026, superseding the former
+seven-day comparison and fourteen-day observation rollout gates. Those windows
+and the waived iOS/human checks are not recorded as passed. See
+[permanent operations](slack-member-permanent-operations.md) for release and
+recovery behavior. Dated phase documents describe the retired rollout.
 
-`community_bridge/member_channels.py` retains the channel refresh queue, Slack
-metadata observations, managed-text policy and adapter room synchronization as
-foundations for the separately gated member-authorized lane. No reader or
-router calls them automatically yet. Queued admin intent remains pending;
-metadata synchronization alone never enables message delivery or claims a
-reader or synchronized audience. The new flags stay at their defaults:
-`SLACK_MEMBER_CHANNELS_ENABLED=false`, `SLACK_COMMUNITY_SEND_AS_MEMBER=false`,
-`SLACK_COMMUNITY_SOURCE=bot` and `MESSAGE_SYNC_EVENT_ROUTING=false`.
+### Member-managed rooms
+
+The former bot lifecycle and fixed deployment mapping lanes are retired. Current
+member grants, verified public membership, Mirror/Hold/Exclude decisions and
+managed relay audiences control discovery and delivery. Metadata by itself never
+grants membership or a synchronized audience.
 
 Every adapter room request explicitly states `audience: community|members`.
 Community rooms retain their existing identities and access policy; Members

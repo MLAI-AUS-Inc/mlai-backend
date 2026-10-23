@@ -56,11 +56,11 @@ class CommunityLegacyHold(member.MemberDeliveryDeferred):
 
 
 def enabled():
-    return bool(getattr(settings, "SLACK_COMMUNITY_SEND_AS_MEMBER", False))
+    return access.enabled()
 
 
 def admitted(channel):
-    """The existing public rollout cohort gates new Phase5 permission too."""
+    """Apply current workspace/channel scope and the processing pause."""
     from .member_channels import member_channel_in_scope
 
     return enabled() and member_channel_in_scope(channel.slack_workspace_id, channel.slack_channel_id)
@@ -90,7 +90,7 @@ def required(delivery):
 
 
 def enqueue_marker(channel, event):
-    """Mark only newly enqueued, ordinary, flag-on Community work as unsent."""
+    """Mark only newly enqueued, ordinary Community work as unsent."""
     candidate = {**event, "payload": event, "source_platform": "buzz", "target_platform": "slack",
                  "channel": {"destination_channel_id": channel.destination_channel_id}}
     if (not getattr(settings, "MESSAGE_SYNC_ENABLED", False)

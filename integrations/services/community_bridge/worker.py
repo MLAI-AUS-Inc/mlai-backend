@@ -64,7 +64,6 @@ from integrations.services.slack_workspace_users import warm_workspace_directory
 logger = logging.getLogger(__name__)
 WORKER_ID = f"{socket.gethostname()}:{os.getpid()}"[:100]
 # Host/PID can repeat after a container process restart. Coverage cannot.
-SOURCE_MONITOR_ID = f"{WORKER_ID}:{uuid.uuid4()}"
 _discovery_heartbeat_at = 0.0
 _discovery_completed = 0
 _discovery_failed = 0
@@ -290,8 +289,6 @@ class CommunityBridgeDiscordClient(discord.Client):
         try:
             self._sync_completed_count += await asyncio.to_thread(process_inbox_once)
             if time.monotonic() - self._sync_heartbeat_at >= 10:
-                from .community_source import heartbeat as source_heartbeat
-                await asyncio.to_thread(source_heartbeat, SOURCE_MONITOR_ID)
                 await asyncio.to_thread(heartbeat, WORKER_ID, "inbox", completed=self._sync_completed_count)
                 self._sync_completed_count = 0
                 self._sync_heartbeat_at = time.monotonic()

@@ -58,9 +58,8 @@ class MemberAccessDenied(dm.SlackDmMirrorAuthorizationError):
 
 
 def enabled() -> bool:
-    """Keep all new member-provider activity behind the deployment switch."""
-    return bool(getattr(settings, "SLACK_MEMBER_CHANNELS_ENABLED", False)
-                and getattr(settings, "SLACK_OWNER_INVENTORY_ENABLED", False)
+    """Keep member-provider activity behind the shared processing pause."""
+    return bool(getattr(settings, "SLACK_OWNER_INVENTORY_ENABLED", False)
                 and getattr(settings, "MESSAGE_SYNC_ENABLED", False))
 
 
@@ -154,7 +153,7 @@ def _lock_reader_authority(user_ids, workspace_id, channel_id):
     return users, grants, connections, memberships
 
 
-def assess_readers(workspace_id, channel_id, *, locked=None, mode=None):
+def assess_readers(workspace_id, channel_id, *, locked=None):
     """Assess every current owner; exclusions/cooldowns never reduce entitlement.
 
     With ``locked`` this is evaluated within the caller's ordered authority
@@ -164,7 +163,7 @@ def assess_readers(workspace_id, channel_id, *, locked=None, mode=None):
     from .community_bridge.member_channels import member_channel_in_scope
     from .slack_member_membership_epoch import membership_floor
 
-    mode = mode or getattr(settings, "SLACK_COMMUNITY_SOURCE", "bot")
+    mode = "members"
     if not enabled() or not member_channel_in_scope(workspace_id, channel_id):
         return ReaderAssessment(0, 1, False, "hold", "", "")
     if locked is None:
@@ -214,9 +213,9 @@ def assess_readers(workspace_id, channel_id, *, locked=None, mode=None):
                                             separators=(",", ":")).encode()).hexdigest()
     count = len({g.user_id for g in eligible})
     complete = unknown == 0
-    effective = mode if mode in {"bot", "both"} else "members" if count else "hold"
+    effective = "members" if count else "hold"
     return ReaderAssessment(count, unknown, complete, effective,
-                            "no_reader" if mode == "members" and complete and not count else "",
+                            "no_reader" if complete and not count else "",
                             fingerprint, tuple(eligible), tuple(available))
 
 
@@ -270,7 +269,7 @@ def community_reader_cohort(rows):
 
 
 def _community_callback_channel(payload):
-    if getattr(settings, "SLACK_COMMUNITY_SOURCE", "bot") != "members" or not isinstance(payload, dict):
+    if not isinstance(payload, dict):
         return None
     event = payload.get("event")
     if not isinstance(event, dict):
@@ -322,7 +321,7 @@ def community_source_needs_revalidation(row):
     from .community_bridge.member_channels import member_channel_in_scope
 
     seen, now = row.slack_seen_at, timezone.now()
-    return bool(enabled() and getattr(settings, "SLACK_COMMUNITY_SOURCE", "bot") == "members"
+    return bool(enabled()
                 and member_channel_in_scope(row.slack_workspace_id, row.slack_channel_id)
                 and row.audience == "community" and row.destination_platform == "buzz"
                 and row.destination_workspace_id and row.destination_channel_id
@@ -357,92 +356,20 @@ def community_reader_policy_current(row):
                           locked=(users, grants, connections, memberships))
 
 
-def record_community_reader_state(row, assessment, *, continuity=None):
-    """Persist bounded facts; duration requires the monitor's proven chain.
-
-    Callback/history observations never extend monitor coverage. They retain a
-    still-fresh unchanged proof, or invalidate duration on a known transition.
-    The comparison epoch independently certifies any rollout stability gate.
-    """
-    from django.utils.dateparse import parse_datetime
-    from .community_bridge.community_source import MonitoringContinuity
-
+def record_community_reader_state(row, assessment):
+    """Persist current availability; retained comparison epochs stay untouched."""
     if row.audience != "community":
         return
-    instant = timezone.now()
-    now = instant.isoformat()
-    now_ns = int(instant.timestamp()) * 1_000_000_000 + instant.microsecond * 1000
-    mode = getattr(settings, "SLACK_COMMUNITY_SOURCE", "bot")
-    binding = hashlib.sha256(json.dumps([
-        row.pk, row.slack_workspace_id, row.slack_channel_id, row.destination_platform,
-        row.destination_workspace_id, row.destination_channel_id, mode,
-        getattr(settings, "MESSAGE_SYNC_SLACK_APP_ID", ""),
-        getattr(settings, "MESSAGE_SYNC_SLACK_USER_APP_ID", ""),
-        getattr(settings, "SLACK_MEMBER_CHANNEL_ALLOWED_IDS", ""), enabled(),
-    ], separators=(",", ":")).encode()).hexdigest()
     state = dict(row.room_state or {})
-    previous = state.get(COMMUNITY_READER_STATE)
-    previous = previous if isinstance(previous, dict) else {}
-
-    def saved_timestamp(name):
-        raw = previous.get(name)
-        try:
-            stamp = parse_datetime(raw) if isinstance(raw, str) else None
-        except ValueError:
-            stamp = None
-        return raw if stamp is not None and timezone.is_aware(stamp) and stamp <= instant else None
-
-    checked = previous.get("monitor_checked_ns")
-    prior_fresh = (type(checked) is int and 0 <= now_ns - checked <= 180_000_000_000
-                   and previous.get("binding") == binding and previous.get("mode") == mode)
-    monitored = (type(continuity) is MonitoringContinuity and type(continuity.checked_ns) is int
-                 and 0 <= now_ns - continuity.checked_ns <= 180_000_000_000
-                 and type(continuity.token) is str and re.fullmatch(r"[0-9a-f]{64}", continuity.token)
-                 and type(continuity.continuous) is bool)
-    unchanged = (previous.get("effective_source") == assessment.effective_source
-                 and previous.get("fallback_reason") == assessment.fallback_reason
-                 and previous.get("complete") is assessment.complete)
-    if monitored:
-        preserve = bool(prior_fresh and unchanged and continuity.continuous
-                        and previous.get("monitor_token") == continuity.token
-                        and checked <= continuity.checked_ns)
-        checked_ns, token = continuity.checked_ns, continuity.token
-        proven = continuity.continuous
-        observed = datetime.fromtimestamp(checked_ns // 1_000_000_000, tz=instant.tzinfo).replace(
-            microsecond=(checked_ns % 1_000_000_000) // 1000).isoformat()
-    else:
-        preserve = bool(prior_fresh and unchanged and previous.get("continuity_proven") is True)
-        checked_ns = checked if preserve else None
-        token = previous.get("monitor_token") if preserve else None
-        proven = preserve
-        observed = now
-    fallback = assessment.fallback_reason == "no_reader"
-    stable = (mode == "members" and assessment.complete and assessment.effective_source == "members"
-              and assessment.eligible_count > 0)
     state[COMMUNITY_READER_STATE] = {
-        "version": 1, "mode": mode, "binding": binding,
-        "eligible_count": assessment.eligible_count, "unknown_count": assessment.unknown_count,
-        "complete": assessment.complete, "effective_source": assessment.effective_source,
+        "version": 2, "mode": "members", "eligible_count": assessment.eligible_count,
+        "unknown_count": assessment.unknown_count, "complete": assessment.complete,
+        "effective_source": assessment.effective_source,
         "fallback_reason": assessment.fallback_reason,
-        "fallback_since": (saved_timestamp("fallback_since") or observed) if fallback and preserve else observed if fallback and monitored else None,
-        "last_fallback_at": now if fallback else saved_timestamp("last_fallback_at"),
-        "stable_since": (saved_timestamp("stable_since") or observed) if stable and preserve else observed if stable and monitored else None,
-        "monitor_token": token, "monitor_checked_ns": checked_ns, "continuity_proven": proven,
-        "last_checked_at": now, "fingerprint": assessment.fingerprint,
+        "last_checked_at": timezone.now().isoformat(), "fingerprint": assessment.fingerprint,
     }
     row.room_state = state
     row.save(update_fields=("room_state", "updated_at"))
-    if not unchanged:
-        from .community_bridge.observability import compare
-        compare(row, kind="fallback", outcome=(
-            "no_reader" if assessment.complete and assessment.fallback_reason == "no_reader"
-            else assessment.effective_source if assessment.complete else "hold"))
-    if continuity is None:
-        # History/callback fallback between monitor ticks must invalidate the
-        # prospective stability window immediately. The typed heartbeat owns
-        # its own epoch update; this local hook acquires no further locks.
-        from .community_bridge.community_source import note_reader_transition
-        note_reader_transition(row, assessment)
 
 
 def _key(grant, channel_id, purpose):

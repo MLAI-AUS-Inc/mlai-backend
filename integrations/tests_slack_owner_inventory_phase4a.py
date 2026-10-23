@@ -168,7 +168,7 @@ class PublicInventoryMembershipDatabaseTests(MemberAccessFixture, TestCase):
         inventory.grant_metadata_consent(self.grant)
         self.grant.connection.refresh_from_db()
         self.provider.return_value = page([public_row("COLD")], "next")
-        with override_settings(SLACK_MEMBER_CHANNELS_ENABLED=False):
+        with override_settings(MESSAGE_SYNC_ENABLED=False):
             inventory.collect_public_page(self.authority)
         self.assertEqual(self.provider.call_count, 1)
         self.assertEqual(self.provider.call_args.kwargs["limit"], 20)

@@ -263,7 +263,7 @@ class CommunityDeliveryTests(CommunityFixture, TransactionTestCase):
     def test_member_create_flag_off_never_becomes_bot_and_cleanup_uses_original(self):
         row = self.delivery()
         self.send(row)
-        with override_settings(SLACK_COMMUNITY_SEND_AS_MEMBER=False):
+        with override_settings(SLACK_MEMBER_CHANNEL_ALLOWED_IDS="COTHER"):
             edit = self.delivery(op="edit", source_id=row.source_message_id)
             with self.assertRaises(BudgetDeferred):
                 self.send(edit)
@@ -373,7 +373,7 @@ class CommunityDeliveryTests(CommunityFixture, TransactionTestCase):
         row = CommunityBridgeDelivery.objects.get(pk=result["delivery_id"])
         self.assertEqual(row.payload[community.ENQUEUE], {"version": 1, "mapping": member._identity(self.channel)})
         self.assertNotIn(community.MEMBER_STAMP, row.payload["metadata"])
-        with override_settings(SLACK_COMMUNITY_SEND_AS_MEMBER=False):
+        with override_settings(MESSAGE_SYNC_ENABLED=False):
             self.assertIsNone(community.enqueue_marker(self.channel, event))
 
     def test_new_flag_off_cleanup_still_gets_the_recorded_actor_fence(self):

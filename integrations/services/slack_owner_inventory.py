@@ -434,8 +434,7 @@ def _collect_public_page_once(authority) -> bool:
     from integrations.services.slack_chat_catalog import public_channels_enabled
 
     with transaction.atomic():
-        required = set() if getattr(settings, "SLACK_MEMBER_CHANNELS_ENABLED", False) else {"im:read"}
-        grant, connection = _lock_slack_grant_api_authority(authority, required_scopes=required)
+        grant, connection = _lock_slack_grant_api_authority(authority, required_scopes=set())
         if not public_inventory_allowed(grant, connection, authority):
             return False
         state = state_for(connection, authority)
@@ -555,7 +554,8 @@ def public_inventory_allowed(grant, connection, authority) -> bool:
     """Keep existing metadata consent; add only the enabled public-source lane."""
     if has_metadata_consent(connection, authority):
         return True
-    if not getattr(settings, "SLACK_MEMBER_CHANNELS_ENABLED", False):
+    from integrations.services import slack_member_access as access
+    if not access.enabled():
         return False
     from integrations.services.slack_chat_catalog import public_channels_enabled
 

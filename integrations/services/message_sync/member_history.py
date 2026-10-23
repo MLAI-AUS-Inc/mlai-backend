@@ -41,8 +41,8 @@ class _SourceClosed(RuntimeError):
 
 
 def required(channel):
-    """Members are never bot-readable, even during a flag-off rollback."""
-    return channel.audience == "members" or getattr(settings, "SLACK_COMMUNITY_SOURCE", "bot") == "members"
+    """Every Chat public room uses current member read authority."""
+    return channel.destination_platform == "buzz"
 
 
 def guard_page(channel):
@@ -75,7 +75,7 @@ def _scope(row, authority, grant, state_generation):
     # An observation refresh is not a new authority epoch. Consent/OAuth/floor,
     # mapping identity and applied audience changes do restart every cursor.
     value = [str(state_generation), _identity(row),
-             getattr(settings, "SLACK_COMMUNITY_SOURCE", "bot") if row.audience == "community" else "members",
+             "members",
              authority.grant_id, authority.user_id, authority.connection_id,
              authority.workspace_id, authority.slack_user_id, authority.scopes, authority.consent_generation,
              authority.consent_version, authority.oauth_generation,
@@ -96,7 +96,7 @@ class _Client:
         locked_job(self.lease)
         if self.cohort_ids is not None:
             access.assert_reader_cohort_current(self.row.slack_workspace_id, self.cohort_ids)
-            if getattr(settings, "SLACK_COMMUNITY_SOURCE", "bot") != "members" or self.row.audience != "community":
+            if self.row.audience != "community":
                 raise LeaseLost("community_history_strategy_changed")
 
     def _call(self, method, **kwargs):
@@ -316,18 +316,6 @@ def run_page(lease, state, page):
     _defer(lease, original, "history_reader_retry")
 
 
-def community_bot_scope(row, state_generation, *, assessment=None):
-    """Separate every observed source strategy from member pagination authority."""
-    value = ["community-history-v1", str(state_generation), _identity(row),
-             getattr(settings, "SLACK_COMMUNITY_SOURCE", "bot"),
-             "zero-reader-bot" if assessment is not None else "primary-bot",
-             assessment.fingerprint if assessment is not None else None,
-             (row.room_state or {}).get("source_reduction_observed_at"),
-             getattr(settings, "MESSAGE_SYNC_SLACK_APP_ID", ""),
-             getattr(settings, "SLACK_BRIDGE_BOT_USER_ID", "")]
-    return hashlib.sha256(json.dumps(value, separators=(",", ":")).encode()).hexdigest()
-
-
 def _community_attempt(lease, state, page, authority):
     original, client, failure = state.public_channel, None, None
     with transaction.atomic():
@@ -470,7 +458,7 @@ def invalidate_channel_history(workspace_id, channel_id):
 
     Caller holds its membership User authority. Updating State first follows
     the same history order and supersedes in-flight leases/cursors atomically
-    with the leave. Community bot/both history keeps its existing authority.
+    with the leave. Both Community and Members history are fenced.
     """
     from integrations.models import BridgeSyncState
 
@@ -478,8 +466,6 @@ def invalidate_channel_history(workspace_id, channel_id):
         raise transaction.TransactionManagementError("History invalidation requires membership authority")
     rows = BridgeSyncState.objects.filter(public_channel__slack_workspace_id=workspace_id,
                                           public_channel__slack_channel_id=channel_id)
-    if getattr(settings, "SLACK_COMMUNITY_SOURCE", "bot") != "members":
-        rows = rows.filter(public_channel__audience="members")
     for state in rows.select_for_update(of=("self",)).order_by("pk"):
         if state.authority_generation >= 2**63 - 1:
             # A privacy reduction must commit even at the integer ceiling.

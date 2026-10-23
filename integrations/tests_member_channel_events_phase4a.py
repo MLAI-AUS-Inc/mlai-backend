@@ -19,7 +19,7 @@ def payload(event, **changes):
 
 
 def public_row(**changes):
-    return SimpleNamespace(**(dict(pk=7, destination_platform='buzz', destination_channel_id=ROOM,
+    return SimpleNamespace(**(dict(pk=7, destination_platform='buzz', destination_workspace_id='relay', destination_channel_id=ROOM,
         slack_visibility='public', slack_archived=False, slack_deleted=False, mirror_decision='mirror',
         hold_reason='', slack_seen_at=timezone.now(), audience='members', enabled=True,
         slack_workspace_id=WORKSPACE, slack_channel_id=CHANNEL, audience_generation=GENERATION,
@@ -96,7 +96,7 @@ class MemberEventRouterTests(SimpleTestCase):
         hint = router.channels.info_reader_hint(self.refresh.call_args.kwargs['reason'])
         self.assertEqual((hint.grant_id, hint.observed_at), (3, router._observed_at(payload(event), event)))
 
-    def test_legacy_mapping_hint_only_proves_ordinary_public_create(self):
+    def test_legacy_mapping_hint_cannot_replace_current_reader_authority(self):
         self.query.return_value.first.return_value = public_row(slack_seen_at=None, audience='community')
         for subtype in ('message_changed', 'message_deleted', {'malformed': True}):
             self.assertIsNone(router.route_member_public_event(payload({
@@ -105,7 +105,8 @@ class MemberEventRouterTests(SimpleTestCase):
         with override_settings(SLACK_COMMUNITY_SOURCE='both'):
             self.assertEqual(router.route_member_public_event(payload({
                 'type': 'message', 'channel': CHANNEL, 'channel_type': 'channel', 'user': 'UACTOR',
-            })), {'status': 'accepted'})
+            })), {'status': 'community_source_pending'})
+        self.ingest.assert_not_called()
 
     def test_members_source_without_server_reader_policy_keeps_public_content_pending(self):
         self.query.return_value.first.return_value = public_row(slack_seen_at=None, audience='community')
@@ -293,10 +294,10 @@ class MemberEventRouterTests(SimpleTestCase):
         self.refresh.assert_not_called()
 
     @override_settings(SLACK_COMMUNITY_SOURCE='bot')
-    def test_bot_remains_community_content_source_until_source_cutover(self):
+    def test_retired_bot_setting_cannot_bypass_current_member_reader_policy(self):
         self.query.return_value.first.return_value = public_row(audience='community')
         result = router.route_member_public_event(payload({'type': 'message', 'channel': CHANNEL}))
-        self.assertEqual(result['reason'], 'community_source_bot')
+        self.assertEqual(result, {'status': 'community_source_pending'})
         self.ingest.assert_not_called()
 
     def test_unusable_timestamp_does_not_invent_membership_observation(self):

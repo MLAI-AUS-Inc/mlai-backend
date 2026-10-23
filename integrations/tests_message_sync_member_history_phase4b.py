@@ -131,7 +131,7 @@ class MemberHistoryTests(Fixture, TransactionTestCase):
         self.assertEqual(self.calls[-2][1], 'conversations_history')
         self.assertEqual(CommunityBridgeDelivery.objects.count(), 1)
 
-    @override_settings(SLACK_MEMBER_CHANNELS_ENABLED=False)
+    @override_settings(MESSAGE_SYNC_ENABLED=False)
     def test_flags_off_never_fall_back_to_bot_for_members(self):
         with self.assertRaises(member.MemberHistoryDeferred):
             self.run_page()

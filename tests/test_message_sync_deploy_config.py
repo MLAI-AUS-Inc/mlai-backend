@@ -216,92 +216,46 @@ class DependencyVerdictFlagConfigTests(ResponsivenessConfigTests):
         self.assertEqual(self.flags['COMMUNITY_BRIDGE_DEPENDENCY_VERDICTS_ENABLED'], 'false')
 
 
-class MemberChannelFlagConfigTests(unittest.TestCase):
-    flags = {
-        "SLACK_MEMBER_CHANNELS_ENABLED": "false",
-        "SLACK_COMMUNITY_SEND_AS_MEMBER": "false",
-        "SLACK_COMMUNITY_SOURCE": "bot",
-        "MESSAGE_SYNC_EVENT_ROUTING": "false",
-    }
-    valid_sync = {
-        "MESSAGE_SYNC_ENABLED": "true", "COMMUNITY_BRIDGE_PRODUCTION_ENABLED": "true",
-        "MESSAGE_SYNC_SLACK_APP_ID": "ATEST", "MESSAGE_SYNC_SLACK_BOT_WORKSPACE_ID": "TTEST",
-        "SLACK_BRIDGE_WORKSPACE_ID": "TTEST", "MESSAGE_SYNC_SLACK_APP_TOKEN": "xapp-synthetic",
-    }
+class PermanentMemberConfigTests(unittest.TestCase):
+    retired = ('SLACK_MEMBER_CHANNELS_ENABLED', 'SLACK_COMMUNITY_SEND_AS_MEMBER',
+               'SLACK_COMMUNITY_SOURCE', 'MESSAGE_SYNC_EVENT_ROUTING')
 
-    def test_four_defaults_and_managed_wiring_match(self):
+    def test_deployment_cannot_restore_retired_flags_or_bot_source(self):
         root = Path(__file__).resolve().parents[1]
-        workflow = (root / ".github/workflows/deploy.yml").read_text()
-        deploy = (root / "deploy.sh").read_text()
-        settings = (root / "mlai/settings.py").read_text()
-        example = (root / ".env.example").read_text()
-        for key, default in self.flags.items():
-            with self.subTest(key=key):
-                self.assertIn(key + ": ${{ vars." + key + " || '" + default + "' }}", workflow)
-                self.assertIn(key + '="${' + key + ':-' + default + '}"', deploy)
-                self.assertIn('install_remote_env_value ' + key + ' "$' + key + '"', deploy)
-                self.assertIn(key + '=' + default, example)
-                expected = key + " = os.getenv('" + key + "', 'bot')" if default == "bot" else key + " = _env_is_true('" + key + "', False)"
-                self.assertIn(expected, settings)
-        retired = "COMMUNITY_BRIDGE_CHANNEL_" + "LIFECYCLE_ENABLED"
-        for text in (workflow, deploy, settings, example,
-                     (root / "scripts/upsert_env_value_from_stdin.sh").read_text(),
-                     (root / "scripts/validate_message_sync_deploy_config.py").read_text()):
-            self.assertNotIn(retired, text)
-        validate({})
+        for name in ('.github/workflows/deploy.yml', 'deploy.sh', 'mlai/settings.py', '.env.example',
+                     'scripts/upsert_env_value_from_stdin.sh', 'scripts/validate_message_sync_deploy_config.py'):
+            source = (root / name).read_text()
+            for key in self.retired:
+                with self.subTest(path=name, key=key):
+                    self.assertNotIn(key, source)
+        for name in ('integrations/services/slack_member_access.py',
+                     'integrations/services/community_bridge/community_source.py',
+                     'integrations/services/community_bridge/community_delivery.py',
+                     'integrations/services/message_sync/member_history.py',
+                     'integrations/services/message_sync/history.py',
+                     'integrations/services/message_sync/event_routing.py'):
+            for key in self.retired:
+                self.assertNotIn(key, (root / name).read_text())
 
-    def test_dependency_matrix(self):
-        from itertools import product
-        for sync, inventory, member, send, routing, source in product(
-            (False, True), (False, True), (False, True), (False, True), (False, True),
-            ("bot", "both", "members"),
-        ):
-            env = {**self.valid_sync,
-                   "MESSAGE_SYNC_ENABLED": str(sync).lower(),
-                   "SLACK_OWNER_INVENTORY_ENABLED": str(inventory).lower(),
-                   "SLACK_MEMBER_CHANNELS_ENABLED": str(member).lower(),
-                   "SLACK_COMMUNITY_SEND_AS_MEMBER": str(send).lower(),
-                   "MESSAGE_SYNC_EVENT_ROUTING": str(routing).lower(),
-                   "SLACK_COMMUNITY_SOURCE": source}
-            expected = ((not inventory or sync) and (not member or (sync and inventory))
-                        and (not send or (sync and member)) and (not routing or sync)
-                        and (source == "bot" or (sync and member)))
-            with self.subTest(sync=sync, inventory=inventory, member=member, send=send, routing=routing, source=source):
-                if expected:
-                    validate(env)
-                else:
-                    with self.assertRaises(ValueError):
-                        validate(env)
-
-    def test_noncanonical_or_multiline_values_are_rejected(self):
-        for key in self.flags:
-            invalid = ("", "BOT", "all", "members ", "bot\n", "members\nINJECT=true") if key == "SLACK_COMMUNITY_SOURCE" else ("", "yes", "TRUE", "true\n", "false\r\n", "true\nINJECT=true")
-            for value in invalid:
-                with self.subTest(key=key, value=value), self.assertRaises(ValueError):
-                    validate({key: value})
-
-    def test_all_four_values_upsert_atomically_with_exact_canonical_values(self):
+    def test_remote_upsert_rejects_retired_keys_without_touching_existing_values(self):
         root = Path(__file__).resolve().parents[1]
         with tempfile.TemporaryDirectory() as directory:
             sandbox = Path(directory)
-            (sandbox / "scripts").mkdir()
-            shutil.copy(root / "scripts/upsert_env_value_from_stdin.sh", sandbox / "scripts")
-            target = sandbox / ".env"
-            for key in self.flags:
-                valid = ("bot", "both", "members") if key == "SLACK_COMMUNITY_SOURCE" else ("true", "false")
-                for value in (*valid, "", "TRUE", "yes", "all", valid[0] + "\n", valid[0] + "\r", valid[0] + "\nINJECT=true"):
-                    before = "KEEP_ME=yes\n" + key + "=old\n"
-                    target.write_text(before)
-                    result = subprocess.run(["bash", "scripts/upsert_env_value_from_stdin.sh", key],
-                                            cwd=sandbox, input=value, text=True, capture_output=True, timeout=5)
-                    with self.subTest(key=key, value=value):
-                        self.assertEqual(result.returncode == 0, value in valid, result.stderr)
-                        if value in valid:
-                            self.assertEqual(target.read_text(), "KEEP_ME=yes\n" + key + "=" + value + "\n")
-                            self.assertEqual(target.stat().st_mode & 0o777, 0o600)
-                        else:
-                            self.assertEqual(target.read_text(), before)
-                            self.assertEqual(list(sandbox.glob(".env.managed-value.*")), [])
+            (sandbox / 'scripts').mkdir()
+            shutil.copy(root / 'scripts/upsert_env_value_from_stdin.sh', sandbox / 'scripts')
+            target = sandbox / '.env'
+            for key in self.retired:
+                before = 'KEEP_ME=yes\n' + key + '=old\n'
+                target.write_text(before)
+                result = subprocess.run(['bash', 'scripts/upsert_env_value_from_stdin.sh', key],
+                    cwd=sandbox, input='false', text=True, capture_output=True, timeout=5)
+                self.assertEqual(result.returncode, 64)
+                self.assertEqual(target.read_text(), before)
+
+    def test_inventory_still_requires_shared_processing_pause(self):
+        with self.assertRaisesRegex(ValueError, 'requires MESSAGE_SYNC_ENABLED=true'):
+            validate({'SLACK_OWNER_INVENTORY_ENABLED': 'true', 'MESSAGE_SYNC_ENABLED': 'false'})
+        validate({})
 
 
 class DeviceFanoutConfigTests(unittest.TestCase):

@@ -399,7 +399,7 @@ class PublicInventoryConsentDatabaseTests(MemberAccessFixture, TestCase):
         self.assertEqual(self.provider.call_args.args[1], "users_conversations")
         self.assertEqual(self.provider.call_args.kwargs["required_scopes"], {"channels:read"})
 
-    @override_settings(SLACK_MEMBER_CHANNELS_ENABLED=False)
+    @override_settings(MESSAGE_SYNC_ENABLED=False)
     def test_flag_off_keeps_existing_metadata_consent_requirement(self):
         self.grant.connection.scopes = [*PUBLIC_CHANNEL_SCOPES, "im:read"]
         self.grant.connection.save(update_fields=("scopes",))
@@ -407,7 +407,7 @@ class PublicInventoryConsentDatabaseTests(MemberAccessFixture, TestCase):
         self.provider.assert_not_called()
         self.assertFalse(SlackOwnerConversationInventory.objects.filter(grant=self.grant).exists())
 
-    @override_settings(SLACK_MEMBER_CHANNELS_ENABLED=False)
+    @override_settings(MESSAGE_SYNC_ENABLED=False)
     def test_flag_off_existing_metadata_opt_in_retains_public_inventory(self):
         self.grant.connection.scopes = ["im:read", "channels:read"]
         self.grant.connection.save(update_fields=("scopes",))

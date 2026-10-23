@@ -136,13 +136,13 @@ class PendingMemberCallbackDatabaseTests(MemberAccessFixture, TestCase):
         self.queue()
         self.assertEqual(inbox.process_inbox_once(), 0)
         self.due()
-        with override_settings(SLACK_MEMBER_CHANNELS_ENABLED=False):
+        with override_settings(MESSAGE_SYNC_ENABLED=False):
             self.assertEqual(inbox.process_inbox_once(), 0)
         row = BridgeSyncInbox.objects.get()
         self.assertEqual((row.status, row.last_error_code), ('pending', 'member_audience_pending'))
         self.assertTrue(row.encrypted_payload)
         self.due()
-        with override_settings(SLACK_MEMBER_CHANNELS_ENABLED=False):
+        with override_settings(MESSAGE_SYNC_ENABLED=False):
             self.assertEqual(inbox.process_inbox_once(), 0)
         row.refresh_from_db()
         self.assertEqual((row.status, row.last_error_code), ('pending', 'member_audience_pending'))
