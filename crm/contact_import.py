@@ -1,8 +1,13 @@
-"""Import contacts from a CSV file.
+"""Import contacts from a CSV file or from chunks uploaded in MLAI Chat.
 
 Parsing is pure so it can be checked without a database. Applying an import
 never overwrites a filled field, never re-subscribes anyone who unsubscribed,
 bounced or is banned, and stores no row data in the import record.
+
+The management command parses the whole file and calls ``apply_import``. An
+upload stores its column plan with ``start_upload_import``; each chunk of
+``{header: value}`` rows then goes through the same ``_parse_row`` and
+``_apply_chunk`` path in ``apply_upload_chunk``.
 """
 
 from __future__ import annotations
@@ -77,6 +82,10 @@ MAX_ATTRIBUTE_KEYS = 50
 CHUNK_SIZE = 1000
 BULK_BATCH_SIZE = 250
 ERROR_SAMPLE_LIMIT = 20
+MAX_COLUMNS = 200
+MAX_UPLOAD_ROWS = 1_000_000
+FIRST_DATA_ROW = 2  # row 1 of the file is the header
+_ATTRIBUTE_TARGET = re.compile(r"^attributes\.[a-z0-9][a-z0-9_]{0,254}$")
 _YES = {"yes", "y", "true", "1", "on", "checked", "agree", "i agree", "opted in"}
 _DATE_FORMATS = (
     "%Y-%m-%d %H:%M:%S",
@@ -90,6 +99,18 @@ _DATE_FORMATS = (
 
 class ImportFileError(ValueError):
     """The file cannot be imported as a whole (for example, no email column)."""
+
+    def __init__(self, message: str, code: str = "invalid_file"):
+        self.code = code
+        super().__init__(message)
+
+
+class ImportChunkError(ValueError):
+    """An uploaded chunk was refused; nothing in it was applied."""
+
+    def __init__(self, code: str, **detail):
+        self.code, self.detail = code, detail
+        super().__init__(code)
 
 
 @dataclass
@@ -143,7 +164,9 @@ def plan_columns(headers: Iterable[str], overrides: Optional[dict] = None) -> di
         target = overrides.get(key)
         if target is not None:
             if target not in TARGETS:
-                raise ImportFileError(f"Unknown field {target!r} in --map for column {header!r}.")
+                raise ImportFileError(
+                    f"Unknown field {target!r} in --map for column {header!r}.", "unknown_target"
+                )
         else:
             target = aliases.get(key)
             if target in used:
@@ -155,17 +178,42 @@ def plan_columns(headers: Iterable[str], overrides: Optional[dict] = None) -> di
             used.add(target)
         plan[header] = target
     if "email" not in plan.values():
-        raise ImportFileError("The file has no email column; name one with --map HEADER=email.")
+        raise ImportFileError(
+            "The file has no email column; name one with --map HEADER=email.", "no_email_column"
+        )
     return plan
 
 
-def parse_rows(rows: Iterable[dict], plan: dict) -> ParsedFile:
+def validate_column_plan(mapping) -> dict:
+    """Check an uploaded ``{header: target}`` plan, as edited after ``plan_columns``."""
+
+    if not isinstance(mapping, dict) or not mapping:
+        raise ImportFileError("Send a mapping of column headers to fields.", "invalid_mapping")
+    if len(mapping) > MAX_COLUMNS:
+        raise ImportFileError(f"A file can have at most {MAX_COLUMNS} columns.", "too_many_columns")
+    plan, used = {}, set()
+    for header, target in mapping.items():
+        if not isinstance(header, str) or len(header) > 255 or not isinstance(target, str):
+            raise ImportFileError("Column headers and fields must be text.", "invalid_mapping")
+        if target not in TARGETS and not _ATTRIBUTE_TARGET.match(target):
+            raise ImportFileError(f"Unknown field for column {header!r}.", "unknown_target")
+        if target != "ignore" and not target.startswith("attributes."):
+            if target in used:
+                raise ImportFileError(f"Two columns map to {target}.", "duplicate_target")
+            used.add(target)
+        plan[header] = target
+    if "email" not in used:
+        raise ImportFileError("The mapping has no email column.", "no_email_column")
+    return plan
+
+
+def parse_rows(rows: Iterable[dict], plan: dict, *, first_row_number: int = FIRST_DATA_ROW) -> ParsedFile:
     """Validate rows and keep one per email, merging duplicates into the first."""
 
     by_email: dict[str, ParsedRow] = {}
     counts: Counter = Counter()
     errors: list = []
-    for row_number, raw in enumerate(rows, start=2):
+    for row_number, raw in enumerate(rows, start=first_row_number):
         counts["rows"] += 1
         parsed = _parse_row(row_number, raw, plan, counts)
         if parsed is None:
@@ -185,7 +233,7 @@ def parse_rows(rows: Iterable[dict], plan: dict) -> ParsedFile:
 def read_csv(handle, *, delimiter: str = ",", overrides: Optional[dict] = None) -> tuple[dict, ParsedFile]:
     reader = csv.DictReader(handle, delimiter=delimiter)
     if not reader.fieldnames:
-        raise ImportFileError("The file is empty or has no header row.")
+        raise ImportFileError("The file is empty or has no header row.", "empty_file")
     plan = plan_columns(reader.fieldnames, overrides)
     return plan, parse_rows(reader, plan)
 
@@ -227,11 +275,8 @@ def apply_import(
 ) -> ContactImport:
     """Write the parsed rows in chunks and return the finished import record."""
 
-    if consent not in ContactImport.Consent.values:
-        raise ValueError(f"Unknown consent value {consent!r}.")
     now = now or timezone.now()
-    extra_tags = _unique(_clean_tag(tag) for tag in tags if _clean_tag(tag))
-    default_source = consent_source.strip()[:255] or f"csv:{file_name}"[:255]
+    default_source, extra_tags = _import_options(file_name, consent, consent_source, tags)
     counts = Counter(parsed.counts)
     record_fields = {
         "file_name": file_name[:255],
@@ -286,6 +331,123 @@ def apply_import(
         detail=dict(counts),
     )
     return record
+
+
+def start_upload_import(
+    *,
+    file_name: str,
+    consent: str,
+    column_plan: dict,
+    consent_source: str = "",
+    tags: Iterable[str] = (),
+    row_count: int = 0,
+    dry_run: bool = False,
+    actor=None,
+) -> ContactImport:
+    """Open an upload; its rows arrive later in chunks of up to ``CHUNK_SIZE``."""
+
+    plan = validate_column_plan(column_plan)
+    default_source, extra_tags = _import_options(file_name, consent, consent_source, tags)
+    with transaction.atomic():
+        record = ContactImport.objects.create(
+            file_name=file_name[:255],
+            uploaded_by=actor,
+            consent=consent,
+            consent_source=default_source,
+            tags=extra_tags,
+            dry_run=dry_run,
+            origin=ContactImport.Origin.UPLOAD,
+            column_plan=plan,
+            row_count=max(0, min(int(row_count or 0), MAX_UPLOAD_ROWS)),
+        )
+        _audit_upload(record, actor, "start")
+    return record
+
+
+def apply_upload_chunk(import_id, *, start_row: int, rows: list, now: Optional[datetime] = None) -> ContactImport:
+    """Apply one chunk with the stored column plan and merge its counts.
+
+    ``start_row`` is the zero-based index of the chunk's first data row, so it
+    must equal ``rows_received``. Re-sending a chunk that was already applied
+    returns the record unchanged, which makes a retried request safe. The import
+    row stays locked while the chunk is applied, so chunks never interleave.
+    """
+
+    if not isinstance(rows, list) or not rows:
+        raise ImportChunkError("no_rows")
+    if len(rows) > CHUNK_SIZE:
+        raise ImportChunkError("too_many_rows", limit=CHUNK_SIZE)
+    if any(not isinstance(row, dict) for row in rows):
+        raise ImportChunkError("invalid_rows")
+    if isinstance(start_row, bool) or not isinstance(start_row, int) or start_row < 0:
+        raise ImportChunkError("invalid_start_row")
+    now = now or timezone.now()
+    with transaction.atomic():
+        record = ContactImport.objects.select_for_update().get(pk=import_id)
+        if record.status != ContactImport.Status.RUNNING or record.origin != ContactImport.Origin.UPLOAD:
+            raise ImportChunkError("import_not_running")
+        received = record.rows_received
+        if start_row < received and start_row + len(rows) <= received:
+            return record
+        if start_row != received:
+            raise ImportChunkError("start_row_mismatch", expected_start_row=received)
+        if record.row_count and received + len(rows) > record.row_count:
+            raise ImportChunkError("row_count_exceeded", row_count=record.row_count)
+
+        parsed = parse_rows(rows, record.column_plan, first_row_number=start_row + FIRST_DATA_ROW)
+        if record.dry_run:
+            with transaction.atomic():
+                applied = _apply_chunk(parsed.rows, record.consent, record.consent_source, record.tags, now)
+                transaction.set_rollback(True)
+        else:
+            applied = _apply_chunk(parsed.rows, record.consent, record.consent_source, record.tags, now)
+        counts = Counter(record.counts)
+        counts.update(parsed.counts)
+        counts.update(applied)
+        record.counts = dict(counts)
+        record.error_sample = [*record.error_sample, *parsed.errors][:ERROR_SAMPLE_LIMIT]
+        record.rows_received = received + len(rows)
+        record.save(update_fields=["counts", "error_sample", "rows_received", "updated_at"])
+    return record
+
+
+def finish_upload_import(import_id, *, actor=None) -> ContactImport:
+    """Close an upload and record its counts in the audit log."""
+
+    with transaction.atomic():
+        record = ContactImport.objects.select_for_update().get(pk=import_id)
+        if record.status != ContactImport.Status.RUNNING or record.origin != ContactImport.Origin.UPLOAD:
+            raise ImportChunkError("import_not_running")
+        record.status = ContactImport.Status.COMPLETED
+        record.finished_at = timezone.now()
+        record.save(update_fields=["status", "finished_at", "updated_at"])
+        _audit_upload(record, actor, "finish")
+    return record
+
+
+def _audit_upload(record: ContactImport, actor, operation: str) -> None:
+    CrmAuditEvent.objects.create(
+        actor=actor,
+        action=CrmAuditEvent.Action.IMPORT,
+        target_type="contact_import",
+        target_id=str(record.pk),
+        detail={
+            "operation": operation,
+            "origin": record.origin,
+            "dry_run": record.dry_run,
+            "row_count": record.row_count,
+            "rows_received": record.rows_received,
+            "counts": dict(record.counts),
+        },
+    )
+
+
+def _import_options(file_name: str, consent: str, consent_source: str, tags: Iterable[str]) -> tuple[str, list]:
+    if consent not in ContactImport.Consent.values:
+        raise ValueError(f"Unknown consent value {consent!r}.")
+    extra_tags = _unique(_clean_tag(tag) for tag in tags if _clean_tag(tag))
+    default_source = str(consent_source or "").strip()[:255] or f"csv:{file_name}"[:255]
+    return default_source, extra_tags
 
 
 def _apply_chunk(rows: list, consent: str, default_source: str, extra_tags: list, now: datetime) -> Counter:
@@ -445,6 +607,12 @@ def _parse_row(row_number: int, raw: dict, plan: dict, counts: Counter) -> Optio
         return None
     parsed.email = email
     return parsed
+
+
+def clean_tags(values: Iterable[str]) -> list:
+    """Collapse whitespace, cut each tag to 64 characters, and drop blanks and repeats."""
+
+    return _unique(tag for tag in map(_clean_tag, values) if tag)
 
 
 def _clean_tag(value: str) -> str:

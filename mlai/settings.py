@@ -518,6 +518,7 @@ REST_FRAMEWORK = {
         'community_chat_slack_read_receipt': os.getenv('COMMUNITY_CHAT_SLACK_READ_RECEIPT_RATE', '60/minute'),
         'community_chat_slack_directory': os.getenv('COMMUNITY_CHAT_SLACK_DIRECTORY_RATE', '120/minute'),
         'community_chat_home': os.getenv('COMMUNITY_CHAT_HOME_RATE', '60/minute'),
+        'community_chat_crm': os.getenv('COMMUNITY_CHAT_CRM_RATE', '240/minute'),
         'my_startup_bootstrap': os.getenv('MY_STARTUP_BOOTSTRAP_RATE', '120/minute'),
         'my_startup_read': os.getenv('MY_STARTUP_READ_RATE', '120/minute'),
         'my_startup_poll': os.getenv('MY_STARTUP_POLL_RATE', '120/minute'),
@@ -533,6 +534,7 @@ REST_FRAMEWORK = {
         'token_usage_leaderboard': os.getenv('TOKEN_USAGE_LEADERBOARD_RATE', '60/minute'),
         'token_usage_insights': os.getenv('TOKEN_USAGE_INSIGHTS_RATE', '120/minute'),
         'community_chat_home': os.getenv('COMMUNITY_CHAT_HOME_RATE', '60/minute'),
+        'community_chat_crm': os.getenv('COMMUNITY_CHAT_CRM_RATE', '240/minute'),
         'community_chat_slack_delete': os.getenv(
             'COMMUNITY_CHAT_SLACK_DELETE_RATE', '20/minute'
         ),
@@ -2223,6 +2225,9 @@ CRM_LUMA_WHATSAPP_QUESTION_LABELS = [
     for label in os.environ.get('CRM_LUMA_WHATSAPP_QUESTION_LABELS', '').split('|')
     if label.strip()
 ]
+# Contacts API for Chat owners and admins (/api/v1/community-chat/crm/).
+# Off by default; the API answers 404 crm_disabled until an operator enables it.
+COMMUNITY_CHAT_CRM_ENABLED = _env_is_true('COMMUNITY_CHAT_CRM_ENABLED', False)
 HUMANITIX_API_BASE_URL = os.environ.get(
     'HUMANITIX_API_BASE_URL',
     'https://api.humanitix.com/v1',
