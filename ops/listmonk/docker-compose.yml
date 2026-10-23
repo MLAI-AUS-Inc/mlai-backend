@@ -1,0 +1,158 @@
+name: mlai-listmonk
+
+services:
+  database:
+    # Images are required and must be immutable references. See .env.example.
+    image: ${LISTMONK_POSTGRES_IMAGE:?Set LISTMONK_POSTGRES_IMAGE to a tested tag@sha256 digest}
+    environment:
+      POSTGRES_DB: ${LISTMONK_POSTGRES_DB:-listmonk}
+      POSTGRES_USER: ${LISTMONK_POSTGRES_USER:-listmonk}
+      POSTGRES_PASSWORD: ${LISTMONK_POSTGRES_PASSWORD:?Set LISTMONK_POSTGRES_PASSWORD}
+      POSTGRES_INITDB_ARGS: --auth-host=scram-sha-256 --data-checksums
+      PGDATA: /var/lib/postgresql/data/pgdata
+      TZ: UTC
+    volumes:
+      - listmonk-postgres-data:/var/lib/postgresql/data
+    restart: unless-stopped
+    stop_grace_period: 60s
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "pg_isready -U ${LISTMONK_POSTGRES_USER:-listmonk} -d ${LISTMONK_POSTGRES_DB:-listmonk}",
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+    networks:
+      - listmonk-internal
+
+  listmonk:
+    image: ${LISTMONK_IMAGE:?Set LISTMONK_IMAGE to a tested listmonk v6.2 tag@sha256 digest}
+    # Configuration comes only from the environment (--config ''). The first
+    # start installs the schema on an empty database; every start applies any
+    # migrations the pinned image needs, so take a dump before changing it.
+    command:
+      [
+        "sh",
+        "-c",
+        "./listmonk --install --idempotent --yes --config '' && ./listmonk --upgrade --yes --config '' && exec ./listmonk --config ''",
+      ]
+    environment:
+      LISTMONK_app__address: 0.0.0.0:9000
+      LISTMONK_db__host: database
+      LISTMONK_db__port: "5432"
+      LISTMONK_db__user: ${LISTMONK_POSTGRES_USER:-listmonk}
+      LISTMONK_db__password: ${LISTMONK_POSTGRES_PASSWORD:?Set LISTMONK_POSTGRES_PASSWORD}
+      LISTMONK_db__database: ${LISTMONK_POSTGRES_DB:-listmonk}
+      LISTMONK_db__ssl_mode: disable
+      LISTMONK_db__max_open: "25"
+      LISTMONK_db__max_idle: "25"
+      LISTMONK_db__max_lifetime: 300s
+      # Only read on the very first start, to create the super admin. Clear both
+      # from .env afterwards; the password then lives only in listmonk.
+      LISTMONK_ADMIN_USER: ${LISTMONK_ADMIN_USER:-}
+      LISTMONK_ADMIN_PASSWORD: ${LISTMONK_ADMIN_PASSWORD:-}
+      # The image's entrypoint drops root to this user before starting listmonk.
+      PUID: ${LISTMONK_PUID:-1000}
+      PGID: ${LISTMONK_PGID:-1000}
+      TZ: UTC
+    depends_on:
+      database:
+        condition: service_healthy
+    volumes:
+      # Images used in email templates. Set Admin -> Settings -> Media to the
+      # filesystem provider with upload path /listmonk/uploads.
+      - listmonk-uploads:/listmonk/uploads
+    ports:
+      # Keep the admin UI and API on loopback. The public ingress exposes only
+      # the subscriber-facing routes listed in README.md.
+      - "${LISTMONK_BIND_HOST:-127.0.0.1}:${LISTMONK_PORT:-9100}:9000"
+    restart: unless-stopped
+    stop_grace_period: 30s
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:9000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
+    networks:
+      listmonk-internal:
+      # Not internal: listmonk needs outbound SMTP to Google's relay and Resend.
+      mlai-shared:
+        aliases:
+          - listmonk
+
+  backup:
+    image: ${LISTMONK_POSTGRES_IMAGE:?Set LISTMONK_POSTGRES_IMAGE to a tested tag@sha256 digest}
+    environment:
+      PGHOST: database
+      PGPORT: "5432"
+      PGDATABASE: ${LISTMONK_POSTGRES_DB:-listmonk}
+      PGUSER: ${LISTMONK_POSTGRES_USER:-listmonk}
+      PGPASSWORD: ${LISTMONK_POSTGRES_PASSWORD:?Set LISTMONK_POSTGRES_PASSWORD}
+      BACKUP_RETENTION_DAYS: ${LISTMONK_BACKUP_RETENTION_DAYS:-30}
+      TZ: UTC
+    command:
+      - /bin/sh
+      - -ec
+      - |
+        case "$${BACKUP_RETENTION_DAYS}" in
+          ''|*[!0-9]*) echo "BACKUP_RETENTION_DAYS must be an integer" >&2; exit 64 ;;
+        esac
+        if [ "$${BACKUP_RETENTION_DAYS}" -lt 7 ]; then
+          echo "BACKUP_RETENTION_DAYS must be at least 7" >&2
+          exit 64
+        fi
+        while true; do
+          stamp="$$(date -u +%Y%m%dT%H%M%SZ)"
+          partial="/backups/.listmonk-$${stamp}.dump.partial"
+          final="/backups/listmonk-$${stamp}.dump"
+          trap 'rm -f "$${partial}"' EXIT INT TERM
+          pg_dump --format=custom --compress=9 --no-owner --no-acl --file="$${partial}"
+          mv "$${partial}" "$${final}"
+          touch /state/last-success
+          find /backups -type f -name 'listmonk-*.dump' -mtime "+$${BACKUP_RETENTION_DAYS}" -delete
+          trap - EXIT INT TERM
+          sleep 86400
+        done
+    depends_on:
+      database:
+        condition: service_healthy
+    volumes:
+      - listmonk-postgres-backups:/backups
+      - listmonk-backup-state:/state
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    restart: unless-stopped
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "test -n \"$$(find /state -name last-success -mtime -2 -print -quit)\"",
+        ]
+      interval: 1h
+      timeout: 10s
+      retries: 3
+      start_period: 5m
+    networks:
+      - listmonk-internal
+
+networks:
+  listmonk-internal:
+    internal: true
+  mlai-shared:
+    name: ${MLAI_SHARED_NETWORK:-mlai-shared}
+    external: true
+
+volumes:
+  listmonk-postgres-data:
+  listmonk-postgres-backups:
+  listmonk-backup-state:
+  listmonk-uploads:
