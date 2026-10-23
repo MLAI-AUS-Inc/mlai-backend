@@ -1,3 +1,4 @@
+from contextlib import nullcontext
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
@@ -24,8 +25,13 @@ class WorkspaceMentionTests(SimpleTestCase):
     def setUp(self):
         cache.clear()
         self.user = SimpleNamespace(pk=1, is_active=True)
+        self.authority = SimpleNamespace(grant_id=1, user_id=2, connection_id=3,
+            workspace_id="TMLAI", slack_user_id="UREADER", consent_generation="consent",
+            consent_version="current", oauth_generation="oauth", scopes=("users:read", "channels:read", "channels:history"),
+            access_token="synthetic-user-token")
         self.client = MagicMock()
-        self.client.auth_test.return_value = {"team_id": "TMLAI"}
+        self.client.conversations_info.return_value = {"ok": True, "channel": {
+            "id": "CPUBLIC", "is_private": False, "is_channel": True, "is_member": True}}
         self.client.conversations_members.return_value = {"members": ["UALICE"]}
         self.client.users_list.return_value = {
             "members": [
@@ -45,13 +51,16 @@ class WorkspaceMentionTests(SimpleTestCase):
         patches = [
             patch.object(directory, "require_community_access"),
             patch.object(
-                directory.SlackBridgeClient, "get_client", return_value=self.client
+                directory.directory, "read", side_effect=lambda authority, connection, method, **kwargs: getattr(self.client, method)(**kwargs)
             ),
             patch.object(directory.SlackDmMirrorConversation, "objects"),
             patch.object(directory.CommunityBridgeChannel, "objects"),
             patch(
                 "integrations.services.slack_mentions.CommunityBridgeIdentityLink.objects"
             ),
+            patch.object(directory.directory, "capture_reader", side_effect=lambda workspace, **kwargs: self.authority if workspace == "TMLAI" else None),
+            patch.object(directory.directory, "fence", side_effect=lambda *args, **kwargs: nullcontext((None, None))),
+            patch.object(directory.mirror, "_invoke_slack_with_locked_connection", side_effect=lambda authority, connection, method, **kwargs: getattr(self.client, method)(**kwargs)),
         ]
         self.mocks = [p.start() for p in patches]
         for p in patches:
@@ -60,7 +69,7 @@ class WorkspaceMentionTests(SimpleTestCase):
             2
         ].select_related.return_value.filter.return_value.first.return_value = None
         self.mocks[3].filter.return_value.first.return_value = SimpleNamespace(
-            slack_channel_id="CPUBLIC"
+            slack_channel_id="CPUBLIC", audience="community"
         )
         self.mocks[4].filter.return_value.values_list.return_value = []
 
@@ -133,8 +142,9 @@ class WorkspaceMentionTests(SimpleTestCase):
             self.assertIsNone(result["users"][0]["is_member"])
             self.assertFalse(result["membership_pending"])
 
-    def test_wrong_bot_workspace_fails_closed(self):
-        self.client.auth_test.return_value = {"team_id": "TOTHER"}
+    def test_private_source_fails_closed_before_membership_read(self):
+        self.client.conversations_info.return_value = {"ok": True, "channel": {
+            "id": "CPUBLIC", "is_private": True, "is_channel": True, "is_member": True}}
         with self.assertRaises(mirror.SlackDmMirrorAuthorizationError):
             self.search()
         self.client.users_list.assert_not_called()
@@ -186,7 +196,7 @@ class WorkspaceMentionTests(SimpleTestCase):
         read.assert_not_called()
 
     def test_roo_remains_available_while_provider_budget_is_deferred(self):
-        self.client.auth_test.side_effect = BudgetDeferred(3)
+        self.client.users_list.side_effect = BudgetDeferred(3)
         result = self.search(query="roo")
         self.assertEqual(result["users"][0]["slack_user_id"], "UROO")
         self.assertEqual(result["retry_after_seconds"], 3)
@@ -268,13 +278,18 @@ class WorkspaceMentionTests(SimpleTestCase):
         self.assertEqual(self.client.users_list.call_count, calls)
         self.assertEqual(len(snapshots.cached_workspace_users(workspace)), 2)
 
-    def test_snapshot_is_bound_to_configured_credential_and_workspace(self):
+    def test_snapshot_is_bound_to_member_consent_and_workspace_not_bot_token(self):
         self.assertEqual(snapshots.warm_workspace_directory_once(), 1)
         self.assertIsNone(snapshots.cached_workspace_users("TOTHER"))
         with override_settings(SLACK_BRIDGE_BOT_TOKEN="another-installation"):
-            self.assertIsNone(snapshots.cached_workspace_users("TMLAI"))
-        self.client.auth_test.return_value = {"team_id": "TOTHER"}
-        cache.clear()
-        with self.assertRaisesMessage(ValueError, "slack_directory_workspace_mismatch"):
-            snapshots.warm_workspace_directory_once()
+            self.assertIsNotNone(snapshots.cached_workspace_users("TMLAI"))
+        self.authority.oauth_generation = "new-oauth"
         self.assertIsNone(snapshots.cached_workspace_users("TMLAI"))
+        self.assertEqual(snapshots.warm_workspace_directory_once(), 1)
+        self.authority.consent_generation = "new-consent"
+        self.assertIsNone(snapshots.cached_workspace_users("TMLAI"))
+        self.mocks[5].side_effect = None
+        self.mocks[5].return_value = None
+        self.assertEqual(snapshots.warm_workspace_directory_once(), 0)
+        self.assertIsNone(snapshots.cached_workspace_users("TMLAI"))
+        self.client.auth_test.assert_not_called()

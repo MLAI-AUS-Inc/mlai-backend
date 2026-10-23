@@ -6,13 +6,11 @@ directory for all the people in the workspace.
 """
 
 import hashlib
-import re
 import time
 import uuid
 
-from django.conf import settings
 from django.core.cache import cache
-from integrations.services.community_bridge.slack import SlackBridgeClient
+from integrations.services import slack_directory_authority as directory
 from integrations.services.message_sync.scheduler import BudgetDeferred
 
 SNAPSHOT_TTL_SECONDS = 3600
@@ -21,36 +19,32 @@ PAGE_LIMIT = 200
 
 
 def configured_scope():
-    """Return the configured workspace and credential-bound public scope."""
-    workspace = str(
-        getattr(settings, "MESSAGE_SYNC_SLACK_BOT_WORKSPACE_ID", "") or ""
-    ).strip()
-    token = str(getattr(settings, "SLACK_BRIDGE_BOT_TOKEN", "") or "").strip()
-    if not re.fullmatch(r"T[A-Z0-9]+", workspace) or not token:
-        return None
-    return workspace, hashlib.sha256(f"{workspace}:{token}".encode()).hexdigest()
+    """Return the configured workspace and current member's directory scope."""
+    authority = directory.capture_reader(directory.configured_workspace())
+    return (authority.workspace_id, directory.cache_scope(authority)) if authority else None
 
 
 def cache_key(scope, category, value=""):
     """Keep metadata from separate Slack installations in separate keys."""
     return (
-        "slack-community-directory-v1:"
+        "slack-community-directory-v2:"
         + hashlib.sha256(f"{scope}:{category}:{value}".encode()).hexdigest()
     )
 
 
-def cached_workspace_snapshot(workspace, *, version=""):
-    """Return a complete snapshot, including a prior version during pagination."""
-    configured = configured_scope()
-    if configured is None or configured[0] != workspace:
+def cached_workspace_snapshot(workspace, *, version="", authority=None):
+    """Read a complete snapshot only under current source consent and OAuth."""
+    authority = authority or directory.capture_reader(workspace)
+    if authority is None or authority.workspace_id != workspace:
         return None
-    snapshot = cache.get(cache_key(configured[1], "snapshot", version))
-    if (
-        isinstance(snapshot, dict)
-        and isinstance(snapshot.get("users"), list)
-        and isinstance(snapshot.get("version"), str)
-    ):
-        return snapshot
+    try:
+        with directory.fence(authority):
+            snapshot = cache.get(cache_key(directory.cache_scope(authority), "snapshot", version))
+            if (isinstance(snapshot, dict) and isinstance(snapshot.get("users"), list)
+                    and isinstance(snapshot.get("version"), str)):
+                return snapshot
+    except directory.mirror.SlackDmMirrorAuthorizationError:
+        return None
     return None
 
 
@@ -67,10 +61,10 @@ def warm_workspace_directory_once():
     provider error only postpones this independent lane; the last complete
     snapshot stays available for searches.
     """
-    configured = configured_scope()
-    if configured is None:
+    authority = directory.capture_reader(directory.configured_workspace(), refresh_token=True)
+    if authority is None:
         return 0
-    workspace, scope = configured
+    workspace, scope = authority.workspace_id, directory.cache_scope(authority)
     snapshot_key = cache_key(scope, "snapshot")
     progress_key = cache_key(scope, "progress")
     retry_key = cache_key(scope, "retry")
@@ -91,14 +85,10 @@ def warm_workspace_directory_once():
     try:
         progress = cache.get(progress_key) or {"cursor": "", "users": []}
         cursor = str(progress.get("cursor") or "")
-        client = SlackBridgeClient.get_client()
-        verified_key = cache_key(scope, "workspace")
-        if not cache.get(verified_key):
-            identity = client.auth_test()
-            if identity.get("team_id") != workspace:
-                raise ValueError("slack_directory_workspace_mismatch")
-            cache.set(verified_key, True, timeout=600)
-        response = client.users_list(limit=PAGE_LIMIT, cursor=cursor)
+        # Each page has its own exact authority lease. A consent/OAuth change
+        # selects a new cache scope and cannot continue the previous cursor.
+        with directory.fence(authority) as (_, connection):
+            response = directory.read(authority, connection, "users_list", limit=PAGE_LIMIT, cursor=cursor)
         next_cursor = str(
             (response.get("response_metadata") or {}).get("next_cursor") or ""
         ).strip()
