@@ -736,8 +736,7 @@ class CommunityBridgeDiscordClient(discord.Client):
             and (not author_display_name or not author_avatar_url)
         ):
             slack_profile = await asyncio.to_thread(
-                legacy_send, delivery, SlackBridgeClient.get_user_profile,
-                source_author_id,
+                SlackBridgeClient.get_user_profile, source_author_id, workspace_id=slack_workspace_id,
             )
             author_display_name = author_display_name or str(
                 slack_profile.get("display_name") or ""
@@ -952,7 +951,8 @@ class CommunityBridgeDiscordClient(discord.Client):
                 return str(identity.get("display_name") or user_id)
         if source_platform == CommunityBridgePlatform.SLACK and user_id:
             return await asyncio.to_thread(
-                legacy_send, delivery, SlackBridgeClient.get_user_display_name, user_id,
+                SlackBridgeClient.get_user_display_name, user_id,
+                workspace_id=str((channel or {}).get("slack_workspace_id") or ""),
             )
         return user_id or "Unknown user"
 
@@ -964,12 +964,14 @@ class CommunityBridgeDiscordClient(discord.Client):
         display_markdown = metadata.get("slack_display_markdown")
         if isinstance(display_markdown, str):
             return await asyncio.to_thread(
-                legacy_send, delivery, SlackBridgeClient.resolve_markdown_entities, display_markdown
+                SlackBridgeClient.resolve_markdown_entities, display_markdown,
+                workspace_id=str(((delivery or {}).get("channel") or {}).get("slack_workspace_id") or ""),
             )
         raw_text = str(metadata.get("slack_raw_text") or "")
         if not raw_text:
             return body
-        return await asyncio.to_thread(legacy_send, delivery, SlackBridgeClient.resolve_message_text, raw_text)
+        return await asyncio.to_thread(SlackBridgeClient.resolve_message_text, raw_text,
+            workspace_id=str(((delivery or {}).get("channel") or {}).get("slack_workspace_id") or ""))
 
     def _should_process_message(self, message: discord.Message) -> bool:
         if message.guild is None:
