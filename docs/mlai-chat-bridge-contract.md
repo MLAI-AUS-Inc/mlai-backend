@@ -725,42 +725,16 @@ history has finished. Slack plan retention, missing scopes and API rate limits
 still apply. Archived and external Slack Connect conversations, bot messages,
 and unsupported Slack system events retain their existing exclusions.
 
-## Slack thread reconciliation
+## Slack thread recovery
 
-Slack is authoritative for thread membership. Audit a controlled batch before
-applying any mutation:
-
-```sh
-python manage.py reconcile_community_bridge_slack_threads \
-  --slack-channel-id C0123456789 \
-  --max-roots 25
-```
-
-The JSON report identifies missing events, orphaned or incorrectly parented
-replies, incorrect broadcast state, duplicate bridge events, stale links, and
-links that can be restored without republishing. A multi-channel dry-run returns
-one cursor per channel in `resume.by_channel`; apply mode deliberately requires
-exactly one channel, whose cursor is also exposed as `resume.latest`. Continue
-older batches only with that channel's cursor. Apply after reviewing the
-mismatch rate and worker health:
-
-```sh
-python manage.py reconcile_community_bridge_slack_threads \
-  --slack-channel-id C0123456789 \
-  --latest <resume.latest> \
-  --max-roots 25 \
-  --apply \
-  --confirm-historical-repair \
-  --wait-seconds 120
-```
-
-Apply mode restores trustworthy database links, tombstones malformed or
-duplicate bridge events, recreates each source message once with its exact
-Slack parent and broadcast state, and waits for the durable worker after every
-step. Receipt keys include the reconciliation version, source ID, and target
-event ID, so repeating a completed batch is idempotent. The GitHub Actions
-workflow `Reconcile production Slack threads` exposes the same bounded,
-dry-run-first operation for production.
+Use `message_sync_repair --workspace-id T… --channel-id C…` for a database-only
+preview. Up to twenty explicit `--thread-ts` values select bounded thread jobs;
+`--apply` queues the same durable member-authorized worker after operator review.
+It does not fetch Slack during planning, replay messages directly, reset cursors,
+rewrite historical avatars/mentions or recreate orphaned events. Current reader,
+consent, membership, source, audience and provider-budget fences apply when the
+worker executes. See [member repair](slack-member-repair.md) for limits and the
+supported recovery procedure. The old thread replay workflows are removed.
 
 Run the live staging matrix and capture durable, content-free evidence with
 [`mlai-chat-bridge-staging.md`](mlai-chat-bridge-staging.md). The final database
@@ -1243,14 +1217,10 @@ require the requesting account's live/paused mirror and non-revoked grant.
 Unknown, disabled, or deleted mappings return 422 without public URL scraping.
 Thread mapping responses use `Cache-Control: private, no-store`.
 
-To repair older public posts whose reference attachments were dropped, run
-`python manage.py backfill_community_bridge_thread_references --slack-channel-id C…`
-as an authorized operator. It is a bounded dry run (500 posts by default,
-maximum 5000); `--oldest`/`--latest` bound the Slack history interval. Explicit
-`--apply --confirm-historical-edits` queues existing-post edits through the
-normal bridge outbox. It never creates replacement posts. Deleted posts,
-concurrent/pending updates, and already-restored references are skipped. The
-report contains counts and a pagination timestamp, never message bodies.
+Older dropped references can be revisited only through the bounded member worker
+when their source message remains inside its permitted history window. The
+standalone thread-reference backfill is removed. Cleanup does not promise a
+historical rewrite and does not alter already queued immutable edits.
 
 ## Durable synchronization rollout (14 September 2026)
 
