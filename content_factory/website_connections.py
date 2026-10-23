@@ -1283,6 +1283,16 @@ def _verified_setup_run_base(run, head_sha, website, *, automatic_approval=False
     base_sha = str(saved.get("expected_source_sha") or "")
     generation = result.get("resume_generation")
     from .website_hosted_build import enabled as hosted_enabled, current_scan_source, valid_hosted_build
+    if not base_sha and not website.verified_sha:
+        # A first-time site has no verified source for Prepare to pin, so its setup
+        # is dispatched without expected_source_sha and every merge was refused as
+        # "changed" (PawShare setup ccd3ea22, 23 Oct 2026). Such a setup is built
+        # from the connection's current scan: accept the run's recorded source only
+        # when it is exactly that server-observed scan. The caller still requires
+        # GitHub's branch head to equal it.
+        recorded = str(result.get("source_sha") or "")
+        if recorded and recorded == current_scan_source(website):
+            base_sha = recorded
     hosted = hosted_enabled(website)
     source_matches = base_sha == current_scan_source(website) if hosted else not website.verified_sha or website.verified_sha == base_sha
     build_passed = gates.get("local_build") is True and gates.get("local_build_skipped") is False
@@ -1292,6 +1302,12 @@ def _verified_setup_run_base(run, head_sha, website, *, automatic_approval=False
         and setup.get("status") in SETUP_PR_OPEN_STATUSES)
     pending_setup = (automatic_approval and run.status == "awaiting_approval" and run.approval_state == "approval_required"
         and result.get("status") == "preview_ready" and setup.get("status") == "preview_ready")
+    # The preview platform could not run the app, so Content Factory parked the
+    # setup for code review and the founder approved the branch diff itself (La Vie
+    # setup c12e1329, 23 Oct 2026). That approval stands in for the browser proof;
+    # source, local build, source-quality and exact-head checks still apply.
+    code_review_setup = bool(approved_setup and result.get("preview_runtime_unsupported") is True
+        and setup.get("preview_runtime_unsupported") is True and proof.get("status") == "code_review_ready")
     adopted_kit = (run.approval_state == "not_required" and result.get("status") == "adopted"
         and setup.get("status") == "adopted" and result.get("adopted") is True and setup.get("adopted") is True
         and result.get("verification_kit_required") is True and result.get("adoption_kit_preview_verified") is True
@@ -1307,19 +1323,20 @@ def _verified_setup_run_base(run, head_sha, website, *, automatic_approval=False
             and not (not hosted and (approved_setup or adopted_kit) and _source_observed(website, base_sha)))
         or result.get("source_sha") != base_sha or setup.get("source_sha") != base_sha
         or result.get("branch_commit_sha") != head_sha or setup.get("branch_commit_sha") != head_sha
-        or preview.get("exactRender") is not True or preview.get("commitSha") != head_sha
-        or proof.get("status") != "passed" or proof.get("commit_sha") != head_sha
-        or proof.get("preview_identity") != f"commit:{head_sha}"
+        or not code_review_setup and (
+            preview.get("exactRender") is not True or preview.get("commitSha") != head_sha
+            or proof.get("status") != "passed" or proof.get("commit_sha") != head_sha
+            or proof.get("preview_identity") != f"commit:{head_sha}"
+            or type(proof.get("resume_generation")) is not int or proof.get("resume_generation") != generation
+            or gates.get("status") != "passed"
+            or any(gates.get(key) is not True for key in ("browser", "visual_style")))
         or not proof.get("task_id") or not proof.get("completed_at")
         or type(generation) is not int or generation < 0
-        or type(proof.get("resume_generation")) is not int or type(setup.get("resume_generation")) is not int
-        or proof.get("resume_generation") != generation or setup.get("resume_generation") != generation
-        or gates.get("status") != "passed"
+        or type(setup.get("resume_generation")) is not int or setup.get("resume_generation") != generation
         or any(gates.get(key) is not True for key in (
-            "dependency_validation", "static_policy", "dom_slot_compliance",
-            "publish_surface", "browser", "visual_style",
+            "dependency_validation", "static_policy", "dom_slot_compliance", "publish_surface",
         ))
-        or not (build_passed or (not hosted and (approved_setup or adopted_kit)
+        or not (build_passed or (not hosted and (approved_setup or adopted_kit) and not code_review_setup
                 and _hosted_build_proven(gates, preview, head_sha)))
         or result.get("manual_quality_gate_override") or setup.get("manual_quality_gate_override")
     ):
