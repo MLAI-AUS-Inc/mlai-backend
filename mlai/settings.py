@@ -269,6 +269,7 @@ INSTALLED_APPS = [
     "roo",
 
     "integrations",
+    "crm",
 ]
 
 MIDDLEWARE = [
@@ -2190,6 +2191,31 @@ LUMA_UPCOMING_EVENTS_CACHE_SECONDS = max(
     0,
     int(os.environ.get('LUMA_UPCOMING_EVENTS_CACHE_SECONDS', '300')),
 )
+
+# Contacts store (crm app). The scheduled Luma guest sync stays off until an
+# operator enables it; the backfill and import commands work regardless.
+CRM_LUMA_SYNC_ENABLED = _env_is_true('CRM_LUMA_SYNC_ENABLED', False)
+CRM_LUMA_SYNC_INTERVAL_SECONDS = max(
+    300,
+    int(os.environ.get('CRM_LUMA_SYNC_INTERVAL_SECONDS', '1800')),
+)
+CRM_LUMA_SYNC_RECENT_DAYS = max(0, int(os.environ.get('CRM_LUMA_SYNC_RECENT_DAYS', '14')))
+CRM_LUMA_SYNC_MAX_EVENTS_PER_RUN = max(
+    1,
+    int(os.environ.get('CRM_LUMA_SYNC_MAX_EVENTS_PER_RUN', '25')),
+)
+# Chat Home, Volunteer and Roo share the calendar key's 200/minute budget.
+CRM_LUMA_REQUESTS_PER_MINUTE = max(
+    1,
+    min(200, int(os.environ.get('CRM_LUMA_REQUESTS_PER_MINUTE', '100'))),
+)
+# Pipe-separated Luma registration question labels whose "yes" grants
+# marketing consent, e.g. "Keep me updated about MLAI events".
+CRM_LUMA_CONSENT_QUESTION_LABELS = [
+    label.strip()
+    for label in os.environ.get('CRM_LUMA_CONSENT_QUESTION_LABELS', '').split('|')
+    if label.strip()
+]
 HUMANITIX_API_BASE_URL = os.environ.get(
     'HUMANITIX_API_BASE_URL',
     'https://api.humanitix.com/v1',
