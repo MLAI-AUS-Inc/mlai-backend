@@ -68,6 +68,15 @@ departures by absence. Unknown, malformed, shared or partial observations do
 not establish a complete sweep. Public inventory uses 200-item pages and at
 most three pages per enabled turn, persisting unfinished work for follow-up.
 
+The collector calls [`users.conversations`](https://docs.slack.dev/reference/methods/users.conversations/)
+with the current user's captured OAuth authority and no `user` override. Slack
+documents that this method lists that user's memberships while omitting
+`is_member`; omission therefore supplies positive membership only in this
+endpoint context. An explicit false remains nonmembership, and any present
+nonboolean value still prevents absence-based reconciliation. Public/privacy,
+Slack Connect, consent, pagination and newer-leave checks remain in force.
+Missing `is_member` on `conversations.info` or an event remains unknown.
+
 Pause, consent renewal/change/withdrawal and OAuth authority changes advance a
 membership proof floor in existing connection state. Resume/reconnect retains
 the existing consent choice but cannot restore an older joined observation.
