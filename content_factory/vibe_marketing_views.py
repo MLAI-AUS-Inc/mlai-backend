@@ -4303,10 +4303,46 @@ def _is_live_preview_root_asset_path(value):
     return any(path.startswith(prefix) for prefix in _LIVE_PREVIEW_PROXY_ASSET_PREFIXES)
 
 
-def _rewrite_root_asset_reference(run_id, value):
+# Paths that already point into a preview proxy, lease or the Content Factory
+# proxy layer; rewriting them again would nest one proxy inside another.
+_LIVE_PREVIEW_SCOPED_ROOT_PREFIXES = ("/api/v1/vibe-marketing/", "/api/v1/my-startup/vibe-marketing/", "/api/runs/")
+# The read-only review renders a page's styles, fonts and media, never its
+# scripts: a site script loaded under the capability path can route the page to
+# its own 404. These references are scoped whatever their root path; scripts,
+# frames, objects and module preloads keep the asset-folder rule.
+_LIVE_PREVIEW_RENDER_LINK_RELS = frozenset({
+    "stylesheet", "icon", "apple-touch-icon", "apple-touch-icon-precomposed", "mask-icon", "manifest",
+})
+_LIVE_PREVIEW_RENDER_PRELOAD_TYPES = frozenset({"style", "font", "image"})
+_LIVE_PREVIEW_RENDER_SRC_TAGS = frozenset({"img", "source", "video", "audio", "track", "input"})
+# SVG elements whose href loads a resource (a sprite, an image or a filter input).
+_LIVE_PREVIEW_SVG_RESOURCE_TAGS = frozenset({"use", "image", "feimage"})
+
+
+def _is_unscoped_root_reference(value):
+    text = str(value or "")
+    return text.startswith("/") and not text.startswith("//") and not text.startswith(_LIVE_PREVIEW_SCOPED_ROOT_PREFIXES)
+
+
+def _rewrite_root_asset_reference(run_id, value, *, any_root_path=False):
+    """Route a root-relative reference into the run's preview proxy.
+
+    The proxy serves the preview under a path on the API origin, so a
+    root-relative URL the browser fetches would otherwise leave it. With
+    ``any_root_path`` every such resource is scoped: PawShare's
+    ``<link rel="stylesheet" href="/styles.css">`` (23 Oct 2026) sat outside the
+    folder allowlist, resolved to the API origin's /styles.css and the setup
+    review rendered unstyled. Without it only allowlisted asset folders change,
+    which keeps navigation links and script strings as the site wrote them.
+    """
     text = str(value or "")
     parsed = urlsplit(text)
-    if parsed.scheme or parsed.netloc or not text.startswith("/") or not _is_live_preview_root_asset_path(text):
+    if parsed.scheme or parsed.netloc or not text.startswith("/"):
+        return text
+    if any_root_path:
+        if not _is_unscoped_root_reference(text):
+            return text
+    elif not _is_live_preview_root_asset_path(text):
         return text
     return _live_preview_proxy_destination(run_id, text.lstrip("/"))
 
@@ -4356,12 +4392,36 @@ def _rewrite_srcset_reference(run_id, value):
             continue
         pieces = candidate.split()
         if pieces:
-            pieces[0] = _rewrite_external_visual_reference(run_id, _rewrite_root_asset_reference(run_id, pieces[0]))
+            # Every srcset candidate is an image the browser fetches.
+            pieces[0] = _rewrite_external_visual_reference(
+                run_id, _rewrite_root_asset_reference(run_id, pieces[0], any_root_path=True),
+            )
         candidates.append(" ".join(pieces))
     return ", ".join(candidates)
 
 
-def _rewrite_css_asset_references(run_id, text):
+_LIVE_PREVIEW_CSS_URL_ROOT_RE = re.compile(
+    r"(?P<prefix>url\(\s*)(?P<quote>['\"]?)(?P<url>/(?!/)[^'\"\s)]*)(?P=quote)(?P<suffix>\s*\))",
+    re.IGNORECASE,
+)
+_LIVE_PREVIEW_CSS_IMPORT_ROOT_RE = re.compile(
+    r"(?P<prefix>@import\s+)(?P<quote>['\"])(?P<url>/(?!/)[^'\"]*)(?P=quote)",
+    re.IGNORECASE,
+)
+
+
+def _rewrite_css_root_references(run_id, text):
+    """Scope every root-relative CSS ``url()`` and ``@import``: each one is a fetch."""
+    def replace(match):
+        return (f"{match.group('prefix')}{match.group('quote')}"
+                f"{_rewrite_root_asset_reference(run_id, match.group('url'), any_root_path=True)}"
+                f"{match.group('quote')}{match.groupdict().get('suffix') or ''}")
+
+    rewritten = _LIVE_PREVIEW_CSS_URL_ROOT_RE.sub(replace, str(text or ""))
+    return _LIVE_PREVIEW_CSS_IMPORT_ROOT_RE.sub(replace, rewritten)
+
+
+def _rewrite_css_asset_references(run_id, text, *, any_root_path=False):
     def replace_css_url(match):
         quote_char = match.group("quote") or ""
         return (
@@ -4396,6 +4456,8 @@ def _rewrite_css_asset_references(run_id, text):
     rewritten = _LIVE_PREVIEW_CSS_IMPORT_ASSET_RE.sub(replace_css_import, rewritten)
     rewritten = _LIVE_PREVIEW_CSS_EXTERNAL_URL_RE.sub(replace_css_external_url, rewritten)
     rewritten = _LIVE_PREVIEW_CSS_EXTERNAL_IMPORT_RE.sub(replace_css_external_import, rewritten)
+    if any_root_path:
+        rewritten = _rewrite_css_root_references(run_id, rewritten)
     return rewritten
 
 
@@ -4451,6 +4513,14 @@ def _strip_live_preview_client_runtime(text):
 
 
 def _rewrite_live_preview_html_assets(run_id, text):
+    """Scope every style, font and media reference into the run's preview proxy.
+
+    The page's stylesheets, icons, manifest, style/font/image preloads, media
+    sources, posters, srcsets, SVG sprite and image hrefs, inline styles and
+    <style> blocks are scoped whatever their root path, so the review renders
+    as the hosted preview does. Scripts, frames, navigation and form actions
+    keep the asset-folder rule.
+    """
     soup = BeautifulSoup(str(text or ""), "html.parser")
     for base in soup.find_all("base"):
         base.decompose()
@@ -4458,23 +4528,36 @@ def _rewrite_live_preview_html_assets(run_id, text):
         tag_name = str(tag.name or "").lower()
         for attr in ("src", "poster"):
             if tag.has_attr(attr):
-                tag[attr] = _rewrite_external_visual_reference(run_id, _rewrite_root_asset_reference(run_id, tag.get(attr)))
+                renders = attr == "poster" or tag_name in _LIVE_PREVIEW_RENDER_SRC_TAGS
+                tag[attr] = _rewrite_external_visual_reference(
+                    run_id, _rewrite_root_asset_reference(run_id, tag.get(attr), any_root_path=renders),
+                )
         if tag.has_attr("action"):
             tag["action"] = _rewrite_root_asset_reference(run_id, tag.get("action"))
-        if tag.has_attr("srcset"):
-            tag["srcset"] = _rewrite_srcset_reference(run_id, tag.get("srcset"))
+        for attr in ("srcset", "imagesrcset"):
+            if tag.has_attr(attr):
+                tag[attr] = _rewrite_srcset_reference(run_id, tag.get(attr))
         if tag.has_attr("style"):
-            tag["style"] = _rewrite_css_asset_references(run_id, str(tag.get("style") or ""))
-        if tag.has_attr("href"):
-            href = str(tag.get("href") or "")
-            rel = " ".join(str(item).lower() for item in (tag.get("rel") or []))
-            should_rewrite_href = (
-                _is_live_preview_root_asset_path(href)
-                or tag_name == "link"
-                and any(token in rel for token in ("stylesheet", "preload", "icon", "apple-touch-icon"))
-            )
-            if should_rewrite_href:
-                tag["href"] = _rewrite_external_visual_reference(run_id, _rewrite_root_asset_reference(run_id, href))
+            tag["style"] = _rewrite_css_asset_references(run_id, str(tag.get("style") or ""), any_root_path=True)
+        if tag_name == "style" and tag.string is not None:
+            styled = _rewrite_css_root_references(run_id, str(tag.string))
+            if styled != str(tag.string):
+                tag.string.replace_with(styled)
+        rel = {str(item).lower() for item in (tag.get("rel") or [])} if tag_name == "link" else set()
+        renders = (
+            bool(rel & _LIVE_PREVIEW_RENDER_LINK_RELS)
+            or bool(rel & {"preload", "prefetch"}) and str(tag.get("as") or "").lower() in _LIVE_PREVIEW_RENDER_PRELOAD_TYPES
+            or tag_name in _LIVE_PREVIEW_SVG_RESOURCE_TAGS
+        )
+        legacy_link = bool(rel & {"stylesheet", "preload", "icon", "apple-touch-icon"})
+        for attr in ("href", "xlink:href"):
+            if not tag.has_attr(attr) or (attr == "xlink:href" and tag_name not in _LIVE_PREVIEW_SVG_RESOURCE_TAGS):
+                continue
+            href = str(tag.get(attr) or "")
+            if renders or legacy_link or _is_live_preview_root_asset_path(href):
+                tag[attr] = _rewrite_external_visual_reference(
+                    run_id, _rewrite_root_asset_reference(run_id, href, any_root_path=renders),
+                )
     return str(soup)
 
 
@@ -4490,7 +4573,9 @@ def _rewrite_live_preview_proxy_text(run_id, text, content_type=""):
 
     content_type_lower = str(content_type or "").lower()
     rewritten = _rewrite_content_factory_preview_prefixes(run_id, text)
-    rewritten = _rewrite_css_asset_references(run_id, rewritten)
+    # A stylesheet's url() and @import are always fetches; other bodies keep the
+    # folder rule because their quoted strings are not all URLs.
+    rewritten = _rewrite_css_asset_references(run_id, rewritten, any_root_path="text/css" in content_type_lower)
     rewritten = _LIVE_PREVIEW_QUOTED_ASSET_RE.sub(replace_quoted, rewritten)
     rewritten = _LIVE_PREVIEW_UNQUOTED_ATTR_ASSET_RE.sub(replace_unquoted_attr, rewritten)
     rewritten = _LIVE_PREVIEW_JS_IMPORT_ASSET_RE.sub(replace_js_import, rewritten)
