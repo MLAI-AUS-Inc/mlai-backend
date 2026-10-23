@@ -17,11 +17,19 @@ from startup_updates.models import (
     MonthlyEvidenceSnapshot, MonthlyUpdateApproval, MonthlyUpdateDraft,
     MonthlyUpdateRevision, StartupEvent, StartupMetricObservation, StartupProfile,
 )
+from startup_updates.review_policy import has_narrative
 
 
 class RevisionConflict(APIException):
     status_code = 409
     default_detail = "This update changed. Reload and review the latest revision."
+
+
+class EmptyUpdate(APIException):
+    """A string detail, unlike ValidationError's list, reaches the founder verbatim."""
+    status_code = 400
+    default_code = "empty_update"
+    default_detail = "Write at least one section of your update before publishing."
 
 
 def capture_snapshot(organization, month, *, run=None, manual_metrics=None, base_snapshot=None):
@@ -350,6 +358,9 @@ def approve_and_publish(draft, *, actor, revision_id, revision_hash, audience_vi
         and (revision.structured_memo.get("_agent_provenance") or {}).get("kind") == "agent_supplied")
     if revision.validation.get("groundedness_status") not in {"passed", "founder_asserted"} and not agent_reviewed:
         raise ValidationError("Resolve the evidence review before publishing.")
+    if not has_narrative(revision.structured_memo):
+        # Approval publishes the update and unlocks Pulse points and the coworking discount.
+        raise EmptyUpdate()
     period = (revision.snapshot.payload or {}).get("period") or {}
     try:
         reporting_period(draft.month, period.get("timezone") or "UTC", as_of=timezone.now())

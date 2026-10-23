@@ -7,6 +7,7 @@ from django.utils import timezone
 from rest_framework.test import APIClient
 from community_chat.account_sessions import issue_account_session
 from community_chat.models import CommunityChatEmailCodeChallenge
+from startup_updates.models import MonthlyUpdateApproval, MonthlyUpdateDraft
 
 BASE = '/api/v1/community-chat/startups/'
 ORIGIN = 'https://chat.example'
@@ -67,6 +68,14 @@ class ChatStartupJourneyTests(TestCase):
         self.assertNotIn('manualSummary', community)
         self.assertNotIn('evidenceSnapshot', community)
         self.assertNotIn('PRIVATE SOURCE NOTES', str(community))
+
+    def test_blank_update_cannot_be_approved(self):
+        update = self.save(summary='')
+        response = self.approve(update)
+        self.assertEqual(response.status_code, 400, response.data)
+        self.assertEqual(response.data['detail'], 'Write at least one section of your update before publishing.')
+        self.assertIsNone(MonthlyUpdateDraft.objects.get(pk=update['id']).published_at)
+        self.assertFalse(MonthlyUpdateApproval.objects.exists())
 
     def test_sibling_company_cannot_read_or_approve_update(self):
         update = self.save()

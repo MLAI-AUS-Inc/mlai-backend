@@ -22,7 +22,7 @@ from community_chat.startups import views
 from community_chat.startups.connections import SALT, connect_browser, consume_ticket
 from community_chat.startups.presentation import PUBLIC_FIELDS, update_payload
 from startup_updates import revisions
-from startup_updates.review_policy import manual_validation
+from startup_updates.review_policy import NARRATIVE_MEMO_KEYS, has_narrative, manual_validation
 from vibe_raising.views import _serialize_monthly_update, _build_manual_structured_memo, _extract_display_config
 from vibe_raising.serializers import VibeRaisingMonthlyUpdateUpsertSerializer
 
@@ -232,8 +232,8 @@ class ReviewPolicyTests(SimpleTestCase):
             result = revisions.approve_and_publish.__wrapped__(draft, **body)
         return result
 
-    def revision(self, status='passed'):
-        return Obj(pk=5, content_hash='exact-hash', structured_memo={'_audience_visibility': ['community']}, validation={'groundedness_status': status}, snapshot=Obj(payload={'period': {'timezone': 'UTC'}}))
+    def revision(self, status='passed', **memo):
+        return Obj(pk=5, content_hash='exact-hash', structured_memo={'highlights': ['We shipped.'], **memo, '_audience_visibility': ['community']}, validation={'groundedness_status': status}, snapshot=Obj(payload={'period': {'timezone': 'UTC'}}))
 
     def test_stale_receipt_cannot_publish(self):
         for override in ({'revision_id': 4}, {'revision_hash': 'stale'}, {'audience_visibility': ['just_me']}):
@@ -251,6 +251,18 @@ class ReviewPolicyTests(SimpleTestCase):
         self.assertIs(published.published_revision, revision)
         self.assertIsNone(published.run)
         published.save.assert_called_once()
+
+    def test_blank_update_cannot_be_approved(self):
+        blank = self.revision('founder_asserted', summary='  ', highlights=['', ' '], lowlights=[],
+            next_30_days=[{'text': ''}], kpi_snapshot=[{'metric_key': 'revenue', 'value': '100'}])
+        with self.assertRaises(revisions.EmptyUpdate):
+            self.approve(blank)
+
+    def test_any_narrative_section_is_enough_to_approve(self):
+        for key in NARRATIVE_MEMO_KEYS:
+            with self.subTest(key=key):
+                self.assertTrue(has_narrative({key: 'Signed our first customer.'}))
+        self.assertFalse(has_narrative({'kpi_snapshot': [{'value': '100'}], 'cover_image': {'url': 'cover.png'}}))
 
 
 @override_settings(COMMUNITY_CHAT_STARTUP_UPDATES_ENABLED=True,
