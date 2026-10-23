@@ -29,7 +29,7 @@ class AudienceTests(SimpleTestCase):
                 normalize_audience_visibility(audience)
 
     def test_public_revision_approval_requires_its_own_exact_disclosure(self):
-        revision = Obj(pk=5, content_hash="reviewed", structured_memo={"_audience_visibility": ["public"]}, validation={"groundedness_status": "passed"}, snapshot=Obj(payload={}))
+        revision = Obj(pk=5, content_hash="reviewed", structured_memo={"highlights": ["Shipped the release."], "_audience_visibility": ["public"]}, validation={"groundedness_status": "passed"}, snapshot=Obj(payload={}))
         draft = Obj(pk=1, month=date(2026, 9, 1), current_revision=revision, published_revision_id=None,
             published_at=None, first_published_at=None, save=MagicMock())
         with patch.object(revisions.MonthlyUpdateDraft, "objects") as drafts, patch.object(revisions.MonthlyUpdateApproval, "objects") as approvals:
