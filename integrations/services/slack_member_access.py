@@ -214,9 +214,9 @@ def assess_readers(workspace_id, channel_id, *, locked=None, mode=None):
                                             separators=(",", ":")).encode()).hexdigest()
     count = len({g.user_id for g in eligible})
     complete = unknown == 0
-    effective = mode if mode in {"bot", "both"} else "members" if count else "bot" if complete else "hold"
+    effective = mode if mode in {"bot", "both"} else "members" if count else "hold"
     return ReaderAssessment(count, unknown, complete, effective,
-                            "no_reader" if mode == "members" and effective == "bot" else "",
+                            "no_reader" if mode == "members" and complete and not count else "",
                             fingerprint, tuple(eligible), tuple(available))
 
 

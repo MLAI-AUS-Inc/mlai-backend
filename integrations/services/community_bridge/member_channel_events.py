@@ -257,11 +257,7 @@ def route_member_public_event(payload):
                         channels.queue_refresh(workspace, source, reason='member_room_not_ready')
                 return {'status': 'member_audience_pending'}
             return ingest_slack_event(normalized, public_source_verified=True)
-    retired = (row.audience == 'community'
-               and getattr(settings, 'SLACK_COMMUNITY_SOURCE', 'bot') == 'members'
-               and policy.effective_source == 'bot')
-    return ingest_slack_event(normalized, public_source_verified=True, **(
-        {'retired_bot_source': True} if retired else {}))
+    return ingest_slack_event(normalized, public_source_verified=True)
 
 
 def dispatch_slack_callback(payload, *, private_ingest=None, public_ingest=None):
@@ -286,14 +282,7 @@ def dispatch_slack_callback(payload, *, private_ingest=None, public_ingest=None)
             audience='community', destination_platform='buzz',
         ).first()
         if row is not None:
-            policy = access.community_reader_policy_current(row)
-            if (policy is None or policy.effective_source == 'hold'
-                    or not policy.complete and policy.eligible_count <= 0):
-                from .community_source import hold_reader_source
-                hold_reader_source(row)
-                return {'status': 'community_source_pending'}
-            if policy.effective_source == 'members':
-                return ingest_slack_event(payload, retired_bot_source=True)
+            return ingest_slack_event(payload, retired_bot_source=True)
     return (public_ingest or ingest_slack_event)(payload)
 
 

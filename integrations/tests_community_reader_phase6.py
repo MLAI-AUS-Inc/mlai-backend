@@ -161,22 +161,25 @@ class CommunityReaderTests(Fixture, TransactionTestCase):
         self.assertEqual(self.channel.room_state["preserve"], "unchanged")
         self.assertFalse(access.community_source_needs_revalidation(self.channel))
 
-    def test_zero_reader_bot_can_renew_aged_proof_on_successive_durable_pages(self):
+    def test_zero_reader_hold_preserves_aged_proof_and_checkpoint_on_retries(self):
         self.left()
+        checkpoint = {"cursor": "SAVED-MEMBER", "member_authority": "prior-authority"}
+        self.state.jobs.filter(kind="archive").update(checkpoint=checkpoint)
         for _ in range(2):
             self.wake()
-            self.bot_calls.clear()
             before = self.age_source()
             self.run_page()
             self.channel.refresh_from_db()
-            self.assertGreater(self.channel.slack_seen_at, before)
-            self.assertEqual([c[0] for c in self.bot_calls], ["auth_test", "conversations_info", "conversations_history", "conversations_info"])
+            self.assertEqual(self.channel.slack_seen_at, before)
+            self.assertEqual(self.state.jobs.get(kind="archive").checkpoint, checkpoint)
             self.assertEqual(self.reader_state()["fallback_reason"], "no_reader")
+            self.assertEqual(self.channel.sync_paused_reason, "no_reader")
+            self.assertEqual(self.calls, [])
+            self.assertEqual(self.bot_calls, [])
 
     def test_successful_info_renewal_survives_later_history_quota_deferral(self):
-        self.left()
         before = self.age_source()
-        self.bot_hook = lambda method: (_ for _ in ()).throw(BudgetDeferred(60)) if method == "conversations_history" else None
+        self.member_hook = lambda method: (_ for _ in ()).throw(BudgetDeferred(60)) if method == "conversations_history" else None
         with self.assertRaises(BudgetDeferred):
             self.run_page()
         self.channel.refresh_from_db()
@@ -184,7 +187,8 @@ class CommunityReaderTests(Fixture, TransactionTestCase):
         self.assertFalse(CommunityBridgeDelivery.objects.exists())
         payload = {"team_id": "TTEST", "api_app_id": "ABOT", "event": {"type": "message", "channel": "CROOM"}}
         with transaction.atomic(), callback_user_fence(payload), access.community_reader_policy(payload):
-            self.assertEqual(access.community_reader_policy_current(self.channel).effective_source, "bot")
+            self.assertEqual(access.community_reader_policy_current(self.channel).effective_source, "members")
+
 
     def test_stale_reader_info_private_or_connect_closes_before_any_body(self):
         for marker, reason in (("is_private", "converted_to_private"), ("is_ext_shared", "slack_connect")):
@@ -209,21 +213,20 @@ class CommunityReaderTests(Fixture, TransactionTestCase):
                 self.assertEqual(self.bot_calls, [])
                 self.assertFalse(CommunityBridgeDelivery.objects.exists())
 
-    def test_stale_zero_bot_private_info_cannot_renew_or_request_content(self):
-        self.left()
+    def test_stale_member_private_info_cannot_renew_or_request_content(self):
         before = self.age_source()
-        self.bot_info["channel"]["is_private"] = True
+        self.member_info = {"ok": True, "channel": {**self.bot_info["channel"], "is_private": True}}
         with self.assertRaises(BudgetDeferred):
             self.run_page()
         self.channel.refresh_from_db()
         self.assertEqual(self.channel.slack_seen_at, before)
         self.assertEqual(self.channel.hold_reason, "converted_to_private")
-        self.assertEqual([c[0] for c in self.bot_calls], ["auth_test", "conversations_info"])
+        self.assertEqual([c[1] for c in self.calls], ["conversations_info"])
         self.assertFalse(CommunityBridgeDelivery.objects.exists())
+
 
     def test_stale_scroll_demand_schedules_metadata_then_worker_revalidates(self):
         from integrations.services.slack_history_pages import _public_progress
-        self.left()
         before = self.age_source()
         result = member.request_history(self.a.user, self.channel, "1" * 64, "a" * 64, _public_progress)
         self.assertTrue(result["pending"])
@@ -234,16 +237,17 @@ class CommunityReaderTests(Fixture, TransactionTestCase):
         self.channel.refresh_from_db()
         self.assertGreater(self.channel.slack_seen_at, before)
 
-    def test_stale_bot_info_uncertainty_never_renews_or_requests_body(self):
-        self.left()
+
+    def test_stale_member_info_uncertainty_never_renews_or_requests_body(self):
         before = self.age_source()
-        self.bot_info = {"ok": True, "channel": {"id": "CROOM", "is_channel": True, "is_private": False}}
+        self.member_info = {"ok": True, "channel": {"id": "CROOM", "is_channel": True, "is_private": False}}
         with self.assertRaises(BudgetDeferred):
             self.run_page()
         self.channel.refresh_from_db()
         self.assertEqual(self.channel.slack_seen_at, before)
-        self.assertEqual([c[0] for c in self.bot_calls], ["auth_test", "conversations_info"])
+        self.assertEqual([c[1] for c in self.calls], ["conversations_info"])
         self.assertFalse(CommunityBridgeDelivery.objects.exists())
+
 
     def test_unknown_source_proof_or_reader_cannot_use_stale_info_admission(self):
         self.left()
@@ -315,18 +319,19 @@ class CommunityReaderTests(Fixture, TransactionTestCase):
         self.b.connection.scopes = ["chat:write"]
         self.b.connection.save(update_fields=("scopes",))
         proof = self.assessment()
-        self.assertEqual((proof.eligible_count, proof.complete, proof.effective_source), (0, True, "bot"))
+        self.assertEqual((proof.eligible_count, proof.complete, proof.effective_source), (0, True, "hold"))
 
-    def test_known_zero_uses_exact_bot_identity_and_pre_post_info(self):
+    def test_known_zero_holds_without_any_provider_request(self):
         self.left()
         self.run_page()
-        self.assertEqual([c[0] for c in self.bot_calls], ["auth_test", "conversations_info", "conversations_history", "conversations_info"])
+        self.assertEqual(self.bot_calls, [])
         self.assertEqual(self.calls, [])
         state = self.reader_state()
-        self.assertEqual((state["effective_source"], state["fallback_reason"]), ("bot", "no_reader"))
+        self.assertEqual((state["effective_source"], state["fallback_reason"]), ("hold", "no_reader"))
         self.assertIsNone(state["fallback_since"])
         self.assertFalse(state["continuity_proven"])
         self.assertEqual(self.channel.room_state["preserve"], "unchanged")
+        self.assertFalse(CommunityBridgeDelivery.objects.exists())
 
     def test_unknown_or_cooling_reader_is_not_no_reader_fallback(self):
         self.member_hook = lambda method: (_ for _ in ()).throw(BudgetDeferred(60))
@@ -366,7 +371,7 @@ class CommunityReaderTests(Fixture, TransactionTestCase):
         self.assertTrue(CommunityBridgeDelivery.objects.exists())
         self.remote_revoke.assert_called_once()
 
-    def test_full_missing_scope_revocation_can_prove_new_zero_before_bot_fallback(self):
+    def test_full_missing_scope_revocation_holds_after_all_readers_fail(self):
         self.grant(3)
         self.member_hook = lambda method: (_ for _ in ()).throw(dm.SlackApiError("synthetic", {"ok": False, "error": "missing_scope"}))
         self.run_page()
@@ -375,7 +380,7 @@ class CommunityReaderTests(Fixture, TransactionTestCase):
         self.assertEqual(self.assessment().eligible_count, 0)
         self.assertTrue(self.assessment().complete)
         self.assertEqual(self.reader_state()["fallback_reason"], "no_reader")
-        self.assertEqual([c[0] for c in self.bot_calls], ["auth_test", "conversations_info", "conversations_history", "conversations_info"])
+        self.assertEqual(self.bot_calls, [])
 
     def test_departure_fences_old_lease_then_recovers_with_other_reader(self):
         self._rejected_reader_recovers("not_in_channel")
@@ -395,31 +400,29 @@ class CommunityReaderTests(Fixture, TransactionTestCase):
         self.assertEqual({c[0] for c in self.calls}, {self.b.pk})
         self.assertEqual(self.bot_calls, [])
 
-    def test_bot_budget_deferral_retains_honest_fallback_without_page_effect(self):
+    def test_no_reader_hold_does_not_use_bot_budget(self):
         self.left()
-        self.bot_hook = lambda method: (_ for _ in ()).throw(BudgetDeferred(60)) if method == "conversations_info" else None
-        with self.assertRaises(BudgetDeferred):
+        with patch("integrations.services.message_sync.slack_client.budgeted_client", side_effect=AssertionError("bot budget")):
             self.run_page()
         self.assertEqual(self.reader_state()["fallback_reason"], "no_reader")
         self.assertFalse(CommunityBridgeDelivery.objects.exists())
 
-    def test_wrong_bot_identity_refuses_before_info_or_history(self):
+    def test_no_reader_hold_does_not_require_bot_configuration(self):
         self.left()
-        with patch.object(self.sdk, "auth_test", return_value={"ok": True, "team_id": "TFOREIGN",
-                "user_id": "UBOT", "bot_id": "BBOT"}):
-            with self.assertRaises(BudgetDeferred):
-                self.run_page()
+        with override_settings(SLACK_BRIDGE_BOT_TOKEN="", SLACK_BRIDGE_BOT_USER_ID=""):
+            self.run_page()
         self.assertEqual(self.bot_calls, [])
+        self.assertEqual(self.reader_state()["effective_source"], "hold")
         self.assertFalse(CommunityBridgeDelivery.objects.exists())
 
     def test_private_post_read_info_discards_body_and_records_source_reduction(self):
-        self.left()
-        self.bot_page = {"ok": True, "messages": [{"ts": f"{self.now-10}.000001", "user": "USOURCE",
+        self.member_info = self.bot_info
+        self.member_page = {"ok": True, "messages": [{"ts": f"{self.now-10}.000001", "user": "USOURCE",
                                                   "text": "synthetic discarded body"}]}
         def convert(method):
-            if method == "conversations_info" and len([c for c in self.bot_calls if c[0] == method]) == 2:
+            if method == "conversations_info" and len([c for c in self.calls if c[1] == method]) == 2:
                 self.bot_info["channel"]["is_private"] = True
-        self.bot_hook = convert
+        self.member_hook = convert
         with self.assertRaises(BudgetDeferred):
             self.run_page()
         self.assertFalse(CommunityBridgeDelivery.objects.exists())
@@ -427,27 +430,23 @@ class CommunityReaderTests(Fixture, TransactionTestCase):
         self.assertEqual(self.channel.hold_reason, "converted_to_private")
         self.assertEqual(self.reader_state()["effective_source"], "hold")
 
-    def test_quota_delay_expiring_lease_never_enters_bot_sdk(self):
-        self.left()
-        def budget(client, **kwargs):
-            def before():
-                self.state.jobs.filter(kind="archive").update(lease_expires_at=timezone.now()-timedelta(seconds=1))
-                kwargs["before_request"]()
-            self.sdk.before_request = before
-            return client
-        with patch("integrations.services.message_sync.slack_client.budgeted_client", side_effect=budget):
-            with self.assertRaises(LeaseLost):
-                self.run_page()
-        self.assertEqual(self.bot_calls, [])
-        self.assertFalse(CommunityBridgeDelivery.objects.exists())
 
-    def test_bot_to_member_recovery_resets_cursor_and_retains_last_fallback(self):
+    def test_expired_lease_cannot_commit_no_reader_hold(self):
         self.left()
-        self.bot_page = {"ok": True, "messages": [], "response_metadata": {"next_cursor": "BOT-CURSOR"}}
+        from integrations.services.message_sync.scheduler import claim_job
+        lease = claim_job(kinds=["archive"])
+        self.state.jobs.filter(kind="archive").update(lease_expires_at=timezone.now()-timedelta(seconds=1))
+        with self.assertRaises(LeaseLost):
+            member.run_page(lease, self.state, lambda *args, **kwargs: self.fail("held page ran"))
+        self.assertEqual(self.bot_calls, [])
+        self.assertNotIn(access.COMMUNITY_READER_STATE, self.channel.room_state)
+
+    def test_returning_reader_restarts_foreign_cursor_and_recovers_held_job(self):
+        self.left()
+        old = {"cursor": "LEGACY-BOT-CURSOR", "member_authority": "legacy-bot-authority"}
+        self.state.jobs.filter(kind="archive").update(checkpoint=old)
         self.run_page()
-        old = self.state.jobs.get(kind="archive").checkpoint
-        self.assertEqual(old["cursor"], "BOT-CURSOR")
-        since = self.reader_state()["fallback_since"]
+        self.assertEqual(self.state.jobs.get(kind="archive").checkpoint, old)
         self.joined()
         self.wake()
         self.run_page()
@@ -455,20 +454,22 @@ class CommunityReaderTests(Fixture, TransactionTestCase):
         self.assertNotIn("cursor", kwargs)
         state = self.reader_state()
         self.assertEqual(state["effective_source"], "members")
-        self.assertIsNone(state["fallback_since"])
+        self.assertEqual(self.channel.sync_paused_reason, "")
         self.assertIsNotNone(state["last_fallback_at"])
-        self.assertIsNone(state["stable_since"])
-        self.assertNotEqual(old.get("member_authority"), self.state.jobs.get(kind="archive").checkpoint.get("member_authority"))
-        self.assertIsNone(since)
+        self.assertTrue(CommunityBridgeDelivery.objects.exists())
+        self.assertEqual(self.bot_calls, [])
 
-    def test_member_to_bot_fallback_does_not_transplant_member_cursor(self):
+    def test_reader_loss_preserves_member_cursor_without_any_bot_read(self):
         self.member_page = {"ok": True, "messages": [], "response_metadata": {"next_cursor": "MEMBER-CURSOR"}}
         self.run_page()
+        old = self.state.jobs.get(kind="archive").checkpoint
         self.left()
         self.wake()
+        self.calls.clear()
         self.run_page()
-        kwargs = next(c[1] for c in self.bot_calls if c[0] == "conversations_history")
-        self.assertNotIn("cursor", kwargs)
+        self.assertEqual(self.state.jobs.get(kind="archive").checkpoint, old)
+        self.assertEqual(self.calls, [])
+        self.assertEqual(self.bot_calls, [])
 
     def test_both_history_keeps_bot_without_member_selection(self):
         self.bot.side_effect = None
@@ -493,23 +494,21 @@ class CommunityReaderTests(Fixture, TransactionTestCase):
                 self.assertNotIn("member_authority", checkpoint)
                 self.assertEqual(checkpoint["cursor"], "NEXT")
 
-    def test_community_scroll_can_schedule_proven_zero_without_slack_link(self):
+    def test_unlinked_community_scroll_reports_unavailable_until_reader_returns(self):
         from integrations.services.slack_history_pages import _public_progress
+        from integrations.services.slack_owner_inventory_api import InventoryError
         self.left()
         requester = get_user_model().objects.create_user(email="unlinked-reader@example.invalid")
         CommunityChatDevice.objects.create(user=requester, public_key="c" * 64, status="verified", verified_at=timezone.now())
-        original = dm._capture_slack_grant_api_authority
-        def capture(grant, *, refresh_token=True):
-            self.assertFalse(refresh_token)
-            return original(grant, refresh_token=False)
-        with patch.object(dm, "_capture_slack_grant_api_authority", side_effect=capture):
-            result = member.request_history(requester, self.channel, "c" * 64, "a" * 64, _public_progress)
+        old = self.state.jobs.get(kind="archive").checkpoint
+        with self.assertRaises(InventoryError):
+            member.request_history(requester, self.channel, "c" * 64, "a" * 64, _public_progress)
+        self.assertEqual(self.state.jobs.get(kind="archive").checkpoint, old)
+        self.joined()
+        result = member.request_history(requester, self.channel, "c" * 64, "a" * 64, _public_progress)
         self.assertTrue(result["pending"])
-        checkpoint = self.state.jobs.get(kind="archive").checkpoint
-        self.assertIn("member_authority", checkpoint)
         self.assertEqual(self.calls, [])
         self.assertEqual(self.bot_calls, [])
-        self.assertEqual(self.reader_state()["fallback_reason"], "no_reader")
 
     def test_unknown_scroll_reader_never_schedules_bot_or_borrows_cursor(self):
         from integrations.services.slack_history_pages import _public_progress
@@ -539,22 +538,16 @@ class CommunityReaderTests(Fixture, TransactionTestCase):
                 self.channel.save(update_fields=(field,))
                 self.wake()
 
-    def test_new_owner_before_sdk_or_during_info_discards_page(self):
-        self.left()
-        for stage in ("before_sdk", "info", "history"):
+    def test_new_owner_during_member_info_or_history_discards_page(self):
+        for stage in ("conversations_info", "conversations_history"):
             with self.subTest(stage=stage):
                 self.wake()
-                self.bot_calls.clear()
-                def insert():
-                    self.grant(3)
-                self.webclient_hook = insert if stage == "before_sdk" else None
-                self.bot_hook = lambda method: insert() if method == ("conversations_info" if stage == "info" else "conversations_history") else None
+                self.member_hook = lambda method: self.grant(3) if method == stage else None
                 with self.assertRaises(CallbackAuthorityChanged):
                     self.run_page()
                 self.assertFalse(CommunityBridgeDelivery.objects.exists())
                 self.assertEqual(self.state.jobs.get(kind="archive").checkpoint, {})
-                if stage == "before_sdk":
-                    self.assertEqual(self.bot_calls, [])
+                self.assertEqual(self.bot_calls, [])
 
     def test_only_monitor_chain_can_extend_contiguous_fallback_or_stability(self):
         from integrations.services.community_bridge.community_source import MonitoringContinuity
@@ -679,7 +672,13 @@ class CommunityReaderTests(Fixture, TransactionTestCase):
                 reading.set()
                 self.assertTrue(attempted.wait(5))
                 self.assertFalse(joined.wait(.2))
-        self.bot_hook = during
+        original_finish = member.finish_job
+        def finish(*args, **kwargs):
+            during("conversations_history")
+            return original_finish(*args, **kwargs)
+        finish_patch = patch.object(member, "finish_job", side_effect=finish)
+        finish_patch.start()
+        self.addCleanup(finish_patch.stop)
         thread = threading.Thread(target=change)
         thread.start()
         try:
@@ -691,10 +690,10 @@ class CommunityReaderTests(Fixture, TransactionTestCase):
         self.assertTrue(joined.is_set())
         self.assertEqual(self.assessment().eligible_count, 1)
 
+
     @tag("postgres-only")
     @skipUnlessDBFeature("has_select_for_update")
-    def test_committed_new_owner_during_bot_read_discards_whole_page(self):
-        self.left()
+    def test_committed_new_owner_during_member_read_discards_whole_page(self):
         reading, committed = threading.Event(), threading.Event()
         errors = []
         def add():
@@ -711,7 +710,7 @@ class CommunityReaderTests(Fixture, TransactionTestCase):
             if method == "conversations_history":
                 reading.set()
                 self.assertTrue(committed.wait(5))
-        self.bot_hook = during
+        self.member_hook = during
         thread = threading.Thread(target=add)
         thread.start()
         try:
@@ -721,6 +720,6 @@ class CommunityReaderTests(Fixture, TransactionTestCase):
             thread.join(10)
         self.assertFalse(thread.is_alive())
         self.assertEqual(errors, [])
-        self.assertEqual(self.assessment().eligible_count, 1)
+        self.assertEqual(self.assessment().eligible_count, 3)
         self.assertFalse(CommunityBridgeDelivery.objects.exists())
         self.assertEqual(self.state.jobs.get(kind="archive").checkpoint, {})

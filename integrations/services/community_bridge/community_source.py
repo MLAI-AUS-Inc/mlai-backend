@@ -80,6 +80,9 @@ def retirement_policy(row, payload):
     if role is None:
         _invalidate(row, "configuration_changed")
         return "hold"
+    if role == "bot":
+        # Reader loss never promotes the bot's copy into the content lane.
+        return "retire"
     from integrations.services import slack_member_access as access
     assessment = access.community_reader_policy_current(row)
     if (assessment is None or assessment.effective_source == "hold"

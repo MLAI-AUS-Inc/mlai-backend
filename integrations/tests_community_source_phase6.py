@@ -557,7 +557,7 @@ class CommunitySourceTests(SourceFixture, TransactionTestCase):
             self.assertEqual(self.epoch()['cohort'],first['cohort'])
             self.assertEqual(self.epoch()['report'],first['report'])
 
-    def test_members_bot_copy_cannot_claim_shared_key_and_zero_reader_user_copy_is_quarantined(self):
+    def test_bot_copy_is_retired_and_zero_reader_member_copy_waits_for_recovery(self):
         # Synthetic cutover receipt; actual deployment requires a passing live
         # seven-day report and owner approval, neither claimed by this fixture.
         with override_settings(SLACK_COMMUNITY_SOURCE='members'):
@@ -581,17 +581,22 @@ class CommunitySourceTests(SourceFixture, TransactionTestCase):
             inbox=self.inbox(user)
             result=dispatch_authenticated_slack_callback(user,app_id=inbox.app_id,received_at=inbox.received_at,
                 inbox_id=inbox.pk,source_event_id=inbox.source_event_id)
-            held=CommunityBridgeReceipt.objects.get(pk=result['receipt_id'])
-            self.assertEqual(held.error_text,'member_source_no_reader')
-            self.assertFalse(CommunityBridgeDelivery.objects.filter(receipt=held).exists())
+            self.assertEqual(result, {'status': 'community_source_pending'})
+            self.assertFalse(CommunityBridgeReceipt.objects.filter(receipt_key=user['event_id']).exists())
             bot={**user,'api_app_id':'ABOT','event_id':'EBOTZERO'}
             inbox=self.inbox(bot)
             result=dispatch_authenticated_slack_callback(bot,app_id=inbox.app_id,received_at=inbox.received_at,
                 inbox_id=inbox.pk,source_event_id=inbox.source_event_id)
+            self.assertEqual(CommunityBridgeDelivery.objects.filter(receipt_id=result['receipt_id']).count(),0)
+            self.assertEqual(CommunityBridgeReceipt.objects.get(pk=result['receipt_id']).error_text, 'bot_source_retired')
+            SlackChannelMembership.objects.update(state='joined')
+            inbox=self.inbox(user)
+            result=dispatch_authenticated_slack_callback(user,app_id=inbox.app_id,received_at=inbox.received_at,
+                inbox_id=inbox.pk,source_event_id=inbox.source_event_id)
             self.assertEqual(CommunityBridgeDelivery.objects.filter(receipt_id=result['receipt_id']).count(),1)
 
     def test_unknown_reader_policy_preserves_pending_encrypted_callback(self):
-        row=self.inbox(self.callback(),completed=False)
+        row=self.inbox(self.callback(app='AUSER'),completed=False)
         with override_settings(SLACK_COMMUNITY_SOURCE='members'), \
                 patch('integrations.services.slack_member_access.community_reader_policy_current',return_value=None):
             self.assertEqual(process_inbox_once(),0)
@@ -630,7 +635,7 @@ class CommunitySourceTests(SourceFixture, TransactionTestCase):
             self.assertEqual((saved['eligible_count'], saved['unknown_count'], saved['complete'],
                               saved['effective_source']), (1, 1, False, 'members'))
 
-    def test_zero_known_readers_with_unknown_grant_keeps_both_app_callbacks_pending(self):
+    def test_unknown_reader_holds_member_callback_and_retires_bot_until_recovery(self):
         from integrations.services import slack_member_access as access
 
         SlackChannelMembership.objects.filter(grant=self.b, slack_channel_id='CROOM1').delete()
@@ -642,12 +647,21 @@ class CommunitySourceTests(SourceFixture, TransactionTestCase):
                               proof.effective_source), (0, 1, False, 'hold'))
             for app in ('ABOT', 'AUSER'):
                 row = self.inbox(self.callback(app=app, suffix='unknown'), completed=False)
-                self.assertEqual(process_inbox_once(), 0)
+                self.assertEqual(process_inbox_once(), 1 if app == 'ABOT' else 0)
                 row.refresh_from_db()
-                self.assertEqual((row.status, row.last_error_code), ('pending', 'community_source_pending'))
-                self.assertTrue(row.encrypted_payload)
-            self.assertFalse(CommunityBridgeReceipt.objects.exists())
+                if app == 'AUSER':
+                    self.assertEqual((row.status, row.last_error_code), ('pending', 'community_source_pending'))
+                    self.assertTrue(row.encrypted_payload)
+                else:
+                    self.assertEqual(row.status, 'completed')
+            self.assertEqual(CommunityBridgeReceipt.objects.get().error_text, 'bot_source_retired')
             self.assertFalse(CommunityBridgeDelivery.objects.exists())
+            SlackChannelMembership.objects.filter(grant=self.a, slack_channel_id='CROOM1').update(
+                state='joined', observed_at=timezone.now(), left_at=None)
+            row.available_at = timezone.now()
+            row.save(update_fields=['available_at'])
+            self.assertEqual(process_inbox_once(), 1)
+            self.assertEqual(CommunityBridgeDelivery.objects.count(), 1)
 
 
 @override_settings(**CONFIG, SLACK_BRIDGE_SIGNING_SECRET='synthetic-bot-secret',
