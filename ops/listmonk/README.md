@@ -31,9 +31,11 @@ Open the admin UI with `ssh -L 9100:127.0.0.1:9100 mlai-droplet`, then browse to
 
 ## First deployment
 
-1. **Environment.** Copy `.env.example` to `.env`.
+On the droplet, run this project from `/root/mlai-listmonk`, next to `/root/mlai-content-analytics`. Keep it out of `/root/mlai-backend`, because `deploy.sh` rsyncs that directory with `--delete` on every backend deploy.
+
+1. **Environment.** Copy `.env.example` to `.env` and `chmod 600 .env`.
    - Generate `LISTMONK_POSTGRES_PASSWORD` with `openssl rand -hex 32`. It must stay URL-safe.
-   - Set `LISTMONK_ADMIN_USER` and a strong `LISTMONK_ADMIN_PASSWORD`. They are only used on the very first start.
+   - Leave `LISTMONK_ADMIN_USER` and `LISTMONK_ADMIN_PASSWORD` empty. listmonk then starts with no users, and the first visit to the admin UI asks for the super admin's name and password (step 5), so the password never sits in a file. Only someone with an SSH tunnel can reach that page.
 2. **Images.** Keep both image values as immutable `tag@sha256` references. Compose has no `latest` fallback.
 3. **Shared network.** The `mlai-shared` network already exists on the droplet, because `deploy.sh` creates it. Elsewhere, run `docker network create mlai-shared`.
 4. **Validate and start:**
@@ -46,7 +48,7 @@ Open the admin UI with `ssh -L 9100:127.0.0.1:9100 mlai-droplet`, then browse to
    curl -fsS http://127.0.0.1:9100/health
    ```
 
-5. **Secure the admin account.** Sign in over the SSH tunnel and turn on two-factor authentication for the admin user. Then delete the two `LISTMONK_ADMIN_*` lines from `.env`.
+5. **Create and secure the admin account.** Open the admin UI over the SSH tunnel straight away and create the super admin, then turn on two-factor authentication for it. If you set `LISTMONK_ADMIN_*` instead, delete both lines from `.env` after the first sign-in.
 6. **Settings** (Admin → Settings):
 
    | Section | Setting | Value |
@@ -98,6 +100,9 @@ Open the admin UI with `ssh -L 9100:127.0.0.1:9100 mlai-droplet`, then browse to
 
       ```sh
       nginx -t && systemctl reload nginx
+      # The origin itself, before or without Cloudflare:
+      PUBLIC_LISTMONK_ORIGIN=https://lists.mlai.au ORIGIN_IP=127.0.0.1 LOCAL_LISTMONK_URL=http://127.0.0.1:9100 ./smoke-test.sh
+      # Through Cloudflare, once the DNS record exists:
       PUBLIC_LISTMONK_ORIGIN=https://lists.mlai.au LOCAL_LISTMONK_URL=http://127.0.0.1:9100 ./smoke-test.sh
       ```
 
@@ -202,7 +207,7 @@ A rollback means restoring the pre-upgrade dump with the previous digest, not ju
 - the public hostname serves static assets and reaches listmonk on the subscriber routes;
 - `/`, `/admin`, `/api`, the public signup API and form, the archive and the admin bounce webhook are closed.
 
-With `LOCAL_LISTMONK_URL` set, it also checks listmonk's health on loopback.
+With `LOCAL_LISTMONK_URL` set, it also checks listmonk's health on loopback. With `ORIGIN_IP` set, it skips DNS and Cloudflare and talks to nginx on that address, trusting only the origin certificate in `ORIGIN_CA` (default `/etc/nginx/ssl/listmonk-selfsigned.crt`).
 
 ```sh
 PUBLIC_LISTMONK_ORIGIN=https://lists.mlai.au LOCAL_LISTMONK_URL=http://127.0.0.1:9100 ./smoke-test.sh

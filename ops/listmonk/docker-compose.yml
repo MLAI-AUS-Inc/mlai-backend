@@ -50,8 +50,8 @@ services:
       LISTMONK_db__max_open: "25"
       LISTMONK_db__max_idle: "25"
       LISTMONK_db__max_lifetime: 300s
-      # Only read on the very first start, to create the super admin. Clear both
-      # from .env afterwards; the password then lives only in listmonk.
+      # Normally empty: the first visit to the admin UI creates the super admin.
+      # If set, they are read only on the very first start; clear them after.
       LISTMONK_ADMIN_USER: ${LISTMONK_ADMIN_USER:-}
       LISTMONK_ADMIN_PASSWORD: ${LISTMONK_ADMIN_PASSWORD:-}
       # The image's entrypoint drops root to this user before starting listmonk.

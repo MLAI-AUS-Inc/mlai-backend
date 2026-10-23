@@ -20,8 +20,20 @@ done
 PUBLIC_LISTMONK_ORIGIN=${PUBLIC_LISTMONK_ORIGIN%/}
 LOCAL_LISTMONK_URL=${LOCAL_LISTMONK_URL:-}
 
+# ORIGIN_IP skips DNS and Cloudflare and checks nginx on that address directly,
+# trusting only ORIGIN_CA (the self-signed origin certificate).
+ORIGIN_IP=${ORIGIN_IP:-}
+ORIGIN_CA=${ORIGIN_CA:-/etc/nginx/ssl/listmonk-selfsigned.crt}
+
 case "$PUBLIC_LISTMONK_ORIGIN" in
-  https://*) curl_transport_args="--proto =https --tlsv1.2" ;;
+  https://*)
+    curl_transport_args="--proto =https --tlsv1.2"
+    if [ -n "$ORIGIN_IP" ]; then
+      host=${PUBLIC_LISTMONK_ORIGIN#https://}
+      [ -r "$ORIGIN_CA" ] || fail "ORIGIN_CA $ORIGIN_CA is not readable"
+      curl_transport_args="$curl_transport_args --resolve $host:443:$ORIGIN_IP --cacert $ORIGIN_CA"
+    fi
+    ;;
   http://localhost:*|http://127.0.0.1:*)
     [ "${ALLOW_HTTP_LOCALHOST:-0}" = "1" ] || fail "HTTP is allowed only when ALLOW_HTTP_LOCALHOST=1"
     curl_transport_args=""
