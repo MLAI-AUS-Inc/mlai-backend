@@ -538,17 +538,8 @@ with patch('dotenv.load_dotenv', return_value=False), \
             '"$BUZZ_BRIDGE_ADAPTER_URL"',
             deploy,
         )
-        self.assertIn(
-            "compose_run_web python manage.py upsert_community_bridge_channel",
-            deploy,
-        )
-        self.assertIn('--slack-workspace-id "$SLACK_BRIDGE_WORKSPACE_ID"', deploy)
-        self.assertIn('--slack-channel-id "$SLACK_BRIDGE_CHANNEL_ID"', deploy)
-        self.assertIn("--destination-platform buzz", deploy)
-        self.assertIn(
-            '--destination-channel-id "$BUZZ_BRIDGE_DESTINATION_CHANNEL_ID"',
-            deploy,
-        )
+        self.assertNotIn("upsert_community_bridge_channel", deploy)
+        self.assertNotIn("upsert_discord_bridge_channel", deploy)
         self.assertIn(
             "docker compose stop bridge-worker bridge-reconciler bridge-retention || true",
             deploy,
@@ -556,15 +547,6 @@ with patch('dotenv.load_dotenv', return_value=False), \
         self.assertIn(
             "docker compose rm -f bridge-worker bridge-reconciler bridge-retention || true",
             deploy,
-        )
-        # deploy_postmigrate verifies migration readiness as its first step, so
-        # the bridge mapping still cannot be written against a half-migrated
-        # database.
-        self.assertLess(
-            deploy.index("compose_run_web python manage.py deploy_postmigrate"),
-            deploy.index(
-                "compose_run_web python manage.py upsert_community_bridge_channel"
-            ),
         )
         self.assertLess(
             deploy.index('docker compose stop "\\${all_runtime_writer_services[@]}"'),

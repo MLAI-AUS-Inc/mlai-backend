@@ -618,18 +618,18 @@ UUID `client_msg_id`. Discovery and history maintenance run independently from
 the delivery retry loop. Adapter provisioning occurs for discovery, explicit
 start, or participant changes rather than as a fleet-wide periodic refresh.
 
-Create each public-channel mapping with:
+Public MLAI Chat mappings are created and maintained by authorized member
+inventory, channel lifecycle events and the member-sync refresh queue. The
+fifteen existing Community rooms retain their registered IDs and audience;
+new eligible channels become Members rooms. Use the channel admin's **Mirror**,
+**Hold** and **Exclude** actions for an operator decision. These actions queue
+revalidation and never authorize access without current grant and membership
+evidence. Production deployment no longer upserts a fixed mapping, and the
+one-off tech-volunteers provisioning workflow is retired.
 
-```sh
-python manage.py upsert_community_bridge_channel \
-  --slack-workspace-id T0123456789 \
-  --slack-channel-id C0123456789 \
-  --slack-channel-name community \
-  --destination-platform buzz \
-  --destination-workspace-id chat.mlai.au \
-  --destination-channel-id 922c3b22-8002-4c3c-a37b-ce406a5e606e \
-  --destination-channel-name community
-```
+The separate Discord integration retains `upsert_discord_bridge_channel` with
+the existing Discord URL/ID arguments. It cannot create a MLAI Chat mapping or
+replace an existing Chat room with a Discord destination.
 
 After investigating an exhausted delivery, replay it without changing its
 idempotency identity:

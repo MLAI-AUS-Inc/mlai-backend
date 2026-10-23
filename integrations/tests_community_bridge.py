@@ -830,7 +830,7 @@ class CommunityBridgeSetupCommandTests(TestCase):
         out = StringIO()
 
         call_command(
-            "upsert_community_bridge_channel",
+            "upsert_discord_bridge_channel",
             slack_channel_id="C-SLACK-PILOT",
             slack_channel_name="community-pilot",
             discord_url="https://discord.com/channels/1492063515987410957/1492063517191180340",
@@ -850,40 +850,45 @@ class CommunityBridgeSetupCommandTests(TestCase):
         self.assertTrue(channel.sync_deletes)
         self.assertTrue(channel.sync_replies)
 
-    def test_command_creates_generic_buzz_mapping(self):
-        out = StringIO()
-
-        call_command(
-            "upsert_community_bridge_channel",
-            slack_channel_id="C-MLAI-CHAT",
-            slack_channel_name="community",
-            slack_workspace_id="T-MLAI",
-            destination_platform=CommunityBridgePlatform.BUZZ,
-            destination_workspace_id="chat.mlai.au",
-            destination_channel_id="nostr-channel-event-id",
-            destination_channel_name="community",
-            stdout=out,
-        )
-
-        payload = json.loads(out.getvalue())
-        channel = CommunityBridgeChannel.objects.get(slack_channel_id="C-MLAI-CHAT")
-        self.assertEqual(payload["destination_platform"], CommunityBridgePlatform.BUZZ)
-        self.assertEqual(channel.slack_workspace_id, "T-MLAI")
-        self.assertEqual(channel.destination_workspace_id, "chat.mlai.au")
-        self.assertEqual(channel.destination_channel_id, "nostr-channel-event-id")
-        self.assertEqual(channel.discord_channel_id, "")
-
-    def test_command_requires_workspace_for_buzz_mapping(self):
-        with self.assertRaisesMessage(
-            CommandError,
-            "--slack-workspace-id is required for MLAI Chat mappings.",
-        ):
+    def test_discord_command_rejects_manual_buzz_creation(self):
+        with self.assertRaisesMessage(CommandError, "MLAI Chat mappings are managed by member sync"):
             call_command(
-                "upsert_community_bridge_channel",
-                slack_channel_id="C-MLAI-CHAT",
-                destination_platform=CommunityBridgePlatform.BUZZ,
-                destination_channel_id="nostr-channel-event-id",
+                "upsert_discord_bridge_channel", slack_channel_id="CSYNTHETIC",
+                slack_workspace_id="TSYNTHETIC", destination_platform=CommunityBridgePlatform.BUZZ,
+                destination_channel_id="00000000-0000-0000-0000-000000000001",
             )
+        self.assertFalse(CommunityBridgeChannel.objects.filter(slack_channel_id="CSYNTHETIC").exists())
+
+    def test_discord_command_cannot_repoint_existing_chat_room(self):
+        room = CommunityBridgeChannel.objects.create(
+            slack_channel_id="CSYNTHETIC", slack_workspace_id="TSYNTHETIC", audience="members",
+            destination_platform=CommunityBridgePlatform.BUZZ,
+            destination_channel_id="00000000-0000-0000-0000-000000000001",
+        )
+        with self.assertRaisesMessage(CommandError, "cannot be replaced with Discord"):
+            call_command("upsert_discord_bridge_channel", slack_channel_id="CSYNTHETIC",
+                         discord_guild_id="123", discord_channel_id="456")
+        room.refresh_from_db()
+        self.assertEqual(room.destination_platform, CommunityBridgePlatform.BUZZ)
+        self.assertEqual(room.audience, "members")
+        self.assertEqual(room.destination_channel_id, "00000000-0000-0000-0000-000000000001")
+
+    def test_concurrent_chat_mapping_cannot_be_repointed_after_initial_check(self):
+        from django.db import IntegrityError, transaction
+
+        room = CommunityBridgeChannel.objects.create(
+            slack_channel_id="CRACED", destination_platform=CommunityBridgePlatform.BUZZ,
+            destination_channel_id="00000000-0000-0000-0000-000000000002", audience="members",
+        )
+        # Simulate the preflight reads missing a concurrently created Chat row.
+        # The scoped upsert must still reject it at the database boundary.
+        with patch("django.db.models.query.QuerySet.first", return_value=None):
+            with self.assertRaises(IntegrityError), transaction.atomic():
+                call_command("upsert_discord_bridge_channel", slack_channel_id="CRACED",
+                             discord_guild_id="123", discord_channel_id="456")
+        room.refresh_from_db()
+        self.assertEqual(room.destination_platform, CommunityBridgePlatform.BUZZ)
+        self.assertEqual(room.audience, "members")
 
     def test_command_updates_existing_mapping(self):
         CommunityBridgeChannel.objects.create(
@@ -901,7 +906,7 @@ class CommunityBridgeSetupCommandTests(TestCase):
         out = StringIO()
 
         call_command(
-            "upsert_community_bridge_channel",
+            "upsert_discord_bridge_channel",
             slack_channel_id="C-SLACK-PILOT",
             slack_channel_name="community-pilot",
             discord_guild_id="1492063515987410957",
@@ -935,7 +940,7 @@ class CommunityBridgeSetupCommandTests(TestCase):
             "Discord channel 1492063517191180340 is already mapped to Slack channel C-SLACK-ONE.",
         ):
             call_command(
-                "upsert_community_bridge_channel",
+                "upsert_discord_bridge_channel",
                 slack_channel_id="C-SLACK-TWO",
                 discord_url="https://discord.com/channels/1492063515987410957/1492063517191180340",
             )

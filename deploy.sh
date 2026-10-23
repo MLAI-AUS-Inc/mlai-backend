@@ -265,14 +265,9 @@ if [ "$COMMUNITY_BRIDGE_PRODUCTION_ENABLED" = "true" ]; then
         "${SLACK_BRIDGE_SIGNING_SECRET:-}"
         "${SLACK_BRIDGE_BOT_USER_ID:-}"
         "${SLACK_BRIDGE_WORKSPACE_ID:-}"
-        "${SLACK_BRIDGE_CHANNEL_ID:-}"
-        "${SLACK_BRIDGE_CHANNEL_NAME:-}"
         "${BUZZ_BRIDGE_ADAPTER_URL:-}"
         "${BUZZ_BRIDGE_ADAPTER_TOKEN:-}"
         "${BUZZ_BRIDGE_CALLBACK_SECRET:-}"
-        "${BUZZ_BRIDGE_DESTINATION_WORKSPACE_ID:-}"
-        "${BUZZ_BRIDGE_DESTINATION_CHANNEL_ID:-}"
-        "${BUZZ_BRIDGE_DESTINATION_CHANNEL_NAME:-}"
     )
     for bridge_value in "${bridge_values[@]}"; do
         [ -n "$bridge_value" ] && bridge_present=$((bridge_present + 1))
@@ -294,19 +289,7 @@ import re
 
 if not re.fullmatch(r"T[A-Z0-9]+", os.environ["SLACK_BRIDGE_WORKSPACE_ID"]):
     raise SystemExit("SLACK_BRIDGE_WORKSPACE_ID must be a Slack workspace ID")
-if not re.fullmatch(r"C[A-Z0-9]+", os.environ["SLACK_BRIDGE_CHANNEL_ID"]):
-    raise SystemExit("SLACK_BRIDGE_CHANNEL_ID must be a public Slack channel ID")
-if not re.fullmatch(r"[a-z0-9_-]{1,80}", os.environ["SLACK_BRIDGE_CHANNEL_NAME"]):
-    raise SystemExit("SLACK_BRIDGE_CHANNEL_NAME must be a valid public channel name")
-if os.environ["BUZZ_BRIDGE_DESTINATION_WORKSPACE_ID"] != "chat.mlai.au":
-    raise SystemExit("BUZZ_BRIDGE_DESTINATION_WORKSPACE_ID must be chat.mlai.au")
-if not re.fullmatch(
-    r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}",
-    os.environ["BUZZ_BRIDGE_DESTINATION_CHANNEL_ID"],
-):
-    raise SystemExit("BUZZ_BRIDGE_DESTINATION_CHANNEL_ID must be a lowercase UUID")
-if not re.fullmatch(r"[a-z0-9_-]{1,80}", os.environ["BUZZ_BRIDGE_DESTINATION_CHANNEL_NAME"]):
-    raise SystemExit("BUZZ_BRIDGE_DESTINATION_CHANNEL_NAME must be a valid channel name")
+
 PY
 else
     echo "ℹ️ Community bridge production activation is disabled; staged bridge settings will not be installed."
@@ -1575,17 +1558,6 @@ ssh "$DEPLOY_SSH_TARGET" <<EOF
     echo "✅ Running post-migration deployment checks..."
     compose_run_web python manage.py deploy_postmigrate
 
-    if [ "$bridge_present" -gt 0 ]; then
-        echo "🌉 Upserting the reviewed Slack to MLAI Chat channel mapping..."
-        compose_run_web python manage.py upsert_community_bridge_channel \
-            --slack-workspace-id "$SLACK_BRIDGE_WORKSPACE_ID" \
-            --slack-channel-id "$SLACK_BRIDGE_CHANNEL_ID" \
-            --slack-channel-name "$SLACK_BRIDGE_CHANNEL_NAME" \
-            --destination-platform buzz \
-            --destination-workspace-id "$BUZZ_BRIDGE_DESTINATION_WORKSPACE_ID" \
-            --destination-channel-id "$BUZZ_BRIDGE_DESTINATION_CHANNEL_ID" \
-            --destination-channel-name "$BUZZ_BRIDGE_DESTINATION_CHANNEL_NAME"
-    fi
 
     if [ "\$org_memory_production_deploy_enabled" = "true" ]; then
         approval_manifest="/root/mlai-backend-operations/pilot-approval.json"
