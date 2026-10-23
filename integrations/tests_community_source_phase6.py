@@ -210,7 +210,9 @@ class CommunitySourceTests(SourceFixture, TransactionTestCase):
         self.assertEqual(CommunityBridgeDelivery.objects.filter(receipt=receipt).count(), 1)
         evidence = same.payload[codec.KEY]
         self.assertEqual(set(evidence['sources']), {'bot','members'})
-        earlier = timezone.now()-timedelta(milliseconds=10)
+        # Just after the message's own time (a receipt can never precede it) and well before the
+        # member copy arrived, so slow CI cannot make this retry the later receipt.
+        earlier = self.start.replace(microsecond=0)+timedelta(seconds=1, milliseconds=1)
         self.ingest(self.callback(app='AUSER', suffix='retry'), received=earlier)
         same.refresh_from_db()
         self.assertEqual(same.payload[codec.KEY]['sources']['members'], codec.stamp(earlier))

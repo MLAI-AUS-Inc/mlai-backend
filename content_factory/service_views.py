@@ -41,6 +41,7 @@ from content_factory.article_setup_reset import (
     clear_cancelled_article_setup_config,
 )
 from content_factory.authors import normalize_authors, org_config_author_payload
+from content_factory.article_voice import article_voice_for_dispatch
 from content_factory.editorial_catalog import EDIT_FIELDS, catalog_payload, merge_strategy, public_strategy
 from content_factory.editorial_run_state import EditorialRunConflict, merge_editorial_run_snapshot
 from content_factory.editorial_views import service_catalog_update
@@ -554,6 +555,8 @@ class ContentFactoryOrgConfigView(APIView):
         # authors + default_author_name/default_author_profile: content-factory re-fetches this
         # per run and the renderer seeds its inline author byline from the default profile.
         response_data.update(org_config_author_payload(config))
+        # Read-only fallback for runs whose payload predates the voice; CF cannot write it back.
+        response_data["article_voice"] = article_voice_for_dispatch(getattr(config, "pillar_strategy", None))
         response_data.update(catalog_payload(config.pillar_strategy if config else {}))
 
         # Opt-in heavy payload for the scan hydration path ONLY: the full stored component

@@ -92,6 +92,13 @@ from content_factory.baseline_metrics import baseline_display_metrics
 from content_factory.baseline_ai_evidence import ai_answer_metadata, compact_ai_providers
 from content_factory.dispatch_binding import bind_dispatch_token_run, run_is_dispatch_token_keyed, reserve_portable_dispatch_intent, bind_portable_dispatch_snapshot
 from content_factory.editorial_catalog import article_brief_for_catalog
+from content_factory.article_voice import (
+    ArticleVoiceError,
+    article_voice_for_dispatch,
+    article_voice_payload,
+    save_article_voice,
+    validate_article_voice,
+)
 from content_factory.google_baseline import collect_verified_google_metrics, google_baseline_connection_status
 from content_factory.run_state import ARTICLE_WORKFLOWS, active_retry_signal, clear_obsolete_active_run_blockers
 from content_factory.section_issues import public_section_issues
@@ -7536,6 +7543,10 @@ def _restart_article_payload_from_run(*, run, context, config, actor_id):
     )
     if delivery_mode_explicit and delivery_mode:
         payload["delivery_mode"] = delivery_mode
+    # A restart writes in the founder's current voice, like a fresh start.
+    article_voice = article_voice_for_dispatch(config.pillar_strategy)
+    if article_voice:
+        payload["article_voice"] = article_voice
     return payload
 
 
@@ -11929,6 +11940,7 @@ def _compute_bootstrap_payload(context, request=None, *, view="summary", config=
             "githubConnectionState": config.github_connection_state,
             "authors": normalize_authors(config.authors),
             "defaultAuthorId": str(config.default_author_id or ""),
+            "articleVoice": article_voice_payload(getattr(config, "pillar_strategy", None)),
         },
         "startupProfile": _serialize_startup_profile(context.organization),
         "websiteBaseline": _serialize_baseline_snapshot(baseline_snapshot, config, compact=compact),
@@ -12023,6 +12035,7 @@ def _serialize_bootstrap_without_domain(company):
             "dailyDiscoveryPriority": 0,
             "defaultTimezone": "",
             "githubConnectionState": "missing_domain",
+            "articleVoice": None,
         },
         "checks": checks,
         "articleCapabilities": article_capabilities(None),
@@ -15499,6 +15512,16 @@ class VibeMarketingSettingsView(APIView):
         from rest_framework.exceptions import ValidationError
 
         validate_profile_fields(request.data)
+        # Validate the founder's article voice before any write; absent leaves it unchanged.
+        self.voice_submitted = "articleVoice" in request.data or "article_voice" in request.data
+        self.prepared_voice = None
+        if self.voice_submitted:
+            raw_voice = request.data.get("articleVoice", request.data.get("article_voice"))
+            if raw_voice is not None:
+                try:
+                    self.prepared_voice = validate_article_voice(raw_voice)
+                except ArticleVoiceError as exc:
+                    raise ValidationError({"articleVoice": str(exc)}) from exc
         mode = request.data.get("articleDeliveryMode", request.data.get("article_delivery_mode"))
         if mode is not None and mode not in {"review_draft", "publish_code", "content_only"}:
             raise ValidationError({"articleDeliveryMode": "Choose a supported article delivery mode."})
@@ -15674,6 +15697,8 @@ class VibeMarketingSettingsView(APIView):
                              if any(alias in request.data for alias in aliases))
         if config_fields:
             config.save(update_fields=list(dict.fromkeys([*config_fields, "updated_at"])))
+        if getattr(self, "voice_submitted", False):
+            save_article_voice(organization, self.prepared_voice)
         if daily_enabled_submitted:
             # Keep the channel-backed automation in lock-step with the legacy
             # boolean so the two daily schedulers never disagree.
@@ -17309,6 +17334,10 @@ def start_article_generation(*, user, context, data, request_hash=None, website_
         payload["author_id"] = effective_author.get("id", "")
         payload["default_author_name"] = effective_author.get("name", "")
         payload["default_author_profile"] = author_profile_for_renderer(effective_author)
+    # Voice: the founder's saved article voice, with a digest Content Factory can cache on.
+    article_voice = article_voice_for_dispatch(config.pillar_strategy)
+    if article_voice:
+        payload["article_voice"] = article_voice
     if website_contract:
         payload.update(website_contract)
     if request_hash:
