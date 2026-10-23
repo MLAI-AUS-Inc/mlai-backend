@@ -568,6 +568,37 @@ def _setup_surface(config, journey, *, goal=None):
     raise WebsiteAuthorityError("article_surface_unresolved", "Scan the repository to identify an articles page before setup.", retryable=False)
 
 
+def _merged_setup_surface(op, config):
+    """The page this preparation's own merged setup used, for the setup that follows it.
+
+    A setup merged without its verification kit is set up once more to install
+    the kit (TalaThrive PR #40). That follow-up adopts the page the merged setup
+    built, so it keeps the owner's original choice. A rescan of the merged source
+    can rank build output and tag pages as candidates and would ask the owner to
+    choose again (PawShare setup ccd3ea22, 23 Oct 2026).
+    """
+    run_id = op.receipt.get("merged_setup_run_id")
+    connection = config.website_connection
+    if not run_id or connection is None:
+        return None
+    from workflow_runs.models import ContentFactoryRun
+    run = ContentFactoryRun.objects.filter(run_id=run_id, organization_id=connection.organization_id,
+        workflow="article_system_setup", run_request__website_connection_id=str(connection.pk),
+        run_request__connection_generation=connection.generation).first()
+    result = run.result if run is not None and isinstance(run.result, dict) else {}
+    setup = result.get("article_system_setup") if isinstance(result.get("article_system_setup"), dict) else {}
+    if "merged" not in {result.get("merge_status"), setup.get("merge_status")}:
+        return None
+    request = run.run_request if isinstance(run.run_request, dict) else {}
+    hint = request.get("article_surface_hint") if isinstance(request.get("article_surface_hint"), dict) else {}
+    chosen = hint.get("route_path") or hint.get("listing_url") or ""
+    if request.get("article_surface_mode") == "existing" and isinstance(chosen, str) and chosen:
+        return "existing", _canonical_article_route(chosen)
+    # A page the merged setup created now exists at the route it built.
+    built = result.get("route_path") or setup.get("route_path") or ""
+    return ("existing", _canonical_article_route(built)) if isinstance(built, str) and built else None
+
+
 def _owner_request(op, context, config, step, *, user, journey=None):
     """Call existing guarded owner handlers with a complete POST request shape."""
     connection = config.website_connection
@@ -593,7 +624,8 @@ def _owner_request(op, context, config, step, *, user, journey=None):
         if valid_consent(op.receipt["goal"]) and hosted_enabled(connection):
             data["verification_mode"] = op.receipt["goal"]["consent"]["answers"]["ci_mode"]
     if step == "setup":
-        mode, surface = _setup_surface(config, journey or journey_for_context(context, config), goal=op.receipt.get("goal"))
+        mode, surface = _merged_setup_surface(op, config) or _setup_surface(
+            config, journey or journey_for_context(context, config), goal=op.receipt.get("goal"))
         pending = (config.article_system or {}).get("pending_article_system_setup") or {}
         if op.payload.get("manual_setup_example_cleanup_retry") or op.payload.get("source_reverify"):
             pending = {**pending, "source_scan_run_id": op.receipt.get("scan_run_id") or ""}
