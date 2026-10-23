@@ -8,8 +8,6 @@ MLAI's own community; there is no per-organisation tenancy in this version.
 import uuid
 
 from django.conf import settings
-from django.contrib.postgres.fields import ArrayField
-from django.contrib.postgres.indexes import GinIndex
 from django.db import models
 from django.db.models import Q
 from django.db.models.functions import Lower
@@ -84,7 +82,7 @@ class Contact(TimestampedRecord):
     job_title = models.CharField(max_length=300, blank=True)
     city = models.CharField(max_length=120, blank=True)
     linkedin_url = models.URLField(max_length=500, blank=True)
-    tags = ArrayField(models.CharField(max_length=64), default=list, blank=True)
+    tags = models.JSONField(default=list, blank=True)
     attributes = models.JSONField(default=dict, blank=True)
     user = models.ForeignKey(
         settings.AUTH_USER_MODEL,
@@ -121,7 +119,6 @@ class Contact(TimestampedRecord):
                 fields=("email_status", "marketing_consent"), name="crm_contact_sendable_idx"
             ),
             models.Index(fields=("last_attended_at",), name="crm_contact_attended_idx"),
-            GinIndex(fields=("tags",), name="crm_contact_tags_gin"),
         ]
 
     def __str__(self):
@@ -137,7 +134,7 @@ class EventRegistration(TimestampedRecord):
     approval_status = models.CharField(max_length=32, blank=True)
     registered_at = models.DateTimeField(null=True, blank=True)
     checked_in_at = models.DateTimeField(null=True, blank=True)
-    ticket_names = ArrayField(models.CharField(max_length=255), default=list, blank=True)
+    ticket_names = models.JSONField(default=list, blank=True)
     registration_answers = models.JSONField(default=list, blank=True)
     utm_source = models.CharField(max_length=255, blank=True)
     custom_source = models.CharField(max_length=255, blank=True)
@@ -303,7 +300,7 @@ class EmailCampaignRecipient(models.Model):
     status = models.CharField(max_length=16, choices=Status.choices, default=Status.QUEUED)
     first_opened_at = models.DateTimeField(null=True, blank=True)
     first_clicked_at = models.DateTimeField(null=True, blank=True)
-    clicked_urls = ArrayField(models.CharField(max_length=2048), default=list, blank=True)
+    clicked_urls = models.JSONField(default=list, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
@@ -338,7 +335,7 @@ class ContactImport(TimestampedRecord):
     )
     consent = models.CharField(max_length=16, choices=Consent.choices)
     consent_source = models.CharField(max_length=255, blank=True)
-    tags = ArrayField(models.CharField(max_length=64), default=list, blank=True)
+    tags = models.JSONField(default=list, blank=True)
     dry_run = models.BooleanField(default=False)
     status = models.CharField(max_length=16, choices=Status.choices, default=Status.RUNNING)
     counts = models.JSONField(default=dict, blank=True)
