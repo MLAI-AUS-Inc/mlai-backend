@@ -277,7 +277,7 @@ def save_blast_draft(blast: Optional[Blast], data: dict, *, actor, now: datetime
             raise CrmError("invalid_request", fields={"purpose": ["required"]})
         blast = Blast(created_by=actor)
     elif blast.status != Blast.Status.DRAFT:
-        raise CrmError("blast_not_draft", 409, status=blast.status)
+        raise CrmError("blast_not_draft", 409, blast_status=blast.status)
     if "purpose" in data:
         blast.purpose = data["purpose"]
     if "event_id" in data:

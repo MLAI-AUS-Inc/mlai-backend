@@ -482,7 +482,7 @@ def queue_blast(blast_id, *, confirm: dict, idempotency_key: str, actor, now=Non
             if blast.idempotency_key == key:
                 return blast
             if blast.status != Blast.Status.DRAFT:
-                raise BlastError("blast_not_draft", 409, status=blast.status)
+                raise BlastError("blast_not_draft", 409, blast_status=blast.status)
             check_channels_available(blast.channels or [], status=403)
             check_ready(blast)
             audience = resolve_audience(blast, now=now)
@@ -711,7 +711,7 @@ def cancel_blast(blast_id, *, actor, now=None) -> Blast:
         if blast.status == Blast.Status.CANCELLED:
             return blast
         if blast.status not in (Blast.Status.DRAFT, *LIVE):
-            raise BlastError("blast_not_cancellable", 409, status=blast.status)
+            raise BlastError("blast_not_cancellable", 409, blast_status=blast.status)
         previous = blast.status
         if previous in LIVE and Channel.EMAIL in (blast.channels or []):
             values = blast_email.cancel_campaign(blast, now=now)
@@ -742,7 +742,7 @@ def send_tests(blast_id, channels: list, *, user, now=None) -> dict:
 
     blast = Blast.objects.select_related("event", "mailbox", "whatsapp_template").get(pk=blast_id)
     if blast.status != Blast.Status.DRAFT:
-        raise BlastError("blast_not_draft", 409, status=blast.status)
+        raise BlastError("blast_not_draft", 409, blast_status=blast.status)
     channels = list(dict.fromkeys(channels))
     for channel in channels:
         if channel not in (blast.channels or []):

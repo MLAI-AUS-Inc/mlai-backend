@@ -467,3 +467,9 @@ class BlastApiShapeTests(SimpleTestCase):
         ):
             with self.subTest(path=path):
                 self.assertIs(resolve(PREFIX + path).func.view_class, view)
+
+
+class BlastErrorExtrasTests(SimpleTestCase):
+    def test_a_blast_state_extra_never_collides_with_the_http_status(self):
+        error = blasts.BlastError("blast_not_draft", 409, blast_status="sent")
+        self.assertEqual((error.code, error.status, error.extra), ("blast_not_draft", 409, {"blast_status": "sent"}))
