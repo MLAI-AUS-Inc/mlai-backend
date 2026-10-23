@@ -169,7 +169,9 @@ New Slack events retain their inline user/channel references until the bridge
 worker resolves them with the scoped bot token. The worker caches `users.info`
 and `conversations.info` results, emits plain `@Display Name` and `#channel-name`
 text, and falls back to `@user`/`#channel` without exposing provider IDs when a
-lookup is unavailable.
+lookup fails. A lookup that the shared Slack API budget merely paces
+(`BudgetDeferred`) is not a failure: the delivery is deferred and retried so the
+name resolves instead of being stored as `@user`.
 
 Messages mirrored before this behavior was deployed can be repaired while the
 raw Slack receipt is still inside the retention window. The command is dry-run
