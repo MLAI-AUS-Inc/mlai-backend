@@ -202,3 +202,25 @@ def record_progress(*, domain: str, run_id: str, data: dict) -> HostedArticlePub
                 site.save(update_fields=["proxy_verified_at", "updated_at"])
         publication.save(update_fields=sorted(fields))
     return publication
+
+
+def record_site_deployment(*, domain: str, data: dict) -> HostedArticleSite:
+    """Record a whole-site deployment (no new article) and whether the customer's domain serves it."""
+    now = timezone.now()
+    with transaction.atomic():
+        site = HostedArticleSite.objects.select_for_update().filter(domain=normalized_domain(domain)).first()
+        if site is None:
+            raise HostedPublishError("hosted_site_not_found", "No hosted site for this domain.", status=404)
+        fields = {"updated_at"}
+        deployment = data.get("deployment") if isinstance(data.get("deployment"), dict) else {}
+        if deployment:
+            site.worker_name = str(deployment.get("worker_name") or site.worker_name)[:100]
+            site.worker_url = str(deployment.get("url") or site.worker_url)[:255]
+            site.manifest_digest = str(deployment.get("manifest_digest") or site.manifest_digest)[:64]
+            site.last_deployed_at = now
+            fields |= {"worker_name", "worker_url", "manifest_digest", "last_deployed_at"}
+        if data.get("proxy_verified") is True and site.proxy_verified_at is None:
+            site.proxy_verified_at = now
+            fields.add("proxy_verified_at")
+        site.save(update_fields=sorted(fields))
+    return site

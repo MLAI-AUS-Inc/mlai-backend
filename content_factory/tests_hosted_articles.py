@@ -148,3 +148,38 @@ class HostedArticleTests(TestCase):
                                                   "revision_digest": DIGEST}, format="json", HTTP_X_API_KEY=KEY)
         response = HostedArticlePublicationServiceView.as_view()(request, run_id=self.run.run_id)
         self.assertEqual((response.status_code, response.data["status"], response.data["slug"]), (200, "rendering", "dog-friendly-cafes"))
+
+
+@override_settings(ROO_API_KEY=KEY, INTERNAL_API_KEY=KEY)
+class HostedArticleSiteLifecycleTests(TestCase):
+    def setUp(self):
+        self.org = Organization.objects.create(domain="lifecycle.example.test", name="Synthetic lifecycle")
+        self.factory = APIRequestFactory()
+
+    def test_a_site_is_registered_as_draft_deployed_then_activated(self):
+        import json
+        import tempfile
+        from io import StringIO
+
+        from django.core.management import call_command
+        from django.core.management.base import CommandError
+
+        profile = {"domain": self.org.domain, "base_path": "/blog/", "page_size": 24, "card_template": "c",
+                   "detail_main_template": "d", "previous_link_template": "p", "next_link_template": "n", "page_label_template": "l"}
+        with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as fh:
+            json.dump(profile, fh)
+        call_command("hosted_article_site", "register", "https://www." + self.org.domain, profile=fh.name, stdout=StringIO())
+        site = HostedArticleSite.objects.get(domain=self.org.domain)
+        self.assertEqual((site.state, site.organization, site.profile["page_size"]), ("draft", self.org, 24))
+        with self.assertRaises(CommandError):
+            call_command("hosted_article_site", "activate", self.org.domain, stdout=StringIO())
+        request = self.factory.put("/synthetic", {"domain": self.org.domain, "proxy_verified": True,
+            "deployment": {"worker_name": "mlai-blog-y", "url": "https://mlai-blog-y.mlai.workers.dev", "manifest_digest": "m" * 64}},
+            format="json", HTTP_X_API_KEY=KEY)
+        self.assertEqual(HostedArticleSiteServiceView.as_view()(request).status_code, 200)
+        site.refresh_from_db()
+        self.assertEqual(site.worker_url, "https://mlai-blog-y.mlai.workers.dev")
+        self.assertIsNotNone(site.proxy_verified_at)
+        call_command("hosted_article_site", "activate", self.org.domain, stdout=StringIO())
+        site.refresh_from_db()
+        self.assertEqual(site.state, "active")

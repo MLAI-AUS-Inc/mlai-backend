@@ -34,6 +34,14 @@ class HostedArticleSiteServiceView(APIView):
             return Response({"code": "hosted_site_not_found", "detail": "No hosted site for this domain."}, status=404)
         return Response(hosted.site_render_state(site))
 
+    def put(self, request):
+        data = request.data if isinstance(request.data, dict) else {}
+        try:
+            site = hosted.record_site_deployment(domain=data.get("domain"), data=data)
+        except hosted.HostedPublishError as exc:
+            return _error(exc)
+        return Response(hosted.site_render_state(site))
+
 
 class HostedArticlePublicationServiceView(APIView):
     """Content Factory reports rendering, upload and live-check progress for one publication."""
