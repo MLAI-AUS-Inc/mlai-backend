@@ -2,6 +2,7 @@ from .website_metrics import WebsiteMetricsView
 from .company_billing import CompanyBillingView
 from .article_preview_lease import ArticlePreviewLeaseView, ArticlePreviewLeaseProxyView
 from .article_review_views import VibeMarketingArticleReviewView
+from .hosted_article_views import HostedArticlePublishView
 from .website_views import WebsiteConnectionView, WebsiteConnectionActionView, WebsiteConnectionOperationView, WebsiteCostUsageView
 from django.urls import include, path
 
@@ -80,6 +81,8 @@ urlpatterns = [
     path("runs/<str:run_id>/article-review/preview-lease", ArticlePreviewLeaseView.as_view()),
     path("article-preview/<str:token>/<str:run_id>/", ArticlePreviewLeaseProxyView.as_view()),
     path("article-preview/<str:token>/<str:run_id>/<path:proxy_path>", ArticlePreviewLeaseProxyView.as_view()),
+    path("runs/<str:run_id>/hosted-publish", HostedArticlePublishView.as_view(), name="vibe-hosted-publish"),
+    path("runs/<str:run_id>/hosted-publish/", HostedArticlePublishView.as_view()),
     path("runs/<str:run_id>/article-review", VibeMarketingArticleReviewView.as_view(), name="vibe-article-review"),
     path("runs/<str:run_id>/article-review/", VibeMarketingArticleReviewView.as_view(), name="vibe-article-review-slash"),
     path("islands/research", ContentIslandResearchView.as_view(), name="vibe-marketing-island-research-no-slash"),
