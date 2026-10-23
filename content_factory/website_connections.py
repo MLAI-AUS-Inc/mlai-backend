@@ -1283,6 +1283,16 @@ def _verified_setup_run_base(run, head_sha, website, *, automatic_approval=False
     base_sha = str(saved.get("expected_source_sha") or "")
     generation = result.get("resume_generation")
     from .website_hosted_build import enabled as hosted_enabled, current_scan_source, valid_hosted_build
+    if not base_sha and not website.verified_sha:
+        # A first-time site has no verified source for Prepare to pin, so its setup
+        # is dispatched without expected_source_sha and every merge was refused as
+        # "changed" (PawShare setup ccd3ea22, 23 Oct 2026). Such a setup is built
+        # from the connection's current scan: accept the run's recorded source only
+        # when it is exactly that server-observed scan. The caller still requires
+        # GitHub's branch head to equal it.
+        recorded = str(result.get("source_sha") or "")
+        if recorded and recorded == current_scan_source(website):
+            base_sha = recorded
     hosted = hosted_enabled(website)
     source_matches = base_sha == current_scan_source(website) if hosted else not website.verified_sha or website.verified_sha == base_sha
     build_passed = gates.get("local_build") is True and gates.get("local_build_skipped") is False

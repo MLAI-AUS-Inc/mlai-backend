@@ -49,6 +49,25 @@ class SetupMergeVerificationUnitTests(SimpleTestCase):
         self.assertEqual(self.website.verified_sha, "")
         self.website.targets.update_or_create.assert_not_called()
 
+    def test_first_setup_without_a_pinned_source_uses_its_current_scan(self):
+        # PawShare setup ccd3ea22 (23 Oct 2026): Prepare cannot pin a source for a
+        # site with no verified SHA, so every Publish answered 409.
+        self.run.run_request.pop("expected_source_sha")
+        with patch("content_factory.website_hosted_build.current_scan_source", return_value=self.base):
+            self.validate()
+        for scan in ("c" * 40, None):
+            with self.subTest(scan=scan), \
+                    patch("content_factory.website_hosted_build.current_scan_source", return_value=scan), \
+                    self.assertRaises(WebsiteAuthorityError):
+                self.validate()
+
+    def test_a_verified_site_never_falls_back_to_the_recorded_source(self):
+        self.run.run_request.pop("expected_source_sha")
+        self.website.verified_sha = self.base
+        with patch("content_factory.website_hosted_build.current_scan_source", return_value=self.base), \
+                self.assertRaises(WebsiteAuthorityError):
+            self.validate()
+
     def test_adopted_kit_requires_its_actual_preview_head_and_full_proof(self):
         self.run.approval_state = "not_required"
         self.run.result.update(status="adopted", adopted=True, adoption_kit_preview_verified=True,
