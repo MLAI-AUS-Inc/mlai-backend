@@ -227,7 +227,8 @@ def route_member_public_event(payload):
         return {'status': 'ignored', 'reason': 'community_source_bot'}
     if row.audience == 'community' and getattr(settings, 'SLACK_COMMUNITY_SOURCE', 'bot') == 'members':
         policy = access.community_reader_policy_current(row)
-        if policy is None or not policy.complete or policy.effective_source == 'hold':
+        if (policy is None or policy.effective_source == 'hold'
+                or not policy.complete and policy.eligible_count <= 0):
             from .community_source import hold_reader_source
             hold_reader_source(row)
             return {'status': 'community_source_pending'}
@@ -286,7 +287,8 @@ def dispatch_slack_callback(payload, *, private_ingest=None, public_ingest=None)
         ).first()
         if row is not None:
             policy = access.community_reader_policy_current(row)
-            if policy is None or not policy.complete or policy.effective_source == 'hold':
+            if (policy is None or policy.effective_source == 'hold'
+                    or not policy.complete and policy.eligible_count <= 0):
                 from .community_source import hold_reader_source
                 hold_reader_source(row)
                 return {'status': 'community_source_pending'}
