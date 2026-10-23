@@ -2216,6 +2216,13 @@ CRM_LUMA_CONSENT_QUESTION_LABELS = [
     for label in os.environ.get('CRM_LUMA_CONSENT_QUESTION_LABELS', '').split('|')
     if label.strip()
 ]
+# Same format: labels whose "yes" answer is WhatsApp opt-in. A phone number
+# on its own never is.
+CRM_LUMA_WHATSAPP_QUESTION_LABELS = [
+    label.strip()
+    for label in os.environ.get('CRM_LUMA_WHATSAPP_QUESTION_LABELS', '').split('|')
+    if label.strip()
+]
 HUMANITIX_API_BASE_URL = os.environ.get(
     'HUMANITIX_API_BASE_URL',
     'https://api.humanitix.com/v1',

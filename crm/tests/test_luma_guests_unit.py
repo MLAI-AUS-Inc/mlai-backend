@@ -57,6 +57,17 @@ class GuestRecordTests(SimpleTestCase):
         no = guest(registration_answers=[{"label": "Keep me updated about MLAI events", "answer": "No"}])
         self.assertFalse(guest_record(no, consent_labels=labels).consent_granted)
 
+    def test_whatsapp_opt_in_has_its_own_question(self):
+        answers = [{"label": "Send me updates on WhatsApp", "answer": "Yes"}]
+        record = guest_record(
+            guest(registration_answers=answers),
+            consent_labels=["Keep me updated about MLAI events"],
+            whatsapp_labels=["Send me updates on WhatsApp"],
+        )
+        self.assertTrue(record.whatsapp_opt_in)
+        self.assertFalse(record.consent_granted)
+        self.assertFalse(guest_record(guest(), whatsapp_labels=["Send me updates on WhatsApp"]).whatsapp_opt_in)
+
     def test_guest_without_a_usable_email_is_dropped(self):
         self.assertIsNone(guest_record(guest(user_email="not-an-email")))
         self.assertIsNone(guest_record(guest(user_email=None)))

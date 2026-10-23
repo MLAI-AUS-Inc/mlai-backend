@@ -113,7 +113,7 @@ jobs:
       run: python scripts/test_without_database.py tests.test_luma_event_discounts_unit tests.test_event_discount_worker
 
     - name: Check CRM Luma guest parsing and CSV import rules without database access
-      run: python scripts/test_without_database.py crm.tests.test_luma_guests_unit crm.tests.test_contact_import_unit
+      run: python scripts/test_without_database.py crm.tests.test_luma_guests_unit crm.tests.test_contact_import_unit crm.tests.test_phones_unit
 
     - name: Verify event discounts against disposable migration state
       run: python scripts/test_event_discounts.py roo.tests_event_discounts roo.tests_event_discount_api roo.tests_event_discount_concurrency

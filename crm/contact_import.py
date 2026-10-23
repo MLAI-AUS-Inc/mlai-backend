@@ -22,7 +22,8 @@ from core.models import AccountBan
 
 from .emails import normalize_contact_email
 from .luma_sync import users_by_email
-from .models import Contact, ContactConsentEvent, ContactImport, CrmAuditEvent
+from .contact_fields import fill_phone, grant_whatsapp_opt_in
+from .models import Channel, Contact, ContactConsentEvent, ContactImport, CrmAuditEvent
 
 PROFILE_FIELDS = (
     "first_name",
@@ -44,7 +45,9 @@ _FIELD_LIMITS = {
     "phone": 64,
     "linkedin_url": 500,
 }
-TARGETS = ("email", *PROFILE_FIELDS, "tags", "consent_at", "consent_source", "ignore")
+TARGETS = (
+    "email", *PROFILE_FIELDS, "tags", "consent_at", "consent_source", "whatsapp_opt_in", "ignore"
+)
 COLUMN_ALIASES = {
     "email": ("email", "email address", "e mail", "e mail address", "user email"),
     "first_name": ("first name", "firstname", "given name", "fname"),
@@ -67,12 +70,14 @@ COLUMN_ALIASES = {
         "confirm time",
     ),
     "consent_source": ("opt in source", "consent source", "signup source", "source"),
+    "whatsapp_opt_in": ("whatsapp opt in", "whatsapp optin", "whatsapp consent", "whatsapp"),
 }
 MAX_TAGS = 50
 MAX_ATTRIBUTE_KEYS = 50
 CHUNK_SIZE = 1000
 BULK_BATCH_SIZE = 250
 ERROR_SAMPLE_LIMIT = 20
+_YES = {"yes", "y", "true", "1", "on", "checked", "agree", "i agree", "opted in"}
 _DATE_FORMATS = (
     "%Y-%m-%d %H:%M:%S",
     "%Y-%m-%d %H:%M",
@@ -96,6 +101,7 @@ class ParsedRow:
     attributes: dict = field(default_factory=dict)
     consent_at: Optional[datetime] = None
     consent_source: str = ""
+    whatsapp_opt_in: bool = False
 
     def merge(self, other: "ParsedRow") -> None:
         """Fill this row's blanks from a later duplicate of the same email."""
@@ -108,6 +114,7 @@ class ParsedRow:
                 self.attributes.setdefault(key, value)
         self.consent_at = self.consent_at or other.consent_at
         self.consent_source = self.consent_source or other.consent_source
+        self.whatsapp_opt_in = self.whatsapp_opt_in or other.whatsapp_opt_in
 
 
 @dataclass
@@ -214,6 +221,8 @@ def apply_import(
     tags: Iterable[str] = (),
     actor=None,
     dry_run: bool = False,
+    column_plan: Optional[dict] = None,
+    origin: str = ContactImport.Origin.COMMAND,
     now: Optional[datetime] = None,
 ) -> ContactImport:
     """Write the parsed rows in chunks and return the finished import record."""
@@ -224,22 +233,32 @@ def apply_import(
     extra_tags = _unique(_clean_tag(tag) for tag in tags if _clean_tag(tag))
     default_source = consent_source.strip()[:255] or f"csv:{file_name}"[:255]
     counts = Counter(parsed.counts)
+    record_fields = {
+        "file_name": file_name[:255],
+        "uploaded_by": actor,
+        "consent": consent,
+        "consent_source": default_source,
+        "tags": extra_tags,
+        "origin": origin,
+        "column_plan": column_plan or {},
+        "row_count": counts["rows"],
+    }
     if dry_run:
         with transaction.atomic():
             for chunk in _chunks(parsed.rows, CHUNK_SIZE):
                 counts.update(_apply_chunk(chunk, consent, default_source, extra_tags, now))
             transaction.set_rollback(True)
-        return _record_import(
-            file_name, actor, consent, default_source, extra_tags, True, counts, parsed.errors, now
+        return ContactImport.objects.create(
+            **record_fields,
+            dry_run=True,
+            status=ContactImport.Status.COMPLETED,
+            counts=dict(counts),
+            error_sample=parsed.errors,
+            rows_received=counts["rows"],
+            finished_at=timezone.now(),
         )
 
-    record = ContactImport.objects.create(
-        file_name=file_name[:255],
-        uploaded_by=actor,
-        consent=consent,
-        consent_source=default_source,
-        tags=extra_tags,
-    )
+    record = ContactImport.objects.create(**record_fields)
     try:
         for chunk in _chunks(parsed.rows, CHUNK_SIZE):
             with transaction.atomic():
@@ -254,8 +273,11 @@ def apply_import(
     record.status = ContactImport.Status.COMPLETED
     record.counts = dict(counts)
     record.error_sample = parsed.errors
+    record.rows_received = counts["rows"]
     record.finished_at = timezone.now()
-    record.save(update_fields=["status", "counts", "error_sample", "finished_at", "updated_at"])
+    record.save(
+        update_fields=["status", "counts", "error_sample", "rows_received", "finished_at", "updated_at"]
+    )
     CrmAuditEvent.objects.create(
         actor=actor,
         action=CrmAuditEvent.Action.IMPORT,
@@ -309,9 +331,11 @@ def _apply_chunk(rows: list, consent: str, default_source: str, extra_tags: list
             continue
         dirty = False
         for name, value in row.profile.items():
-            if value and not getattr(contact, name):
+            if name != "phone" and value and not getattr(contact, name):
                 setattr(contact, name, value)
                 dirty = True
+        if fill_phone(contact, row.profile.get("phone", ""), now=now):
+            dirty = True
         merged_tags = _unique([*contact.tags, *row.tags, *extra_tags])[:MAX_TAGS]
         if merged_tags != list(contact.tags):
             contact.tags = merged_tags
@@ -334,6 +358,7 @@ def _apply_chunk(rows: list, consent: str, default_source: str, extra_tags: list
             consent_events.append(
                 ContactConsentEvent(
                     contact=contact,
+                    channel=Channel.EMAIL,
                     kind=ContactConsentEvent.Kind.GRANTED,
                     source=contact.marketing_consent_source,
                     detail={"import_source": default_source, "row": row.row_number},
@@ -342,6 +367,17 @@ def _apply_chunk(rows: list, consent: str, default_source: str, extra_tags: list
             )
             counts["consent_granted"] += 1
             dirty = True
+        if row.whatsapp_opt_in:
+            whatsapp_event = grant_whatsapp_opt_in(
+                contact,
+                source=row.consent_source or default_source,
+                at=row.consent_at or now,
+            )
+            if whatsapp_event is not None:
+                whatsapp_event.detail = {"import_source": default_source, "row": row.row_number}
+                consent_events.append(whatsapp_event)
+                counts["whatsapp_opt_in"] += 1
+                dirty = True
         if is_new:
             counts["created"] += 1
         elif dirty:
@@ -363,27 +399,18 @@ def _apply_chunk(rows: list, consent: str, default_source: str, extra_tags: list
                 "marketing_consent",
                 "marketing_consent_source",
                 "marketing_consent_at",
+                "phone_e164",
+                "sms_status",
+                "sms_status_changed_at",
+                "whatsapp_opt_in",
+                "whatsapp_opt_in_source",
+                "whatsapp_opt_in_at",
                 "updated_at",
             ],
             batch_size=BULK_BATCH_SIZE,
         )
     ContactConsentEvent.objects.bulk_create(consent_events)
     return counts
-
-
-def _record_import(file_name, actor, consent, source, tags, dry_run, counts, errors, now) -> ContactImport:
-    return ContactImport.objects.create(
-        file_name=file_name[:255],
-        uploaded_by=actor,
-        consent=consent,
-        consent_source=source,
-        tags=tags,
-        dry_run=dry_run,
-        status=ContactImport.Status.COMPLETED,
-        counts=dict(counts),
-        error_sample=errors,
-        finished_at=timezone.now(),
-    )
 
 
 def _parse_row(row_number: int, raw: dict, plan: dict, counts: Counter) -> Optional[ParsedRow]:
@@ -410,6 +437,8 @@ def _parse_row(row_number: int, raw: dict, plan: dict, counts: Counter) -> Optio
                 counts["consent_date_unparsed"] += 1
         elif target == "consent_source":
             parsed.consent_source = value[:255]
+        elif target == "whatsapp_opt_in":
+            parsed.whatsapp_opt_in = value.casefold() in _YES
         elif target.startswith("attributes.") and len(parsed.attributes) < MAX_ATTRIBUTE_KEYS:
             parsed.attributes.setdefault(target.removeprefix("attributes."), value[:2000])
     if not email:

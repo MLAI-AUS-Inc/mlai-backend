@@ -1,4 +1,4 @@
-"""MLAI's contact store: Luma guests, imported opt-ins and email campaigns.
+"""MLAI's contact store: Luma guests, imported opt-ins and message blasts.
 
 mlai-backend is the source of truth for every person and their consent.
 listmonk only receives what it needs to deliver a campaign. All rows belong to
@@ -11,6 +11,12 @@ from django.conf import settings
 from django.db import models
 from django.db.models import Q
 from django.db.models.functions import Lower
+
+
+class Channel(models.TextChoices):
+    EMAIL = "email", "Email"
+    SMS = "sms", "SMS"
+    WHATSAPP = "whatsapp", "WhatsApp"
 
 
 class TimestampedRecord(models.Model):
@@ -73,11 +79,24 @@ class Contact(TimestampedRecord):
         GRANTED = "granted", "Granted"
         WITHDRAWN = "withdrawn", "Withdrawn"
 
+    class SmsStatus(models.TextChoices):
+        NONE = "none", "No mobile number"
+        ACTIVE = "active", "Can receive texts"
+        OPTED_OUT = "opted_out", "Opted out"
+        INVALID = "invalid", "Number can't receive texts"
+
+    class WhatsAppOptIn(models.TextChoices):
+        # A phone number alone is never WhatsApp opt-in.
+        UNKNOWN = "unknown", "Not asked"
+        GRANTED = "granted", "Opted in"
+        WITHDRAWN = "withdrawn", "Opted out"
+
     email = models.EmailField(max_length=254, unique=True)
     first_name = models.CharField(max_length=150, blank=True)
     last_name = models.CharField(max_length=150, blank=True)
     display_name = models.CharField(max_length=300, blank=True)
     phone = models.CharField(max_length=64, blank=True)
+    phone_e164 = models.CharField(max_length=16, blank=True)
     company = models.CharField(max_length=300, blank=True)
     job_title = models.CharField(max_length=300, blank=True)
     city = models.CharField(max_length=120, blank=True)
@@ -101,6 +120,15 @@ class Contact(TimestampedRecord):
     )
     marketing_consent_source = models.CharField(max_length=255, blank=True)
     marketing_consent_at = models.DateTimeField(null=True, blank=True)
+    sms_status = models.CharField(
+        max_length=16, choices=SmsStatus.choices, default=SmsStatus.NONE
+    )
+    sms_status_changed_at = models.DateTimeField(null=True, blank=True)
+    whatsapp_opt_in = models.CharField(
+        max_length=16, choices=WhatsAppOptIn.choices, default=WhatsAppOptIn.UNKNOWN
+    )
+    whatsapp_opt_in_source = models.CharField(max_length=255, blank=True)
+    whatsapp_opt_in_at = models.DateTimeField(null=True, blank=True)
     first_seen_at = models.DateTimeField(null=True, blank=True)
     last_event_at = models.DateTimeField(null=True, blank=True)
     last_attended_at = models.DateTimeField(null=True, blank=True)
@@ -119,6 +147,7 @@ class Contact(TimestampedRecord):
                 fields=("email_status", "marketing_consent"), name="crm_contact_sendable_idx"
             ),
             models.Index(fields=("last_attended_at",), name="crm_contact_attended_idx"),
+            models.Index(fields=("phone_e164",), name="crm_contact_phone_idx"),
         ]
 
     def __str__(self):
@@ -161,6 +190,7 @@ class ContactConsentEvent(models.Model):
         COMPLAINED = "complained", "Marked as spam"
 
     contact = models.ForeignKey(Contact, on_delete=models.CASCADE, related_name="consent_events")
+    channel = models.CharField(max_length=16, choices=Channel.choices, default=Channel.EMAIL)
     kind = models.CharField(max_length=16, choices=Kind.choices)
     source = models.CharField(max_length=255)
     actor = models.ForeignKey(
@@ -220,8 +250,34 @@ class SenderMailbox(TimestampedRecord):
         return f"{self.display_name} <{self.email}>"
 
 
-class EmailCampaign(TimestampedRecord):
-    """One send; listmonk ids are stored before any status change for retries."""
+class MessageTemplate(TimestampedRecord):
+    """An approved WhatsApp Content template; Twilio holds the wording."""
+
+    class Category(models.TextChoices):
+        UTILITY = "utility", "Utility"
+        MARKETING = "marketing", "Marketing"
+        AUTHENTICATION = "authentication", "Authentication"
+
+    channel = models.CharField(max_length=16, choices=Channel.choices, default=Channel.WHATSAPP)
+    name = models.CharField(max_length=200)
+    content_sid = models.CharField(max_length=64, unique=True)
+    category = models.CharField(max_length=16, choices=Category.choices, default=Category.UTILITY)
+    body = models.TextField(blank=True)
+    variables = models.JSONField(default=list, blank=True)
+    approved = models.BooleanField(default=False)
+    enabled = models.BooleanField(default=False)
+    last_synced_at = models.DateTimeField(null=True, blank=True)
+
+    def __str__(self):
+        return self.name
+
+
+class Blast(TimestampedRecord):
+    """One send to many people over email, SMS and WhatsApp.
+
+    Provider ids are stored before any status change so a retried dispatch
+    reuses them instead of sending twice.
+    """
 
     class Purpose(models.TextChoices):
         EVENT_UPDATE = "event_update", "Event update"
@@ -232,22 +288,31 @@ class EmailCampaign(TimestampedRecord):
         QUEUED = "queued", "Queued"
         SENDING = "sending", "Sending"
         SENT = "sent", "Sent"
+        PARTIALLY_SENT = "partially_sent", "Partly sent"
         FAILED = "failed", "Failed"
         CANCELLED = "cancelled", "Cancelled"
 
     purpose = models.CharField(max_length=16, choices=Purpose.choices)
     event = models.ForeignKey(
-        CrmEvent, on_delete=models.SET_NULL, null=True, blank=True, related_name="campaigns"
+        CrmEvent, on_delete=models.SET_NULL, null=True, blank=True, related_name="blasts"
     )
     segment = models.ForeignKey(
-        Segment, on_delete=models.SET_NULL, null=True, blank=True, related_name="campaigns"
+        Segment, on_delete=models.SET_NULL, null=True, blank=True, related_name="blasts"
     )
     segment_definition = models.JSONField(default=dict, blank=True)
+    quick_segment = models.CharField(max_length=32, blank=True)
+    channels = models.JSONField(default=list, blank=True)
     mailbox = models.ForeignKey(
-        SenderMailbox, on_delete=models.PROTECT, null=True, blank=True, related_name="campaigns"
+        SenderMailbox, on_delete=models.PROTECT, null=True, blank=True, related_name="blasts"
     )
     subject = models.CharField(max_length=300, blank=True)
     body_markdown = models.TextField(blank=True)
+    sms_body = models.TextField(blank=True)
+    sms_only_without_whatsapp = models.BooleanField(default=True)
+    whatsapp_template = models.ForeignKey(
+        MessageTemplate, on_delete=models.PROTECT, null=True, blank=True, related_name="blasts"
+    )
+    whatsapp_variables = models.JSONField(default=dict, blank=True)
     status = models.CharField(max_length=16, choices=Status.choices, default=Status.DRAFT)
     recipient_count = models.PositiveIntegerField(default=0)
     idempotency_key = models.CharField(max_length=64, blank=True)
@@ -270,16 +335,16 @@ class EmailCampaign(TimestampedRecord):
             models.UniqueConstraint(
                 fields=("idempotency_key",),
                 condition=~Q(idempotency_key=""),
-                name="crm_campaign_idempotency_unique",
+                name="crm_blast_idempotency_unique",
             ),
         ]
         indexes = [
-            models.Index(fields=("status", "queued_at"), name="crm_campaign_queue_idx"),
+            models.Index(fields=("status", "queued_at"), name="crm_blast_queue_idx"),
         ]
 
 
-class EmailCampaignRecipient(models.Model):
-    """The recipient snapshot taken at send time, with the consent basis used."""
+class BlastDelivery(models.Model):
+    """One message to one person on one channel, with its provider status."""
 
     class ConsentBasis(models.TextChoices):
         EVENT_REGISTRATION = "event_registration", "Registered for the event"
@@ -288,33 +353,82 @@ class EmailCampaignRecipient(models.Model):
 
     class Status(models.TextChoices):
         QUEUED = "queued", "Queued"
+        SUBMITTING = "submitting", "Submitting"
         SENT = "sent", "Sent"
+        DELIVERED = "delivered", "Delivered"
+        READ = "read", "Read"
+        FAILED = "failed", "Failed"
+        UNDELIVERED = "undelivered", "Undelivered"
         BOUNCED = "bounced", "Bounced"
         UNSUBSCRIBED = "unsubscribed", "Unsubscribed"
-        FAILED = "failed", "Failed"
+        # The provider call timed out: it may or may not have been sent, so
+        # a person decides rather than an automatic retry.
+        UNKNOWN = "unknown", "Unknown"
 
-    campaign = models.ForeignKey(EmailCampaign, on_delete=models.CASCADE, related_name="recipients")
-    contact = models.ForeignKey(Contact, on_delete=models.CASCADE, related_name="campaign_receipts")
-    email = models.EmailField(max_length=254)
+    blast = models.ForeignKey(Blast, on_delete=models.CASCADE, related_name="deliveries")
+    contact = models.ForeignKey(Contact, on_delete=models.CASCADE, related_name="blast_deliveries")
+    channel = models.CharField(max_length=16, choices=Channel.choices)
+    address = models.CharField(max_length=254)
     consent_basis = models.CharField(max_length=24, choices=ConsentBasis.choices)
     status = models.CharField(max_length=16, choices=Status.choices, default=Status.QUEUED)
+    provider_id = models.CharField(max_length=64, blank=True)
+    error_code = models.CharField(max_length=32, blank=True)
+    segments = models.PositiveSmallIntegerField(null=True, blank=True)
+    price = models.DecimalField(max_digits=10, decimal_places=5, null=True, blank=True)
+    price_unit = models.CharField(max_length=3, blank=True)
+    delivered_at = models.DateTimeField(null=True, blank=True)
     first_opened_at = models.DateTimeField(null=True, blank=True)
     first_clicked_at = models.DateTimeField(null=True, blank=True)
     clicked_urls = models.JSONField(default=list, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
 
     class Meta:
         constraints = [
-            models.UniqueConstraint(fields=("campaign", "contact"), name="crm_recipient_once"),
+            models.UniqueConstraint(
+                fields=("blast", "contact", "channel"), name="crm_delivery_once"
+            ),
+            models.UniqueConstraint(
+                fields=("provider_id",),
+                condition=~Q(provider_id=""),
+                name="crm_delivery_provider_unique",
+            ),
         ]
         indexes = [
-            models.Index(fields=("contact", "created_at"), name="crm_recipient_history_idx"),
-            models.Index(fields=("created_at",), name="crm_recipient_created_idx"),
+            models.Index(fields=("contact", "created_at"), name="crm_delivery_history_idx"),
+            models.Index(fields=("channel", "created_at"), name="crm_delivery_channel_idx"),
+        ]
+
+
+class InboundMessage(models.Model):
+    """A text or WhatsApp message to MLAI's number; opt-out keywords included."""
+
+    contact = models.ForeignKey(
+        Contact, on_delete=models.CASCADE, null=True, blank=True, related_name="inbound_messages"
+    )
+    channel = models.CharField(max_length=16, choices=Channel.choices)
+    from_address = models.CharField(max_length=32)
+    body = models.TextField(blank=True)
+    provider_id = models.CharField(max_length=64, unique=True)
+    blast = models.ForeignKey(
+        Blast, on_delete=models.SET_NULL, null=True, blank=True, related_name="replies"
+    )
+    received_at = models.DateTimeField()
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        indexes = [
+            models.Index(fields=("contact", "received_at"), name="crm_inbound_contact_idx"),
+            models.Index(fields=("blast", "received_at"), name="crm_inbound_blast_idx"),
         ]
 
 
 class ContactImport(TimestampedRecord):
     """One CSV import; the file itself is never stored."""
+
+    class Origin(models.TextChoices):
+        COMMAND = "command", "Management command"
+        UPLOAD = "upload", "Upload in MLAI Chat"
 
     class Status(models.TextChoices):
         RUNNING = "running", "Running"
@@ -337,6 +451,10 @@ class ContactImport(TimestampedRecord):
     consent_source = models.CharField(max_length=255, blank=True)
     tags = models.JSONField(default=list, blank=True)
     dry_run = models.BooleanField(default=False)
+    origin = models.CharField(max_length=16, choices=Origin.choices, default=Origin.COMMAND)
+    column_plan = models.JSONField(default=dict, blank=True)
+    row_count = models.PositiveIntegerField(default=0)
+    rows_received = models.PositiveIntegerField(default=0)
     status = models.CharField(max_length=16, choices=Status.choices, default=Status.RUNNING)
     counts = models.JSONField(default=dict, blank=True)
     error_sample = models.JSONField(default=list, blank=True)

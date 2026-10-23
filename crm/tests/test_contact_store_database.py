@@ -131,6 +131,36 @@ class LumaGuestSyncTests(TestCase):
         withdrawn = Contact.objects.get(email="withdrawn@example.com")
         self.assertEqual(withdrawn.marketing_consent, Contact.MarketingConsent.WITHDRAWN)
 
+    def test_phone_numbers_and_whatsapp_opt_in(self):
+        Contact.objects.create(
+            email="stopped@example.com",
+            source=Contact.Source.MANUAL,
+            sms_status=Contact.SmsStatus.OPTED_OUT,
+        )
+        answers = [{"label": "Send me updates on WhatsApp", "answer": "yes"}]
+        self.luma.guests["evt-1"] = [
+            luma_guest("ada@example.com", "gst-1", phone_number="0412 345 678", registration_answers=answers),
+            luma_guest("landline@example.com", "gst-2", phone_number="(03) 9123 4567"),
+            luma_guest("stopped@example.com", "gst-3", phone_number="+61 400 111 222"),
+        ]
+
+        result = sync_event_guests(
+            self.luma, self.event, now=NOW, whatsapp_labels=["Send me updates on WhatsApp"]
+        )
+
+        self.assertEqual(result["whatsapp_opt_in"], 1)
+        ada = Contact.objects.get(email="ada@example.com")
+        self.assertEqual((ada.phone_e164, ada.sms_status), ("+61412345678", Contact.SmsStatus.ACTIVE))
+        self.assertEqual(ada.whatsapp_opt_in, Contact.WhatsAppOptIn.GRANTED)
+        self.assertEqual(ada.whatsapp_opt_in_source, "luma:evt-1")
+        self.assertTrue(
+            ContactConsentEvent.objects.filter(contact=ada, channel="whatsapp", kind="granted").exists()
+        )
+        landline = Contact.objects.get(email="landline@example.com")
+        self.assertEqual(landline.sms_status, Contact.SmsStatus.INVALID)
+        stopped = Contact.objects.get(email="stopped@example.com")
+        self.assertEqual((stopped.phone_e164, stopped.sms_status), ("+61400111222", Contact.SmsStatus.OPTED_OUT))
+
 
 class ContactImportTests(TestCase):
     CSV = (
@@ -196,6 +226,19 @@ class ContactImportTests(TestCase):
         self.assertEqual(record.counts["created"], 1)
         self.assertFalse(Contact.objects.filter(email="new@example.com").exists())
         self.assertEqual(Contact.objects.get(email="ada@example.com").company, "")
+
+    def test_import_reads_mobiles_and_whatsapp_opt_in(self):
+        _, parsed = read_csv(
+            io.StringIO("email,mobile,whatsapp\nnew@example.com,0412 345 678,yes\n")
+        )
+        record = apply_import(parsed, file_name="whatsapp.csv", consent=ContactImport.Consent.NONE)
+
+        self.assertEqual(record.counts["whatsapp_opt_in"], 1)
+        self.assertEqual(record.row_count, 1)
+        new = Contact.objects.get(email="new@example.com")
+        self.assertEqual((new.phone_e164, new.sms_status), ("+61412345678", Contact.SmsStatus.ACTIVE))
+        self.assertEqual(new.whatsapp_opt_in, Contact.WhatsAppOptIn.GRANTED)
+        self.assertEqual(new.marketing_consent, Contact.MarketingConsent.UNKNOWN)
 
     def test_no_consent_import_records_people_without_permission(self):
         self.run_import(consent=ContactImport.Consent.NONE)

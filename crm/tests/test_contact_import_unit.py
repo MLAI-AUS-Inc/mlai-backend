@@ -73,6 +73,15 @@ class ParseRowsTests(SimpleTestCase):
         self.assertEqual(parsed.rows[0].profile, {})
         self.assertEqual(parsed.rows[0].attributes, {"linkedin": "linkedin.com/in/ada"})
 
+    def test_whatsapp_opt_in_column(self):
+        plan, parsed = self.parse(
+            "email,mobile,WhatsApp opt-in\nada@example.com,0412 345 678,Yes\nbob@example.com,,no\n"
+        )
+        self.assertEqual(plan["WhatsApp opt-in"], "whatsapp_opt_in")
+        self.assertEqual(plan["mobile"], "phone")
+        self.assertEqual([row.whatsapp_opt_in for row in parsed.rows], [True, False])
+        self.assertEqual(parsed.rows[0].profile["phone"], "0412 345 678")
+
     def test_unparseable_consent_dates_are_counted(self):
         _, parsed = self.parse("email,consent date\nada@example.com,last tuesday\n")
         self.assertIsNone(parsed.rows[0].consent_at)

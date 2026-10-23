@@ -72,6 +72,7 @@ class Command(BaseCommand):
             tags=options["tag"],
             actor=actor,
             dry_run=options["dry_run"],
+            column_plan=plan,
         )
         self.stdout.write(
             json.dumps(

@@ -82,7 +82,10 @@ class Command(BaseCommand):
         for attempt in range(RATE_LIMIT_RETRIES + 1):
             try:
                 return sync_event_guests(
-                    service, event, consent_labels=settings.CRM_LUMA_CONSENT_QUESTION_LABELS
+                    service,
+                    event,
+                    consent_labels=settings.CRM_LUMA_CONSENT_QUESTION_LABELS,
+                    whatsapp_labels=settings.CRM_LUMA_WHATSAPP_QUESTION_LABELS,
                 )
             except LumaAPIError as exc:
                 if exc.status_code in (401, 403):

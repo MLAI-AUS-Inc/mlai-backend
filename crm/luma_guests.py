@@ -45,6 +45,7 @@ class LumaGuestRecord:
     utm_source: str
     custom_source: str
     consent_granted: bool
+    whatsapp_opt_in: bool
 
 
 def event_record(raw: Any) -> Optional[LumaEventRecord]:
@@ -76,7 +77,12 @@ def event_record(raw: Any) -> Optional[LumaEventRecord]:
     )
 
 
-def guest_record(raw: Any, *, consent_labels: Iterable[str] = ()) -> Optional[LumaGuestRecord]:
+def guest_record(
+    raw: Any,
+    *,
+    consent_labels: Iterable[str] = (),
+    whatsapp_labels: Iterable[str] = (),
+) -> Optional[LumaGuestRecord]:
     """Return one guest, or None when Luma gave no usable email."""
 
     if not isinstance(raw, dict):
@@ -121,6 +127,7 @@ def guest_record(raw: Any, *, consent_labels: Iterable[str] = ()) -> Optional[Lu
         utm_source=_text(guest.get("utm_source"), 255),
         custom_source=_text(guest.get("custom_source"), 255),
         consent_granted=_consent_granted(answers, consent_labels),
+        whatsapp_opt_in=_consent_granted(answers, whatsapp_labels),
     )
 
 

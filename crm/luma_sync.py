@@ -28,6 +28,7 @@ from integrations.services.luma import (
     LumaConfigurationError,
 )
 
+from .contact_fields import fill_phone, grant_whatsapp_opt_in
 from .luma_guests import (
     APPROVED,
     WAITLIST,
@@ -37,13 +38,22 @@ from .luma_guests import (
     guest_record,
     one_guest_per_email,
 )
-from .models import Contact, ContactConsentEvent, CrmAuditEvent, CrmEvent, EventRegistration
+from .models import (
+    Channel,
+    Contact,
+    ContactConsentEvent,
+    CrmAuditEvent,
+    CrmEvent,
+    EventRegistration,
+)
 
 logger = logging.getLogger(__name__)
 
 SYNC_THROTTLE_KEY = "crm:luma-guest-sync:throttle"
 BULK_BATCH_SIZE = 250
-_FILLABLE_FIELDS = ("first_name", "last_name", "display_name", "phone", "company", "job_title")
+_FILLABLE_FIELDS = ("first_name", "last_name", "display_name", "company", "job_title")
+_PHONE_FIELDS = ("phone", "phone_e164", "sms_status", "sms_status_changed_at")
+_WHATSAPP_FIELDS = ("whatsapp_opt_in", "whatsapp_opt_in_source", "whatsapp_opt_in_at")
 _REGISTRATION_FIELDS = (
     "luma_guest_id",
     "approval_status",
@@ -132,17 +142,23 @@ def sync_event_guests(
     *,
     now: Optional[datetime] = None,
     consent_labels: Iterable[str] = (),
+    whatsapp_labels: Iterable[str] = (),
 ) -> dict:
     """Replace one event's registrations with Luma's current guest list."""
 
     now = now or timezone.now()
     raw_guests = service.list_guests(event_id=event.luma_event_id, approval_status=None)
-    parsed = [guest_record(raw, consent_labels=consent_labels) for raw in raw_guests]
+    parsed = [
+        guest_record(raw, consent_labels=consent_labels, whatsapp_labels=whatsapp_labels)
+        for raw in raw_guests
+    ]
     records = one_guest_per_email(record for record in parsed if record)
     skipped = sum(1 for record in parsed if record is None)
 
     with transaction.atomic():
-        contacts, created_count, consent_count = _upsert_contacts(records, event=event, now=now)
+        contacts, created_count, consent_count, whatsapp_count = _upsert_contacts(
+            records, event=event, now=now
+        )
         removed_ids = _replace_registrations(event, records, contacts, now=now)
         _refresh_event_counts(event, now=now)
         refresh_contact_rollups({contact.pk for contact in contacts.values()} | removed_ids)
@@ -152,6 +168,7 @@ def sync_event_guests(
         "skipped_without_email": skipped,
         "contacts_created": created_count,
         "consent_granted": consent_count,
+        "whatsapp_opt_in": whatsapp_count,
         "registrations_removed": len(removed_ids),
     }
 
@@ -178,7 +195,11 @@ def sync_recent_luma_guests(
         try:
             totals.update(
                 sync_event_guests(
-                    service, event, now=now, consent_labels=settings.CRM_LUMA_CONSENT_QUESTION_LABELS
+                    service,
+                    event,
+                    now=now,
+                    consent_labels=settings.CRM_LUMA_CONSENT_QUESTION_LABELS,
+                    whatsapp_labels=settings.CRM_LUMA_WHATSAPP_QUESTION_LABELS,
                 )
             )
             synced += 1
@@ -268,10 +289,10 @@ def refresh_contact_rollups(contact_ids: Iterable) -> None:
 
 def _upsert_contacts(
     records: list[LumaGuestRecord], *, event: CrmEvent, now: datetime
-) -> tuple[dict[str, Contact], int, int]:
+) -> tuple[dict[str, Contact], int, int, int]:
     emails = [record.email for record in records]
     if not emails:
-        return {}, 0, 0
+        return {}, 0, 0, 0
     already = set(Contact.objects.filter(email__in=emails).values_list("email", flat=True))
     users = users_by_email(emails)
     Contact.objects.bulk_create(
@@ -295,6 +316,8 @@ def _upsert_contacts(
         for contact in Contact.objects.select_for_update().filter(email__in=emails)
     }
     changed, consent_events = [], []
+    email_grants = whatsapp_grants = 0
+    source = f"luma:{event.luma_event_id}"
     for record in records:
         contact = contacts[record.email]
         dirty = False
@@ -302,6 +325,8 @@ def _upsert_contacts(
             if not getattr(contact, name) and getattr(record, name):
                 setattr(contact, name, getattr(record, name))
                 dirty = True
+        if fill_phone(contact, record.phone, now=now):
+            dirty = True
         if contact.user_id is None and users.get(record.email):
             contact.user = users[record.email]
             dirty = True
@@ -311,11 +336,13 @@ def _upsert_contacts(
             dirty = True
         if record.consent_granted and contact.marketing_consent == Contact.MarketingConsent.UNKNOWN:
             contact.marketing_consent = Contact.MarketingConsent.GRANTED
-            contact.marketing_consent_source = f"luma:{event.luma_event_id}"
+            contact.marketing_consent_source = source
             contact.marketing_consent_at = seen_at
+            email_grants += 1
             consent_events.append(
                 ContactConsentEvent(
                     contact=contact,
+                    channel=Channel.EMAIL,
                     kind=ContactConsentEvent.Kind.GRANTED,
                     source=contact.marketing_consent_source,
                     detail={"event": event.luma_event_id},
@@ -323,6 +350,13 @@ def _upsert_contacts(
                 )
             )
             dirty = True
+        if record.whatsapp_opt_in:
+            whatsapp_event = grant_whatsapp_opt_in(contact, source=source, at=seen_at)
+            if whatsapp_event is not None:
+                whatsapp_event.detail = {"event": event.luma_event_id}
+                consent_events.append(whatsapp_event)
+                whatsapp_grants += 1
+                dirty = True
         if dirty:
             contact.updated_at = timezone.now()
             changed.append(contact)
@@ -331,6 +365,8 @@ def _upsert_contacts(
             changed,
             [
                 *_FILLABLE_FIELDS,
+                *_PHONE_FIELDS,
+                *_WHATSAPP_FIELDS,
                 "user",
                 "first_seen_at",
                 "marketing_consent",
@@ -341,7 +377,7 @@ def _upsert_contacts(
             batch_size=BULK_BATCH_SIZE,
         )
     ContactConsentEvent.objects.bulk_create(consent_events)
-    return contacts, len(set(emails) - already), len(consent_events)
+    return contacts, len(set(emails) - already), email_grants, whatsapp_grants
 
 
 def _replace_registrations(

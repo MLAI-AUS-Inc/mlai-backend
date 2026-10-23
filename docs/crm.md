@@ -10,12 +10,12 @@ or listmonk integration yet; those arrive in later phases.
 | Table | Contents |
 | --- | --- |
 | `CrmEvent` | MLAI calendar events (managed Luma events only; external listings are skipped) and guest counts |
-| `Contact` | One row per lowercase email: profile fields, tags, free-form `attributes`, email status, marketing consent, attendance roll-ups, optional link to an MLAI account |
+| `Contact` | One row per lowercase email: profile fields, tags, free-form `attributes`, email status, marketing consent, phone (`phone_e164`, `sms_status`), WhatsApp opt-in, attendance roll-ups, optional link to an MLAI account |
 | `EventRegistration` | One row per contact per event: Luma guest id, approval status, registration and check-in times, tickets, registration answers. Guests removed in Luma get `removed_at`, never a delete |
-| `ContactConsentEvent` | Append-only evidence for consent and deliverability changes |
+| `ContactConsentEvent` | Append-only evidence for consent and deliverability changes, per channel (email, SMS, WhatsApp) |
 | `ContactImport` | One row per CSV import with counts and an error sample (row numbers and reasons only; no row data) |
 | `CrmAuditEvent` | Append-only record of syncs, imports and, later, edits and sends |
-| `Segment`, `SenderMailbox`, `EmailCampaign`, `EmailCampaignRecipient` | Created now so the schema needs one migration approval; unused until the sending phases |
+| `Segment`, `SenderMailbox`, `MessageTemplate`, `Blast`, `BlastDelivery`, `InboundMessage` | Saved audiences, From addresses, approved WhatsApp templates, multi-channel blasts (email, SMS, WhatsApp), one delivery row per person per channel, and replies to MLAI's number. Created now so the schema needs one migration approval; unused until the blast phases |
 
 Rules that hold everywhere:
 
@@ -23,6 +23,8 @@ Rules that hold everywhere:
 - Synced and imported data only fills blank contact fields. Manual edits and earlier values are never overwritten.
 - Marketing consent is stored as `unknown`, `granted` or `withdrawn`. Consent inferred from recent attendance is computed at send time from `last_attended_at` and never stored.
 - Nothing re-subscribes a contact who unsubscribed, bounced, complained or withdrew consent, or anyone with an active `AccountBan`.
+- Phone numbers are normalised to E.164 (`crm/phones.py`; Australian local formats are accepted). `sms_status` is `active` for a textable number, `invalid` for an Australian landline, and an SMS opt-out always sticks.
+- A phone number is never WhatsApp opt-in. Opt-in comes only from a Luma question named in `CRM_LUMA_WHATSAPP_QUESTION_LABELS`, a CSV `whatsapp` column, or (later) the person messaging MLAI's number.
 
 ## Luma guest sync
 
@@ -79,7 +81,7 @@ python manage.py crm_import_contacts PATH --consent granted|none [--consent-sour
 
 ## Migration
 
-`crm.0001_initial` is additive. It creates the ten tables above and touches no existing table. Like every migration it needs explicit approval and the `APPROVED_MIGRATION_PLAN_SHA256` cycle before deployment (see `README.md`). Tests:
+`crm.0001_initial` is additive. It creates the twelve tables above and touches no existing table. Like every migration it needs explicit approval and the `APPROVED_MIGRATION_PLAN_SHA256` cycle before deployment (see `README.md`). Tests:
 
 - `crm.tests.test_luma_guests_unit` and `crm.tests.test_contact_import_unit` run without a database.
 - `crm.tests.test_contact_store_database` runs in the CI PostgreSQL job.

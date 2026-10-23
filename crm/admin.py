@@ -1,13 +1,16 @@
 from django.contrib import admin
 
 from .models import (
+    Blast,
+    BlastDelivery,
     Contact,
     ContactConsentEvent,
     ContactImport,
     CrmAuditEvent,
     CrmEvent,
-    EmailCampaign,
     EventRegistration,
+    InboundMessage,
+    MessageTemplate,
     Segment,
     SenderMailbox,
 )
@@ -25,7 +28,7 @@ class EventRegistrationInline(admin.TabularInline):
 class ContactConsentEventInline(admin.TabularInline):
     model = ContactConsentEvent
     extra = 0
-    fields = ("kind", "source", "occurred_at", "created_at")
+    fields = ("channel", "kind", "source", "occurred_at", "created_at")
     readonly_fields = fields
     can_delete = False
 
@@ -41,10 +44,12 @@ class ContactAdmin(admin.ModelAdmin):
         "company",
         "email_status",
         "marketing_consent",
+        "sms_status",
+        "whatsapp_opt_in",
         "events_attended_count",
         "last_attended_at",
     )
-    list_filter = ("email_status", "marketing_consent", "source")
+    list_filter = ("email_status", "marketing_consent", "sms_status", "whatsapp_opt_in", "source")
     search_fields = ("email", "display_name", "first_name", "last_name", "company")
     readonly_fields = (
         "source",
@@ -56,6 +61,12 @@ class ContactAdmin(admin.ModelAdmin):
         "marketing_consent",
         "marketing_consent_source",
         "marketing_consent_at",
+        "phone_e164",
+        "sms_status",
+        "sms_status_changed_at",
+        "whatsapp_opt_in",
+        "whatsapp_opt_in_source",
+        "whatsapp_opt_in_at",
         "listmonk_subscriber_id",
         "created_at",
         "updated_at",
@@ -98,5 +109,33 @@ class SenderMailboxAdmin(admin.ModelAdmin):
     list_filter = ("route", "enabled")
 
 
+@admin.register(MessageTemplate)
+class MessageTemplateAdmin(admin.ModelAdmin):
+    list_display = ("name", "channel", "category", "approved", "enabled", "last_synced_at")
+    list_filter = ("channel", "category", "approved", "enabled")
+    search_fields = ("name", "content_sid")
+
+
+@admin.register(Blast)
+class BlastAdmin(admin.ModelAdmin):
+    list_display = ("subject", "purpose", "status", "event", "recipient_count", "queued_at", "sent_at")
+    list_filter = ("status", "purpose")
+    readonly_fields = [field.name for field in Blast._meta.fields]
+
+
+@admin.register(BlastDelivery)
+class BlastDeliveryAdmin(admin.ModelAdmin):
+    list_display = ("blast", "contact", "channel", "status", "error_code", "updated_at")
+    list_filter = ("channel", "status")
+    search_fields = ("contact__email", "provider_id")
+    readonly_fields = [field.name for field in BlastDelivery._meta.fields]
+
+
+@admin.register(InboundMessage)
+class InboundMessageAdmin(admin.ModelAdmin):
+    list_display = ("from_address", "channel", "contact", "blast", "received_at")
+    list_filter = ("channel",)
+    readonly_fields = [field.name for field in InboundMessage._meta.fields]
+
+
 admin.site.register(Segment)
-admin.site.register(EmailCampaign)
