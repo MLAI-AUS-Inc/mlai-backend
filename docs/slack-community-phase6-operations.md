@@ -6,6 +6,13 @@ This implements the existing `SLACK_COMMUNITY_SOURCE` modes without adding a mig
 
 `bot` retains the legacy Community intake and bot history. `both` accepts and deduplicates authenticated callbacks received by either configured app; history still uses the bot. `members` uses member intake and readers. During this transition, a Community channel with a complete, current assessment proving zero eligible readers falls back to bot intake and history and reports `no_reader`. Cooldown, quota, network failure, missing authority, incomplete assessment or exhausting a bounded selector cannot prove zero. Members-only, private, Slack Connect and uncertain source state never gain this fallback.
 
+A current eligible reader positively authorizes the member-source callback
+path even when another grant has unknown membership. Such a count is a lower
+bound, not a complete assessment. A grant that never joined a channel may have
+no membership row after a complete inventory sweep; it cannot veto another
+reader's proven access. With no eligible reader and any unknown authority,
+callbacks remain pending and cannot fall back to the bot.
+
 Reader eligibility requires the existing consent and current active account/grant/OAuth/connection, workspace, joined membership and read scopes. It is separate from the author's posting eligibility: neither AI consent, a public identity link, verified-device rank nor `chat:write` can be added as a condition for Community readers. Status counts independent eligible accounts/Slack subjects, not devices or callback authorization recipients. Actual provider work rechecks current authority under the existing ordered locks through page settlement; a status count is not a lease. If only the approved Community mapping's metadata freshness has expired, revalidate it with `conversations.info` before reading content. A successful current public, non-Connect, non-archived result can renew freshness; pending edits and reactions remain queued during this check.
 
 Source and reader changes invalidate the history cursor's authority. A bot cursor cannot continue as a member cursor or vice versa. Original Phase 5 send actors, saved request bytes, attempts, ambiguous results and later mutation ownership remain unchanged through source-mode rollback.

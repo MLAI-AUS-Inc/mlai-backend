@@ -82,7 +82,8 @@ def retirement_policy(row, payload):
         return "hold"
     from integrations.services import slack_member_access as access
     assessment = access.community_reader_policy_current(row)
-    if assessment is None or not assessment.complete or assessment.effective_source == "hold":
+    if (assessment is None or assessment.effective_source == "hold"
+            or not assessment.complete and assessment.eligible_count <= 0):
         _invalidate(row, "reader_unknown")
         return "hold"
     access.record_community_reader_state(row, assessment)
