@@ -178,6 +178,59 @@ class PostMergePrepareTests(SimpleTestCase):
         self.assertNotIn("repair_setup", self.op.payload)
 
 
+class PostMergeSetupSurfaceTests(SimpleTestCase):
+    """PawShare (23 Oct): setup ccd3ea22 merged without its kit. The follow-up setup asked
+    the owner to choose the articles page again from /dist/blog, /articles/detail and tag pages."""
+
+    def setUp(self):
+        self.replay = replay.PrepareJourneyReplayTests()
+        self.replay.setUp()
+        self.replay.facts["resolution"] = {"existence_state": "ambiguous", "ranked_candidates": {"listing_surface_candidates": [
+            {"route": "/dist/blog"}, {"route": "/articles/detail"}, {"route": "/dist/blog/tag/Melbourne"}]}}
+        self.op = self.replay.op
+        self.op.payload.update(attempt=15, retry_epoch="post-merge", source_reverify=True)
+        self.op.receipt = {"merged_setup_run_id": "setup-3", "scan_run_id": "scan-9"}
+
+    def merged(self, *, mode="existing", hint="/dist/blog", built="/blog", merged=True):
+        run = setup_run(merged=merged)
+        run.run_request.update(article_surface_mode=mode,
+            article_surface_hint={"source": "user_input", "route_path": hint, "listing_url": hint} if hint else None)
+        run.result["route_path"] = built
+        return run
+
+    def request(self, run):
+        with patch("workflow_runs.models.ContentFactoryRun.objects.filter", return_value=newest_first(run)) as rows:
+            data = prepare._owner_request(self.op, self.replay.context, self.replay.config, "setup",
+                user=self.replay.user, journey=self.replay.journey()).data
+        return data, rows
+
+    def test_the_kit_follow_up_keeps_the_merged_setups_page(self):
+        data, rows = self.request(self.merged())
+        self.assertEqual((data["article_surface_mode"], data["article_surface_url"]), ("existing", "/dist/blog"))
+        self.assertEqual(data["source_scan_run_id"], "scan-9")
+        self.assertEqual(rows.call_args.kwargs, {"run_id": "setup-3", "organization_id": 7, "workflow": "article_system_setup",
+            "run_request__website_connection_id": "website", "run_request__connection_generation": 3})
+
+    def test_a_page_the_merged_setup_created_is_now_existing(self):
+        data, _ = self.request(self.merged(mode="none", hint="", built="/articles/"))
+        self.assertEqual((data["article_surface_mode"], data["article_surface_url"]), ("existing", "/articles"))
+
+    def test_an_unmerged_or_foreign_setup_leaves_the_choice_to_the_owner(self):
+        for run in (self.merged(merged=False), None):
+            with self.subTest(run=run), self.assertRaises(WebsiteAuthorityError) as raised:
+                self.request(run)
+            self.assertEqual(raised.exception.code, "articles_page_choice_required")
+
+    def test_without_its_own_merge_the_rescan_still_decides(self):
+        self.op.receipt.pop("merged_setup_run_id")
+        with patch("workflow_runs.models.ContentFactoryRun.objects.filter") as rows, \
+                self.assertRaises(WebsiteAuthorityError) as raised:
+            prepare._owner_request(self.op, self.replay.context, self.replay.config, "setup",
+                user=self.replay.user, journey=self.replay.journey())
+        self.assertEqual(raised.exception.code, "articles_page_choice_required")
+        rows.assert_not_called()
+
+
 class OwnedSquashMergeAttestationTests(SimpleTestCase):
     """A squash merge never contains the reviewed head; the platform's own merge record is the lineage."""
 
