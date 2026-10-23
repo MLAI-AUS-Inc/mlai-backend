@@ -2,8 +2,8 @@ name: Deploy to Digital Ocean
 
 on:
   pull_request:
-    # Stacked Articles implementation PRs need the same validation lanes.
-    branches: [ main, "codex/articles-*", "fix/admin-brain-deploy-decoupling", "feat/goal-wakeups", "feat/deploy-detection", "feat/first-article-goal" ]
+    # Stacked implementation PRs need the same validation lanes.
+    branches: [ main, "codex/articles-*", "codex/slack-*", "fix/admin-brain-deploy-decoupling", "feat/goal-wakeups", "feat/deploy-detection", "feat/first-article-goal" ]
   push:
     branches: [ main ]
   workflow_dispatch:
