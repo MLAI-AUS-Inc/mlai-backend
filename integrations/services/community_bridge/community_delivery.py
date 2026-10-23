@@ -220,14 +220,39 @@ def _choose(delivery, channel, saved):
     return None, _bot_actor(account, channel)
 
 
+def _bot_reader(channel):
+    """Capture a current joined reader before acquiring lower-order locks."""
+    grant = access.reader_for_channel(channel.slack_workspace_id, channel.slack_channel_id)
+    if grant is None:
+        raise member.MemberDeliveryDeferred(60)
+    return dm._capture_slack_grant_api_authority(grant)
+
+
 @contextmanager
-def _fence(delivery, original, authority, actor, *, read_reconcile=False):
+def _fence(delivery, original, authority, actor, *, reader_authority=None, read_reconcile=False):
     owner = actor.get("user_id")
     if type(owner) is not int or owner <= 0:
         raise MemberDeliveryUnavailable("invalid_community_actor")
     with transaction.atomic():
+        owners = {owner}
+        if reader_authority is not None:
+            owners.add(reader_authority.user_id)
         users, grants, connections, memberships = member.audiences._lock_authority(
-            {owner}, original.slack_workspace_id, original.slack_channel_id)
+            owners, original.slack_workspace_id, original.slack_channel_id)
+        reader_connection = None
+        if actor.get("kind") == "bot":
+            if reader_authority is None or not access.enabled():
+                raise member.MemberDeliveryDeferred(60)
+            reader = next((g for g in grants if g.pk == reader_authority.grant_id), None)
+            reader_user = next((u for u in users if u.pk == reader_authority.user_id), None)
+            reader_connection = next((c for c in connections if c.pk == reader_authority.connection_id), None)
+            if reader is None or reader_user is None or reader_connection is None:
+                raise member.MemberDeliveryDeferred(60)
+            reader.user, reader.connection = reader_user, reader_connection
+            if (reader.slack_workspace_id != original.slack_workspace_id
+                    or not access.public_reader_enabled(reader, authority=reader_authority)
+                    or access._membership_state(reader, next((m for m in memberships if m.grant_id == reader.pk), None)) != "joined"):
+                raise member.MemberDeliveryDeferred(60)
         links = list(CommunityBridgeIdentityLink.objects.select_for_update().filter(user_id=owner).order_by("pk"))
         user = next((u for u in users if u.pk == owner), None)
         if user is None or not user.is_active or not member_device_key_allowed(owner, actor.get("public_key")):
@@ -259,6 +284,8 @@ def _fence(delivery, original, authority, actor, *, read_reconcile=False):
             # of publishing a stale fallback strategy. No provider call here.
             current = []
             for candidate in grants:
+                if candidate.user_id != owner:
+                    continue
                 conn = next((item for item in connections if item.pk == candidate.connection_id), None)
                 candidate.user, candidate.connection = user, conn
                 if (conn is not None and candidate.slack_workspace_id == original.slack_workspace_id and public_channels_enabled(candidate)
@@ -276,13 +303,21 @@ def _fence(delivery, original, authority, actor, *, read_reconcile=False):
                 or (row.payload or {}).get(IDENTITY) != _expected_identity(row, channel)):
             raise MemberDeliveryUnavailable("immutable_community_source_changed")
         client = (member._Client(row, channel, authority, connection, read_only=read_reconcile)
-                  if authority is not None else _BotClient(row, channel, read_only=read_reconcile))
+                  if authority is not None else _BotClient(row, channel, reader_authority, reader_connection, read_only=read_reconcile))
         yield row, channel, user, client
 
 
 class _BotClient(member._Client):
-    def __init__(self, row, channel, *, read_only=False):
-        super().__init__(row, channel, None, None, read_only=read_only)
+    READ_SCOPES = {
+        "conversations_info": "channels:read",
+        "conversations_history": "channels:history",
+        "conversations_replies": "channels:history",
+        "users_info": "users:read",
+    }
+
+    def __init__(self, row, channel, reader_authority=None, reader_connection=None, *, read_only=False):
+        super().__init__(row, channel, reader_authority, reader_connection, read_only=read_only)
+        self.reader_failed = False
 
     def verify(self):
         # Reactions/delete responses carry no actor identity. Verify this exact
@@ -295,15 +330,19 @@ class _BotClient(member._Client):
                 or not re.fullmatch(r"B[A-Z0-9]{1,99}", response["bot_id"])
                 or response.get("app_id", getattr(settings, "MESSAGE_SYNC_SLACK_APP_ID", "")) != getattr(settings, "MESSAGE_SYNC_SLACK_APP_ID", "")):
             raise MemberDeliveryUnavailable("bot_identity_unavailable")
-        return super().verify()
+        try:
+            return super().verify()
+        except dm.SlackApiError as error:
+            self.reader_failed = True
+            error.member_delivery_observed_at = self.started_at
+            raise
 
     def call(self, method, **kwargs):
         if self.read_only and method in member.WRITES.values():
             raise MemberDeliveryUnavailable("reconciliation_must_be_read_only")
         guard_delivery(self.row)
-        if method in {"conversations_history", "conversations_replies"}:
-            from integrations.services.message_sync.member_history import reject_legacy_bot_read
-            reject_legacy_bot_read(self.channel.slack_channel_id)
+        if method not in self.READ_SCOPES and method not in member.WRITES.values() and method != "auth_test":
+            raise MemberDeliveryUnavailable("unsupported_bot_operation")
         if "channel" in kwargs and kwargs["channel"] != self.channel.slack_channel_id:
             raise MemberDeliveryUnavailable("community_source_changed")
         self.started_at = None
@@ -314,6 +353,21 @@ class _BotClient(member._Client):
             if method in member.WRITES.values():
                 self.mutation_started = True
 
+        if method in self.READ_SCOPES:
+            if (self.authority is None or self.connection is None
+                    or self.READ_SCOPES[method] not in self.authority.scopes):
+                raise member.MemberDeliveryDeferred(60)
+            if method != "users_info" and kwargs.get("channel") != self.channel.slack_channel_id:
+                raise MemberDeliveryUnavailable("community_source_changed")
+            if method == "users_info" and not re.fullmatch(r"[UW][A-Z0-9]{1,99}", str(kwargs.get("user") or "")):
+                raise MemberDeliveryUnavailable("invalid_mention_user")
+            try:
+                return dm._invoke_slack_with_locked_connection(
+                    self.authority, self.connection, method, before_request=before_request, **kwargs)
+            except dm.SlackApiError as error:
+                self.reader_failed = True
+                error.member_delivery_observed_at = self.started_at
+                raise
         client = budgeted_client(WebClient(token=getattr(settings, "SLACK_BRIDGE_BOT_TOKEN", ""), timeout=20),
                                  workspace_id=self.channel.slack_workspace_id, before_request=before_request)
         return getattr(client, method)(**kwargs)
@@ -357,16 +411,18 @@ def _bot_wire(row, channel, actor, client, info, name):
         kwargs.update(timestamp=parent if operation == "reaction_add" else target, name=reaction)
     if operation in {"create", "edit"}:
         from integrations.services.slack_channel_mentions import render_slack_mentions
-        from integrations.services.slack_mentions import validate_mention_users
+        from integrations.services.slack_mentions import validate_mention_users, _key as mention_key
         from .broadcast_mentions import render_broadcast_mentions
         from community_chat.permissions import device_chat_role
 
         text, ids = render_slack_mentions(str(payload.get("text") or ""), (payload.get("metadata") or {}).get("slack_mention_tags") or [])
         if ids:
+            if "users:read" not in client.authority.scopes:
+                raise member.MemberDeliveryUnavailable("mention_scope_unavailable")
             class Mentions:
                 def users_info(self, **options):
                     return client.call("users_info", **options)
-            validate_mention_users(Mentions(), ids, channel.slack_workspace_id, scope="public-bot")
+            validate_mention_users(Mentions(), ids, channel.slack_workspace_id, scope=mention_key(client.authority, "bot-write-validation", ""))
         role = device_chat_role(actor["public_key"])
         # An unlinked bot author cannot prove Slack guest authority. Ordinary
         # text remains deliverable; uncertain broadcast intent remains silent.
@@ -442,6 +498,7 @@ def execute(delivery):
     if delivery["delivery_type"] in member.CONTENT and not admitted(original) and not real_attempt:
         raise member.MemberDeliveryDeferred(60)
     authority, actor = _choose(delivery, original, saved)
+    reader_authority = _bot_reader(original) if actor["kind"] == "bot" else None
     command = saved or None
     attempt = None
     client = None
@@ -452,7 +509,7 @@ def execute(delivery):
     implementation = sys.modules[__name__]
     try:
         if command is None:
-            with _fence(delivery, original, authority, actor) as (row, channel, user, client):
+            with _fence(delivery, original, authority, actor, reader_authority=reader_authority) as (row, channel, user, client):
                 info = client.verify()
                 wire = (member._wire(row, channel, actor, client, info, identity_key=IDENTITY) if authority is not None
                         else _bot_wire(row, channel, actor, client, info, user.full_name or "MLAI member"))
@@ -465,7 +522,7 @@ def execute(delivery):
                 row.save(update_fields=("payload", "updated_at"))
         _same(command, original, actor)
         attempt, reconcile = attempts.arm(delivery, original, command, implementation=implementation)
-        with _fence(delivery, original, authority, actor, read_reconcile=reconcile) as (row, channel, user, client):
+        with _fence(delivery, original, authority, actor, reader_authority=reader_authority, read_reconcile=reconcile) as (row, channel, user, client):
             if (row.payload or {}).get(MEMBER_STAMP) != command:
                 raise MemberDeliveryUnavailable("immutable_community_command_changed")
             info = client.verify()
@@ -512,13 +569,14 @@ def execute(delivery):
         raise member.MemberDeliveryDeferred(60) from None
     except dm.SlackApiError as error:
         provider_error = error
-        if authority is not None:
+        failed_authority = reader_authority if client is not None and getattr(client, "reader_failed", False) else authority
+        if failed_authority is not None:
             from integrations.models import SlackDmMirrorGrant
 
-            grant = SlackDmMirrorGrant.objects.filter(pk=authority.grant_id).first()
+            grant = SlackDmMirrorGrant.objects.filter(pk=failed_authority.grant_id).first()
             if grant is not None:
                 access.record_reader_failure(grant, error, channel_id=original.slack_channel_id,
-                                             authority=authority, purpose="write",
+                                             authority=failed_authority, purpose="history" if failed_authority is reader_authority else "write",
                                              observed_at=getattr(error, "member_delivery_observed_at", None))
         raise member.MemberDeliveryRetry("community_provider_uncertain") from None
     finally:

@@ -18,7 +18,10 @@ cooldowns choose another eligible reader or delay work, never the bot.
 
 Linked members post as themselves. Approved active, verified, AI-consenting
 unlinked accounts retain bot posting. Edits, deletes and reactions preserve the
-original actor. Neither cleanup nor recovery replays an uncertain write or
+original actor. Bot posting also requires a current channel member for source checks,
+mention validation and uncertain-write reconciliation. Losing that reader holds
+the request; choosing another reader never changes the recorded bot posting actor.
+Neither cleanup nor recovery replays an uncertain write or
 changes its immutable request.
 
 The former four rollout variables are no longer inputs. Keep production
