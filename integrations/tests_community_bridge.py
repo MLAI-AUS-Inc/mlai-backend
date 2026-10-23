@@ -166,6 +166,54 @@ class SlackBridgeClientProfileTests(MemberFixture, TransactionTestCase):
 
 
 
+    def legacy_text(self, text="<@UOTHER>", ids=("UOTHER",)):
+        from integrations.services.community_bridge.member_metadata import prepare_legacy_text
+        return prepare_legacy_text({"channel_id": self.channel.pk, "source_platform": "buzz",
+            "delivery_type": "create", "target_channel_id": "CROOM",
+            "channel": {"slack_workspace_id": "TTEST"}, "payload": {}}, text, ids)
+
+    def test_legacy_mentions_use_member_and_recheck_cache_authority(self):
+        self.assertEqual(self.legacy_text(), "<@UOTHER>")
+        self.assertEqual([m for _, m, _ in self.calls], ["conversations_info", "users_info"])
+        self.calls.clear()
+        self.legacy_text()
+        self.assertEqual([m for _, m, _ in self.calls], ["conversations_info"])
+        type(self.a).objects.update(status="paused")
+        self.calls.clear()
+        from integrations.services.slack_dm_mirror import SlackDmMirrorAuthorizationError
+        with self.assertRaises(SlackDmMirrorAuthorizationError):
+            self.legacy_text()
+        self.assertEqual(self.calls, [])
+        self.bot.assert_not_called()
+
+    def test_legacy_mentions_do_not_read_private_members_or_held_channels(self):
+        from integrations.services.slack_dm_mirror import SlackDmMirrorAuthorizationError
+        for field, value in (("audience", "members"), ("hold_reason", "admin"),
+                             ("slack_visibility", "private"), ("slack_archived", True)):
+            original = getattr(self.channel, field)
+            setattr(self.channel, field, value)
+            self.channel.save()
+            with self.assertRaises(SlackDmMirrorAuthorizationError):
+                self.legacy_text()
+            setattr(self.channel, field, original)
+            self.channel.save()
+        self.assertEqual(self.calls, [])
+
+    def test_legacy_mentions_recheck_source_before_cached_user(self):
+        from integrations.services.slack_dm_mirror import SlackDmMirrorAuthorizationError
+        self.legacy_text()
+        self.raw["is_private"] = True
+        self.calls.clear()
+        with self.assertRaises(SlackDmMirrorAuthorizationError):
+            self.legacy_text()
+        self.assertEqual([m for _, m, _ in self.calls], ["conversations_info"])
+
+    def test_legacy_plain_text_and_co_working_need_no_slack_read(self):
+        type(self.a).objects.update(status="paused")
+        self.assertEqual(self.legacy_text("Book today", ()), "Book today")
+        self.assertEqual(self.calls, [])
+
+
 class RecentSlackBridgeReconciliationCommandTests(TestCase):
     def setUp(self):
         CommunityBridgeChannel.objects.create(
