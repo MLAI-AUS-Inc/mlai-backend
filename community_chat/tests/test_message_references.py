@@ -195,9 +195,9 @@ class MessageReferenceAccessTests(TestCase):
         from django.core.management import call_command
         from django.core.management.base import CommandError
         from integrations.models import CommunityBridgeDelivery
-        with patch("integrations.services.community_bridge.slack.SlackBridgeClient.get_channel_history") as history:
+        with patch("integrations.services.community_bridge.slack.SlackBridgeClient.get_client") as history:
             for apply in (False, True):
-                with self.subTest(apply=apply), self.assertRaisesMessage(CommandError, "durable member-authorized"):
+                with self.subTest(apply=apply), self.assertRaisesMessage(CommandError, "Unknown command"):
                     call_command("backfill_community_bridge_thread_references", slack_channel_id="CREF",
                         apply=apply, confirm_historical_edits=apply, stdout=StringIO())
             history.assert_not_called()

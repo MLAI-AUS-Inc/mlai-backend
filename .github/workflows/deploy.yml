@@ -523,7 +523,7 @@ jobs:
           integrations.tests_member_pending_intake_phase4a \
           integrations.tests_message_sync_member_history_phase4b \
           integrations.tests_member_delivery_phase4c \
-          integrations.tests_community_member_send_phase5 integrations.tests_slack_member_directory integrations.tests_slack_member_files \
+          integrations.tests_community_member_send_phase5 integrations.tests_slack_member_directory integrations.tests_slack_member_files integrations.tests_message_sync_repair \
           integrations.tests_community_source_phase6 \
           integrations.tests_community_source_codec_phase6 \
           integrations.tests_community_reader_phase6 \
@@ -535,8 +535,6 @@ jobs:
           integrations.tests_message_sync_event_routing \
           integrations.tests_coworking_handoff \
           integrations.tests_public_bridge_consent \
-          integrations.tests_community_bridge_avatar_backfill \
-          integrations.tests_community_bridge_mention_backfill \
           integrations.tests_community_bridge_contracts \
           core.tests.test_auth_contract \
           core.tests.test_account_ban_guards \
@@ -746,7 +744,7 @@ jobs:
           integrations.tests_member_pending_intake_phase4a \
           integrations.tests_message_sync_member_history_phase4b \
           integrations.tests_member_delivery_phase4c \
-          integrations.tests_community_member_send_phase5 integrations.tests_slack_member_directory integrations.tests_slack_member_files \
+          integrations.tests_community_member_send_phase5 integrations.tests_slack_member_directory integrations.tests_slack_member_files integrations.tests_message_sync_repair \
           integrations.tests_community_source_phase6 \
           integrations.tests_community_source_codec_phase6 \
           integrations.tests_community_reader_phase6 \
@@ -881,8 +879,6 @@ jobs:
           integrations.test_luma_cover \
           integrations.tests \
           integrations.tests_article \
-          integrations.tests_community_bridge_thread_reconciliation \
-          integrations.tests_community_bridge_thread_repair \
           integrations.tests_connection_org_scoping \
           integrations.tests_connector_company_scoping \
           integrations.tests_github_callback \

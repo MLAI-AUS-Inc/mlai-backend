@@ -440,19 +440,6 @@ def _run_community_page(lease, state, page):
     return _community_attempt(lease, state, page, None)
 
 
-def reject_legacy_bot_read(channel_id):
-    """Legacy multi-page repairs may not read member-governed sources as bot."""
-    for row in CommunityBridgeChannel.objects.filter(slack_channel_id=channel_id):
-        if required(row):
-            raise RuntimeError("Member-channel repair requires a durable member-authorized history job")
-
-
-def reject_legacy_repair(channel):
-    from django.core.management.base import CommandError
-    if required(channel):
-        raise CommandError("Member-channel repair requires durable member-authorized history jobs; direct replay is unavailable")
-
-
 def invalidate_channel_history(workspace_id, channel_id):
     """Fence an observed leave/rejoin ABA before the pending Channel lock.
 

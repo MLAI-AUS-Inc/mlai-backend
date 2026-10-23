@@ -215,66 +215,15 @@ class SlackBridgeClientProfileTests(MemberFixture, TransactionTestCase):
 
 
 class RecentSlackBridgeReconciliationCommandTests(TestCase):
-    def setUp(self):
-        CommunityBridgeChannel.objects.create(
-            audience="community",
-            slack_workspace_id="T123",
-            slack_channel_id="C123",
-            slack_channel_name="general",
-            destination_platform=CommunityBridgePlatform.BUZZ,
-            destination_channel_id="relay-general",
-            destination_channel_name="general",
-            enabled=True,
-            sync_replies=True,
-            sync_deletes=True,
-        )
-
-    @patch(
-        "integrations.management.commands."
-        "reconcile_recent_community_bridge_slack.call_command"
-    )
-    def test_reconciles_each_enabled_mapping_with_bounded_apply(self, mock_reconcile):
-        def write_report(command_name, **kwargs):
-            self.assertEqual(
-                command_name, "reconcile_community_bridge_slack_threads"
-            )
-            kwargs["stdout"].write(
-                json.dumps(
-                    {
-                        "totals": {
-                            "errors": 0,
-                            "mismatches": 2,
-                            "repairs_enqueued": 2,
-                            "links_restored": 0,
-                        }
-                    }
-                )
-            )
-
-        mock_reconcile.side_effect = write_report
-        output = StringIO()
-
-        call_command(
-            "reconcile_recent_community_bridge_slack",
-            lookback_seconds=3600,
-            max_roots_per_channel=50,
-            maximum_history_messages=500,
-            wait_seconds=30,
-            stdout=output,
-        )
-
-        kwargs = mock_reconcile.call_args.kwargs
-        self.assertEqual(kwargs["slack_channel_id"], ["C123"])
-        self.assertTrue(kwargs["include_unthreaded"])
-        self.assertTrue(kwargs["apply"])
-        self.assertTrue(kwargs["confirm_historical_repair"])
-        self.assertEqual(kwargs["max_roots"], 50)
-        self.assertEqual(kwargs["maximum_history_messages"], 500)
-        self.assertEqual(kwargs["wait_seconds"], 30)
-        self.assertEqual(
-            json.loads(output.getvalue()),
-            {"channels": 1, "errors": 0, "mismatches": 2, "repairs": 2},
-        )
+    def test_compatibility_command_only_seeds_enabled_durable_worker(self):
+        with patch("integrations.services.message_sync.history.seed_states") as seed:
+            for enabled in (False, True):
+                with self.subTest(enabled=enabled), override_settings(MESSAGE_SYNC_ENABLED=enabled):
+                    output = StringIO()
+                    call_command("reconcile_recent_community_bridge_slack", stdout=output)
+                    self.assertEqual(json.loads(output.getvalue()),
+                        {"scheduler": "durable", "enabled": enabled, "legacy_scan_skipped": True})
+            seed.assert_called_once_with()
 
 
 class _FakeSentMessage:
@@ -1737,34 +1686,6 @@ class CommunityBridgeInspectionTests(TestCase):
         self.assertEqual(result["receipts"], [])
         self.assertEqual(result["recent_receipts"]["count"], 1)
         self.assertNotIn("private payload", output.getvalue())
-
-
-@override_settings(SLACK_BRIDGE_BOT_TOKEN="synthetic-bot", BUZZ_BRIDGE_ADAPTER_URL="https://adapter.invalid",
-                   BUZZ_BRIDGE_ADAPTER_TOKEN="synthetic-token", BUZZ_BRIDGE_CALLBACK_SECRET="synthetic-secret")
-class CommunityBridgeSlackThreadRepairTests(TestCase):
-    def setUp(self):
-        self.channel = CommunityBridgeChannel.objects.create(audience="community", slack_workspace_id="TMLAI",
-            slack_channel_id="CGENERAL", destination_platform="buzz", destination_channel_id="a" * 32)
-        self.link = CommunityBridgeMessageLink.objects.create(channel=self.channel, source_platform="slack",
-            source_channel_id="CGENERAL", source_message_id="1786660929.427979", destination_platform="buzz",
-            destination_channel_id=self.channel.destination_channel_id, destination_message_id="b" * 64,
-            source_parent_message_id="1786660000.000001", source_payload={"text": "retained"})
-
-    def test_retired_repair_rejects_every_mode_without_provider_or_data_mutation(self):
-        from django.core.management.base import CommandError
-        from integrations.models import CommunityBridgeDelivery, CommunityBridgeReceipt
-        before = list(CommunityBridgeMessageLink.objects.values())
-        with patch("integrations.services.community_bridge.slack.SlackBridgeClient.get_client") as slack, \
-             patch("integrations.services.community_bridge.buzz.BuzzBridgeClient.deliver") as relay:
-            for options in [{"slack_channel_id": "CGENERAL", "root_message_id": "1786660929.427979", "phase": phase, "apply": apply, "confirm_historical_repair": apply} for apply in (False, True) for phase in ("root", "delete_orphans", "recreate_orphans")]:
-                with self.subTest(options=options), self.assertRaisesMessage(CommandError, "durable member-authorized"):
-                    call_command("repair_community_bridge_slack_thread", stdout=StringIO(), **options)
-            slack.assert_not_called()
-            relay.assert_not_called()
-        self.assertEqual(list(CommunityBridgeMessageLink.objects.values()), before)
-        self.assertEqual(CommunityBridgeDelivery.objects.count(), 0)
-        self.assertEqual(CommunityBridgeReceipt.objects.count(), 0)
-
 
 
 @override_settings(
