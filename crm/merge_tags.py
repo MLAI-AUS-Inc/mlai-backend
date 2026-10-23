@@ -12,6 +12,8 @@ from datetime import datetime, timezone as datetime_timezone
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 SUPPORTED_TAGS = ("first_name", "display_name", "event_name", "event_start_local", "event_url")
+PERSON_TAGS = ("first_name", "display_name")
+EVENT_TAGS = ("event_name", "event_start_local", "event_url")
 DEFAULT_EVENT_TIMEZONE = "Australia/Melbourne"
 FALLBACK_NAME = "there"
 
@@ -41,6 +43,21 @@ def validate(text) -> None:
     unsupported = sorted({tag[:64] for tag in tags_in(text) if tag not in SUPPORTED_TAGS})
     if unsupported:
         raise UnsupportedMergeTag(unsupported)
+
+
+def split(text) -> list[tuple[str, str]]:
+    """The text as ``("text", literal)`` and ``("tag", name)`` parts, in order."""
+
+    text = str(text or "")
+    parts, last = [], 0
+    for match in _TAG.finditer(text):
+        if match.start() > last:
+            parts.append(("text", text[last : match.start()]))
+        parts.append(("tag", match.group(1).strip()))
+        last = match.end()
+    if last < len(text):
+        parts.append(("text", text[last:]))
+    return parts
 
 
 def render(text, contact, event) -> str:

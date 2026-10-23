@@ -14,6 +14,8 @@ from content_factory.reconciliation import run_content_factory_reconciliation_sw
 from content_factory.website_reconciliation import process_website_connection_operations
 from content_factory.dispatch_outbox import process_dispatch_outbox
 from content_factory.services.island_refresh_scheduler import run_island_refresh_scheduler
+from crm.blasts import run_blast_dispatch_scheduler
+from crm.listmonk_sync import run_listmonk_sync_scheduler
 from crm.luma_sync import run_luma_guest_sync_scheduler
 from integrations.services.daily_discovery import (
     enqueue_scheduled_discovery,
@@ -135,6 +137,14 @@ class Command(BaseCommand):
             # cache-throttled to one pass per CRM_LUMA_SYNC_INTERVAL_SECONDS,
             # and paced under the calendar key's shared rate limit.
             ("crm_luma_guest_sync", run_luma_guest_sync_scheduler),
+            # Sends queued crm blasts: email through listmonk, SMS and WhatsApp
+            # through Twilio. Off unless a blast channel is enabled, and
+            # cache-throttled to CRM_BLAST_DISPATCH_INTERVAL_SECONDS.
+            ("crm_blast_dispatch", run_blast_dispatch_scheduler),
+            # Polls listmonk for campaign progress, opens, clicks, bounces and
+            # unsubscribes. Runs whenever listmonk is configured, throttled to
+            # CRM_LISTMONK_SYNC_INTERVAL_SECONDS (about five minutes).
+            ("crm_listmonk_sync", run_listmonk_sync_scheduler),
             # Releases expired, undispatched MLAI Coding reservations and
             # resolves calls whose provider usage could not be confirmed.
             # Authenticated request paths only reconcile their own account;

@@ -12,9 +12,10 @@ from django.core.validators import URLValidator
 from rest_framework import serializers
 from rest_framework.exceptions import ErrorDetail
 
+from crm.blasts import QUICK_SEGMENTS as BLAST_QUICK_SEGMENTS, mask_address
 from crm.contact_import import MAX_TAGS, clean_tags
 from crm.emails import normalize_contact_email
-from crm.models import Channel, Contact, ContactImport
+from crm.models import Blast, BlastDelivery, Channel, Contact, ContactImport
 from crm.phones import normalize_contact_phone
 from crm.queries import CONTACT_SORTS, EVENT_SCOPES, GUEST_STATUSES, INFERRED_CONSENT_DAYS
 from crm.segments import ATTRIBUTE_KEY, PURPOSES
@@ -33,6 +34,10 @@ EDITABLE_FIELDS = (*PROFILE_TEXT_FIELDS, "phone", "linkedin_url", "tags", "attri
 MAX_ATTRIBUTE_KEYS = 50
 MAX_ATTRIBUTE_VALUE = 2000
 MAX_IMPORT_HEADERS = 200
+MAX_BLAST_BODY = 100_000
+MAX_SMS_BODY = 1600
+MAX_TEMPLATE_VARIABLES = 20
+MAX_TEMPLATE_VALUE = 500
 QUICK_SEGMENTS = {
     "going": "Going",
     "checked_in": "Checked in",
@@ -40,6 +45,7 @@ QUICK_SEGMENTS = {
     "waitlist": "Waitlist",
 }
 _TITLE_LENGTH = 60
+BlastDeliveryStatus = BlastDelivery.Status
 _SCALARS = (str, int, float, bool, type(None))
 
 
@@ -189,6 +195,104 @@ class SegmentPreviewInput(StrictSerializer):
     definition = serializers.JSONField()
     purpose = serializers.ChoiceField(choices=PURPOSES, allow_null=True, required=False, default=None)
     event_id = serializers.UUIDField(allow_null=True, required=False, default=None)
+
+
+def _channel_list(**kwargs):
+    return serializers.ListField(
+        child=serializers.ChoiceField(choices=Channel.values), max_length=3, **kwargs
+    )
+
+
+class BlastEmailInput(StrictSerializer):
+    mailbox_id = serializers.UUIDField(allow_null=True, required=False)
+    subject = serializers.CharField(max_length=300, allow_blank=True, required=False)
+    body_markdown = serializers.CharField(
+        max_length=MAX_BLAST_BODY, allow_blank=True, required=False, trim_whitespace=False
+    )
+
+
+class BlastSmsInput(StrictSerializer):
+    body = serializers.CharField(max_length=MAX_SMS_BODY, allow_blank=True, required=False)
+
+
+class BlastWhatsAppInput(StrictSerializer):
+    template_id = serializers.UUIDField(allow_null=True, required=False)
+    variables = serializers.DictField(
+        child=serializers.CharField(max_length=MAX_TEMPLATE_VALUE, allow_blank=True), required=False
+    )
+
+    def validate_variables(self, value):
+        if len(value) > MAX_TEMPLATE_VARIABLES:
+            raise serializers.ValidationError("Too many template values.", code="too_many_variables")
+        for key in value:
+            if not key.isdigit() or not 0 < int(key) < 100:
+                raise serializers.ValidationError("Template slots are numbered 1 to 99.", code="invalid_slot")
+        return {str(int(key)): " ".join(text.split()) for key, text in value.items()}
+
+
+class BlastInput(StrictSerializer):
+    """A blast draft. On ``PATCH`` every key is optional and only sent keys change."""
+
+    purpose = serializers.ChoiceField(choices=Blast.Purpose.values, required=False)
+    event_id = serializers.UUIDField(allow_null=True, required=False)
+    quick_segment = serializers.ChoiceField(
+        choices=BLAST_QUICK_SEGMENTS, allow_null=True, allow_blank=True, required=False
+    )
+    segment_id = serializers.UUIDField(allow_null=True, required=False)
+    channels = _channel_list(required=False)
+    sms_only_without_whatsapp = serializers.BooleanField(required=False)
+    email = BlastEmailInput(required=False)
+    sms = BlastSmsInput(required=False)
+    whatsapp = BlastWhatsAppInput(required=False)
+
+    def validate_channels(self, value):
+        return list(dict.fromkeys(value))
+
+    def validate(self, attrs):
+        if attrs.get("quick_segment") and attrs.get("segment_id"):
+            raise serializers.ValidationError(
+                {"segment_id": [ErrorDetail("Choose a quick segment or a saved segment.", code="audience_conflict")]}
+            )
+        return attrs
+
+
+class BlastSendInput(StrictSerializer):
+    confirm = serializers.DictField(child=serializers.IntegerField(min_value=0))
+    idempotency_key = serializers.CharField(max_length=64)
+
+    def validate_confirm(self, value):
+        if any(key not in Channel.values for key in value):
+            raise serializers.ValidationError("Confirm counts per channel.", code="invalid_channel")
+        return value
+
+
+class BlastTestInput(StrictSerializer):
+    channels = _channel_list(min_length=1)
+
+
+def blast_list_filters(params) -> dict:
+    status = params.get("status") or ""
+    if status and status not in Blast.Status.values:
+        raise CrmError("invalid_filter", field="status")
+    channel = params.get("channel") or ""
+    if channel and channel not in Channel.values:
+        raise CrmError("invalid_filter", field="channel")
+    event_id = params.get("event_id") or ""
+    return {
+        "status": status,
+        "channel": channel,
+        "event_id": parse_uuid(event_id, "event_id") if event_id else "",
+    }
+
+
+def delivery_filters(params) -> dict:
+    channel = params.get("channel") or ""
+    if channel and channel not in Channel.values:
+        raise CrmError("invalid_filter", field="channel")
+    status = params.get("status") or ""
+    if status and status not in BlastDeliveryStatus.values:
+        raise CrmError("invalid_filter", field="status")
+    return {"channel": channel, "status": status}
 
 
 def contact_list_filters(params) -> dict:
@@ -467,6 +571,111 @@ def blast_summary(blast, stats: Optional[dict] = None) -> dict:
         ),
         "queued_at": iso(blast.queued_at),
         "sent_at": iso(blast.sent_at),
+    }
+
+
+def blast_progress(blast, rows: dict) -> dict:
+    """Per channel ``sent`` of ``to_send``; a running email campaign uses listmonk's counts."""
+
+    progress = {}
+    for channel in blast.channels or []:
+        if channel not in Channel.values:
+            continue
+        row = rows.get(channel) or {}
+        sent, pending = row.get("sent") or 0, row.get("pending") or 0
+        progress[channel] = {"sent": sent, "to_send": sent + pending}
+    email = (blast.stats or {}).get("email") if isinstance(blast.stats, dict) else None
+    if (
+        "email" in progress
+        and isinstance(email, dict)
+        and email.get("listmonk_status") == "running"
+        and isinstance(email.get("sent"), int)
+        and isinstance(email.get("to_send"), int)
+    ):
+        progress["email"] = {"sent": email["sent"], "to_send": email["to_send"]}
+    return progress
+
+
+def blast_detail(blast, stats: Optional[dict] = None) -> dict:
+    stats = stats or {"channels": {}, "replies": 0}
+    return {
+        **blast_summary(blast, stats),
+        "sms_only_without_whatsapp": blast.sms_only_without_whatsapp,
+        "email": {
+            "mailbox_id": str(blast.mailbox_id) if blast.mailbox_id else None,
+            "subject": blast.subject,
+            "body_markdown": blast.body_markdown,
+        },
+        "sms": {"body": blast.sms_body},
+        "whatsapp": {
+            "template_id": str(blast.whatsapp_template_id) if blast.whatsapp_template_id else None,
+            "variables": dict(blast.whatsapp_variables or {}),
+        },
+        "quick_segment": blast.quick_segment or None,
+        "segment_id": str(blast.segment_id) if blast.segment_id else None,
+        "segment_definition": blast.segment_definition or None,
+        "progress": blast_progress(blast, stats["channels"]),
+        "last_error": blast.last_error or None,
+        "created_at": iso(blast.created_at),
+        "updated_at": iso(blast.updated_at),
+    }
+
+
+def delivery_row(delivery) -> dict:
+    return {
+        "contact_id": str(delivery.contact_id),
+        "display_name": _display_name(delivery.contact),
+        "channel": delivery.channel,
+        "address": mask_address(delivery.channel, delivery.address),
+        "status": delivery.status,
+        "error_code": delivery.error_code or None,
+        "first_opened_at": iso(delivery.first_opened_at),
+        "first_clicked_at": iso(delivery.first_clicked_at),
+        "updated_at": iso(delivery.updated_at),
+    }
+
+
+def reply_row(message) -> dict:
+    contact = message.contact if message.contact_id else None
+    return {
+        "contact_id": str(message.contact_id) if message.contact_id else None,
+        "display_name": _display_name(contact) if contact else "",
+        "channel": message.channel,
+        "body": message.body,
+        "received_at": iso(message.received_at),
+    }
+
+
+def mailbox_dto(mailbox, sent_last_24h: int) -> dict:
+    return {
+        "id": str(mailbox.pk),
+        "email": mailbox.email,
+        "display_name": mailbox.display_name,
+        "route": mailbox.route,
+        "reply_to": mailbox.reply_to,
+        "daily_limit": mailbox.daily_limit,
+        "sent_last_24h": sent_last_24h,
+        "remaining_today": max(0, mailbox.daily_limit - sent_last_24h),
+        "enabled": mailbox.enabled,
+    }
+
+
+def template_dto(template) -> dict:
+    return {
+        "id": str(template.pk),
+        "name": template.name,
+        "category": template.category,
+        "body": template.body,
+        "variables": [
+            {
+                "index": slot.get("index"),
+                "source": slot.get("source") or "custom",
+                "label": slot.get("label") or "",
+            }
+            for slot in template.variables or []
+            if isinstance(slot, dict)
+        ],
+        "approved": template.approved,
     }
 
 

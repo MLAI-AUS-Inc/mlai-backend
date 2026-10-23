@@ -1,4 +1,4 @@
-"""Contacts API for Chat owners and admins; thin views over ``crm``.
+"""Contacts and blasts API for Chat owners and admins; thin views over ``crm``.
 
 Every endpoint except ``access/`` answers 404 ``crm_disabled`` while
 ``COMMUNITY_CHAT_CRM_ENABLED`` is off and 403 ``not_authorised`` to anyone who
@@ -21,6 +21,7 @@ from community_chat.authentication import CommunityChatAccountAuthentication
 from community_chat.throttles import CommunityChatScopedThrottle
 from crm import queries
 from crm.access import channel_availability, crm_access, crm_enabled, is_crm_admin
+from crm.blasts import BlastError, blast_audience, cancel_blast, queue_blast, send_tests
 from crm.contact_import import (
     TARGETS,
     ImportChunkError,
@@ -30,7 +31,18 @@ from crm.contact_import import (
     plan_columns,
     start_upload_import,
 )
-from crm.models import Blast, Contact, ContactImport, CrmEvent, Segment
+from crm.listmonk import ListmonkError
+from crm.merge_tags import UnsupportedMergeTag
+from crm.models import (
+    Blast,
+    Channel,
+    Contact,
+    ContactImport,
+    CrmEvent,
+    MessageTemplate,
+    Segment,
+    SenderMailbox,
+)
 from crm.segments import (
     SegmentError,
     catalog,
@@ -45,6 +57,7 @@ from .errors import CrmError
 from .services import (
     create_contact,
     delete_segment,
+    save_blast_draft,
     save_segment,
     stop_messaging,
     update_contact,
@@ -110,8 +123,14 @@ class CrmView(APIView):
             raise CrmError("not_authorised", 403)
 
     def handle_exception(self, exc):
-        if isinstance(exc, CrmError):
+        if isinstance(exc, (CrmError, BlastError)):
             return Response(error_body(exc.code, **exc.extra), status=exc.status)
+        if isinstance(exc, UnsupportedMergeTag):
+            return Response(error_body(exc.code, tags=list(exc.tags)), status=exc.status)
+        if isinstance(exc, ListmonkError):
+            if exc.transient or exc.credentials_rejected:
+                return Response(error_body("listmonk_unavailable", detail=exc.code), status=503)
+            return Response(error_body("listmonk_rejected", detail=exc.code), status=502)
         if isinstance(exc, SegmentError):
             extra = {"pointer": exc.pointer, "reason": exc.reason} if exc.pointer else {}
             return Response(error_body(exc.code, **extra), status=400)
@@ -154,6 +173,14 @@ def event_summaries(events, *, now):
 def blast_summaries(blasts):
     stats = queries.blast_stats(blasts)
     return [wire.blast_summary(blast, stats.get(blast.pk)) for blast in blasts]
+
+
+BLAST_RELATIONS = ("event", "segment", "created_by", "whatsapp_template", "mailbox")
+
+
+def blast_detail(blast_id):
+    blast = get_object_or_404(Blast.objects.select_related(*BLAST_RELATIONS), pk=blast_id)
+    return wire.blast_detail(blast, queries.blast_stats([blast]).get(blast.pk))
 
 
 def contact_detail(contact_id, now):
@@ -407,5 +434,101 @@ class SegmentCatalogView(CrmView):
                 tags=queries.tag_counts(),
                 attributes=queries.attribute_key_counts(),
                 questions=queries.registration_question_counts(),
+            )
+        )
+
+
+class MailboxesView(CrmView):
+    def get(self, request):
+        mailboxes = list(SenderMailbox.objects.order_by("display_name", "email", "pk"))
+        sent = queries.mailbox_sent_last_24h([mailbox.pk for mailbox in mailboxes], timezone.now())
+        return Response(
+            {"results": [wire.mailbox_dto(mailbox, sent.get(mailbox.pk, 0)) for mailbox in mailboxes]}
+        )
+
+
+class WhatsAppTemplatesView(CrmView):
+    """Approved, enabled templates only: WhatsApp allows no business-started free text."""
+
+    def get(self, request):
+        templates = MessageTemplate.objects.filter(
+            channel=Channel.WHATSAPP, approved=True, enabled=True
+        ).order_by("name", "pk")
+        return Response({"results": [wire.template_dto(template) for template in templates]})
+
+
+class BlastsView(CrmView):
+    def get(self, request, blast_id=None):
+        if blast_id is not None:
+            return Response(blast_detail(blast_id))
+        blasts = queries.blasts_queryset(**wire.blast_list_filters(request.query_params))
+        return Response(paginated(request, blasts, blast_summaries))
+
+    def post(self, request):
+        data = validated(wire.BlastInput, request)
+        blast = save_blast_draft(None, data, actor=request.user, now=timezone.now())
+        return Response(blast_detail(blast.pk), status=201)
+
+    def patch(self, request, blast_id):
+        blast = get_object_or_404(Blast.objects.select_related("event", "segment"), pk=blast_id)
+        data = validated(wire.BlastInput, request, partial=True)
+        save_blast_draft(blast, data, actor=request.user, now=timezone.now())
+        return Response(blast_detail(blast_id))
+
+
+class BlastAudienceView(CrmView):
+    def post(self, request, blast_id):
+        blast = get_object_or_404(
+            Blast.objects.select_related("event", "mailbox", "segment"), pk=blast_id
+        )
+        return Response(blast_audience(blast))
+
+
+class BlastTestView(CrmView):
+    def post(self, request, blast_id):
+        data = validated(wire.BlastTestInput, request)
+        return Response(send_tests(blast_id, data["channels"], user=request.user))
+
+
+class BlastSendView(CrmView):
+    def post(self, request, blast_id):
+        data = validated(wire.BlastSendInput, request)
+        blast = queue_blast(
+            blast_id,
+            confirm=data["confirm"],
+            idempotency_key=data["idempotency_key"],
+            actor=request.user,
+        )
+        return Response(blast_detail(blast.pk), status=202)
+
+
+class BlastCancelView(CrmView):
+    def post(self, request, blast_id):
+        cancel_blast(blast_id, actor=request.user)
+        return Response(blast_detail(blast_id))
+
+
+class BlastDeliveriesView(CrmView):
+    def get(self, request, blast_id):
+        blast = get_object_or_404(Blast, pk=blast_id)
+        deliveries = queries.blast_deliveries(blast, **wire.delivery_filters(request.query_params))
+        return Response(
+            paginated(
+                request,
+                deliveries,
+                lambda page: [wire.delivery_row(delivery) for delivery in page],
+                with_count=True,
+            )
+        )
+
+
+class BlastRepliesView(CrmView):
+    def get(self, request, blast_id):
+        blast = get_object_or_404(Blast, pk=blast_id)
+        return Response(
+            paginated(
+                request,
+                queries.blast_replies(blast),
+                lambda page: [wire.reply_row(message) for message in page],
             )
         )

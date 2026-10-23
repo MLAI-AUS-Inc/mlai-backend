@@ -1,8 +1,8 @@
 """Who may use the contacts API, and which blast channels are switched on.
 
 Access needs the Chat owner or admin role on a verified device installation
-and ``COMMUNITY_CHAT_CRM_ENABLED``. Channel settings are read with defaults
-because the sending phases add them later.
+and ``COMMUNITY_CHAT_CRM_ENABLED``. Email needs ``CRM_SENDING_ENABLED`` and a
+listmonk API user; SMS and WhatsApp need their flags and Twilio credentials.
 """
 
 from __future__ import annotations
@@ -11,7 +11,7 @@ from django.conf import settings
 
 from community_chat.permissions import account_chat_role, is_chat_admin
 
-EMAIL_CREDENTIALS = ("LISTMONK_BASE_URL",)
+EMAIL_CREDENTIALS = ("LISTMONK_BASE_URL", "LISTMONK_API_USER", "LISTMONK_API_TOKEN")
 TWILIO_CREDENTIALS = ("TWILIO_ACCOUNT_SID", "TWILIO_AUTH_TOKEN")
 SMS_CREDENTIALS = (*TWILIO_CREDENTIALS, "TWILIO_MESSAGING_SERVICE_SID")
 WHATSAPP_CREDENTIALS = (*TWILIO_CREDENTIALS, "TWILIO_WHATSAPP_FROM")

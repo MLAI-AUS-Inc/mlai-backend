@@ -1,4 +1,4 @@
-"""Contact edits, opt-outs and saved segments; every write leaves a ``CrmAuditEvent``.
+"""Contact edits, opt-outs, saved segments and blast drafts; every write leaves a ``CrmAuditEvent``.
 
 Audit rows name the changed fields, never their values.
 """
@@ -12,8 +12,19 @@ from django.db import IntegrityError, transaction
 from django.db.models.functions import Lower
 
 from core.models import AccountBan
+from crm.blasts import check_channel_rules
 from crm.luma_sync import users_by_email
-from crm.models import Channel, Contact, ContactConsentEvent, CrmAuditEvent, Segment
+from crm.models import (
+    Blast,
+    Channel,
+    Contact,
+    ContactConsentEvent,
+    CrmAuditEvent,
+    CrmEvent,
+    MessageTemplate,
+    Segment,
+    SenderMailbox,
+)
 from crm.phones import NO_PHONE, normalize_contact_phone, sms_status_for
 from crm.segments import SegmentError, evaluate, validate_definition
 
@@ -231,3 +242,85 @@ def delete_segment(segment: Segment, *, actor) -> None:
     with transaction.atomic():
         segment.delete()
         audit(actor, CrmAuditEvent.Action.EDIT, "segment", segment_id, {"operation": "delete"})
+
+
+def _found(model, pk, code: str, **filters):
+    found = model.objects.filter(pk=pk, **filters).first()
+    if found is None:
+        raise CrmError(code, 404)
+    return found
+
+
+def _set_audience(blast: Blast, data: dict) -> None:
+    if data.get("quick_segment"):
+        blast.quick_segment = data["quick_segment"]
+        blast.segment = None
+        blast.segment_definition = {}
+    elif "quick_segment" in data:
+        blast.quick_segment = ""
+    if data.get("segment_id"):
+        segment = _found(Segment, data["segment_id"], "segment_not_found")
+        blast.segment = segment
+        blast.segment_definition = validate_definition(segment.definition)
+        blast.quick_segment = ""
+    elif "segment_id" in data and not blast.quick_segment:
+        blast.segment = None
+        blast.segment_definition = {}
+
+
+def save_blast_draft(blast: Optional[Blast], data: dict, *, actor, now: datetime) -> Blast:
+    """Create a draft, or change one; only drafts can change."""
+
+    creating = blast is None
+    if creating:
+        if "purpose" not in data:
+            raise CrmError("invalid_request", fields={"purpose": ["required"]})
+        blast = Blast(created_by=actor)
+    elif blast.status != Blast.Status.DRAFT:
+        raise CrmError("blast_not_draft", 409, status=blast.status)
+    if "purpose" in data:
+        blast.purpose = data["purpose"]
+    if "event_id" in data:
+        blast.event = (
+            None if data["event_id"] is None else _found(CrmEvent, data["event_id"], "event_not_found")
+        )
+    _set_audience(blast, data)
+    if "channels" in data:
+        blast.channels = data["channels"]
+    if "sms_only_without_whatsapp" in data:
+        blast.sms_only_without_whatsapp = data["sms_only_without_whatsapp"]
+    email = data.get("email") or {}
+    if "mailbox_id" in email:
+        blast.mailbox = (
+            None
+            if email["mailbox_id"] is None
+            else _found(SenderMailbox, email["mailbox_id"], "mailbox_not_found")
+        )
+    if "subject" in email:
+        blast.subject = " ".join(email["subject"].split())
+    if "body_markdown" in email:
+        blast.body_markdown = email["body_markdown"]
+    if "body" in (data.get("sms") or {}):
+        blast.sms_body = data["sms"]["body"].strip()
+    whatsapp = data.get("whatsapp") or {}
+    if "template_id" in whatsapp:
+        blast.whatsapp_template = (
+            None
+            if whatsapp["template_id"] is None
+            else _found(
+                MessageTemplate, whatsapp["template_id"], "template_not_found", channel=Channel.WHATSAPP
+            )
+        )
+    if "variables" in whatsapp:
+        blast.whatsapp_variables = whatsapp["variables"]
+    check_channel_rules(blast)
+    with transaction.atomic():
+        blast.save()
+        audit(
+            actor,
+            CrmAuditEvent.Action.EDIT,
+            "blast",
+            blast.pk,
+            {"operation": "create" if creating else "update", "fields": sorted(data)},
+        )
+    return blast

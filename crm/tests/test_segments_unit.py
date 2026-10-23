@@ -6,7 +6,7 @@ from datetime import datetime, timezone
 from django.db.models import Exists, Q
 from django.test import SimpleTestCase
 
-from crm.models import CrmEvent
+from crm.models import BlastDelivery, CrmEvent
 from crm.segments import (
     ANSWER_SCAN_LIMIT,
     MAX_RULES,
@@ -212,12 +212,22 @@ class ExpressionTests(SimpleTestCase):
         ]
         self.assertEqual(len(label_checks), ANSWER_SCAN_LIMIT)
 
-    def test_blast_engagement_validates_but_is_not_available_yet(self):
-        rule = {"type": "blast_engagement", "blast_id": EVENT_ID, "action": "opened"}
-        with self.assertRaises(SegmentError) as caught:
-            self.build({"type": "chat_member", "value": True}, rule)
-        self.assertEqual(caught.exception.code, "rule_not_available")
-        self.assertEqual(caught.exception.pointer, "/rules/1")
+    def engagement_fields(self, action):
+        rule = {"type": "blast_engagement", "blast_id": EVENT_ID, "action": action}
+        [exists] = [child for child in flatten(self.build(rule)) if isinstance(child, Exists)]
+        self.assertIs(exists.query.model, BlastDelivery)
+        return {
+            leaf.lhs.target.name
+            for leaf in leaves(exists.query.where)
+            if getattr(getattr(leaf, "lhs", None), "target", None) is not None
+        }
+
+    def test_blast_engagement_reads_the_blast_deliveries(self):
+        clicked = self.engagement_fields("clicked")
+        self.assertIn("first_clicked_at", clicked)
+        self.assertNotIn("first_opened_at", clicked)
+        # A click means the email was opened, even with its tracking pixel blocked.
+        self.assertTrue({"first_opened_at", "first_clicked_at"} <= self.engagement_fields("opened"))
 
     def test_purpose_rules_are_checked_before_any_query(self):
         with self.assertRaises(SegmentError) as caught:
@@ -239,7 +249,7 @@ class CatalogTests(SimpleTestCase):
             questions=[{"label": "What do you do?", "count": 5}],
         )
         availability = {item["type"]: item["available"] for item in body["rule_types"]}
-        self.assertFalse(availability.pop("blast_engagement"))
+        self.assertTrue(availability.pop("blast_engagement"))
         self.assertTrue(all(availability.values()))
         self.assertIn({"field": "city", "label": "City"}, body["fields"])
         self.assertEqual(body["tags"], [{"tag": "founder", "count": 3}])

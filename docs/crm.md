@@ -2,9 +2,9 @@
 
 Phase 1 of the contacts, segments and event-email plan
 (`mlai-chat/docs/mlai/CONTACTS_EVENTS_EMAIL_PLAN_2026-10-23.md`). It stores
-MLAI's Luma guests and imported opt-ins as contacts, and serves them to Chat
-admins through the contacts API below. Sending and the listmonk integration
-arrive in later phases.
+MLAI's Luma guests and imported opt-ins as contacts, serves them to Chat
+admins through the contacts API below, and sends blasts by email (through a
+self-hosted listmonk), SMS and WhatsApp.
 
 ## What is stored
 
@@ -16,7 +16,7 @@ arrive in later phases.
 | `ContactConsentEvent` | Append-only evidence for consent and deliverability changes, per channel (email, SMS, WhatsApp) |
 | `ContactImport` | One row per CSV import with counts and an error sample (row numbers and reasons only; no row data) |
 | `CrmAuditEvent` | Append-only record of syncs, imports, edits, opt-outs and, later, sends |
-| `Segment`, `SenderMailbox`, `MessageTemplate`, `Blast`, `BlastDelivery`, `InboundMessage` | Saved audiences, From addresses, approved WhatsApp templates, multi-channel blasts (email, SMS, WhatsApp), one delivery row per person per channel, and replies to MLAI's number. Created now so the schema needs one migration approval; unused until the blast phases |
+| `Segment`, `SenderMailbox`, `MessageTemplate`, `Blast`, `BlastDelivery`, `InboundMessage` | Saved audiences, From addresses with daily caps, approved WhatsApp templates, multi-channel blasts (email, SMS, WhatsApp), one delivery row per person per channel (with opens and clicks for email), and replies to MLAI's number |
 
 Rules that hold everywhere:
 
@@ -122,6 +122,15 @@ access rules are in `crm/queries.py`, `crm/segments.py` and `crm/access.py`.
 | `GET`, `POST segments/`; `GET`, `PATCH`, `DELETE segments/{id}/` | Saved segments |
 | `POST segments/preview/` | Count, a sample of 20 and exclusion counts for a definition |
 | `GET segments/catalog/` | Rule types, fields, attribute keys, registration questions and tags for the builder |
+| `GET mailboxes/` | From addresses with their daily cap, `sent_last_24h` and `remaining_today` |
+| `GET whatsapp-templates/` | Approved, enabled WhatsApp templates and their slot mapping |
+| `GET`, `POST blasts/`; `GET`, `PATCH blasts/{id}/` | Blasts (filters `status`, `event_id`, `channel`); create and edit drafts |
+| `POST blasts/{id}/audience/` | People and reach per channel, exclusions, SMS segments and cost, caps |
+| `POST blasts/{id}/test/` | Send the draft to the caller's own email and `User.phone` |
+| `POST blasts/{id}/send/` | Queue it (`confirm` counts and `idempotency_key`) |
+| `POST blasts/{id}/cancel/` | Cancel a draft, queued or sending blast |
+| `GET blasts/{id}/deliveries/?channel=&status=` | One row per person per channel, addresses masked |
+| `GET blasts/{id}/replies/` | Replies linked to the blast |
 
 **Contacts**
 
@@ -159,14 +168,14 @@ access rules are in `crm/queries.py`, `crm/segments.py` and `crm/access.py`.
 **Segments** (`crm/segments.py`)
 
 - **Validation:** `validate_definition` is pure and returns the canonical definition, or 400 `invalid_definition` with a JSON pointer and a reason.
-- **Rules:** every v1 rule type in the UI plan. `blast_engagement` validates and can be saved (with `last_count` null), but evaluating it answers 400 `rule_not_available` until engagement data exists (step B5).
+- **Rules:** every v1 rule type in the UI plan. `blast_engagement` matches people whose delivery of that blast was opened (a click counts as an open) or clicked, from the listmonk sync below.
 - **Evaluation:** `evaluate(definition, purpose, event)` uses ORM `Q` and `Exists` expressions only and returns `(queryset, excluded)`. Suppression applies after the rules: banned, then unsubscribed (or marked as spam), then bounced. Then the purpose rule: `marketing` needs the consent rule, and `event_update` needs a registration for the event. Each excluded person is counted once, under the first reason that applies.
 - **Answers:** registration-answer rules check the first 30 answers of each registration.
 - **`last_count`:** the email audience with no purpose, recounted whenever the definition changes.
 
 **Audit**
 
-- **Writes:** every write leaves a `CrmAuditEvent`. Contact create and edit, and segment create, update and delete, are `edit` rows that name the changed fields, never their values. Opt-outs are `opt_out`; uploads are `import`.
+- **Writes:** every write leaves a `CrmAuditEvent`. Contact create and edit, segment create, update and delete, and blast draft create and edit, are `edit` rows that name the changed fields, never their values. Opt-outs are `opt_out`; uploads are `import`. Queueing, test sends and cancels are `send` rows with the counts per channel, never addresses.
 - **Reads:** reads are not audited yet. `CrmAuditEvent.Action` has no read action, and adding one needs a migration.
 
 ## Blasts by SMS and WhatsApp
@@ -221,18 +230,85 @@ Both endpoints check `X-Twilio-Signature` against the URL rebuilt from `DEFAULT_
 
 Tests: `crm.tests.test_messaging_unit` runs without a database; `crm.tests.test_messaging_database` runs in the CI PostgreSQL job.
 
+## Blasts and listmonk
+
+Steps B4 and B5 of `mlai-chat/docs/mlai/CONTACTS_UI_PLAN_2026-10-23.md`. Domain logic is in `crm/blasts.py` (audiences, queueing, dispatch, cancel, tests), `crm/blast_email.py` (the listmonk bridge) and `crm/listmonk_sync.py` (feedback); the client is `crm/listmonk.py`.
+
+### Settings
+
+| Setting | Purpose |
+| --- | --- |
+| `CRM_SENDING_ENABLED` | Email kill switch (default off). The dispatcher also runs while SMS or WhatsApp is on |
+| `LISTMONK_BASE_URL` | listmonk on the `mlai-shared` network, e.g. `http://listmonk:9000`. Never hard-coded |
+| `LISTMONK_API_USER`, `LISTMONK_API_TOKEN` | The listmonk API user, sent as HTTP Basic auth. Email is `not_configured` without all three |
+| `LISTMONK_TEMPLATE_ID` | The MLAI campaign template's id; blank uses listmonk's default |
+| `CRM_BLAST_DISPATCH_INTERVAL_SECONDS` | Dispatcher pass interval (default 60) |
+| `CRM_LISTMONK_SYNC_INTERVAL_SECONDS` | Feedback sync interval (default 300) |
+
+### listmonk setup (operator)
+
+- **Version and network:** v6.2.x, pinned by digest. listmonk joins the `mlai-shared` network as `listmonk`; mlai-backend's API container (test sends) and scheduler container (both runners) must be on that network too.
+- **API user** for mlai-backend with permissions to manage lists, subscribers and campaigns, send test campaigns, and run **SQL subscriber queries** (`subscribers:sql_query`). The feedback sync filters subscribers with SQL expressions; without that permission the sync fails, which stops the shared scheduler until it is fixed.
+- **Template:** one MLAI-branded campaign template (`LISTMONK_TEMPLATE_ID`) with the sender identity and listmonk's unsubscribe link in the footer.
+- **SMTP:** one SMTP server per sending domain, tagged with that domain (v6.2 per-domain routing). The campaign's From address picks the server, so never add two servers for one domain. Google Workspace domains use `smtp-relay.gmail.com`; bulk sends use Resend or SES on a dedicated subdomain.
+- **Privacy settings:** individual subscriber tracking on (per-person opens and clicks), `List-Unsubscribe` header with one-click unsubscribe, blocklisting allowed.
+- **Bounces:** bounce processing on, with the action "blocklist" for hard bounces.
+- **Mailboxes:** add a `SenderMailbox` in Django admin for each From address (`daily_limit`, `reply_to`, `enabled`). Its domain must have an SMTP server in listmonk.
+
+### Composing and sending
+
+- **Drafts:** `POST blasts/` takes `purpose`, `event_id`, `quick_segment` (`going`, `checked_in`, `no_show`, `waitlist`) or `segment_id`, `channels`, `sms_only_without_whatsapp`, and the `email`, `sms` and `whatsapp` parts. SMS and WhatsApp need an `event_update` blast with an event (400 `channel_not_allowed`). Merge tags are checked on every save (400 `unsupported_merge_tag` with `field`; event tags without an event are 400 `merge_tag_needs_event`). A draft follows its saved segment until it is queued.
+- **Audience:** email follows the segment's suppression and purpose rules (`segments.evaluate`). SMS and WhatsApp count people registered for the event: SMS needs an active mobile on an allowed prefix, WhatsApp needs opt-in and a number. With `sms_only_without_whatsapp`, anyone WhatsApp reaches gets no SMS (`covered_by_whatsapp`). Each excluded person is counted once, under the first reason. SMS segments and cost are counted with merge tags rendered for each recipient.
+- **Caps:** email allows a mailbox's `daily_limit` minus its email deliveries in the last 24 hours (rows still waiting on a live blast count). SMS and WhatsApp use `CRM_SMS_DAILY_LIMIT` / `CRM_WHATSAPP_DAILY_LIMIT`.
+- **`send/`** checks, in order: the blast is a draft (409 `blast_not_draft`); every channel is available (403 `channel_disabled` with `channel` and `reason`); the draft is complete (400, e.g. `mailbox_required`, `subject_required`, `sms_body_required`, `template_variable_missing`, `audience_required`); the counts equal `confirm` (409 `count_changed` with the fresh `audience/` body); and the caps (409 `daily_limit` with `limits`). It then snapshots one `BlastDelivery` per person per channel (lowercase email or E.164, with the consent basis: `event_registration`, `explicit` or `inferred_attendance`), sets `queued`, and writes a `send` audit row. The same `idempotency_key` returns the same blast; a key used by another blast is 409 `idempotency_key_reused`.
+- **`test/`** sends only to the caller: email through listmonk's campaign test endpoint (the draft's list and campaign are created once and reused), SMS and WhatsApp through Twilio to the caller's `User.phone`. An unavailable channel answers 409 `channel_disabled`; no phone is 400 `test_phone_missing`.
+- **`cancel/`** works on drafts, queued and sending blasts. Twilio stops between two messages. A running listmonk campaign is cancelled; its rows become `unknown`, since some may have gone. If listmonk can't be reached the blast is still cancelled and the sync retries the listmonk cancel (`last_error=listmonk_cancel_pending`).
+
+### Runner `crm_blast_dispatch`
+
+Cache-throttled to `CRM_BLAST_DISPATCH_INTERVAL_SECONDS`; off unless `CRM_SENDING_ENABLED`, `CRM_SMS_ENABLED` or `CRM_WHATSAPP_ENABLED` is on. Each pass claims up to 10 queued or sending blasts with `select_for_update(skip_locked=True)` and, for each:
+
+1. **Email:**
+   1. Finds or creates the list `crm-blast-<id>` and stores its id, with the blast row locked.
+   2. Loads up to 500 recipients per pass (at most 45 seconds), in batches of 100: subscribers are looked up by `Contact.listmonk_subscriber_id` or email, created when missing, and added to the list. Consent is re-read first, so an opt-out since queueing wins; people blocklisted or unsubscribed in listmonk are dropped too (`unsubscribed` with an error code).
+   3. Once everyone is loaded, finds or creates the campaign (`crm-blast-<id>`, Markdown, `From: Display <mailbox>`, `Reply-To` from the mailbox, tags `crm` and `blast:<id>`), stores its id, then sets it `running`.
+   - List and campaign are always looked up by name before one is created, so a retry never makes a second.
+   - Rows move `queued` → `submitting` (on the list) → `sent` when listmonk reports the campaign finished.
+2. **SMS and WhatsApp:** `messaging.deliver_twilio_deliveries`, outside any transaction, sharing `CRM_TWILIO_SENDS_PER_TICK` across the pass.
+3. **Status:** `sending` while anything is queued or in flight; then `sent`, `partially_sent` (one channel finished, another failed or was blocked by a disabled or unconfigured channel; rows stay `queued`) or `failed`. A disabled channel never sends an old blast later.
+
+**Email content:** `{{ first_name }}` and `{{ display_name }}` become `{{ .Subscriber.FirstName }}` and `{{ .Subscriber.Name }}`; event tags are filled in server-side. Every other `{` is escaped (`&#123;` in Markdown, `{{ "{" }}` in the subject), so nothing in a body or an event name can run a template expression. Links written as `[text](https://…)` get `@TrackLink` for per-person click tracking.
+
+**Outcomes:** a listmonk outage leaves rows queued and the runner `deferred`; listmonk refusing a blast (4xx) fails that blast's email rows; listmonk refusing the API credentials is the only `failed` (it stops the shared scheduler). One blast's unexpected error is logged and the pass goes on (`partial`).
+
+### Runner `crm_listmonk_sync`
+
+Runs whenever listmonk is configured, cache-throttled to `CRM_LISTMONK_SYNC_INTERVAL_SECONDS`. listmonk has no webhooks, so it polls:
+
+- **Campaigns** of live blasts and of blasts queued or sent in the last 30 days: status and counts into `Blast.stats["email"]`; `finished` marks email rows `sent`.
+- **Engagement**, for 30 days after a campaign starts: opens into `first_opened_at`, clicks into `first_clicked_at` and the tracked link into `clicked_urls`, hard and soft bounces into `bounced`, and unsubscribes from that blast's list into `unsubscribed`. Times are when the sync first saw the event, so they are accurate to the interval.
+- **Opt-outs since the last pass:** blocklisted subscribers become `complained` (a complaint), `bounced` (a bounce) or `unsubscribed`; unsubscribes from any `crm-blast-*` list become `unsubscribed`. Each change writes an email `ContactConsentEvent` (source `listmonk:…`); unsubscribes and complaints also withdraw marketing consent; a bounce does not. A stronger status is never weakened.
+- **Global blocklist:** unsubscribes are then blocklisted in listmonk, so unsubscribing means every list. Contacts opted out in MLAI Chat are blocklisted too.
+- **Cursor:** the last pass time, kept in the cache and in a `sync` audit row (`target_type=listmonk`) whenever something changed. Each pass re-reads five minutes before it.
+
+Outcomes: an outage is `deferred`; listmonk refusing the credentials or the SQL-query permission is `failed`; a blast whose campaign listmonk no longer has is skipped (`partial`).
+
+Tests: `crm.tests.test_blasts_unit` and `crm.tests.test_listmonk_unit` run without a database; `crm.tests.test_blasts_database` runs in the CI PostgreSQL job against a fake listmonk and Twilio.
+
 ## Migration
 
 `crm.0001_initial` is additive. It creates the twelve tables above and touches no existing table. Like every migration it needs explicit approval and the `APPROVED_MIGRATION_PLAN_SHA256` cycle before deployment (see `README.md`). Tests:
 
-- `crm.tests.test_luma_guests_unit`, `crm.tests.test_contact_import_unit`, `crm.tests.test_phones_unit`, `crm.tests.test_api_unit` and `crm.tests.test_segments_unit` run without a database.
-- `crm.tests.test_contact_store_database`, `crm.tests.test_api_database` and `crm.tests.test_segments_database` run in the CI PostgreSQL job.
+- `crm.tests.test_luma_guests_unit`, `crm.tests.test_contact_import_unit`, `crm.tests.test_phones_unit`, `crm.tests.test_api_unit`, `crm.tests.test_segments_unit`, `crm.tests.test_messaging_unit`, `crm.tests.test_blasts_unit` and `crm.tests.test_listmonk_unit` run without a database.
+- `crm.tests.test_contact_store_database`, `crm.tests.test_api_database`, `crm.tests.test_segments_database`, `crm.tests.test_messaging_database` and `crm.tests.test_blasts_database` run in the CI PostgreSQL job.
+
+Blasts and listmonk need no schema change: they use the tables in `crm.0001_initial`.
 
 ## Ownership
 
 | | |
 | --- | --- |
 | Owning package | `crm` |
-| Entry points | the scheduler runner, the two management commands, and the contacts API under `/api/v1/community-chat/crm/` |
+| Entry points | the scheduler runners (`crm_luma_guest_sync`, `crm_blast_dispatch`, `crm_listmonk_sync`), the management commands, the contacts API under `/api/v1/community-chat/crm/`, and the Twilio webhooks under `/api/v1/crm/webhooks/` |
 | Personal data | names, emails, phone numbers, employers and registration answers |
 | Retention | retention undecided |

@@ -55,4 +55,42 @@ urlpatterns = [
         views.SegmentsView.as_view(),
         name="community_chat_crm_segment",
     ),
+    path("mailboxes/", views.MailboxesView.as_view(), name="community_chat_crm_mailboxes"),
+    path(
+        "whatsapp-templates/",
+        views.WhatsAppTemplatesView.as_view(),
+        name="community_chat_crm_whatsapp_templates",
+    ),
+    path("blasts/", views.BlastsView.as_view(), name="community_chat_crm_blasts"),
+    path("blasts/<uuid:blast_id>/", views.BlastsView.as_view(), name="community_chat_crm_blast"),
+    path(
+        "blasts/<uuid:blast_id>/audience/",
+        views.BlastAudienceView.as_view(),
+        name="community_chat_crm_blast_audience",
+    ),
+    path(
+        "blasts/<uuid:blast_id>/test/",
+        views.BlastTestView.as_view(),
+        name="community_chat_crm_blast_test",
+    ),
+    path(
+        "blasts/<uuid:blast_id>/send/",
+        views.BlastSendView.as_view(),
+        name="community_chat_crm_blast_send",
+    ),
+    path(
+        "blasts/<uuid:blast_id>/cancel/",
+        views.BlastCancelView.as_view(),
+        name="community_chat_crm_blast_cancel",
+    ),
+    path(
+        "blasts/<uuid:blast_id>/deliveries/",
+        views.BlastDeliveriesView.as_view(),
+        name="community_chat_crm_blast_deliveries",
+    ),
+    path(
+        "blasts/<uuid:blast_id>/replies/",
+        views.BlastRepliesView.as_view(),
+        name="community_chat_crm_blast_replies",
+    ),
 ]

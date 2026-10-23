@@ -35,6 +35,7 @@ from .luma_guests import APPROVED, WAITLIST
 from .models import (
     Blast,
     BlastDelivery,
+    Channel,
     Contact,
     ContactConsentEvent,
     CrmAuditEvent,
@@ -44,6 +45,7 @@ from .models import (
 )
 
 PENDING = "pending_approval"
+LUMA_SYNC_TARGET = "luma_calendar"
 DECLINED = "declined"
 INFERRED_CONSENT_DAYS = 730
 DEFAULT_SMS_PREFIXES = ("+614",)
@@ -68,6 +70,27 @@ _SENT = (
 )
 _DELIVERED = (BlastDelivery.Status.DELIVERED, BlastDelivery.Status.READ)
 _FAILED = (BlastDelivery.Status.FAILED, BlastDelivery.Status.UNDELIVERED)
+_PENDING = (BlastDelivery.Status.QUEUED, BlastDelivery.Status.SUBMITTING)
+# Dropped at send time because the person had opted out: never sent. An
+# unsubscribe after delivery (from the email's link) carries no error code.
+_DROPPED = Q(status=BlastDelivery.Status.UNSUBSCRIBED) & ~Q(error_code="")
+MAILBOX_WINDOW = timedelta(hours=24)
+# Email rows that count against a mailbox's daily cap: everything that went
+# or may have gone to listmonk, plus rows still waiting on a live blast.
+EMAIL_CAP_Q = (
+    Q(
+        status__in=(
+            BlastDelivery.Status.SUBMITTING,
+            BlastDelivery.Status.SENT,
+            BlastDelivery.Status.DELIVERED,
+            BlastDelivery.Status.READ,
+            BlastDelivery.Status.BOUNCED,
+            BlastDelivery.Status.UNKNOWN,
+        )
+    )
+    | Q(status=BlastDelivery.Status.UNSUBSCRIBED, error_code="")
+    | (Q(status=BlastDelivery.Status.QUEUED) & ~Q(blast__status=Blast.Status.CANCELLED))
+)
 
 
 def banned(prefix: str = "") -> Exists:
@@ -393,12 +416,15 @@ def blast_stats(blasts: Iterable[Blast]) -> dict:
         .values("blast_id", "channel")
         .annotate(
             recipients=Count("id"),
-            sent=Count("id", filter=Q(status__in=_SENT)),
+            pending=Count("id", filter=Q(status__in=_PENDING)),
+            sent=Count("id", filter=Q(status__in=_SENT) & ~_DROPPED),
             delivered=Count("id", filter=Q(status__in=_DELIVERED)),
             read=Count("id", filter=Q(status=BlastDelivery.Status.READ)),
             failed=Count("id", filter=Q(status__in=_FAILED)),
             bounced=Count("id", filter=Q(status=BlastDelivery.Status.BOUNCED)),
-            unsubscribed=Count("id", filter=Q(status=BlastDelivery.Status.UNSUBSCRIBED)),
+            unsubscribed=Count(
+                "id", filter=Q(status=BlastDelivery.Status.UNSUBSCRIBED, error_code="")
+            ),
             opened=Count("id", filter=Q(first_opened_at__isnull=False)),
             clicked=Count("id", filter=Q(first_clicked_at__isnull=False)),
             segments=Sum("segments"),
@@ -420,6 +446,61 @@ def blast_stats(blasts: Iterable[Blast]) -> dict:
     return stats
 
 
+def mailbox_sent_last_24h(mailbox_ids: Iterable, now: datetime) -> dict:
+    """Email deliveries counted against each mailbox's cap in the rolling 24 hours."""
+
+    ids = list(mailbox_ids)
+    if not ids:
+        return {}
+    rows = (
+        BlastDelivery.objects.filter(
+            channel=Channel.EMAIL,
+            blast__mailbox_id__in=ids,
+            created_at__gte=now - MAILBOX_WINDOW,
+        )
+        .filter(EMAIL_CAP_Q)
+        .values("blast__mailbox_id")
+        .annotate(total=Count("id"))
+        .order_by()
+    )
+    return {row["blast__mailbox_id"]: row["total"] for row in rows}
+
+
+def mailbox_remaining_today(mailbox, now: datetime) -> int:
+    used = mailbox_sent_last_24h([mailbox.pk], now).get(mailbox.pk, 0)
+    return max(0, mailbox.daily_limit - used)
+
+
+def blasts_queryset(*, status: str = "", event_id: str = "", channel: str = ""):
+    """Blasts newest first, narrowed by status, event and channel."""
+
+    blasts = Blast.objects.select_related("event", "segment", "created_by", "whatsapp_template")
+    if status:
+        blasts = blasts.filter(status=status)
+    if event_id:
+        blasts = blasts.filter(event_id=event_id)
+    if channel:
+        blasts = blasts.filter(channels__contains=[channel])
+    return blasts.order_by("-created_at", "-pk")
+
+
+def blast_deliveries(blast: Blast, *, channel: str = "", status: str = ""):
+    deliveries = BlastDelivery.objects.filter(blast=blast).select_related("contact")
+    if channel:
+        deliveries = deliveries.filter(channel=channel)
+    if status:
+        deliveries = deliveries.filter(status=status)
+    return deliveries.order_by("channel", "-updated_at", "pk")
+
+
+def blast_replies(blast: Blast):
+    return (
+        InboundMessage.objects.filter(blast=blast)
+        .select_related("contact")
+        .order_by("-received_at", "-pk")
+    )
+
+
 def latest_sent_blast() -> Optional[Blast]:
     return (
         Blast.objects.filter(sent_at__isnull=False)
@@ -433,7 +514,9 @@ def luma_sync_status() -> dict:
     """Whether the scheduled sync is on, and the outcome of the last recorded pass."""
 
     last = (
-        CrmAuditEvent.objects.filter(action=CrmAuditEvent.Action.SYNC)
+        CrmAuditEvent.objects.filter(
+            action=CrmAuditEvent.Action.SYNC, target_type=LUMA_SYNC_TARGET
+        )
         .order_by("-created_at")
         .first()
     )

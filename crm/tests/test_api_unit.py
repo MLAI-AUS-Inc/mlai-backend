@@ -89,9 +89,18 @@ class ChannelAvailabilityTests(SimpleTestCase):
         self.assertEqual(channels["sms"], {"available": False, "reason": "not_configured"})
         self.assertEqual(channels["whatsapp"], {"available": True, "reason": None})
 
-    @override_settings(CRM_SENDING_ENABLED=True, LISTMONK_BASE_URL="https://lists.example.test")
+    @override_settings(
+        CRM_SENDING_ENABLED=True,
+        LISTMONK_BASE_URL="https://lists.example.test",
+        LISTMONK_API_USER="mlai-backend",
+        LISTMONK_API_TOKEN="synthetic-token",
+    )
     def test_email_is_available_with_listmonk(self):
         self.assertEqual(channel_availability()["email"], {"available": True, "reason": None})
+        with override_settings(LISTMONK_API_TOKEN=""):
+            self.assertEqual(
+                channel_availability()["email"], {"available": False, "reason": "not_configured"}
+            )
 
 
 class AccessTests(SimpleTestCase):

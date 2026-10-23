@@ -121,6 +121,9 @@ jobs:
     - name: Check CRM API and segment rules without database access
       run: python scripts/test_without_database.py crm.tests.test_api_unit crm.tests.test_segments_unit
 
+    - name: Check CRM blasts and the listmonk client without database access
+      run: python scripts/test_without_database.py crm.tests.test_blasts_unit crm.tests.test_listmonk_unit
+
     - name: Verify event discounts against disposable migration state
       run: python scripts/test_event_discounts.py roo.tests_event_discounts roo.tests_event_discount_api roo.tests_event_discount_concurrency
 
@@ -678,6 +681,9 @@ jobs:
 
     - name: Verify CRM API and segments on PostgreSQL
       run: python manage.py test crm.tests.test_api_database crm.tests.test_segments_database --verbosity 2
+
+    - name: Verify CRM blasts and listmonk feedback on PostgreSQL
+      run: python manage.py test crm.tests.test_blasts_database --verbosity 2
 
     - name: Verify PostgreSQL search infrastructure
       run: |

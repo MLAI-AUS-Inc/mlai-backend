@@ -2252,6 +2252,27 @@ CRM_LUMA_WHATSAPP_QUESTION_LABELS = [
 # Contacts API for Chat owners and admins (/api/v1/community-chat/crm/).
 # Off by default; the API answers 404 crm_disabled until an operator enables it.
 COMMUNITY_CHAT_CRM_ENABLED = _env_is_true('COMMUNITY_CHAT_CRM_ENABLED', False)
+# Email blasts go through a self-hosted listmonk (v6.2) reached on the
+# mlai-shared network, e.g. LISTMONK_BASE_URL=http://listmonk:9000, as a
+# listmonk API user. CRM_SENDING_ENABLED is the email kill switch; SMTP
+# credentials live only in listmonk. See docs/crm.md.
+CRM_SENDING_ENABLED = _env_is_true('CRM_SENDING_ENABLED', False)
+LISTMONK_BASE_URL = os.environ.get('LISTMONK_BASE_URL', '').strip().rstrip('/')
+LISTMONK_API_USER = os.environ.get('LISTMONK_API_USER', '').strip()
+LISTMONK_API_TOKEN = os.environ.get('LISTMONK_API_TOKEN', '').strip()
+# The MLAI campaign template's numeric id in listmonk; blank uses listmonk's default.
+_LISTMONK_TEMPLATE_ID = os.environ.get('LISTMONK_TEMPLATE_ID', '').strip()
+LISTMONK_TEMPLATE_ID = int(_LISTMONK_TEMPLATE_ID) if _LISTMONK_TEMPLATE_ID.isdigit() else None
+# The blast dispatcher and the listmonk feedback sync are scheduler runners,
+# each cache-throttled to one pass per interval.
+CRM_BLAST_DISPATCH_INTERVAL_SECONDS = max(
+    10,
+    int(os.environ.get('CRM_BLAST_DISPATCH_INTERVAL_SECONDS', '60')),
+)
+CRM_LISTMONK_SYNC_INTERVAL_SECONDS = max(
+    60,
+    int(os.environ.get('CRM_LISTMONK_SYNC_INTERVAL_SECONDS', '300')),
+)
 HUMANITIX_API_BASE_URL = os.environ.get(
     'HUMANITIX_API_BASE_URL',
     'https://api.humanitix.com/v1',

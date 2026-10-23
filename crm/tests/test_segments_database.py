@@ -10,7 +10,7 @@ from django.utils import timezone
 
 from community_chat.models import CommunityChatDevice
 from core.models import AccountBan, User
-from crm.models import Contact, CrmAuditEvent, EventRegistration, Segment
+from crm.models import Blast, BlastDelivery, Contact, CrmAuditEvent, EventRegistration, Segment
 from crm.segments import evaluate, quick_segment_definition, segment_contacts
 
 from .api_fixtures import PREFIX, CrmApiMixin, ban, crm_enabled, make_contact, make_event, register
@@ -218,6 +218,32 @@ class SegmentRuleDatabaseTests(Population, TestCase):
         with self.settings(CRM_SMS_ALLOWED_PREFIXES=["+614", "+64"]):
             self.assertEqual(self.match({"type": "reachable", "channel": "sms"}), self.people(self.ada, self.dan))
 
+    def test_blast_engagement(self):
+        blast = Blast.objects.create(purpose="marketing", channels=["email"], status="sent")
+        other = Blast.objects.create(purpose="marketing", channels=["email"], status="sent")
+        seen = self.now - timedelta(days=1)
+        for contact, opened, clicked in (
+            (self.ada, seen, seen),
+            (self.dan, seen, None),
+            (self.fay, None, seen),  # clicked with the tracking pixel blocked
+            (self.eve, None, None),
+        ):
+            BlastDelivery.objects.create(
+                blast=blast, contact=contact, channel="email", address=contact.email,
+                consent_basis="explicit", status="sent", first_opened_at=opened, first_clicked_at=clicked,
+            )
+        BlastDelivery.objects.create(
+            blast=other, contact=self.bob, channel="email", address=self.bob.email,
+            consent_basis="explicit", status="sent", first_opened_at=seen, first_clicked_at=seen,
+        )
+        rule = {"type": "blast_engagement", "blast_id": str(blast.pk)}
+        self.assertEqual(self.match({**rule, "action": "opened"}), self.people(self.ada, self.dan, self.fay))
+        self.assertEqual(self.match({**rule, "action": "clicked"}), self.people(self.ada, self.fay))
+        self.assertEqual(
+            self.match({"type": "tag", "op": "has_any", "values": ["founder"]}, exclude=[{**rule, "action": "opened"}]),
+            self.people(self.bob, self.gus),
+        )
+
     def test_match_any_with_exclusions(self):
         self.assertEqual(
             self.match(
@@ -400,12 +426,11 @@ class SegmentApiDatabaseTests(CrmApiMixin, Population, TestCase):
         engagement = {"rules": [{"type": "blast_engagement", "blast_id": str(uuid.uuid4()), "action": "clicked"}]}
         saved = self.client.post(PREFIX + "segments/", {"name": "Clickers", "definition": engagement}, format="json")
         self.assertEqual(saved.status_code, 201)
-        self.assertIsNone(saved.json()["last_count"])
+        self.assertEqual(saved.json()["last_count"], 0)
         preview = self.client.post(PREFIX + "segments/preview/", {"definition": engagement}, format="json")
-        self.assertEqual(preview.status_code, 400)
-        self.assertEqual((preview.json()["error"], preview.json()["pointer"]), ("rule_not_available", "/rules/0"))
+        self.assertEqual((preview.status_code, preview.json()["count"]), (200, 0))
         listed = self.client.get(PREFIX + f"contacts/?segment_id={saved.json()['id']}")
-        self.assertEqual(listed.json()["error"], "rule_not_available")
+        self.assertEqual(listed.json()["count"], 0)
         self.assertFalse(Segment.objects.filter(name="Broken").exists())
 
     def test_preview(self):

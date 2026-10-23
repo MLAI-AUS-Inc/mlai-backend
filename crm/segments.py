@@ -24,7 +24,7 @@ from django.utils import timezone
 from community_chat.models import CommunityChatDevice, DeviceBindingStatus
 
 from .luma_guests import APPROVED, WAITLIST
-from .models import Channel, Contact, CrmEvent, EventRegistration
+from .models import BlastDelivery, Channel, Contact, CrmEvent, EventRegistration
 from .queries import (
     PENDING,
     REACHABLE,
@@ -92,11 +92,11 @@ RULE_TYPES = {
     "chat_member": {"label": "Has an MLAI Chat account", "keys": {"value"}, "available": True},
     "source": {"label": "Where the contact came from", "keys": {"values"}, "available": True},
     "reachable": {"label": "Can be reached on a channel", "keys": {"channel"}, "available": True},
-    # Engagement data arrives with the email feedback sync (step B5).
+    # Opens and clicks come from the listmonk feedback sync (crm/listmonk_sync.py).
     "blast_engagement": {
         "label": "Opened or clicked a blast",
         "keys": {"blast_id", "action"},
-        "available": False,
+        "available": True,
     },
 }
 EXCLUDED_REASONS = ("unsubscribed", "bounced", "banned", "no_consent", "not_registered")
@@ -438,6 +438,16 @@ def _rule_q(rule: dict, at: tuple, now: datetime) -> Q:
         return Q(source__in=rule["values"])
     if rule_type == "reachable":
         return REACHABLE[rule["channel"]]()
+    if rule_type == "blast_engagement":
+        deliveries = BlastDelivery.objects.filter(blast_id=rule["blast_id"], contact=OuterRef("pk"))
+        if rule["action"] == "clicked":
+            deliveries = deliveries.filter(first_clicked_at__isnull=False)
+        else:
+            # A click means the email was opened, even if its tracking pixel was blocked.
+            deliveries = deliveries.filter(
+                Q(first_opened_at__isnull=False) | Q(first_clicked_at__isnull=False)
+            )
+        return Q(Exists(deliveries))
     raise SegmentError("rule_not_available", _pointer(*at), rule_type)
 
 
