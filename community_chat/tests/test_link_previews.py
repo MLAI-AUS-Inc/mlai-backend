@@ -21,7 +21,7 @@ from integrations.models import (
     ExternalServiceProvider,
     SlackDmMirrorConversation,
     SlackDmMirrorConversationStatus,
-    SlackDmMirrorGrant,
+    SlackDmMirrorGrant, SlackChannelMembership,
 )
 
 
@@ -47,7 +47,7 @@ def _public_key(private_int):
     return PrivateKey.from_int(private_int).public_key.format(compressed=True)[1:].hex()
 
 
-@override_settings(SLACK_BRIDGE_BOT_TOKEN="xoxb-test")
+@override_settings(SLACK_BRIDGE_BOT_TOKEN="xoxb-test", MESSAGE_SYNC_ENABLED=True, SLACK_OWNER_INVENTORY_ENABLED=True, MESSAGE_SYNC_SLACK_BOT_WORKSPACE_ID="TMLAI", COMMUNITY_CHAT_SIGNUP_ENABLED=False)
 class CommunityChatLinkPreviewTests(TestCase):
     def setUp(self):
         cache.clear()
@@ -73,6 +73,27 @@ class CommunityChatLinkPreviewTests(TestCase):
         self.client.credentials(
             HTTP_AUTHORIZATION=f"Bearer {credentials.access_token}"
         )
+
+    def member(self):
+        connection = ExternalServiceConnection.objects.create(user=self.user, provider="slack", status="connected",
+            access_token="xoxp-owner", scopes=["files:read", "channels:read", "channels:history", "im:read"],
+            external_account_id="TMLAI", provider_metadata={"team": {"id": "TMLAI"}, "authed_user": {"id": "UOWNER"}})
+        grant = SlackDmMirrorGrant.objects.create(user=self.user, connection=connection,
+            slack_workspace_id="TMLAI", slack_user_id="UOWNER", consented_at=timezone.now()-timedelta(minutes=1))
+        SlackChannelMembership.objects.create(grant=grant, slack_workspace_id="TMLAI", slack_channel_id="CRANDOM",
+            state="joined", source="event", observed_at=timezone.now())
+        return grant
+
+    def provider(self, mock, file):
+        def read(authority, connection, method, **kwargs):
+            if method == "files_info":
+                return file
+            if method == "conversations_info":
+                channel = kwargs["channel"]
+                return {"ok": True, "channel": {"id": channel, "is_channel": channel.startswith("C"),
+                    "is_im": channel.startswith("D"), "is_private": channel.startswith("D"), "is_member": True}}
+            raise AssertionError(method)
+        mock.side_effect = read
 
     def tearDown(self):
         cache.clear()
@@ -123,29 +144,30 @@ class CommunityChatLinkPreviewTests(TestCase):
 
         self.assertEqual(response.status_code, status.HTTP_401_UNAUTHORIZED)
 
-    @patch("community_chat.slack_file_previews.SlackBridgeClient.get_client")
+    @patch("integrations.services.slack_dm_mirror._invoke_slack_with_locked_connection")
     def test_slack_image_in_a_mapped_public_channel_returns_proxied_preview(
         self,
         get_client,
     ):
-        CommunityBridgeChannel.objects.create(
+        self.member()
+        CommunityBridgeChannel.objects.create(audience="community", slack_visibility="public", mirror_decision="mirror",
             slack_workspace_id="TMLAI",
             slack_channel_id="CRANDOM",
             slack_channel_name="random-and-memes",
             destination_platform=CommunityBridgePlatform.BUZZ,
             destination_channel_id="buzz-random",
         )
-        get_client.return_value.files_info.return_value = {
+        self.provider(get_client, {
             "ok": True,
             "file": {
-                "id": "F0BRPQD104F",
+                "id": "F0BRPQD104F", "team_id": "TMLAI",
                 "title": "image.png",
                 "mimetype": "image/png",
                 "channels": ["CRANDOM"],
                 "permalink": "https://mlai-aus.slack.com/files/U123/F0BRPQD104F/image.png",
                 "url_private_download": "https://files.slack.com/files-pri/T-F/image.png",
             },
-        }
+        })
 
         response = self.client.get(
             reverse("community_chat_link_preview"),
@@ -161,28 +183,29 @@ class CommunityChatLinkPreviewTests(TestCase):
         self.assertNotIn("xoxb", str(response.data))
 
     @patch("community_chat.slack_file_previews.requests.Session.get")
-    @patch("community_chat.slack_file_previews.SlackBridgeClient.get_client")
+    @patch("integrations.services.slack_dm_mirror._invoke_slack_with_locked_connection")
     def test_slack_image_proxy_downloads_with_server_side_credentials(
         self,
         get_client,
         session_get,
     ):
-        CommunityBridgeChannel.objects.create(
+        self.member()
+        CommunityBridgeChannel.objects.create(audience="community", slack_visibility="public", mirror_decision="mirror",
             slack_workspace_id="TMLAI",
             slack_channel_id="CRANDOM",
             destination_platform=CommunityBridgePlatform.BUZZ,
             destination_channel_id="buzz-random",
         )
-        get_client.return_value.files_info.return_value = {
+        self.provider(get_client, {
             "ok": True,
             "file": {
-                "id": "F0BRPQD104F",
+                "id": "F0BRPQD104F", "team_id": "TMLAI",
                 "title": "image.png",
                 "mimetype": "image/png",
                 "channels": ["CRANDOM"],
                 "url_private_download": "https://files.slack.com/files-pri/T-F/image.png",
             },
-        }
+        })
         session_get.return_value = _FakeResponse(
             body=b"\x89PNG\r\n\x1a\npreview",
             content_type="image/png",
@@ -198,21 +221,21 @@ class CommunityChatLinkPreviewTests(TestCase):
         self.assertEqual(response.content, b"\x89PNG\r\n\x1a\npreview")
         self.assertEqual(
             session_get.call_args.kwargs["headers"]["Authorization"],
-            "Bearer xoxb-test",
+            "Bearer xoxp-owner",
         )
 
-    @patch("community_chat.slack_file_previews.SlackBridgeClient.get_client")
+    @patch("integrations.services.slack_dm_mirror._invoke_slack_with_locked_connection")
     def test_slack_image_outside_mapped_channels_is_rejected(self, get_client):
-        get_client.return_value.files_info.return_value = {
+        self.provider(get_client, {
             "ok": True,
             "file": {
-                "id": "F0BRPQD104F",
+                "id": "F0BRPQD104F", "team_id": "TMLAI",
                 "title": "private.png",
                 "mimetype": "image/png",
                 "channels": ["CUNMAPPED"],
                 "url_private_download": "https://files.slack.com/files-pri/T-F/image.png",
             },
-        }
+        })
 
         response = self.client.get(
             reverse("community_chat_link_preview"),
@@ -225,29 +248,13 @@ class CommunityChatLinkPreviewTests(TestCase):
         self.assertEqual(response.data["error"], "preview_unavailable")
 
     @patch("community_chat.slack_file_previews.requests.Session.get")
-    @patch("community_chat.slack_file_previews.WebClient")
-    @patch("community_chat.slack_file_previews.SlackBridgeClient.get_client")
+    @patch("integrations.services.slack_dm_mirror._invoke_slack_with_locked_connection")
     def test_slack_dm_owner_can_render_an_image_from_their_private_mirror(
         self,
         get_client,
-        web_client,
         session_get,
     ):
-        connection = ExternalServiceConnection.objects.create(
-            user=self.user,
-            provider=ExternalServiceProvider.SLACK,
-            access_token="xoxp-owner",
-            scopes=["files:read"],
-            external_account_id="TMLAI",
-            account_label="MLAI",
-        )
-        grant = SlackDmMirrorGrant.objects.create(
-            user=self.user,
-            connection=connection,
-            slack_workspace_id="TMLAI",
-            slack_user_id="UOWNER",
-            consented_at=timezone.now(),
-        )
+        grant = self.member()
         SlackDmMirrorConversation.objects.create(
             grant=grant,
             slack_workspace_id="TMLAI",
@@ -265,8 +272,7 @@ class CommunityChatLinkPreviewTests(TestCase):
             "url_private_download": "https://files.slack.com/files-pri/T-F/private-image.png",
         }
         slack_response = {"ok": True, "file": private_file}
-        get_client.return_value.files_info.return_value = slack_response
-        web_client.return_value.files_info.return_value = slack_response
+        self.provider(get_client, slack_response)
         session_get.return_value = _FakeResponse(
             body=b"\x89PNG\r\n\x1a\nprivate-preview",
             content_type="image/png",

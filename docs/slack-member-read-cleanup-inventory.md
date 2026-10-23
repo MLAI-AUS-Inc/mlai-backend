@@ -12,7 +12,7 @@ comparison writers; the read conversion must finish before cleanup is complete.
 | Five historical repair/backfill commands | Thread history, avatars and mentions use bot helpers | Durable member-authorized repair scheduling; retire one-off commands that directly rewrite historical messages after the supported replacement is tested |
 | `slack_workspace_users.py` | Member conversion implemented; release verification pending | Complete sanitized snapshots use a current member token, exact credential/consent/OAuth cache scope and live validation on cache hits; failed readers can yield to another member |
 | `slack_mention_directory.py`, `slack_mentions.py`, `slack_dm_directory.py` | Member directory conversion implemented; release verification pending | Community names remain available to unlinked accounts through an eligible member; Members membership requires the requester's current joined grant and acknowledged device audience. Private searches retain owner validation. Cached public membership is rechecked against Slack before disclosure |
-| `community_chat/slack_file_previews.py` | Public files.info/download fallback uses bot credentials | Current member grant with files scope, current channel/source permission, and existing file-to-message checks; keep private owner checks and cache isolation |
+| `community_chat/slack_file_previews.py`, `slack_file_authority.py` | Member file conversion implemented; release verification pending | Fresh member files.info share proof and source INFO precede every metadata/image response, including image cache hits. Community uses a joined reader; Members/private require the owner. Consent, OAuth, source and device authority stay held through serialization/download. Cache scope binds exact credentials; external hosts/redirects never receive tokens. |
 
 Audit all SDK construction and aliases as well as direct `SlackBridgeClient`
 references. Keep `coworking.py`'s authorized bot write and `deletion.py`'s original
@@ -24,3 +24,13 @@ selection and I/O, quota admission and lease expiry, private/Connect transitions
 cache hits after authority changes, uncertain writes without duplicate posts,
 original bot actor preservation, and read-only repair planning. No new schema or
 production data deletion is planned.
+
+File-preview policy follows Slack's [file object](https://docs.slack.dev/reference/objects/file-object/)
+and [download guidance](https://docs.slack.dev/messaging/working-with-files/#downloading-files).
+Top-level file workspace fields can be absent; exact member authority and the
+current shared conversation establish scope, and explicit mismatches are denied.
+Metadata is freshly revalidated because an hour-old share list cannot authorize
+a cached image after unsharing. Image bytes retain the bounded cache, and
+provider budget/rate delays remain retryable without trying another token.
+Only active grants and live private mirrors authorize provider reads; paused
+imports retain stored history but cannot initiate file reads.
