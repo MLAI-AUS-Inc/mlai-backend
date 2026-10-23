@@ -1,10 +1,16 @@
 # Slack member-sync evidence
 
-Updated 21 October 2026. **Live event behaviour checks remain outstanding.** This file
+Updated 23 October 2026. **Live event behaviour checks remain outstanding.** This file
 separates Slack's documented contract from observations of the MLAI apps. It
 does not certify event delivery or authorize an app-settings change. The owner
 approved moving the event spike to the Phase 4 pre-enable canary, allowing
 client/relay work after the Phase 0 diagnostic release.
+
+On 23 October, the owner waived the deferred physical-device check of iOS
+build 97 and the human Sam/Shan/third-participant checks, and authorized general
+Members activation. Those checks were not performed or passed. This waiver
+does not remove the Phase 6 observation period or Phase 7 stability period,
+or change the consent, membership, privacy and authority checks in the code.
 
 ## Owner decisions
 
@@ -99,7 +105,9 @@ For each case retain only:
 | Dedicated lifecycle/membership canary identified | Pending |
 | Observations reviewed and recorded | Pending |
 
-The owner approved deferring live event observations until the Phase 4
-pre-enable canary. They remain a hard gate before enabling member sync.
+The earlier requirement to complete the deferred physical iOS and human
+checks before member-sync activation was superseded by the owner's 23 October
+waiver above. The pending observations in this historical checklist remain
+unmeasured; the waiver does not certify their outcomes.
 Phase 0 diagnostic release and the operational baseline checks remain in
 [the Phase 0 runbook](slack-member-phase0-operations.md).
