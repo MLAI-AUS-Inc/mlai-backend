@@ -4,6 +4,10 @@ The blast dispatcher creates ``queued`` delivery rows. ``deliver_twilio_deliveri
 claims them one at a time, marks each ``submitting`` and commits before
 calling Twilio, then stores the SID or the failure. Nothing is retried: a
 timeout leaves the row ``unknown`` for a person to decide.
+
+No acting account reaches this module: the dispatcher (which re-checks the
+blast's creator first) and the signature-verified Twilio webhooks call it, so
+it has no MLAI admin gate of its own.
 """
 
 from __future__ import annotations

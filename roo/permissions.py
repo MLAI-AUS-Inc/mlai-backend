@@ -14,6 +14,7 @@ FULL_POINTS_ADMIN_ROLES = ("admin", "committee", "portfolio_lead")
 COWORKING_REPORT_ROLES = (*FULL_POINTS_ADMIN_ROLES, "partner")
 LUMA_EXPORT_ROLES = ("admin", "committee", "partner")
 COMMITTEE_CANDIDATE_EMAIL_ROLES = ("admin", "committee")
+MLAI_ADMIN_ROLES = ("admin", "committee")
 
 
 def _clean_slack_id(slack_id: str) -> str:
@@ -78,6 +79,31 @@ def is_points_admin_user(user) -> bool:
         is_active=True,
         role__in=FULL_POINTS_ADMIN_ROLES,
     ).exists()
+
+
+def mlai_admin_role(user) -> Optional[str]:
+    """'superuser', 'admin' or 'committee' for an active account, else None.
+
+    Keyed on ``PointsAdmin.user`` (``sync_committee_points_admins`` links it).
+    Portfolio leads and partners are excluded: the admin area holds contact PII.
+    Slack-ID-only bootstrap admins don't count either; there is no account to
+    key on.
+    """
+    if not getattr(user, "is_authenticated", False) or not getattr(user, "is_active", False):
+        return None
+    if getattr(user, "is_superuser", False):
+        return "superuser"
+    return (
+        PointsAdmin.objects.filter(user=user, is_active=True, role__in=MLAI_ADMIN_ROLES)
+        .order_by("role")
+        .values_list("role", flat=True)
+        .first()
+    )
+
+
+def is_mlai_admin_user(user) -> bool:
+    """Whether the account may use MLAI Chat's Admin area (see ``mlai_admin_role``)."""
+    return mlai_admin_role(user) is not None
 
 
 def can_generate_coworking_reports(slack_id: str) -> bool:

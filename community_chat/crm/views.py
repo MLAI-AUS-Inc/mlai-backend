@@ -1,9 +1,10 @@
-"""Contacts and blasts API for Chat owners and admins; thin views over ``crm``.
+"""Contacts and blasts API for MLAI admins and committee; thin views over ``crm``.
 
-Every endpoint except ``access/`` answers 404 ``crm_disabled`` while
-``COMMUNITY_CHAT_CRM_ENABLED`` is off and 403 ``not_authorised`` to anyone who
-is not a Chat owner or admin on a verified installation. Reads are not
-audited: ``CrmAuditEvent`` has no read action yet.
+Every endpoint except ``access/`` answers 403 ``not_authorised`` to anyone who
+is not an MLAI admin on a verified installation (``MlaiAdminView``), whatever
+the flag says, and then 404 ``crm_disabled`` to admins while
+``COMMUNITY_CHAT_CRM_ENABLED`` is off. Reads are not audited:
+``CrmAuditEvent`` has no read action yet.
 """
 
 from django.core.exceptions import ObjectDoesNotExist
@@ -12,15 +13,11 @@ from django.http import Http404
 from django.shortcuts import get_object_or_404
 from django.utils import timezone
 from rest_framework.exceptions import ValidationError
-from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
-from rest_framework.views import APIView
 
-from core.authentication import CustomJWTAuthentication
-from community_chat.authentication import CommunityChatAccountAuthentication
-from community_chat.throttles import CommunityChatScopedThrottle
+from community_chat.admin_views import MlaiAdminView
 from crm import queries
-from crm.access import channel_availability, crm_access, crm_enabled, is_crm_admin
+from crm.access import channel_availability, crm_access, crm_enabled
 from crm.blasts import BlastError, blast_audience, cancel_blast, queue_blast, send_tests
 from crm.contact_import import (
     TARGETS,
@@ -103,26 +100,16 @@ def error_body(code, **extra):
     return {"error": code, "outcome": code, **extra}
 
 
-class CrmView(APIView):
-    """Volunteer's account-session and JWT contracts, with the CRM admin gate."""
+class CrmView(MlaiAdminView):
+    """The MLAI admin gate, then the CRM flag, then CRM's typed errors."""
 
-    authentication_classes = (
-        CommunityChatAccountAuthentication,
-        CustomJWTAuthentication,
-    )
-    permission_classes = (IsAuthenticated,)
-    throttle_classes = (CommunityChatScopedThrottle,)
     community_chat_throttle_scope = "community_chat_crm"
-    admin_only = True
 
     def initial(self, request, *args, **kwargs):
+        # The admin check runs first, so non-admins get 403 whatever the flag says.
         super().initial(request, *args, **kwargs)
-        if not self.admin_only:
-            return
-        if not crm_enabled():
+        if self.admin_only and not crm_enabled():
             raise CrmError("crm_disabled", 404)
-        if not is_crm_admin(request):
-            raise CrmError("not_authorised", 403)
 
     def handle_exception(self, exc):
         if isinstance(exc, (CrmError, BlastError)):
@@ -149,11 +136,6 @@ class CrmView(APIView):
         if isinstance(exc, IntegrityError):
             return Response(error_body("conflict"), status=409)
         return super().handle_exception(exc)
-
-    def finalize_response(self, request, response, *args, **kwargs):
-        response = super().finalize_response(request, response, *args, **kwargs)
-        response["Cache-Control"] = "no-store"
-        return response
 
 
 def event_summaries(events, *, now):
@@ -220,15 +202,21 @@ class AccessView(CrmView):
 
 
 class OverviewView(CrmView):
+    """The Admin overview: contacts, segments, email over 30 days, the next event and recent activity."""
+
     def get(self, request):
         now = timezone.now()
         event = queries.next_event(now)
         last_blast = queries.latest_sent_blast()
+        activity, blasts = queries.recent_activity()
         return Response(
             {
                 "contacts": queries.contact_overview(now),
                 "next_event": event_summaries([event], now=now)[0] if event else None,
                 "last_blast": blast_summaries([last_blast])[0] if last_blast else None,
+                "segments": queries.segment_overview(now),
+                "email_30d": queries.email_overview(now),
+                "recent_activity": [wire.activity_row(row, blasts) for row in activity],
             }
         )
 
@@ -377,7 +365,9 @@ class ImportRowsView(CrmView):
         if isinstance(rows, list) and len(rows) > 1000:
             raise CrmError("too_many_rows", limit=1000)
         data = validated(wire.ImportRowsInput, request)
-        record = apply_upload_chunk(import_id, start_row=data["start_row"], rows=data["rows"])
+        record = apply_upload_chunk(
+            import_id, start_row=data["start_row"], rows=data["rows"], actor=request.user
+        )
         return Response(wire.import_record(record))
 
 

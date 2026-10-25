@@ -8,9 +8,10 @@ from django.utils import timezone
 from rest_framework.test import APIClient
 
 from community_chat.account_sessions import issue_account_session
-from community_chat.models import ChatRole, CommunityChatDevice, CommunityChatEmailCodeChallenge
+from community_chat.models import CommunityChatDevice, CommunityChatEmailCodeChallenge
 from core.models import AccountBan, User
 from crm.models import Contact, CrmEvent, EventRegistration
+from roo.models import PointsAdmin
 
 PREFIX = "/api/v1/community-chat/crm/"
 
@@ -22,24 +23,30 @@ crm_enabled = override_settings(
 
 
 class CrmApiMixin:
-    """An admin and a member, each signed in on their own verified device."""
+    """A committee member and a plain member, each signed in on their own verified device."""
 
     def setUp(self):
         super().setUp()
         cache.clear()
-        self.admin = self.chat_user("admin@example.test", "a", role="admin")
+        self.admin = self.chat_user("admin@example.test", "a", role="committee")
         self.member = self.chat_user("member@example.test", "b")
         self.client = self.account_client(self.admin)
         self.member_client = self.account_client(self.member)
 
-    def chat_user(self, email, key, role=None):
+    def chat_user(self, email, key, role=None, *, device_status="verified"):
+        """``role`` makes them an active, linked ``PointsAdmin`` with that role."""
+
         user = User.objects.create_user(email)
         if role:
-            ChatRole.objects.create(user=user, role=role)
-        CommunityChatDevice.objects.create(user=user, public_key=key * 64, status="verified")
+            PointsAdmin.objects.create(
+                slack_user_id=f"U{key.upper() * 8}", user=user, role=role, is_active=True
+            )
+        CommunityChatDevice.objects.create(user=user, public_key=key * 64, status=device_status)
         return user
 
-    def account_client(self, user):
+    def account_client(self, user, *, installation_id=None):
+        """A session on the user's own device; ``installation_id`` overrides the installation it names."""
+
         device = CommunityChatDevice.objects.get(user=user)
         challenge = CommunityChatEmailCodeChallenge.objects.create(
             user=user,
@@ -47,7 +54,7 @@ class CrmApiMixin:
             code_digest="d" * 64,
             public_key=device.public_key,
             client_id="mlai-chat-ios",
-            installation_id=device.installation_id,
+            installation_id=installation_id or device.installation_id,
             origin="mlaichat://callback",
             platform="ios",
             device_name="Synthetic test phone",

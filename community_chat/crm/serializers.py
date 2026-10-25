@@ -15,7 +15,7 @@ from rest_framework.exceptions import ErrorDetail
 from crm.blasts import QUICK_SEGMENTS as BLAST_QUICK_SEGMENTS, mask_address
 from crm.contact_import import MAX_TAGS, clean_tags
 from crm.emails import normalize_contact_email
-from crm.models import Blast, BlastDelivery, Channel, Contact, ContactImport
+from crm.models import Blast, BlastDelivery, Channel, Contact, ContactImport, CrmAuditEvent
 from crm.phones import normalize_contact_phone
 from crm.queries import CONTACT_SORTS, EVENT_SCOPES, GUEST_STATUSES, INFERRED_CONSENT_DAYS
 from crm.segments import ATTRIBUTE_KEY, PURPOSES
@@ -484,13 +484,92 @@ def blast_title(blast) -> str:
 
     if blast.subject:
         return blast.subject
-    text = " ".join(str(blast.sms_body or "").split())
+    text = _shorten(blast.sms_body)
     if text:
-        if len(text) <= _TITLE_LENGTH:
-            return text
-        return (text[:_TITLE_LENGTH].rsplit(" ", 1)[0] or text[:_TITLE_LENGTH]) + "…"
+        return text
     template = blast.whatsapp_template if blast.whatsapp_template_id else None
     return template.name if template else ""
+
+
+_SYNC_SUMMARIES = {
+    "luma_calendar": "Luma sync",
+    "luma_backfill": "Luma backfill",
+    "listmonk": "Email feedback synced",
+    "whatsapp_templates": "WhatsApp templates synced",
+}
+_EDIT_SUMMARIES = {
+    ("contact", "create"): "Contact added",
+    ("contact", "update"): "Contact edited",
+    ("segment", "create"): "Segment created",
+    ("segment", "update"): "Segment edited",
+    ("segment", "delete"): "Segment deleted",
+}
+_BLAST_VERBS = {
+    ("edit", "create"): "Campaign {title}drafted",
+    ("edit", "update"): "Campaign {title}edited",
+    ("send", "queue"): "Campaign {title}sent",
+    ("send", "cancel"): "Campaign {title}cancelled",
+    ("send", "refuse"): "Campaign {title}stopped: its creator is no longer an admin",
+    ("send", "test"): "Test of campaign {title}sent",
+}
+
+
+def _count(value) -> int:
+    return value if isinstance(value, int) and not isinstance(value, bool) and value > 0 else 0
+
+
+def _contacts(count: int) -> str:
+    return f"{count} contact{'' if count == 1 else 's'}"
+
+
+def activity_summary(event, blasts: dict) -> str:
+    """One short line for an audit row, from its action and a few whitelisted detail keys.
+
+    ``blasts`` maps blast ids to blasts, for the campaign's title. Free text in
+    ``detail`` never reaches the line.
+    """
+
+    action, target = event.action, event.target_type
+    detail = event.detail if isinstance(event.detail, dict) else {}
+    operation = detail.get("operation")
+    Action = CrmAuditEvent.Action
+    if action == Action.SYNC:
+        return _SYNC_SUMMARIES.get(target, "Sync")
+    if action == Action.IMPORT:
+        if operation == "cancel":
+            return "Import stopped"
+        counts = detail.get("counts") if operation else detail
+        counts = counts if isinstance(counts, dict) else {}
+        imported = _count(counts.get("created")) + _count(counts.get("updated"))
+        if detail.get("dry_run"):
+            return f"Import checked: {_contacts(imported)}"
+        return f"{_contacts(imported)} imported"
+    if target == "blast" and (action, operation) in _BLAST_VERBS:
+        blast = blasts.get(event.target_id)
+        title = _shorten(blast_title(blast)) if blast is not None else ""
+        return _BLAST_VERBS[(action, operation)].format(title=f'"{title}" ' if title else "")
+    if action == Action.EDIT:
+        return _EDIT_SUMMARIES.get((target, operation), "Record edited")
+    if action == Action.OPT_OUT:
+        return "Contact opted out"
+    return str(Action(action).label) if action in Action.values else "Activity"
+
+
+def activity_row(event, blasts: dict) -> dict:
+    actor = event.actor if event.actor_id else None
+    return {
+        "action": event.action,
+        "created_at": iso(event.created_at),
+        "actor_name": (actor.full_name or None) if actor is not None else None,
+        "summary": activity_summary(event, blasts),
+    }
+
+
+def _shorten(text: str) -> str:
+    text = " ".join(str(text or "").split())
+    if len(text) <= _TITLE_LENGTH:
+        return text
+    return (text[:_TITLE_LENGTH].rsplit(" ", 1)[0] or text[:_TITLE_LENGTH]) + "…"
 
 
 def event_summary(event, stats: dict, last_blast=None) -> dict:

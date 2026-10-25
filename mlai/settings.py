@@ -519,6 +519,7 @@ REST_FRAMEWORK = {
         'community_chat_slack_directory': os.getenv('COMMUNITY_CHAT_SLACK_DIRECTORY_RATE', '120/minute'),
         'community_chat_home': os.getenv('COMMUNITY_CHAT_HOME_RATE', '60/minute'),
         'community_chat_crm': os.getenv('COMMUNITY_CHAT_CRM_RATE', '240/minute'),
+        'community_chat_admin': os.getenv('COMMUNITY_CHAT_ADMIN_RATE', '120/minute'),
         'my_startup_bootstrap': os.getenv('MY_STARTUP_BOOTSTRAP_RATE', '120/minute'),
         'my_startup_read': os.getenv('MY_STARTUP_READ_RATE', '120/minute'),
         'my_startup_poll': os.getenv('MY_STARTUP_POLL_RATE', '120/minute'),
@@ -535,6 +536,7 @@ REST_FRAMEWORK = {
         'token_usage_insights': os.getenv('TOKEN_USAGE_INSIGHTS_RATE', '120/minute'),
         'community_chat_home': os.getenv('COMMUNITY_CHAT_HOME_RATE', '60/minute'),
         'community_chat_crm': os.getenv('COMMUNITY_CHAT_CRM_RATE', '240/minute'),
+        'community_chat_admin': os.getenv('COMMUNITY_CHAT_ADMIN_RATE', '120/minute'),
         'community_chat_slack_delete': os.getenv(
             'COMMUNITY_CHAT_SLACK_DELETE_RATE', '20/minute'
         ),

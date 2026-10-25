@@ -9,6 +9,10 @@ Twilio (``crm/messaging.py``), and rolls the blast's status up from its rows.
 Channel rules: email follows the segment's suppression and purpose rules; SMS
 and WhatsApp are for event blasts only, to people registered for the event.
 With ``sms_only_without_whatsapp`` anyone WhatsApp reaches gets no SMS.
+
+Queueing, test sends and cancelling refuse an actor who isn't an MLAI admin,
+and dispatch fails a live blast whose creator has since lost admin. The
+dispatcher itself has no actor and isn't gated.
 """
 
 from __future__ import annotations
@@ -27,6 +31,9 @@ from django.core.cache import cache
 from django.db import IntegrityError, transaction
 from django.db.models import Count, Exists, OuterRef, Q
 from django.utils import timezone
+
+from community_chat.admin_access import require_mlai_admin
+from roo.permissions import is_mlai_admin_user
 
 from . import blast_email, listmonk, merge_tags, twilio
 from .access import channel_availability
@@ -76,6 +83,7 @@ _REACHED = (
     BlastDelivery.Status.UNKNOWN,
 )
 IN_FLIGHT, DONE, FAILED, BLOCKED = "in_flight", "done", "failed", "blocked"
+NOT_AUTHORISED = "not_authorised"
 _LISTMONK_OUTAGES = ("listmonk_timeout", "listmonk_connection_error", "listmonk_unreadable_response") + tuple(
     f"listmonk_http_{code}" for code in (429, 500, 502, 503, 504)
 )
@@ -463,6 +471,7 @@ def queue_blast(blast_id, *, confirm: dict, idempotency_key: str, actor, now=Non
     draft, 409 ``count_changed`` (with fresh counts) or ``daily_limit``.
     """
 
+    require_mlai_admin(actor)
     now = now or timezone.now()
     key = str(idempotency_key or "").strip()
     if not key or len(key) > 64:
@@ -583,13 +592,47 @@ def refresh_status(blast_id, *, now=None) -> str:
 # Dispatch
 
 
+def fail_unauthorised(blast_id, *, now) -> str:
+    """Stop a live blast whose creator is no longer an MLAI admin, and return its status.
+
+    The listmonk campaign is cancelled as ``cancel_blast`` does, rows not yet
+    sent fail with ``not_authorised`` and the stop is audited.
+    """
+
+    with transaction.atomic():
+        blast = Blast.objects.select_for_update().get(pk=blast_id)
+        if blast.status not in LIVE or is_mlai_admin_user(blast.created_by):
+            return blast.status
+        previous = blast.status
+        if Channel.EMAIL in (blast.channels or []):
+            values = blast_email.cancel_campaign(blast, now=now)
+            if values:
+                blast.stats = blast_email.with_email_stats(blast.stats, **values)
+        BlastDelivery.objects.filter(blast=blast, status=BlastDelivery.Status.QUEUED).update(
+            status=BlastDelivery.Status.FAILED, error_code=NOT_AUTHORISED, updated_at=now
+        )
+        blast.status = Blast.Status.FAILED
+        blast.last_error = NOT_AUTHORISED
+        blast.save(update_fields=["status", "stats", "last_error", "updated_at"])
+        CrmAuditEvent.objects.create(
+            action=CrmAuditEvent.Action.SEND,
+            target_type="blast",
+            target_id=str(blast.pk),
+            detail={"operation": "refuse", "reason": NOT_AUTHORISED, "previous_status": previous},
+        )
+    logger.warning("crm blast %s stopped: its creator is no longer an MLAI admin", blast_id)
+    return Blast.Status.FAILED
+
+
 def dispatch_blast(blast_id, *, now=None, twilio_budget: Optional[int] = None) -> dict:
     """One tick for one blast. Call outside any transaction: Twilio claims commit per send."""
 
     now = now or timezone.now()
-    blast = Blast.objects.select_related("event", "mailbox").get(pk=blast_id)
+    blast = Blast.objects.select_related("event", "mailbox", "created_by").get(pk=blast_id)
     if blast.status not in LIVE:
         return {"status": blast.status, "twilio_sends": 0}
+    if not is_mlai_admin_user(blast.created_by):
+        return {"status": fail_unauthorised(blast.pk, now=now), "twilio_sends": 0, "refused": NOT_AUTHORISED}
     outcome: dict[str, Any] = {"twilio_sends": 0}
     if Channel.EMAIL in (blast.channels or []):
         try:
@@ -705,6 +748,7 @@ def run_blast_dispatch_scheduler(*, now=None) -> dict:
 def cancel_blast(blast_id, *, actor, now=None) -> Blast:
     """Cancel a draft or live blast; listmonk's campaign is cancelled if it started."""
 
+    require_mlai_admin(actor)
     now = now or timezone.now()
     with transaction.atomic():
         blast = Blast.objects.select_for_update().get(pk=blast_id)
@@ -740,6 +784,7 @@ def _test_person(user):
 def send_tests(blast_id, channels: list, *, user, now=None) -> dict:
     """Send a draft to the caller only: their own email and their own ``User.phone``."""
 
+    require_mlai_admin(user)
     blast = Blast.objects.select_related("event", "mailbox", "whatsapp_template").get(pk=blast_id)
     if blast.status != Blast.Status.DRAFT:
         raise BlastError("blast_not_draft", 409, blast_status=blast.status)

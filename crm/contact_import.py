@@ -8,6 +8,10 @@ The management command parses the whole file and calls ``apply_import``. An
 upload stores its column plan with ``start_upload_import``; each chunk of
 ``{header: value}`` rows then goes through the same ``_parse_row`` and
 ``_apply_chunk`` path in ``apply_upload_chunk``.
+
+Uploads act for someone in MLAI Chat, so each upload step refuses an actor who
+isn't an MLAI admin. ``apply_import`` is the operator's command (shell access,
+no acting account) and isn't gated.
 """
 
 from __future__ import annotations
@@ -23,6 +27,7 @@ from django.db import transaction
 from django.db.models.functions import Lower
 from django.utils import timezone
 
+from community_chat.admin_access import require_mlai_admin
 from core.models import AccountBan
 
 from .emails import normalize_contact_email
@@ -349,10 +354,11 @@ def start_upload_import(
     tags: Iterable[str] = (),
     row_count: int = 0,
     dry_run: bool = False,
-    actor=None,
+    actor,
 ) -> ContactImport:
     """Open an upload; its rows arrive later in chunks of up to ``CHUNK_SIZE``."""
 
+    require_mlai_admin(actor)
     plan = validate_column_plan(column_plan)
     default_source, extra_tags = _import_options(file_name, consent, consent_source, tags)
     expire_stale_uploads()
@@ -372,7 +378,9 @@ def start_upload_import(
     return record
 
 
-def apply_upload_chunk(import_id, *, start_row: int, rows: list, now: Optional[datetime] = None) -> ContactImport:
+def apply_upload_chunk(
+    import_id, *, start_row: int, rows: list, actor, now: Optional[datetime] = None
+) -> ContactImport:
     """Apply one chunk with the stored column plan and merge its counts.
 
     ``start_row`` is the zero-based index of the chunk's first data row, so it
@@ -389,6 +397,8 @@ def apply_upload_chunk(import_id, *, start_row: int, rows: list, now: Optional[d
         raise ImportChunkError("invalid_rows")
     if isinstance(start_row, bool) or not isinstance(start_row, int) or start_row < 0:
         raise ImportChunkError("invalid_start_row")
+    # After the shape checks (no database work), before anything is read or written.
+    require_mlai_admin(actor)
     now = now or timezone.now()
     with transaction.atomic():
         record = ContactImport.objects.select_for_update().get(pk=import_id)
@@ -419,9 +429,10 @@ def apply_upload_chunk(import_id, *, start_row: int, rows: list, now: Optional[d
     return record
 
 
-def finish_upload_import(import_id, *, actor=None) -> ContactImport:
+def finish_upload_import(import_id, *, actor) -> ContactImport:
     """Close an upload and record its counts in the audit log."""
 
+    require_mlai_admin(actor)
     with transaction.atomic():
         record = ContactImport.objects.select_for_update().get(pk=import_id)
         if record.status != ContactImport.Status.RUNNING or record.origin != ContactImport.Origin.UPLOAD:
@@ -433,12 +444,13 @@ def finish_upload_import(import_id, *, actor=None) -> ContactImport:
     return record
 
 
-def cancel_upload_import(import_id, *, actor=None) -> ContactImport:
+def cancel_upload_import(import_id, *, actor) -> ContactImport:
     """Stop an upload that is still running. A finished upload is returned unchanged.
 
     Rows already applied stay applied; a dry run never wrote any.
     """
 
+    require_mlai_admin(actor)
     with transaction.atomic():
         record = ContactImport.objects.select_for_update().get(pk=import_id)
         if record.status != ContactImport.Status.RUNNING or record.origin != ContactImport.Origin.UPLOAD:

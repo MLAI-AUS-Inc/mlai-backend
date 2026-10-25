@@ -1,6 +1,7 @@
 """Contacts API rules that need no database: access, inputs, wire shapes and filters."""
 
 import uuid
+from contextlib import ExitStack
 from datetime import datetime, timedelta, timezone
 from unittest.mock import Mock, patch
 
@@ -61,6 +62,17 @@ def signed_in(method="get", path=PREFIX, data=None, **extra):
     return request
 
 
+def admin_gate(is_admin=True, *, verified=True):
+    """Patch the MLAI admin gate's two lookups, for the views and ``crm_access`` alike."""
+
+    stack = ExitStack()
+    stack.enter_context(
+        patch("community_chat.admin_access.has_verified_installation", return_value=verified)
+    )
+    stack.enter_context(patch("community_chat.admin_access.is_mlai_admin_user", return_value=is_admin))
+    return stack
+
+
 class ChannelAvailabilityTests(SimpleTestCase):
     @override_settings(CRM_SENDING_ENABLED=False, CRM_SMS_ENABLED=False, CRM_WHATSAPP_ENABLED=False)
     def test_channels_are_disabled_by_default(self):
@@ -106,22 +118,28 @@ class ChannelAvailabilityTests(SimpleTestCase):
 class AccessTests(SimpleTestCase):
     @override_settings(COMMUNITY_CHAT_CRM_ENABLED=False)
     def test_flag_off_denies_everyone_without_reading_roles(self):
-        with patch("crm.access.account_chat_role") as role:
+        with patch("community_chat.admin_access.is_mlai_admin_user") as role:
             self.assertEqual(
                 crm_access(signed_in()), {"enabled": False, "can_view": False, "can_send": False}
             )
         role.assert_not_called()
 
     @override_settings(COMMUNITY_CHAT_CRM_ENABLED=True)
-    def test_only_owner_and_admin_roles_on_the_session_installation_can_view(self):
+    def test_only_mlai_admins_on_the_session_installation_can_view(self):
         request = signed_in()
         request.user = request._force_auth_user
-        for role, allowed in (("owner", True), ("admin", True), ("moderator", False), ("member", False)):
-            with self.subTest(role=role), patch("crm.access.account_chat_role", return_value=role) as lookup:
+        for verified, is_admin, allowed in ((True, True, True), (True, False, False), (False, True, False)):
+            with (
+                self.subTest(verified=verified, is_admin=is_admin),
+                patch(
+                    "community_chat.admin_access.has_verified_installation", return_value=verified
+                ) as device,
+                patch("community_chat.admin_access.is_mlai_admin_user", return_value=is_admin),
+            ):
                 self.assertEqual(
                     crm_access(request), {"enabled": True, "can_view": allowed, "can_send": allowed}
                 )
-                lookup.assert_called_once_with(
+                device.assert_called_once_with(
                     request.user,
                     request.community_chat_public_key,
                     request.community_chat_installation_id,
@@ -130,10 +148,10 @@ class AccessTests(SimpleTestCase):
     @override_settings(COMMUNITY_CHAT_CRM_ENABLED=True)
     def test_sessions_without_a_device_installation_are_members(self):
         request = RequestFactory().get(PREFIX)
-        request.user = User(email="jwt@example.test", is_active=True)
-        with patch("crm.access.account_chat_role", return_value="member") as lookup:
+        request.user = User(email="jwt@example.test", is_active=True, is_superuser=True)
+        with patch("community_chat.admin_access.is_mlai_admin_user", return_value=True) as role:
             self.assertFalse(is_crm_admin(request))
-        lookup.assert_called_once_with(request.user, None, None)
+        role.assert_not_called()
 
 
 @patch.object(CommunityChatScopedThrottle, "allow_request", return_value=True)
@@ -145,9 +163,17 @@ class GateTests(SimpleTestCase):
 
     @override_settings(COMMUNITY_CHAT_CRM_ENABLED=False)
     def test_flag_off_is_404_and_access_still_answers(self, _throttle):
-        response = self.call(views.TagsView, signed_in())
+        with admin_gate():
+            response = self.call(views.TagsView, signed_in())
         self.assertEqual(response.status_code, 404)
         self.assertEqual(response.data, {"error": "crm_disabled", "outcome": "crm_disabled"})
+        self.assertEqual(response["Cache-Control"], "no-store")
+
+        # The admin check comes first, so a non-admin never learns the flag.
+        with admin_gate(False):
+            response = self.call(views.TagsView, signed_in())
+        self.assertEqual(response.status_code, 403)
+        self.assertEqual(response.data, {"error": "not_authorised", "outcome": "not_authorised"})
         self.assertEqual(response["Cache-Control"], "no-store")
 
         response = self.call(views.AccessView, signed_in())
@@ -165,7 +191,7 @@ class GateTests(SimpleTestCase):
 
     @override_settings(COMMUNITY_CHAT_CRM_ENABLED=True)
     def test_members_get_403_and_a_quiet_access_answer(self, _throttle):
-        with patch("crm.access.account_chat_role", return_value="member"):
+        with admin_gate(False):
             response = self.call(views.ContactsView, signed_in())
             self.assertEqual(response.status_code, 403)
             self.assertEqual(response.data, {"error": "not_authorised", "outcome": "not_authorised"})
@@ -178,7 +204,7 @@ class GateTests(SimpleTestCase):
     def test_admins_see_sync_and_channel_state(self, _throttle):
         sync = {"enabled": True, "last_synced_at": NOW, "status": "completed"}
         with (
-            patch("crm.access.account_chat_role", return_value="owner"),
+            admin_gate(),
             patch("crm.queries.luma_sync_status", return_value=sync),
         ):
             response = self.call(views.AccessView, signed_in())
@@ -217,7 +243,7 @@ class GateTests(SimpleTestCase):
                 "invalid_definition",
             ),
         ]
-        with patch("crm.access.account_chat_role", return_value="admin"):
+        with admin_gate():
             for view, request, kwargs, status, code in cases:
                 with self.subTest(view=view.__name__, code=code):
                     response = self.call(view, request, **kwargs)
@@ -229,7 +255,7 @@ class GateTests(SimpleTestCase):
         request = signed_in(
             "post", data={"definition": {"rules": [{"type": "tag", "op": "has_any", "values": []}]}}
         )
-        with patch("crm.access.account_chat_role", return_value="admin"):
+        with admin_gate():
             response = self.call(views.SegmentPreviewView, request)
         self.assertEqual(
             response.data,
@@ -244,7 +270,7 @@ class GateTests(SimpleTestCase):
     @override_settings(COMMUNITY_CHAT_CRM_ENABLED=True)
     def test_import_plan_without_email_still_shows_the_columns(self, _throttle):
         request = signed_in("post", data={"headers": ["Name", "Company"]})
-        with patch("crm.access.account_chat_role", return_value="admin"):
+        with admin_gate():
             response = self.call(views.ImportPlanView, request)
         self.assertEqual(response.status_code, 200)
         self.assertFalse(response.data["has_email"])
@@ -253,7 +279,7 @@ class GateTests(SimpleTestCase):
     @override_settings(COMMUNITY_CHAT_CRM_ENABLED=True)
     def test_import_plan_maps_headers_in_order(self, _throttle):
         request = signed_in("post", data={"headers": ["Email Address", "First Name", "Favourite model"]})
-        with patch("crm.access.account_chat_role", return_value="admin"):
+        with admin_gate():
             response = self.call(views.ImportPlanView, request)
         self.assertEqual(response.status_code, 200)
         self.assertEqual(
@@ -657,5 +683,5 @@ class UploadImportRuleTests(SimpleTestCase):
         ]
         for rows, start_row, code in cases:
             with self.subTest(code=code), self.assertRaises(ImportChunkError) as caught:
-                apply_upload_chunk(uuid.uuid4(), start_row=start_row, rows=rows)
+                apply_upload_chunk(uuid.uuid4(), start_row=start_row, rows=rows, actor=None)
             self.assertEqual(caught.exception.code, code)

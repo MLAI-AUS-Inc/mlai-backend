@@ -59,18 +59,20 @@ def device_protection_role(public_key):
     return appointed_chat_role(device.user) or "member"
 
 
+def has_verified_installation(user, public_key, installation_id):
+    """Whether the session runs on the account's own verified, unrevoked installation."""
+    return bool(installation_id) and CommunityChatDevice.objects.filter(
+        user=user,
+        public_key=public_key,
+        installation_id=installation_id,
+        status=DeviceBindingStatus.VERIFIED,
+        revoked_at__isnull=True,
+    ).exists()
+
+
 def account_chat_role(user, public_key, installation_id):
     """A session may use only its own account's verified device installation."""
-    if (
-        not installation_id
-        or not CommunityChatDevice.objects.filter(
-            user=user,
-            public_key=public_key,
-            installation_id=installation_id,
-            status=DeviceBindingStatus.VERIFIED,
-            revoked_at__isnull=True,
-        ).exists()
-    ):
+    if not has_verified_installation(user, public_key, installation_id):
         return "member"
     return chat_role(user)
 

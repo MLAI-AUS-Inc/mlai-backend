@@ -4,6 +4,7 @@ from .privacy_views import AccountDeletionView, AiConsentView
 from .device_management_views import AccountDevicesView, AccountDeviceView
 from .onboarding_views import MemberOnboardingView
 from .account_ban_views import AccountBanView
+from .admin_views import AdminAccessView
 from .permission_views import ChatPermissionsView, RelayChatRoleView, ChatModeratorView, ChatMemberRolesView, ChatAdminView
 
 from .views import (
@@ -75,6 +76,8 @@ urlpatterns = [
     path("relay-roles/<str:public_key>/", RelayChatRoleView.as_view(), name="community_chat_relay_role"),
     path("volunteer/", include("community_chat.volunteer.urls")),
     path("crm/", include("community_chat.crm.urls")),
+    # MLAI Chat's Admin area; not Django's /admin/ site or the relay's /api/admin/v1.
+    path("admin/access/", AdminAccessView.as_view(), name="community_chat_admin_access"),
     path("home/", CommunityHomeView.as_view(), name="community_chat_home"),
     path("coworking/today/", CoworkingTodayView.as_view(), name="community_chat_coworking_today"),
     path("meeting-rooms/rooms/", MeetingRoomListView.as_view(), name="community_chat_meeting_room_list"),

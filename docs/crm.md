@@ -91,10 +91,14 @@ access rules are in `crm/queries.py`, `crm/segments.py` and `crm/access.py`.
 **Access**
 
 - **Authentication:** the Volunteer API's classes (`CommunityChatAccountAuthentication`, `CustomJWTAuthentication`).
-- **Who:** a Chat owner or admin, resolved by `account_chat_role` on the session's own verified device installation. A JWT session has no installation, so it is never an admin here.
+- **Who:** an MLAI admin or committee member: an active account with a linked, active `roo.PointsAdmin` row whose role is `admin` or `committee`, or a superuser (`roo.permissions.mlai_admin_role`). Portfolio leads, partners, Slack-ID-only bootstrap admins and Chat owners or admins don't count.
+- **Session:** the account's own verified, unrevoked device installation (`community_chat.admin_access.is_mlai_admin_request`). A JWT session has no installation, so it is never an admin here.
+- **Granting access:** add the person to the roster in `roo/management/commands/sync_committee_points_admins.py` and run it with `--apply`, or create a `PointsAdmin` linked to their account with role `admin` or `committee`.
 - **Flag:** `COMMUNITY_CHAT_CRM_ENABLED` (default off).
 - **`GET access/`** always answers 200 for a signed-in account, with `enabled`, `can_view` and `can_send`. Admins also get `luma_sync` and per-channel availability (`disabled` when a channel's flag is off, `not_configured` when a credential is missing). Others get `null` for both.
-- **Every other route** answers 404 `crm_disabled` while the flag is off, and 403 `not_authorised` to everyone but owners and admins.
+- **Every other route** answers 403 `not_authorised` to anyone who isn't an MLAI admin, whatever the flag says, and then 404 `crm_disabled` to admins while the flag is off. Every view subclasses `community_chat.admin_views.MlaiAdminView`; a route-audit test fails if one doesn't.
+- **Services:** each write the views call (contacts, segments, uploads, blast drafts, queue, test send and cancel) also refuses a non-admin actor, so a caller that skips the views is still refused. Dispatch fails a live blast whose creator has lost admin (`last_error` `not_authorised`). The scheduler, commands and signature-verified Twilio webhooks have no actor and aren't gated.
+- **`GET /api/v1/community-chat/admin/access/`** (MLAI Chat's Admin tab, not Django's `/admin/`) always answers 200 for a signed-in account: `{"is_admin": true, "sections": ["crm"]}` for an admin (`crm` only while the flag is on), `{"is_admin": false, "sections": []}` for anyone else. Throttle scope `community_chat_admin` (`COMMUNITY_CHAT_ADMIN_RATE`, default `120/minute`).
 
 **Conventions**
 
@@ -107,7 +111,7 @@ access rules are in `crm/queries.py`, `crm/segments.py` and `crm/access.py`.
 
 | Route | Purpose |
 | --- | --- |
-| `GET overview/` | Contact totals, the next event and the last sent blast |
+| `GET overview/` | Contact totals, the next event and the last sent blast; `segments` (`total`, `updated_last_7_days`, the largest three as `top`), `email_30d` (`sent`: email rows that reached the provider in 30 days; `delivery_rate`: (sent - undelivered - bounced) / sent, or `null`) and `recent_activity` (the latest five audit rows as `action`, `created_at`, `actor_name` and a server-built `summary`; only the newest sync pass, no draft saves) |
 | `GET events/?scope=upcoming\|past&q=` | Events with guest counts and per-channel reach |
 | `GET events/{id}/` | One event with its blasts and quick segments (each with a saveable `definition`) |
 | `GET events/{id}/guests/?status=going\|waitlist\|pending\|checked_in\|no_show\|all&q=` | Guest list. Removed guests never appear; `no_show` is empty until the event ends |

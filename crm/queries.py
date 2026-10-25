@@ -7,6 +7,7 @@ through a relation to it, such as ``EventRegistration`` (``"contact__"``).
 from __future__ import annotations
 
 import re
+import uuid
 from collections import Counter
 from datetime import datetime, timedelta
 from typing import Iterable, Optional
@@ -42,6 +43,7 @@ from .models import (
     CrmEvent,
     EventRegistration,
     InboundMessage,
+    Segment,
 )
 
 PENDING = "pending_approval"
@@ -58,6 +60,17 @@ MAX_SEARCH_LENGTH = 200
 MIN_PHONE_DIGITS = 4
 DETAIL_REGISTRATION_LIMIT = 200
 DETAIL_ACTIVITY_LIMIT = 100
+OVERVIEW_TOP_SEGMENTS = 3
+OVERVIEW_ACTIVITY_LIMIT = 5
+# Email rows that reached the provider, and the ones it then couldn't deliver.
+EMAIL_SENT_STATUSES = (
+    BlastDelivery.Status.SENT,
+    BlastDelivery.Status.DELIVERED,
+    BlastDelivery.Status.READ,
+    BlastDelivery.Status.UNDELIVERED,
+    BlastDelivery.Status.BOUNCED,
+)
+EMAIL_NOT_DELIVERED_STATUSES = (BlastDelivery.Status.UNDELIVERED, BlastDelivery.Status.BOUNCED)
 _PHONE_LIKE = re.compile(r"^[\d\s()+\-.]+$")
 _NOTHING = "pk__isnull"  # never true: a primary key is never null
 _SENT = (
@@ -529,6 +542,89 @@ def luma_sync_status() -> dict:
         "last_synced_at": last.created_at if last else None,
         "status": status,
     }
+
+
+def segment_overview(now: datetime) -> dict:
+    """How many saved segments, how many changed this week, and the largest three.
+
+    ``top`` ranks by ``last_count``; segments that were never counted go last.
+    """
+
+    totals = Segment.objects.aggregate(
+        total=Count("pk"),
+        updated_last_7_days=Count("pk", filter=Q(updated_at__gte=now - timedelta(days=7))),
+    )
+    top = Segment.objects.order_by(F("last_count").desc(nulls_last=True), "name", "pk").values(
+        "pk", "name", "last_count"
+    )[:OVERVIEW_TOP_SEGMENTS]
+    return {
+        **totals,
+        "top": [{"id": str(row["pk"]), "name": row["name"], "last_count": row["last_count"]} for row in top],
+    }
+
+
+def delivery_rate(sent: int, not_delivered: int) -> Optional[float]:
+    """``(sent - undelivered - bounced) / sent`` to four places, or None when nothing was sent."""
+
+    if not sent:
+        return None
+    return round(max(0, sent - not_delivered) / sent, 4)
+
+
+def email_overview(now: datetime) -> dict:
+    """Email deliveries in the last 30 days.
+
+    ``sent`` counts email rows that reached the provider: ``sent``,
+    ``delivered``, ``read``, ``undelivered`` and ``bounced``. ``delivery_rate``
+    is that minus ``undelivered`` and ``bounced``, over ``sent`` (None when
+    ``sent`` is 0). ``BlastDelivery`` has no send time, so the window is on
+    ``created_at``, when the blast was queued.
+    """
+
+    counts = BlastDelivery.objects.filter(
+        channel=Channel.EMAIL, created_at__gte=now - timedelta(days=30)
+    ).aggregate(
+        sent=Count("pk", filter=Q(status__in=EMAIL_SENT_STATUSES)),
+        not_delivered=Count("pk", filter=Q(status__in=EMAIL_NOT_DELIVERED_STATUSES)),
+    )
+    return {"sent": counts["sent"], "delivery_rate": delivery_rate(counts["sent"], counts["not_delivered"])}
+
+
+def recent_activity(limit: int = OVERVIEW_ACTIVITY_LIMIT) -> tuple[list, dict]:
+    """The overview's latest audit rows, newest first, and the blasts they name by id.
+
+    Sync passes run every few minutes, so only the latest one is shown. Blast
+    draft saves (the composer saves as people type) and upload starts are left
+    out; the matching send and finish rows say what happened.
+    """
+
+    people = list(
+        CrmAuditEvent.objects.exclude(action=CrmAuditEvent.Action.SYNC)
+        .exclude(
+            action=CrmAuditEvent.Action.EDIT,
+            target_type="blast",
+            detail__contains={"operation": "update"},
+        )
+        .exclude(action=CrmAuditEvent.Action.IMPORT, detail__contains={"operation": "start"})
+        .select_related("actor")
+        .order_by("-created_at", "-pk")[:limit]
+    )
+    last_sync = (
+        CrmAuditEvent.objects.filter(action=CrmAuditEvent.Action.SYNC).order_by("-created_at", "-pk").first()
+    )
+    rows = sorted([*people, *([last_sync] if last_sync else [])], key=lambda row: row.created_at, reverse=True)
+    rows = rows[:limit]
+    blast_ids = [row.target_id for row in rows if row.target_type == "blast" and _is_uuid(row.target_id)]
+    blasts = Blast.objects.filter(pk__in=blast_ids).select_related("whatsapp_template") if blast_ids else []
+    return rows, {str(blast.pk): blast for blast in blasts}
+
+
+def _is_uuid(value) -> bool:
+    try:
+        uuid.UUID(str(value))
+    except ValueError:
+        return False
+    return True
 
 
 def contact_overview(now: datetime) -> dict:

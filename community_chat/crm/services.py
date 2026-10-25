@@ -1,6 +1,7 @@
 """Contact edits, opt-outs, saved segments and blast drafts; every write leaves a ``CrmAuditEvent``.
 
-Audit rows name the changed fields, never their values.
+Audit rows name the changed fields, never their values. Each write refuses an
+acting account that isn't an MLAI admin, whoever calls it.
 """
 
 from __future__ import annotations
@@ -28,6 +29,7 @@ from crm.models import (
 from crm.phones import NO_PHONE, normalize_contact_phone, sms_status_for
 from crm.segments import SegmentError, evaluate, validate_definition
 
+from ..admin_access import require_mlai_admin
 from .errors import CrmError
 from .serializers import EDITABLE_FIELDS, PROFILE_TEXT_FIELDS
 
@@ -105,6 +107,7 @@ def _existing(email: str) -> CrmError:
 def create_contact(data: dict, *, actor, now: datetime) -> Contact:
     """Add a person by hand; banned emails are refused, as in imports."""
 
+    require_mlai_admin(actor)
     email = data["email"]
     if Contact.objects.filter(email=email).exists():
         raise _existing(email)
@@ -133,6 +136,7 @@ def create_contact(data: dict, *, actor, now: datetime) -> Contact:
 
 
 def update_contact(contact_id, data: dict, *, actor, now: datetime) -> None:
+    require_mlai_admin(actor)
     with transaction.atomic():
         contact = Contact.objects.select_for_update().get(pk=contact_id)
         changed = _apply_fields(contact, data, now=now)
@@ -151,6 +155,7 @@ def update_contact(contact_id, data: dict, *, actor, now: datetime) -> None:
 def stop_messaging(contact_id, channels: list[str], *, reason: str, actor, now: datetime) -> None:
     """Opt a contact out of each listed channel and record the evidence; never reversed here."""
 
+    require_mlai_admin(actor)
     with transaction.atomic():
         contact = Contact.objects.select_for_update().get(pk=contact_id)
         columns, events = {"updated_at"}, []
@@ -211,6 +216,7 @@ def segment_count(definition: dict, *, now: datetime) -> Optional[int]:
 def save_segment(segment: Optional[Segment], data: dict, *, actor, now: datetime) -> Segment:
     """Create a segment, or update the given one; a new definition is recounted."""
 
+    require_mlai_admin(actor)
     creating = segment is None
     if creating:
         segment = Segment(created_by=actor)
@@ -238,6 +244,7 @@ def save_segment(segment: Optional[Segment], data: dict, *, actor, now: datetime
 
 
 def delete_segment(segment: Segment, *, actor) -> None:
+    require_mlai_admin(actor)
     segment_id = segment.pk
     with transaction.atomic():
         segment.delete()
@@ -269,8 +276,9 @@ def _set_audience(blast: Blast, data: dict) -> None:
 
 
 def save_blast_draft(blast: Optional[Blast], data: dict, *, actor, now: datetime) -> Blast:
-    """Create a draft, or change one; only drafts can change."""
+    """Create a draft, or change one (its audience included); only drafts can change."""
 
+    require_mlai_admin(actor)
     creating = blast is None
     if creating:
         if "purpose" not in data:

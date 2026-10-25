@@ -2,7 +2,8 @@
 
 Uses the MLAI calendar key (``LUMA_API_KEY``). Luma is the source of truth for
 registrations and check-ins; contact profile fields are only filled when blank
-so manual edits and imports are never overwritten.
+so manual edits and imports are never overwritten. The scheduler and commands
+call this with no acting account, so it has no MLAI admin gate.
 """
 
 from __future__ import annotations

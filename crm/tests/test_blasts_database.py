@@ -27,6 +27,7 @@ from crm.models import (
     MessageTemplate,
     SenderMailbox,
 )
+from roo.models import PointsAdmin
 
 from .api_fixtures import PREFIX, CrmApiMixin, make_contact, make_event, register
 
@@ -623,6 +624,32 @@ class BlastDispatchDatabaseTests(BlastFixtures, TestCase):
         self.fake.fail_next("POST", r"/api/campaigns", status=400)
         self.assertEqual(blasts.dispatch_blast(refused.pk)["status"], "failed")
         self.assertEqual(set(self.statuses(refused, "email").values()), {"failed"})
+
+    def test_a_blast_whose_creator_lost_admin_is_stopped_not_sent(self):
+        blast = self.queued()
+        PointsAdmin.objects.filter(user=self.admin).update(is_active=False)
+        outcome = blasts.dispatch_blast(blast.pk)
+        self.assertEqual((outcome["status"], outcome["refused"]), ("failed", "not_authorised"))
+        blast.refresh_from_db()
+        self.assertEqual((blast.status, blast.last_error), ("failed", "not_authorised"))
+        self.assertEqual((self.fake.calls, self.fake.twilio), ([], []))
+        self.assertEqual(
+            set(BlastDelivery.objects.filter(blast=blast).values_list("status", "error_code")),
+            {("failed", "not_authorised")},
+        )
+        audit = CrmAuditEvent.objects.get(target_id=str(blast.pk), detail__operation="refuse")
+        self.assertEqual((audit.action, audit.actor, audit.detail["previous_status"]), ("send", None, "queued"))
+        self.assertEqual(blasts.dispatch_blast(blast.pk)["status"], "failed")
+
+    def test_a_running_campaign_is_cancelled_when_its_creator_loses_admin(self):
+        blast = self.queued(channels=["email"], sms={"body": ""}, whatsapp={"template_id": None, "variables": {}})
+        self.assertEqual(blasts.dispatch_blast(blast.pk)["status"], "sending")
+        PointsAdmin.objects.filter(user=self.admin).delete()
+        self.assertEqual(blasts.dispatch_blast(blast.pk)["status"], "failed")
+        blast.refresh_from_db()
+        self.assertEqual(self.fake.campaigns[blast.listmonk_campaign_id]["status"], "cancelled")
+        self.assertEqual(set(self.statuses(blast, "email").values()), {"unknown"})
+        self.assertEqual(blast.stats["email"]["listmonk_status"], "cancelled")
 
     def test_the_runner_claims_live_blasts(self):
         blast = self.queued()

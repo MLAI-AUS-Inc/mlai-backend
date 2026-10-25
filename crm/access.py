@@ -1,15 +1,17 @@
 """Who may use the contacts API, and which blast channels are switched on.
 
-Access needs the Chat owner or admin role on a verified device installation
-and ``COMMUNITY_CHAT_CRM_ENABLED``. Email needs ``CRM_SENDING_ENABLED`` and a
-listmonk API user; SMS and WhatsApp need their flags and Twilio credentials.
+Access needs an MLAI admin or committee account (a linked ``roo.PointsAdmin``
+row with role ``admin`` or ``committee``, or a superuser) on its own verified
+device installation, and ``COMMUNITY_CHAT_CRM_ENABLED``. Chat owner and admin
+roles don't count. Email needs ``CRM_SENDING_ENABLED`` and a listmonk API
+user; SMS and WhatsApp need their flags and Twilio credentials.
 """
 
 from __future__ import annotations
 
 from django.conf import settings
 
-from community_chat.permissions import account_chat_role, is_chat_admin
+from community_chat.admin_access import is_mlai_admin_request
 
 EMAIL_CREDENTIALS = ("LISTMONK_BASE_URL", "LISTMONK_API_USER", "LISTMONK_API_TOKEN")
 TWILIO_CREDENTIALS = ("TWILIO_ACCOUNT_SID", "TWILIO_AUTH_TOKEN")
@@ -22,18 +24,9 @@ def crm_enabled() -> bool:
 
 
 def is_crm_admin(request) -> bool:
-    """Only an owner or admin session on its own verified installation."""
+    """Only an MLAI admin's session on that account's own verified installation."""
 
-    user = getattr(request, "user", None)
-    if not getattr(user, "is_authenticated", False) or not user.is_active:
-        return False
-    return is_chat_admin(
-        account_chat_role(
-            user,
-            getattr(request, "community_chat_public_key", None),
-            getattr(request, "community_chat_installation_id", None),
-        )
-    )
+    return is_mlai_admin_request(request)
 
 
 def crm_access(request) -> dict:
