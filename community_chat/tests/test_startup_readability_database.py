@@ -164,6 +164,48 @@ class OwnAiReadabilityJourneyTests(TestCase):
         draft.refresh_from_db()
         self.assertEqual(draft.current_revision_id, cleared['revisionId'])
 
+    def test_own_ai_intro_edits_preserve_frozen_history_and_prior_publication(self):
+        from datetime import date
+        from startup_updates.evidence_contract import content_hash
+        from startup_updates.models import MonthlyEvidenceSnapshot
+        from startup_updates.revisions import save_revision
+        from startup_updates.tests_financial_history_unit import evidence_payload
+        payload = evidence_payload()
+        month = date(2026, 8, 1)
+        draft = MonthlyUpdateDraft.objects.create(organization=self.organization, month=month)
+        snapshot = MonthlyEvidenceSnapshot.objects.create(organization=self.organization, month=month,
+            payload=payload, content_hash=content_hash(payload))
+        first = save_revision(draft, {'summary': 'We tested delivery routes.',
+            'startupOverview': 'We help shops plan deliveries.',
+            '_financial_history_selection': {'enabled': True, 'shareAmounts': False}},
+            snapshot=snapshot, audience='public', validation={'groundedness_status': 'founder_asserted'})
+        update = self.detail(draft.pk)['update']
+        self.assertEqual(self.approve(update).status_code, 200)
+        published = self.client.get(BASE + 'community/').data['updates'][0]
+        self.assertFalse(published['financialHistory']['shareAmounts'])
+        self.assertIsNone(published['financialHistory']['currency'])
+        expected_revision = first.pk
+        for overview in ('We help local shops plan deliveries.', ''):
+            edited = self.tool('save_narrative_draft', self.arguments(month='2026-08', sources=[],
+                updateId=draft.pk, expectedRevision=expected_revision,
+                narrative={'summary': 'We tested another route.', 'startupOverview': overview}))
+            current = self.detail(draft.pk)['update']
+            self.assertEqual(current['startupOverview'], overview)
+            self.assertEqual(current['validation']['groundedness_status'], 'needs_review')
+            self.assertEqual(current['financialHistory'], published['financialHistory'])
+            draft.refresh_from_db()
+            self.assertEqual(draft.current_revision.snapshot_id, snapshot.pk)
+            self.assertEqual(draft.current_revision.structured_memo['financial_history'], first.structured_memo['financial_history'])
+            self.assertEqual(self.client.get(BASE + 'community/').data['updates'][0], published)
+            self.assertEqual(self.approve(update).status_code, 409)
+            expected_revision = edited['revisionId']
+        rejected = self.tool('save_narrative_draft', self.arguments(month='2026-08', sources=[],
+            updateId=draft.pk, expectedRevision=expected_revision,
+            financialHistorySelection={'enabled': True, 'shareAmounts': True}), error=True)
+        self.assertEqual(rejected['status'], 400)
+        draft.refresh_from_db()
+        self.assertEqual(draft.current_revision_id, expected_revision)
+
     def test_background_only_cannot_be_published(self):
         response = self.client.post(BASE + 'updates/', {'companyId': self.company, 'month': 'October',
             'year': 2026, 'summary': '', 'startupOverview': FIXTURE['narrative']['startupOverview'],
