@@ -20,6 +20,15 @@ from .article_preview_lease import ArticlePreviewLeaseProxyView, SALT
 from .website_contract import evidence_digest
 
 
+def sealed_setup_target():
+    """La Vie (25 Oct 2026): a merged setup's target whose digest its kit sealed."""
+    marker = {"kind": "artifact_digest", "value": "9" * 64, "meta_name": "mlai-artifact-digest", "schema_version": 1}
+    sealed = {"target_id": "registry", "delivery_adapter": "registry_entry", "source": "adopted",
+        "contract_digest": "f" * 64, "live_marker": marker, "contract": {"contract_digest": "f" * 64, "live_marker": marker}}
+    return SimpleNamespace(generation=3, source_sha="b" * 40, verified_at=None, adapter="registry_entry",
+        contract=sealed, target_key="registry", capabilities={"publishingReady": False})
+
+
 class DispatchKeyRecoveryReplays(SimpleTestCase):
     def setUp(self):
         self.run = SimpleNamespace(
@@ -306,6 +315,20 @@ class IncidentAuthorityReplays(SimpleTestCase):
         candidate = deepcopy(self.target)
         candidate["verification"]["checked_at"] = (self.now + timedelta(seconds=1)).isoformat()
         self.assertFalse(target_update_allowed(self.previous, candidate, generation=3, sha=self.sha))
+
+    def test_unsealed_rescan_cannot_erase_a_setup_sealed_target(self):
+        previous = sealed_setup_target()
+        rescan = {"target_id": "registry", "delivery_adapter": "registry_entry", "source": "scan"}
+        for candidate in (rescan, {**rescan, "contract_digest": "", "live_marker": {}}):
+            with self.subTest(candidate=candidate):
+                self.assertFalse(target_update_allowed(previous, candidate, generation=3, sha=self.sha))
+        # A new setup or verified custom proof brings its own digest, and an
+        # unsealed row stays a plain proposal.
+        resealed = {**rescan, "contract_digest": "e" * 64, "live_marker": {**previous.contract["live_marker"], "value": "8" * 64}}
+        self.assertTrue(target_update_allowed(previous, resealed, generation=3, sha=self.sha))
+        self.assertTrue(target_update_allowed(previous, {**rescan, "contract_digest": "e" * 64}, generation=3, sha=self.sha))
+        unsealed = SimpleNamespace(**{**vars(previous), "contract": rescan})
+        self.assertTrue(target_update_allowed(unsealed, rescan, generation=3, sha=self.sha))
 
     def test_changed_source_remains_an_unverified_proposal_until_reverified(self):
         candidate = {**self.target, "route_path": "/other", "verification": {}}
@@ -634,6 +657,26 @@ class IncidentIntegratedReplays(SimpleTestCase):
         self.assertTrue(connection.capabilities["templatesValid"])
         self.assertEqual(connection.last_verified_at, accepted_at)
         self.assertEqual(connection.verified_sha, sha)
+
+    def test_post_merge_rescan_keeps_the_sealed_target_row_for_its_kit_proof(self):
+        from . import website_connections as authority
+        sha = "c" * 40
+        previous = sealed_setup_target()
+        targets = Mock()
+        targets.filter.side_effect = lambda **kwargs: SimpleNamespace(first=lambda: previous) if "target_key" in kwargs else []
+        connection = SimpleNamespace(pk=uuid.uuid4(), generation=3, verified_sha="", last_verified_at=None,
+            targets=targets, capabilities={"publishingReady": False}, blockers=[], state="connected", save=Mock())
+        config = SimpleNamespace(article_template="<article>Template</article>", design_guide="Native classes")
+        rescan = {"target_id": "registry", "delivery_adapter": "registry_entry", "source": "scan", "publish_capability": "direct"}
+        with patch.object(authority, "_authority_depth") as depth, \
+                patch.object(authority.WebsiteScanSnapshot.objects, "get_or_create"), \
+                patch.object(authority.WebsiteConnectionTarget.objects, "update_or_create") as upsert, \
+                patch.object(authority.OrganizationContentConfig.objects, "get", return_value=config):
+            depth.get.return_value = 1
+            authority.record_scan_evidence(connection, {"source_sha": sha, "publish_targets": [rescan]})
+        upsert.assert_not_called()
+        self.assertEqual(previous.contract["contract_digest"], "f" * 64)
+        self.assertFalse(connection.capabilities["publishingReady"])
 
     def test_ci_preview_capability_survives_a_same_source_scan_without_preview_flag(self):
         from . import website_connections as authority
