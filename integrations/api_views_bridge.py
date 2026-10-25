@@ -1,6 +1,7 @@
 import json
 import logging
 
+from django.conf import settings
 from django.db import DatabaseError
 from django.utils import timezone
 from rest_framework import status
@@ -11,6 +12,7 @@ from rest_framework.views import APIView
 from integrations.services.message_sync.inbox import enabled as message_sync_enabled, enqueue_slack_callback
 from integrations.models import CommunityBridgePlatform
 from integrations.services.community_bridge.buzz import BuzzBridgeClient
+from integrations.services.community_bridge.native_mentions import native_mention_bindings, native_mention_tags
 from integrations.services.community_bridge.slack import SlackBridgeClient
 from integrations.services.community_bridge.member_channel_events import dispatch_authenticated_slack_callback
 from integrations.services.community_bridge.store import ingest_inbound_event, ingest_slack_event
@@ -134,12 +136,26 @@ class BuzzCommunityBridgeEventView(APIView):
                 status=status.HTTP_200_OK,
             )
 
-        raw_event = payload.get("raw_payload") or {}
-        if isinstance(raw_event, dict):
-            normalized_event = {**normalized_event, "metadata": {**(normalized_event.get("metadata") or {}), "slack_mention_tags": [
+        raw_event = payload.get("raw_payload")
+        raw_event = raw_event if isinstance(raw_event, dict) else {}
+        try:
+            person_tags = native_mention_tags(normalized_event.get("text"), raw_event.get("tags", []))
+        except ValueError:
+            return Response({"error": "invalid_native_mentions"}, status=status.HTTP_400_BAD_REQUEST)
+        source_metadata = normalized_event.get("metadata")
+        source_metadata = source_metadata if isinstance(source_metadata, dict) else {}
+        normalized_event = {**normalized_event, "metadata": {
+            **source_metadata, "mlai_mention_tags": person_tags,
+            "mlai_mention_bindings": native_mention_bindings(
+                workspace_id=getattr(settings, "MESSAGE_SYNC_SLACK_BOT_WORKSPACE_ID", ""),
+                text=normalized_event.get("text"), tags=person_tags,
+                source_created_at=raw_event.get("created_at"),
+            ),
+            "slack_mention_tags": [
                 tag for tag in raw_event.get("tags", [])
                 if isinstance(tag, list) and tag[:1] == ["slack-mention"]
-            ]}}
+            ],
+        }}
 
         result = ingest_inbound_event(
             source_platform=CommunityBridgePlatform.BUZZ,

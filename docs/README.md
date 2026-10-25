@@ -144,6 +144,8 @@ rollout sequence.
 
 ## Roo
 
+- [Roo awards to members without Slack](roo-chat-only-points.md)
+
 - [Roo event discounts](roo-event-discounts.md) — private quotes, general-point holds, one-use Luma coupons and supervised reconciliation.
 
 - [`roo-points-gst.md`](roo-points-gst.md) — inclusive GST checkout, payment evidence and release configuration
