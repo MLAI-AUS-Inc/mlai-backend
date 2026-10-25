@@ -109,10 +109,17 @@ class Check:
     expected: str
     required: bool
     judge: Callable[[list[str]], tuple[bool, str]]
+    # Which looked-up values to show; a domain's root TXT holds unrelated
+    # verification strings, so its SPF rows show only the SPF record.
+    shown: Callable[[list[str]], list[str]] = list
 
 
 def _spf_records(values):
     return [value for value in values if value.lower().startswith("v=spf1")]
+
+
+def _spf_or_all(values):
+    return _spf_records(values) or values
 
 
 def _judge_root_spf(include: Optional[str]):
@@ -200,6 +207,7 @@ def checks_for(domain: str, route: str) -> list[Check]:
                 "v=spf1 include:_spf.google.com ~all",
                 True,
                 _judge_root_spf("_spf.google.com"),
+                _spf_or_all,
             ),
             dmarc,
             inbound,
@@ -241,6 +249,7 @@ def checks_for(domain: str, route: str) -> list[Check]:
             "One v=spf1 record (Resend aligns through DKIM, so this is advisory)",
             False,
             _judge_root_spf(None),
+            _spf_or_all,
         ),
         inbound,
     ]
@@ -256,7 +265,7 @@ def run_check(check: Check) -> dict:
         passed, status, detail, found = False, ERROR, "DNS lookup failed; try again.", []
     else:
         passed, detail = check.judge(values)
-        status, found = (PASS if passed else FAIL), _clip(values)
+        status, found = (PASS if passed else FAIL), _clip(check.shown(values))
     return {
         "key": check.key,
         "label": check.label,

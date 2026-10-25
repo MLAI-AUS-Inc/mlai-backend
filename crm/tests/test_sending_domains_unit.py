@@ -42,7 +42,7 @@ def resend_zone(domain="mlai.au", overrides=None):
         (f"send.{domain}", "TXT"): ['"v=spf1 ip4:52.3.252.119 ~all"'],
         (f"send.{domain}", "MX"): ["10 feedback.forge.rmta.net."],
         (f"_dmarc.{domain}", "TXT"): [f'"v=DMARC1; p=none; rua=mailto:team@{domain}"'],
-        (domain, "TXT"): ['"v=spf1 include:_spf.google.com ~all"', '"google-site-verification=x"'],
+        (domain, "TXT"): ['"google-site-verification=x"', '"v=spf1 include:_spf.google.com ~all"'],
         (domain, "MX"): ["1 smtp.google.com."],
     }
     zone.update(overrides or {})
@@ -145,6 +145,7 @@ class DomainHealthTests(SimpleTestCase):
         self.assertEqual(records["dkim"]["host"], "resend._domainkey.mlai.au")
         self.assertEqual(records["dkim"]["found"], ["p=MIGfMA0GCSqGSIb3DQEB"])
         self.assertIn("p=none", records["dmarc"]["detail"])
+        self.assertEqual(records["spf"]["found"], ["v=spf1 include:_spf.google.com ~all"])
         self.assertTrue(all(record["status"] == "pass" for record in records.values()))
 
     def test_a_missing_required_record_fails_the_domain(self):
