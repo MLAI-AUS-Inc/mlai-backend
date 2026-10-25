@@ -893,6 +893,8 @@ def _serialize_draft_for_form(draft):
         "audienceVisibility": structured_memo.get("_audience_visibility", ["just_me"]),
         "month": calendar.month_name[month_value.month],
         "year": month_value.year,
+        **({"startupOverview": _structured_memo_text(structured_memo, "startupOverview") or ""}
+           if "startupOverview" in structured_memo else {}),
         "summary": _structured_memo_text(structured_memo, "summary", "topline"),
         "sourceUrl": _structured_memo_text(structured_memo, "sourceUrl", "source_url"),
         "manualDocuments": _structured_memo_manual_documents(structured_memo),
@@ -1000,6 +1002,9 @@ def _build_manual_structured_memo(payload):
     if "coverImage" in payload:
         memo["cover_image"] = payload["coverImage"]
 
+    if "startupOverview" in payload:
+        memo["startupOverview"] = str(payload["startupOverview"]).strip()
+
     display_config = payload.get("displayConfig")
     if display_config is not None:
         memo["display_config"] = display_config
@@ -1084,6 +1089,8 @@ def _serialize_monthly_update(draft, structured_memo=None, *, published=False, s
         "visibility": "published" if published_at else "private",
         "audienceVisibility": structured_memo.get("_audience_visibility") or monthly_update_visibility(draft),
         "publishedAt": published_at.isoformat() if published_at else None,
+        **({"startupOverview": _structured_memo_text(structured_memo, "startupOverview") or ""}
+           if "startupOverview" in structured_memo else {}),
         "summary": _structured_memo_text(structured_memo, "summary", "topline"),
         "sourceUrl": _structured_memo_text(structured_memo, "sourceUrl", "source_url"),
         "manualDocuments": _structured_memo_manual_documents(structured_memo),
@@ -1141,6 +1148,8 @@ def _serialize_draft_bundle(drafts):
         past_months.append(
             {
                 "month": f"{calendar.month_name[month_value.month]} {month_value.year}",
+                **({"startupOverview": _structured_memo_text(structured_memo, "startupOverview") or ""}
+                   if "startupOverview" in structured_memo else {}),
                 "highlights": _join_named_sections(structured_memo, _HIGHLIGHT_SECTIONS),
                 "challenges": _join_text_items_with_newlines(structured_memo.get("lowlights")),
                 "asks": _join_named_sections(structured_memo, [
@@ -1172,6 +1181,8 @@ def _serialize_email_draft_month(draft):
         "isoMonth": month_value.isoformat(),
         "month": calendar.month_name[month_value.month],
         "year": month_value.year,
+        **({"startupOverview": _structured_memo_text(structured_memo, "startupOverview") or ""}
+           if "startupOverview" in structured_memo else {}),
         "summary": _structured_memo_text(structured_memo, "summary", "topline"),
         "sourceUrl": _structured_memo_text(structured_memo, "sourceUrl", "source_url"),
         "manualDocuments": _structured_memo_manual_documents(structured_memo),
@@ -3101,6 +3112,12 @@ class VibeRaisingEmailDraftStartView(APIView):
         if "financialHistorySelection" in request.data:
             from vibe_raising.serializers import FinancialHistorySelectionField
             history_selection = FinancialHistorySelectionField().run_validation(request.data["financialHistorySelection"])
+        startup_overview = None
+        if "startupOverview" in request.data:
+            startup_overview = request.data["startupOverview"]
+            if not isinstance(startup_overview, str) or len(startup_overview) > 2000:
+                return Response({"startupOverview": "Use a short text overview of at most 2000 characters."}, status=status.HTTP_400_BAD_REQUEST)
+            startup_overview = startup_overview.strip()
 
         company = context["company"]
         domain = context["domain"]
@@ -3219,6 +3236,8 @@ class VibeRaisingEmailDraftStartView(APIView):
             if existing_run:
                 if history_selection is not None and (existing_run.run_request or {}).get("financial_history_selection") != history_selection:
                     raise RevisionConflict("Financial sharing choices changed. Finish or cancel the current generation before starting again.")
+                if startup_overview is not None and (existing_run.run_request or {}).get("startup_overview") != startup_overview:
+                    raise RevisionConflict("This run uses a different startup overview. Finish or cancel it before generating again.")
                 from startup_updates.activity_scope import run_uses_month_scope
                 if not run_uses_month_scope(existing_run.run_request or {}):
                     raise RevisionConflict("This draft was started with an older source period. Cancel it and generate the monthly update again.")
@@ -3246,7 +3265,7 @@ class VibeRaisingEmailDraftStartView(APIView):
                 automatic_source_scope=bool(getattr(self, "automatic_source_scope", False)),
                 audience_visibility=requested_audience,
                 cover_image=(display_config or {}).get("cover_image"),
-                financial_history_selection=history_selection)
+                financial_history_selection=history_selection, startup_overview=startup_overview)
             return draft, run, existing_run, run_month, redispatch_existing
 
         draft, run, existing_run, target_month, redispatch_existing = run_in_retryable_transaction(

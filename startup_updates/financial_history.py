@@ -175,9 +175,44 @@ def history_for_revision(draft, memo, current, snapshot, *, captured_at):
         return copy.deepcopy(prior)
     selection = validate_selection(requested)
     frozen = copy.deepcopy(prior.get("snapshot")) if isinstance(prior, dict) else None
+    source = copy.deepcopy(prior.get("_source")) if isinstance(prior, dict) else None
     if selection["enabled"] and (selection["refresh"] or not frozen or frozen.get("reportingMonth") != draft.month.isoformat()):
         frozen = build_snapshot(snapshot.payload, draft.month, captured_at=captured_at)
-    return {"enabled": selection["enabled"], "shareAmounts": selection["shareAmounts"], "snapshot": frozen}
+        source = {"snapshotId": snapshot.pk, "snapshotHash": snapshot.content_hash}
+    result = {"enabled": selection["enabled"], "shareAmounts": selection["shareAmounts"], "snapshot": frozen}
+    if source is not None:
+        result["_source"] = source
+    return result
+
+
+def history_review_evidence(revision):
+    """Resolve the chart's original immutable input within its startup and month."""
+    from startup_updates.models import MonthlyEvidenceSnapshot
+    history = (revision.structured_memo or {}).get("financial_history")
+    source = history.get("_source") if isinstance(history, dict) else None
+    if (not isinstance(source, dict) or type(source.get("snapshotId")) is not int
+            or not isinstance(source.get("snapshotHash"), str)):
+        return None
+    # A later narrative revision may have fresh evidence while retaining the
+    # approved chart. Never substitute that newer evidence for the chart's input.
+    snapshot = MonthlyEvidenceSnapshot.objects.filter(
+        pk=source["snapshotId"], content_hash=source["snapshotHash"],
+        organization_id=revision.snapshot.organization_id, month=revision.snapshot.month,
+    ).first()
+    if snapshot is None:
+        return None
+    payload = snapshot.payload
+    if not isinstance(payload, dict):
+        return None
+    # Captured snapshots carry their own hash outside the hashed body; older
+    # snapshots may instead hash the complete payload. Validate either encoding.
+    unhashed = {key: value for key, value in payload.items() if key != "hash"}
+    if content_hash(payload) != snapshot.content_hash and not (
+        payload.get("hash") == snapshot.content_hash and content_hash(unhashed) == snapshot.content_hash
+    ):
+        return None
+    return {"snapshotId": snapshot.pk, "snapshotHash": snapshot.content_hash,
+        **{key: copy.deepcopy(payload.get(key)) for key in ("period", "metrics", "charts")}}
 
 
 def generated_history_selection(memo, run_request):
@@ -211,7 +246,7 @@ def history_export_memo(memo):
     result["kpi_snapshot"] = [item for item in metrics if isinstance(item, dict)
         and item.get("metric_key") not in keys
         and not has_financial_amount(" ".join(str(item.get(key) or "") for key in ("label", "value", "unit")), metric_keys=keys)]
-    for key in ("title", "topline", "summary", "financial_performance", "highlights", "operations", "lowlights", "learnings", "next_30_days", "asks"):
+    for key in ("title", "startupOverview", "topline", "summary", "financial_performance", "highlights", "operations", "lowlights", "learnings", "next_30_days", "asks"):
         if key in result:
             result[key] = redact(result[key])
     # Generic progress charts are not in the community/public allowlist. Their

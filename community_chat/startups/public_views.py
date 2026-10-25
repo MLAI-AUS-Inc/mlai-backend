@@ -14,6 +14,7 @@ from .publication import approved_updates
 
 
 SECTIONS = (
+    ("startupOverview", "What we do"),
     ("summary", "Summary"), ("highlights", "Highlights"),
     ("challenges", "Challenges"), ("learnings", "Learnings"),
     ("next30Days", "Next month"), ("asks", "Ways to help"),

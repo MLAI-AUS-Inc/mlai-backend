@@ -169,7 +169,7 @@ class FinancialHistoryUnitTests(unittest.TestCase):
         current = SimpleNamespace(structured_memo={"financial_history": original})
         changed = evidence_payload()
         replace_totals(changed, -1, 9000, 300)
-        snapshot = SimpleNamespace(payload=changed)
+        snapshot = SimpleNamespace(pk=52, content_hash=content_hash(changed), payload=changed)
         draft = SimpleNamespace(month=MONTH, update_date=date(2026, 10, 25))
         inherited = history_for_revision(draft, {}, current, snapshot, captured_at=CAPTURED)
         self.assertEqual(inherited, original)
@@ -183,10 +183,12 @@ class FinancialHistoryUnitTests(unittest.TestCase):
         self.assertEqual(disabled["snapshot"], original["snapshot"])
         refreshed = history_for_revision(draft, {"_financial_history_selection": {"enabled": True, "shareAmounts": True, "refresh": True}}, current, snapshot, captured_at=CAPTURED)
         self.assertEqual(history_payload(refreshed)["points"][-1]["revenue"], 9000)
+        self.assertEqual(refreshed["_source"], {"snapshotId": 52, "snapshotHash": content_hash(changed)})
         self.assertEqual(history_payload(original)["points"][-1]["revenue"], 100)
 
     def test_shared_allowlist_never_exposes_internal_metadata_and_keeps_money_filter(self):
         history = frozen(share=True)
+        history["_source"] = {"snapshotId": 123, "snapshotHash": "private-source"}
         history["snapshot"]["private"] = {"connection_id": 123, "report_payload": {"secret": True}}
         history["snapshot"]["points"][0]["report_hash"] = "private"
         shared = shared_update({"metrics": {"invoice": 999}, "summary": "Revenue was AUD 999. We shipped.",

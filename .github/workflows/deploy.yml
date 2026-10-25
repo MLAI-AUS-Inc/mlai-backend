@@ -176,6 +176,8 @@ jobs:
           startup_updates.tests_linear_reconnect_unit \
           community_chat.tests.test_startup_lifecycle \
           community_chat.tests.test_startup_mcp \
+          community_chat.tests.test_startup_mcp_readability \
+          community_chat.tests.test_startup_readability \
           community_chat.tests.test_mlai_mcp \
           community_chat.tests.test_mlai_mcp_native_agents \
           community_chat.tests.test_relay_role_service_unit \
@@ -576,6 +578,7 @@ jobs:
           vibe_raising.tests_transaction_retry \
           community_chat.tests.test_startup_updates \
           community_chat.tests.test_startup_updates_database \
+          community_chat.tests.test_startup_readability_database \
           startup_updates.tests_evidence_contract \
           startup_updates.tests_dashboard_financial_refresh \
           startup_updates.tests_source_evidence \
