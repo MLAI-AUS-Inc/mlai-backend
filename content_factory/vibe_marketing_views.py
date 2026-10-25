@@ -15174,6 +15174,13 @@ class VibeMarketingBootstrapView(APIView):
         context, error_response = _resolve_context_or_response(request, require_domain=True)
         if error_response:
             return error_response
+        try:
+            # Renew an unchanged site's expiring proof before projecting it, so
+            # opening Articles shows a ready site rather than "check again".
+            from .website_freshness import refresh_for_page
+            refresh_for_page(context.organization)
+        except Exception:
+            logger.exception("website_freshness_page_failed organization=%s", context.organization.pk)
         payload = _serialize_bootstrap(context, request=request, view=view)
         return _timed_vibe_response(payload, started_at=started_at, metric_name="vibe_bootstrap", view=view)
 

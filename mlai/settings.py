@@ -2323,6 +2323,9 @@ ARTICLES_WEBSITE_EVENT_WAKES_ENABLED = os.getenv("ARTICLES_WEBSITE_EVENT_WAKES_E
 
 ARTICLES_WEBSITE_DOCTOR_ENABLED = os.getenv("ARTICLES_WEBSITE_DOCTOR_ENABLED", "false").lower() == "true"
 
+# Renew an unchanged site's native CI and live-route proof before it expires.
+WEBSITE_VERIFICATION_AUTO_REFRESH_ENABLED = _env_is_true("WEBSITE_VERIFICATION_AUTO_REFRESH_ENABLED", True)
+
 # C1/C2: owner consent and automatic route choice (default off).
 ARTICLES_SETUP_CONSENT_ENABLED = _env_is_true("ARTICLES_SETUP_CONSENT_ENABLED", False)
 ARTICLES_AUTO_PAGE_ENABLED = _env_is_true("ARTICLES_AUTO_PAGE_ENABLED", False)

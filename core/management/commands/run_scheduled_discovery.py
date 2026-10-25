@@ -30,6 +30,7 @@ from roo.models import ScheduledDiscoveryHeartbeat
 from startup_updates.monthly_update_reminders import run_monthly_update_reminder_scheduler
 
 from content_factory.website_consistency import run_website_consistency_sweep
+from content_factory.website_freshness import run_verification_freshness_sweep
 
 logger = logging.getLogger(__name__)
 
@@ -102,6 +103,9 @@ class Command(BaseCommand):
             ("github_installation_reconciliation", run_github_installation_reconciliation_sweep),
             ("website_connection_operations", process_website_connection_operations),
             ("website_consistency", run_website_consistency_sweep),
+            # Re-reads an unchanged site's native CI check and live route before
+            # its seven-day proof expires. Self-throttled to every 30 minutes.
+            ("website_verification_freshness", run_verification_freshness_sweep),
             ("article_dispatch_outbox", process_dispatch_outbox),
             # Refreshes the durable Stripe payout ledger once per local day.
             # This never posts to Xero; posting always requires admin approval.
