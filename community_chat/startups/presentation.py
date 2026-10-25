@@ -5,7 +5,7 @@ from vibe_raising.views import _serialize_monthly_update
 
 PUBLIC_FIELDS = (
     "id", "updateTitle", "monthSequence", "coverImage", "coverImageUrl", "revisionId", "revisionHash", "isoMonth", "month", "year", "publishedAt",
-    "summary", "highlights", "challenges", "learnings", "next30Days", "asks",
+    "startupOverview", "summary", "highlights", "challenges", "learnings", "next30Days", "asks",
     "metrics", "metricEvidence", "displayConfig", "financialChart", "financialHistory", "audienceVisibility", "evidenceStatus",
 )
 

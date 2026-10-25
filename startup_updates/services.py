@@ -3286,6 +3286,9 @@ def build_startup_context_snapshot(
         "organization_id": organization.id,
         "domain": organization.domain,
         "company_name": organization.name,
+        "short_description": profile.short_description,
+        "problem_solved": profile.problem_solved,
+        "target_audience": profile.target_audience,
         "company_aliases": list(profile.company_aliases or []),
         "domain_aliases": list(profile.domain_aliases or []),
         "product_names": list(profile.product_names or []),
@@ -3504,6 +3507,7 @@ def create_startup_update_run(
     audience_visibility=None,
     cover_image=None,
     financial_history_selection=None,
+    startup_overview: Optional[str] = None,
 ) -> ContentFactoryRun:
     from startup_updates.cover_images import normalize_cover_image
     from startup_updates.financial_history import validate_selection
@@ -3552,6 +3556,9 @@ def create_startup_update_run(
         if not run_uses_month_scope(existing.run_request or {}):
             from startup_updates.revisions import RevisionConflict
             raise RevisionConflict("This run used an older source range. Cancel it and draft this month again.")
+    if existing and startup_overview is not None and (existing.run_request or {}).get("startup_overview") != startup_overview:
+        from startup_updates.revisions import RevisionConflict
+        raise RevisionConflict("This run uses a different startup overview. Finish or cancel it before generating again.")
     if existing and update_draft:
         if financial_history_selection is not None and (existing.run_request or {}).get("financial_history_selection") != financial_history_selection:
             from startup_updates.revisions import RevisionConflict
@@ -3626,6 +3633,9 @@ def create_startup_update_run(
     }
     if financial_history_selection is not None:
         run_request["financial_history_selection"] = financial_history_selection
+    if startup_overview is not None:
+        run_request["startup_overview"] = startup_overview
+        startup_context["startup_overview"] = startup_overview
     if automatic_source_scope:
         from startup_updates.activity_scope import discover_activity_resources
         run_request["automatic_source_scope"] = discover_activity_resources(binding.user, organization, selected_input_sources)
@@ -5560,27 +5570,32 @@ def render_monthly_update_markdown(structured_memo: dict) -> str:
     from startup_updates.financial_history import history_export_memo
     memo = history_export_memo(structured_memo or {})
     title = str(memo.get("title") or "").strip()
-    topline = str(memo.get("topline") or "").strip()
+    startup_overview = str(memo.get("startupOverview") or "").strip()
+    topline = str(memo.get("topline") or memo.get("summary") or "").strip()
     sections = [
-        ("KPI Snapshot", memo.get("kpi_snapshot") or []),
-        ("Financial Performance", memo.get("financial_performance") or []),
-        ("Asks", memo.get("asks") or []),
-        ("Highlights", memo.get("highlights") or []),
-        ("Lowlights / Risks", memo.get("lowlights") or []),
-        ("Product / GTM / Team / Fundraising", memo.get("operations") or []),
-        ("Learnings", memo.get("learnings") or []),
-        ("Next 30 Days", memo.get("next_30_days") or []),
+        ("Key numbers", memo.get("kpi_snapshot") or []),
+        ("Financial overview", memo.get("financial_performance") or []),
+        ("How you can help", memo.get("asks") or []),
+        ("Progress", memo.get("highlights") or []),
+        ("Challenges", memo.get("lowlights") or []),
+        ("Other progress", memo.get("operations") or []),
+        ("What we learned", memo.get("learnings") or []),
+        ("Next steps", memo.get("next_30_days") or []),
     ]
 
     if isinstance(memo.get("progress_charts"), list):
-        sections = [(heading, items) for heading, items in sections if heading != "KPI Snapshot"]
+        sections = [(heading, items) for heading, items in sections if heading != "Key numbers"]
 
     lines = []
     if title:
         lines.append(f"# {title}")
         lines.append("")
+    if startup_overview:
+        lines.append("## What we do")
+        lines.append(startup_overview)
+        lines.append("")
     if topline:
-        lines.append("## Executive Summary")
+        lines.append("## This month")
         lines.append(topline)
         lines.append("")
 

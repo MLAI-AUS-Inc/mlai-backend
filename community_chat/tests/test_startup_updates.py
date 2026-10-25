@@ -313,12 +313,12 @@ class ConnectionHandoffTests(SimpleTestCase):
 
 
 class FrozenManualEvidenceTests(SimpleTestCase):
-    def snapshot(self, *, metrics=None, base=None):
+    def snapshot(self, *, metrics=None, base=None, run_context=None):
         from contextlib import ExitStack
         from startup_updates import services
         profile = Obj(reporting_timezone='UTC', kpi_definitions=[], default_currency='AUD', reporting_config_version=1, stage='seed', short_description='Acme')
         org = Obj(pk=1, name='Acme')
-        run = Obj(result={}, pk=1, run_request={'input_sources': ['manual_documents'], 'manual_document_ids': ['doc'], 'manual_summary': 'Founder notes'})
+        run = Obj(result={}, pk=1, run_request={'input_sources': ['manual_documents'], 'manual_document_ids': ['doc'], 'manual_summary': 'Founder notes', **(run_context or {})})
         with ExitStack() as stack:
             profiles = stack.enter_context(patch.object(revisions.StartupProfile, 'objects'))
             profiles.get_or_create.return_value = (profile, False)

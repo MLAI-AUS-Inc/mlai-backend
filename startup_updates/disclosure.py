@@ -8,7 +8,7 @@ from decimal import Decimal, InvalidOperation
 AGGREGATE_KEYS = {"revenue": "revenue", "monthlyCosts": "costs", "monthly_costs": "costs"}
 ACCEPTED_QUALITIES = {"source_reported", "verified", "founder_asserted"}
 CURRENCIES = {"AUD", "USD", "NZD", "CAD", "GBP", "EUR", "JPY", "CNY", "HKD", "SGD", "CHF", "INR", "KRW", "SEK", "NOK", "DKK", "ZAR", "BRL", "MXN"}
-NARRATIVE_FIELDS = ("summary", "highlights", "challenges", "learnings", "next30Days", "asks")
+NARRATIVE_FIELDS = ("startupOverview", "summary", "highlights", "challenges", "learnings", "next30Days", "asks")
 SHARED_FIELDS = {
     "id", "updateTitle", "monthSequence", "coverImage", "coverImageUrl", "revisionId", "revisionHash", "isoMonth", "month", "monthName", "year", "date", "status", "visibility", "publishedAt",
     *NARRATIVE_FIELDS, "startup", "metrics", "metricEvidence", "displayConfig", "financialChart", "audienceVisibility", "evidenceStatus",
