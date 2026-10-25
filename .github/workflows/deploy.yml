@@ -73,7 +73,7 @@ jobs:
         python -m pip install --only-binary=:all: --require-hashes -r .github/requirements-ci.lock
 
     - name: Test deployment failure handling and live contract
-      run: python -m unittest tests.test_deploy_runtime_checks tests.test_message_sync_deploy_config tests.test_community_bridge_dependency_review_workflow tests.test_valley_mcp_deploy_config tests.test_native_agent_deploy_config tests.test_slack_owner_inventory_deploy_config tests.test_member_room_provisioning_contract -v
+      run: python -m unittest tests.test_deploy_runtime_checks tests.test_message_sync_deploy_config tests.test_community_bridge_dependency_review_workflow tests.test_valley_mcp_deploy_config tests.test_crm_deploy_config tests.test_native_agent_deploy_config tests.test_slack_owner_inventory_deploy_config tests.test_member_room_provisioning_contract -v
 
     - name: Check jobs delivery contracts without database access
       run: python -m unittest tests.test_jobs_delivery_unit -v
@@ -1046,6 +1046,15 @@ jobs:
         COMMUNITY_CHAT_ADAPTER_URL: ${{ vars.COMMUNITY_CHAT_ADAPTER_URL }}
         COMMUNITY_CHAT_PASSWORD_AUTH_ENABLED: ${{ vars.COMMUNITY_CHAT_PASSWORD_AUTH_ENABLED || 'false' }}
         COMMUNITY_CHAT_STARTUP_UPDATES_ENABLED: ${{ vars.COMMUNITY_CHAT_STARTUP_UPDATES_ENABLED || '' }}
+        COMMUNITY_CHAT_CRM_ENABLED: ${{ vars.COMMUNITY_CHAT_CRM_ENABLED || '' }}
+        CRM_LUMA_SYNC_ENABLED: ${{ vars.CRM_LUMA_SYNC_ENABLED || '' }}
+        CRM_SENDING_ENABLED: ${{ vars.CRM_SENDING_ENABLED || '' }}
+        CRM_SMS_ENABLED: ${{ vars.CRM_SMS_ENABLED || '' }}
+        CRM_WHATSAPP_ENABLED: ${{ vars.CRM_WHATSAPP_ENABLED || '' }}
+        LISTMONK_BASE_URL: ${{ vars.LISTMONK_BASE_URL || '' }}
+        LISTMONK_API_USER: ${{ vars.LISTMONK_API_USER || '' }}
+        LISTMONK_API_TOKEN: ${{ secrets.LISTMONK_API_TOKEN || '' }}
+        TWILIO_MESSAGING_SERVICE_SID: ${{ vars.TWILIO_MESSAGING_SERVICE_SID || '' }}
         MLAI_MCP_ENABLED: ${{ vars.MLAI_MCP_ENABLED || 'false' }}
         VALLEY_MCP_UNIFIED_ALIAS_ENABLED: ${{ vars.VALLEY_MCP_UNIFIED_ALIAS_ENABLED || 'false' }}
         MLAI_MCP_COMMUNITY_ENABLED: ${{ vars.MLAI_MCP_COMMUNITY_ENABLED || 'false' }}

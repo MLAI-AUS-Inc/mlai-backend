@@ -313,6 +313,22 @@ Outcomes: an outage is `deferred`; listmonk refusing the credentials or the SQL-
 
 Tests: `crm.tests.test_blasts_unit` and `crm.tests.test_listmonk_unit` run without a database; `crm.tests.test_blasts_database` runs in the CI PostgreSQL job against a fake listmonk and Twilio.
 
+## Switching on in production
+
+The deploy copies these from repository variables, and one secret, into the host's `.env`. An unset variable keeps the host's value, so deleting one never switches anything off: set it to `false` instead. `scripts/validate_crm_deploy_config.py` checks them before anything is copied (`tests.test_crm_deploy_config`).
+
+| Name | Kind | Value |
+| --- | --- | --- |
+| `COMMUNITY_CHAT_CRM_ENABLED` | variable | `true` opens Admin → Contacts to MLAI admin and committee accounts |
+| `CRM_LUMA_SYNC_ENABLED` | variable | `true` copies Luma guests; needs `LUMA_API_KEY` on the host |
+| `CRM_SENDING_ENABLED`, `CRM_SMS_ENABLED`, `CRM_WHATSAPP_ENABLED` | variables | `true` switches that blast channel on |
+| `LISTMONK_BASE_URL` | variable | `http://listmonk:9000` |
+| `LISTMONK_API_USER` | variable | the listmonk API user's name |
+| `LISTMONK_API_TOKEN` | secret | that user's token |
+| `TWILIO_MESSAGING_SERVICE_SID` | variable | the Messaging Service's `MG…` SID |
+
+A channel switched on without its credentials shows as "not configured" and sends nothing.
+
 ## Migration
 
 `crm.0001_initial` is additive. It creates the twelve tables above and touches no existing table. Like every migration it needs explicit approval and the `APPROVED_MIGRATION_PLAN_SHA256` cycle before deployment (see `README.md`). Tests:
