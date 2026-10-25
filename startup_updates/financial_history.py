@@ -211,7 +211,7 @@ def history_export_memo(memo):
     result["kpi_snapshot"] = [item for item in metrics if isinstance(item, dict)
         and item.get("metric_key") not in keys
         and not has_financial_amount(" ".join(str(item.get(key) or "") for key in ("label", "value", "unit")), metric_keys=keys)]
-    for key in ("title", "topline", "summary", "financial_performance", "highlights", "operations", "lowlights", "learnings", "next_30_days", "asks"):
+    for key in ("title", "startupOverview", "topline", "summary", "financial_performance", "highlights", "operations", "lowlights", "learnings", "next_30_days", "asks"):
         if key in result:
             result[key] = redact(result[key])
     # Generic progress charts are not in the community/public allowlist. Their

@@ -24,6 +24,7 @@ REGRESSION_LABELS = [
     'startup_updates.tests_revisions.FounderEvidenceApiTests',
     'startup_updates.tests_update_identity',
     'startup_updates.tests_reporting_canaries', 'startup_updates.tests_founder_metrics',
+    'startup_updates.tests_financial_history_database',
     'vibe_raising.tests_company_scoping', 'vibe_raising.tests_progress_api',
 ]
 

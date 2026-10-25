@@ -168,12 +168,31 @@ class StartupOverviewTests(SimpleTestCase):
         sections = public_sections({'startupOverview': 'We help shops plan deliveries.', 'summary': 'We tested uploads.'})
         self.assertEqual([item['label'] for item in sections], ['What we do', 'Summary'])
 
-    def generation_request(self, *, overview=None, include_overview=True, active_run=None):
+    def test_financial_history_export_redacts_overview_without_altering_saved_intro(self):
+        from startup_updates.financial_history import build_snapshot
+        from startup_updates.services import render_monthly_update_markdown
+        from startup_updates.tests_financial_history_unit import evidence_payload
+        overview = 'We help shops plan deliveries. Our fee is AUD 500.'
+        frozen = build_snapshot(evidence_payload(), date(2026, 8, 1), captured_at='2026-08-18T00:00:00+00:00')
+        for share_amounts in (False, True):
+            memo = {'startupOverview': overview, 'topline': 'We tested uploads.',
+                '_audience_visibility': ['community'],
+                'financial_history': {'enabled': True, 'shareAmounts': share_amounts, 'snapshot': frozen}}
+            rendered = render_monthly_update_markdown(memo)
+            self.assertIn('We help shops plan deliveries.', rendered)
+            self.assertNotIn('Our fee', rendered)
+            self.assertNotIn('AUD 500', rendered)
+            self.assertIn('## Revenue and costs', rendered)
+            self.assertEqual(memo['startupOverview'], overview)
+
+    def generation_request(self, *, overview=None, include_overview=True, active_run=None, financial_history=None):
         from vibe_raising import views as founder_views
         org, company, binding = Obj(id=7), Obj(organization=Obj()), Obj(id=2, google_connection_id=None)
         body = {'updateDate': '2026-09-30'}
         if include_overview:
             body['startupOverview'] = overview
+        if financial_history is not None:
+            body['financialHistorySelection'] = financial_history
         request = Obj(user=Obj(id=1), data=body, query_params={})
         patches = {
             '_get_founder_company_context_or_response': ({'company': company, 'domain': 'acme.example'}, None),
@@ -223,6 +242,23 @@ class StartupOverviewTests(SimpleTestCase):
             dispatch.assert_not_called()
             with self.assertRaises(revisions.RevisionConflict):
                 self.generation_request(overview='Different company context.', active_run=run)
+
+    def test_generation_keeps_overview_and_financial_sharing_choices_independent(self):
+        selection = {'enabled': True, 'shareAmounts': False}
+        pinned = {**selection, 'refresh': False}
+        response, create, dispatch = self.generation_request(overview='', financial_history=selection)
+        self.assertEqual(response.status_code, 201)
+        self.assertEqual(create.call_args.kwargs['startup_overview'], '')
+        self.assertEqual(create.call_args.kwargs['financial_history_selection'], pinned)
+        dispatch.assert_called_once()
+        run = Obj(run_id='active', run_request={'update_id': 1, 'startup_overview': '',
+            'financial_history_selection': pinned}, status='running', updated_at=timezone.now())
+        response, create, dispatch = self.generation_request(overview='', financial_history=selection, active_run=run)
+        self.assertEqual(response.status_code, 200)
+        create.assert_not_called()
+        dispatch.assert_not_called()
+        with self.assertRaises(revisions.RevisionConflict):
+            self.generation_request(overview='', financial_history={**selection, 'shareAmounts': True}, active_run=run)
 
     def test_compact_profile_and_custom_overview_are_frozen_outside_monthly_evidence(self):
         from community_chat.tests.test_startup_updates import FrozenManualEvidenceTests

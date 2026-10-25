@@ -55,6 +55,9 @@ Read responses omit this field when a historical revision never had it, while
 preserving a saved empty string. Reopening an old draft therefore does not turn
 missing context into a founder's instruction to suppress the generated overview.
 Historical publications remain unchanged and never acquire live profile text.
+The overview uses the existing financial redaction rules in shared views and
+financial-history exports; opting into chart amounts does not disclose amounts
+embedded in the introduction.
 
 Generation accepts the same optional field separately from monthly notes. The
 run freezes it as `startup_overview`, including deliberate blank text. The compact
