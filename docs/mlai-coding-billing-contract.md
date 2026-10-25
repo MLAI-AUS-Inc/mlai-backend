@@ -13,8 +13,8 @@ creation still requires a device-bound Community Chat account session and a
 configured ticket signing key.
 
 The entitlement advertises Kimi Code 0.36.1 as its primary runtime for older
-desktop clients and explicitly accepts 0.36.1 and 0.39.1 during the desktop
-rollout. Desktop 0.5.29 and 0.5.30 embed 0.39.1 and validate this list before
+desktop clients and explicitly accepts 0.36.1, 0.39.1 and 2.3.1 during the desktop
+rollout. Kimi Code 2.3.1 retains DigitalOcean Kimi K3 and the existing Roo tariff. Desktop 0.5.29 and 0.5.30 embed 0.39.1 and validate this list before
 opening Coding.
 
 ## Public account endpoints
