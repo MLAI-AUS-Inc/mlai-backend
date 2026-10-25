@@ -1,7 +1,8 @@
 """Publishing for MLAI-hosted article directories.
 
-Content Factory renders the site, uploads it and checks the live page; this
-module owns which articles a hosted site serves and records each step.
+Content Factory builds the site from its own repository with its hosted
+articles, uploads the build and checks the live page; this module owns which
+articles a hosted site serves and records each step.
 Publishing never touches the customer's repository.
 """
 
@@ -83,7 +84,7 @@ def publication_payload(publication: HostedArticlePublication) -> dict:
 
 
 def site_render_state(site: HostedArticleSite) -> dict:
-    """Everything Content Factory needs to render the next deployment of this site."""
+    """Everything Content Factory needs to build the next deployment of this site."""
     # An article that was live keeps its last revision while a republish is queued or after one fails.
     served = Q(status__in=HostedArticlePublication.RENDERED) | Q(status__in=[Status.PENDING, Status.FAILED], live_verified_at__isnull=False)
     rendered = site.publications.filter(served).exclude(article={}).order_by("created_at")
@@ -97,6 +98,76 @@ def site_render_state(site: HostedArticleSite) -> dict:
         "publications": [{"runId": row.run_id, "slug": row.slug, "status": row.status,
                           "revisionDigest": row.revision_digest, "article": row.article} for row in rendered],
     }
+
+
+BRANCH = re.compile(r"^[A-Za-z0-9._/-]{1,200}$")
+COMMIT = re.compile(r"^[a-f0-9]{40}$")
+
+
+def _source_connection(site: HostedArticleSite):
+    """The organisation's selected website repository, or the one connected repository that can be this site."""
+    from .models import OrganizationContentConfig
+    from .website_models import WebsiteConnection
+
+    usable = [WebsiteConnection.State.CONNECTED, WebsiteConnection.State.PAUSED]
+    config = OrganizationContentConfig.objects.select_related("website_connection").filter(organization=site.organization).first()
+    selected = config.website_connection if config else None
+    if selected is not None and selected.state in usable and selected.installation_id:
+        return selected
+    connections = list(WebsiteConnection.objects.filter(
+        organization=site.organization, state__in=usable,
+    ).exclude(installation_id="").order_by("-updated_at"))
+    matching = [row for row in connections if normalized_domain(row.site_url) == site.domain]
+    if len(matching) == 1 or (not matching and len(connections) == 1):
+        return (matching or connections)[0]
+    if not connections:
+        raise HostedPublishError("hosted_source_not_connected", "Connect this website's repository to MLAI first.")
+    raise HostedPublishError("hosted_source_ambiguous", "More than one connected repository could be this website.")
+
+
+def site_source(site: HostedArticleSite) -> dict:
+    """The repository a hosted site is built from and its current commit, read with MLAI's GitHub App.
+
+    The preview builder checks out exactly this commit. Nothing is written to the repository.
+    """
+    from integrations import http_client
+    from integrations.services.github_app import create_installation_access_token
+
+    connection = _source_connection(site)
+    credential = None
+    try:
+        credential = create_installation_access_token(
+            installation_id=connection.installation_id, repository=connection.github_repo,
+            repository_id=connection.repository_id, permission_mode="read", use_cache=False)
+        headers = {"Authorization": f"Bearer {credential.token}", "Accept": "application/vnd.github+json"}
+        repository = http_client.get(f"https://api.github.com/repos/{connection.github_repo}", headers=headers, timeout=(3, 15))
+        repository.raise_for_status()
+        metadata = repository.json()
+        if (not isinstance(metadata, dict) or str(metadata.get("full_name") or "").casefold() != connection.github_repo.casefold()
+                or (connection.repository_id and metadata.get("id") != connection.repository_id)):
+            raise HostedPublishError("hosted_source_mismatch", "GitHub returned a different repository.")
+        branch = connection.branch or str(metadata.get("default_branch") or "")
+        if not BRANCH.match(branch) or ".." in branch:
+            raise HostedPublishError("hosted_source_unavailable", "The website's branch could not be read.", status=503)
+        commit = http_client.get(f"https://api.github.com/repos/{connection.github_repo}/commits/{branch}",
+                                 headers=headers, timeout=(3, 15))
+        commit.raise_for_status()
+        sha = str((commit.json() or {}).get("sha") or "")
+        if not COMMIT.match(sha):
+            raise HostedPublishError("hosted_source_unavailable", "GitHub did not return the branch's commit.", status=503)
+    except HostedPublishError:
+        raise
+    except Exception:
+        logger.warning("hosted_source_unavailable domain=%s", site.domain, exc_info=True)
+        raise HostedPublishError("hosted_source_unavailable", "GitHub could not be read. Retry shortly.", status=503) from None
+    finally:
+        if credential is not None:
+            try:
+                http_client.delete("https://api.github.com/installation/token",
+                                   headers={"Authorization": f"Bearer {credential.token}"}, timeout=(3, 10))
+            except Exception:
+                pass
+    return {"githubRepo": connection.github_repo, "repositoryId": connection.repository_id, "branch": branch, "sha": sha}
 
 
 def request_publication(*, site: HostedArticleSite, run, user) -> HostedArticlePublication:

@@ -12,7 +12,7 @@ from datetime import timedelta
 # The button names the action; the step's reason sentence travels beside it.
 NEXT_ACTION_LABELS = {"verify-access": "Check GitHub access", "scan": "Scan repository",
     "permissions": "Review GitHub permissions", "setup": "Set up articles",
-    "ci-attestation": "Recheck verification", "verify": "Verify website"}
+    "ci-attestation": "Recheck verification", "verify": "Verify website", "prepare": "Check website again"}
 # Cleanup, re-verification and dispatch follow-ups run in the background and can
 # stay queued for days. None of them is the owner's current website operation.
 BACKGROUND_OPERATION_ACTIONS = ("cancel-operation", "source-reverify", "worker_followup", "superseded-setup-cleanup")
@@ -108,7 +108,7 @@ def project_journey(*, company_id, domain, website=None, capabilities=None, disc
         "verification": fact(proof.get("buildVerified", verified) and not ci_attestation_needed,
             code="ci_attestation_required" if ci_attestation_needed else "verification_stale" if verification_stale else reason_code,
             reason="Authenticate native CI proof for this exact target and operation." if ci_attestation_needed else
-                "Rerun native CI verification and attest the current source." if verification_stale else reason,
+                "Your website's publishing verification is out of date." if verification_stale else reason,
             status="stale" if verification_stale else None, verified_at=capabilities.get("verifiedAt")),
         "deployment": fact(deployed, code="deployment_verification_required", reason="Verify the deployed public articles route.", verified_at=deployment.get("checked_at")),
     }
@@ -153,8 +153,15 @@ def project_journey(*, company_id, domain, website=None, capabilities=None, disc
     next_step = next((step for step in steps if step["status"] != "complete"), None)
     action_id = {"github": "verify-access", "repository": "verify-access", "scan": "scan", "permissions": "permissions", "integration": "setup",
         "preview": "ci-attestation" if verification_stale else "verify", "activation": "verify"}.get(next_step["id"] if next_step else "")
+    if action_id == "ci-attestation" and "prepare" in allowed:
+        # Expired proof of an installed integration is renewed by the server's
+        # own re-check: preparation re-reads the sealed CI check and the live
+        # route. Pasting exported CI evidence stays a support action.
+        action_id = "prepare"
     next_action = {"id": action_id, "label": NEXT_ACTION_LABELS[action_id], "step": next_step["id"],
         "reason": next_step["reason"]} if next_step and action_id in allowed else None
+    if next_action and action_id == "prepare":
+        next_action["params"] = {"retry": True}
     if next_action and setup_pr and next_step["id"] in {"scan", "integration"}:
         # MLAI Chat opens the saved setup run for "Review setup changes", where Publish
         # lives. Until preparation returns to this PR, the setup page's Prepare does.
@@ -251,6 +258,14 @@ def build_proof_fresh(connection, target, capabilities, *, now=None):
         for stamp in (target_stamp, connection.last_verified_at))
 
 
+def deployment_receipt_current(receipt, *, now=None):
+    """A live-route receipt counts within the same age limit publication enforces."""
+    from .incident_guards import proof_stamp
+    now = now or timezone.now()
+    stamp = proof_stamp(mapping(receipt), now=now)
+    return bool(stamp and now - VERIFICATION_MAX_AGE <= stamp)
+
+
 def current_operation(connection):
     """The owner's current website operation in this generation, if any.
 
@@ -327,6 +342,10 @@ def journey_for_context(context, config, *, capabilities=None, owner_view=False)
             payload__source_sha=connection.verified_sha, payload__target_id=config.default_publish_target_id).order_by("-created_at").first()
         if deployment and selected and (deployment.receipt.get("artifact_digest") != mapping(selected.contract.get("live_marker")).get("value")
                 or deployment.receipt.get("contract_digest") != selected.contract.get("contract_digest")):
+            deployment = None
+        if deployment and not deployment_receipt_current(deployment.receipt):
+            # Publication refuses an expired live receipt (live_deployment_verified),
+            # so the journey must not report it as a complete deployment either.
             deployment = None
         target = {"key": selected.target_key, "sourceSha": selected.source_sha, "adapter": selected.adapter, "contract": selected.contract, "deployment_receipt": deployment.receipt if deployment else {}} if selected else None
         preview_proof = mapping(mapping(preview_target.contract).get("verification")) if preview_target else {}

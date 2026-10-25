@@ -21,7 +21,7 @@ def configured_workspace():
     return workspace if access.WORKSPACE_ID.fullmatch(workspace) else ""
 
 
-def capture_reader(workspace, *, channel_id="", user_id=None, refresh_token=False):
+def capture_reader(workspace, *, channel_id="", user_id=None, refresh_token=False, required_scopes=()):
     """Select without provider I/O; refresh only before taking a room lock."""
     if not access.enabled() or workspace != configured_workspace():
         return None
@@ -33,7 +33,7 @@ def capture_reader(workspace, *, channel_id="", user_id=None, refresh_token=Fals
         grants = grants.filter(user_id=user_id)
     for grant in grants:
         if (not access.public_reader_enabled(grant, allow_expired=refresh_token)
-                or "users:read" not in (grant.connection.scopes or [])):
+                or not ({"users:read"} | set(required_scopes)).issubset(grant.connection.scopes or [])):
             continue
         if channel_id and access._membership_state(grant, access._membership(grant, channel_id)) != "joined":
             continue

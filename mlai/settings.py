@@ -1642,6 +1642,7 @@ SLACK_OAUTH_SCOPES = _env_list(
         "users:read",
         "reactions:read",
         "reactions:write",
+        "emoji:read",
         "files:read",
     ],
 )
@@ -2322,6 +2323,9 @@ ARTICLES_GOAL_REPAIRABLE_ATTEMPTS = int(os.getenv("ARTICLES_GOAL_REPAIRABLE_ATTE
 ARTICLES_WEBSITE_EVENT_WAKES_ENABLED = os.getenv("ARTICLES_WEBSITE_EVENT_WAKES_ENABLED", "false").lower() == "true"
 
 ARTICLES_WEBSITE_DOCTOR_ENABLED = os.getenv("ARTICLES_WEBSITE_DOCTOR_ENABLED", "false").lower() == "true"
+
+# Opening Articles runs a website's due same-source verification refresh first.
+WEBSITE_VERIFICATION_PAGE_REFRESH_ENABLED = _env_is_true("WEBSITE_VERIFICATION_PAGE_REFRESH_ENABLED", True)
 
 # C1/C2: owner consent and automatic route choice (default off).
 ARTICLES_SETUP_CONSENT_ENABLED = _env_is_true("ARTICLES_SETUP_CONSENT_ENABLED", False)

@@ -1,3 +1,4 @@
+from .slack_emoji_views import SlackEmojiDirectoryView
 from django.urls import include, path
 from .apple_iap_views import AppleIapView, AppleIapTransactionView, AppleIapNotificationView
 from .privacy_views import AccountDeletionView, AiConsentView
@@ -81,6 +82,7 @@ urlpatterns = [
     path("meeting-rooms/book/", MeetingRoomBookView.as_view(), name="community_chat_meeting_room_book"),
     path("meeting-rooms/my-bookings/", MyMeetingRoomBookingsView.as_view(), name="community_chat_meeting_room_my_bookings"),
     path("meeting-rooms/cancel/", MeetingRoomCancelView.as_view(), name="community_chat_meeting_room_cancel"),
+    path("slack/emoji/", SlackEmojiDirectoryView.as_view(), name="community_chat_slack_emoji"),
     path("slack/message/", SlackMessageActionView.as_view(), name="community_chat_slack_message"),
     path("slack/", SlackDmMirrorView.as_view(), name="community_chat_slack"),
     path("slack/conversations/", SlackOwnerConversationView.as_view(), name="community_chat_slack_conversations"),

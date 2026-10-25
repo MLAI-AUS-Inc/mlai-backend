@@ -248,6 +248,16 @@ def start_prepare(config, *, expected=None, company_id=None, user=None, retry=Fa
                 for key in ("scan_run_id", "setup_run_id", "completed_steps"):
                     op.receipt.pop(key, None)
             op.save(update_fields=["state", "next_attempt_at", "receipt", "payload", "updated_at"])
+        elif not created and retry and op.state == "completed" and _readiness_lapsed(config, current):
+            # "Check website again" on a finished preparation whose proof has
+            # lapsed: re-verify on the server, as a source change would, rather
+            # than replaying a completion the website no longer satisfies.
+            for field, value in _source_recheck_values(op, message="Checking your website again.").items():
+                setattr(op, field, value)
+            op.payload["user_clicks"] = op.payload.get("user_clicks", 1) + 1
+            op.receipt["dispatch_outcome"] = "new_attempt"
+            op.save(update_fields=["state", "next_attempt_at", "receipt", "payload", "updated_at"])
+            _adopt_source_checks(current, op)
         elif not created:
             op.receipt = {**op.receipt, "dispatch_outcome": "replayed"}
             # A response replay must not invalidate a worker's updated_at lease.
@@ -963,6 +973,10 @@ def _advance_claimed_prepare(op, *, now, handlers):
         for _ in range(2):
             next_action = journey.get("nextAction") or {}
             step = next_action.get("id")
+            if step == "prepare":
+                # The owner's "Check website again" names this preparation; for
+                # it, that requirement is re-attesting the current source.
+                step = "ci-attestation"
             blocked = next((item for item in journey.get("steps", []) if item.get("status") != "complete"), {})
             if not step:
                 step = blocked.get("id") or op.receipt.get("current_step") or "prepare"
@@ -1084,25 +1098,62 @@ def wake_prepare_for_source(connection_id, *, organization_id, owned_merge_run_i
         run_request__connection_generation=connection.generation).exists()
     if owned_setup:
         reopenable.append("cancelled")
-    # Cancellation bookkeeping stays with the cancel follow-up that owns the cleanup.
-    receipt = {key: value for key, value in op.receipt.items()
-        if key not in {"scan_run_id", "setup_run_id", "completed_steps", "deployment_wait_started_at", "transient_started_at", "child_resume_pending",
-            "remote_effects", "remote_outcome_unknown", "remote_cleanup_pending", "cancellation_undoes_remote_writes"}}
-    if owned_setup:
-        receipt["merged_setup_run_id"] = owned_merge_run_id
+    values = _source_recheck_values(op, message="Rechecking the changed website source.",
+        merged_setup_run_id=owned_merge_run_id if owned_setup else "")
     reopened = WebsiteConnectionOperation.objects.filter(pk=op.pk, generation=connection.generation,
-        state__in=reopenable).update(state="pending", next_attempt_at=timezone.now(),
-            receipt={**receipt, "status": "working", "current_step": "scan", "deployment_attempts": 0,
-                "step_failures": {}, "user_action": None, "last_completed": None, "child_run_id": None,
-                "message": "Rechecking the changed website source."},
-            payload={**{key: value for key, value in op.payload.items() if key not in {"run_id", "repair_setup"}},
-                "source_reverify": True, "attempt": op.payload.get("attempt", 1) + 1, "retry_epoch": uuid4().hex}, updated_at=timezone.now())
+        state__in=reopenable).update(**values, updated_at=timezone.now())
     if not reopened:
         return None
+    _adopt_source_checks(connection, op)
+    return op
+
+
+# Cancellation bookkeeping stays with the cancel follow-up that owns the cleanup.
+SOURCE_RECHECK_DROPPED_RECEIPT_KEYS = frozenset({"scan_run_id", "setup_run_id", "completed_steps", "deployment_wait_started_at",
+    "transient_started_at", "child_resume_pending", "remote_effects", "remote_outcome_unknown", "remote_cleanup_pending",
+    "cancellation_undoes_remote_writes"})
+
+
+def _source_recheck_values(op, *, message, merged_setup_run_id=""):
+    """Fields that restart preparation at a fresh check of the selected source.
+
+    A new attempt and dispatch epoch mean no earlier child or request key is
+    replayed. Consent, the saved company and the requesting owner are kept.
+    """
+    receipt = {key: value for key, value in op.receipt.items() if key not in SOURCE_RECHECK_DROPPED_RECEIPT_KEYS}
+    if merged_setup_run_id:
+        receipt["merged_setup_run_id"] = merged_setup_run_id
+    return {"state": "pending", "next_attempt_at": timezone.now(),
+        "receipt": {**receipt, "status": "working", "current_step": "scan", "deployment_attempts": 0,
+            "step_failures": {}, "user_action": None, "last_completed": None, "child_run_id": None, "message": message},
+        "payload": {**{key: value for key, value in op.payload.items() if key not in {"run_id", "repair_setup"}},
+            "source_reverify": True, "attempt": op.payload.get("attempt", 1) + 1, "retry_epoch": uuid4().hex}}
+
+
+def _adopt_source_checks(connection, op):
+    """The reopened preparation now owns any queued source check of this generation."""
     connection.operations.filter(generation=connection.generation, action="source-reverify", state="pending").update(
         state="completed", receipt={"status": "managed_by_prepare", "prepare_operation_id": str(op.pk),
             "repository_modified": False}, updated_at=timezone.now())
-    return op
+
+
+# A lapse that re-verification cannot repair. Retrying such a completed
+# preparation stays a harmless replay; its own action is shown instead.
+READINESS_LAPSES_WITHOUT_RECHECK = frozenset({"website_disconnected", "website_publishing_paused", "website_writes_paused",
+    "repository_changed", "publishing_adapter_required"})
+
+
+def _readiness_lapsed(config, connection):
+    """Whether a completed preparation's website has lost current publication proof.
+
+    Accepted CI and live receipts expire after VERIFICATION_MAX_AGE, and a push
+    revokes readiness until its source is verified. Reads saved state only.
+    """
+    from .activation import durable_integration_evidence
+    evidence = durable_integration_evidence(config, connection)
+    if evidence.get("reasonCode") in READINESS_LAPSES_WITHOUT_RECHECK:
+        return False
+    return not (evidence.get("verified") is True and evidence.get("publishingVerified") is True)
 
 
 def _begin_post_merge_attempt(op, child):

@@ -431,8 +431,9 @@ class PreparePermissionsTests(SimpleTestCase):
                 ci_missing = build != "fresh" and not (checks and statuses)
                 permissions_complete = not (workflow_missing or ci_missing)
                 publish_ready = integration and build == "fresh" and deployed
+                # Writable, connected sites renew expired proof through preparation.
                 next_id = "permissions" if not permissions_complete else "setup" if not integration else (
-                    "ci-attestation" if build == "stale" else "verify" if build != "fresh" or not deployed else None)
+                    "prepare" if build == "stale" else "verify" if build != "fresh" or not deployed else None)
                 self.assertEqual(journey["capabilities"]["canPublishArticle"], publish_ready)
                 self.assertEqual(journey["capabilities"]["canGenerateArticle"], integration and build == "fresh")
                 self.assertEqual((journey["nextAction"] or {}).get("id"), next_id)

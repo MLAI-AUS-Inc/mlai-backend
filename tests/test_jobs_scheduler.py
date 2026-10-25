@@ -139,6 +139,7 @@ class JobsSchedulerTests(TestCase):
         self.assertEqual(json.loads(output)["website_connection_operations"], {
             "completed": 0, "operations": [], "pending": 0,
             "processed": 0, "status": "completed",
+            "verification_refreshes_queued": 0,
         })
         heartbeat = ScheduledDiscoveryHeartbeat.objects.get(
             name="scheduled_discovery"
