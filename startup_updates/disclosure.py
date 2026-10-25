@@ -130,10 +130,12 @@ def financial_chart(value: dict, *, respect_selection=False, metric_items=None):
     return {key: float(amount / maximum) if maximum else 0.0 for key, amount in totals.items()}
 
 
-def shared_update(value: dict, *, metric_items=None) -> dict:
+def shared_update(value: dict, *, metric_items=None, financial_history=None) -> dict:
     """Project existing publications without modifying private frozen evidence."""
     result = {key: copy.deepcopy(item) for key, item in value.items() if key in SHARED_FIELDS}
     result["financialChart"] = financial_chart(value, respect_selection=True, metric_items=metric_items)
+    from startup_updates.financial_history import history_payload
+    result["financialHistory"] = history_payload(financial_history)
     result["metrics"] = {}
     result["metricEvidence"] = {}
     result["displayConfig"] = {"snippetMetricKeys": [], "fullMetricKeys": []}

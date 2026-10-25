@@ -15,6 +15,20 @@ from vibe_raising.serializer_fields import AudienceVisibilityField
 VIBE_RAISING_UPDATE_METRIC_KEYS = STARTUP_UPDATE_METRIC_KEY_SET
 
 
+class FinancialHistorySelectionField(serializers.Field):
+    """Financial disclosure requires strict booleans, never coerced strings."""
+
+    def to_internal_value(self, data):
+        from startup_updates.financial_history import FinancialHistoryError, validate_selection
+        try:
+            return validate_selection(data)
+        except FinancialHistoryError as exc:
+            raise serializers.ValidationError(str(exc)) from exc
+
+    def to_representation(self, value):
+        return value
+
+
 def _normalize_display_config_keys(values):
     keys = []
     for item in values if isinstance(values, (list, tuple)) else []:
@@ -272,6 +286,7 @@ class VibeRaisingMonthlyUpdateUpsertSerializer(AliasInputSerializer):
 
     coverImage = serializers.DictField(required=False, allow_null=True)
     chartSelections = serializers.ListField(child=serializers.DictField(), max_length=12, required=False)
+    financialHistorySelection = FinancialHistorySelectionField(required=False)
     month = serializers.CharField()
     year = serializers.IntegerField(min_value=2000, max_value=2100)
     audienceVisibility = AudienceVisibilityField(required=False)

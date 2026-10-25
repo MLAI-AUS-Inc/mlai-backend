@@ -83,9 +83,11 @@ class AudienceTests(SimpleTestCase):
             rows = stack.enter_context(patch.object(services.ContentFactoryRun, "objects"))
             services.create_startup_update_run(organization=organization, binding=binding,
                 input_sources=["manual_documents"], manual_summary="We shipped.",
-                audience_visibility=["public"], target_month=date(2026, 9, 1))
+                audience_visibility=["public"], target_month=date(2026, 9, 1),
+                financial_history_selection={"enabled": True, "shareAmounts": False})
         payload = rows.create.call_args.kwargs["run_request"]
         self.assertEqual(payload["audience_visibility"], ["public"])
+        self.assertEqual(payload["financial_history_selection"], {"enabled": True, "shareAmounts": False, "refresh": False})
         self.assertNotIn("published_at", payload)
 
 
@@ -138,6 +140,23 @@ class PublicReaderTests(SimpleTestCase):
     def test_multiline_and_legacy_points_match_the_editor(self):
         sections = public_views.public_sections({"summary": "- First point\n  continuation line\n+ Second point\n\nLegacy third point"})
         self.assertEqual(sections, [{"label": "Summary", "points": ["First point\ncontinuation line", "Second point", "Legacy third point"]}])
+
+    def test_public_history_renders_only_disclosed_values_after_summary(self):
+        from startup_updates.financial_history import history_payload
+        from startup_updates.tests_financial_history_unit import frozen
+        update = {"startup": {"name": "Synthetic"}, "month": "August 2026", "summary": "Summary first.",
+            "highlights": "Details after chart.", "financialHistory": history_payload(frozen())}
+        with patch.object(public_views, "approved_updates"), patch.object(public_views, "get_object_or_404", return_value=Obj()), patch.object(public_views, "update_payload", return_value=update):
+            response = self.view(self.factory.get("/", HTTP_ACCEPT="text/html"), update_id=1)
+        html = response.content.decode()
+        self.assertIn("This update", html)
+        self.assertIn("Relative scale", html)
+        self.assertIn("View financial data", html)
+        self.assertNotIn("AUD", html)
+        self.assertNotIn("600.00", html)
+        self.assertLess(html.index("Summary first."), html.index("<h2>Revenue and costs</h2>"))
+        self.assertLess(html.index("<h2>Revenue and costs</h2>"), html.index("Details after chart."))
+        self.assertNotIn("<script", html)
 
     def test_private_missing_and_revoked_publications_have_no_anonymous_fallback(self):
         with patch.object(public_views, "approved_updates") as lookup, patch.object(public_views, "get_object_or_404", side_effect=Http404), patch.object(public_views, "update_payload") as project:

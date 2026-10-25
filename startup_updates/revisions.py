@@ -288,6 +288,14 @@ def save_revision(draft, memo, *, snapshot, audience="private", expected_revisio
     progress_charts = charts_for_revision(draft, memo, current)
     if progress_charts is not None:
         memo["progress_charts"] = progress_charts
+    from startup_updates.financial_history import FinancialHistoryError, history_for_revision
+    try:
+        financial_history = history_for_revision(draft, memo, current, snapshot,
+            captured_at=timezone.now().isoformat())
+    except FinancialHistoryError as exc:
+        raise ValidationError({"financialHistorySelection": str(exc)}) from exc
+    if financial_history is not None:
+        memo["financial_history"] = financial_history
     try:
         memo = render_metric_claims(memo, snapshot.payload["metrics"])
     except ValueError as exc:
