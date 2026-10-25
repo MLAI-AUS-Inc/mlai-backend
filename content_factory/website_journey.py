@@ -16,6 +16,12 @@ NEXT_ACTION_LABELS = {"verify-access": "Check GitHub access", "scan": "Scan repo
 # Cleanup, re-verification and dispatch follow-ups run in the background and can
 # stay queued for days. None of them is the owner's current website operation.
 BACKGROUND_OPERATION_ACTIONS = ("cancel-operation", "source-reverify", "worker_followup", "superseded-setup-cleanup")
+# While the server re-checks a website's source, the proof that check renews is
+# reported as running instead of as an action for the owner to take.
+SOURCE_CHECK_FACTS = {"inventory": "scan", "verification": "preview", "deployment": "activation"}
+SOURCE_CHECK_WINDOW = timedelta(hours=24)
+SOURCE_CHANGED_REASON = "Checking your latest website changes."
+SOURCE_RECHECK_REASON = "Checking your website again."
 
 
 def fact(complete=False, *, code="", reason="", status=None, verified_at=None, operation=None):
@@ -24,8 +30,13 @@ def fact(complete=False, *, code="", reason="", status=None, verified_at=None, o
         "reason": "" if complete else reason, "verifiedAt": verified_at, "operationId": operation}
 
 
-def project_journey(*, company_id, domain, website=None, capabilities=None, discovery=None, target=None, operation=None, epoch=0, proof=None, source_runs=None, ci_source_runs=None, permissions=None, setup_pull_request=None):
-    """Project verified facts without interpreting legacy completion ticks."""
+def project_journey(*, company_id, domain, website=None, capabilities=None, discovery=None, target=None, operation=None, epoch=0, proof=None, source_runs=None, ci_source_runs=None, permissions=None, setup_pull_request=None, source_check=None):
+    """Project verified facts without interpreting legacy completion ticks.
+
+    ``source_check`` names the server's own re-check of the current source,
+    still in flight, for the owner's view only: preparation keeps acting on the
+    unmasked facts.
+    """
     website, capabilities, target = mapping(website), mapping(capabilities), mapping(target)
     setup_pr = mapping(setup_pull_request)
     discovery = discovery or discovery_snapshot({})
@@ -156,6 +167,23 @@ def project_journey(*, company_id, domain, website=None, capabilities=None, disc
         # lives. Until preparation returns to this PR, the setup page's Prepare does.
         next_action = {**next_action, "setupRunId": setup_pr.get("runId"),
             "label": "Review setup changes" if setup_pr.get("savedSetup") else "Return to your setup pull request"}
+    checking = mapping(source_check)
+    checking = {"status": "running", "reason": checking.get("reason") or SOURCE_CHANGED_REASON,
+        "operationId": checking.get("operationId")} if checking and write_allowed and not setup_pr \
+        and prerequisites["integration"]["status"] == "complete" else None
+    if checking:
+        # A pushed source is re-scanned and re-verified automatically. Until that
+        # check settles, its proof is being checked, not waiting on the owner;
+        # only a failed check offers an action. Reason codes stay the facts'.
+        for key in SOURCE_CHECK_FACTS:
+            if prerequisites[key]["status"] in {"needs_action", "stale"}:
+                prerequisites[key] = {**prerequisites[key], **checking}
+        for step in steps:
+            if (step["id"] in SOURCE_CHECK_FACTS.values() or step["id"] == "articles") and step["status"] in {"needs_action", "stale"}:
+                step.update(checking)
+        if next_step and next_step["status"] == "running":
+            next_action = None
+    source_checking = bool(checking and any(step["status"] == "running" for step in steps))
     repository = {"id": website.get("repositoryId"), "name": website.get("githubRepo", ""), "branch": website.get("branch", ""),
         "appRoot": website.get("appRoot", ""), "sourceSha": website.get("verifiedSha") or discovery.get("sourceSha"), "targetId": target.get("key"),
         "observedSourceSha": capabilities.get("repositorySourceSha"),
@@ -170,7 +198,7 @@ def project_journey(*, company_id, domain, website=None, capabilities=None, disc
         "configurationRevision": website.get("configurationVersion", 0), "deletionEpoch": epoch, "repository": repository,
         "pricing": {"setupPoints": 0, "requiredPoints": 0, "free": True},
         "policy": {"allowed": write_allowed, "reasonCode": "" if write_allowed else reason_code, "reason": "" if write_allowed else reason},
-        "reasonCode": "" if verified else reason_code, "reason": "" if verified else reason,
+        "reasonCode": "" if verified else reason_code, "reason": "" if verified else checking["reason"] if source_checking else reason,
         "prerequisites": prerequisites, "steps": steps,
         "capabilities": {"canRead": access, "canScan": bool(access and connected), "canPrepare": "setup" in allowed,"repositoryWriteVerified":capabilities.get("repositoryWriteVerified") is True,
             "canPreview": bool(mapping(website.get("capabilities")).get("previewSupported") and write_allowed),
@@ -255,8 +283,39 @@ def current_operation(connection):
     return latest
 
 
-def journey_for_context(context, config, *, capabilities=None):
-    """Load current-generation facts only; authenticated account probes stay live."""
+def source_check_in_flight(connection, latest, capabilities=None, *, now=None):
+    """The server's unsettled re-check of this website's source, if any.
+
+    That is a preparation reopened for the source, or the background check a
+    push queued (which also runs when no preparation could be reopened). A
+    check that has failed without retry, or that is a day old, is not reported:
+    its facts then ask the owner to act.
+    """
+    now = now or timezone.now()
+    since = now - SOURCE_CHECK_WINDOW
+    check = None
+    if (latest is not None and latest.action == "prepare" and latest.state in {"pending", "running"}
+            and mapping(latest.payload).get("source_reverify") and latest.updated_at and latest.updated_at >= since):
+        check = latest
+    else:
+        queued = connection.operations.filter(generation=connection.generation, action="source-reverify", state="pending",
+            created_at__gte=since).order_by("-created_at")[:5]
+        check = next((row for row in queued if mapping(row.receipt).get("retryable") is not False), None)
+    if check is None:
+        return None
+    observed = mapping(capabilities).get("repositorySourceSha") or ""
+    changed = (any(mapping(item).get("code") == "repository_source_changed" for item in connection.blockers or [])
+        or observed not in ("", connection.verified_sha)
+        or mapping(check.payload).get("source_sha") not in (None, "", connection.verified_sha))
+    return {"operationId": str(check.pk), "reason": SOURCE_CHANGED_REASON if changed else SOURCE_RECHECK_REASON}
+
+
+def journey_for_context(context, config, *, capabilities=None, owner_view=False):
+    """Load current-generation facts only; authenticated account probes stay live.
+
+    ``owner_view`` reports the server's own in-flight source re-check as running
+    for the owner; preparation reads the unmasked journey to choose its step.
+    """
     from .website_connections import summary_for
     if capabilities is None:
         from .vibe_marketing_views import _article_capabilities_for_context
@@ -264,6 +323,7 @@ def journey_for_context(context, config, *, capabilities=None):
     website = summary_for(config, company_id=context.company.pk)
     connection = config.website_connection
     discovery, target, operation, epoch, proof, source_runs, ci_source_runs = None, None, None, 0, {}, [], []
+    source_check = None
     if connection:
         website["hasMutationHistory"] = connection.repository_mutations.exists()
         from django.db.models import Q
@@ -307,6 +367,8 @@ def journey_for_context(context, config, *, capabilities=None):
         if hosted_enabled(connection) and valid_consent(saved_goal) and scope_matches(saved_goal.get("scope"), scope_for(connection, context.company.pk)):
             proof["hostedVerificationSelected"] = saved_goal["consent"]["answers"]["ci_mode"] == "hosted"
         operation = operation_summary(latest) if latest else None
+        if owner_view:
+            source_check = source_check_in_flight(connection, latest, capabilities)
         epoch = deletion_epoch(connection)
         from workflow_runs.models import ContentFactoryRun
         source_runs = [{"runId": row.run_id, "workflow": row.workflow, "status": row.status,
@@ -344,4 +406,4 @@ def journey_for_context(context, config, *, capabilities=None):
                 "savedSetup": (pending.get("setup_run_id") or pending.get("setupRunId")) == run.run_id}
     return project_journey(company_id=context.company.pk, domain=context.organization.domain, website=website,
         capabilities=capabilities, discovery=discovery, target=target, operation=operation, epoch=epoch, proof=proof, source_runs=source_runs, ci_source_runs=ci_source_runs, permissions=grants,
-        setup_pull_request=setup_pull_request)
+        setup_pull_request=setup_pull_request, source_check=source_check)
