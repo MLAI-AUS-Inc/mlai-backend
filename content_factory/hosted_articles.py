@@ -38,10 +38,12 @@ ARTICLE_FIELDS = ("slug", "title", "excerpt", "published_at", "modified_at", "au
 class HostedPublishError(ValueError):
     def __init__(self, code, message, status=409):
         super().__init__(message)
-        self.code, self.message, self.status = code, message, status
+        self.reason, self.message, self.status = code, message, status
 
     def as_dict(self):
-        return {"code": self.code, "detail": self.message}
+        # Hosted publication outcomes are not Articles failure envelopes, so they
+        # never use the failure registry's "code" field.
+        return {"reason": self.reason, "detail": self.message}
 
 
 def normalized_domain(value) -> str:

@@ -31,7 +31,7 @@ class HostedArticleSiteServiceView(APIView):
         domain = hosted.normalized_domain(request.query_params.get("domain"))
         site = HostedArticleSite.objects.filter(domain=domain).first()
         if site is None:
-            return Response({"code": "hosted_site_not_found", "detail": "No hosted site for this domain."}, status=404)
+            return Response({"reason": "hosted_site_not_found", "detail": "No hosted site for this domain."}, status=404)
         return Response(hosted.site_render_state(site))
 
     def put(self, request):
@@ -91,7 +91,7 @@ class HostedArticlePublishView(APIView):
             return None, None, None, Response({"detail": "Run not found."}, status=404)
         site = hosted.active_site(context.organization)
         if site is None:
-            return None, None, None, Response({"code": "hosted_site_not_active",
+            return None, None, None, Response({"reason": "hosted_site_not_active",
                 "detail": "Hosted publishing is not switched on for this website."}, status=409)
         return context, run, site, None
 
@@ -112,16 +112,16 @@ class HostedArticlePublishView(APIView):
         if error:
             return error
         if run.workflow not in views.ARTICLE_WORKFLOWS or not original_portable_run(run):
-            return Response({"code": "not_a_hosted_article", "detail": "Only articles written for your hosted blog can be published there."}, status=400)
+            return Response({"reason": "not_a_hosted_article", "detail": "Only articles written for your hosted blog can be published there."}, status=400)
         if views._latest_review_ready_component_revision(run, context) is not None:
-            return Response({"code": "newer_revision", "detail": "A newer draft is ready. Open that revision before publishing."}, status=409)
+            return Response({"reason": "newer_revision", "detail": "A newer draft is ready. Open that revision before publishing."}, status=409)
         data = request.data if isinstance(request.data, dict) else {}
         review = remote_review(run)
         if isinstance(review, Response):
             return review
         reviewed = str(data.get("reviewedRevision") or "")
         if not reviewed or reviewed != str(review.get("revision") or "") or review.get("previewPending"):
-            return Response({"code": "review_changed", "detail": "The article changed since you reviewed it. Review it again before publishing."}, status=409)
+            return Response({"reason": "review_changed", "detail": "The article changed since you reviewed it. Review it again before publishing."}, status=409)
         blocked = check_approval_comments(run, data)
         if blocked is not None:
             return blocked

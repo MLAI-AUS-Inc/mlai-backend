@@ -78,12 +78,12 @@ class HostedArticleTests(TestCase):
     def test_publishing_needs_the_current_reviewed_revision_and_a_repo_free_article(self):
         for reviewed, review in (("", None), ("rev-0", None), ("rev-1", {"revision": "rev-1", "previewPending": True})):
             response, post = self.publish(reviewed=reviewed, review=review)
-            self.assertEqual((response.status_code, response.data["code"]), (409, "review_changed"))
+            self.assertEqual((response.status_code, response.data["reason"]), (409, "review_changed"))
             post.assert_not_called()
         self.run.run_request = {"delivery_mode": "review_draft"}
         self.run.save(update_fields=["run_request"])
         response, post = self.publish()
-        self.assertEqual((response.status_code, response.data["code"]), (400, "not_a_hosted_article"))
+        self.assertEqual((response.status_code, response.data["reason"]), (400, "not_a_hosted_article"))
         self.assertFalse(HostedArticlePublication.objects.exists())
 
     def test_a_content_factory_outage_is_reported_and_recorded(self):
@@ -96,12 +96,12 @@ class HostedArticleTests(TestCase):
         self.run.status = "running"
         self.run.save(update_fields=["status"])
         response, post = self.publish()
-        self.assertEqual((response.status_code, response.data["code"]), (409, "article_not_ready"))
+        self.assertEqual((response.status_code, response.data["reason"]), (409, "article_not_ready"))
         post.assert_not_called()
         self.site.state = "paused"
         self.site.save(update_fields=["state"])
         response, post = self.publish()
-        self.assertEqual((response.status_code, response.data["code"]), (409, "hosted_site_not_active"))
+        self.assertEqual((response.status_code, response.data["reason"]), (409, "hosted_site_not_active"))
         post.assert_not_called()
 
     def test_render_upload_and_live_check_make_the_article_live(self):
@@ -125,11 +125,11 @@ class HostedArticleTests(TestCase):
         hosted.request_publication(site=self.site, run=self.run, user=self.user)
         with self.assertRaises(hosted.HostedPublishError) as stale:
             self.progress(status="live", verified_digest=DIGEST)
-        self.assertEqual(stale.exception.code, "hosted_status_stale")
+        self.assertEqual(stale.exception.reason, "hosted_status_stale")
         self.progress(status="rendering", article=article(), revision_digest=DIGEST)
         with self.assertRaises(hosted.HostedPublishError) as unverified:
             self.progress(status="live", verified_digest="e" * 64)
-        self.assertEqual(unverified.exception.code, "hosted_live_unverified")
+        self.assertEqual(unverified.exception.reason, "hosted_live_unverified")
         self.written.refresh_from_db()
         self.assertNotEqual(self.written.publish_status, ArticlePublishStatus.LIVE)
 
@@ -142,7 +142,7 @@ class HostedArticleTests(TestCase):
         with self.assertRaises(hosted.HostedPublishError) as taken:
             hosted.record_progress(domain=self.site.domain, run_id=other.run_id,
                                    data={"status": "rendering", "article": article(), "revision_digest": DIGEST})
-        self.assertEqual(taken.exception.code, "hosted_slug_taken")
+        self.assertEqual(taken.exception.reason, "hosted_slug_taken")
 
     def test_a_live_article_keeps_its_last_revision_while_a_republish_is_queued_or_fails(self):
         hosted.request_publication(site=self.site, run=self.run, user=self.user)
