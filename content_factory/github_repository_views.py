@@ -54,11 +54,12 @@ class VibeMarketingGitHubRepositoryView(APIView):
             # connection, so without one it can only refuse.
             access = marketing._verify_github_repository_access(context, config, force=True)
             if not access.get("verified"):
-                code = access.get("reasonCode", "github_access_required")
+                # The failure-contract audit pins this exact code expression.
+                body = {"code": access.get("reasonCode", "github_access_required")}
                 logger.warning("vibe_marketing_repository_selection_refused org=%s repo=%s stage=reverify code=%s",
-                    context.organization.pk, repo, code)
-                return Response({"code": code, "detail": REVERIFY_REFUSAL_DETAILS.get(
-                    code, REVERIFY_REFUSAL_FALLBACK).format(repo=repo)}, status=409)
+                    context.organization.pk, repo, body["code"])
+                body["detail"] = REVERIFY_REFUSAL_DETAILS.get(body["code"], REVERIFY_REFUSAL_FALLBACK).format(repo=repo)
+                return Response(body, status=409)
         if changed or needs_binding:
             try:
                 if repo:
