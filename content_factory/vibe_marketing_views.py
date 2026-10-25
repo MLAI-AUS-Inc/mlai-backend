@@ -15157,6 +15157,21 @@ class VibeMarketingAbnLookupView(APIView):
         return Response({"configured": True, "suggestions": _abn_records_from_xml(response.text)[:5]}, status=status.HTTP_200_OK)
 
 
+def _refresh_website_verification_for_page(context):
+    """Renew an unchanged site's due proof before projecting it; never blocks the page.
+
+    Opening Articles then shows a ready site rather than "Check website again".
+    """
+    organization = getattr(context, "organization", None)
+    if organization is None:
+        return
+    try:
+        from .website_reconciliation import refresh_verification_for_page
+        refresh_verification_for_page(organization)
+    except Exception:
+        logger.exception("website_verification_page_refresh_failed organization=%s", getattr(organization, "pk", None))
+
+
 class VibeMarketingBootstrapView(APIView):
     def get(self, request):
         started_at = time.perf_counter()
@@ -15174,6 +15189,7 @@ class VibeMarketingBootstrapView(APIView):
         context, error_response = _resolve_context_or_response(request, require_domain=True)
         if error_response:
             return error_response
+        _refresh_website_verification_for_page(context)
         payload = _serialize_bootstrap(context, request=request, view=view)
         return _timed_vibe_response(payload, started_at=started_at, metric_name="vibe_bootstrap", view=view)
 
