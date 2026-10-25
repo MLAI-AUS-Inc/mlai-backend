@@ -1642,6 +1642,7 @@ SLACK_OAUTH_SCOPES = _env_list(
         "users:read",
         "reactions:read",
         "reactions:write",
+        "emoji:read",
         "files:read",
     ],
 )
