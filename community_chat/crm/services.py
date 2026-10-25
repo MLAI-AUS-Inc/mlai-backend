@@ -1,4 +1,4 @@
-"""Contact edits, opt-outs, saved segments and blast drafts; every write leaves a ``CrmAuditEvent``.
+"""Contact edits, opt-outs, segments, senders and blast drafts; every write leaves a ``CrmAuditEvent``.
 
 Audit rows name the changed fields, never their values. Each write refuses an
 acting account that isn't an MLAI admin, whoever calls it.
@@ -13,6 +13,7 @@ from django.db import IntegrityError, transaction
 from django.db.models.functions import Lower
 
 from core.models import AccountBan
+from crm import sending_domains
 from crm.blasts import check_channel_rules
 from crm.luma_sync import users_by_email
 from crm.models import (
@@ -249,6 +250,49 @@ def delete_segment(segment: Segment, *, actor) -> None:
     with transaction.atomic():
         segment.delete()
         audit(actor, CrmAuditEvent.Action.EDIT, "segment", segment_id, {"operation": "delete"})
+
+
+_MAILBOX_FIELDS = ("display_name", "reply_to", "daily_limit", "enabled")
+
+
+def save_mailbox(mailbox: Optional[SenderMailbox], data: dict, *, actor) -> SenderMailbox:
+    """Add a sender on a listed domain, or change one; switching it on needs a verified domain.
+
+    The route comes from ``CRM_SENDING_DOMAINS``, never from the caller. A
+    sender whose domain has left the list can still be edited or switched
+    off, but not on.
+    """
+
+    require_mlai_admin(actor)
+    creating = mailbox is None
+    if creating:
+        email = data["email"]
+        domain = sending_domains.domain_of(email)
+        route = sending_domains.configured_domains().get(domain)
+        if route is None:
+            raise CrmError("sending_domain_not_configured", domain=domain)
+        if SenderMailbox.objects.filter(email=email).exists():
+            raise CrmError("mailbox_exists", 409)
+        mailbox = SenderMailbox(email=email, domain=domain, route=route)
+    switching_on = data.get("enabled") is True and (creating or not mailbox.enabled)
+    for name in _MAILBOX_FIELDS:
+        if name in data:
+            setattr(mailbox, name, data[name])
+    if switching_on and not sending_domains.is_verified(mailbox.domain):
+        raise CrmError("sending_domain_unverified", domain=mailbox.domain)
+    try:
+        with transaction.atomic():
+            mailbox.save()
+            audit(
+                actor,
+                CrmAuditEvent.Action.EDIT,
+                "mailbox",
+                mailbox.pk,
+                {"operation": "create" if creating else "update", "fields": sorted(data)},
+            )
+    except IntegrityError:
+        raise CrmError("mailbox_exists", 409) from None
+    return mailbox
 
 
 def _found(model, pk, code: str, **filters):

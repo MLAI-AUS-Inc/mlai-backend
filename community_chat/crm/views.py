@@ -9,6 +9,7 @@ the flag says, and then 404 ``crm_disabled`` to admins while
 
 from django.core.exceptions import ObjectDoesNotExist
 from django.db import IntegrityError
+from django.db.models import Count
 from django.http import Http404
 from django.shortcuts import get_object_or_404
 from django.utils import timezone
@@ -16,7 +17,7 @@ from rest_framework.exceptions import ValidationError
 from rest_framework.response import Response
 
 from community_chat.admin_views import MlaiAdminView
-from crm import queries
+from crm import queries, sending_domains
 from crm.access import channel_availability, crm_access, crm_enabled
 from crm.blasts import BlastError, blast_audience, cancel_blast, queue_blast, send_tests
 from crm.contact_import import (
@@ -57,6 +58,7 @@ from .services import (
     create_contact,
     delete_segment,
     save_blast_draft,
+    save_mailbox,
     save_segment,
     stop_messaging,
     update_contact,
@@ -438,13 +440,56 @@ class SegmentCatalogView(CrmView):
         )
 
 
+def mailbox_response(mailbox, *, status=200):
+    sent = queries.mailbox_sent_last_24h([mailbox.pk], timezone.now())
+    return Response(wire.mailbox_dto(mailbox, sent.get(mailbox.pk, 0)), status=status)
+
+
 class MailboxesView(CrmView):
-    def get(self, request):
+    def get(self, request, mailbox_id=None):
+        if mailbox_id is not None:
+            return mailbox_response(get_object_or_404(SenderMailbox, pk=mailbox_id))
         mailboxes = list(SenderMailbox.objects.order_by("display_name", "email", "pk"))
         sent = queries.mailbox_sent_last_24h([mailbox.pk for mailbox in mailboxes], timezone.now())
         return Response(
             {"results": [wire.mailbox_dto(mailbox, sent.get(mailbox.pk, 0)) for mailbox in mailboxes]}
         )
+
+    def post(self, request):
+        mailbox = save_mailbox(None, validated(wire.MailboxCreateInput, request), actor=request.user)
+        return mailbox_response(mailbox, status=201)
+
+    def patch(self, request, mailbox_id):
+        mailbox = get_object_or_404(SenderMailbox, pk=mailbox_id)
+        data = validated(wire.MailboxUpdateInput, request, partial=True)
+        return mailbox_response(save_mailbox(mailbox, data, actor=request.user))
+
+
+class SendingDomainsView(CrmView):
+    """Listed sending domains with their DNS checks; ``?refresh=1`` skips the cache."""
+
+    def get(self, request):
+        refresh = request.query_params.get("refresh") in ("1", "true")
+        configured = sending_domains.configured_domains()
+        counts = dict(
+            SenderMailbox.objects.values_list("domain").annotate(total=Count("pk")).order_by()
+        )
+        now = timezone.now()
+        results = [
+            wire.sending_domain_dto(
+                domain,
+                route,
+                sending_domains.domain_health(domain, route, refresh=refresh, now=now),
+                counts.get(domain, 0),
+            )
+            for domain, route in configured.items()
+        ]
+        results += [
+            wire.sending_domain_dto(domain, None, None, total)
+            for domain, total in sorted(counts.items())
+            if domain not in configured
+        ]
+        return Response({"results": results})
 
 
 class WhatsAppTemplatesView(CrmView):

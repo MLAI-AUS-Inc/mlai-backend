@@ -2265,6 +2265,16 @@ LISTMONK_API_TOKEN = os.environ.get('LISTMONK_API_TOKEN', '').strip()
 # The MLAI campaign template's numeric id in listmonk; blank uses listmonk's default.
 _LISTMONK_TEMPLATE_ID = os.environ.get('LISTMONK_TEMPLATE_ID', '').strip()
 LISTMONK_TEMPLATE_ID = int(_LISTMONK_TEMPLATE_ID) if _LISTMONK_TEMPLATE_ID.isdigit() else None
+# Comma-separated domain:route pairs CRM email may be sent from (route is
+# resend or google_relay). Admins add sender addresses on these domains in
+# Admin → Sending; a sender can only be enabled while the domain's DNS checks pass.
+CRM_SENDING_DOMAINS = [
+    entry.strip()
+    for entry in os.environ.get(
+        'CRM_SENDING_DOMAINS', 'mlai.au:resend,mlai-aus.com:resend,mlai.org.au:resend'
+    ).split(',')
+    if entry.strip()
+]
 # The blast dispatcher and the listmonk feedback sync are scheduler runners,
 # each cache-throttled to one pass per interval.
 CRM_BLAST_DISPATCH_INTERVAL_SECONDS = max(

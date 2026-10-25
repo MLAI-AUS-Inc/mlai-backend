@@ -62,6 +62,16 @@ urlpatterns = [
     ),
     path("mailboxes/", views.MailboxesView.as_view(), name="community_chat_crm_mailboxes"),
     path(
+        "mailboxes/<uuid:mailbox_id>/",
+        views.MailboxesView.as_view(),
+        name="community_chat_crm_mailbox",
+    ),
+    path(
+        "sending-domains/",
+        views.SendingDomainsView.as_view(),
+        name="community_chat_crm_sending_domains",
+    ),
+    path(
         "whatsapp-templates/",
         views.WhatsAppTemplatesView.as_view(),
         name="community_chat_crm_whatsapp_templates",

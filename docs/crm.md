@@ -127,7 +127,8 @@ access rules are in `crm/queries.py`, `crm/segments.py` and `crm/access.py`.
 | `GET`, `POST segments/`; `GET`, `PATCH`, `DELETE segments/{id}/` | Saved segments |
 | `POST segments/preview/` | Count, a sample of 20 and exclusion counts for a definition |
 | `GET segments/catalog/` | Rule types, fields, attribute keys, registration questions and tags for the builder |
-| `GET mailboxes/` | From addresses with their daily cap, `sent_last_24h` and `remaining_today` |
+| `GET`, `POST mailboxes/`; `GET`, `PATCH mailboxes/{id}/` | From addresses (senders) with their `domain`, daily cap, `sent_last_24h` and `remaining_today`; add one (`email`, `display_name`, `reply_to`, `daily_limit`, `enabled`) or edit one (the address is fixed). The address must be on a `CRM_SENDING_DOMAINS` domain (400 `sending_domain_not_configured` with `domain`), which also sets `route`; a taken address is 409 `mailbox_exists`; switching a sender on needs its domain `verified` (400 `sending_domain_unverified`). Switching one off holds its blasts that haven't started; listmonk finishes ones already running |
+| `GET sending-domains/?refresh=1` | Each `CRM_SENDING_DOMAINS` domain with `route`, `status` (`verified`, `failing` or `unknown` when DNS didn't answer), `checked_at`, `mailbox_count` and its `records` (`key`, `label`, `type`, `host`, `expected`, `required`, `status` `pass`/`fail`/`error`, `detail`, `found`). Domains only a stored sender still names follow with `configured: false` and status `not_configured`. Answers are cached for five minutes; `refresh=1` checks again |
 | `GET whatsapp-templates/` | Approved, enabled WhatsApp templates and their slot mapping |
 | `GET`, `POST blasts/`; `GET`, `PATCH blasts/{id}/` | Blasts (filters `status`, `event_id`, `channel`); create and edit drafts |
 | `POST blasts/{id}/audience/` | People and reach per channel, exclusions, SMS segments and cost, caps |
@@ -247,6 +248,7 @@ Steps B4 and B5 of `mlai-chat/docs/mlai/CONTACTS_UI_PLAN_2026-10-23.md`. Domain 
 | `LISTMONK_BASE_URL` | listmonk on the `mlai-shared` network, e.g. `http://listmonk:9000`. Never hard-coded |
 | `LISTMONK_API_USER`, `LISTMONK_API_TOKEN` | The listmonk API user, sent as HTTP Basic auth. Email is `not_configured` without all three |
 | `LISTMONK_TEMPLATE_ID` | The MLAI campaign template's id; blank uses listmonk's default |
+| `CRM_SENDING_DOMAINS` | Comma-separated `domain:route` pairs senders may use; route is `resend` or `google_relay` (default `mlai.au:resend,mlai-aus.com:resend,mlai.org.au:resend`). Bad entries are logged and skipped |
 | `CRM_BLAST_DISPATCH_INTERVAL_SECONDS` | Dispatcher pass interval (default 60) |
 | `CRM_LISTMONK_SYNC_INTERVAL_SECONDS` | Feedback sync interval (default 300) |
 
@@ -255,10 +257,21 @@ Steps B4 and B5 of `mlai-chat/docs/mlai/CONTACTS_UI_PLAN_2026-10-23.md`. Domain 
 - **Version and network:** v6.2.x, pinned by digest. listmonk joins the `mlai-shared` network as `listmonk`; mlai-backend's API container (test sends) and scheduler container (both runners) must be on that network too.
 - **API user** for mlai-backend with permissions to manage lists, subscribers and campaigns, send test campaigns, and run **SQL subscriber queries** (`subscribers:sql_query`). The feedback sync filters subscribers with SQL expressions; without that permission the sync fails, which stops the shared scheduler until it is fixed.
 - **Template:** one MLAI-branded campaign template (`LISTMONK_TEMPLATE_ID`) with the sender identity and listmonk's unsubscribe link in the footer.
-- **SMTP:** one SMTP server per sending domain, tagged with that domain (v6.2 per-domain routing). The campaign's From address picks the server, so never add two servers for one domain. Google Workspace domains use `smtp-relay.gmail.com`; bulk sends use Resend or SES on a dedicated subdomain.
+- **SMTP:** one SMTP server per sending domain, tagged with that domain (v6.2 per-domain routing). The campaign's From address picks the server, so never add two servers for one domain. Google Workspace domains use `smtp-relay.gmail.com`; Resend domains send from the domain itself, with Resend's return path on `send.` keeping SPF aligned under relaxed DMARC.
 - **Privacy settings:** individual subscriber tracking on (per-person opens and clicks), `List-Unsubscribe` header with one-click unsubscribe, blocklisting allowed.
 - **Bounces:** bounce processing on, with the action "blocklist" for hard bounces.
-- **Mailboxes:** add a `SenderMailbox` in Django admin for each From address (`daily_limit`, `reply_to`, `enabled`). Its domain must have an SMTP server in listmonk.
+- **Senders:** add From addresses in MLAI Chat under Admin → Sending (or as a `SenderMailbox` in Django admin). Each domain in `CRM_SENDING_DOMAINS` must have its own SMTP server in listmonk whose Domains field names it; for Resend that is `smtp.resend.com:587`, user `resend`, a sending-only API key for that domain as the password.
+
+### Domain checks (`crm/sending_domains.py`)
+
+Admin → Sending reads `sending-domains/`, which checks each listed domain's public DNS over HTTPS (Cloudflare's resolver, then Google's) with no provider credentials. Required records decide `status`; advisory ones are shown but never fail a domain.
+
+| Route | Required | Advisory |
+| --- | --- | --- |
+| `resend` | DKIM TXT at `resend._domainkey`; SPF TXT and MX at the return path `send.` (Resend's CNAME to `send.forge.rmta.net` answers both); one DMARC TXT at `_dmarc` | One SPF record on the domain; MX for replies |
+| `google_relay` | DKIM TXT at `google._domainkey`; one SPF record on the domain including `_spf.google.com`; DMARC | MX for replies |
+
+A DMARC record with `p=none` or no `rua=` passes with a note. A check whose resolvers both fail is `error` and makes the domain `unknown`; that result isn't cached.
 
 ### Composing and sending
 

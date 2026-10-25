@@ -211,6 +211,43 @@ class BlastEmailInput(StrictSerializer):
     )
 
 
+MAX_MAILBOX_DAILY_LIMIT = 100_000
+
+
+def _valid_email(value: str) -> str:
+    email = normalize_contact_email(value)
+    if not email:
+        raise serializers.ValidationError("Enter a valid email address.", code="invalid_email")
+    return email
+
+
+class MailboxUpdateInput(StrictSerializer):
+    """A sender's editable settings; on ``PATCH`` only sent keys change. The address is fixed."""
+
+    display_name = serializers.CharField(max_length=200)
+    reply_to = serializers.CharField(max_length=254, allow_blank=True, required=False, default="")
+    daily_limit = serializers.IntegerField(
+        min_value=1, max_value=MAX_MAILBOX_DAILY_LIMIT, required=False, default=500
+    )
+    enabled = serializers.BooleanField(required=False, default=False)
+
+    def validate_display_name(self, value):
+        name = " ".join(value.split())
+        if not name:
+            raise serializers.ValidationError("Enter a From name.", code="blank")
+        return name
+
+    def validate_reply_to(self, value):
+        return _valid_email(value) if value.strip() else ""
+
+
+class MailboxCreateInput(MailboxUpdateInput):
+    email = serializers.CharField(max_length=254)
+
+    def validate_email(self, value):
+        return _valid_email(value)
+
+
 class BlastSmsInput(StrictSerializer):
     body = serializers.CharField(max_length=MAX_SMS_BODY, allow_blank=True, required=False)
 
@@ -730,12 +767,27 @@ def mailbox_dto(mailbox, sent_last_24h: int) -> dict:
         "id": str(mailbox.pk),
         "email": mailbox.email,
         "display_name": mailbox.display_name,
+        "domain": mailbox.domain,
         "route": mailbox.route,
         "reply_to": mailbox.reply_to,
         "daily_limit": mailbox.daily_limit,
         "sent_last_24h": sent_last_24h,
         "remaining_today": max(0, mailbox.daily_limit - sent_last_24h),
         "enabled": mailbox.enabled,
+    }
+
+
+def sending_domain_dto(domain: str, route: Optional[str], health: Optional[dict], mailbox_count: int) -> dict:
+    """A sending domain; ``configured`` is false for one only a stored mailbox still names."""
+
+    return {
+        "domain": domain,
+        "route": route,
+        "configured": route is not None,
+        "status": health["status"] if health else "not_configured",
+        "checked_at": iso(health["checked_at"]) if health else None,
+        "records": health["records"] if health else [],
+        "mailbox_count": mailbox_count,
     }
 
 
