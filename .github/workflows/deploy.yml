@@ -190,6 +190,7 @@ jobs:
           startup_updates.tests_curation_context_unit \
           startup_updates.tests_curation_context_api_unit \
           startup_updates.tests_draft_disclosure_unit \
+          startup_updates.tests_financial_history_unit \
           startup_updates.tests_dispatch_timing_unit \
           startup_updates.tests_update_identity.GenerationDateCompatibilityTests
 
@@ -436,6 +437,7 @@ jobs:
           integrations.tests_github_workflow_permissions \
           integrations.tests_github_ci_evidence \
           content_factory.tests_activation_connections \
+          content_factory.tests_hosted_articles \
           content_factory.tests_website_portable \
           content_factory.tests_website_portable_wire \
           integrations.tests_content_factory_website_reads \
@@ -579,6 +581,7 @@ jobs:
           startup_updates.tests_source_evidence \
           startup_updates.tests_reporting_canaries \
           startup_updates.tests_revisions \
+          startup_updates.tests_financial_history_database \
           startup_updates.tests_update_identity \
           hospital.test_sim_contest \
           hospital.test_sim_guess_proxy \

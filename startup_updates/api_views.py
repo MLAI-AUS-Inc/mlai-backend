@@ -4300,6 +4300,8 @@ class StartupUpdateDraftResultsView(APIView):
                         raise RevisionConflict("Generation base revision does not match this run.")
                     from startup_updates.cover_images import generated_cover_image
                     memo = generated_cover_image(item["structured_memo"], run.run_request)
+                    from startup_updates.financial_history import generated_history_selection
+                    memo = generated_history_selection(memo, run.run_request)
                     from startup_updates.evidence_contract import content_hash, validate_generated_metric_claims
                     try:
                         validate_generated_metric_claims(memo, snapshot.payload.get("metrics"))

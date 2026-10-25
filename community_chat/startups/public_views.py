@@ -63,6 +63,7 @@ class PublicUpdateView(APIView):
             raise NotFound("Update not found.")
         draft = get_object_or_404(approved_updates("public"), pk=update_id)
         update = update_payload(draft, published=True, community=True)
+        from startup_updates.financial_history import history_chart_context
         metrics = [
             {"label": (update.get("metricEvidence", {}).get(key) or {}).get("label") or key,
              "value": value if value not in (None, "") else "Unknown"}
@@ -70,6 +71,7 @@ class PublicUpdateView(APIView):
         ]
         return render(request, "community_chat/startups/public_update.html", {
             "update": update, "sections": public_sections(update), "metrics": metrics,
+            "financial_history": history_chart_context(update.get("financialHistory")),
         })
 
     def finalize_response(self, request, response, *args, **kwargs):

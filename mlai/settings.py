@@ -1112,6 +1112,8 @@ ARTICLES_WEBSITE_GOAL_ENROLLED_ORGANIZATIONS = tuple(
     identifier.strip() for identifier in os.getenv('ARTICLES_WEBSITE_GOAL_ENROLLED_ORGANIZATIONS', '').split(',')
     if identifier.strip()
 )
+# MLAI-hosted article sites: owners publish repo-free drafts that MLAI serves on their own domain.
+ARTICLES_HOSTED_SITES_ENABLED = os.getenv('ARTICLES_HOSTED_SITES_ENABLED', 'false').lower() == 'true'
 CONTENT_FACTORY_DEFAULT_ARTICLE_DELIVERY_MODE = os.getenv(
     'CONTENT_FACTORY_DEFAULT_ARTICLE_DELIVERY_MODE',
     'review_draft',

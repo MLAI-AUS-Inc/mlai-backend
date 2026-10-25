@@ -221,6 +221,7 @@ def article_capabilities(config, *, domain="", user=None, account=None, evidence
     evidence = evidence or integration_evidence(config)
     access = repository_access or {}
     from .article_publication_policy import can_publish_article
+    from .hosted_articles import hosted_capabilities
     repo_selected = bool(str(getattr(config, "github_repo", "") or "").strip())
     writable = access.get("writable", access.get("verified"))
     ready = bool(account.get("owned") and evidence.get("verified") and access.get("verified")
@@ -257,7 +258,8 @@ def article_capabilities(config, *, domain="", user=None, account=None, evidence
             "integrationVerified": bool(evidence.get("verified")), "routePath": route, "surfaceLabel": label,
             "nextStep": "repository" if not repo_selected or not account.get("saved") or code.startswith("github_") else "articles",
             "verifiedAt": evidence.get("verifiedAt"),
-            "prices": {"article": get_content_factory_article_cost_points(domain, user=user), "researchTopic": unit, "research": unit * 4, "islandResearch": unit, "automationResearch": unit * 3}}
+            "prices": {"article": get_content_factory_article_cost_points(domain, user=user), "researchTopic": unit, "research": unit * 4, "islandResearch": unit, "automationResearch": unit * 3},
+            **hosted_capabilities(config)}
 
 
 def founder_context_for_domain(user, domain):
