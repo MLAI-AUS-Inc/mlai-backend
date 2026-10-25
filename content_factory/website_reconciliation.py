@@ -1325,26 +1325,113 @@ def queue_verification_refreshes(*, limit=20, now=None, connection_id=None):
         target = _refresh_target(connection, config)
         if target is None:
             continue
-        stamp = min(connection.last_verified_at, target.verified_at)
-        operation, created = WebsiteConnectionOperation.objects.get_or_create(
-            idempotency_key=f"{connection.pk}:verification-refresh:{connection.generation}:{connection.verified_sha}:{stamp.isoformat()}",
-            defaults={"connection": connection, "generation": connection.generation, "action": "source-reverify",
-                "payload": {"source_sha": connection.verified_sha, "target_id": target.target_key, "scan_required": False,
-                    "owned_merge_run_id": "", "purpose": VERIFICATION_REFRESH_PURPOSE, "verified_at": stamp.isoformat(),
-                    "configuration_revision": connection.configuration_version},
-                "receipt": {"status": "verification_queued", "repository_modified": False}})
-        if created:
+        operation = _reserve_verification_refresh(connection, target, min(connection.last_verified_at, target.verified_at))
+        if operation is not None:
             queued.append(str(operation.pk))
-            logger.info("website_verification_refresh_queued connection=%s operation=%s generation=%s source_sha=%s verified_at=%s",
-                connection.pk, operation.pk, connection.generation, connection.verified_sha, stamp.isoformat())
+    if len(queued) < limit:
+        queued += _queue_live_check_refreshes(limit=limit - len(queued), threshold=now - VERIFICATION_REFRESH_AFTER,
+            connection_id=connection_id)
     return queued
+
+
+def _queue_live_check_refreshes(*, limit, threshold, connection_id=None):
+    """Renew a passed live check that ages out while its CI proof is still current.
+
+    Vyavos (25 Oct 2026): its CI check was read again that morning, but its
+    live-route check had passed on 17 Oct, so it could draft articles and not
+    publish them. The CI-age sweep above never saw it. Such a refresh observes
+    the live routes again with the current CI receipt (``renew=deployment``).
+    A source that never passed a live check is left to setup.
+    """
+    from django.db.models import Exists, OuterRef
+    live_checks = WebsiteConnectionOperation.objects.filter(connection_id=OuterRef("website_connection_id"),
+        generation=OuterRef("website_connection__generation"), action="deployment-verify", state="completed")
+    in_flight = WebsiteConnectionOperation.objects.filter(connection_id=OuterRef("website_connection_id"),
+        generation=OuterRef("website_connection__generation"), action="source-reverify", state="pending")
+    # An older CI proof belongs to the sweep above, which renews both checks.
+    configs = (OrganizationContentConfig.objects.select_related("website_connection__organization")
+        .filter(website_connection__state="connected", website_connection__last_verified_at__gt=threshold)
+        .exclude(default_publish_target_id="")
+        .filter(Exists(live_checks), ~Exists(live_checks.filter(updated_at__gt=threshold)), ~Exists(in_flight)))
+    if connection_id:
+        configs = configs.filter(website_connection_id=connection_id)
+    queued = []
+    for config in configs.order_by("-website_connection__last_verified_at")[:VERIFICATION_REFRESH_SCAN_LIMIT]:
+        if len(queued) >= limit:
+            break
+        connection = config.website_connection
+        target = _refresh_target(connection, config)
+        stamp = _aged_live_check(connection, target, threshold) if target is not None else None
+        operation = _reserve_verification_refresh(connection, target, stamp, renew="deployment") if stamp else None
+        if operation is not None:
+            queued.append(str(operation.pk))
+    return queued
+
+
+def _aged_live_check(connection, target, threshold):
+    """When the passed live check publication reads for this source and target ran, if that is due for renewal."""
+    from .activation import mapping
+    from .incident_guards import proof_stamp
+    latest = connection.operations.filter(generation=connection.generation, action="deployment-verify", state="completed",
+        payload__source_sha=connection.verified_sha, payload__target_id=target.target_key).order_by("-created_at").first()
+    receipt = mapping(latest.receipt) if latest else {}
+    stamp = proof_stamp(receipt) if receipt.get("status") == "passed" else None
+    return stamp if stamp and stamp <= threshold else None
+
+
+def _reserve_verification_refresh(connection, target, stamp, *, renew=None):
+    """Queue the one refresh for this proof stamp; None when it was queued before."""
+    payload = {"source_sha": connection.verified_sha, "target_id": target.target_key, "scan_required": False,
+        "owned_merge_run_id": "", "purpose": VERIFICATION_REFRESH_PURPOSE, "verified_at": stamp.isoformat(),
+        "configuration_revision": connection.configuration_version}
+    key = f"{connection.pk}:verification-refresh:{connection.generation}:{connection.verified_sha}:{stamp.isoformat()}"
+    if renew:
+        payload["renew"] = renew
+        key = f"{connection.pk}:verification-refresh:{connection.generation}:{connection.verified_sha}:{renew}:{stamp.isoformat()}"
+    operation, created = WebsiteConnectionOperation.objects.get_or_create(idempotency_key=key,
+        defaults={"connection": connection, "generation": connection.generation, "action": "source-reverify",
+            "payload": payload, "receipt": {"status": "verification_queued", "repository_modified": False}})
+    if not created:
+        return None
+    logger.info("website_verification_refresh_queued connection=%s operation=%s generation=%s source_sha=%s verified_at=%s renew=%s",
+        connection.pk, operation.pk, connection.generation, connection.verified_sha, stamp.isoformat(), renew or "all")
+    return operation
+
+
+# Opening Articles runs a site's due refresh at most this often.
+VERIFICATION_PAGE_REFRESH_SECONDS = 10 * 60
+
+
+def refresh_verification_for_page(organization, *, now=None):
+    """Run this website's due verification refresh while its owner opens Articles.
+
+    The scheduler queues and runs refreshes every minute. This covers a page
+    opened before it gets there, or while it is down, so the page projects the
+    renewed proof instead of "Check website again". It runs only a refresh
+    that is already due, under the worker's own claim and retry backoff, and
+    at most once per website every ten minutes.
+    """
+    from django.conf import settings
+    from django.core.cache import cache
+    if not getattr(settings, "WEBSITE_VERIFICATION_PAGE_REFRESH_ENABLED", True):
+        return None
+    connection_id = (OrganizationContentConfig.objects.filter(organization=organization)
+        .values_list("website_connection_id", flat=True).first())
+    if not connection_id or not cache.add(f"website-verification-refresh:page:{connection_id}", "1", VERIFICATION_PAGE_REFRESH_SECONDS):
+        return None
+    now = now or timezone.now()
+    queue_verification_refreshes(limit=1, now=now, connection_id=connection_id)
+    due = (WebsiteConnectionOperation.objects.filter(connection_id=connection_id, action="source-reverify", state="pending",
+            payload__purpose=VERIFICATION_REFRESH_PURPOSE).filter(Q(next_attempt_at__isnull=True) | Q(next_attempt_at__lte=now))
+        .order_by("created_at").values_list("pk", flat=True).first())
+    return _process_source_reverification(due, now) if due else None
 
 
 def _process_source_reverification(identifier, now):
     """Re-scan external changes and then authenticate current CI/live proof."""
     from .website_connections import authority_guard, require_unlocked_remote_call
     from .website_contract import WebsiteAuthorityError
-    from .website_verification import discover_source_attestation, record_ci_attestation, verify_live_deployment
+    from .website_verification import current_ci_attestation, discover_source_attestation, record_ci_attestation, verify_live_deployment
     from .vibe_marketing_views import (_content_factory_remote_config, _content_factory_headers, _create_local_run,
         _require_roo_points_for_ai_agent, _mark_roo_points_gate_authorized, founder_actor_id_for_user)
     from .contract import CONTENT_FACTORY_REQUEST_SOURCE
@@ -1441,13 +1528,20 @@ def _process_source_reverification(identifier, now):
         elif target is None:
             raise WebsiteAuthorityError("verified_target_required", "Waiting for a current verified publishing target.", retryable=True)
         else:
-            proof = discover_source_attestation(website, target, op.payload["source_sha"])
-            ci = record_ci_attestation(proof)
+            ci, attested = None, None
+            if op.payload.get("renew") == "deployment":
+                # Only the live check aged out, and the current CI receipt still
+                # proves this commit. Read the check again only if it no longer does.
+                attested = current_ci_attestation(website, target)
+            if attested is None:
+                proof = discover_source_attestation(website, target, op.payload["source_sha"])
+                ci = record_ci_attestation(proof)
+                attested = ci.receipt
             config = OrganizationContentConfig.objects.get(website_connection=website)
-            deployment = verify_live_deployment(config, data=ci.receipt)
+            deployment = verify_live_deployment(config, data=attested)
             state, receipt = "completed", {**receipt, "status": "verified", "source_sha": op.payload["source_sha"],
-                "target_id": target.target_key, "ci_operation_id": str(ci.pk), "deployment_operation_id": str(deployment.pk),
-                "repository_modified": False}
+                "target_id": target.target_key, "ci_operation_id": str(ci.pk) if ci else "", "ci_reused": ci is None,
+                "deployment_operation_id": str(deployment.pk), "repository_modified": False}
     except WebsiteAuthorityError as exc:
         receipt.update(status="verification_pending", code=exc.code, retryable=exc.retryable)
         if exc.code in {"website_disconnected", "website_connection_changed", "website_operation_cancelled"}:

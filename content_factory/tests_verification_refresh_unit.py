@@ -15,7 +15,7 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock, Mock, patch
 from uuid import uuid4
 
-from django.test import SimpleTestCase
+from django.test import SimpleTestCase, override_settings
 from django.utils import timezone
 
 from . import vibe_marketing_views  # noqa: F401 -- decorates with transaction.atomic at import; load before it is patched
@@ -126,6 +126,77 @@ class RefreshEligibilityTests(SimpleTestCase):
         self.assertEqual(report["verification_refreshes_queued"], 0)
 
 
+class LiveCheckRefreshTests(SimpleTestCase):
+    """A passed live check ages out on its own while the CI proof is current (Vyavos, 25 Oct 2026)."""
+
+    def setUp(self):
+        self.now = timezone.now()
+        self.threshold = self.now - VERIFICATION_REFRESH_AFTER
+        self.target = SimpleNamespace(target_key=TARGET, source_sha=SOURCE, verified_at=self.now - timedelta(hours=3))
+        self.live = SimpleNamespace(receipt={"status": "passed", "checked_at": (self.now - timedelta(days=8)).isoformat()})
+        self.connection = SimpleNamespace(pk=uuid4(), generation=3, configuration_version=7, verified_sha=SOURCE,
+            last_verified_at=self.now - timedelta(hours=3), operations=rows(first=self.live))
+        self.config = SimpleNamespace(default_publish_target_id=TARGET, website_connection=self.connection)
+
+    def test_only_a_passed_live_check_older_than_the_refresh_age_is_due(self):
+        stamp = reconciliation._aged_live_check(self.connection, self.target, self.threshold)
+        self.assertEqual(stamp.isoformat(), self.live.receipt["checked_at"])
+        # Publication reads the latest live check of this exact source and target.
+        self.connection.operations.filter.assert_called_with(generation=3, action="deployment-verify", state="completed",
+            payload__source_sha=SOURCE, payload__target_id=TARGET)
+        self.connection.operations.order_by.assert_called_with("-created_at")
+        cases = {
+            "recent": {"status": "passed", "checked_at": (self.now - timedelta(days=4)).isoformat()},
+            "not passed": {"status": "failed", "checked_at": self.live.receipt["checked_at"]},
+            "no stamp": {"status": "passed"},
+            "naive stamp": {"status": "passed", "checked_at": "2026-10-17T00:00:00"},
+        }
+        for name, receipt in cases.items():
+            with self.subTest(name):
+                self.live.receipt = receipt
+                self.assertIsNone(reconciliation._aged_live_check(self.connection, self.target, self.threshold))
+        with self.subTest("never passed"):
+            self.connection.operations = rows(first=None)
+            self.assertIsNone(reconciliation._aged_live_check(self.connection, self.target, self.threshold))
+
+    def test_an_aged_live_check_is_queued_for_its_live_routes(self):
+        created = SimpleNamespace(pk=uuid4())
+        configs = rows(items=[self.config])
+        with patch.object(reconciliation.OrganizationContentConfig.objects, "select_related", return_value=configs), \
+                patch.object(reconciliation, "_refresh_target", return_value=self.target), \
+                patch.object(reconciliation.WebsiteConnectionOperation.objects, "get_or_create", return_value=(created, True)) as reserve:
+            queued = reconciliation._queue_live_check_refreshes(limit=5, threshold=self.threshold)
+        self.assertEqual(queued, [str(created.pk)])
+        # Only sites with current CI proof; the CI-age sweep renews both checks of the rest.
+        self.assertEqual(configs.filter.call_args_list[0].kwargs, {"website_connection__state": "connected",
+            "website_connection__last_verified_at__gt": self.threshold})
+        stamp = self.live.receipt["checked_at"]
+        kwargs = reserve.call_args.kwargs
+        self.assertEqual(kwargs["idempotency_key"], f"{self.connection.pk}:verification-refresh:3:{SOURCE}:deployment:{stamp}")
+        self.assertEqual(kwargs["defaults"]["payload"], {"source_sha": SOURCE, "target_id": TARGET, "scan_required": False,
+            "owned_merge_run_id": "", "purpose": "verification_refresh", "verified_at": stamp, "configuration_revision": 7,
+            "renew": "deployment"})
+
+    def test_a_current_live_check_or_ineligible_site_is_not_queued(self):
+        configs = rows(items=[self.config])
+        for name, target, live in (("current", self.target, {"status": "passed", "checked_at": self.now.isoformat()}),
+                ("ineligible", None, self.live.receipt)):
+            with self.subTest(name):
+                self.live.receipt = live
+                with patch.object(reconciliation.OrganizationContentConfig.objects, "select_related", return_value=configs), \
+                        patch.object(reconciliation, "_refresh_target", return_value=target), \
+                        patch.object(reconciliation.WebsiteConnectionOperation.objects, "get_or_create") as reserve:
+                    self.assertEqual(reconciliation._queue_live_check_refreshes(limit=5, threshold=self.threshold), [])
+                reserve.assert_not_called()
+
+    def test_the_sweep_gives_the_live_pass_what_is_left_of_its_limit(self):
+        configs = rows(items=[])
+        with patch.object(reconciliation.OrganizationContentConfig.objects, "select_related", return_value=configs), \
+                patch.object(reconciliation, "_queue_live_check_refreshes", return_value=["live-1"]) as live:
+            self.assertEqual(reconciliation.queue_verification_refreshes(limit=3, now=self.now, connection_id="c-1"), ["live-1"])
+        live.assert_called_once_with(limit=3, threshold=self.threshold, connection_id="c-1")
+
+
 class RefreshCheckTests(SimpleTestCase):
     """The queued refresh is the ordinary source check at an unchanged commit."""
 
@@ -136,12 +207,13 @@ class RefreshCheckTests(SimpleTestCase):
             branch="main", organization=SimpleNamespace(domain="synthetic.test"),
             targets=SimpleNamespace(filter=lambda **kwargs: SimpleNamespace(first=lambda: self.target)))
 
-    def process(self, *, purpose="verification_refresh", age=timedelta(minutes=1), error=None):
+    def process(self, *, purpose="verification_refresh", age=timedelta(minutes=1), error=None, renew=None, current=None):
         from . import website_connections as authority
         from . import website_verification as verification
         op = SimpleNamespace(pk=uuid4(), connection=self.website, generation=3, attempts=0, next_attempt_at=None, save=Mock(),
             created_at=self.now - age, receipt={"status": "verification_queued", "repository_modified": False},
-            payload={"source_sha": SOURCE, "target_id": TARGET, "scan_required": False, "owned_merge_run_id": "", "purpose": purpose})
+            payload={"source_sha": SOURCE, "target_id": TARGET, "scan_required": False, "owned_merge_run_id": "", "purpose": purpose,
+                **({"renew": renew} if renew else {})})
         proof = {"source_sha": SOURCE, "evidence_digest": "e" * 64}
         ci = SimpleNamespace(pk=uuid4(), receipt={**proof, "checked_at": self.now.isoformat()})
         with patch.object(reconciliation.transaction, "atomic", side_effect=lambda: nullcontext()), \
@@ -151,11 +223,13 @@ class RefreshCheckTests(SimpleTestCase):
                 patch.object(authority, "require_unlocked_remote_call"), \
                 patch.object(verification, "discover_source_attestation", return_value=proof, side_effect=error) as discover, \
                 patch.object(verification, "record_ci_attestation", return_value=ci) as record, \
+                patch.object(verification, "current_ci_attestation", return_value=current) as reused, \
                 patch.object(verification, "verify_live_deployment", return_value=SimpleNamespace(pk=uuid4())) as live, \
                 patch.object(reconciliation.OrganizationContentConfig.objects, "get", return_value=SimpleNamespace()), \
                 patch("integrations.http_client.post", side_effect=AssertionError("A same-source refresh never rescans")):
             claimed.return_value.select_related.return_value.filter.return_value.first.return_value = op
             state = reconciliation._process_source_reverification(op.pk, self.now)
+        self.reused = reused
         return state, stored.return_value.update.call_args.kwargs, discover, record, live, ci
 
     def test_a_refresh_reads_new_provider_proof_at_the_same_commit(self):
@@ -166,6 +240,26 @@ class RefreshCheckTests(SimpleTestCase):
         record.assert_called_once_with(discover.return_value)
         live.assert_called_once()
         self.assertEqual(live.call_args.kwargs["data"], ci.receipt)
+
+    def test_a_live_check_refresh_reuses_the_current_ci_receipt(self):
+        current = {"source_sha": SOURCE, "evidence_digest": "f" * 64, "checked_at": self.now.isoformat()}
+        state, written, discover, record, live, _ = self.process(renew="deployment", current=current)
+        self.assertEqual((state, written["receipt"]["status"], written["receipt"]["ci_reused"]), ("completed", "verified", True))
+        self.reused.assert_called_once_with(self.website, self.target)
+        discover.assert_not_called()
+        record.assert_not_called()
+        self.assertEqual(live.call_args.kwargs["data"], current)
+
+    def test_a_live_check_refresh_reads_ci_again_when_its_receipt_no_longer_counts(self):
+        state, written, discover, record, live, ci = self.process(renew="deployment", current=None)
+        self.assertEqual((state, written["receipt"]["ci_reused"]), ("completed", False))
+        discover.assert_called_once_with(self.website, self.target, SOURCE)
+        self.assertEqual(live.call_args.kwargs["data"], ci.receipt)
+
+    def test_a_full_refresh_never_reuses_the_ci_receipt(self):
+        *_, discover, record, live, ci = self.process(current={"source_sha": SOURCE})
+        self.reused.assert_not_called()
+        discover.assert_called_once()
 
     def test_a_refresh_that_cannot_succeed_stops_instead_of_retrying_hourly(self):
         denied = WebsiteAuthorityError("github_ci_evidence_permission_required", "Approve Checks: read.", retryable=False)
@@ -184,6 +278,68 @@ class RefreshCheckTests(SimpleTestCase):
         denied = WebsiteAuthorityError("github_ci_evidence_permission_required", "Approve Checks: read.", retryable=False)
         state, written, *_ = self.process(purpose=None, error=denied, age=timedelta(days=3))
         self.assertEqual((state, written["state"]), ("pending", "pending"))
+
+
+class PageOpenRefreshTests(SimpleTestCase):
+    """Opening Articles runs a due refresh instead of waiting for the scheduler."""
+
+    def setUp(self):
+        self.now = timezone.now()
+        self.organization = SimpleNamespace(pk=7)
+
+    def open_page(self, *, connection_id="c-1", fresh_claim=True, due="op-1"):
+        configs = rows()
+        configs.values_list.return_value.first.return_value = connection_id
+        pending = rows()
+        pending.values_list.return_value.first.return_value = due
+        with patch.object(reconciliation.OrganizationContentConfig.objects, "filter", return_value=configs), \
+                patch("django.core.cache.cache.add", return_value=fresh_claim) as claim, \
+                patch.object(reconciliation, "queue_verification_refreshes", return_value=[]) as queue, \
+                patch.object(reconciliation.WebsiteConnectionOperation.objects, "filter", return_value=pending) as find, \
+                patch.object(reconciliation, "_process_source_reverification", return_value="completed") as run:
+            result = reconciliation.refresh_verification_for_page(self.organization, now=self.now)
+        return result, claim, queue, find, run
+
+    def test_a_due_refresh_runs_while_the_page_loads(self):
+        result, claim, queue, find, run = self.open_page()
+        self.assertEqual(result, "completed")
+        claim.assert_called_once_with("website-verification-refresh:page:c-1", "1", 600)
+        queue.assert_called_once_with(limit=1, now=self.now, connection_id="c-1")
+        find.assert_called_once_with(connection_id="c-1", action="source-reverify", state="pending",
+            payload__purpose="verification_refresh")
+        run.assert_called_once_with("op-1", self.now)
+
+    def test_nothing_runs_without_a_due_refresh_a_website_or_a_free_claim(self):
+        for name, kwargs in {"nothing due": {"due": None}, "no website": {"connection_id": None},
+                "opened in the last ten minutes": {"fresh_claim": False}}.items():
+            with self.subTest(name):
+                result, _claim, _queue, _find, run = self.open_page(**kwargs)
+                self.assertIsNone(result)
+                run.assert_not_called()
+
+    def test_articles_bootstrap_refreshes_first_and_still_loads_when_that_fails(self):
+        context = SimpleNamespace(organization=self.organization)
+        calls = Mock()
+        calls.serialize.return_value = {"latestRuns": []}
+        with patch.object(vibe_marketing_views, "_resolve_profile_company_or_response",
+                    return_value=(None, SimpleNamespace(domain="synthetic.test"), None)), \
+                patch.object(vibe_marketing_views, "_resolve_context_or_response", return_value=(context, None)), \
+                patch.object(vibe_marketing_views, "_serialize_bootstrap", calls.serialize), \
+                patch.object(reconciliation, "refresh_verification_for_page", calls.refresh), \
+                self.assertLogs(vibe_marketing_views.logger, level="ERROR"):
+            calls.refresh.side_effect = RuntimeError("provider down")
+            response = vibe_marketing_views.VibeMarketingBootstrapView().get(SimpleNamespace(query_params={}))
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual([name for name, *_ in calls.mock_calls], ["refresh", "serialize"])
+        calls.refresh.assert_called_once_with(self.organization)
+
+    @override_settings(WEBSITE_VERIFICATION_PAGE_REFRESH_ENABLED=False)
+    def test_the_page_trigger_can_be_switched_off(self):
+        result, claim, queue, _find, run = self.open_page()
+        self.assertIsNone(result)
+        claim.assert_not_called()
+        queue.assert_not_called()
+        run.assert_not_called()
 
 
 class DeploymentReceiptAgeTests(SimpleTestCase):
