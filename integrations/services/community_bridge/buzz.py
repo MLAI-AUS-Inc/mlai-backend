@@ -138,6 +138,7 @@ class BuzzBridgeClient:
         broadcast: bool = False,
         mention_pubkeys: list[str] | None = None,
         member_scope: dict | None = None,
+        emojis: list[dict] | None = None,
     ) -> dict:
         adapter_url = cls._validated_adapter_url()
         api_token = cls._api_token()
@@ -168,6 +169,8 @@ class BuzzBridgeClient:
                     or payload['member_scope']['slack_workspace_id'] != payload['source_workspace_id']
                     or payload['member_scope']['slack_channel_id'] != payload['source_channel_id']):
                 raise BuzzBridgeError('Members delivery scope does not match source')
+        if emojis:
+            payload['emojis'] = emojis
         if mention_pubkeys:
             payload['mention_pubkeys'] = cls._mention_keys(mention_pubkeys)
         timeout = max(1, min(int(getattr(settings, "BUZZ_BRIDGE_ADAPTER_TIMEOUT_SECONDS", 15)), 60))
@@ -483,6 +486,7 @@ class BuzzBridgeClient:
         parent_message_id: str = "",
         mention_pubkeys: list[str] | None = None,
         broadcast: bool = False,
+        emojis: list[dict] | None = None,
     ) -> dict:
         result = cls._post_adapter(
             "v1/private-deliveries",
@@ -504,6 +508,7 @@ class BuzzBridgeClient:
                 "parent_message_id": str(parent_message_id or "") or None,
                 **({'mention_pubkeys': cls._mention_keys(mention_pubkeys)} if mention_pubkeys else {}),
                 **({'broadcast': True} if broadcast else {}),
+                **({'emojis': emojis} if emojis else {}),
             },
         )
         return cls._validated_private_delivery_result(

@@ -373,7 +373,7 @@ class _BotClient(member._Client):
         return getattr(client, method)(**kwargs)
 
 
-def _bot_wire(row, channel, actor, client, info, name):
+def _bot_wire(row, channel, actor, client, info, name, *, emoji_catalog=None):
     payload = row.payload or {}
     operation = row.delivery_type
     target = ""
@@ -395,7 +395,7 @@ def _bot_wire(row, channel, actor, client, info, name):
             target = str((link.destination_payload or {}).get("message_id") or "")
             reaction = str((link.destination_payload or {}).get("reaction") or "")
     elif operation == "reaction_add":
-        reaction = emoji_to_slack_reaction(str(payload.get("text") or ""))
+        reaction = emoji_to_slack_reaction(str(payload.get("text") or ""), catalog=emoji_catalog)
     kwargs = {"channel": channel.slack_channel_id}
     if operation == "create":
         kwargs["client_msg_id"] = payload[IDENTITY]["client_msg_id"]
@@ -509,10 +509,12 @@ def execute(delivery):
     implementation = sys.modules[__name__]
     try:
         if command is None:
+            from integrations.services.slack_custom_emoji import load_catalog, catalog_names, needs_catalog
+            catalog = load_catalog(original.slack_workspace_id, requested_names=catalog_names((delivery.get("payload") or {}).get("text"))) if delivery["delivery_type"] == "reaction_add" and needs_catalog((delivery.get("payload") or {}).get("text")) else {}
             with _fence(delivery, original, authority, actor, reader_authority=reader_authority) as (row, channel, user, client):
                 info = client.verify()
-                wire = (member._wire(row, channel, actor, client, info, identity_key=IDENTITY) if authority is not None
-                        else _bot_wire(row, channel, actor, client, info, user.full_name or "MLAI member"))
+                wire = (member._wire(row, channel, actor, client, info, identity_key=IDENTITY, emoji_catalog=catalog) if authority is not None
+                        else _bot_wire(row, channel, actor, client, info, user.full_name or "MLAI member", emoji_catalog=catalog))
                 command = {"version": 1, "actor": actor, "mapping": _identity(channel), "wire": wire}
                 guard_delivery(row)
                 existing = (row.payload or {}).get(MEMBER_STAMP)

@@ -860,6 +860,12 @@ class CommunityBridgeDiscordClient(discord.Client):
         )
 
     async def _freeze_and_send_buzz_delivery(self, delivery: dict, **envelope) -> None:
+        from integrations.services.slack_custom_emoji import load_catalog, catalog_names, needs_catalog, present
+        if delivery.get("source_platform") == "slack" and not delivery.get("canonical_envelope"):
+            catalog = await asyncio.to_thread(load_catalog, envelope.get("source_workspace_id", ""), requested_names=catalog_names(envelope.get("text"))) if needs_catalog(envelope.get("text")) else {}
+            envelope["text"], emojis = present(envelope.get("text", ""), catalog)
+            if emojis:
+                envelope["emojis"] = emojis
         frozen = await asyncio.to_thread(
             freeze_buzz_delivery, delivery_id=delivery["id"], envelope=envelope,
         )

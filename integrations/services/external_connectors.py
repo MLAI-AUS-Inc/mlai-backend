@@ -433,6 +433,7 @@ def _slack_oauth_user_scope_list() -> list[str]:
             "users:read",
             "reactions:read",
             "reactions:write",
+            "emoji:read",
             "files:read",
         ]
     )
