@@ -171,3 +171,28 @@ class OwnAiReadabilityJourneyTests(TestCase):
         self.assertIn(response.status_code, (200, 201), response.data)
         self.assertEqual(self.approve(response.data['update']).status_code, 400)
         self.assertFalse(MonthlyUpdateApproval.objects.exists())
+
+    def test_worker_workflow_notes_and_metric_suggestions_never_enter_reader_projection(self):
+        from startup_updates.revisions import save_revision
+        saved = self.tool('save_narrative_draft', self.arguments())
+        draft = MonthlyUpdateDraft.objects.get(pk=saved['updateId'])
+        current = draft.current_revision
+        # The worker can retain these internal memo fields. They must not become
+        # narrative merely because the memo later receives a public approval.
+        memo = {**current.structured_memo,
+            'source_notes': ['PRIVATE SOURCE WORKFLOW'],
+            'groundedness_notes': 'PRIVATE GROUNDING WORKFLOW',
+            'metric_suggestions': [{'metric_key': 'customerInterviews', 'reason': 'PRIVATE METRIC SUGGESTION'}]}
+        save_revision(draft, memo, snapshot=current.snapshot, audience='public',
+            expected_revision=current.pk, validation=current.validation)
+        update = self.detail(draft.pk)['update']
+        self.assertEqual(self.approve(update).status_code, 200)
+        shared = self.client.get(BASE + 'community/').data['updates'][0]
+        html = APIClient().get(BASE + f'public/{draft.pk}/').content.decode()
+        for field in ('source_notes', 'groundedness_notes', 'metric_suggestions'):
+            self.assertNotIn(field, shared)
+        for marker in ('PRIVATE SOURCE WORKFLOW', 'PRIVATE GROUNDING WORKFLOW', 'PRIVATE METRIC SUGGESTION'):
+            self.assertNotIn(marker, json.dumps(shared))
+            self.assertNotIn(marker, html)
+        draft.refresh_from_db()
+        self.assertEqual(draft.published_revision.structured_memo['source_notes'], ['PRIVATE SOURCE WORKFLOW'])

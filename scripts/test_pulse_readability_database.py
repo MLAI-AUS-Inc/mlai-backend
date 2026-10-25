@@ -31,7 +31,7 @@ REGRESSION_LABELS = [
 def load_generated_narrative(path):
     """Import only narrative from an explicitly synthetic worker sample."""
     sample = json.loads(path.read_text())
-    source = sample.get('source') or {}
+    source = sample.get('source') or sample
     if source.get('synthetic') is not True or not str(source.get('domain', '')).endswith('.invalid'):
         raise ValueError('Only a synthetic sample with an .invalid domain may be replayed.')
     memo = sample['draft']['structured_memo']
@@ -46,10 +46,12 @@ def load_generated_narrative(path):
     mapping = {'startupOverview': 'startupOverview', 'summary': 'topline', 'highlights': 'highlights',
         'challenges': 'lowlights', 'learnings': 'learnings', 'next30Days': 'next_30_days', 'asks': 'asks'}
     narrative = {field: plain(memo.get(key)) for field, key in mapping.items()}
+    narrative['highlights'] = '\n'.join(filter(None, (plain(memo.get('highlights')), plain(memo.get('operations')))))
     if not narrative['summary'] or len(narrative['startupOverview']) > 2000:
         raise ValueError('The sample must have a summary and a bounded startup overview.')
     return narrative, {
         'generationModel': sample.get('generation_model'), 'reviewModel': sample.get('review_model'),
+        'workerReviews': sample.get('reviews'),
         'sampleSha256': hashlib.sha256(path.read_bytes()).hexdigest(),
     }
 
