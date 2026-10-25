@@ -733,7 +733,8 @@ def _serialize_draft_for_editor(draft) -> dict:
         "metricEvidence": {item.get("metric_key"): {key: item.get(key) for key in ("quality", "source_provider", "basis", "limitations")} for item in structured_memo.get("kpi_snapshot", []) if isinstance(item, dict)},
         "month": month_value.strftime("%B"),
         "year": month_value.year,
-        "startupOverview": str(structured_memo.get("startupOverview") or ""),
+        **({"startupOverview": str(structured_memo.get("startupOverview") or "")}
+           if "startupOverview" in structured_memo else {}),
         "highlights": _join_named_sections(structured_memo, _HIGHLIGHT_SECTIONS),
         "challenges": _join_text_items_with_newlines(structured_memo.get("lowlights")),
         "asks": _join_named_sections(structured_memo, [
@@ -768,7 +769,8 @@ def _serialize_email_draft_month(draft) -> dict:
         "presentationMode": str(
             structured_memo.get("presentation_mode") or structured_memo.get("presentationMode") or ""
         ),
-        "startupOverview": str(structured_memo.get("startupOverview") or ""),
+        **({"startupOverview": str(structured_memo.get("startupOverview") or "")}
+           if "startupOverview" in structured_memo else {}),
         "highlights": _join_named_sections(structured_memo, _HIGHLIGHT_SECTIONS),
         "challenges": _join_text_items_with_newlines(structured_memo.get("lowlights")),
         "asks": _join_named_sections(structured_memo, [
@@ -792,7 +794,7 @@ def _serialize_draft_results_bundle(drafts) -> Optional[dict]:
         editor_past_months.append(
             {
                 "month": f"{payload['month']} {payload['year']}",
-                "startupOverview": payload["startupOverview"],
+                **({"startupOverview": payload["startupOverview"]} if "startupOverview" in payload else {}),
                 "highlights": payload["highlights"],
                 "challenges": payload["challenges"],
                 "asks": payload["asks"],

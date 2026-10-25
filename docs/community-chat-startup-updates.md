@@ -51,6 +51,10 @@ generated results, and the MCP `save_narrative_draft.narrative` object. It descr
 what the startup does, who it helps, and the problem it solves in one or two short
 sentences. An omitted field retains a saved overview; an explicit empty string
 clears it. An overview alone does not qualify an empty monthly update for approval.
+Read responses omit this field when a historical revision never had it, while
+preserving a saved empty string. Reopening an old draft therefore does not turn
+missing context into a founder's instruction to suppress the generated overview.
+Historical publications remain unchanged and never acquire live profile text.
 
 Generation accepts the same optional field separately from monthly notes. The
 run freezes it as `startup_overview`, including deliberate blank text. The compact

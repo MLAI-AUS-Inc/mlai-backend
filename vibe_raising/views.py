@@ -893,7 +893,8 @@ def _serialize_draft_for_form(draft):
         "audienceVisibility": structured_memo.get("_audience_visibility", ["just_me"]),
         "month": calendar.month_name[month_value.month],
         "year": month_value.year,
-        "startupOverview": _structured_memo_text(structured_memo, "startupOverview") or "",
+        **({"startupOverview": _structured_memo_text(structured_memo, "startupOverview") or ""}
+           if "startupOverview" in structured_memo else {}),
         "summary": _structured_memo_text(structured_memo, "summary", "topline"),
         "sourceUrl": _structured_memo_text(structured_memo, "sourceUrl", "source_url"),
         "manualDocuments": _structured_memo_manual_documents(structured_memo),
@@ -1088,7 +1089,8 @@ def _serialize_monthly_update(draft, structured_memo=None, *, published=False, s
         "visibility": "published" if published_at else "private",
         "audienceVisibility": structured_memo.get("_audience_visibility") or monthly_update_visibility(draft),
         "publishedAt": published_at.isoformat() if published_at else None,
-        "startupOverview": _structured_memo_text(structured_memo, "startupOverview") or "",
+        **({"startupOverview": _structured_memo_text(structured_memo, "startupOverview") or ""}
+           if "startupOverview" in structured_memo else {}),
         "summary": _structured_memo_text(structured_memo, "summary", "topline"),
         "sourceUrl": _structured_memo_text(structured_memo, "sourceUrl", "source_url"),
         "manualDocuments": _structured_memo_manual_documents(structured_memo),
@@ -1146,7 +1148,8 @@ def _serialize_draft_bundle(drafts):
         past_months.append(
             {
                 "month": f"{calendar.month_name[month_value.month]} {month_value.year}",
-                "startupOverview": _structured_memo_text(structured_memo, "startupOverview") or "",
+                **({"startupOverview": _structured_memo_text(structured_memo, "startupOverview") or ""}
+                   if "startupOverview" in structured_memo else {}),
                 "highlights": _join_named_sections(structured_memo, _HIGHLIGHT_SECTIONS),
                 "challenges": _join_text_items_with_newlines(structured_memo.get("lowlights")),
                 "asks": _join_named_sections(structured_memo, [
@@ -1178,7 +1181,8 @@ def _serialize_email_draft_month(draft):
         "isoMonth": month_value.isoformat(),
         "month": calendar.month_name[month_value.month],
         "year": month_value.year,
-        "startupOverview": _structured_memo_text(structured_memo, "startupOverview") or "",
+        **({"startupOverview": _structured_memo_text(structured_memo, "startupOverview") or ""}
+           if "startupOverview" in structured_memo else {}),
         "summary": _structured_memo_text(structured_memo, "summary", "topline"),
         "sourceUrl": _structured_memo_text(structured_memo, "sourceUrl", "source_url"),
         "manualDocuments": _structured_memo_manual_documents(structured_memo),

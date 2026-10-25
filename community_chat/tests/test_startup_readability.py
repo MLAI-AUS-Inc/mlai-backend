@@ -73,7 +73,7 @@ class StartupOverviewTests(SimpleTestCase):
         self.assertEqual(update_payload(draft, published=True, community=True)['startupOverview'], 'We help clinics plan care.')
         self.assertEqual(draft.published_revision.structured_memo['startupOverview'], original)
         draft.published_revision = revision(2, None)
-        self.assertEqual(update_payload(draft, published=True, community=True)['startupOverview'], '')
+        self.assertNotIn('startupOverview', update_payload(draft, published=True, community=True))
 
     def test_overview_is_hashed_retained_for_older_clients_and_blank_is_a_new_revision(self):
         current = Obj(pk=2, validation={'groundedness_status': 'passed'}, structured_memo={'_month_sequence': 1, 'startupOverview': 'We help clinics.'}, content_hash='previous')
@@ -110,6 +110,53 @@ class StartupOverviewTests(SimpleTestCase):
         self.assertEqual(_serialize_email_draft_month(draft)['startupOverview'], overview)
         markdown = render_monthly_update_markdown(draft.structured_memo)
         self.assertLess(markdown.index(overview), markdown.index('Our first clinic tried the service.'))
+
+    def overview_projections(self, overview):
+        from startup_updates.api_views import _serialize_draft_results_bundle
+        from vibe_raising.views import _serialize_draft_bundle, _serialize_email_draft_bundle
+        memo = {'_month_sequence': 1, 'summary': 'Our first clinic tried the service.'}
+        if overview is not None:
+            memo['startupOverview'] = overview
+        draft = Obj(id=1, pk=1, creation_key=None, first_published_at=None, published_at=None,
+            published_revision=None, published_revision_id=None, update_date=None,
+            month=date(2026, 9, 1), current_revision=None, current_revision_id=None,
+            updated_at=timezone.now(), status='draft', organization=Obj(name='Acme'), structured_memo=memo)
+        results = _serialize_draft_results_bundle([draft, draft])
+        form = _serialize_draft_bundle([draft, draft])
+        email = _serialize_email_draft_bundle([draft, draft])
+        return {
+            'owner': update_payload(draft), 'community': update_payload(draft, community=True),
+            'published': update_payload(draft, published=True, community=True),
+            'editor': results['draft'], 'editor_past': results['draft']['pastMonths'][0],
+            'result_email': results['current_month'], 'result_email_past': results['past_months'][0],
+            'form': form, 'form_past': form['pastMonths'][0],
+            'email': email['currentMonth'], 'email_past': email['pastMonths'][0],
+        }
+
+    def test_every_read_projection_preserves_missing_legacy_overview_and_explicit_blank(self):
+        from community_chat.startups.public_views import public_sections
+        for overview in (None, '', 'We help clinics plan care.'):
+            for surface, payload in self.overview_projections(overview).items():
+                with self.subTest(surface=surface, overview=overview):
+                    if overview is None:
+                        self.assertNotIn('startupOverview', payload)
+                    else:
+                        self.assertEqual(payload['startupOverview'], overview)
+                    if not overview:
+                        self.assertNotIn('What we do', [section['label'] for section in public_sections(payload)])
+
+    def test_reopening_legacy_draft_does_not_send_a_false_clear_on_regeneration(self):
+        for overview in (None, '', 'We help clinics plan care.'):
+            projections = self.overview_projections(overview)
+            for surface in ('owner', 'form', 'editor'):
+                payload = projections[surface]
+                # Clients preserve field presence when reopening and submitting.
+                response, create, dispatch = self.generation_request(
+                    overview=payload.get('startupOverview'), include_overview='startupOverview' in payload)
+                with self.subTest(surface=surface, overview=overview):
+                    self.assertEqual(response.status_code, 201)
+                    self.assertEqual(create.call_args.kwargs['startup_overview'], overview)
+                    dispatch.assert_called_once()
 
 
 
