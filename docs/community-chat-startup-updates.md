@@ -44,6 +44,56 @@ of the metrics selected for sharing. Community and public projections never
 include the snapshot. Refreshing historical reporting evidence creates a separate
 private approved update, preserving shared revisions and approval receipts.
 
+## Plain-language context and own-AI drafts — 25 October 2026
+
+`startupOverview` is optional text of at most 2,000 characters in founder saves,
+generated results, and the MCP `save_narrative_draft.narrative` object. It describes
+what the startup does, who it helps, and the problem it solves in one or two short
+sentences. An omitted field retains a saved overview; an explicit empty string
+clears it. An overview alone does not qualify an empty monthly update for approval.
+
+Generation accepts the same optional field separately from monthly notes. The
+run freezes it as `startup_overview`, including deliberate blank text. The compact
+snapshot `startup` includes the frozen profile's `short_description`,
+`problem_solved`, and `target_audience`, plus an explicit override when supplied.
+Full source context still uses the existing deduplicated `startup_context` field.
+A repeated request for the same active run and overview reuses that run; changed
+background conflicts until the founder finishes or cancels it. This does not
+change the monthly activity window or create a monthly event from company context.
+
+The own-AI brief supplies these safe profile fields and asks for conversational,
+self-contained bullets: one or two summary bullets and up to four in other
+sections. Each bullet states what happened and why it matters, preserves material
+limitations, and explains necessary terminology. Source-retrieval and coverage
+notes remain in the private `coverageNotes` field. Asks identify a supported action
+without inventing deadlines, contacts or needs.
+
+The overview belongs to the saved revision and approval hash. Owner preview,
+community/public projections, public HTML, email draft results and Markdown export
+all use the selected revision. Reads never fill historical omissions from a live
+company profile. Shared projections apply the same monetary redaction as all other
+narrative sections. Own-AI writes remain private and require explicit founder
+review; overview edits cannot bypass stale-revision or failed-evidence checks.
+
+The real HTTP/ORM regression is
+`community_chat.tests.test_startup_readability_database`. For an isolated local
+run, use `scripts/test_pulse_readability_database.py` only after explicit approval
+of the exact 373-file inventory in
+`pulse-readability-test-migrations-2026-10-25.json` (SHA-256
+`8495cdb1a849bbca019ea54ac59fcd2b14d6e2de3b3b98555fcfad70555f1810`).
+The user approved this exact inventory for disposable local and CI test databases
+on 25 October 2026. That approval does not authorise production migrations.
+The runner disables dotenv, external credentials and network access, verifies all
+migration hashes, and creates and deletes a fresh disposable SQLite database.
+`--include-regressions` also runs the existing startup identity, review, financial
+and progress tests within the same verified migration scope.
+`--sample-output /absolute/path.json` exports only the fictional RouteNest test
+trace after all tests pass. The deterministic API fixture is identified as such;
+`--generated-sample /absolute/model-sample.json` instead replays the narrative
+from an approved synthetic Valley preflight and records its file hash and model
+names. It makes no model call or backend request outside the local test client. This feature
+adds no model changes or migrations.
+
 ## Connection tiles and lifecycle additions — 26 September 2026
 
 The source catalog contains `gmail`, `stripe`, `humanitix`, `xero`, `bank_feed`, `notion`, `google_drive`, `slack`, `linear`, `google_analytics`, and `luma`. Existing fields are preserved; each source adds `connectMode` (`oauth` or `api_key`), `canConnect`, `canDisconnect`, and `usableForUpdates`. Chat discovers accessible Analytics properties automatically when a draft starts. The separate `connect/google/` handoff requests website/Search Console consent; it is not a Valley input. GitHub remains a separate publishing connection.

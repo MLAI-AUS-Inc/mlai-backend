@@ -1,7 +1,7 @@
 """A human rewrite is an assertion; changing disclosure is not evidence review."""
 import copy
 
-NARRATIVE_FIELDS = ("summary", "highlights", "challenges", "learnings", "next30Days", "asks")
+NARRATIVE_FIELDS = ("startupOverview", "summary", "highlights", "challenges", "learnings", "next30Days", "asks")
 # Memo sections behind those fields: highlights merges financial_performance and
 # operations, challenges are lowlights, and a legacy topline stands in for summary.
 NARRATIVE_MEMO_KEYS = ("summary", "topline", "financial_performance", "highlights", "operations",
@@ -10,7 +10,7 @@ NARRATIVE_MEMO_KEYS = ("summary", "topline", "financial_performance", "highlight
 
 def manual_validation(previous, proposed, validation, *, metrics_changed=False):
     unchanged = previous is not None and not metrics_changed and all(
-        str(previous.get(key) or "").strip() == str(proposed.get(key) or "").strip()
+        str(previous.get(key) or "").strip() == str(proposed.get(key, previous.get(key) if key == "startupOverview" else None) or "").strip()
         for key in NARRATIVE_FIELDS
     )
     if unchanged:
