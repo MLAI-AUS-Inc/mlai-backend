@@ -569,6 +569,9 @@ def _effective_article_delivery_mode(config, *, requested_mode=None, explicit=Fa
     if explicit and requested in ARTICLE_DELIVERY_MODES:
         return requested
 
+    from .hosted_articles import hosted_site_active
+    if hosted_site_active(config):
+        return "content_only"
     stored = _stored_article_delivery_mode(config)
     if _article_repo_is_review_capable(config, github_ready=github_ready, article_ready=article_ready):
         if stored in LEGACY_REVIEW_BLOCKING_DELIVERY_MODES or not stored:
@@ -10460,7 +10463,19 @@ def _workflow_progress(*, context=None, run=None, latest_runs=None, checks=None,
         summary_by_id["package"] = f"Article package ready{': ' + title if title else '.'}"
         action_by_id["package"] = _workflow_step_action("Review package", href=_run_url(article_run))
 
-    if publish_complete:
+    from .hosted_articles import hosted_publish_step
+    hosted_step = hosted_publish_step(article_run, config) if content_package_ready else None
+    if hosted_step is not None:
+        status_by_id["publish"] = hosted_step["status"]
+        href_by_id["publish"] = hosted_step["href"] or _run_url(article_run)
+        run_by_id["publish"] = article_run.run_id
+        summary_by_id["publish"] = hosted_step["summary"]
+        if hosted_step["label"]:
+            action_by_id["publish"] = _workflow_step_action(hosted_step["label"], href=hosted_step["href"] or _run_url(article_run),
+                                                            intent=hosted_step["intent"] or None)
+        else:
+            action_by_id.pop("publish", None)
+    elif publish_complete:
         status_by_id["publish"] = "complete"
         href_by_id["publish"] = _run_url(publish_evidence_run)
         run_by_id["publish"] = publish_evidence_run.run_id
