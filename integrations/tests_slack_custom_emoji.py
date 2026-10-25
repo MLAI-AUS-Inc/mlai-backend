@@ -6,6 +6,16 @@ from integrations.services.slack_emoji import custom_shortcode, emoji_to_slack_r
 URL = 'https://emoji.slack-edge.com/TTEST/parrot/abc.gif'
 
 class SlackCustomEmojiTests(unittest.TestCase):
+    def test_reconnect_requests_emoji_read_even_with_legacy_environment_scopes(self):
+        from django.test import override_settings
+        from integrations.services.external_connectors import _slack_oauth_user_scope_list
+        with override_settings(SLACK_OAUTH_USER_SCOPES=['channels:read']):
+            scopes = _slack_oauth_user_scope_list()
+        self.assertIn('emoji:read', scopes)
+        self.assertIn('channels:read', scopes)
+        self.assertIn('reactions:write', scopes)
+        self.assertEqual(len(scopes),len(set(scopes)))
+
     def test_plain_text_and_standard_emoji_do_not_depend_on_catalog(self):
         for text in ('hello', '👍', ':thumbsup::skin-tone-4:', '`x :custom:`', 'https://example.com/:custom:'):
             self.assertFalse(needs_catalog(text))
