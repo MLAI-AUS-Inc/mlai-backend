@@ -259,9 +259,17 @@ class HostedArticleSourceTests(TestCase):
         WebsiteConnection.objects.create(organization=self.org, github_repo="owner/other", installation_id="7",
                                          site_url="https://other.example.test")
         self.assertEqual(self.read()[0].status_code, 200)
-        WebsiteConnection.objects.create(organization=self.org, github_repo="owner/copy", installation_id="7",
-                                         site_url="https://source.example.test")
+        copy = WebsiteConnection.objects.create(organization=self.org, github_repo="owner/copy", installation_id="7",
+                                                site_url="https://source.example.test")
         self.assertEqual(self.read()[0].data["reason"], "hosted_source_ambiguous")
+        # The website the organisation selected in MLAI is the source.
+        from .models import OrganizationContentConfig
+        config = OrganizationContentConfig.objects.create(organization=self.org, website_connection=self.connection)
+        self.assertEqual(self.read()[0].data["githubRepo"], "Owner/site")
+        config.website_connection = copy
+        config.save(update_fields=["website_connection"])
+        self.assertEqual(self.read()[1].call_args.kwargs["repository"], "owner/copy")
+        config.delete()
         WebsiteConnection.objects.filter(organization=self.org).update(state="disconnected")
         self.assertEqual(self.read()[0].data["reason"], "hosted_source_not_connected")
         request = self.factory.get("/synthetic", {"domain": "missing.example.test"}, HTTP_X_API_KEY=KEY)

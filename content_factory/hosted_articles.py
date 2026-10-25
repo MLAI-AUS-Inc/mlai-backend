@@ -105,11 +105,17 @@ COMMIT = re.compile(r"^[a-f0-9]{40}$")
 
 
 def _source_connection(site: HostedArticleSite):
-    """The organisation's connected repository for this site, if exactly one can be its source."""
+    """The organisation's selected website repository, or the one connected repository that can be this site."""
+    from .models import OrganizationContentConfig
     from .website_models import WebsiteConnection
 
+    usable = [WebsiteConnection.State.CONNECTED, WebsiteConnection.State.PAUSED]
+    config = OrganizationContentConfig.objects.select_related("website_connection").filter(organization=site.organization).first()
+    selected = config.website_connection if config else None
+    if selected is not None and selected.state in usable and selected.installation_id:
+        return selected
     connections = list(WebsiteConnection.objects.filter(
-        organization=site.organization, state__in=[WebsiteConnection.State.CONNECTED, WebsiteConnection.State.PAUSED],
+        organization=site.organization, state__in=usable,
     ).exclude(installation_id="").order_by("-updated_at"))
     matching = [row for row in connections if normalized_domain(row.site_url) == site.domain]
     if len(matching) == 1 or (not matching and len(connections) == 1):
