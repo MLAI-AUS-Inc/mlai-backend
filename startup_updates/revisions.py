@@ -243,10 +243,16 @@ def capture_snapshot(organization, month, *, run=None, manual_metrics=None, base
 
 
 def revision_payload(revision, *, include_evidence=True):
+    evidence = copy.deepcopy(revision.snapshot.payload) if include_evidence else None
+    if evidence is not None and isinstance((revision.structured_memo or {}).get("financial_history"), dict):
+        from startup_updates.financial_history import history_review_evidence
+        # This server-resolved input is private review context. Missing legacy or
+        # invalid references stay explicit so workers cannot use newer evidence.
+        evidence["financial_history_evidence"] = history_review_evidence(revision)
     return {
         "revisionId": revision.pk, "revision": revision.number,
         "revisionHash": revision.content_hash, "snapshotId": revision.snapshot_id,
-        "evidenceSnapshot": revision.snapshot.payload if include_evidence else None,
+        "evidenceSnapshot": evidence,
         "audience": revision.audience,
     }
 
