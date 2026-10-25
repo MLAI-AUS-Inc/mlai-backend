@@ -5,9 +5,14 @@
   manage.py hosted_article_site activate pawshareclub.com
   manage.py hosted_article_site pause pawshareclub.com
 
-A site is registered as "draft": Content Factory can deploy it, but owners
-cannot publish until it is activated, normally after the customer's proxy
+A site is registered as "draft": Content Factory can build and deploy it, but
+owners cannot publish until it is activated, normally after the customer's proxy
 serves the hosted directory.
+
+The profile names the site and its build contract: where the site's own build
+reads its articles, how it builds, and which part of its output MLAI serves.
+Content Factory's ``hosted_articles.site_sources.SourceContract`` validates it
+fully before every build.
 """
 import json
 from pathlib import Path
@@ -18,8 +23,8 @@ from content_factory.hosted_article_models import HostedArticleSite
 from content_factory.hosted_articles import normalized_domain, site_render_state
 from organizations.models import Organization
 
-REQUIRED_PROFILE_KEYS = {"domain", "base_path", "page_size", "card_template", "detail_main_template",
-                         "previous_link_template", "next_link_template", "page_label_template"}
+REQUIRED_PROFILE_KEYS = {"domain", "base_path", "build"}
+REQUIRED_BUILD_KEYS = {"registry_path", "body_dir", "build_command", "output_dir", "publish_prefix"}
 
 
 class Command(BaseCommand):
@@ -28,7 +33,7 @@ class Command(BaseCommand):
     def add_arguments(self, parser):
         parser.add_argument("action", choices=["show", "register", "activate", "pause"])
         parser.add_argument("domain")
-        parser.add_argument("--profile", help="Renderer profile JSON (register only).")
+        parser.add_argument("--profile", help="Site profile JSON with its build contract (register only).")
 
     def handle(self, *args, action, domain, profile=None, **options):
         domain = normalized_domain(domain)
@@ -57,6 +62,12 @@ class Command(BaseCommand):
         missing = REQUIRED_PROFILE_KEYS - set(profile)
         if missing:
             raise CommandError(f"Profile is missing {sorted(missing)}.")
+        build = profile["build"]
+        missing = REQUIRED_BUILD_KEYS - set(build) if isinstance(build, dict) else REQUIRED_BUILD_KEYS
+        if missing:
+            raise CommandError(f"The build contract is missing {sorted(missing)}.")
+        if not isinstance(build["build_command"], list) or not all(isinstance(part, str) and part for part in build["build_command"]):
+            raise CommandError("build_command must be a list of arguments.")
         if normalized_domain(profile["domain"]) != domain:
             raise CommandError("The profile is for a different domain.")
         organization = Organization.objects.filter(domain=domain).first()

@@ -383,7 +383,7 @@ def reconcile(client, row, channel, actor, wire, attempt):
                     and emoji_to_slack_reaction(
                         slack_reaction_to_emoji(reaction["name"])
                     )
-                    == wire["reaction"]
+                    == emoji_to_slack_reaction(slack_reaction_to_emoji(wire["reaction"]))
                     and isinstance(reaction.get("users"), list)
                     and actor["slack_user_id"] in reaction["users"]
                     for reaction in reactions

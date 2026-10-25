@@ -5,12 +5,15 @@ from .website_views import WebsiteConnectionAuthorizeView, WebsiteMutationView
 from .website_current import WebsiteCurrentConnectionView
 from .website_verification import WebsiteCiAttestationView
 from .website_runtime_observation import WebsiteRuntimeObservationView
-from .hosted_article_views import HostedArticlePublicationServiceView, HostedArticleSiteServiceView
+from .hosted_article_views import (HostedArticlePublicationServiceView, HostedArticleSiteServiceView,
+                                   HostedArticleSiteSourceServiceView)
 
 urlpatterns = [
     path('articles/runtime-observation/', WebsiteRuntimeObservationView.as_view(), name='articles_runtime_observation'),
     path('hosted-sites/', HostedArticleSiteServiceView.as_view(), name='hosted_article_site'),
     path('hosted-sites', HostedArticleSiteServiceView.as_view()),
+    path('hosted-sites/source/', HostedArticleSiteSourceServiceView.as_view(), name='hosted_article_site_source'),
+    path('hosted-sites/source', HostedArticleSiteSourceServiceView.as_view()),
     path('hosted-sites/publications/<str:run_id>', HostedArticlePublicationServiceView.as_view(), name='hosted_article_publication'),
     path('hosted-sites/publications/<str:run_id>/', HostedArticlePublicationServiceView.as_view()),
     path('connections/current', WebsiteCurrentConnectionView.as_view()),
