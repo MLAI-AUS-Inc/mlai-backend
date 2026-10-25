@@ -5,6 +5,7 @@ from datetime import datetime
 from django.conf import settings
 from django.db import transaction
 from django.utils import timezone
+from django.utils.dateparse import parse_datetime
 
 from roo.models import ChannelFirstPost, Ledger
 from roo.services import PointsService
@@ -80,13 +81,14 @@ def persist_receipt(payload):
         or origin not in ("relay", "luma", "startup_updates", "merch")
     ):
         raise VolunteerError("invalid_receipt")
-    user = (
-        actor_for_key(payload.get("actor_public_key"))
-        if origin == "relay"
-        else linked_member(payload.get("actor_id"))
-    )
     when = occurrence(payload.get("occurred_at"))
     source = public_source(payload.get("source", {}))
+    intro_post = origin == "relay" and kind == "post" and source.get("channel_id") == channels().get("start_here")
+    if origin == "relay":
+        user = (actor_for_key(payload.get("actor_public_key"), occurred_at=when)
+                if intro_post else actor_for_key(payload.get("actor_public_key")))
+    else:
+        user = linked_member(payload.get("actor_id"))
     key = payload.get("source_key")
     if not isinstance(key, str) or not 1 <= len(key) <= 240:
         raise VolunteerError("invalid_source_key")
@@ -128,6 +130,8 @@ def persist_receipt(payload):
         participants[target.pk] = target
     for member_id in sorted(participants):
         lock_member(participants[member_id])
+    if intro_post and actor_for_key(payload.get("actor_public_key"), occurred_at=when).pk != user.pk:
+        raise VolunteerError("member_unavailable", 404)
     # Initialise before creating a qualifying source, preserving legacy totals.
     state_for(user)
     ineligible = ""
@@ -331,7 +335,14 @@ def _process_receipt(receipt_id):
         return receipt
     if action_key in ("introduce_yourself", "boost_startup", "helpful_answer"):
         start = getattr(settings, "COMMUNITY_CHAT_VOLUNTEER_ACTIVE_FROM", "")
-        if not start or receipt.occurred_at < occurrence(start):
+        if action_key == "introduce_yourself" and flag("intro_rewards_enabled"):
+            start = getattr(settings, "COMMUNITY_CHAT_VOLUNTEER_INTRO_ACTIVE_FROM", "")
+        try:
+            boundary = parse_datetime(start) if isinstance(start, str) else start
+        except (TypeError, ValueError):
+            boundary = None
+        if (not isinstance(boundary, datetime) or timezone.is_naive(boundary)
+                or receipt.occurred_at < boundary):
             raise VolunteerError("action_inactive", 409)
     if not awards_enabled(action_key):
         receipt.status, receipt.error = "pending", "awards_disabled"
@@ -344,6 +355,13 @@ def _process_receipt(receipt_id):
         ),
         trusted_receipt=receipt,
     )
+    if action_key == "introduce_yourself" and record.status not in ("pending", "approved"):
+        # A trusted source can complete an undecided introduction, but cannot
+        # override a review, withdrawal or correction of its once-only outcome.
+        receipt.recognition = record
+        receipt.status, receipt.error = "recorded", "recognition_review_preserved"
+        receipt.save(update_fields=("recognition", "status", "error", "updated_at"))
+        return receipt
     if record.status != "approved":
         record, _ = decision(
             record,
@@ -523,10 +541,13 @@ def award_legacy_intro(user, slack_user_id, channel_id):
     marker, created = ChannelFirstPost.objects.get_or_create(
         slack_user_id=slack_user_id, channel_id=channel_id
     )
-    native = VolunteerRecognition.objects.filter(
+    native = VolunteerRecognition.objects.select_for_update().filter(
         community=community_id(), user=user, action_key="introduce_yourself"
     ).first()
-    if native is not None and native.status in ("approved", "reversed"):
+    # An existing request owns this member's once-only introduction outcome.
+    # Only an undecided request may be completed by verified Slack evidence;
+    # automatic processing must preserve reviewer decisions and withdrawals.
+    if native is not None and (native.status != "pending" or native.ledger_id is not None):
         return False, None
     if not created:
         return False, None
@@ -547,28 +568,38 @@ def award_legacy_intro(user, slack_user_id, channel_id):
     )
     action = active_policy()["introduce_yourself"]
     source = {"source_id": f"legacy-intro:{user.pk}"}
-    record = VolunteerRecognition.objects.create(
-        community=community_id(),
-        user=user,
-        action_key="introduce_yourself",
-        outcome_key=outcome_key(action, source, ledger.created_at),
-        source=source,
-        occurred_at=ledger.created_at,
-        policy_snapshot={**action, "version": VERSION},
-        status="approved",
-        reward_microroo=ledger.delta_microroo,
-        ledger=ledger,
-        note="Existing first-contact award",
-        review_history=[
-            dict(
-                decision="approve",
-                note="Recorded from the existing introduction workflow",
-                actor_id=None,
-                automatic=True,
-                at=ledger.created_at.isoformat(),
-            )
-        ],
+    review = dict(
+        decision="approve",
+        note="Recorded from the existing introduction workflow",
+        actor_id=None,
+        automatic=True,
+        at=ledger.created_at.isoformat(),
+        idempotency_key=f"legacy-intro:{user.pk}:{ledger.pk}",
+        reward_roo=roo(ledger.delta_microroo),
     )
+    if native is not None:
+        native.status = "approved"
+        native.reward_microroo = ledger.delta_microroo
+        native.ledger = ledger
+        native.review_history = [*native.review_history, review]
+        native.version += 1
+        native.save(update_fields=("status", "reward_microroo", "ledger", "review_history", "version", "updated_at"))
+        record = native
+    else:
+        record = VolunteerRecognition.objects.create(
+            community=community_id(),
+            user=user,
+            action_key="introduce_yourself",
+            outcome_key=outcome_key(action, source, ledger.created_at),
+            source=source,
+            occurred_at=ledger.created_at,
+            policy_snapshot={**action, "version": VERSION},
+            status="approved",
+            reward_microroo=ledger.delta_microroo,
+            ledger=ledger,
+            note="Existing first-contact award",
+            review_history=[review],
+        )
     award_milestones(user, record)
     return awarded, PointsService.get_balance(user)["balance"]
 

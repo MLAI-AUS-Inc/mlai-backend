@@ -51,9 +51,11 @@ class VolunteerConcurrencyTests(TransactionTestCase):
             is_superuser=True,
         )
         for user, key in ((self.member, "d"), (self.reviewer, "e")):
-            CommunityChatDevice.objects.create(
-                user=user, public_key=key * 64, status="verified"
+            enrolled = timezone.now() - timedelta(minutes=2)
+            device = CommunityChatDevice.objects.create(
+                user=user, public_key=key * 64, status="verified", verified_at=enrolled,
             )
+            CommunityChatDevice.objects.filter(pk=device.pk).update(created_at=enrolled)
         VolunteerAttendance.objects.create(
             community="volunteer-concurrency-tests",
             user=self.member,

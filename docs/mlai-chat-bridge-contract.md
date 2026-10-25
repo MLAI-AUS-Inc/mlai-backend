@@ -58,27 +58,83 @@ MLAI Chat is another client surface, not a one-time data migration.
 
 ## Public Roo mentions from Chat
 
-Slack attributes a mirrored Chat post to the bridge bot. The visible author
-header is presentation and must never be used to grant that bot the human's
-permissions. Public Roo resolves bot-origin `app_mention` events through
+Slack can attribute a mirrored Chat post to its verified member poster or to
+the bridge bot fallback. The visible author header is presentation and must
+never grant a transport identity the human's permissions. Public Roo resolves
+API-posted `app_mention` events through
 `GET /api/v1/integrations/bridge/roo/actor`, authenticated exclusively with
 `ROO_API_KEY` (not the general internal key).
 
 Query parameters are `workspace_id`, `channel_id`, `message_id`, `thread_ts`,
-and `bridge_user_id`, taken from the verified Slack event. The sender must
-match `SLACK_BRIDGE_BOT_USER_ID`. The backend finds the exact completed
+and `bridge_user_id`, taken from the verified Slack event. The backend finds the exact completed
 Chat-to-Slack message link in that workspace and enabled public channel,
 checks the reply thread and deletion state, and resolves the original signing
-device through the current account identity link. Legacy key-only links,
+device through the current account identity link. For member posts, the sender
+must match the server-recorded poster of that exact acknowledged create
+delivery, including its canonical owner, grant, connection and consent epoch.
+The command hash, verified provider receipt, destination timestamp, channel and
+thread must agree. Current account device, Slack attribution link, grant consent,
+posting scope and joined channel membership are revalidated without token
+refresh or provider calls. For bot fallback the sender must match
+`SLACK_BRIDGE_BOT_USER_ID`; modern account-bound bot records also require their
+exact delivery acknowledgement. Legacy configured-bot links remain supported.
+Legacy key-only identities,
 revoked devices/accounts, missing AI-sharing consent, and messages without an
 explicit signed Roo mention cannot delegate an actor. Private mirrors are
 outside this endpoint's scope.
 
-The response echoes that scope and returns `user_id`, `source_event_id`, and
-the stored source `text` with signed mention IDs rendered for Slack. Roo uses
+The version 2 response echoes that scope and returns `version: 2`,
+`posting_mode` (`member` or `bot`), canonical `actor_profile_id`, legacy human
+Slack `user_id`, `source_event_id`, `recipient_targets`, and the stored source
+`text` with signed Slack mention IDs rendered for Slack. A resolved human
+`user_id` may equal the observed transport sender only for verified member
+posting. The actor currently requires a linked Slack identity; recipients do
+not. Roo uses
 that human actor in its existing permission checks; this does not grant points
 administration or change role policy. Caller-supplied names, text and actor IDs
 are ignored. Successful responses are `Cache-Control: no-store`.
+
+Explicit native recipient selections use signed tags
+`["mlai-mention", "<64 lowercase hex device key>", "<display label>"]`.
+The authenticated callback replaces any normalized recipient hints with these
+raw source tags. At most 20 are accepted; labels contain 1–80 characters and
+exclude controls, backticks, angle brackets and `@`. A corresponding `@label`
+must occur in source prose outside Markdown code. Generic `p` tags, broadcasts,
+reply participants, routing tags and plain names never select award recipients.
+Ambiguous identical labels for different accounts are omitted. At actor resolution,
+each key must still belong to an active, verified, non-revoked community device;
+multiple keys for one account collapse to one target:
+
+```json
+{"kind":"mlai_profile","profile_id":"<public profile UUID>","display_name":"<current account name>","source_labels":["<signed label>"]}
+```
+
+`source_labels` preserves the matched signed selection labels, even if the
+account was renamed later. Roo excludes these exact mention spans from amount
+parsing; a name containing `4 points` cannot supply the award amount.
+Labels confer no identity or authority. Roo must escape display names in
+provider replies and restrict a native award to this verified target set. An
+empty target set requires an explicit selection, never fuzzy name resolution.
+Existing messages without these tags cannot retroactively authorize a target.
+
+At authenticated ingress the server replaces any supplied
+`mlai_mention_bindings` metadata with bounded key/profile bindings from the
+device enrollment valid at signed `raw_payload.created_at`. Enrollment and
+source timestamps may fall within the same second; conflicting canonical owners
+within that second are omitted. Historical revoked enrollments identify the
+original owner only and never grant current access. Resolution requires the
+current verified device owner to match that original profile. A revoked key
+later enrolled by another account cannot redirect a pending or retried award.
+Missing source timestamps or bindings confer no native recipient authority.
+The native introduction receipt path applies the same source-second ownership
+check locally before persisting its canonical author, and rechecks it under that
+account's lock. Delayed introductions cannot reward a later owner of a reused
+key. Unknown or ambiguous original authors are ignored as unavailable members.
+The actor response's top-level `source_labels` retains every validated signed
+prose label, including ambiguous or currently ineligible recipients, solely to
+exclude those label spans from amount parsing. A target may include its valid
+canonical `slack_user_id` so Roo can recognize the same person when both native
+and Slack mention tags were selected.
 
 An absent delivery link returns `409 bridge_delivery_pending`: Slack can send
 its callback before the posting worker commits the link. Roo briefly retries
