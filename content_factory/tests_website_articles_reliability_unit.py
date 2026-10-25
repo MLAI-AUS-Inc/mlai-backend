@@ -45,14 +45,32 @@ class WebsiteJourneyContractTests(SimpleTestCase):
         self.assertEqual(result["repository"]["sourceSha"], "b" * 40)
 
     def test_stale_build_proof_preserves_installed_fact_and_requests_ci_refresh(self):
+        # Without write access, preparation cannot run, so the CI-evidence path remains.
         result = project_journey(company_id="42", domain="example.test", website={"status": "connected", "repositoryId": 123,
             "verifiedSha": "a" * 40, "writePolicy": {"allowed": True}},
-            capabilities={"repositoryAccessVerified": True, "canGenerateArticle": False, "reasonCode": "verification_stale"},
+            capabilities={"repositoryAccessVerified": True, "repositoryWriteVerified": False, "canGenerateArticle": False, "reasonCode": "verification_stale"},
             discovery={"complete": True, "sourceSha": "a" * 40},
             proof={"integrationVerified": True, "buildVerified": False, "verificationStale": True})
         self.assertEqual(result["prerequisites"]["integration"]["status"], "complete")
         self.assertEqual(result["prerequisites"]["verification"]["status"], "stale")
         self.assertEqual(result["nextAction"]["id"], "ci-attestation")
+        self.assertNotIn("verify", result["allowedActions"])
+        self.assertIn("ci-attestation", result["allowedActions"])
+
+    def test_stale_build_proof_offers_the_server_recheck_when_the_site_is_writable(self):
+        result = project_journey(company_id="42", domain="example.test", website={"status": "connected", "repositoryId": 123,
+            "verifiedSha": "a" * 40, "writePolicy": {"allowed": True}},
+            capabilities={"repositoryAccessVerified": True, "repositoryWriteVerified": True, "canGenerateArticle": False,
+                "reasonCode": "verification_stale", "reason": "Check your website integration again."},
+            discovery={"complete": True, "sourceSha": "a" * 40},
+            proof={"integrationVerified": True, "buildVerified": False, "verificationStale": True})
+        self.assertEqual(result["prerequisites"]["verification"]["status"], "stale")
+        self.assertEqual(result["nextAction"], {"id": "prepare", "label": "Check website again", "step": "preview",
+            "reason": "Your website's publishing verification is out of date.", "params": {"retry": True}})
+        prepare = next(action for action in result["actions"] if action["id"] == "prepare")
+        self.assertEqual((prepare["method"], prepare["path"]), ("POST", "/api/v1/my-startup/vibe-marketing/website-connection/prepare"))
+        # The developer CI-evidence form stays available, but is no longer the next step.
+        self.assertIn("ci-attestation", result["allowedActions"])
         self.assertNotIn("verify", result["allowedActions"])
 
     def test_proof_age_source_and_policy_are_independent(self):

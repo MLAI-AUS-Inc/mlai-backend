@@ -758,6 +758,13 @@ def process_website_connection_operations(*, limit=20, now=None, connection_id=N
     if not getattr(settings, "ARTICLES_OPERATIONAL_ALERTS_ENABLED", False):
         excluded.append(alert_action)
     unconfigured_alerts = Q(action=alert_action, state="needs_attention", receipt__status="unconfigured") if alert_channel() else Q(pk__in=[])
+    refreshes = []
+    try:
+        # Queue first, so a due refresh is checked in this same pass.
+        refreshes = queue_verification_refreshes(limit=limit, now=now, connection_id=connection_id)
+    except Exception as exc:
+        # Freshness upkeep must never stop cancellation, cleanup or preparation.
+        logger.warning("website_verification_refresh_sweep_failed error_type=%s", type(exc).__name__)
     due = WebsiteConnectionOperation.objects.filter(Q(next_attempt_at__isnull=True) | Q(next_attempt_at__lte=now),
         Q(state="pending") | Q(action="prepare", state="running") | Q(action=notice_action,state="running") | Q(action=refund_action,state="running") |
         Q(action=usage_action, state="running") |
@@ -767,7 +774,8 @@ def process_website_connection_operations(*, limit=20, now=None, connection_id=N
     if connection_id:
         due = due.filter(connection_id=connection_id)
     ids = list(due.order_by("next_attempt_at").values_list("id", flat=True)[:limit])
-    result = {"status": "completed", "processed": 0, "completed": 0, "pending": 0, "operations": []}
+    result = {"status": "completed", "processed": 0, "completed": 0, "pending": 0, "operations": [],
+        "verification_refreshes_queued": len(refreshes)}
     from .website_support import reconcile_support_verifications
     reconcile_support_verifications(limit=limit, connection_id=connection_id)
     monitor_cleanup_pull_requests(limit=limit, connection_id=connection_id)
@@ -1240,6 +1248,98 @@ def _source_rescan_request(op, website, attempt):
     return f"source-rescan:{op.pk}:{count + 1}", None
 
 
+VERIFICATION_REFRESH_PURPOSE = "verification_refresh"
+# A refresh that has not settled within this window stops retrying. The proof
+# then ages out as before, and the owner's "Check website again" (prepare)
+# reports the specific action it needs.
+VERIFICATION_REFRESH_RETRY_WINDOW = timedelta(hours=24)
+# How many due websites one sweep examines, most recently verified first, so
+# that ineligible long-stale rows cannot crowd out ones about to lapse.
+VERIFICATION_REFRESH_SCAN_LIMIT = 200
+VERIFICATION_REFRESH_BLOCKERS = frozenset({"repository_source_changed", "APPLICATION_ROOT_VERIFICATION_REQUIRED",
+    "SETUP_BRANCH_VERIFICATION_REQUIRED"})
+
+
+def _refresh_target(connection, config):
+    """The selected target whose accepted in-repository CI proof can be read again, or None.
+
+    Only a connected source with no newer observed head, no source blocker and
+    an exact selected target that authenticated in-repository CI accepted
+    qualifies. Hosted, sealed (version 3) and custom proofs re-attest through
+    their own flows, and a pushed source is owned by its push check.
+    """
+    from .activation import mapping
+    from .website_connections import observed_source_sha
+    from .website_contract import SHA_PATTERN
+    from .website_sealed_workflow import required
+    if (connection.state != "connected" or not connection.branch or connection.app_root
+            or not SHA_PATTERN.fullmatch(connection.verified_sha or "")
+            or not mapping(connection.capabilities).get("publishingReady")
+            or any(isinstance(item, dict) and item.get("code") in VERIFICATION_REFRESH_BLOCKERS for item in connection.blockers or [])
+            or observed_source_sha(connection) not in ("", connection.verified_sha)):
+        return None
+    key = str(config.default_publish_target_id or "")
+    target = connection.targets.filter(generation=connection.generation, target_key=key).first() if key else None
+    if (target is None or target.source_sha != connection.verified_sha or not target.verified_at
+            or not mapping(target.capabilities).get("publishingReady") or target.adapter == "custom_contract_v1"
+            or required(connection, target)):
+        return None
+    accepted = connection.operations.filter(generation=connection.generation, action="ci-verify", state="completed",
+        payload__source_sha=connection.verified_sha, payload__target_id=target.target_key).order_by("-updated_at").first()
+    if accepted is None or mapping(accepted.receipt).get("attestation_origin") != "authenticated_ci":
+        return None
+    return target
+
+
+def queue_verification_refreshes(*, limit=20, now=None, connection_id=None):
+    """Re-attest unchanged sources before their accepted proof reaches VERIFICATION_MAX_AGE.
+
+    ``integration_evidence`` stops trusting a website's verification seven days
+    after it was accepted, although nothing about the website changed. The
+    ``source-reverify`` check re-reads GitHub's own sealed native check at the
+    exact commit, confirms the selected branch still points there and observes
+    the live listing, detail and unknown-slug routes before recording new
+    receipts (``record_ci_attestation``, ``verify_live_deployment``). Nothing
+    copies an older stamp. A same-source check needs no rescan and no new CI
+    run; the GitHub App holds no Actions permission to dispatch one.
+
+    At most one check is queued per accepted verification. A push's own check
+    supersedes it, and preparation adopts it when it reopens.
+    """
+    from django.db.models import Exists, OuterRef
+    from .activation import VERIFICATION_REFRESH_AFTER
+    now = now or timezone.now()
+    checked = WebsiteConnectionOperation.objects.filter(connection_id=OuterRef("website_connection_id"),
+        generation=OuterRef("website_connection__generation"), action="source-reverify",
+        created_at__gte=OuterRef("website_connection__last_verified_at"))
+    configs = (OrganizationContentConfig.objects.select_related("website_connection__organization")
+        .filter(website_connection__state="connected", website_connection__last_verified_at__lte=now - VERIFICATION_REFRESH_AFTER)
+        .exclude(default_publish_target_id="").filter(~Exists(checked)))
+    if connection_id:
+        configs = configs.filter(website_connection_id=connection_id)
+    queued = []
+    for config in configs.order_by("-website_connection__last_verified_at")[:VERIFICATION_REFRESH_SCAN_LIMIT]:
+        if len(queued) >= limit:
+            break
+        connection = config.website_connection
+        target = _refresh_target(connection, config)
+        if target is None:
+            continue
+        stamp = min(connection.last_verified_at, target.verified_at)
+        operation, created = WebsiteConnectionOperation.objects.get_or_create(
+            idempotency_key=f"{connection.pk}:verification-refresh:{connection.generation}:{connection.verified_sha}:{stamp.isoformat()}",
+            defaults={"connection": connection, "generation": connection.generation, "action": "source-reverify",
+                "payload": {"source_sha": connection.verified_sha, "target_id": target.target_key, "scan_required": False,
+                    "owned_merge_run_id": "", "purpose": VERIFICATION_REFRESH_PURPOSE, "verified_at": stamp.isoformat(),
+                    "configuration_revision": connection.configuration_version},
+                "receipt": {"status": "verification_queued", "repository_modified": False}})
+        if created:
+            queued.append(str(operation.pk))
+            logger.info("website_verification_refresh_queued connection=%s operation=%s generation=%s source_sha=%s verified_at=%s",
+                connection.pk, operation.pk, connection.generation, connection.verified_sha, stamp.isoformat())
+    return queued
+
+
 def _process_source_reverification(identifier, now):
     """Re-scan external changes and then authenticate current CI/live proof."""
     from .website_connections import authority_guard, require_unlocked_remote_call
@@ -1366,6 +1466,13 @@ def _process_source_reverification(identifier, now):
                 message="The repository scan for this change could not be restarted. Scan the repository again.")
     except Exception:
         receipt.update(status="verification_pending", code="source_reverification_unavailable", retryable=True)
+    if state == "pending" and op.payload.get("purpose") == VERIFICATION_REFRESH_PURPOSE and (
+            receipt.get("retryable") is False or now - op.created_at >= VERIFICATION_REFRESH_RETRY_WINDOW):
+        # A same-source refresh never revoked anything, so stopping it changes
+        # nothing: the accepted proof ages out as before and the owner's own
+        # re-check reports the cause instead of an hourly retry forever.
+        state = "needs_attention"
+        receipt.update(status="needs_attention", retryable=False)
     WebsiteConnectionOperation.objects.filter(pk=identifier, attempts=attempt, state="pending").update(
         state=state, receipt=receipt, next_attempt_at=now + timedelta(seconds=min(3600, 15 * 2 ** min(attempt, 8))), updated_at=timezone.now())
     return state

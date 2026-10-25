@@ -18,6 +18,9 @@ from content_factory.billing import (
 )
 
 VERIFICATION_MAX_AGE = timedelta(days=7)
+# An unchanged, connected source is re-attested this long after its accepted
+# verification, which leaves two days of retries before that proof lapses.
+VERIFICATION_REFRESH_AFTER = VERIFICATION_MAX_AGE - timedelta(days=2)
 
 
 def mapping(value):
