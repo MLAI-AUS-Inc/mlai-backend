@@ -12,9 +12,9 @@ from integrations.models import (
     SlackDmMirrorConversation,
 )
 from integrations.services import slack_dm_mirror as mirror
-from integrations.services.community_bridge.slack import SlackBridgeClient
+from integrations.services import slack_directory_authority as directory
 from integrations.services.slack_mentions import _search_directory, search_mentions
-from integrations.services.slack_workspace_users import cache_key, configured_scope
+from integrations.services.slack_workspace_users import cache_key, cached_workspace_snapshot
 
 
 def search_workspace_mentions(user, *, channel_id, query="", cursor="", limit=50):
@@ -51,64 +51,70 @@ def search_workspace_mentions(user, *, channel_id, query="", cursor="", limit=50
             limit=limit,
         )
 
-    configured = configured_scope()
-    if configured is None:
-        raise mirror.SlackDmMirrorError(
-            "The community Slack directory is not configured."
-        )
-    workspace, scope = configured
+    workspace = directory.configured_workspace()
+    public = CommunityBridgeChannel.objects.filter(
+        enabled=True, destination_platform=CommunityBridgePlatform.BUZZ,
+        destination_channel_id=channel_id, slack_workspace_id=workspace,
+    ).first()
+    member_room = public is not None and public.audience == "members"
+    authority = directory.capture_reader(
+        workspace, channel_id=public.slack_channel_id if public else "",
+        user_id=user.pk if member_room else None, refresh_token=True,
+    )
+    membership_unknown = bool(private)
+    source = public.slack_channel_id if public else ""
+    if authority is None and not member_room:
+        # Community names remain available without claiming channel membership
+        # when no current joined reader can prove that particular channel.
+        authority = directory.capture_reader(workspace, refresh_token=True)
+        membership_unknown = bool(private or public)
+        source = ""
+    if authority is None:
+        raise mirror.SlackDmMirrorAuthorizationError("A current Slack directory reader is required.")
+    scope = directory.cache_scope(authority)
 
     def scoped_key(category, value):
         return cache_key(scope, category, value)
 
-    client = SlackBridgeClient.get_client()
-    verified_key = scoped_key("workspace", "")
-    public = CommunityBridgeChannel.objects.filter(
-        enabled=True,
-        destination_platform=CommunityBridgePlatform.BUZZ,
-        destination_channel_id=channel_id,
-        slack_workspace_id=workspace,
-    ).first()
-    membership_unknown = bool(private)
+    with directory.fence(authority, channel_id=source,
+                         room_id=channel_id if source else "", requester_id=user.pk) as (_, connection):
+        def read(method, **kwargs):
+            nonlocal membership_unknown
+            try:
+                return directory.read(authority, connection, method, **kwargs)
+            except SlackApiError as exc:
+                if method == "conversations_members" and exc.response.get("error") in {
+                    "channel_not_found", "not_in_channel", "missing_scope",
+                }:
+                    membership_unknown = True
+                    return {"members": [], "response_metadata": {"next_cursor": ""}}
+                raise
 
-    def read(method, **kwargs):
-        nonlocal membership_unknown
-        try:
-            if not cache.get(verified_key):
-                identity = client.auth_test()
-                if identity.get("team_id") != workspace:
-                    raise mirror.SlackDmMirrorAuthorizationError(
-                        "The Slack directory workspace does not match this community."
-                    )
-                cache.set(verified_key, True, timeout=600)
-            return getattr(client, method)(**kwargs)
-        except SlackApiError as exc:
-            # Directory access does not depend on the bot joining every channel.
-            if method == "conversations_members" and exc.response.get("error") in {
-                "channel_not_found",
-                "not_in_channel",
-                "missing_scope",
-            }:
+        # Cached membership still needs current public-source proof. Otherwise
+        # a private/Connect transition could disclose the prior member list.
+        if source:
+            try:
+                info = mirror._invoke_slack_with_locked_connection(
+                    authority, connection, "conversations_info", channel=source)
+                raw = info.get("channel") or {}
+                if (info.get("ok") is not True or not directory.access._public_channel_response(info, source)
+                        or raw.get("is_archived") is True or raw.get("is_member") is not True):
+                    raise mirror.SlackDmMirrorAuthorizationError("Current public channel access is required.")
+            except SlackApiError as exc:
+                if exc.response.get("error") not in {"channel_not_found", "not_in_channel", "missing_scope"}:
+                    raise
                 membership_unknown = True
-                return {"members": [], "response_metadata": {"next_cursor": ""}}
-            raise
-
-    result = _search_directory(
-        workspace=workspace,
-        channel=public.slack_channel_id if public else "",
-        private=None,
-        query=query,
-        cursor=cursor,
-        limit=limit,
-        read=read,
-        cache_key=scoped_key,
-        validate=lambda: None,
-        membership_unknown=membership_unknown,
-    )
-    if membership_unknown:
-        if public:
-            cache.delete(scoped_key("members", public.slack_channel_id))
-        for entry in result["users"]:
-            entry["is_member"] = None
-            entry["native_only"] = False
-    return result
+        result = _search_directory(
+            workspace=workspace, channel="" if membership_unknown else source, private=None,
+            query=query, cursor=cursor, limit=limit, read=read,
+            cache_key=scoped_key, validate=lambda: None,
+            membership_unknown=membership_unknown,
+            snapshot_reader=lambda version: cached_workspace_snapshot(workspace, version=version, authority=authority),
+        )
+        if membership_unknown:
+            if public:
+                cache.delete(scoped_key("members", public.slack_channel_id))
+            for entry in result["users"]:
+                entry["is_member"] = None
+                entry["native_only"] = False
+        return result

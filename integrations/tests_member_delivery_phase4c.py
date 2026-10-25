@@ -202,7 +202,7 @@ class MemberDeliveryTests(MemberDeliveryFixture, TransactionTestCase):
         self.assertEqual(self.mutations, [])
         self.bot.assert_not_called()
 
-    @override_settings(SLACK_MEMBER_CHANNELS_ENABLED=False)
+    @override_settings(MESSAGE_SYNC_ENABLED=False)
     def test_flag_off_member_never_uses_bot_or_provider(self):
         row = self.delivery()
         with self.assertRaises(member.MemberDeliveryDeferred):
@@ -334,6 +334,36 @@ class MemberDeliveryTests(MemberDeliveryFixture, TransactionTestCase):
         self.assertEqual(command["scope"], command["wire"]["member_scope"])
         self.assertEqual(row.status, "completed")
         self.bot.assert_not_called()
+
+    def test_custom_emoji_image_is_frozen_with_the_member_command(self):
+        from integrations.services.slack_custom_emoji import resolve_catalog
+        row = self.delivery(source="slack")
+        row.payload["text"] = ":party_parrot: :thumbsup::skin-tone-4:"
+        row.save()
+        catalog = resolve_catalog({"party_parrot": "https://emoji.slack-edge.com/TTEST/parrot/id.gif"})
+        response = {"channel_id": self.channel.destination_channel_id, "message_id": "d"*64, "parent_message_id":""}
+        with patch("integrations.services.slack_custom_emoji.load_catalog",return_value=catalog), patch.object(member.BuzzBridgeClient,"deliver",return_value=response) as adapter:
+            self.send(row)
+        wire = row.payload[member.MEMBER_STAMP]["wire"]
+        self.assertIn(":party_parrot: 👍🏽", wire["text"])
+        self.assertEqual(wire["emojis"], [{"shortcode":"party_parrot","url":catalog["party_parrot"]["url"]}])
+        self.assertEqual(adapter.call_args.kwargs,wire)
+        self.assertEqual(row.canonical_envelope,wire)
+
+    def test_long_custom_reaction_restores_provider_name_for_write_and_reconciliation(self):
+        from integrations.services.slack_custom_emoji import resolve_catalog
+        from integrations.services.slack_emoji import slack_reaction_to_emoji
+        create=self.delivery()
+        self.send(create)
+        name="x"*100
+        add=self.delivery("reaction_add",source_id="b"*64,parent=create.source_message_id)
+        add.payload["text"]=slack_reaction_to_emoji(name)
+        add.save()
+        catalog=resolve_catalog({name:"https://emoji.slack-edge.com/TTEST/custom/id.gif"})
+        with patch("integrations.services.slack_custom_emoji.load_catalog",return_value=catalog):
+            self.send(add)
+        self.assertEqual(self.mutations[-1][2]["name"],name)
+        self.assertEqual(add.payload[member.MEMBER_STAMP]["wire"]["reaction"],name)
 
     def test_forged_server_metadata_is_stripped(self):
         result = ingest_inbound_event(
@@ -1105,7 +1135,7 @@ class MemberDeliveryTests(MemberDeliveryFixture, TransactionTestCase):
             guard_legacy_provider_request,
         )
 
-        row = self.delivery()
+        row = self.delivery(source="slack")
         self.channel.audience = "community"
         self.channel.save()
         claimed = claim_ready_deliveries(1)[0]
@@ -1214,7 +1244,7 @@ class MemberDeliveryConcurrencyTests(MemberDeliveryFixture, TransactionTestCase)
         self._interleave("legacy")
 
     def _interleave(self, kind):
-        row = self.delivery()
+        row = self.delivery(source="slack" if kind == "legacy" else "buzz")
         claimed = claim_ready_deliveries(1)[0]
         entered, release, attempting, changed = [threading.Event() for _ in range(4)]
         errors = []

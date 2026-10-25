@@ -26,9 +26,8 @@ logger = logging.getLogger(__name__)
 
 
 def enabled():
-    """The new lane deliberately does not require the older targeted flag."""
-    return bool(getattr(settings, "MESSAGE_SYNC_ENABLED", False)
-                and getattr(settings, "MESSAGE_SYNC_EVENT_ROUTING", False))
+    """Private event routing follows the shared processing pause."""
+    return bool(getattr(settings, "MESSAGE_SYNC_ENABLED", False))
 
 
 def _number(value, default=0):

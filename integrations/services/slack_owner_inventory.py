@@ -398,20 +398,28 @@ def collect_public_page(authority) -> None:
 
 
 def _public_membership_evidence(rows):
-    """Return proven joined IDs and whether absence may prove a departure."""
+    """Read membership from our own-user ``users.conversations`` page.
+
+    That method lists the calling user's conversations and deliberately omits
+    ``is_member``. Only this exact-authority endpoint context supplies the
+    missing positive; explicit false and malformed present values retain their
+    existing meanings. This is not a rule for ``conversations.info`` or events.
+    https://docs.slack.dev/reference/methods/users.conversations/
+    """
     from integrations.services.slack_member_access import _public_channel_response
 
     seen = set()
     complete = True
     for raw in rows:
         source_id = str(raw.get("id") or "") if isinstance(raw, dict) else ""
+        member = raw["is_member"] if isinstance(raw, dict) and "is_member" in raw else True
         if (not isinstance(raw, dict) or not _public_channel_response({"channel": raw}, source_id)
                 or _eligibility(raw) != "eligible"
                 or raw.get("is_im") or raw.get("is_mpim")
-                or type(raw.get("is_member")) is not bool):
+                or type(member) is not bool):
             complete = False
             continue
-        if raw["is_member"]:
+        if member:
             seen.add(source_id)
     return seen, complete
 
@@ -426,8 +434,7 @@ def _collect_public_page_once(authority) -> bool:
     from integrations.services.slack_chat_catalog import public_channels_enabled
 
     with transaction.atomic():
-        required = set() if getattr(settings, "SLACK_MEMBER_CHANNELS_ENABLED", False) else {"im:read"}
-        grant, connection = _lock_slack_grant_api_authority(authority, required_scopes=required)
+        grant, connection = _lock_slack_grant_api_authority(authority, required_scopes=set())
         if not public_inventory_allowed(grant, connection, authority):
             return False
         state = state_for(connection, authority)
@@ -547,7 +554,8 @@ def public_inventory_allowed(grant, connection, authority) -> bool:
     """Keep existing metadata consent; add only the enabled public-source lane."""
     if has_metadata_consent(connection, authority):
         return True
-    if not getattr(settings, "SLACK_MEMBER_CHANNELS_ENABLED", False):
+    from integrations.services import slack_member_access as access
+    if not access.enabled():
         return False
     from integrations.services.slack_chat_catalog import public_channels_enabled
 

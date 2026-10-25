@@ -208,10 +208,7 @@ def route_member_public_event(payload):
         if row is not None and row.audience == 'members' and _public_mapping(row):
             return {'status': 'member_audience_pending'}
         if (row is not None and row.audience == 'community'
-                and getattr(settings, 'SLACK_COMMUNITY_SOURCE', 'bot') == 'members'
                 and access.community_source_needs_revalidation(row)):
-            from .community_source import hold_reader_source
-            hold_reader_source(row)
             return {'status': 'community_source_pending'}
         return None
     if event_type == 'member_joined_channel':
@@ -223,13 +220,10 @@ def route_member_public_event(payload):
     if _ordinary_create(event) and observed is not None:
         for grant in _subject_grants(workspace, event.get('user')):
             membership.mark_joined(grant, source, observed_at=observed, source='message', public_verified=True)
-    if row.audience == 'community' and getattr(settings, 'SLACK_COMMUNITY_SOURCE', 'bot') not in {'both', 'members'}:
-        return {'status': 'ignored', 'reason': 'community_source_bot'}
-    if row.audience == 'community' and getattr(settings, 'SLACK_COMMUNITY_SOURCE', 'bot') == 'members':
+    if row.audience == 'community':
         policy = access.community_reader_policy_current(row)
-        if policy is None or not policy.complete or policy.effective_source == 'hold':
-            from .community_source import hold_reader_source
-            hold_reader_source(row)
+        if (policy is None or policy.effective_source == 'hold'
+                or not policy.complete and policy.eligible_count <= 0):
             return {'status': 'community_source_pending'}
     if row.audience != 'members' and not row.enabled:
         channels.queue_refresh(workspace, source, reason='member_room_not_ready')
@@ -256,11 +250,7 @@ def route_member_public_event(payload):
                         channels.queue_refresh(workspace, source, reason='member_room_not_ready')
                 return {'status': 'member_audience_pending'}
             return ingest_slack_event(normalized, public_source_verified=True)
-    retired = (row.audience == 'community'
-               and getattr(settings, 'SLACK_COMMUNITY_SOURCE', 'bot') == 'members'
-               and policy.effective_source == 'bot')
-    return ingest_slack_event(normalized, public_source_verified=True, **(
-        {'retired_bot_source': True} if retired else {}))
+    return ingest_slack_event(normalized, public_source_verified=True)
 
 
 def dispatch_slack_callback(payload, *, private_ingest=None, public_ingest=None):
@@ -278,20 +268,13 @@ def dispatch_slack_callback(payload, *, private_ingest=None, public_ingest=None)
         return {'status': 'ignored', 'reason': 'unowned_member_event'}
     event = payload.get('event') if isinstance(payload.get('event'), dict) else {}
     from .community_source import authenticated_role
-    if (getattr(settings, 'SLACK_COMMUNITY_SOURCE', 'bot') == 'members'
-            and authenticated_role(payload) == 'bot' and event.get('type') in _CONTENT):
+    if (authenticated_role(payload) == 'bot' and event.get('type') in _CONTENT):
         row = CommunityBridgeChannel.objects.filter(
             slack_workspace_id=payload.get('team_id'), slack_channel_id=_channel_id(event),
             audience='community', destination_platform='buzz',
         ).first()
         if row is not None:
-            policy = access.community_reader_policy_current(row)
-            if policy is None or not policy.complete or policy.effective_source == 'hold':
-                from .community_source import hold_reader_source
-                hold_reader_source(row)
-                return {'status': 'community_source_pending'}
-            if policy.effective_source == 'members':
-                return ingest_slack_event(payload, retired_bot_source=True)
+            return ingest_slack_event(payload, retired_bot_source=True)
     return (public_ingest or ingest_slack_event)(payload)
 
 
@@ -316,5 +299,4 @@ def dispatch_authenticated_slack_callback(payload, *, app_id, received_at, inbox
                                                          public_ingest=public_ingest)
                         if community_source.authenticated_role(payload) is not None:
                             observability.event(route, result)
-                    community_source.rate_limited(payload)
                     return result

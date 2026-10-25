@@ -168,7 +168,9 @@ def project_journey(*, company_id, domain, website=None, capabilities=None, disc
         "capabilities": {"canRead": access, "canScan": bool(access and connected), "canPrepare": "setup" in allowed,"repositoryWriteVerified":capabilities.get("repositoryWriteVerified") is True,
             "canPreview": bool(mapping(website.get("capabilities")).get("previewSupported") and write_allowed),
             "canGeneratePortableDraft": bool(capabilities.get("canGeneratePortableDraft", company_id)), "canGenerateArticle": verified, "canOpenPublicationPr": verified,
-            "canPublishArticle": live_ready, "canMerge": bool(write_allowed and proof.get("reviewedMergeReady")), "canDisconnect": bool(website), "canPurge": bool(website), "canCleanup": "cleanup" in allowed},
+            "canPublishArticle": live_ready, **({"canPublishHostedArticle": capabilities.get("canPublishHostedArticle") is True,
+                "hostedSite": capabilities.get("hostedSite") if capabilities.get("canPublishHostedArticle") is True else None}
+                if "canPublishHostedArticle" in capabilities else {}), "canMerge": bool(write_allowed and proof.get("reviewedMergeReady")), "canDisconnect": bool(website), "canPurge": bool(website), "canCleanup": "cleanup" in allowed},
         "allowedActions": list(dict.fromkeys(allowed)), "actions": actions, "nextAction": next_action,
         "setupPullRequest": setup_pr or None,
         "discovery": discovery, "githubPermissions": grants, "operation": operation, "sourceRuns": source_runs or [], "ciSourceRuns": ci_source_runs or source_runs or [],

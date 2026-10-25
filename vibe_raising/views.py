@@ -881,6 +881,7 @@ def _structured_memo_with_xero_metrics(draft):
 
 def _serialize_draft_for_form(draft):
     from startup_updates.revisions import revision_payload
+    from startup_updates.financial_history import history_payload, history_selection
     structured_memo = _structured_memo_with_xero_metrics(draft)
     video_metadata = _structured_memo_video_metadata(structured_memo)
     month_value = draft.month
@@ -892,6 +893,8 @@ def _serialize_draft_for_form(draft):
         "audienceVisibility": structured_memo.get("_audience_visibility", ["just_me"]),
         "month": calendar.month_name[month_value.month],
         "year": month_value.year,
+        **({"startupOverview": _structured_memo_text(structured_memo, "startupOverview") or ""}
+           if "startupOverview" in structured_memo else {}),
         "summary": _structured_memo_text(structured_memo, "summary", "topline"),
         "sourceUrl": _structured_memo_text(structured_memo, "sourceUrl", "source_url"),
         "manualDocuments": _structured_memo_manual_documents(structured_memo),
@@ -915,6 +918,8 @@ def _serialize_draft_for_form(draft):
         "reportingPeriod": (structured_memo or {}).get("reporting_period"),
         "evidenceWarnings": (structured_memo or {}).get("evidence_warnings", []),
         "metricHistory": (structured_memo or {}).get("metric_history", {}),
+        "financialHistory": history_payload(structured_memo.get("financial_history")),
+        "financialHistorySelection": history_selection(structured_memo.get("financial_history")),
         "financialSnapshot": _structured_memo_financial_snapshot(structured_memo),
         "conciseAnalysis": _structured_memo_concise_analysis(structured_memo),
         "presentationMode": _structured_memo_text(structured_memo, "presentation_mode", "presentationMode"),
@@ -997,6 +1002,9 @@ def _build_manual_structured_memo(payload):
     if "coverImage" in payload:
         memo["cover_image"] = payload["coverImage"]
 
+    if "startupOverview" in payload:
+        memo["startupOverview"] = str(payload["startupOverview"]).strip()
+
     display_config = payload.get("displayConfig")
     if display_config is not None:
         memo["display_config"] = display_config
@@ -1054,6 +1062,7 @@ def _build_manual_structured_memo(payload):
 
 def _serialize_monthly_update(draft, structured_memo=None, *, published=False, shared=None):
     from .progress import public_chart_payload
+    from startup_updates.financial_history import history_payload, history_selection
     from startup_updates.revisions import frozen_memo, revision_payload
     revision = draft.published_revision if published and draft.published_revision_id else draft.current_revision
     if revision:
@@ -1080,6 +1089,8 @@ def _serialize_monthly_update(draft, structured_memo=None, *, published=False, s
         "visibility": "published" if published_at else "private",
         "audienceVisibility": structured_memo.get("_audience_visibility") or monthly_update_visibility(draft),
         "publishedAt": published_at.isoformat() if published_at else None,
+        **({"startupOverview": _structured_memo_text(structured_memo, "startupOverview") or ""}
+           if "startupOverview" in structured_memo else {}),
         "summary": _structured_memo_text(structured_memo, "summary", "topline"),
         "sourceUrl": _structured_memo_text(structured_memo, "sourceUrl", "source_url"),
         "manualDocuments": _structured_memo_manual_documents(structured_memo),
@@ -1104,6 +1115,8 @@ def _serialize_monthly_update(draft, structured_memo=None, *, published=False, s
         "evidenceWarnings": (structured_memo or {}).get("evidence_warnings", []),
         "metricHistory": (structured_memo or {}).get("metric_history", {}),
         "progressCharts": public_chart_payload(structured_memo.get("progress_charts")),
+        "financialHistory": history_payload(structured_memo.get("financial_history")),
+        "financialHistorySelection": history_selection(structured_memo.get("financial_history")),
         "financialSnapshot": _structured_memo_financial_snapshot(structured_memo),
         "conciseAnalysis": _structured_memo_concise_analysis(structured_memo),
         "presentationMode": _structured_memo_text(structured_memo, "presentation_mode", "presentationMode"),
@@ -1118,7 +1131,8 @@ def _serialize_monthly_update(draft, structured_memo=None, *, published=False, s
             value.update(metrics={}, metricEvidence={}, metricSuggestions={}, metricHistory={},
                 financialSnapshot=None, conciseAnalysis=None, financialChart=None)
     if shared:
-        return shared_update(value, metric_items=structured_memo.get("kpi_snapshot"))
+        return shared_update(value, metric_items=structured_memo.get("kpi_snapshot"),
+            financial_history=structured_memo.get("financial_history"))
     return value
 
 
@@ -1134,6 +1148,8 @@ def _serialize_draft_bundle(drafts):
         past_months.append(
             {
                 "month": f"{calendar.month_name[month_value.month]} {month_value.year}",
+                **({"startupOverview": _structured_memo_text(structured_memo, "startupOverview") or ""}
+                   if "startupOverview" in structured_memo else {}),
                 "highlights": _join_named_sections(structured_memo, _HIGHLIGHT_SECTIONS),
                 "challenges": _join_text_items_with_newlines(structured_memo.get("lowlights")),
                 "asks": _join_named_sections(structured_memo, [
@@ -1165,6 +1181,8 @@ def _serialize_email_draft_month(draft):
         "isoMonth": month_value.isoformat(),
         "month": calendar.month_name[month_value.month],
         "year": month_value.year,
+        **({"startupOverview": _structured_memo_text(structured_memo, "startupOverview") or ""}
+           if "startupOverview" in structured_memo else {}),
         "summary": _structured_memo_text(structured_memo, "summary", "topline"),
         "sourceUrl": _structured_memo_text(structured_memo, "sourceUrl", "source_url"),
         "manualDocuments": _structured_memo_manual_documents(structured_memo),
@@ -2738,6 +2756,14 @@ class VibeRaisingMonthlyUpdateView(APIView):
         except FinancialMetricEditError as exc:
             from rest_framework.exceptions import ValidationError
             raise ValidationError({"detail": str(exc)}) from exc
+        history_selection = serializer.validated_data.get("financialHistorySelection")
+        if history_selection and history_selection.get("refresh"):
+            # Explicitly refreshing the chart captures cached source evidence;
+            # it never calls a provider or alters the prior approved revision.
+            snapshot = capture_snapshot(organization, month_bucket)
+            if changed_metrics:
+                snapshot = capture_snapshot(organization, month_bucket,
+                    manual_metrics=changed_metrics, base_snapshot=snapshot)
         memo = _build_manual_structured_memo(structured_payload)
         if draft.current_revision_id:
             # Agent origin, citations and retry receipts are server-owned history.
@@ -2748,6 +2774,8 @@ class VibeRaisingMonthlyUpdateView(APIView):
                     memo[field] = copy.deepcopy(draft.current_revision.structured_memo[field])
         if "chartSelections" in serializer.validated_data:
             memo["_progress_chart_specs"] = serializer.validated_data["chartSelections"]
+        if history_selection is not None:
+            memo["_financial_history_selection"] = history_selection
         if is_creation_request and not draft.current_revision_id:
             memo["_creation_request_hash"] = creation_request_hash
         if draft.current_revision_id:
@@ -3080,6 +3108,16 @@ class VibeRaisingEmailDraftStartView(APIView):
         display_config = normalize_vibe_raising_display_config(
             request.data.get("displayConfig", request.data.get("display_config")), validate_cover=True,
         )
+        history_selection = None
+        if "financialHistorySelection" in request.data:
+            from vibe_raising.serializers import FinancialHistorySelectionField
+            history_selection = FinancialHistorySelectionField().run_validation(request.data["financialHistorySelection"])
+        startup_overview = None
+        if "startupOverview" in request.data:
+            startup_overview = request.data["startupOverview"]
+            if not isinstance(startup_overview, str) or len(startup_overview) > 2000:
+                return Response({"startupOverview": "Use a short text overview of at most 2000 characters."}, status=status.HTTP_400_BAD_REQUEST)
+            startup_overview = startup_overview.strip()
 
         company = context["company"]
         domain = context["domain"]
@@ -3196,6 +3234,10 @@ class VibeRaisingEmailDraftStartView(APIView):
                 draft.refresh_from_db()
             redispatch_existing = False
             if existing_run:
+                if history_selection is not None and (existing_run.run_request or {}).get("financial_history_selection") != history_selection:
+                    raise RevisionConflict("Financial sharing choices changed. Finish or cancel the current generation before starting again.")
+                if startup_overview is not None and (existing_run.run_request or {}).get("startup_overview") != startup_overview:
+                    raise RevisionConflict("This run uses a different startup overview. Finish or cancel it before generating again.")
                 from startup_updates.activity_scope import run_uses_month_scope
                 if not run_uses_month_scope(existing_run.run_request or {}):
                     raise RevisionConflict("This draft was started with an older source period. Cancel it and generate the monthly update again.")
@@ -3222,7 +3264,8 @@ class VibeRaisingEmailDraftStartView(APIView):
                 force_regenerate=force, update_draft=draft, narrative_period=period,
                 automatic_source_scope=bool(getattr(self, "automatic_source_scope", False)),
                 audience_visibility=requested_audience,
-                cover_image=(display_config or {}).get("cover_image"))
+                cover_image=(display_config or {}).get("cover_image"),
+                financial_history_selection=history_selection, startup_overview=startup_overview)
             return draft, run, existing_run, run_month, redispatch_existing
 
         draft, run, existing_run, target_month, redispatch_existing = run_in_retryable_transaction(

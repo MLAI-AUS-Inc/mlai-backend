@@ -26,6 +26,7 @@ if not settings.configured:
 
 from rest_framework import status
 from rest_framework.response import Response
+from .article_voice import article_voice_for_dispatch
 from .editorial_catalog import approve_catalog, article_brief_for_catalog, update_catalog
 from .tests_editorial_catalog_unit import approval_payload
 from .tests_editorial_catalog_unit import approved_catalog, draft_catalog, edit_payload
@@ -200,6 +201,7 @@ class ArticleDispatchControlFlowTests(unittest.TestCase):
             "match_covered_topic": lambda **kwargs: None, "_github_repo_operable": lambda config: True,
             "article_system_ready": lambda config: True, "resolve_article_system": lambda config: {},
             "normalize_authors": lambda authors: authors, "resolve_default_author": lambda *args: None,
+            "article_voice_for_dispatch": article_voice_for_dispatch,
         }
         from content_factory.commands import ContentCommand
         self.ns["ContentCommand"] = ContentCommand
@@ -270,6 +272,22 @@ class ArticleDispatchControlFlowTests(unittest.TestCase):
         self.assertEqual(self.posted[0]["editorial_brief"], selected_brief())
         self.assertEqual(self.charge.call_args.kwargs["article_request"]["editorial_brief"], selected_brief())
         self.config_model.objects.filter.assert_called_with(organization=self.org)
+
+    def test_start_and_restart_carry_the_saved_voice_with_its_digest(self):
+        self.strategy = self.config.pillar_strategy = {**self.strategy, "article_voice": {
+            "schemaVersion": 1, "version": 2, "updatedAt": "2026-10-23T00:00:00Z", "preset": "builder_peer",
+            "category": "general", "dimensions": {"register": 2, "stance": 2, "energy": 0, "humour": 1, "convention": 0},
+            "readerExpertise": "practitioner", "narrator": "brand_we", "voiceCard": [], "stances": [],
+            "avoidWords": [], "preferWords": [],
+        }}
+        result = self.start({"topic": "Delivery", "editorialBrief": selected_brief()})
+        self.assertEqual(result.status_code, 202)
+        voice = self.posted[0]["article_voice"]
+        self.assertEqual((voice["preset"], voice["version"]), ("builder_peer", 2))
+        self.assertRegex(voice["sha256"], "^[0-9a-f]{64}$")
+        child, error = self.ns["_restart_article_run"](run=self.run, context=self.context)
+        self.assertIsNone(error)
+        self.assertEqual(self.posted[-1]["article_voice"]["sha256"], voice["sha256"])
 
     def test_actual_start_handler_rejects_explicit_invalid_brief_before_effects(self):
         result = self.start({"topic": "Delivery", "editorial_brief": None})

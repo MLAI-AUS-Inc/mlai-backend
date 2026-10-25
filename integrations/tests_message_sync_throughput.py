@@ -5,7 +5,7 @@ import threading
 from datetime import timedelta
 from io import StringIO
 from unittest import IsolatedAsyncioTestCase
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 from django.core.cache import cache
 from django.contrib.auth import get_user_model
@@ -90,12 +90,28 @@ class IndependentSlotTests(IsolatedAsyncioTestCase):
                             await pending
                 release.set()
 
+    async def test_history_seeding_recovers_after_a_failed_maintenance_turn(self):
+        seed = MagicMock(side_effect=[RuntimeError("synthetic failure"), None])
+        with patch.object(execution, "close_old_connections"), patch.object(execution, "run_slots", new=AsyncMock()), \
+                patch.object(execution.asyncio, "sleep", new=AsyncMock(side_effect=[None, asyncio.CancelledError])):
+            await execution.run_lane(lambda _: 0, worker_id="synthetic", lane="history", slots=4, seed=seed)
+        self.assertEqual(seed.call_count, 2)
+
+    async def test_history_seeding_resumes_on_each_worker_restart(self):
+        seed = MagicMock()
+        with patch.object(execution, "close_old_connections"), patch.object(execution, "run_slots", new=AsyncMock()), \
+                patch.object(execution.asyncio, "sleep", new=AsyncMock(side_effect=asyncio.CancelledError)):
+            for _ in range(2):
+                await execution.run_lane(lambda _: 0, worker_id="synthetic", lane="history", slots=4, seed=seed)
+        self.assertEqual(seed.call_count, 2)
+
     async def test_both_worker_entrypoints_use_shared_bounded_lanes(self):
         from integrations.services.community_bridge import worker
         with patch.object(worker, "run_lane") as lane, patch.object(worker, "process_history_once") as page:
             await worker._run_history_workers()
             kwargs = lane.call_args.kwargs
             self.assertEqual(kwargs['slots'], 4)
+            self.assertIs(kwargs['seed'], worker.seed_states)
             for slot in range(4):
                 lane.call_args.args[0](slot)
             self.assertEqual([c.kwargs['prefer_import'] for c in page.call_args_list], [True, False, True, False])

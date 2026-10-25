@@ -5,8 +5,8 @@ from vibe_raising.views import _serialize_monthly_update
 
 PUBLIC_FIELDS = (
     "id", "updateTitle", "monthSequence", "coverImage", "coverImageUrl", "revisionId", "revisionHash", "isoMonth", "month", "year", "publishedAt",
-    "summary", "highlights", "challenges", "learnings", "next30Days", "asks",
-    "metrics", "metricEvidence", "displayConfig", "financialChart", "audienceVisibility", "evidenceStatus",
+    "startupOverview", "summary", "highlights", "challenges", "learnings", "next30Days", "asks",
+    "metrics", "metricEvidence", "displayConfig", "financialChart", "financialHistory", "audienceVisibility", "evidenceStatus",
 )
 
 
@@ -21,8 +21,10 @@ def update_payload(draft, *, published=False, community=False, user=None):
             evidence = value.setdefault("metricEvidence", {}).setdefault(metric.get("metric_key"), {})
             evidence.update({"label": metric.get("label"), "unit": metric.get("unit")})
     if community:
-        value = shared_update(value, metric_items=memo.get("kpi_snapshot"))
-        value = {key: copy.deepcopy(value.get(key)) for key in PUBLIC_FIELDS}
+        value = shared_update(value, metric_items=memo.get("kpi_snapshot"),
+            financial_history=memo.get("financial_history"))
+        value = {key: copy.deepcopy(value.get(key)) for key in PUBLIC_FIELDS
+            if key != "startupOverview" or key in value}
     else:
         # The owner-only branch uses the selected revision's private evidence,
         # even when its published memo omits financial metrics for disclosure.

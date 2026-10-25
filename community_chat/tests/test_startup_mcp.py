@@ -785,7 +785,7 @@ class ConnectionConfigurationTests(SimpleTestCase):
 @override_settings(**SETTINGS)
 class FounderAgentReviewTests(SimpleTestCase):
     def revision(self, status="needs_review", **validation):
-        return Obj(pk=5, content_hash="exact-hash", structured_memo={
+        return Obj(pk=5, content_hash="exact-hash", structured_memo={"highlights": ["Agent-drafted launch."],
             "_audience_visibility": ["community"], "_agent_provenance": {"kind": "agent_supplied"}},
             snapshot=Obj(payload={"period": {"timezone": "UTC"}}),
             validation={"groundedness_status": status, "provenance": "agent_supplied",

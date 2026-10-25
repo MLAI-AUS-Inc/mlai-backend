@@ -23,11 +23,7 @@ COMMUNITY_CHAT_MEMBER_ACCOUNTS_ENABLED="${COMMUNITY_CHAT_MEMBER_ACCOUNTS_ENABLED
 COMMUNITY_CHAT_INBOX_ERASURE_ENABLED="${COMMUNITY_CHAT_INBOX_ERASURE_ENABLED:-false}"
 MESSAGE_SYNC_TARGETED_READ_POLLING="${MESSAGE_SYNC_TARGETED_READ_POLLING:-false}"
 MESSAGE_SYNC_RECENT_HISTORY_ENABLED="${MESSAGE_SYNC_RECENT_HISTORY_ENABLED:-false}"
-SLACK_MEMBER_CHANNELS_ENABLED="${SLACK_MEMBER_CHANNELS_ENABLED:-false}"
 SLACK_MEMBER_CHANNEL_ALLOWED_IDS="${SLACK_MEMBER_CHANNEL_ALLOWED_IDS:-}"
-SLACK_COMMUNITY_SEND_AS_MEMBER="${SLACK_COMMUNITY_SEND_AS_MEMBER:-false}"
-SLACK_COMMUNITY_SOURCE="${SLACK_COMMUNITY_SOURCE:-bot}"
-MESSAGE_SYNC_EVENT_ROUTING="${MESSAGE_SYNC_EVENT_ROUTING:-false}"
 MESSAGE_SYNC_OPEN_PRIORITY_ENABLED="${MESSAGE_SYNC_OPEN_PRIORITY_ENABLED:-true}"
 MESSAGE_SYNC_UNREAD_PREFETCH_ENABLED="${MESSAGE_SYNC_UNREAD_PREFETCH_ENABLED:-false}"
 MESSAGE_SYNC_TARGETED_STAGED_ROUTING="${MESSAGE_SYNC_TARGETED_STAGED_ROUTING:-false}"
@@ -133,7 +129,7 @@ case "$MESSAGE_SYNC_QUIET_HEAD_BACKOFF_ENABLED" in
     *) echo "MESSAGE_SYNC_QUIET_HEAD_BACKOFF_ENABLED must be true or false." >&2; exit 1 ;;
 esac
 export MESSAGE_SYNC_QUIET_HEAD_BACKOFF_ENABLED
-for responsiveness_flag in MESSAGE_SYNC_OPEN_PRIORITY_ENABLED MESSAGE_SYNC_UNREAD_PREFETCH_ENABLED MESSAGE_SYNC_RECENT_HISTORY_ENABLED MESSAGE_SYNC_TARGETED_STAGED_ROUTING SLACK_MEMBER_CHANNELS_ENABLED SLACK_COMMUNITY_SEND_AS_MEMBER MESSAGE_SYNC_EVENT_ROUTING; do
+for responsiveness_flag in MESSAGE_SYNC_OPEN_PRIORITY_ENABLED MESSAGE_SYNC_UNREAD_PREFETCH_ENABLED MESSAGE_SYNC_RECENT_HISTORY_ENABLED MESSAGE_SYNC_TARGETED_STAGED_ROUTING; do
     case "${!responsiveness_flag}" in
         true|TRUE|True) printf -v "$responsiveness_flag" '%s' true ;;
         false|FALSE|False) printf -v "$responsiveness_flag" '%s' false ;;
@@ -141,11 +137,6 @@ for responsiveness_flag in MESSAGE_SYNC_OPEN_PRIORITY_ENABLED MESSAGE_SYNC_UNREA
     esac
     export "$responsiveness_flag"
 done
-case "$SLACK_COMMUNITY_SOURCE" in
-    bot|both|members) ;;
-    *) echo "SLACK_COMMUNITY_SOURCE must be bot, both or members." >&2; exit 1 ;;
-esac
-export SLACK_COMMUNITY_SOURCE
 export SLACK_MEMBER_CHANNEL_ALLOWED_IDS
 if ! [[ "$MESSAGE_SYNC_UNREAD_PREFETCH_PER_HOUR" =~ ^[1-9][0-9]{0,2}$ ]] || [ "$MESSAGE_SYNC_UNREAD_PREFETCH_PER_HOUR" -gt 256 ]; then
     echo "MESSAGE_SYNC_UNREAD_PREFETCH_PER_HOUR must be an integer from 1 to 256." >&2
@@ -265,14 +256,9 @@ if [ "$COMMUNITY_BRIDGE_PRODUCTION_ENABLED" = "true" ]; then
         "${SLACK_BRIDGE_SIGNING_SECRET:-}"
         "${SLACK_BRIDGE_BOT_USER_ID:-}"
         "${SLACK_BRIDGE_WORKSPACE_ID:-}"
-        "${SLACK_BRIDGE_CHANNEL_ID:-}"
-        "${SLACK_BRIDGE_CHANNEL_NAME:-}"
         "${BUZZ_BRIDGE_ADAPTER_URL:-}"
         "${BUZZ_BRIDGE_ADAPTER_TOKEN:-}"
         "${BUZZ_BRIDGE_CALLBACK_SECRET:-}"
-        "${BUZZ_BRIDGE_DESTINATION_WORKSPACE_ID:-}"
-        "${BUZZ_BRIDGE_DESTINATION_CHANNEL_ID:-}"
-        "${BUZZ_BRIDGE_DESTINATION_CHANNEL_NAME:-}"
     )
     for bridge_value in "${bridge_values[@]}"; do
         [ -n "$bridge_value" ] && bridge_present=$((bridge_present + 1))
@@ -294,19 +280,7 @@ import re
 
 if not re.fullmatch(r"T[A-Z0-9]+", os.environ["SLACK_BRIDGE_WORKSPACE_ID"]):
     raise SystemExit("SLACK_BRIDGE_WORKSPACE_ID must be a Slack workspace ID")
-if not re.fullmatch(r"C[A-Z0-9]+", os.environ["SLACK_BRIDGE_CHANNEL_ID"]):
-    raise SystemExit("SLACK_BRIDGE_CHANNEL_ID must be a public Slack channel ID")
-if not re.fullmatch(r"[a-z0-9_-]{1,80}", os.environ["SLACK_BRIDGE_CHANNEL_NAME"]):
-    raise SystemExit("SLACK_BRIDGE_CHANNEL_NAME must be a valid public channel name")
-if os.environ["BUZZ_BRIDGE_DESTINATION_WORKSPACE_ID"] != "chat.mlai.au":
-    raise SystemExit("BUZZ_BRIDGE_DESTINATION_WORKSPACE_ID must be chat.mlai.au")
-if not re.fullmatch(
-    r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}",
-    os.environ["BUZZ_BRIDGE_DESTINATION_CHANNEL_ID"],
-):
-    raise SystemExit("BUZZ_BRIDGE_DESTINATION_CHANNEL_ID must be a lowercase UUID")
-if not re.fullmatch(r"[a-z0-9_-]{1,80}", os.environ["BUZZ_BRIDGE_DESTINATION_CHANNEL_NAME"]):
-    raise SystemExit("BUZZ_BRIDGE_DESTINATION_CHANNEL_NAME must be a valid channel name")
+
 PY
 else
     echo "ℹ️ Community bridge production activation is disabled; staged bridge settings will not be installed."
@@ -512,11 +486,7 @@ fi
 # bot/user token: recipient expansion is a separate Slack authorization surface.
 install_remote_env_value MESSAGE_SYNC_ENABLED "$MESSAGE_SYNC_ENABLED"
 install_remote_env_value MESSAGE_SYNC_RECENT_HISTORY_ENABLED "$MESSAGE_SYNC_RECENT_HISTORY_ENABLED"
-install_remote_env_value SLACK_MEMBER_CHANNELS_ENABLED "$SLACK_MEMBER_CHANNELS_ENABLED"
 install_remote_env_value SLACK_MEMBER_CHANNEL_ALLOWED_IDS "$SLACK_MEMBER_CHANNEL_ALLOWED_IDS"
-install_remote_env_value SLACK_COMMUNITY_SEND_AS_MEMBER "$SLACK_COMMUNITY_SEND_AS_MEMBER"
-install_remote_env_value SLACK_COMMUNITY_SOURCE "$SLACK_COMMUNITY_SOURCE"
-install_remote_env_value MESSAGE_SYNC_EVENT_ROUTING "$MESSAGE_SYNC_EVENT_ROUTING"
 install_remote_env_value COMMUNITY_BRIDGE_DEPENDENCY_VERDICTS_ENABLED "$COMMUNITY_BRIDGE_DEPENDENCY_VERDICTS_ENABLED"
 install_remote_env_value MESSAGE_SYNC_QUIET_HEAD_BACKOFF_ENABLED "$MESSAGE_SYNC_QUIET_HEAD_BACKOFF_ENABLED"
 install_remote_env_value MESSAGE_SYNC_OPEN_PRIORITY_ENABLED "$MESSAGE_SYNC_OPEN_PRIORITY_ENABLED"
@@ -891,6 +861,10 @@ ssh "$DEPLOY_SSH_TARGET" <<EOF
     # .env may retain a failed release's marker even when the old container
     # never changed. Use the serving container as rollback truth.
     previous_app_release=\$(docker compose exec -T web sh -lc 'printf "%s" "\$APP_RELEASE"' </dev/null 2>/dev/null || read_env_value APP_RELEASE)
+    # The staging .env may already be false; capture the running contract so a
+    # code-only rollback does not silently disable established member discovery.
+    previous_owner_inventory_enabled=\$(docker compose exec -T web sh -lc 'printf "%s" "\$SLACK_OWNER_INVENTORY_ENABLED"' </dev/null 2>/dev/null || printf false)
+    case "\$previous_owner_inventory_enabled" in true|false) ;; *) echo "Invalid previous owner inventory state" >&2; exit 1 ;; esac
     upsert_env_value APP_RELEASE "$APP_RELEASE"
     upsert_env_value HEALTH_HACK_AI_BUDGET_MODE "enforce"
     # Keep the atomic worst-case reservation aligned with Roo's enforced model
@@ -1419,8 +1393,14 @@ ssh "$DEPLOY_SSH_TARGET" <<EOF
             fi
         fi
 
-        echo "⚠️ Deployment failed after runtime services were paused; disabling Slack owner inventory for recovery."
-        upsert_env_value SLACK_OWNER_INVENTORY_ENABLED "false" || true
+        # Incomplete schema transitions returned above with all writers stopped.
+        # A compatible old-image rollback restores its actual enabled state;
+        # completed schema transitions use the reviewed new runtime setting.
+        recovery_inventory_enabled="\${slack_owner_inventory_enabled:-false}"
+        if [ "\$migration_started" != "1" ]; then
+            recovery_inventory_enabled="\${previous_owner_inventory_enabled:-false}"
+        fi
+        upsert_env_value SLACK_OWNER_INVENTORY_ENABLED "\$recovery_inventory_enabled" || return
         if [ "\$migration_started" != "1" ]; then
             # No schema changed, so the previous image is the last known-good
             # release even if a replacement container has already started.
@@ -1575,17 +1555,6 @@ ssh "$DEPLOY_SSH_TARGET" <<EOF
     echo "✅ Running post-migration deployment checks..."
     compose_run_web python manage.py deploy_postmigrate
 
-    if [ "$bridge_present" -gt 0 ]; then
-        echo "🌉 Upserting the reviewed Slack to MLAI Chat channel mapping..."
-        compose_run_web python manage.py upsert_community_bridge_channel \
-            --slack-workspace-id "$SLACK_BRIDGE_WORKSPACE_ID" \
-            --slack-channel-id "$SLACK_BRIDGE_CHANNEL_ID" \
-            --slack-channel-name "$SLACK_BRIDGE_CHANNEL_NAME" \
-            --destination-platform buzz \
-            --destination-workspace-id "$BUZZ_BRIDGE_DESTINATION_WORKSPACE_ID" \
-            --destination-channel-id "$BUZZ_BRIDGE_DESTINATION_CHANNEL_ID" \
-            --destination-channel-name "$BUZZ_BRIDGE_DESTINATION_CHANNEL_NAME"
-    fi
 
     if [ "\$org_memory_production_deploy_enabled" = "true" ]; then
         approval_manifest="/root/mlai-backend-operations/pilot-approval.json"
@@ -1811,8 +1780,8 @@ PY
 
     if [ "\$bridge_worker_enabled" != "1" ]; then
         echo "🧹 Stopping disabled community bridge services..."
-        docker compose stop bridge-worker bridge-reconciler bridge-retention || true
-        docker compose rm -f bridge-worker bridge-reconciler bridge-retention || true
+        docker compose stop bridge-worker bridge-retention || true
+        docker compose rm -f bridge-worker bridge-retention || true
     fi
 
     if [ "\$analytics_sync_enabled" != "1" ]; then
@@ -1927,6 +1896,11 @@ if slugs != expected:
     raise SystemExit(f"Expected active meeting rooms {sorted(expected)}, got {sorted(slugs)}")
 '
         unset meeting_room_api_key meeting_rooms_body
+    fi
+
+    if [ "\$bridge_worker_enabled" = "1" ]; then
+        echo "🌉 Verifying the current member sync worker..."
+        docker compose exec -T bridge-worker python manage.py message_sync_status --check --local-worker
     fi
 
     echo "🛠️ Verifying external Django admin assets..."

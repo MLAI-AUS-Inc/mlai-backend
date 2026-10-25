@@ -1,3 +1,6 @@
+> Historical rollout document. The permanent implementation supersedes its
+> bot/both switches and comparison finalizer; see [current operations](slack-member-permanent-operations.md).
+
 # Phase 6: Community source comparison and reader fallback
 
 This implements the existing `SLACK_COMMUNITY_SOURCE` modes without adding a migration, consent version, Slack scope or configuration switch. It does not change production settings, certify a live canary, start an observation window or authorize bot retirement. Release and activation require the owner's separate approvals.
@@ -5,6 +8,13 @@ This implements the existing `SLACK_COMMUNITY_SOURCE` modes without adding a mig
 ## Source modes and privacy
 
 `bot` retains the legacy Community intake and bot history. `both` accepts and deduplicates authenticated callbacks received by either configured app; history still uses the bot. `members` uses member intake and readers. During this transition, a Community channel with a complete, current assessment proving zero eligible readers falls back to bot intake and history and reports `no_reader`. Cooldown, quota, network failure, missing authority, incomplete assessment or exhausting a bounded selector cannot prove zero. Members-only, private, Slack Connect and uncertain source state never gain this fallback.
+
+A current eligible reader positively authorizes the member-source callback
+path even when another grant has unknown membership. Such a count is a lower
+bound, not a complete assessment. A grant that never joined a channel may have
+no membership row after a complete inventory sweep; it cannot veto another
+reader's proven access. With no eligible reader and any unknown authority,
+callbacks remain pending and cannot fall back to the bot.
 
 Reader eligibility requires the existing consent and current active account/grant/OAuth/connection, workspace, joined membership and read scopes. It is separate from the author's posting eligibility: neither AI consent, a public identity link, verified-device rank nor `chat:write` can be added as a condition for Community readers. Status counts independent eligible accounts/Slack subjects, not devices or callback authorization recipients. Actual provider work rechecks current authority under the existing ordered locks through page settlement; a status count is not a lease. If only the approved Community mapping's metadata freshness has expired, revalidate it with `conversations.info` before reading content. A successful current public, non-Connect, non-archived result can renew freshness; pending edits and reactions remain queued during this check.
 
@@ -71,3 +81,50 @@ inventing a new observation window or performing another measurement query.
 ## Validation ownership
 
 The owning labels are `integrations.tests_community_source_phase6`, `integrations.tests_community_source_codec_phase6` and `integrations.tests_community_reader_phase6` in the canonical SQLite and durable PostgreSQL jobs. Preserve the Phase 4 privacy/authority/history tests and Phase 5 immutable send/echo and PostgreSQL revocation/settlement regressions. Database tests use only the specifically approved existing disposable migration inventory; this document grants no migration permission and records no test result.
+
+## Slack reaction identities and emoji presentation
+
+The relay acknowledges repeated Community/private reaction adds with the ID of
+its existing live reaction, never the unstored retry ID. The adapter accepts
+`bridge_reaction_duplicate` (and the equivalent legacy message) only for a
+reaction add with a valid canonical ID. Old relay responses without that ID are
+retryable. Deploy relay/adapter support before the backend emoji fields.
+
+Slack custom images are fetched through an active member grant with `emoji:read`,
+using the existing OAuth/consent fences and API budget. Add that **user** scope to
+MLAI – Founder Tools and reconnect at least one current workspace member through
+MLAI Chat. Existing grants keep syncing while awaiting the optional permission;
+custom names remain visible until their catalog is available. No bot reader is
+used. The catalog is cached for five minutes under the exact OAuth generation;
+revoked/changed authority cannot reuse it.
+
+New Slack imports carry only their used `emoji` NIP-30 tags. Desktop and mobile
+already render these images, including GIFs. Standard emoji use Unicode; custom
+aliases resolve to source images or Unicode aliases. Source-hosted images are
+restricted to HTTPS `emoji.slack-edge.com`/`a.slack-edge.com` without credentials,
+queries or fragments. Code spans remain literal. Custom names outside the
+62-character NIP-30 reaction bound get deterministic shortcodes; outgoing
+reactions restore the original workspace name before freezing their command.
+The supplemental standard catalog is pinned to iamcal/emoji-data commit
+`13ee711e222ea17fe537bfea953c687866f16411` (Emoji 17.0, MIT). It only adds aliases
+missing from the previous catalog; established spellings stay unchanged.
+
+Queued immutable commands retain their original body and metadata. Historical
+signed events are not rewritten by a catalog refresh. Any repair must inspect
+current source state and preserve room audience and original mutation ownership.
+For stale failed removals, check for a later completed add before retrying: an
+older remove must never erase a newer reaction. For Community dependencies,
+recover a parent only with positive evidence it failed before provider I/O;
+ambiguous sends remain on their recorded reconciliation path.
+
+Authenticated clients can resolve retained shortcodes through
+`GET /api/v1/community-chat/slack/emoji/?workspace_id=T…&names=name1,name2`.
+This returns only requested names from the configured workspace, as image URLs
+or Unicode values. It follows the community people-directory policy: a verified
+community account may read workspace metadata through a currently authorized
+member reader. It returns no conversation usage, participants or membership,
+and never uses a bot token. Responses are private/no-store; client caches are
+scoped to account and relay and are not written to disk. This lets old signed
+reactions render correctly without rewriting their signatures or ownership.
+Unknown names trigger a bounded catalog refresh so newly added Slack emoji do
+not wait for the normal five-minute catalog expiration.

@@ -16,6 +16,29 @@
     dl { display: grid; grid-template-columns: repeat(auto-fit, minmax(12rem, 1fr)); gap: 1rem; }
     dl div { border: 1px solid #d9ddcf; border-radius: 1rem; padding: 1rem; }
     dt { font-size: .875rem; } dd { margin: .5rem 0 0; font-size: 1.25rem; font-weight: 600; overflow-wrap: anywhere; }
+    .financial-history { border: 1px solid #d9ddcf; border-radius: 1rem; margin: 1.5rem 0; padding: 1rem; }
+    .financial-history h2 { margin-top: 0; }
+    .financial-history .chart-layout { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: .5rem; }
+    .financial-history .y-axis { position: relative; min-width: 2rem; height: 14rem; font-size: .75rem; }
+    .financial-history .y-axis span { position: absolute; right: 0; transform: translateY(-50%); }
+    .financial-history .plot { min-width: 0; }
+    .financial-history svg { display: block; width: 100%; height: 14rem; }
+    .financial-history .months { display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); font-size: .75rem; text-align: center; }
+    .financial-history .month-focus { text-align: right; font-size: .875rem; }
+    .financial-history .highlight { fill: #397d6330; }
+    .financial-history .grid { stroke: currentColor; stroke-opacity: .14; }
+    .financial-history .revenue { stroke: #397d63; fill: #397d63; }
+    .financial-history .costs { stroke: #d17b20; fill: #d17b20; }
+    .financial-history polyline { fill: none; stroke-width: 2.5; vector-effect: non-scaling-stroke; }
+    .financial-history circle, .financial-history rect.costs { stroke-width: 2; vector-effect: non-scaling-stroke; }
+    .financial-history polyline.costs, .financial-history polyline.partial { stroke-dasharray: 5 4; }
+    .financial-history details { margin-top: .75rem; }
+    .financial-history .table-viewport { overflow-x: auto; }
+    .financial-history summary { cursor: pointer; }
+    .financial-history table { width: 100%; font-size: .875rem; border-collapse: collapse; margin-top: .75rem; }
+    .financial-history th, .financial-history td { padding: .5rem .25rem; text-align: right; border-bottom: 1px solid #d9ddcf; }
+    .financial-history th:first-child, .financial-history td:first-child { text-align: left; }
+    .financial-history tr.current { background: #397d6318; }
     footer { border-top: 1px solid #d9ddcf; margin-top: 3rem; padding-top: 1rem; line-height: 1.6; }
     @media (prefers-color-scheme: dark) { :root { background: #222922; color: #e7ecdf; } .eyebrow, footer { color: #b8c2b5; } }
   </style>
@@ -28,8 +51,39 @@
       <p>{{ update.month }} · Public startup update</p>
     </header>
     {% if metrics %}<dl>{% for metric in metrics %}<div><dt>{{ metric.label }}</dt><dd>{{ metric.value }}</dd></div>{% endfor %}</dl>{% endif %}
+    {% if financial_history %}{% for section in sections %}{% if section.label == "Summary" %}<section><h2>{{ section.label }}</h2><ul>{% for point in section.points %}<li>{{ point }}</li>{% endfor %}</ul></section>{% endif %}{% endfor %}{% endif %}
+    {% if financial_history %}
+      <section class="financial-history" aria-label="Frozen revenue and costs history">
+        <h2>Revenue and costs</h2>
+        <p>Six-month snapshot · {{ financial_history.reportingMonth }} · {{ financial_history.unit }}</p>
+        {% if financial_history.partial %}<p>Partial reporting month, through {{ financial_history.cutoff }}.</p>{% endif %}
+        <p class="month-focus"><strong>{{ financial_history.reportingMonth }} · This update</strong></p>
+        <div class="chart-layout">
+          <div class="y-axis" aria-hidden="true">{% for tick in financial_history.ticks %}<span style="top: {{ tick.top }}%">{{ tick.label }}</span>{% endfor %}</div>
+          <div class="plot"><svg viewBox="25 0 600 220" preserveAspectRatio="none" role="img" aria-labelledby="financial-chart-title financial-chart-description">
+          <title id="financial-chart-title">Revenue and costs through {{ financial_history.reportingMonth }}</title>
+          <desc id="financial-chart-description">The shaded final month is the period this update covers. Green circles show revenue and orange squares show costs. Missing values remain gaps. The data table follows.</desc>
+          <rect class="highlight" x="525" y="0" width="100" height="220" rx="8" />
+          {% for tick in financial_history.ticks %}<line class="grid" x1="25" x2="625" y1="{{ tick.y }}" y2="{{ tick.y }}" />{% endfor %}
+          {% for segment in financial_history.segments %}<polyline class="{{ segment.field }}{% if segment.partial %} partial{% endif %}" points="{{ segment.coordinates }}" />{% endfor %}
+          {% for point in financial_history.points %}
+            {% if point.revenueY != None %}<circle class="revenue" cx="{{ point.x }}" cy="{{ point.revenueY }}" r="3.5" />{% endif %}
+            {% if point.costsY != None %}<rect class="costs" x="{{ point.x|add:'-3' }}" y="{{ point.costsY|add:'-3' }}" width="6" height="6" />{% endif %}
+          {% endfor %}
+          </svg><div class="months" aria-hidden="true">{% for point in financial_history.points %}<span>{% if point.highlighted %}<strong>{{ point.label }}</strong>{% else %}{{ point.label }}{% endif %}</span>{% endfor %}</div></div>
+        </div>
+        <p>● Revenue &nbsp; ■ Costs</p>
+        <details><summary>View financial data</summary>
+          <div class="table-viewport"><table><caption>{{ financial_history.unit }} · Frozen with this update</caption><thead><tr><th>Month</th><th>Revenue</th><th>Costs</th></tr></thead><tbody>
+          {% for point in financial_history.points %}<tr{% if point.highlighted %} class="current"{% endif %}><th scope="row">{{ point.monthLabel }}{% if point.highlighted %} · This update{% endif %}{% if point.partial %}<br>Partial, through {{ point.periodEnd }}{% endif %}</th><td>{{ point.revenueLabel }}</td><td>{{ point.costsLabel }}</td></tr>{% endfor %}
+          </tbody></table></div>
+        </details>
+      </section>
+    {% endif %}
     {% for section in sections %}
+      {% if not financial_history or section.label != "Summary" %}
       <section><h2>{{ section.label }}</h2><ul>{% for point in section.points %}<li>{{ point }}</li>{% endfor %}</ul></section>
+      {% endif %}
     {% endfor %}
     <footer>This is the founder's approved public update. Anyone with this link can view it. Comments are available to MLAI members in Community Startup Pulse.</footer>
   </main>

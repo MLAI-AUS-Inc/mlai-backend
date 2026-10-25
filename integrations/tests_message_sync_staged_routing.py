@@ -554,8 +554,8 @@ class EventStageWakeTests(SimpleTestCase):
         self.assertNotIn("source_message_id", json.dumps(schedule))
         self.assertEqual([row["ciphertext"] for row in cursor[PENDING]], ["sealed-only-copy"])
 
-    def test_event_wake_requires_durable_sync_and_its_own_flag_only(self):
-        for durable, event in ((False, False), (False, True), (True, False)):
+    def test_event_wake_obeys_processing_pause_regardless_of_retired_flag(self):
+        for durable, event in ((False, False), (False, True)):
             with self.subTest(durable=durable, event=event), override_settings(
                 MESSAGE_SYNC_ENABLED=durable, MESSAGE_SYNC_EVENT_ROUTING=event,
             ):

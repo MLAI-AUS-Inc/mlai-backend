@@ -92,6 +92,13 @@ from content_factory.baseline_metrics import baseline_display_metrics
 from content_factory.baseline_ai_evidence import ai_answer_metadata, compact_ai_providers
 from content_factory.dispatch_binding import bind_dispatch_token_run, run_is_dispatch_token_keyed, reserve_portable_dispatch_intent, bind_portable_dispatch_snapshot
 from content_factory.editorial_catalog import article_brief_for_catalog
+from content_factory.article_voice import (
+    ArticleVoiceError,
+    article_voice_for_dispatch,
+    article_voice_payload,
+    save_article_voice,
+    validate_article_voice,
+)
 from content_factory.google_baseline import collect_verified_google_metrics, google_baseline_connection_status
 from content_factory.run_state import ARTICLE_WORKFLOWS, active_retry_signal, clear_obsolete_active_run_blockers
 from content_factory.section_issues import public_section_issues
@@ -562,6 +569,9 @@ def _effective_article_delivery_mode(config, *, requested_mode=None, explicit=Fa
     if explicit and requested in ARTICLE_DELIVERY_MODES:
         return requested
 
+    from .hosted_articles import hosted_site_active
+    if hosted_site_active(config):
+        return "content_only"
     stored = _stored_article_delivery_mode(config)
     if _article_repo_is_review_capable(config, github_ready=github_ready, article_ready=article_ready):
         if stored in LEGACY_REVIEW_BLOCKING_DELIVERY_MODES or not stored:
@@ -4296,10 +4306,46 @@ def _is_live_preview_root_asset_path(value):
     return any(path.startswith(prefix) for prefix in _LIVE_PREVIEW_PROXY_ASSET_PREFIXES)
 
 
-def _rewrite_root_asset_reference(run_id, value):
+# Paths that already point into a preview proxy, lease or the Content Factory
+# proxy layer; rewriting them again would nest one proxy inside another.
+_LIVE_PREVIEW_SCOPED_ROOT_PREFIXES = ("/api/v1/vibe-marketing/", "/api/v1/my-startup/vibe-marketing/", "/api/runs/")
+# The read-only review renders a page's styles, fonts and media, never its
+# scripts: a site script loaded under the capability path can route the page to
+# its own 404. These references are scoped whatever their root path; scripts,
+# frames, objects and module preloads keep the asset-folder rule.
+_LIVE_PREVIEW_RENDER_LINK_RELS = frozenset({
+    "stylesheet", "icon", "apple-touch-icon", "apple-touch-icon-precomposed", "mask-icon", "manifest",
+})
+_LIVE_PREVIEW_RENDER_PRELOAD_TYPES = frozenset({"style", "font", "image"})
+_LIVE_PREVIEW_RENDER_SRC_TAGS = frozenset({"img", "source", "video", "audio", "track", "input"})
+# SVG elements whose href loads a resource (a sprite, an image or a filter input).
+_LIVE_PREVIEW_SVG_RESOURCE_TAGS = frozenset({"use", "image", "feimage"})
+
+
+def _is_unscoped_root_reference(value):
+    text = str(value or "")
+    return text.startswith("/") and not text.startswith("//") and not text.startswith(_LIVE_PREVIEW_SCOPED_ROOT_PREFIXES)
+
+
+def _rewrite_root_asset_reference(run_id, value, *, any_root_path=False):
+    """Route a root-relative reference into the run's preview proxy.
+
+    The proxy serves the preview under a path on the API origin, so a
+    root-relative URL the browser fetches would otherwise leave it. With
+    ``any_root_path`` every such resource is scoped: PawShare's
+    ``<link rel="stylesheet" href="/styles.css">`` (23 Oct 2026) sat outside the
+    folder allowlist, resolved to the API origin's /styles.css and the setup
+    review rendered unstyled. Without it only allowlisted asset folders change,
+    which keeps navigation links and script strings as the site wrote them.
+    """
     text = str(value or "")
     parsed = urlsplit(text)
-    if parsed.scheme or parsed.netloc or not text.startswith("/") or not _is_live_preview_root_asset_path(text):
+    if parsed.scheme or parsed.netloc or not text.startswith("/"):
+        return text
+    if any_root_path:
+        if not _is_unscoped_root_reference(text):
+            return text
+    elif not _is_live_preview_root_asset_path(text):
         return text
     return _live_preview_proxy_destination(run_id, text.lstrip("/"))
 
@@ -4349,12 +4395,36 @@ def _rewrite_srcset_reference(run_id, value):
             continue
         pieces = candidate.split()
         if pieces:
-            pieces[0] = _rewrite_external_visual_reference(run_id, _rewrite_root_asset_reference(run_id, pieces[0]))
+            # Every srcset candidate is an image the browser fetches.
+            pieces[0] = _rewrite_external_visual_reference(
+                run_id, _rewrite_root_asset_reference(run_id, pieces[0], any_root_path=True),
+            )
         candidates.append(" ".join(pieces))
     return ", ".join(candidates)
 
 
-def _rewrite_css_asset_references(run_id, text):
+_LIVE_PREVIEW_CSS_URL_ROOT_RE = re.compile(
+    r"(?P<prefix>url\(\s*)(?P<quote>['\"]?)(?P<url>/(?!/)[^'\"\s)]*)(?P=quote)(?P<suffix>\s*\))",
+    re.IGNORECASE,
+)
+_LIVE_PREVIEW_CSS_IMPORT_ROOT_RE = re.compile(
+    r"(?P<prefix>@import\s+)(?P<quote>['\"])(?P<url>/(?!/)[^'\"]*)(?P=quote)",
+    re.IGNORECASE,
+)
+
+
+def _rewrite_css_root_references(run_id, text):
+    """Scope every root-relative CSS ``url()`` and ``@import``: each one is a fetch."""
+    def replace(match):
+        return (f"{match.group('prefix')}{match.group('quote')}"
+                f"{_rewrite_root_asset_reference(run_id, match.group('url'), any_root_path=True)}"
+                f"{match.group('quote')}{match.groupdict().get('suffix') or ''}")
+
+    rewritten = _LIVE_PREVIEW_CSS_URL_ROOT_RE.sub(replace, str(text or ""))
+    return _LIVE_PREVIEW_CSS_IMPORT_ROOT_RE.sub(replace, rewritten)
+
+
+def _rewrite_css_asset_references(run_id, text, *, any_root_path=False):
     def replace_css_url(match):
         quote_char = match.group("quote") or ""
         return (
@@ -4389,6 +4459,8 @@ def _rewrite_css_asset_references(run_id, text):
     rewritten = _LIVE_PREVIEW_CSS_IMPORT_ASSET_RE.sub(replace_css_import, rewritten)
     rewritten = _LIVE_PREVIEW_CSS_EXTERNAL_URL_RE.sub(replace_css_external_url, rewritten)
     rewritten = _LIVE_PREVIEW_CSS_EXTERNAL_IMPORT_RE.sub(replace_css_external_import, rewritten)
+    if any_root_path:
+        rewritten = _rewrite_css_root_references(run_id, rewritten)
     return rewritten
 
 
@@ -4444,6 +4516,14 @@ def _strip_live_preview_client_runtime(text):
 
 
 def _rewrite_live_preview_html_assets(run_id, text):
+    """Scope every style, font and media reference into the run's preview proxy.
+
+    The page's stylesheets, icons, manifest, style/font/image preloads, media
+    sources, posters, srcsets, SVG sprite and image hrefs, inline styles and
+    <style> blocks are scoped whatever their root path, so the review renders
+    as the hosted preview does. Scripts, frames, navigation and form actions
+    keep the asset-folder rule.
+    """
     soup = BeautifulSoup(str(text or ""), "html.parser")
     for base in soup.find_all("base"):
         base.decompose()
@@ -4451,23 +4531,36 @@ def _rewrite_live_preview_html_assets(run_id, text):
         tag_name = str(tag.name or "").lower()
         for attr in ("src", "poster"):
             if tag.has_attr(attr):
-                tag[attr] = _rewrite_external_visual_reference(run_id, _rewrite_root_asset_reference(run_id, tag.get(attr)))
+                renders = attr == "poster" or tag_name in _LIVE_PREVIEW_RENDER_SRC_TAGS
+                tag[attr] = _rewrite_external_visual_reference(
+                    run_id, _rewrite_root_asset_reference(run_id, tag.get(attr), any_root_path=renders),
+                )
         if tag.has_attr("action"):
             tag["action"] = _rewrite_root_asset_reference(run_id, tag.get("action"))
-        if tag.has_attr("srcset"):
-            tag["srcset"] = _rewrite_srcset_reference(run_id, tag.get("srcset"))
+        for attr in ("srcset", "imagesrcset"):
+            if tag.has_attr(attr):
+                tag[attr] = _rewrite_srcset_reference(run_id, tag.get(attr))
         if tag.has_attr("style"):
-            tag["style"] = _rewrite_css_asset_references(run_id, str(tag.get("style") or ""))
-        if tag.has_attr("href"):
-            href = str(tag.get("href") or "")
-            rel = " ".join(str(item).lower() for item in (tag.get("rel") or []))
-            should_rewrite_href = (
-                _is_live_preview_root_asset_path(href)
-                or tag_name == "link"
-                and any(token in rel for token in ("stylesheet", "preload", "icon", "apple-touch-icon"))
-            )
-            if should_rewrite_href:
-                tag["href"] = _rewrite_external_visual_reference(run_id, _rewrite_root_asset_reference(run_id, href))
+            tag["style"] = _rewrite_css_asset_references(run_id, str(tag.get("style") or ""), any_root_path=True)
+        if tag_name == "style" and tag.string is not None:
+            styled = _rewrite_css_root_references(run_id, str(tag.string))
+            if styled != str(tag.string):
+                tag.string.replace_with(styled)
+        rel = {str(item).lower() for item in (tag.get("rel") or [])} if tag_name == "link" else set()
+        renders = (
+            bool(rel & _LIVE_PREVIEW_RENDER_LINK_RELS)
+            or bool(rel & {"preload", "prefetch"}) and str(tag.get("as") or "").lower() in _LIVE_PREVIEW_RENDER_PRELOAD_TYPES
+            or tag_name in _LIVE_PREVIEW_SVG_RESOURCE_TAGS
+        )
+        legacy_link = bool(rel & {"stylesheet", "preload", "icon", "apple-touch-icon"})
+        for attr in ("href", "xlink:href"):
+            if not tag.has_attr(attr) or (attr == "xlink:href" and tag_name not in _LIVE_PREVIEW_SVG_RESOURCE_TAGS):
+                continue
+            href = str(tag.get(attr) or "")
+            if renders or legacy_link or _is_live_preview_root_asset_path(href):
+                tag[attr] = _rewrite_external_visual_reference(
+                    run_id, _rewrite_root_asset_reference(run_id, href, any_root_path=renders),
+                )
     return str(soup)
 
 
@@ -4483,7 +4576,9 @@ def _rewrite_live_preview_proxy_text(run_id, text, content_type=""):
 
     content_type_lower = str(content_type or "").lower()
     rewritten = _rewrite_content_factory_preview_prefixes(run_id, text)
-    rewritten = _rewrite_css_asset_references(run_id, rewritten)
+    # A stylesheet's url() and @import are always fetches; other bodies keep the
+    # folder rule because their quoted strings are not all URLs.
+    rewritten = _rewrite_css_asset_references(run_id, rewritten, any_root_path="text/css" in content_type_lower)
     rewritten = _LIVE_PREVIEW_QUOTED_ASSET_RE.sub(replace_quoted, rewritten)
     rewritten = _LIVE_PREVIEW_UNQUOTED_ATTR_ASSET_RE.sub(replace_unquoted_attr, rewritten)
     rewritten = _LIVE_PREVIEW_JS_IMPORT_ASSET_RE.sub(replace_js_import, rewritten)
@@ -7536,6 +7631,10 @@ def _restart_article_payload_from_run(*, run, context, config, actor_id):
     )
     if delivery_mode_explicit and delivery_mode:
         payload["delivery_mode"] = delivery_mode
+    # A restart writes in the founder's current voice, like a fresh start.
+    article_voice = article_voice_for_dispatch(config.pillar_strategy)
+    if article_voice:
+        payload["article_voice"] = article_voice
     return payload
 
 
@@ -10364,7 +10463,19 @@ def _workflow_progress(*, context=None, run=None, latest_runs=None, checks=None,
         summary_by_id["package"] = f"Article package ready{': ' + title if title else '.'}"
         action_by_id["package"] = _workflow_step_action("Review package", href=_run_url(article_run))
 
-    if publish_complete:
+    from .hosted_articles import hosted_publish_step
+    hosted_step = hosted_publish_step(article_run, config) if content_package_ready else None
+    if hosted_step is not None:
+        status_by_id["publish"] = hosted_step["status"]
+        href_by_id["publish"] = hosted_step["href"] or _run_url(article_run)
+        run_by_id["publish"] = article_run.run_id
+        summary_by_id["publish"] = hosted_step["summary"]
+        if hosted_step["label"]:
+            action_by_id["publish"] = _workflow_step_action(hosted_step["label"], href=hosted_step["href"] or _run_url(article_run),
+                                                            intent=hosted_step["intent"] or None)
+        else:
+            action_by_id.pop("publish", None)
+    elif publish_complete:
         status_by_id["publish"] = "complete"
         href_by_id["publish"] = _run_url(publish_evidence_run)
         run_by_id["publish"] = publish_evidence_run.run_id
@@ -11929,6 +12040,7 @@ def _compute_bootstrap_payload(context, request=None, *, view="summary", config=
             "githubConnectionState": config.github_connection_state,
             "authors": normalize_authors(config.authors),
             "defaultAuthorId": str(config.default_author_id or ""),
+            "articleVoice": article_voice_payload(getattr(config, "pillar_strategy", None)),
         },
         "startupProfile": _serialize_startup_profile(context.organization),
         "websiteBaseline": _serialize_baseline_snapshot(baseline_snapshot, config, compact=compact),
@@ -12023,6 +12135,7 @@ def _serialize_bootstrap_without_domain(company):
             "dailyDiscoveryPriority": 0,
             "defaultTimezone": "",
             "githubConnectionState": "missing_domain",
+            "articleVoice": None,
         },
         "checks": checks,
         "articleCapabilities": article_capabilities(None),
@@ -15499,6 +15612,16 @@ class VibeMarketingSettingsView(APIView):
         from rest_framework.exceptions import ValidationError
 
         validate_profile_fields(request.data)
+        # Validate the founder's article voice before any write; absent leaves it unchanged.
+        self.voice_submitted = "articleVoice" in request.data or "article_voice" in request.data
+        self.prepared_voice = None
+        if self.voice_submitted:
+            raw_voice = request.data.get("articleVoice", request.data.get("article_voice"))
+            if raw_voice is not None:
+                try:
+                    self.prepared_voice = validate_article_voice(raw_voice)
+                except ArticleVoiceError as exc:
+                    raise ValidationError({"articleVoice": str(exc)}) from exc
         mode = request.data.get("articleDeliveryMode", request.data.get("article_delivery_mode"))
         if mode is not None and mode not in {"review_draft", "publish_code", "content_only"}:
             raise ValidationError({"articleDeliveryMode": "Choose a supported article delivery mode."})
@@ -15674,6 +15797,8 @@ class VibeMarketingSettingsView(APIView):
                              if any(alias in request.data for alias in aliases))
         if config_fields:
             config.save(update_fields=list(dict.fromkeys([*config_fields, "updated_at"])))
+        if getattr(self, "voice_submitted", False):
+            save_article_voice(organization, self.prepared_voice)
         if daily_enabled_submitted:
             # Keep the channel-backed automation in lock-step with the legacy
             # boolean so the two daily schedulers never disagree.
@@ -17309,6 +17434,10 @@ def start_article_generation(*, user, context, data, request_hash=None, website_
         payload["author_id"] = effective_author.get("id", "")
         payload["default_author_name"] = effective_author.get("name", "")
         payload["default_author_profile"] = author_profile_for_renderer(effective_author)
+    # Voice: the founder's saved article voice, with a digest Content Factory can cache on.
+    article_voice = article_voice_for_dispatch(config.pillar_strategy)
+    if article_voice:
+        payload["article_voice"] = article_voice
     if website_contract:
         payload.update(website_contract)
     if request_hash:

@@ -94,13 +94,13 @@ class PublicMembershipDatabaseTests(MemberAccessFixture, TestCase):
             self.grant, "CUNKNOWN", observed_at=self.now - timedelta(seconds=1), public_verified=True,
         ))
         self.assertEqual(SlackChannelMembership.objects.get().state, "left")
-        with override_settings(SLACK_MEMBER_CHANNELS_ENABLED=False):
+        with override_settings(MESSAGE_SYNC_ENABLED=False):
             self.assertFalse(membership.mark_left(
                 self.grant, "COTHER", observed_at=self.now, public_verified=True,
             ))
 
     def test_additions_obey_every_flag_and_canary_but_existing_reductions_do_not(self):
-        for setting in ("MESSAGE_SYNC_ENABLED", "SLACK_MEMBER_CHANNELS_ENABLED", "SLACK_OWNER_INVENTORY_ENABLED"):
+        for setting in ("MESSAGE_SYNC_ENABLED", "SLACK_OWNER_INVENTORY_ENABLED"):
             with override_settings(**{setting: False}):
                 self.assertFalse(self.joined())
         with override_settings(SLACK_MEMBER_CHANNEL_ALLOWED_IDS="COTHER"):

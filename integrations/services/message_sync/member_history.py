@@ -41,8 +41,8 @@ class _SourceClosed(RuntimeError):
 
 
 def required(channel):
-    """Members are never bot-readable, even during a flag-off rollback."""
-    return channel.audience == "members" or getattr(settings, "SLACK_COMMUNITY_SOURCE", "bot") == "members"
+    """Every Chat public room uses current member read authority."""
+    return channel.destination_platform == "buzz"
 
 
 def guard_page(channel):
@@ -75,7 +75,7 @@ def _scope(row, authority, grant, state_generation):
     # An observation refresh is not a new authority epoch. Consent/OAuth/floor,
     # mapping identity and applied audience changes do restart every cursor.
     value = [str(state_generation), _identity(row),
-             getattr(settings, "SLACK_COMMUNITY_SOURCE", "bot") if row.audience == "community" else "members",
+             "members",
              authority.grant_id, authority.user_id, authority.connection_id,
              authority.workspace_id, authority.slack_user_id, authority.scopes, authority.consent_generation,
              authority.consent_version, authority.oauth_generation,
@@ -96,7 +96,7 @@ class _Client:
         locked_job(self.lease)
         if self.cohort_ids is not None:
             access.assert_reader_cohort_current(self.row.slack_workspace_id, self.cohort_ids)
-            if getattr(settings, "SLACK_COMMUNITY_SOURCE", "bot") != "members" or self.row.audience != "community":
+            if self.row.audience != "community":
                 raise LeaseLost("community_history_strategy_changed")
 
     def _call(self, method, **kwargs):
@@ -316,69 +316,6 @@ def run_page(lease, state, page):
     _defer(lease, original, "history_reader_retry")
 
 
-class _CommunityBotClient(_Client):
-    """One budgeted bot page, only inside a complete zero-reader authority fence."""
-
-    def __init__(self, lease, row, cohort_ids):
-        from slack_sdk import WebClient
-        from .slack_client import budgeted_client
-
-        super().__init__(lease, row, None, None)
-        self.cohort_ids = frozenset(cohort_ids)
-        if (row.slack_workspace_id != getattr(settings, "MESSAGE_SYNC_SLACK_BOT_WORKSPACE_ID", "")
-                or not getattr(settings, "MESSAGE_SYNC_SLACK_APP_ID", "")
-                or not getattr(settings, "SLACK_BRIDGE_BOT_USER_ID", "")
-                or not getattr(settings, "SLACK_BRIDGE_BOT_TOKEN", "")):
-            raise MemberHistoryDeferred(60)
-        self.sdk = budgeted_client(WebClient(token=settings.SLACK_BRIDGE_BOT_TOKEN, timeout=20),
-                                   workspace_id=row.slack_workspace_id,
-                                   before_request=self._before_request)
-
-    def _guard(self):
-        locked_job(self.lease)
-        access.assert_reader_cohort_current(self.row.slack_workspace_id, self.cohort_ids)
-
-    def _before_request(self):
-        self._guard()
-        if getattr(settings, "SLACK_COMMUNITY_SOURCE", "bot") != "members" or self.row.audience != "community":
-            raise LeaseLost("community_history_strategy_changed")
-        self.started_at = timezone.now()
-
-    def _call(self, method, **kwargs):
-        locked_job(self.lease)
-        if method not in {"auth_test", "conversations_info", "conversations_history", "conversations_replies"}:
-            raise MemberHistoryDeferred(60)
-        if "channel" in kwargs and kwargs["channel"] != self.row.slack_channel_id:
-            raise LeaseLost("community_history_source_changed")
-        self.started_at = None
-        self._guard()
-        response = getattr(self.sdk, method)(**kwargs)
-        self._guard()
-        return response
-
-    def verify_bot(self):
-        response = self._call("auth_test")
-        if (not hasattr(response, "get") or response.get("ok") is not True
-                or response.get("team_id") != self.row.slack_workspace_id
-                or response.get("user_id") != settings.SLACK_BRIDGE_BOT_USER_ID
-                or not isinstance(response.get("bot_id"), str)
-                or not re.fullmatch(r"B[A-Z0-9]{1,99}", response["bot_id"])
-                or response.get("app_id", settings.MESSAGE_SYNC_SLACK_APP_ID) != settings.MESSAGE_SYNC_SLACK_APP_ID):
-            raise MemberHistoryDeferred(60)
-
-
-def community_bot_scope(row, state_generation, *, assessment=None):
-    """Separate every observed source strategy from member pagination authority."""
-    value = ["community-history-v1", str(state_generation), _identity(row),
-             getattr(settings, "SLACK_COMMUNITY_SOURCE", "bot"),
-             "zero-reader-bot" if assessment is not None else "primary-bot",
-             assessment.fingerprint if assessment is not None else None,
-             (row.room_state or {}).get("source_reduction_observed_at"),
-             getattr(settings, "MESSAGE_SYNC_SLACK_APP_ID", ""),
-             getattr(settings, "SLACK_BRIDGE_BOT_USER_ID", "")]
-    return hashlib.sha256(json.dumps(value, separators=(",", ":")).encode()).hexdigest()
-
-
 def _community_attempt(lease, state, page, authority):
     original, client, failure = state.public_channel, None, None
     with transaction.atomic():
@@ -415,17 +352,13 @@ def _community_attempt(lease, state, page, authority):
                 client = _Client(lease, row, authority, grant.connection,
                                  cohort_ids={u.pk for u in locked[0]})
                 scope = _scope(row, authority, grant, current_state.authority_generation)
-            elif assessment.complete and assessment.effective_source == "bot":
-                row.reader_grant = None
-                row.sync_paused_reason = "no_reader"
-                scope = community_bot_scope(row, current_state.authority_generation, assessment=assessment)
             else:
                 row.reader_grant = None
-                # Unknown is represented by the typed reader state, never by
-                # the existing definitive-zero no_reader field value.
-                row.sync_paused_reason = ""
+                # Hold durable work without borrowing a bot credential or
+                # erasing the last checkpoint. Recovery revalidates its scope.
+                row.sync_paused_reason = "no_reader" if assessment.complete else ""
                 row.save(update_fields=("reader_grant", "sync_paused_reason", "updated_at"))
-                finish_job(lease, checkpoint={}, delay_seconds=60)
+                finish_job(lease, checkpoint=lease.checkpoint, delay_seconds=60)
                 return
             row.save(update_fields=("reader_grant", "sync_paused_reason", "updated_at"))
             checkpoint = dict(lease.checkpoint) if lease.checkpoint.get("member_authority") == scope else {}
@@ -434,10 +367,6 @@ def _community_attempt(lease, state, page, authority):
             current_state.public_channel = row
             token = _current.set(row.pk)
             try:
-                if client is None:
-                    client = _CommunityBotClient(lease, row, {u.pk for u in locked[0]})
-                if isinstance(client, _CommunityBotClient):
-                    client.verify_bot()
                 client.verify_source()
                 observed = client.started_at
                 if (not isinstance(observed, datetime) or not timezone.is_aware(observed)
@@ -472,7 +401,7 @@ def _community_attempt(lease, state, page, authority):
 
 
 def _run_community_page(lease, state, page):
-    """Members-primary Community page; only proven zero can select the bot."""
+    """Member-authorized Community page; reader loss holds durable work."""
     original = state.public_channel
     if not access.enabled() or not member_channel_in_scope(original.slack_workspace_id, original.slack_channel_id):
         raise MemberHistoryDeferred(60)
@@ -511,25 +440,12 @@ def _run_community_page(lease, state, page):
     return _community_attempt(lease, state, page, None)
 
 
-def reject_legacy_bot_read(channel_id):
-    """Legacy multi-page repairs may not read member-governed sources as bot."""
-    for row in CommunityBridgeChannel.objects.filter(slack_channel_id=channel_id):
-        if required(row):
-            raise RuntimeError("Member-channel repair requires a durable member-authorized history job")
-
-
-def reject_legacy_repair(channel):
-    from django.core.management.base import CommandError
-    if required(channel):
-        raise CommandError("Member-channel repair requires durable member-authorized history jobs; direct replay is unavailable")
-
-
 def invalidate_channel_history(workspace_id, channel_id):
     """Fence an observed leave/rejoin ABA before the pending Channel lock.
 
     Caller holds its membership User authority. Updating State first follows
     the same history order and supersedes in-flight leases/cursors atomically
-    with the leave. Community bot/both history keeps its existing authority.
+    with the leave. Both Community and Members history are fenced.
     """
     from integrations.models import BridgeSyncState
 
@@ -537,8 +453,6 @@ def invalidate_channel_history(workspace_id, channel_id):
         raise transaction.TransactionManagementError("History invalidation requires membership authority")
     rows = BridgeSyncState.objects.filter(public_channel__slack_workspace_id=workspace_id,
                                           public_channel__slack_channel_id=channel_id)
-    if getattr(settings, "SLACK_COMMUNITY_SOURCE", "bot") != "members":
-        rows = rows.filter(public_channel__audience="members")
     for state in rows.select_for_update(of=("self",)).order_by("pk"):
         if state.authority_generation >= 2**63 - 1:
             # A privacy reduction must commit even at the integer ceiling.
@@ -620,7 +534,7 @@ def request_history(user, mapping, public_key, request_key, progress):
 
 
 def _community_request_history(user, mapping, public_key, request_key, progress):
-    """Schedule Community demand under current readers or a proven zero.
+    """Schedule Community demand under current readers.
 
     The requester needs community access/current device, not a Slack link.
     This path never refreshes credentials or calls Slack; the actual page must
@@ -659,11 +573,9 @@ def _community_request_history(user, mapping, public_key, request_key, progress)
                 authority_scope = _scope(row, authority, selected, state.authority_generation)
                 row.reader_grant = selected
                 row.sync_paused_reason = ""
-            elif assessment.complete and assessment.effective_source == "bot":
-                authority_scope = community_bot_scope(row, state.authority_generation, assessment=assessment)
-                row.reader_grant = None
-                row.sync_paused_reason = "no_reader"
             else:
+                # Existing jobs keep retrying; a reconnect/join restores
+                # access. Do not manufacture authority for a scroll request.
                 raise InventoryError("slack_history_unavailable", 409)
             row.save(update_fields=("reader_grant", "sync_paused_reason", "updated_at"))
             access.record_community_reader_state(row, assessment)

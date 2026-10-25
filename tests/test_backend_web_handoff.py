@@ -283,7 +283,8 @@ class WebHandoffIntegrationTests(unittest.TestCase):
 
 
 class WebHandoffRollbackTests(unittest.TestCase):
-    def run_rollback(self, *, prior_proxy, replacement_started, new_workers=False, stop_status=0):
+    def run_rollback(self, *, prior_proxy, replacement_started, new_workers=False, stop_status=0,
+                     previous_inventory="true"):
         begin = DEPLOY.index("    restore_runtime_on_error() {")
         end = DEPLOY.index("\n    # A code-only release", begin)
         function = DEPLOY[begin:end].replace("\\$", "$")
@@ -311,6 +312,8 @@ class WebHandoffRollbackTests(unittest.TestCase):
                     "web_proxy_script=/unused",
                     "APP_RELEASE=" + "b" * 40,
                     "previous_app_release=" + "a" * 40,
+                    "previous_owner_inventory_enabled=" + previous_inventory,
+                    "slack_owner_inventory_enabled=false",
                     "migrations_pending=0",
                     "migration_started=0",
                     "runtime_pause_started=0",
@@ -355,6 +358,17 @@ class WebHandoffRollbackTests(unittest.TestCase):
         self.assertLess(events.index("up -d --no-deps --force-recreate"), events.index("health 8001"))
         self.assertLess(events.index("health 8001"), events.index("route web"))
         self.assertIn("env APP_RELEASE " + "a" * 40, events)
+
+    def test_code_only_rollback_restores_actual_inventory_before_recreating_workers(self):
+        for enabled in ("true", "false"):
+            with self.subTest(previous_inventory=enabled):
+                events = self.run_rollback(prior_proxy=True, replacement_started=True,
+                                           previous_inventory=enabled)
+                update = f"env SLACK_OWNER_INVENTORY_ENABLED {enabled}"
+                self.assertIn(update, events)
+                self.assertLess(events.index(update), events.index("up -d --no-deps --force-recreate"))
+                opposite = "false" if enabled == "true" else "true"
+                self.assertNotIn(f"env SLACK_OWNER_INVENTORY_ENABLED {opposite}", events)
 
     def test_rollback_stops_new_workers_before_restoring_previous_runtime(self):
         events = self.run_rollback(prior_proxy=True, replacement_started=True, new_workers=True)

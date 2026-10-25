@@ -431,7 +431,7 @@ class FirstApprovalClockTests(SimpleTestCase):
     def draft(self, **kwargs):
         revision = SimpleNamespace(pk=101, content_hash="reviewed-hash",
             snapshot=SimpleNamespace(payload={}),
-            structured_memo={"_audience_visibility": ["just_me"]},
+            structured_memo={"highlights": ["Shipped the release."], "_audience_visibility": ["just_me"]},
             validation={"groundedness_status": "founder_asserted"})
         return SimpleNamespace(**{
             "pk": 41, "month": date(2026, 8, 1), "current_revision": revision, "published_revision_id": None,

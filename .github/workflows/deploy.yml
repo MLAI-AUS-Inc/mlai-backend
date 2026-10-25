@@ -2,8 +2,8 @@ name: Deploy to Digital Ocean
 
 on:
   pull_request:
-    # Stacked Articles implementation PRs need the same validation lanes.
-    branches: [ main, "codex/articles-*", "fix/admin-brain-deploy-decoupling", "feat/goal-wakeups", "feat/deploy-detection", "feat/first-article-goal" ]
+    # Stacked implementation PRs need the same validation lanes.
+    branches: [ main, "codex/articles-*", "codex/slack-*", "fix/admin-brain-deploy-decoupling", "feat/goal-wakeups", "feat/deploy-detection", "feat/first-article-goal" ]
   push:
     branches: [ main ]
   workflow_dispatch:
@@ -73,7 +73,7 @@ jobs:
         python -m pip install --only-binary=:all: --require-hashes -r .github/requirements-ci.lock
 
     - name: Test deployment failure handling and live contract
-      run: python -m unittest tests.test_deploy_runtime_checks tests.test_message_sync_deploy_config tests.test_community_bridge_dependency_review_workflow tests.test_valley_mcp_deploy_config tests.test_native_agent_deploy_config tests.test_slack_owner_inventory_deploy_config tests.test_tech_volunteers_bridge_workflow -v
+      run: python -m unittest tests.test_deploy_runtime_checks tests.test_message_sync_deploy_config tests.test_community_bridge_dependency_review_workflow tests.test_valley_mcp_deploy_config tests.test_native_agent_deploy_config tests.test_slack_owner_inventory_deploy_config tests.test_member_room_provisioning_contract -v
 
     - name: Check jobs delivery contracts without database access
       run: python -m unittest tests.test_jobs_delivery_unit -v
@@ -171,6 +171,7 @@ jobs:
           content_factory.tests_baseline_ai_evidence_unit \
           content_factory.tests_startup_profile_draft_unit \
           content_factory.tests_startup_settings_unit \
+          content_factory.tests_article_voice_unit \
           content_factory.tests_author_photos_unit \
           content_factory.tests_copy_author_photos_unit \
           content_factory.tests_article_website_preview_unit \
@@ -187,6 +188,8 @@ jobs:
           startup_updates.tests_linear_reconnect_unit \
           community_chat.tests.test_startup_lifecycle \
           community_chat.tests.test_startup_mcp \
+          community_chat.tests.test_startup_mcp_readability \
+          community_chat.tests.test_startup_readability \
           community_chat.tests.test_mlai_mcp \
           community_chat.tests.test_mlai_mcp_native_agents \
           community_chat.tests.test_relay_role_service_unit \
@@ -201,6 +204,7 @@ jobs:
           startup_updates.tests_curation_context_unit \
           startup_updates.tests_curation_context_api_unit \
           startup_updates.tests_draft_disclosure_unit \
+          startup_updates.tests_financial_history_unit \
           startup_updates.tests_dispatch_timing_unit \
           startup_updates.tests_update_identity.GenerationDateCompatibilityTests
 
@@ -447,6 +451,7 @@ jobs:
           integrations.tests_github_workflow_permissions \
           integrations.tests_github_ci_evidence \
           content_factory.tests_activation_connections \
+          content_factory.tests_hosted_articles \
           content_factory.tests_website_portable \
           content_factory.tests_website_portable_wire \
           integrations.tests_content_factory_website_reads \
@@ -534,7 +539,7 @@ jobs:
           integrations.tests_member_pending_intake_phase4a \
           integrations.tests_message_sync_member_history_phase4b \
           integrations.tests_member_delivery_phase4c \
-          integrations.tests_community_member_send_phase5 \
+          integrations.tests_community_member_send_phase5 integrations.tests_slack_member_directory integrations.tests_slack_custom_emoji integrations.tests_slack_member_files integrations.tests_message_sync_repair \
           integrations.tests_community_source_phase6 \
           integrations.tests_community_source_codec_phase6 \
           integrations.tests_community_reader_phase6 \
@@ -546,8 +551,6 @@ jobs:
           integrations.tests_message_sync_event_routing \
           integrations.tests_coworking_handoff \
           integrations.tests_public_bridge_consent \
-          integrations.tests_community_bridge_avatar_backfill \
-          integrations.tests_community_bridge_mention_backfill \
           integrations.tests_community_bridge_contracts \
           core.tests.test_auth_contract \
           core.tests.test_account_ban_guards \
@@ -585,11 +588,13 @@ jobs:
           vibe_raising.tests_transaction_retry \
           community_chat.tests.test_startup_updates \
           community_chat.tests.test_startup_updates_database \
+          community_chat.tests.test_startup_readability_database \
           startup_updates.tests_evidence_contract \
           startup_updates.tests_dashboard_financial_refresh \
           startup_updates.tests_source_evidence \
           startup_updates.tests_reporting_canaries \
           startup_updates.tests_revisions \
+          startup_updates.tests_financial_history_database \
           startup_updates.tests_update_identity \
           hospital.test_sim_contest \
           hospital.test_sim_guess_proxy \
@@ -769,7 +774,7 @@ jobs:
           integrations.tests_member_pending_intake_phase4a \
           integrations.tests_message_sync_member_history_phase4b \
           integrations.tests_member_delivery_phase4c \
-          integrations.tests_community_member_send_phase5 \
+          integrations.tests_community_member_send_phase5 integrations.tests_slack_member_directory integrations.tests_slack_custom_emoji integrations.tests_slack_member_files integrations.tests_message_sync_repair \
           integrations.tests_community_source_phase6 \
           integrations.tests_community_source_codec_phase6 \
           integrations.tests_community_reader_phase6 \
@@ -904,8 +909,6 @@ jobs:
           integrations.test_luma_cover \
           integrations.tests \
           integrations.tests_article \
-          integrations.tests_community_bridge_thread_reconciliation \
-          integrations.tests_community_bridge_thread_repair \
           integrations.tests_connection_org_scoping \
           integrations.tests_connector_company_scoping \
           integrations.tests_github_callback \
@@ -1076,11 +1079,7 @@ jobs:
         COMMUNITY_BRIDGE_DEPENDENCY_VERDICTS_ENABLED: ${{ vars.COMMUNITY_BRIDGE_DEPENDENCY_VERDICTS_ENABLED || 'false' }}
         MESSAGE_SYNC_ENABLED: ${{ vars.MESSAGE_SYNC_ENABLED || 'false' }}
         MESSAGE_SYNC_RECENT_HISTORY_ENABLED: ${{ vars.MESSAGE_SYNC_RECENT_HISTORY_ENABLED || 'false' }}
-        SLACK_MEMBER_CHANNELS_ENABLED: ${{ vars.SLACK_MEMBER_CHANNELS_ENABLED || 'false' }}
         SLACK_MEMBER_CHANNEL_ALLOWED_IDS: ${{ vars.SLACK_MEMBER_CHANNEL_ALLOWED_IDS || '' }}
-        SLACK_COMMUNITY_SEND_AS_MEMBER: ${{ vars.SLACK_COMMUNITY_SEND_AS_MEMBER || 'false' }}
-        SLACK_COMMUNITY_SOURCE: ${{ vars.SLACK_COMMUNITY_SOURCE || 'bot' }}
-        MESSAGE_SYNC_EVENT_ROUTING: ${{ vars.MESSAGE_SYNC_EVENT_ROUTING || 'false' }}
         MESSAGE_SYNC_QUIET_HEAD_BACKOFF_ENABLED: ${{ vars.MESSAGE_SYNC_QUIET_HEAD_BACKOFF_ENABLED || 'false' }}
         COMMUNITY_CHAT_MEMBER_ACCOUNTS_ENABLED: ${{ vars.COMMUNITY_CHAT_MEMBER_ACCOUNTS_ENABLED || 'false' }}
         COMMUNITY_CHAT_INBOX_ERASURE_ENABLED: ${{ vars.COMMUNITY_CHAT_INBOX_ERASURE_ENABLED || 'false' }}
@@ -1107,14 +1106,9 @@ jobs:
         SLACK_BRIDGE_SIGNING_SECRET: ${{ secrets.SLACK_BRIDGE_SIGNING_SECRET }}
         SLACK_BRIDGE_BOT_USER_ID: ${{ vars.SLACK_BRIDGE_BOT_USER_ID }}
         SLACK_BRIDGE_WORKSPACE_ID: ${{ vars.SLACK_BRIDGE_WORKSPACE_ID }}
-        SLACK_BRIDGE_CHANNEL_ID: ${{ vars.SLACK_BRIDGE_CHANNEL_ID }}
-        SLACK_BRIDGE_CHANNEL_NAME: ${{ vars.SLACK_BRIDGE_CHANNEL_NAME }}
         BUZZ_BRIDGE_ADAPTER_URL: ${{ vars.BUZZ_BRIDGE_ADAPTER_URL }}
         BUZZ_BRIDGE_ADAPTER_TOKEN: ${{ secrets.BUZZ_BRIDGE_ADAPTER_TOKEN }}
         BUZZ_BRIDGE_CALLBACK_SECRET: ${{ secrets.BUZZ_BRIDGE_CALLBACK_SECRET }}
-        BUZZ_BRIDGE_DESTINATION_WORKSPACE_ID: ${{ vars.BUZZ_BRIDGE_DESTINATION_WORKSPACE_ID }}
-        BUZZ_BRIDGE_DESTINATION_CHANNEL_ID: ${{ vars.BUZZ_BRIDGE_DESTINATION_CHANNEL_ID }}
-        BUZZ_BRIDGE_DESTINATION_CHANNEL_NAME: ${{ vars.BUZZ_BRIDGE_DESTINATION_CHANNEL_NAME }}
         MEETING_ROOM_BOOKING_ENABLED: ${{ vars.MEETING_ROOM_BOOKING_ENABLED || 'false' }}
         COMMUNITY_BRIDGE_PRODUCTION_ENABLED: ${{ vars.COMMUNITY_BRIDGE_PRODUCTION_ENABLED || 'false' }}
         ORG_MEMORY_PRODUCTION_DEPLOY_ENABLED: ${{ vars.ORG_MEMORY_PRODUCTION_DEPLOY_ENABLED || 'false' }}
@@ -1203,14 +1197,9 @@ jobs:
             "$SLACK_BRIDGE_SIGNING_SECRET"
             "$SLACK_BRIDGE_BOT_USER_ID"
             "$SLACK_BRIDGE_WORKSPACE_ID"
-            "$SLACK_BRIDGE_CHANNEL_ID"
-            "$SLACK_BRIDGE_CHANNEL_NAME"
             "$BUZZ_BRIDGE_ADAPTER_URL"
             "$BUZZ_BRIDGE_ADAPTER_TOKEN"
             "$BUZZ_BRIDGE_CALLBACK_SECRET"
-            "$BUZZ_BRIDGE_DESTINATION_WORKSPACE_ID"
-            "$BUZZ_BRIDGE_DESTINATION_CHANNEL_ID"
-            "$BUZZ_BRIDGE_DESTINATION_CHANNEL_NAME"
           )
           for value in "${bridge_values[@]}"; do
             [ -n "$value" ] && bridge_present=$((bridge_present + 1))

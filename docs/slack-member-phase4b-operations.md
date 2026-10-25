@@ -1,3 +1,7 @@
+> Historical rollout document. Bot/both modes and direct replay tools are retired;
+> see [permanent operations](slack-member-permanent-operations.md) and
+> [bounded member repair](slack-member-repair.md) for the supported contract.
+
 # Phase 4b: member-authorized public history
 
 This source adds history, head repair and reply pagination using a current member's Slack login. It applies to Members rooms and to Community rooms when `SLACK_COMMUNITY_SOURCE=members`. Members never fall back to a bot token, including when member switches are off. Community `bot` and `both` history and owner-private history retain their existing paths. No schema, consent choice or production configuration changes are included.

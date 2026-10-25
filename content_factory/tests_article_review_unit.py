@@ -185,10 +185,64 @@ class ArticleReviewTests(SimpleTestCase):
         for asset in (b'_next/static/chunks/layout.css', b'_next/static/media/font.woff2',
                       b'_next/static/media/hero.webp'):
             self.assertIn(prefix + asset, rewritten)
-        self.assertIn(b'url("/unrelated/path")', rewritten)
+        # Every url() in a stylesheet is a fetch, whatever folder it names.
+        self.assertIn(prefix + b'unrelated/path', rewritten)
         self.assertEqual(
             views._rewrite_live_preview_proxy_body('article-1', rewritten, 'text/css'), rewritten,
         )
+
+    @patch.object(ArticlePreviewLeaseProxyView, '_proxy')
+    def test_root_level_styles_fonts_and_media_render_inside_the_lease(self, proxy):
+        # PawShare setup ccd3ea22 (23 Oct 2026): <link rel="stylesheet" href="/styles.css?v=...">
+        # sat outside the asset folders, resolved to the API origin and the review rendered unstyled.
+        from . import vibe_marketing_views as views
+
+        body = (
+            '<html><head><link rel="icon" type="image/svg+xml" href="/assets/favicon.svg">'
+            '<link rel="stylesheet" href="/styles.css?v=4a346247b822">'
+            '<link rel="stylesheet" href="/css/site.css">'
+            '<link rel="shortcut icon" href="/favicon.ico"><link rel="manifest" href="/site.webmanifest">'
+            '<link rel="preload" as="font" href="/fonts/brand.woff2" crossorigin>'
+            '<link rel="preload" as="script" href="/js/app.js"><link rel="modulepreload" href="/main.js">'
+            '<link rel="canonical" href="/blog/"><link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=DM+Sans">'
+            '<script src="/script.js?v=4a346247b822" defer></script>'
+            '<style>@import "/css/print.css"; .hero{background:url(\'/images/hero.jpg\')}</style></head>'
+            '<body><article><img src="/images/card.webp" srcset="/images/card-2x.webp 2x, /images/card.webp 1x">'
+            '<picture><source srcset="/images/card.avif" type="image/avif"></picture>'
+            '<video poster="/media/poster.jpg"><source src="/media/clip.mp4"></video>'
+            '<svg><use href="/icons.svg#paw"></use></svg><div style="background:url(/images/bg.png)"></div>'
+            '<a href="/blog/winter-events/">Read</a><img src="data:image/gif;base64,R0lGOD"><img src="//cdn.example.com/x.png">'
+            '</article></body></html>'
+        ).encode()
+        rewritten = views._rewrite_live_preview_proxy_body('article-1', body, 'text/html')
+        proxy.return_value = HttpResponse(rewritten, content_type='text/html')
+        result = ArticlePreviewLeaseProxyView().get(RequestFactory().get('/preview'), 'article-1', token='grant')
+        text = result.content.decode()
+        lease = '/api/v1/vibe-marketing/article-preview/grant/article-1/'
+        for path in ('assets/favicon.svg', 'styles.css?v=4a346247b822', 'css/site.css', 'favicon.ico',
+                     'site.webmanifest', 'fonts/brand.woff2', 'css/print.css', 'images/hero.jpg', 'images/card.webp',
+                     'images/card-2x.webp 2x', 'images/card.avif', 'media/poster.jpg', 'media/clip.mp4',
+                     'icons.svg#paw', 'images/bg.png'):
+            self.assertIn(lease + path, text)
+        # Navigation, scripts, external, inline and protocol-relative references stay as written.
+        for unchanged in ('href="/blog/"', 'href="/blog/winter-events/"', 'href="/js/app.js"', 'href="/main.js"',
+                          'href="https://fonts.googleapis.com/css2?family=DM+Sans"', 'src="data:image/gif;base64,R0lGOD"',
+                          'src="//cdn.example.com/x.png"'):
+            self.assertIn(unchanged, text)
+        self.assertNotIn('/live-preview/proxy/', text)
+        self.assertEqual(views._rewrite_live_preview_proxy_body('article-1', rewritten, 'text/html'), rewritten)
+
+    def test_already_scoped_references_are_never_nested(self):
+        from . import vibe_marketing_views as views
+
+        for value in ('/api/v1/vibe-marketing/runs/article-1/live-preview/proxy/styles.css',
+                      '/api/v1/vibe-marketing/article-preview/grant/article-1/styles.css',
+                      '/api/runs/article-1/live-preview/proxy/styles.css', '//cdn.example.com/a.css',
+                      'https://example.com/a.css', 'styles.css', '#top', ''):
+            self.assertEqual(views._rewrite_root_asset_reference('article-1', value, any_root_path=True), value)
+        self.assertEqual(views._rewrite_root_asset_reference('article-1', '/styles.css', any_root_path=True),
+                         '/api/v1/vibe-marketing/runs/article-1/live-preview/proxy/styles.css')
+        self.assertEqual(views._rewrite_root_asset_reference('article-1', '/styles.css'), '/styles.css')
 
 
 class FeedbackOutcomeTests(SimpleTestCase):

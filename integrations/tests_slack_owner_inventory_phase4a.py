@@ -25,12 +25,30 @@ def page(rows, cursor=""):
 
 
 class PublicInventoryEvidenceTests(SimpleTestCase):
+    def test_own_user_conversations_omits_membership_field(self):
+        # users.conversations lists this token owner's memberships; Slack's
+        # documented response deliberately omits is_member and num_members.
+        # https://docs.slack.dev/reference/methods/users.conversations/
+        row = public_row("CTEST")
+        del row["is_member"]
+        self.assertEqual(inventory._public_membership_evidence([row]), ({"CTEST"}, True))
+
+    def test_missing_membership_field_does_not_override_public_or_connect_guards(self):
+        for changes in ({"is_private": True}, {"is_private": None}, {"is_channel": False},
+                        {"is_im": True}, {"is_mpim": True}, {"is_shared": True},
+                        {"is_ext_shared": True}, {"is_ext_ws_shared": True}, {"is_org_shared": True}):
+            row = public_row("CTEST", **changes)
+            del row["is_member"]
+            with self.subTest(changes=changes):
+                self.assertEqual(inventory._public_membership_evidence([row]), (set(), False))
+
     def test_exact_public_objects_and_boolean_membership_are_required(self):
         self.assertEqual(inventory._public_membership_evidence([public_row("CTEST")]), ({"CTEST"}, True))
         self.assertEqual(inventory._public_membership_evidence([public_row("CTEST", is_member=False)]), (set(), True))
         for changes in ({"is_private": True}, {"is_im": True}, {"is_mpim": True},
                         {"is_ext_shared": True}, {"is_ext_ws_shared": True}, {"is_org_shared": True},
-                        {"is_member": None}, {"is_member": "true"}, {"is_private": None}):
+                        {"is_member": None}, {"is_member": "true"}, {"is_member": 0},
+                        {"is_member": 1}, {"is_private": None}):
             with self.subTest(changes=changes):
                 self.assertEqual(inventory._public_membership_evidence([public_row("CTEST", **changes)]), (set(), False))
 
@@ -58,6 +76,18 @@ class PublicInventoryMembershipDatabaseTests(MemberAccessFixture, TestCase):
     def state(self):
         self.grant.connection.refresh_from_db()
         return inventory.state_for(self.grant.connection, self.authority)
+
+    def test_documented_own_user_page_reconciles_membership_and_queues_unknown_channel(self):
+        row = public_row("CNEW")
+        del row["is_member"]
+        self.provider.return_value = page([row])
+        inventory.collect_public_page(self.authority)
+        self.assertEqual(self.provider.call_args.args[1], "users_conversations")
+        self.assertNotIn("user", self.provider.call_args.kwargs)
+        self.assertEqual(list(SlackChannelMembership.objects.values_list("slack_channel_id", "state")),
+                         [("CNEW", "joined")])
+        self.assertEqual(CommunityBridgeChannelRefresh.objects.get().slack_channel_id, "CNEW")
+        self.assertTrue(self.state()["public_membership_complete"])
 
     def test_bounded_pages_persist_followup_and_do_not_reduce_before_final_page(self):
         membership.mark_joined(self.grant, "CROOM", observed_at=timezone.now(), public_verified=True)
@@ -138,7 +168,7 @@ class PublicInventoryMembershipDatabaseTests(MemberAccessFixture, TestCase):
         inventory.grant_metadata_consent(self.grant)
         self.grant.connection.refresh_from_db()
         self.provider.return_value = page([public_row("COLD")], "next")
-        with override_settings(SLACK_MEMBER_CHANNELS_ENABLED=False):
+        with override_settings(MESSAGE_SYNC_ENABLED=False):
             inventory.collect_public_page(self.authority)
         self.assertEqual(self.provider.call_count, 1)
         self.assertEqual(self.provider.call_args.kwargs["limit"], 20)

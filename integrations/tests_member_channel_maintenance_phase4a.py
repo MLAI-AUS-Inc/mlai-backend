@@ -159,7 +159,7 @@ class MemberChannelMaintenanceTests(MemberAccessFixture, TestCase):
 
     def test_hint_does_not_bypass_disabled_flag_or_canary_scope(self):
         queued = self.queue_actor("CHINTSCOPE")
-        for settings in ({"SLACK_MEMBER_CHANNELS_ENABLED": False}, {"SLACK_MEMBER_CHANNEL_ALLOWED_IDS": "COTHER"}):
+        for settings in ({"MESSAGE_SYNC_ENABLED": False}, {"SLACK_MEMBER_CHANNEL_ALLOWED_IDS": "COTHER"}):
             with override_settings(**settings):
                 self.assertEqual(self.process_queued()[0], 0)
         self.provider.assert_not_called()
@@ -200,7 +200,7 @@ class MemberChannelMaintenanceTests(MemberAccessFixture, TestCase):
 
     def test_flag_off_and_outside_canary_never_probe_or_create(self):
         channels.queue_refresh("TTEST", "CUNKNOWN", reason="test")
-        with override_settings(SLACK_MEMBER_CHANNELS_ENABLED=False):
+        with override_settings(MESSAGE_SYNC_ENABLED=False):
             self.assertEqual(channels.process_refreshes_once(), 0)
         with override_settings(SLACK_MEMBER_CHANNEL_ALLOWED_IDS="COTHER"):
             self.assertEqual(channels.process_refreshes_once(), 0)

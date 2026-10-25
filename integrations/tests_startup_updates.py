@@ -3928,7 +3928,20 @@ class StartupUpdateServiceHelpersTest(TestCase):
                 "next_30_days": ["Close two more logos"],
             }
         )
-        self.assertIn("## KPI Snapshot", markdown)
+        self.assertEqual(
+            [line for line in markdown.splitlines() if line.startswith("## ")],
+            [
+                "## This month",
+                "## Key numbers",
+                "## Financial overview",
+                "## How you can help",
+                "## Progress",
+                "## Challenges",
+                "## Other progress",
+                "## What we learned",
+                "## Next steps",
+            ],
+        )
         self.assertIn("- **ARR:** $24,000", markdown)
 
     def test_score_message_for_profile_flags_relevant_company_mail(self):

@@ -239,9 +239,6 @@ def ingest_inbound_event(
 
     normalized_channel_id = str(source_channel_id or "").strip()
     channel = _get_enabled_channel(source_platform=source_platform, channel_id=normalized_channel_id)
-    if channel is None and source_platform == "slack":
-        from .community_source import unavailable_mapping
-        unavailable_mapping(raw_payload, normalized_channel_id)
 
     if source_platform == "slack":
         from .community_source import retirement_policy
@@ -332,8 +329,6 @@ def ingest_inbound_event(
             from .public_echo import is_public_slack_echo, newer_reaction_observed
             source_superseded = newer_reaction_observed(channel, raw_payload or {})
             source_echo = is_public_slack_echo(channel, normalized_event, raw_payload or {})
-        if receipt is not None:
-            community_source.observe(receipt, channel, raw_payload or {}, normalized_event, own_send=source_echo)
     if duplicate:
         return {"status": "duplicate", "receipt_id": receipt.id if receipt else None,
                 "receipt_key": normalized_receipt_key}

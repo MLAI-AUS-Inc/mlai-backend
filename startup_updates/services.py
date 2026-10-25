@@ -2107,7 +2107,8 @@ def build_monthly_financial_snapshot(
                 metadata = chosen.source_metadata or {}
                 evidence[output] = {"observation_id": chosen.pk, "source_provider": chosen.source_provider,
                     "observed_at": chosen.observed_at.isoformat() if chosen.observed_at else None, "unit": chosen.unit,
-                    **{key: metadata[key] for key in ("report_hash", "report_start_date", "report_end_date", "accounting_basis", "definition_version", "basis", "limitations") if key in metadata}}
+                    "timezone": metadata.get("timezone") or profile.reporting_timezone,
+                    **{key: metadata[key] for key in ("connection_id", "connection_ids", "source_metric", "report_hash", "report_start_date", "report_end_date", "accounting_basis", "definition_version", "basis", "limitations") if key in metadata}}
                 if metadata.get("report_hash"):
                     source_reports[metadata["report_hash"]] = metadata["report_payload"]
                     partial |= date.fromisoformat(metadata["report_end_date"]) < _month_end(month)
@@ -3285,6 +3286,9 @@ def build_startup_context_snapshot(
         "organization_id": organization.id,
         "domain": organization.domain,
         "company_name": organization.name,
+        "short_description": profile.short_description,
+        "problem_solved": profile.problem_solved,
+        "target_audience": profile.target_audience,
         "company_aliases": list(profile.company_aliases or []),
         "domain_aliases": list(profile.domain_aliases or []),
         "product_names": list(profile.product_names or []),
@@ -3502,8 +3506,13 @@ def create_startup_update_run(
     automatic_source_scope=False,
     audience_visibility=None,
     cover_image=None,
+    financial_history_selection=None,
+    startup_overview: Optional[str] = None,
 ) -> ContentFactoryRun:
     from startup_updates.cover_images import normalize_cover_image
+    from startup_updates.financial_history import validate_selection
+    if financial_history_selection is not None:
+        financial_history_selection = validate_selection(financial_history_selection)
     requested_audience = normalize_audience_visibility(audience_visibility)
     if requested_audience not in (["just_me"], ["community"], ["public"]):
         raise ValueError("Choose private, community, or public visibility.")
@@ -3547,7 +3556,13 @@ def create_startup_update_run(
         if not run_uses_month_scope(existing.run_request or {}):
             from startup_updates.revisions import RevisionConflict
             raise RevisionConflict("This run used an older source range. Cancel it and draft this month again.")
+    if existing and startup_overview is not None and (existing.run_request or {}).get("startup_overview") != startup_overview:
+        from startup_updates.revisions import RevisionConflict
+        raise RevisionConflict("This run uses a different startup overview. Finish or cancel it before generating again.")
     if existing and update_draft:
+        if financial_history_selection is not None and (existing.run_request or {}).get("financial_history_selection") != financial_history_selection:
+            from startup_updates.revisions import RevisionConflict
+            raise RevisionConflict("Financial sharing choices changed. Finish or cancel the current generation before starting again.")
         return existing
     if existing:
         pin_startup_update_run_connection(existing, google_connection_id)
@@ -3616,6 +3631,11 @@ def create_startup_update_run(
         "source_period_contract": "calendar_month_v1",
         "startup_context": startup_context,
     }
+    if financial_history_selection is not None:
+        run_request["financial_history_selection"] = financial_history_selection
+    if startup_overview is not None:
+        run_request["startup_overview"] = startup_overview
+        startup_context["startup_overview"] = startup_overview
     if automatic_source_scope:
         from startup_updates.activity_scope import discover_activity_resources
         run_request["automatic_source_scope"] = discover_activity_resources(binding.user, organization, selected_input_sources)
@@ -5547,30 +5567,49 @@ def build_timeline_payload(*, organization: Organization, requested_months=None,
 
 
 def render_monthly_update_markdown(structured_memo: dict) -> str:
-    memo = structured_memo or {}
+    from startup_updates.financial_history import history_export_memo
+    memo = history_export_memo(structured_memo or {})
     title = str(memo.get("title") or "").strip()
-    topline = str(memo.get("topline") or "").strip()
+    startup_overview = str(memo.get("startupOverview") or "").strip()
+    topline = str(memo.get("topline") or memo.get("summary") or "").strip()
     sections = [
-        ("KPI Snapshot", memo.get("kpi_snapshot") or []),
-        ("Financial Performance", memo.get("financial_performance") or []),
-        ("Asks", memo.get("asks") or []),
-        ("Highlights", memo.get("highlights") or []),
-        ("Lowlights / Risks", memo.get("lowlights") or []),
-        ("Product / GTM / Team / Fundraising", memo.get("operations") or []),
-        ("Learnings", memo.get("learnings") or []),
-        ("Next 30 Days", memo.get("next_30_days") or []),
+        ("Key numbers", memo.get("kpi_snapshot") or []),
+        ("Financial overview", memo.get("financial_performance") or []),
+        ("How you can help", memo.get("asks") or []),
+        ("Progress", memo.get("highlights") or []),
+        ("Challenges", memo.get("lowlights") or []),
+        ("Other progress", memo.get("operations") or []),
+        ("What we learned", memo.get("learnings") or []),
+        ("Next steps", memo.get("next_30_days") or []),
     ]
 
     if isinstance(memo.get("progress_charts"), list):
-        sections = [(heading, items) for heading, items in sections if heading != "KPI Snapshot"]
+        sections = [(heading, items) for heading, items in sections if heading != "Key numbers"]
 
     lines = []
     if title:
         lines.append(f"# {title}")
         lines.append("")
+    if startup_overview:
+        lines.append("## What we do")
+        lines.append(startup_overview)
+        lines.append("")
     if topline:
-        lines.append("## Executive Summary")
+        lines.append("## This month")
         lines.append(topline)
+        lines.append("")
+
+    from startup_updates.financial_history import history_payload
+    financial_history = history_payload(memo.get("financial_history"))
+    if financial_history:
+        unit = financial_history["currency"] if financial_history["shareAmounts"] else "Relative scale (peak = 100; amounts hidden)"
+        lines.extend(["## Revenue and costs", f"Six-month snapshot for {financial_history['reportingMonth'][:7]} · {unit}", ""])
+        for point in financial_history["points"]:
+            revenue = "Unavailable" if point["revenue"] is None else f"{point['revenue']:,.2f}"
+            costs = "Unavailable" if point["costs"] is None else f"{point['costs']:,.2f}"
+            current = " · This update" if point["month"] == financial_history["reportingMonth"] else ""
+            coverage = f" · Partial, through {point['periodEnd']}" if point["partial"] else ""
+            lines.append(f"- {point['month'][:7]}{current}: Revenue {revenue}; costs {costs}{coverage}")
         lines.append("")
 
     for heading, items in sections:

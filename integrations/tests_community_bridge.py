@@ -53,86 +53,85 @@ from integrations.services.community_bridge.identity import (
 User = get_user_model()
 
 
-class SlackBridgeClientProfileTests(TestCase):
+from integrations.tests_message_sync_member_history_phase4b import Fixture as MemberFixture, SETTINGS as MEMBER_SETTINGS
+
+
+@override_settings(**MEMBER_SETTINGS)
+class SlackBridgeClientProfileTests(MemberFixture, TransactionTestCase):
     def setUp(self):
-        SlackBridgeClient._profile_cache.clear()
-        SlackBridgeClient._channel_name_cache.clear()
+        super().setUp()
+        for grant in (self.a, self.b):
+            grant.connection.scopes += ["users:read"]
+            grant.connection.save()
+        self.channel.audience = "community"
+        self.channel.save()
+        self.profile = {"display_name": "Alice Nguyen", "image_192": "https://avatars.slack-edge.com/alice.png"}
+        self.raw = {"id": "CROOM", "name": "general", "is_channel": True, "is_private": False, "is_member": True}
 
-    def tearDown(self):
-        SlackBridgeClient._profile_cache.clear()
-        SlackBridgeClient._channel_name_cache.clear()
+    def transport(self, authority, conn, method, **kwargs):
+        self.calls.append((authority.grant_id, method, kwargs))
+        if method == "users_info":
+            return {"ok": True, "user": {"id": kwargs["user"], "team_id": "TTEST", "profile": self.profile}}
+        if method == "conversations_info":
+            return {"ok": True, "channel": self.raw}
+        raise AssertionError(method)
 
-    @patch("integrations.services.community_bridge.slack.SlackBridgeClient.get_client")
-    def test_profile_resolves_display_name_and_approved_avatar_once(
-        self, mock_get_client
-    ):
-        mock_get_client.return_value.users_info.return_value = {
-            "ok": True,
-            "user": {
-                "profile": {
-                    "display_name": "Alice Nguyen",
-                    "real_name": "Alice N.",
-                    "image_192": "https://avatars.slack-edge.com/2026-08-10/alice_192.png",
-                }
-            },
-        }
-
-        expected = {
-            "display_name": "Alice Nguyen",
-            "avatar_url": "https://avatars.slack-edge.com/2026-08-10/alice_192.png",
-        }
+    def test_profile_cache_uses_member_and_revalidates_current_grant(self):
+        expected = {"display_name": "Alice Nguyen", "avatar_url": "https://avatars.slack-edge.com/alice.png"}
         self.assertEqual(SlackBridgeClient.get_user_profile("U123"), expected)
         self.assertEqual(SlackBridgeClient.get_user_profile("U123"), expected)
-        mock_get_client.return_value.users_info.assert_called_once_with(user="U123")
+        self.assertEqual(len(self.calls), 1)
+        type(self.a).objects.update(status="paused")
+        self.assertEqual(SlackBridgeClient.get_user_profile("U123"), {"display_name": "U123", "avatar_url": ""})
+        self.assertEqual(len(self.calls), 1)
+        self.bot.assert_not_called()
 
-    @patch("integrations.services.community_bridge.slack.SlackBridgeClient.get_client")
-    def test_profile_rejects_unapproved_avatar_host(self, mock_get_client):
-        mock_get_client.return_value.users_info.return_value = {
-            "ok": True,
-            "user": {
-                "profile": {
-                    "display_name": "Alice",
-                    "image_192": "https://evil.example/alice.png",
-                }
-            },
-        }
+    def test_profile_rejects_unapproved_avatar_host(self):
+        self.profile = {"display_name": "Alice", "image_192": "https://outside.invalid/avatar.png"}
+        self.assertEqual(SlackBridgeClient.get_user_profile("U123"), {"display_name": "Alice", "avatar_url": ""})
 
-        self.assertEqual(
-            SlackBridgeClient.get_user_profile("U123"),
-            {"display_name": "Alice", "avatar_url": ""},
-        )
-
-    @patch("integrations.services.community_bridge.slack.SlackBridgeClient.get_client")
-    def test_message_text_resolves_user_and_unlabelled_channel_once(self, mock_get_client):
-        mock_get_client.return_value.users_info.return_value = {
-            "ok": True,
-            "user": {"profile": {"display_name": "Alice Nguyen"}},
-        }
-        mock_get_client.return_value.conversations_info.return_value = {
-            "ok": True,
-            "channel": {"name": "general"},
-        }
-
-        raw_text = (
-            "Ask <@U123> in <#C123> or <#C456|announcements>; "
-            "notify <!channel>."
-        )
+    def test_message_text_resolves_public_mentions_with_member_authority(self):
+        text = "Ask <@U123> in <#CROOM> or <#C456|announcements>; notify <!channel>."
         expected = "Ask @Alice Nguyen in #general or #announcements; notify @channel."
+        self.assertEqual(SlackBridgeClient.resolve_message_text(text), expected)
+        self.assertEqual(SlackBridgeClient.resolve_message_text(text), expected)
+        self.assertEqual([method for _, method, _ in self.calls].count("users_info"), 1)
+        self.assertEqual([method for _, method, _ in self.calls].count("conversations_info"), 2)
+        self.assertEqual({grant for grant, _, _ in self.calls}, {self.a.pk})
+        self.bot.assert_not_called()
 
-        self.assertEqual(SlackBridgeClient.resolve_message_text(raw_text), expected)
-        self.assertEqual(SlackBridgeClient.resolve_message_text(raw_text), expected)
-        mock_get_client.return_value.users_info.assert_called_once_with(user="U123")
-        mock_get_client.return_value.conversations_info.assert_called_once_with(channel="C123")
+    def test_private_members_unmapped_and_wrong_workspace_names_are_not_probed(self):
+        for audience, visibility in (("members", "public"), ("community", "private")):
+            self.channel.audience, self.channel.slack_visibility = audience, visibility
+            self.channel.save()
+            self.assertEqual(SlackBridgeClient.get_channel_display_name("CROOM"), "CROOM")
+        self.assertEqual(SlackBridgeClient.get_channel_display_name("CUNKNOWN"), "CUNKNOWN")
+        self.assertEqual(SlackBridgeClient.get_user_profile("U123", workspace_id="TOTHER")["display_name"], "U123")
+        self.assertEqual(self.calls, [])
 
-    @patch("integrations.services.community_bridge.slack.SlackBridgeClient.get_client")
-    def test_message_text_uses_safe_fallback_when_slack_lookup_fails(self, mock_get_client):
-        mock_get_client.return_value.users_info.return_value = {"ok": False}
-        mock_get_client.return_value.conversations_info.return_value = {"ok": False}
+    def test_source_privacy_change_never_reuses_an_old_channel_label(self):
+        self.assertEqual(SlackBridgeClient.get_channel_display_name("CROOM"), "general")
+        for key in ("is_private", "is_archived", "is_ext_shared"):
+            self.raw[key] = True
+            self.assertEqual(SlackBridgeClient.get_channel_display_name("CROOM"), "CROOM")
+            self.raw[key] = False
 
-        self.assertEqual(
-            SlackBridgeClient.resolve_message_text("Ask <@U404> in <#C404>"),
-            "Ask @user in #channel",
-        )
+    def test_new_consent_or_missing_user_scope_cannot_reuse_profile_cache(self):
+        SlackBridgeClient.get_user_profile("U123")
+        self.a.consented_at = timezone.now()
+        self.a.save()
+        SlackBridgeClient.get_user_profile("U123")
+        self.assertEqual(len(self.calls), 2)
+        for grant in (self.a, self.b):
+            grant.connection.scopes.remove("users:read")
+            grant.connection.save()
+        self.assertEqual(SlackBridgeClient.get_user_profile("U123")["display_name"], "U123")
+        self.assertEqual(len(self.calls), 2)
+
+    def test_message_text_uses_safe_fallback_without_a_reader(self):
+        type(self.a).objects.update(status="paused")
+        self.assertEqual(SlackBridgeClient.resolve_message_text("Ask <@U404> in <#C404>"), "Ask @user in #channel")
+        self.assertEqual(self.calls, [])
 
     @patch("integrations.services.community_bridge.slack.SlackBridgeClient.get_client")
     def test_messages_from_chat_enable_native_slack_link_unfurls(self, mock_get_client):
@@ -166,67 +165,55 @@ class SlackBridgeClientProfileTests(TestCase):
         )
 
 
-class RecentSlackBridgeReconciliationCommandTests(TestCase):
-    def setUp(self):
-        CommunityBridgeChannel.objects.create(
-            audience="community",
-            slack_workspace_id="T123",
-            slack_channel_id="C123",
-            slack_channel_name="general",
-            destination_platform=CommunityBridgePlatform.BUZZ,
-            destination_channel_id="relay-general",
-            destination_channel_name="general",
-            enabled=True,
-            sync_replies=True,
-            sync_deletes=True,
-        )
 
-    @patch(
-        "integrations.management.commands."
-        "reconcile_recent_community_bridge_slack.call_command"
-    )
-    def test_reconciles_each_enabled_mapping_with_bounded_apply(self, mock_reconcile):
-        def write_report(command_name, **kwargs):
-            self.assertEqual(
-                command_name, "reconcile_community_bridge_slack_threads"
-            )
-            kwargs["stdout"].write(
-                json.dumps(
-                    {
-                        "totals": {
-                            "errors": 0,
-                            "mismatches": 2,
-                            "repairs_enqueued": 2,
-                            "links_restored": 0,
-                        }
-                    }
-                )
-            )
+    def legacy_text(self, text="<@UOTHER>", ids=("UOTHER",)):
+        from integrations.services.community_bridge.member_metadata import prepare_legacy_text
+        return prepare_legacy_text({"channel_id": self.channel.pk, "source_platform": "buzz",
+            "delivery_type": "create", "target_channel_id": "CROOM",
+            "channel": {"slack_workspace_id": "TTEST"}, "payload": {}}, text, ids)
 
-        mock_reconcile.side_effect = write_report
-        output = StringIO()
+    def test_legacy_mentions_use_member_and_recheck_cache_authority(self):
+        self.assertEqual(self.legacy_text(), "<@UOTHER>")
+        self.assertEqual([m for _, m, _ in self.calls], ["conversations_info", "users_info"])
+        self.calls.clear()
+        self.legacy_text()
+        self.assertEqual([m for _, m, _ in self.calls], ["conversations_info"])
+        type(self.a).objects.update(status="paused")
+        self.calls.clear()
+        from integrations.services.slack_dm_mirror import SlackDmMirrorAuthorizationError
+        with self.assertRaises(SlackDmMirrorAuthorizationError):
+            self.legacy_text()
+        self.assertEqual(self.calls, [])
+        self.bot.assert_not_called()
 
-        call_command(
-            "reconcile_recent_community_bridge_slack",
-            lookback_seconds=3600,
-            max_roots_per_channel=50,
-            maximum_history_messages=500,
-            wait_seconds=30,
-            stdout=output,
-        )
+    def test_legacy_mentions_do_not_read_private_members_or_held_channels(self):
+        from integrations.services.slack_dm_mirror import SlackDmMirrorAuthorizationError
+        for field, value in (("audience", "members"), ("hold_reason", "admin"),
+                             ("slack_visibility", "private"), ("slack_archived", True)):
+            original = getattr(self.channel, field)
+            setattr(self.channel, field, value)
+            self.channel.save()
+            with self.assertRaises(SlackDmMirrorAuthorizationError):
+                self.legacy_text()
+            setattr(self.channel, field, original)
+            self.channel.save()
+        self.assertEqual(self.calls, [])
 
-        kwargs = mock_reconcile.call_args.kwargs
-        self.assertEqual(kwargs["slack_channel_id"], ["C123"])
-        self.assertTrue(kwargs["include_unthreaded"])
-        self.assertTrue(kwargs["apply"])
-        self.assertTrue(kwargs["confirm_historical_repair"])
-        self.assertEqual(kwargs["max_roots"], 50)
-        self.assertEqual(kwargs["maximum_history_messages"], 500)
-        self.assertEqual(kwargs["wait_seconds"], 30)
-        self.assertEqual(
-            json.loads(output.getvalue()),
-            {"channels": 1, "errors": 0, "mismatches": 2, "repairs": 2},
-        )
+    def test_legacy_mentions_recheck_source_before_cached_user(self):
+        from integrations.services.slack_dm_mirror import SlackDmMirrorAuthorizationError
+        self.legacy_text()
+        self.raw["is_private"] = True
+        self.calls.clear()
+        with self.assertRaises(SlackDmMirrorAuthorizationError):
+            self.legacy_text()
+        self.assertEqual([m for _, m, _ in self.calls], ["conversations_info"])
+
+    def test_legacy_plain_text_and_co_working_need_no_slack_read(self):
+        type(self.a).objects.update(status="paused")
+        self.assertEqual(self.legacy_text("Book today", ()), "Book today")
+        self.assertEqual(self.calls, [])
+
+
 
 
 class _FakeSentMessage:
@@ -830,7 +817,7 @@ class CommunityBridgeSetupCommandTests(TestCase):
         out = StringIO()
 
         call_command(
-            "upsert_community_bridge_channel",
+            "upsert_discord_bridge_channel",
             slack_channel_id="C-SLACK-PILOT",
             slack_channel_name="community-pilot",
             discord_url="https://discord.com/channels/1492063515987410957/1492063517191180340",
@@ -850,40 +837,45 @@ class CommunityBridgeSetupCommandTests(TestCase):
         self.assertTrue(channel.sync_deletes)
         self.assertTrue(channel.sync_replies)
 
-    def test_command_creates_generic_buzz_mapping(self):
-        out = StringIO()
-
-        call_command(
-            "upsert_community_bridge_channel",
-            slack_channel_id="C-MLAI-CHAT",
-            slack_channel_name="community",
-            slack_workspace_id="T-MLAI",
-            destination_platform=CommunityBridgePlatform.BUZZ,
-            destination_workspace_id="chat.mlai.au",
-            destination_channel_id="nostr-channel-event-id",
-            destination_channel_name="community",
-            stdout=out,
-        )
-
-        payload = json.loads(out.getvalue())
-        channel = CommunityBridgeChannel.objects.get(slack_channel_id="C-MLAI-CHAT")
-        self.assertEqual(payload["destination_platform"], CommunityBridgePlatform.BUZZ)
-        self.assertEqual(channel.slack_workspace_id, "T-MLAI")
-        self.assertEqual(channel.destination_workspace_id, "chat.mlai.au")
-        self.assertEqual(channel.destination_channel_id, "nostr-channel-event-id")
-        self.assertEqual(channel.discord_channel_id, "")
-
-    def test_command_requires_workspace_for_buzz_mapping(self):
-        with self.assertRaisesMessage(
-            CommandError,
-            "--slack-workspace-id is required for MLAI Chat mappings.",
-        ):
+    def test_discord_command_rejects_manual_buzz_creation(self):
+        with self.assertRaisesMessage(CommandError, "MLAI Chat mappings are managed by member sync"):
             call_command(
-                "upsert_community_bridge_channel",
-                slack_channel_id="C-MLAI-CHAT",
-                destination_platform=CommunityBridgePlatform.BUZZ,
-                destination_channel_id="nostr-channel-event-id",
+                "upsert_discord_bridge_channel", slack_channel_id="CSYNTHETIC",
+                slack_workspace_id="TSYNTHETIC", destination_platform=CommunityBridgePlatform.BUZZ,
+                destination_channel_id="00000000-0000-0000-0000-000000000001",
             )
+        self.assertFalse(CommunityBridgeChannel.objects.filter(slack_channel_id="CSYNTHETIC").exists())
+
+    def test_discord_command_cannot_repoint_existing_chat_room(self):
+        room = CommunityBridgeChannel.objects.create(
+            slack_channel_id="CSYNTHETIC", slack_workspace_id="TSYNTHETIC", audience="members",
+            destination_platform=CommunityBridgePlatform.BUZZ,
+            destination_channel_id="00000000-0000-0000-0000-000000000001",
+        )
+        with self.assertRaisesMessage(CommandError, "cannot be replaced with Discord"):
+            call_command("upsert_discord_bridge_channel", slack_channel_id="CSYNTHETIC",
+                         discord_guild_id="123", discord_channel_id="456")
+        room.refresh_from_db()
+        self.assertEqual(room.destination_platform, CommunityBridgePlatform.BUZZ)
+        self.assertEqual(room.audience, "members")
+        self.assertEqual(room.destination_channel_id, "00000000-0000-0000-0000-000000000001")
+
+    def test_concurrent_chat_mapping_cannot_be_repointed_after_initial_check(self):
+        from django.db import IntegrityError, transaction
+
+        room = CommunityBridgeChannel.objects.create(
+            slack_channel_id="CRACED", destination_platform=CommunityBridgePlatform.BUZZ,
+            destination_channel_id="00000000-0000-0000-0000-000000000002", audience="members",
+        )
+        # Simulate the preflight reads missing a concurrently created Chat row.
+        # The scoped upsert must still reject it at the database boundary.
+        with patch("django.db.models.query.QuerySet.first", return_value=None):
+            with self.assertRaises(IntegrityError), transaction.atomic():
+                call_command("upsert_discord_bridge_channel", slack_channel_id="CRACED",
+                             discord_guild_id="123", discord_channel_id="456")
+        room.refresh_from_db()
+        self.assertEqual(room.destination_platform, CommunityBridgePlatform.BUZZ)
+        self.assertEqual(room.audience, "members")
 
     def test_command_updates_existing_mapping(self):
         CommunityBridgeChannel.objects.create(
@@ -901,7 +893,7 @@ class CommunityBridgeSetupCommandTests(TestCase):
         out = StringIO()
 
         call_command(
-            "upsert_community_bridge_channel",
+            "upsert_discord_bridge_channel",
             slack_channel_id="C-SLACK-PILOT",
             slack_channel_name="community-pilot",
             discord_guild_id="1492063515987410957",
@@ -935,7 +927,7 @@ class CommunityBridgeSetupCommandTests(TestCase):
             "Discord channel 1492063517191180340 is already mapped to Slack channel C-SLACK-ONE.",
         ):
             call_command(
-                "upsert_community_bridge_channel",
+                "upsert_discord_bridge_channel",
                 slack_channel_id="C-SLACK-TWO",
                 discord_url="https://discord.com/channels/1492063515987410957/1492063517191180340",
             )
@@ -1686,123 +1678,6 @@ class CommunityBridgeInspectionTests(TestCase):
         self.assertNotIn("private payload", output.getvalue())
 
 
-@override_settings(SLACK_BRIDGE_BOT_TOKEN="xoxb-bridge")
-class CommunityBridgeSlackThreadRepairTests(TestCase):
-    def setUp(self):
-        self.channel = CommunityBridgeChannel.objects.create(audience="community",
-            slack_workspace_id="TMLAI",
-            slack_channel_id="CGENERAL",
-            slack_channel_name="general",
-            destination_platform=CommunityBridgePlatform.BUZZ,
-            destination_workspace_id="chat.mlai.au",
-            destination_channel_id="a" * 32,
-            destination_channel_name="general",
-        )
-        self.root_message_id = "1786660929.427979"
-        self.reply_message_id = "1786666478.295369"
-        self.thread = [
-            {
-                "ts": self.root_message_id,
-                "user": "UROOBOT",
-                "bot_id": "BROO",
-                "text": "Alan earned points",
-            },
-            {
-                "ts": self.reply_message_id,
-                "thread_ts": self.root_message_id,
-                "user": "USAM",
-                "text": "Great flex",
-            },
-        ]
-
-    def _command(self, phase):
-        output = StringIO()
-        call_command(
-            "repair_community_bridge_slack_thread",
-            slack_channel_id=self.channel.slack_channel_id,
-            root_message_id=self.root_message_id,
-            phase=phase,
-            apply=True,
-            confirm_historical_repair=True,
-            stdout=output,
-        )
-        return json.loads(output.getvalue())
-
-    @patch(
-        "integrations.management.commands.repair_community_bridge_slack_thread."
-        "SlackBridgeClient.get_thread_messages"
-    )
-    def test_root_phase_enqueues_app_authored_root_with_fresh_relay_timestamp(self, mock_thread):
-        mock_thread.return_value = self.thread
-        started_at = timezone.now()
-
-        result = self._command("root")
-        repeated = self._command("root")
-
-        delivery = CommunityBridgeDelivery.objects.get()
-        self.assertEqual(result["enqueued"], 1)
-        self.assertEqual(repeated["existing"], 1)
-        self.assertEqual(CommunityBridgeDelivery.objects.count(), 1)
-        self.assertEqual(delivery.delivery_type, CommunityBridgeDeliveryType.CREATE)
-        self.assertEqual(delivery.source_message_id, self.root_message_id)
-        self.assertEqual(delivery.source_parent_message_id, "")
-        self.assertEqual(delivery.payload["source_author_id"], "UROOBOT")
-        self.assertEqual(delivery.payload["metadata"]["slack_raw_text"], "Alan earned points")
-        self.assertEqual(delivery.payload["metadata"]["slack_created_at"], 1786660929)
-        self.assertGreaterEqual(delivery.created_at, started_at)
-        self.assertLessEqual(delivery.created_at, timezone.now())
-
-    @patch(
-        "integrations.management.commands.repair_community_bridge_slack_thread."
-        "SlackBridgeClient.get_thread_messages"
-    )
-    def test_delete_then_recreate_phase_reparents_existing_top_level_reply(self, mock_thread):
-        mock_thread.return_value = self.thread
-        root_destination_id = "b" * 64
-        CommunityBridgeMessageLink.objects.create(
-            channel=self.channel,
-            source_platform=CommunityBridgePlatform.SLACK,
-            source_channel_id=self.channel.slack_channel_id,
-            source_message_id=self.root_message_id,
-            destination_platform=CommunityBridgePlatform.BUZZ,
-            destination_channel_id=self.channel.destination_channel_id,
-            destination_message_id=root_destination_id,
-        )
-        orphan = CommunityBridgeMessageLink.objects.create(
-            channel=self.channel,
-            source_platform=CommunityBridgePlatform.SLACK,
-            source_channel_id=self.channel.slack_channel_id,
-            source_message_id=self.reply_message_id,
-            destination_platform=CommunityBridgePlatform.BUZZ,
-            destination_channel_id=self.channel.destination_channel_id,
-            destination_message_id="c" * 64,
-            destination_parent_message_id="",
-        )
-
-        deleted = self._command("delete_orphans")
-        orphan.source_deleted_at = timezone.now()
-        orphan.destination_deleted_at = timezone.now()
-        orphan.save(update_fields=["source_deleted_at", "destination_deleted_at"])
-        recreate_started_at = timezone.now()
-        recreated = self._command("recreate_orphans")
-
-        deliveries = list(CommunityBridgeDelivery.objects.order_by("id"))
-        self.assertEqual(deleted["enqueued"], 1)
-        self.assertEqual(recreated["enqueued"], 1)
-        self.assertEqual(
-            [delivery.delivery_type for delivery in deliveries],
-            [CommunityBridgeDeliveryType.DELETE, CommunityBridgeDeliveryType.CREATE],
-        )
-        self.assertEqual(deliveries[1].source_parent_message_id, self.root_message_id)
-        self.assertEqual(deliveries[1].payload["text"], "Great flex")
-        self.assertEqual(
-            deliveries[1].payload["metadata"]["slack_created_at"],
-            1786666478,
-        )
-        self.assertGreaterEqual(deliveries[1].created_at, recreate_started_at)
-        self.assertLessEqual(deliveries[1].created_at, timezone.now())
-
-
 @override_settings(
     SLACK_BRIDGE_BOT_TOKEN="xoxb-bridge",
     BUZZ_BRIDGE_ADAPTER_URL="http://buzz-bridge-adapter:8090",
@@ -1905,7 +1780,7 @@ class BuzzCommunityBridgeWorkerTests(TransactionTestCase):
 
         asyncio.run(self.client.process_pending_deliveries_once(limit=5))
 
-        mock_resolve_text.assert_called_once_with("Ask <@U999> in <#C999>")
+        mock_resolve_text.assert_called_once_with("Ask <@U999> in <#C999>", workspace_id=self.channel.slack_workspace_id)
         self.assertIn("Ask @Alice Nguyen in #general", mock_deliver.call_args.kwargs["text"])
         self.assertNotIn("<@U999>", mock_deliver.call_args.kwargs["text"])
 

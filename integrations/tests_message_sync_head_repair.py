@@ -6,7 +6,7 @@ from unittest.mock import Mock, patch
 
 from django.test import SimpleTestCase, override_settings
 
-from integrations.services.message_sync import head_repair as repair, history, private_history
+from integrations.services.message_sync import head_repair as repair, history, private_history, member_history
 from integrations.services.message_sync.scheduler import validate_checkpoint
 
 
@@ -309,14 +309,14 @@ class HeadRepairPageIntegrationTests(SimpleTestCase):
         ), patch.object(history.CommunityBridgeChannel.objects, "select_for_update") as channel_lock, patch.object(
             history.SlackDmMirrorConversation.objects, "filter"
         ) as private_owner, patch.object(
-            history.SlackBridgeClient, "get_client", return_value=client
+            member_history, "guard_page"
         ), patch.object(history, "finish_job") as finish:
             channel_lock.return_value.get.return_value = channel
             private_owner.return_value.exists.return_value = False
-            history.public_page(lease, state)
+            history._public_page(lease, state, client=client, member_authority="synthetic-member-scope")
             self.assertEqual(state.head_cursor["completed_upper"], f"{self.now}.999999")
             self.assertEqual(finish.call_args.kwargs["delay_seconds"], 120)
-            history.public_page(lease, state)
+            history._public_page(lease, state, client=client, member_authority="synthetic-member-scope")
         private_owner.assert_called_with(slack_workspace_id="T1", slack_conversation_id="C1")
         self.assertEqual(private_owner.call_count, 2)
         self.assertEqual(private_owner.return_value.exists.call_count, 2)
