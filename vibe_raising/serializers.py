@@ -277,6 +277,7 @@ class VibeRaisingMonthlyUpdateUpsertSerializer(AliasInputSerializer):
         "manualDocumentIds": ("manual_document_ids",),
         "manualSummary": ("manual_summary",),
         "metricSuggestions": ("metric_suggestions",),
+        "startupOverview": ("startup_overview",),
         "next30Days": ("next_30_days",),
         "displayConfig": ("display_config",),
         "financialSnapshot": ("financial_snapshot",),
@@ -295,6 +296,7 @@ class VibeRaisingMonthlyUpdateUpsertSerializer(AliasInputSerializer):
         required=False,
         default="ready",
     )
+    startupOverview = serializers.CharField(allow_blank=True, required=False, max_length=2000)
     summary = serializers.CharField(allow_blank=True, allow_null=True, required=False, default="")
     sourceUrl = serializers.URLField(allow_blank=True, allow_null=True, required=False)
     videoUrl = serializers.URLField(allow_blank=True, allow_null=True, required=False)

@@ -110,7 +110,19 @@ def capture_snapshot(organization, month, *, run=None, manual_metrics=None, base
     payload = financial_snapshot_from_metrics(period, metrics, definitions)
     payload.pop("hash", None)
     payload["organization_id"] = organization.pk
-    payload["startup"] = {"id": organization.pk, "name": organization.name, "stage": profile.stage, "description": profile.short_description}
+    # This small context survives the worker's removal of the larger, deduplicated
+    # startup_context. Both writer and verifier use this frozen description.
+    background = request.get("startup_context") or {}
+    payload["startup"] = {
+        "id": organization.pk, "name": background.get("company_name", organization.name),
+        "stage": background.get("stage", profile.stage),
+        "description": background.get("short_description", profile.short_description),
+        "short_description": background.get("short_description", profile.short_description),
+        "problem_solved": background.get("problem_solved", getattr(profile, "problem_solved", "")),
+        "target_audience": background.get("target_audience", getattr(profile, "target_audience", "")),
+    }
+    if run is not None and "startup_overview" in request:
+        payload["startup"]["startup_overview"] = request["startup_overview"]
     payload["config_version"] = profile.reporting_config_version
     payload["source_providers"] = sorted(set((run.run_request or {}).get("input_sources", [])) | {item.get("source_provider") for item in metrics if item.get("source_provider")}) if run else sorted({item.get("source_provider") for item in metrics if item.get("source_provider")})
     from startup_updates.services import build_monthly_financial_snapshot
@@ -231,10 +243,16 @@ def capture_snapshot(organization, month, *, run=None, manual_metrics=None, base
 
 
 def revision_payload(revision, *, include_evidence=True):
+    evidence = copy.deepcopy(revision.snapshot.payload) if include_evidence else None
+    if evidence is not None and isinstance((revision.structured_memo or {}).get("financial_history"), dict):
+        from startup_updates.financial_history import history_review_evidence
+        # This server-resolved input is private review context. Missing legacy or
+        # invalid references stay explicit so workers cannot use newer evidence.
+        evidence["financial_history_evidence"] = history_review_evidence(revision)
     return {
         "revisionId": revision.pk, "revision": revision.number,
         "revisionHash": revision.content_hash, "snapshotId": revision.snapshot_id,
-        "evidenceSnapshot": revision.snapshot.payload if include_evidence else None,
+        "evidenceSnapshot": evidence,
         "audience": revision.audience,
     }
 
@@ -278,7 +296,12 @@ def save_revision(draft, memo, *, snapshot, audience="private", expected_revisio
     # Identity metadata is owned by the server and survives manual/generation edits.
     memo = memo_with_month_identity(draft, copy.deepcopy(memo))
     from startup_updates.cover_images import retain_cover_image
-    memo = retain_cover_image(memo, current.structured_memo if current else draft.structured_memo or {})
+    previous_memo = current.structured_memo if current else draft.structured_memo or {}
+    memo = retain_cover_image(memo, previous_memo)
+    # Omission by an older client preserves reviewed text; explicit blank clears.
+    # Never replace a saved overview with the current company profile on reads.
+    if "startupOverview" not in memo and "startupOverview" in previous_memo:
+        memo["startupOverview"] = previous_memo["startupOverview"]
     from startup_updates.covers import inherit_cover
     try:
         memo = inherit_cover(copy.deepcopy(memo), current.structured_memo if current else (draft.structured_memo or {}), draft.organization_id)

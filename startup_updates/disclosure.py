@@ -8,7 +8,7 @@ from decimal import Decimal, InvalidOperation
 AGGREGATE_KEYS = {"revenue": "revenue", "monthlyCosts": "costs", "monthly_costs": "costs"}
 ACCEPTED_QUALITIES = {"source_reported", "verified", "founder_asserted"}
 CURRENCIES = {"AUD", "USD", "NZD", "CAD", "GBP", "EUR", "JPY", "CNY", "HKD", "SGD", "CHF", "INR", "KRW", "SEK", "NOK", "DKK", "ZAR", "BRL", "MXN"}
-NARRATIVE_FIELDS = ("summary", "highlights", "challenges", "learnings", "next30Days", "asks")
+NARRATIVE_FIELDS = ("startupOverview", "summary", "highlights", "challenges", "learnings", "next30Days", "asks")
 SHARED_FIELDS = {
     "id", "updateTitle", "monthSequence", "coverImage", "coverImageUrl", "revisionId", "revisionHash", "isoMonth", "month", "monthName", "year", "date", "status", "visibility", "publishedAt",
     *NARRATIVE_FIELDS, "startup", "metrics", "metricEvidence", "displayConfig", "financialChart", "audienceVisibility", "evidenceStatus",
@@ -146,5 +146,7 @@ def shared_update(value: dict, *, metric_items=None, financial_history=None) -> 
     metric_keys = financial_metric_keys(metric_items)
     metric_keys.update(financial_metric_keys([dict(item, key=key) for key, item in (value.get("metricEvidence") or {}).items() if isinstance(item, dict)]))
     for key in NARRATIVE_FIELDS:
+        if key == "startupOverview" and key not in result:
+            continue
         result[key] = shared_narrative(result.get(key), metric_keys=metric_keys)
     return result
