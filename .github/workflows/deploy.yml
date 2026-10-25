@@ -524,7 +524,7 @@ jobs:
           integrations.tests_member_pending_intake_phase4a \
           integrations.tests_message_sync_member_history_phase4b \
           integrations.tests_member_delivery_phase4c \
-          integrations.tests_community_member_send_phase5 integrations.tests_slack_member_directory integrations.tests_slack_member_files integrations.tests_message_sync_repair \
+          integrations.tests_community_member_send_phase5 integrations.tests_slack_member_directory integrations.tests_slack_custom_emoji integrations.tests_slack_member_files integrations.tests_message_sync_repair \
           integrations.tests_community_source_phase6 \
           integrations.tests_community_source_codec_phase6 \
           integrations.tests_community_reader_phase6 \
@@ -745,7 +745,7 @@ jobs:
           integrations.tests_member_pending_intake_phase4a \
           integrations.tests_message_sync_member_history_phase4b \
           integrations.tests_member_delivery_phase4c \
-          integrations.tests_community_member_send_phase5 integrations.tests_slack_member_directory integrations.tests_slack_member_files integrations.tests_message_sync_repair \
+          integrations.tests_community_member_send_phase5 integrations.tests_slack_member_directory integrations.tests_slack_custom_emoji integrations.tests_slack_member_files integrations.tests_message_sync_repair \
           integrations.tests_community_source_phase6 \
           integrations.tests_community_source_codec_phase6 \
           integrations.tests_community_reader_phase6 \

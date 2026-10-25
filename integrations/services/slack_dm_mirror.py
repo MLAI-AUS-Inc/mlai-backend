@@ -4612,7 +4612,7 @@ def _prepare_outbound_echo_metadata(delivery: SlackDmMirrorDelivery) -> None:
         CommunityBridgeDeliveryType.REACTION_ADD,
         CommunityBridgeDeliveryType.REACTION_REMOVE,
     }:
-        reaction = emoji_to_slack_reaction(delivery.encrypted_text)
+        reaction = emoji_to_slack_reaction(delivery.encrypted_text, catalog=getattr(delivery, "_emoji_catalog", {}))
     metadata.update(
         {
             "slack_ts": slack_ts,
@@ -7449,6 +7449,8 @@ def _deliver_private(delivery: SlackDmMirrorDelivery) -> None:
             "The private delivery is no longer authorized."
         )
     _refresh_slack_grant_token_if_due(grant_snapshot)
+    from .slack_custom_emoji import load_catalog, needs_catalog
+    emoji_catalog = load_catalog(grant_snapshot.slack_workspace_id) if needs_catalog(delivery.encrypted_text) else {}
     with transaction.atomic():
         # Consent withdrawal and deletion requests use user->session locks.
         # Keep outbound I/O within the same user-first boundary so a queued
@@ -7511,6 +7513,7 @@ def _deliver_private(delivery: SlackDmMirrorDelivery) -> None:
             )
         conversation.grant = grant
         delivery.conversation = conversation
+        delivery._emoji_catalog = emoji_catalog
         _assert_private_delivery_authorized_locked(
             delivery,
             locked_device=locked_device,
@@ -7551,6 +7554,8 @@ def _deliver_private_batch(claimed: list[SlackDmMirrorDelivery]) -> None:
             "The private delivery batch is no longer authorized."
         )
     _refresh_slack_grant_token_if_due(grant_snapshot)
+    from .slack_custom_emoji import load_catalog, needs_catalog, present
+    emoji_catalog = load_catalog(grant_snapshot.slack_workspace_id) if any(needs_catalog(row.encrypted_text) for row in claimed) else {}
     claimed_ids = [delivery.pk for delivery in claimed]
     with transaction.atomic():
         grant = (
@@ -7614,6 +7619,7 @@ def _deliver_private_batch(claimed: list[SlackDmMirrorDelivery]) -> None:
             rendered_text = render_private_slack_mentions(
                 delivery.encrypted_text, conversation.participant_profiles or {}
             )
+            rendered_text, emojis = present(rendered_text, emoji_catalog)
             from .slack_mentions import DELIVERY_MENTIONS_KEY, DELIVERY_BROADCAST_KEY
             mentions = (delivery.metadata or {}).get(DELIVERY_MENTIONS_KEY) or []
             source_metadata["mention_format_version"] = int(
@@ -7631,6 +7637,7 @@ def _deliver_private_batch(claimed: list[SlackDmMirrorDelivery]) -> None:
                         conversation.participant_buzz_pubkeys or []
                     ),
                     "text": rendered_text,
+                    **({"emojis": emojis} if emojis else {}),
                     "source_workspace_id": conversation.slack_workspace_id,
                     "source_channel_id": conversation.slack_conversation_id,
                     "source_message_id": delivery.source_message_id,
@@ -8128,7 +8135,7 @@ def _deliver_to_slack(delivery: SlackDmMirrorDelivery) -> None:
             CommunityBridgeDeliveryType.REACTION_ADD,
             CommunityBridgeDeliveryType.REACTION_REMOVE,
         }:
-            reaction = emoji_to_slack_reaction(delivery.encrypted_text)
+            reaction = emoji_to_slack_reaction(delivery.encrypted_text, catalog=getattr(delivery, "_emoji_catalog", {}))
             if not reaction:
                 raise SlackDmMirrorError("The reaction is not supported by Slack.")
         echo_key = _slack_echo_key(
@@ -8372,6 +8379,8 @@ def _deliver_to_mlai(delivery: SlackDmMirrorDelivery) -> None:
     rendered_text = render_private_slack_mentions(
         delivery.encrypted_text, conversation.participant_profiles or {}
     )
+    from .slack_custom_emoji import present
+    rendered_text, emojis = present(rendered_text, getattr(delivery, "_emoji_catalog", {}))
     from .slack_mentions import DELIVERY_MENTIONS_KEY, DELIVERY_BROADCAST_KEY
     mentions = (delivery.metadata or {}).get(DELIVERY_MENTIONS_KEY) or []
     result = BuzzBridgeClient.deliver_private(
@@ -8381,6 +8390,7 @@ def _deliver_to_mlai(delivery: SlackDmMirrorDelivery) -> None:
         channel_id=str(conversation.mlai_channel_id),
         participant_pubkeys=list(conversation.participant_buzz_pubkeys or []),
         text=rendered_text,
+        **({"emojis": emojis} if emojis else {}),
         source_workspace_id=conversation.slack_workspace_id,
         source_channel_id=conversation.slack_conversation_id,
         # Queue IDs distinguish successive edits/reactions (slack-event:... or

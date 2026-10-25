@@ -678,7 +678,7 @@ def _target(row, source_id):
     return destination
 
 
-def _wire(row, channel, actor, client, info, *, identity_key=SLACK_STAMP):
+def _wire(row, channel, actor, client, info, *, identity_key=SLACK_STAMP, emoji_catalog=None):
     payload = row.payload or {}
     operation = row.delivery_type
     target = ""
@@ -744,7 +744,7 @@ def _wire(row, channel, actor, client, info, *, identity_key=SLACK_STAMP):
                 reaction = ""
         else:
             reaction = (
-                emoji_to_slack_reaction(str(payload.get("text") or ""))
+                emoji_to_slack_reaction(str(payload.get("text") or ""), catalog=emoji_catalog)
                 if operation == "reaction_add"
                 else ""
             )
@@ -996,14 +996,24 @@ def _same_command(saved, channel, actor):
 def _prepare(delivery, original, authority, actor, saved):
     if saved:
         return saved
+    from integrations.services.slack_custom_emoji import load_catalog, needs_catalog, present
+    catalog = load_catalog(original.slack_workspace_id) if (
+        (delivery.get("source_platform") == "slack" or delivery.get("delivery_type") == "reaction_add")
+        and needs_catalog((delivery.get("payload") or {}).get("text"))
+    ) else {}
     with _fence(delivery, original, authority, actor) as (row, channel, grant, client):
         info = client.verify()
         command = {
             "version": 1,
             "actor": actor,
             "scope": scope_for(channel),
-            "wire": _wire(row, channel, actor, client, info),
+            "wire": _wire(row, channel, actor, client, info, emoji_catalog=catalog),
         }
+        if row.target_platform == "buzz":
+            wire = command["wire"]
+            wire["text"], emojis = present(wire["text"], catalog)
+            if emojis:
+                wire["emojis"] = emojis
         payload = dict(row.payload or {})
         existing = payload.get(MEMBER_STAMP)
         if row.canonical_envelope and existing is None:
