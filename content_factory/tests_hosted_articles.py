@@ -16,7 +16,8 @@ from workflow_runs.models import ContentFactoryRun
 from . import hosted_articles as hosted
 from .activation import founder_context_for_domain
 from .hosted_article_models import HostedArticlePublication, HostedArticleSite
-from .hosted_article_views import HostedArticlePublicationServiceView, HostedArticlePublishView, HostedArticleSiteServiceView
+from .hosted_article_views import (HostedArticlePublicationServiceView, HostedArticlePublishView, HostedArticleSiteServiceView,
+                                   HostedArticleSiteSourceServiceView)
 from .models import ArticlePublishStatus, WrittenArticle
 
 DIGEST = "d" * 64
@@ -182,13 +183,18 @@ class HostedArticleSiteLifecycleTests(TestCase):
         from django.core.management import call_command
         from django.core.management.base import CommandError
 
-        profile = {"domain": self.org.domain, "base_path": "/blog/", "page_size": 24, "card_template": "c",
-                   "detail_main_template": "d", "previous_link_template": "p", "next_link_template": "n", "page_label_template": "l"}
+        build = {"registry_path": "src/articles/articles.json", "body_dir": "src/articles/content",
+                 "build_command": ["npm", "run", "build"], "output_dir": "dist", "publish_prefix": "blog/"}
+        profile = {"domain": self.org.domain, "base_path": "/blog/", "build": {**build, "build_command": "npm run build"}}
         with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as fh:
             json.dump(profile, fh)
+        with self.assertRaises(CommandError):
+            call_command("hosted_article_site", "register", self.org.domain, profile=fh.name, stdout=StringIO())
+        with open(fh.name, "w") as rewrite:
+            json.dump({**profile, "build": build}, rewrite)
         call_command("hosted_article_site", "register", "https://www." + self.org.domain, profile=fh.name, stdout=StringIO())
         site = HostedArticleSite.objects.get(domain=self.org.domain)
-        self.assertEqual((site.state, site.organization, site.profile["page_size"]), ("draft", self.org, 24))
+        self.assertEqual((site.state, site.organization, site.profile["build"]), ("draft", self.org, build))
         with self.assertRaises(CommandError):
             call_command("hosted_article_site", "activate", self.org.domain, stdout=StringIO())
         request = self.factory.put("/synthetic", {"domain": self.org.domain, "proxy_verified": True,
@@ -201,6 +207,67 @@ class HostedArticleSiteLifecycleTests(TestCase):
         call_command("hosted_article_site", "activate", self.org.domain, stdout=StringIO())
         site.refresh_from_db()
         self.assertEqual(site.state, "active")
+
+
+@override_settings(ROO_API_KEY=KEY, INTERNAL_API_KEY=KEY, ARTICLES_HOSTED_SITES_ENABLED=True)
+class HostedArticleSourceTests(TestCase):
+    """Content Factory builds a hosted site from the exact commit MLAI reads from its connected repository."""
+
+    SHA = "c" * 40
+
+    def setUp(self):
+        from .website_models import WebsiteConnection
+
+        self.org = Organization.objects.create(domain="source.example.test", name="Synthetic source")
+        self.site = HostedArticleSite.objects.create(organization=self.org, domain=self.org.domain)
+        self.connection = WebsiteConnection.objects.create(
+            organization=self.org, github_repo="Owner/site", repository_id=42, installation_id="7",
+            site_url="https://www.source.example.test", branch="")
+        self.factory = APIRequestFactory()
+
+    def read(self, repository=None, commit=None):
+        def get(url, **_kwargs):
+            payload = commit if url.endswith("/commits/main") else repository
+            return Mock(status_code=200, json=Mock(return_value=payload), raise_for_status=Mock())
+
+        repository = repository or {"id": 42, "full_name": "owner/site", "default_branch": "main"}
+        commit = commit or {"sha": self.SHA}
+        request = self.factory.get("/synthetic", {"domain": self.site.domain}, HTTP_X_API_KEY=KEY)
+        with patch("integrations.services.github_app.create_installation_access_token", return_value=Mock(token="t")) as mint, \
+             patch("integrations.http_client.get", side_effect=get), patch("integrations.http_client.delete") as revoke:
+            response = HostedArticleSiteSourceServiceView.as_view()(request)
+        return response, mint, revoke
+
+    def test_the_site_is_built_from_its_connected_repositorys_current_commit_with_a_read_token(self):
+        response, mint, revoke = self.read()
+        self.assertEqual(response.status_code, 200, response.data)
+        self.assertEqual(response.data, {"githubRepo": "Owner/site", "repositoryId": 42, "branch": "main", "sha": self.SHA})
+        self.assertEqual(mint.call_args.kwargs["permission_mode"], "read")
+        self.assertEqual(mint.call_args.kwargs["repository_id"], 42)
+        revoke.assert_called_once()
+
+    def test_a_different_repository_or_an_unreadable_commit_is_refused(self):
+        response, _, revoke = self.read(repository={"id": 43, "full_name": "owner/site", "default_branch": "main"})
+        self.assertEqual((response.status_code, response.data["reason"]), (409, "hosted_source_mismatch"))
+        revoke.assert_called_once()
+        response, _, _ = self.read(commit={"sha": "main"})
+        self.assertEqual((response.status_code, response.data["reason"]), (503, "hosted_source_unavailable"))
+
+    def test_the_source_must_be_one_connected_repository(self):
+        from .website_models import WebsiteConnection
+
+        WebsiteConnection.objects.create(organization=self.org, github_repo="owner/other", installation_id="7",
+                                         site_url="https://other.example.test")
+        self.assertEqual(self.read()[0].status_code, 200)
+        WebsiteConnection.objects.create(organization=self.org, github_repo="owner/copy", installation_id="7",
+                                         site_url="https://source.example.test")
+        self.assertEqual(self.read()[0].data["reason"], "hosted_source_ambiguous")
+        WebsiteConnection.objects.filter(organization=self.org).update(state="disconnected")
+        self.assertEqual(self.read()[0].data["reason"], "hosted_source_not_connected")
+        request = self.factory.get("/synthetic", {"domain": "missing.example.test"}, HTTP_X_API_KEY=KEY)
+        self.assertEqual(HostedArticleSiteSourceServiceView.as_view()(request).status_code, 404)
+        request = self.factory.get("/synthetic", {"domain": self.site.domain})
+        self.assertEqual(HostedArticleSiteSourceServiceView.as_view()(request).status_code, 403)
 
 
 @override_settings(ROO_API_KEY=KEY, INTERNAL_API_KEY=KEY, ARTICLES_HOSTED_SITES_ENABLED=True)

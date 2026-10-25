@@ -43,6 +43,23 @@ class HostedArticleSiteServiceView(APIView):
         return Response(hosted.site_render_state(site))
 
 
+class HostedArticleSiteSourceServiceView(APIView):
+    """Content Factory reads which repository commit a hosted site's next build checks out."""
+
+    authentication_classes = []
+    permission_classes = [HasRooApiKey]
+
+    def get(self, request):
+        domain = hosted.normalized_domain(request.query_params.get("domain"))
+        site = HostedArticleSite.objects.filter(domain=domain).first()
+        if site is None:
+            return Response({"reason": "hosted_site_not_found", "detail": "No hosted site for this domain."}, status=404)
+        try:
+            return Response(hosted.site_source(site))
+        except hosted.HostedPublishError as exc:
+            return _error(exc)
+
+
 class HostedArticlePublicationServiceView(APIView):
     """Content Factory reports rendering, upload and live-check progress for one publication."""
 
