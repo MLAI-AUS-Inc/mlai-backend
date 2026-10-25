@@ -76,9 +76,11 @@ class VolunteerTests(TestCase):
             is_superuser=admin,
             email_verified_at=timezone.now(),
         )
-        CommunityChatDevice.objects.create(
-            user=user, public_key=key * 64, status="verified"
+        enrolled = timezone.now() - timedelta(minutes=2)
+        device = CommunityChatDevice.objects.create(
+            user=user, public_key=key * 64, status="verified", verified_at=enrolled,
         )
+        CommunityChatDevice.objects.filter(pk=device.pk).update(created_at=enrolled)
         return user
 
     def receipt(
@@ -239,6 +241,65 @@ class VolunteerTests(TestCase):
         self.assertEqual(Ledger.objects.filter(user=self.member).count(), 2)
         self.assertEqual(VolunteerMilestone.objects.filter(user=self.member).count(), 1)
         self.assertTrue(journey(self.member)["current_level"]["bonus_awarded"])
+
+    @override_settings(COMMUNITY_CHAT_VOLUNTEER_AWARDS_ENABLED=False,
+                       COMMUNITY_CHAT_VOLUNTEER_INTRO_REWARDS_ENABLED=True,
+                       COMMUNITY_CHAT_VOLUNTEER_INTRO_ACTIVE_FROM="2020-01-01T00:00:00Z",
+                       COMMUNITY_CHAT_VOLUNTEER_ADVICE_REWARDS_ENABLED=False,
+                       COMMUNITY_CHAT_VOLUNTEER_BONUSES_ENABLED=False)
+    def test_intro_only_gate_credits_chat_only_wallet_without_other_rewards(self):
+        from community_chat.volunteer.access import awards_enabled
+
+        self.assertIsNone(self.member.slack_id)
+        receipt = self.receipt()
+        self.assertEqual(receipt.status, "processed")
+        self.assertEqual(PointsService.get_balance(self.member)["balance"], 4)
+        self.assertEqual(Ledger.objects.filter(user=self.member).count(), 1)
+        self.assertFalse(awards_enabled("boost_startup"))
+        self.assertFalse(awards_enabled("helpful_answer"))
+        self.assertEqual(self.useful_answer().error, "awards_disabled")
+
+    @override_settings(COMMUNITY_CHAT_VOLUNTEER_AWARDS_ENABLED=False,
+                       COMMUNITY_CHAT_VOLUNTEER_INTRO_REWARDS_ENABLED=True,
+                       COMMUNITY_CHAT_VOLUNTEER_INTRO_ACTIVE_FROM="",
+                       COMMUNITY_CHAT_VOLUNTEER_BONUSES_ENABLED=False)
+    def test_intro_specific_gate_requires_explicit_activation_boundary(self):
+        receipt = self.receipt()
+        self.assertEqual(receipt.error, "action_inactive")
+        self.assertFalse(Ledger.objects.filter(user=self.member).exists())
+
+    @override_settings(COMMUNITY_CHAT_VOLUNTEER_AWARDS_ENABLED=False,
+                       COMMUNITY_CHAT_VOLUNTEER_INTRO_REWARDS_ENABLED=True,
+                       COMMUNITY_CHAT_VOLUNTEER_INTRO_ACTIVE_FROM="2099-01-01T00:00:00Z",
+                       COMMUNITY_CHAT_VOLUNTEER_BONUSES_ENABLED=False)
+    def test_intro_specific_boundary_does_not_retroactively_pay_old_posts(self):
+        self.assertEqual(self.receipt().error, "action_inactive")
+        self.assertFalse(Ledger.objects.filter(user=self.member).exists())
+
+    @override_settings(COMMUNITY_CHAT_VOLUNTEER_AWARDS_ENABLED=False,
+                       COMMUNITY_CHAT_VOLUNTEER_INTRO_REWARDS_ENABLED=True,
+                       COMMUNITY_CHAT_VOLUNTEER_INTRO_ACTIVE_FROM="2020-01-01T00:00:00Z",
+                       COMMUNITY_CHAT_VOLUNTEER_BONUSES_ENABLED=False)
+    def test_intro_deduplicates_other_devices_and_a_later_slack_link(self):
+        from roo.views import award_first_channel_post_bonus
+
+        first = self.receipt()
+        enrolled = timezone.now() - timedelta(minutes=2)
+        device = CommunityChatDevice.objects.create(user=self.member, public_key="e" * 64,
+            status="verified", verified_at=enrolled)
+        CommunityChatDevice.objects.filter(pk=device.pk).update(created_at=enrolled)
+        second = self.receipt(key="second-device-intro", actor="e")
+        self.assertEqual(first.recognition_id, second.recognition_id)
+        self.member.slack_id = "ULINKEDLATER"
+        self.member.save(update_fields=["slack_id"])
+        self.assertFalse(award_first_channel_post_bonus("ULINKEDLATER", "CSTART")[0])
+        self.assertEqual(PointsService.get_balance(self.member)["balance"], 4)
+        self.assertEqual(Ledger.objects.filter(user=self.member).count(), 1)
+
+    def test_revoked_native_device_cannot_issue_receipts(self):
+        CommunityChatDevice.objects.filter(user=self.member).update(revoked_at=timezone.now())
+        with self.assertRaisesMessage(VolunteerError, "member_unavailable"):
+            self.receipt()
 
     def test_zero_wallet_and_legacy_unknown_are_distinct(self):
         self.assertEqual(journey(self.member)["current_level"]["name"], "MLAI Curious")

@@ -1900,7 +1900,8 @@ if slugs != expected:
 
     if [ "\$bridge_worker_enabled" = "1" ]; then
         echo "🌉 Verifying the current member sync worker..."
-        docker compose exec -T bridge-worker python manage.py message_sync_status --check --local-worker
+        # Compose exec still attaches stdin with -T; preserve the SSH script.
+        docker compose exec -T bridge-worker python manage.py message_sync_status --check --local-worker </dev/null
     fi
 
     echo "🛠️ Verifying external Django admin assets..."

@@ -86,11 +86,17 @@ class DeploymentRuntimeChecksTests(unittest.TestCase):
             line for line in DEPLOY_SCRIPT.splitlines()
             if line.strip().startswith("running_release=")
         )
-        sync_probe = next(
+        sync_probes = [
             line for line in DEPLOY_SCRIPT.splitlines()
-            if "if docker compose exec -T bridge-worker" in line
-        )
-        for probe in (release_probe, sync_probe + "\n:; fi"):
+            if "docker compose exec -T bridge-worker" in line
+            and "message_sync_status" in line
+        ]
+        probes = [release_probe, *[
+            probe + "\n:; fi" if probe.strip().startswith("if ") else probe
+            for probe in sync_probes
+        ]]
+        self.assertEqual(len(sync_probes), 2)
+        for probe in probes:
             with self.subTest(probe=probe):
                 # SSH feeds bash via stdin. Simulate Docker attaching to that
                 # stream: later deployment checks must still be executed.
@@ -108,6 +114,59 @@ class DeploymentRuntimeChecksTests(unittest.TestCase):
                 self.assertEqual(
                     result.stdout.strip(), "subsequent-health-check-executed"
                 )
+
+    def test_final_sync_check_preserves_later_release_checks_and_candidate_cleanup(self):
+        start = '    if [ "\\$bridge_worker_enabled" = "1" ]; then\n        echo "🌉 Verifying the current member sync worker..."'
+        tail = (start + DEPLOY_SCRIPT.split(start, 1)[1].split("\nEOF", 1)[0]).replace("\\$", "$")
+        for sync_status in (0, 23):
+            with self.subTest(sync_status=sync_status), tempfile.TemporaryDirectory() as directory:
+                sandbox = Path(directory)
+                calls_file = sandbox / "calls"
+                manifest = sandbox / "rollback-manifest"
+                manifest.write_text("synthetic prior image")
+                script = "\n".join([
+                    "set -euo pipefail",
+                    "bridge_worker_enabled=1; migrations_pending=0; web_candidate_started=1",
+                    "web_candidate_drain_workers=synthetic-worker; rollback_tags=(synthetic-image)",
+                    "calls_file=" + shlex.quote(str(calls_file)),
+                    "rollback_manifest=" + shlex.quote(str(manifest)),
+                    "docker() {",
+                    "  printf 'docker %s\\n' \"$*\" >> \"$calls_file\"",
+                    "  case \" $* \" in",
+                    "    *' message_sync_status '*) cat >/dev/null; return " + str(sync_status) + ";;",
+                    "    *' compose exec '*) cat >/dev/null; printf '/static/admin/base.css\\n';;",
+                    "  esac",
+                    "}",
+                    "curl() {",
+                    "  printf 'curl %s\\n' \"$*\" >> \"$calls_file\"",
+                    "  while [ \"$#\" -gt 0 ]; do",
+                    "    if [ \"$1\" = '-D' ]; then printf 'access-control-allow-origin: https://mlai.au\\n' > \"$2\"; shift; fi",
+                    "    shift",
+                    "  done",
+                    "}",
+                    "wait_for_nginx_workers_to_drain() { echo drained >> \"$calls_file\"; }",
+                    # Execute the actual remote tail through stdin, as SSH does.
+                    # Docker deliberately drains any inherited command stream.
+                    tail,
+                    "echo remote-release-tail-completed",
+                ])
+                result = subprocess.run(["bash"], input=script, text=True,
+                    capture_output=True, timeout=5)
+                self.assertEqual(result.returncode, sync_status, result.stderr)
+                calls = calls_file.read_text()
+                if sync_status:
+                    self.assertNotIn("curl ", calls)
+                    self.assertTrue(manifest.exists())
+                    self.assertNotIn("remote-release-tail-completed", result.stdout)
+                else:
+                    self.assertIn("/admin/login/", calls)
+                    self.assertIn("/static/admin/base.css", calls)
+                    self.assertIn("/uploads/video/session/", calls)
+                    self.assertIn("drained", calls)
+                    self.assertIn("docker compose stop web-candidate", calls)
+                    self.assertIn("docker compose rm -f web-candidate", calls)
+                    self.assertFalse(manifest.exists())
+                    self.assertIn("remote-release-tail-completed", result.stdout)
 
     def test_recovery_preserves_failure_and_stops_deployment(self):
         # Use the actual trap after the outer SSH heredoc removes its escapes.

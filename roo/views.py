@@ -293,7 +293,10 @@ def award_first_channel_post_bonus(slack_user_id: str, channel_id: str) -> Tuple
             if VolunteerRecognition.objects.filter(user=user, action_key="introduce_yourself", status__in=("approved", "reversed")).exists():
                 ChannelFirstPost.objects.get_or_create(slack_user_id=slack_user_id, channel_id=channel_id)
                 return False, None
-        if getattr(settings, "COMMUNITY_CHAT_VOLUNTEER_ENABLED", False) and getattr(settings, "COMMUNITY_CHAT_VOLUNTEER_AWARDS_ENABLED", False):
+        if getattr(settings, "COMMUNITY_CHAT_VOLUNTEER_ENABLED", False) and (
+            getattr(settings, "COMMUNITY_CHAT_VOLUNTEER_AWARDS_ENABLED", False)
+            or getattr(settings, "COMMUNITY_CHAT_VOLUNTEER_INTRO_REWARDS_ENABLED", False)
+        ):
             from community_chat.volunteer.receipts import award_legacy_intro
             return award_legacy_intro(user, slack_user_id, channel_id)
         _, created = ChannelFirstPost.objects.get_or_create(
@@ -2858,86 +2861,30 @@ class ManualAwardView(APIView):
     permission_classes = [HasRooApiKey]
 
     def post(self, request):
+        from .manual_awards import ManualAwardError, adjust_points, parse_manual_award
+
         admin_slack_id = request.data.get('slack_user_id') or request.data.get('admin_slack_id')
-        target_slack_id = request.data.get('target_slack_id')
-        
-        points = request.data.get('points')
-        reason = request.data.get('reason', 'Manual adjustment')
-
-        if admin_slack_id:
-            admin_slack_id = admin_slack_id.strip()
-        if target_slack_id:
-            target_slack_id = target_slack_id.strip()
-
-        # 1. Validation & Admin Check
-        if not admin_slack_id or not target_slack_id or points is None:
+        if not isinstance(admin_slack_id, str) or not admin_slack_id.strip():
             return Response(
-                {'error': 'slack_user_id (or admin_slack_id), target_slack_id and points are required'},
-                status=status.HTTP_400_BAD_REQUEST
+                {'error': 'slack_user_id (or admin_slack_id) is required'},
+                status=status.HTTP_400_BAD_REQUEST,
             )
-
+        admin_slack_id = admin_slack_id.strip()
         try:
-            require_linked_points_admin(admin_slack_id, action_label='award points manually')
+            values = parse_manual_award(request.data)
+            actor = require_linked_points_admin(admin_slack_id, action_label='award points manually')
+            return Response(adjust_points(
+                actor=actor, admin_slack_id=admin_slack_id, values=values,
+                resolve_slack_user=get_or_create_user_for_slack_id,
+            ))
+        except ManualAwardError as exc:
+            return Response({'error': str(exc)}, status=exc.status)
         except PermissionDeniedError as exc:
             return Response({'error': str(exc)}, status=status.HTTP_403_FORBIDDEN)
-        except ValueError as exc:
+        except IdempotencyConflictError as exc:
+            return Response({'error': str(exc)}, status=status.HTTP_409_CONFLICT)
+        except (ValueError, InsufficientBalanceError) as exc:
             return Response({'error': str(exc)}, status=status.HTTP_400_BAD_REQUEST)
-
-        try:
-            points = int(points)
-        except (ValueError, TypeError):
-            return Response({'error': 'Points must be an integer'}, status=status.HTTP_400_BAD_REQUEST)
-
-        # New Rule: Admins cannot award points to themselves
-        if points > 0 and admin_slack_id == target_slack_id:
-            return Response(
-                {'error': 'Admins cannot award points to themselves'}, 
-                status=status.HTTP_400_BAD_REQUEST
-            )
-
-        # 2. User Lookup & Auto-Creation
-        user = get_or_create_user_for_slack_id(target_slack_id)
-
-        # 3. Transaction Execution
-        idempotency_key = f"manual:{admin_slack_id}:{target_slack_id}:{timezone.now().isoformat()}"
-
-        try:
-            if points > 0:
-                ledger, created = PointsService.award(
-                    user=user,
-                    delta=points,
-                    source='MANUAL',
-                    description=reason,
-                    created_by_slack_id=admin_slack_id,
-                    idempotency_key=idempotency_key,
-                )
-            elif points < 0:
-                ledger, created = PointsService.spend(
-                    user=user,
-                    delta=abs(points),
-                    source='MANUAL',
-                    description=reason,
-                    created_by_slack_id=admin_slack_id,
-                    idempotency_key=idempotency_key,
-                )
-            else:
-                return Response({'error': 'Points cannot be zero'}, status=status.HTTP_400_BAD_REQUEST)
-
-            balance = PointsService.get_balance(user)
-            
-            # 4. Response
-            return Response({
-                "success": True,
-                "new_balance": balance['balance'],
-                "ledger_id": ledger.id,
-                "message": f"{'Awarded' if points > 0 else 'Deducted'} {abs(points)} points {'to' if points > 0 else 'from'} {user.full_name or user.email}"
-            })
-
-
-        except InsufficientBalanceError as e:
-            return Response({'error': str(e)}, status=status.HTTP_400_BAD_REQUEST)
-        except Exception as e:
-             return Response({'error': f"Internal error: {str(e)}"}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
 
 class SystemAwardView(APIView):
