@@ -116,3 +116,15 @@ For stale failed removals, check for a later completed add before retrying: an
 older remove must never erase a newer reaction. For Community dependencies,
 recover a parent only with positive evidence it failed before provider I/O;
 ambiguous sends remain on their recorded reconciliation path.
+
+Authenticated clients can resolve retained shortcodes through
+`GET /api/v1/community-chat/slack/emoji/?workspace_id=T…&names=name1,name2`.
+This returns only requested names from the configured workspace, as image URLs
+or Unicode values. It follows the community people-directory policy: a verified
+community account may read workspace metadata through a currently authorized
+member reader. It returns no conversation usage, participants or membership,
+and never uses a bot token. Responses are private/no-store; client caches are
+scoped to account and relay and are not written to disk. This lets old signed
+reactions render correctly without rewriting their signatures or ownership.
+Unknown names trigger a bounded catalog refresh so newly added Slack emoji do
+not wait for the normal five-minute catalog expiration.

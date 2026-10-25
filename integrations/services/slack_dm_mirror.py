@@ -7449,8 +7449,8 @@ def _deliver_private(delivery: SlackDmMirrorDelivery) -> None:
             "The private delivery is no longer authorized."
         )
     _refresh_slack_grant_token_if_due(grant_snapshot)
-    from .slack_custom_emoji import load_catalog, needs_catalog
-    emoji_catalog = load_catalog(grant_snapshot.slack_workspace_id) if needs_catalog(delivery.encrypted_text) else {}
+    from .slack_custom_emoji import load_catalog, catalog_names, needs_catalog
+    emoji_catalog = load_catalog(grant_snapshot.slack_workspace_id, requested_names=catalog_names(delivery.encrypted_text)) if needs_catalog(delivery.encrypted_text) else {}
     with transaction.atomic():
         # Consent withdrawal and deletion requests use user->session locks.
         # Keep outbound I/O within the same user-first boundary so a queued
@@ -7554,8 +7554,8 @@ def _deliver_private_batch(claimed: list[SlackDmMirrorDelivery]) -> None:
             "The private delivery batch is no longer authorized."
         )
     _refresh_slack_grant_token_if_due(grant_snapshot)
-    from .slack_custom_emoji import load_catalog, needs_catalog, present
-    emoji_catalog = load_catalog(grant_snapshot.slack_workspace_id) if any(needs_catalog(row.encrypted_text) for row in claimed) else {}
+    from .slack_custom_emoji import load_catalog, catalog_names, needs_catalog, present
+    emoji_catalog = load_catalog(grant_snapshot.slack_workspace_id, requested_names=set().union(*(catalog_names(row.encrypted_text) for row in claimed))) if any(needs_catalog(row.encrypted_text) for row in claimed) else {}
     claimed_ids = [delivery.pk for delivery in claimed]
     with transaction.atomic():
         grant = (

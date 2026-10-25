@@ -121,3 +121,51 @@ class SlackEmojiAuthorityTests(Fixture, TransactionTestCase):
         with patch.object(dm,'_invoke_slack_with_locked_connection',return_value={'ok':False}):
             with self.assertRaises(dm.SlackDmMirrorError): custom.load_catalog('TTEST')
         self.assertIn('party_parrot',custom.load_catalog('TTEST'))
+
+    def test_new_name_refreshes_cached_catalog_and_bounds_unknown_refreshes(self):
+        custom.load_catalog('TTEST')
+        with patch.object(dm, '_invoke_slack_with_locked_connection', return_value={'ok': True, 'emoji': {'party_parrot': URL, 'new_emoji': URL}}) as fetch:
+            result = custom.load_catalog('TTEST', requested_names=['new_emoji'])
+            self.assertEqual(result['new_emoji']['url'], URL)
+            self.assertEqual(fetch.call_count, 1)
+            custom.load_catalog('TTEST', requested_names=['new_emoji'])
+            self.assertEqual(fetch.call_count, 1)
+            custom.load_catalog('TTEST', requested_names=['absent'])
+            custom.load_catalog('TTEST', requested_names=['absent'])
+            self.assertEqual(fetch.call_count, 2)
+
+    def emoji_request(self, *, names='party_parrot', workspace='TTEST', authenticated=True):
+        from rest_framework.test import APIRequestFactory, force_authenticate
+        from community_chat.slack_emoji_views import SlackEmojiDirectoryView
+        request = APIRequestFactory().get('/community-chat/slack/emoji/', {'workspace_id': workspace, 'names': names})
+        request.community_chat_public_key = '1' * 64
+        if authenticated:
+            force_authenticate(request, user=self.a.user)
+        with patch('community_chat.slack_emoji_views.require_community_access'):
+            return SlackEmojiDirectoryView.as_view(throttle_classes=())(request)
+
+    def test_directory_returns_only_requested_images_and_unicode_and_no_usage(self):
+        response = self.emoji_request(names='party_parrot,head_shaking_vertically')
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data, {'workspace_id':'TTEST', 'emoji': {
+            'party_parrot': {'shortcode':'party_parrot','url':URL},
+            'head_shaking_vertically': {'unicode':'🙂\u200d↕️'},
+        }})
+        self.assertEqual(response['Cache-Control'], 'private, no-store')
+
+    def test_directory_rejects_anonymous_wrong_workspace_and_revoked_device(self):
+        from community_chat.models import CommunityChatDevice
+        self.assertIn(self.emoji_request(authenticated=False).status_code, [401, 403])
+        self.assertEqual(self.emoji_request(workspace='TOTHER').status_code, 400)
+        self.assertEqual(self.emoji_request(names=','.join(['name']*101)).status_code, 400)
+        CommunityChatDevice.objects.filter(user=self.a.user).update(status='revoked')
+        self.assertEqual(self.emoji_request().status_code, 403)
+        self.assertEqual(self.calls, [])
+
+    def test_directory_rechecks_requesting_device_after_catalog_io(self):
+        from community_chat.models import CommunityChatDevice
+        def revoke(*args, **kwargs):
+            CommunityChatDevice.objects.filter(user=self.a.user).update(status='revoked')
+            return {'party_parrot': {'shortcode': 'party_parrot', 'url': URL}}
+        with patch.object(custom, 'load_catalog', side_effect=revoke):
+            self.assertEqual(self.emoji_request().status_code, 403)

@@ -996,8 +996,8 @@ def _same_command(saved, channel, actor):
 def _prepare(delivery, original, authority, actor, saved):
     if saved:
         return saved
-    from integrations.services.slack_custom_emoji import load_catalog, needs_catalog, present
-    catalog = load_catalog(original.slack_workspace_id) if (
+    from integrations.services.slack_custom_emoji import load_catalog, catalog_names, needs_catalog, present
+    catalog = load_catalog(original.slack_workspace_id, requested_names=catalog_names((delivery.get("payload") or {}).get("text"))) if (
         (delivery.get("source_platform") == "slack" or delivery.get("delivery_type") == "reaction_add")
         and needs_catalog((delivery.get("payload") or {}).get("text"))
     ) else {}

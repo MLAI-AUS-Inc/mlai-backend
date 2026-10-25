@@ -509,8 +509,8 @@ def execute(delivery):
     implementation = sys.modules[__name__]
     try:
         if command is None:
-            from integrations.services.slack_custom_emoji import load_catalog, needs_catalog
-            catalog = load_catalog(original.slack_workspace_id) if delivery["delivery_type"] == "reaction_add" and needs_catalog((delivery.get("payload") or {}).get("text")) else {}
+            from integrations.services.slack_custom_emoji import load_catalog, catalog_names, needs_catalog
+            catalog = load_catalog(original.slack_workspace_id, requested_names=catalog_names((delivery.get("payload") or {}).get("text"))) if delivery["delivery_type"] == "reaction_add" and needs_catalog((delivery.get("payload") or {}).get("text")) else {}
             with _fence(delivery, original, authority, actor, reader_authority=reader_authority) as (row, channel, user, client):
                 info = client.verify()
                 wire = (member._wire(row, channel, actor, client, info, identity_key=IDENTITY, emoji_catalog=catalog) if authority is not None

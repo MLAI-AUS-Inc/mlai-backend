@@ -1,7 +1,7 @@
 """Workspace emoji presentation from official, currently authorized member APIs.
 
 NIP-30 carries the source shortcode and image on each message/reaction. No
-workspace-wide palette is published, so a private emoji use stays in its room.
+conversation usage is published by the authenticated workspace directory.
 """
 import re
 from urllib.parse import urlsplit
@@ -12,12 +12,16 @@ TOKEN = re.compile(r":([a-z0-9_+\-]{1,100}(?:::skin-tone-[2-6]){0,2}):")
 CODE = re.compile(r"(```[\s\S]*?```|`[^`\n]*`|<https?://[^>]+>|https?://[^\s<>]+)")
 
 
+def catalog_names(text):
+    """Unknown shortcodes outside code and links, bounded by normal text limits."""
+    standard = _emoji_maps()[0]
+    return {match[1] for i, part in enumerate(CODE.split(str(text or ""))) if i % 2 == 0
+            for match in TOKEN.finditer(part) if match[1] not in standard}
+
+
 def needs_catalog(text):
     """Plain text and known Unicode shortcodes do not need a provider request."""
-    standard = _emoji_maps()[0]
-    return any(match[1] not in standard
-               for i, part in enumerate(CODE.split(str(text or ""))) if i % 2 == 0
-               for match in TOKEN.finditer(part))
+    return bool(catalog_names(text))
 
 
 def safe_url(value):
@@ -62,7 +66,7 @@ def resolve_catalog(raw):
     return result
 
 
-def load_catalog(workspace):
+def load_catalog(workspace, *, requested_names=()):
     """Read/cache emoji metadata before callers acquire delivery/privacy locks."""
     from django.core.cache import cache
     from . import slack_directory_authority as directory, slack_dm_mirror as dm
@@ -77,7 +81,15 @@ def load_catalog(workspace):
             return {}
         cached = cache.get(key)
         if isinstance(cached, dict):
-            return cached
+            known = set(cached) | {item.get("shortcode") for item in cached.values()} | set(_emoji_maps()[0])
+            missing = sorted(set(requested_names) - known)
+            # New custom emoji must not remain a literal shortcode until the
+            # ordinary catalog TTL expires. Bound negative refreshes per name.
+            import hashlib
+            miss_key = key + ":missing:" + hashlib.sha256(",".join(missing).encode()).hexdigest()
+            if not missing or cache.get(miss_key):
+                return cached
+            cache.set(miss_key, True, timeout=30)
         response = dm._invoke_slack_with_locked_connection(authority, connection, "emoji_list")
         if not response.get("ok"):
             raise dm.SlackDmMirrorError("Slack emoji catalog unavailable")
