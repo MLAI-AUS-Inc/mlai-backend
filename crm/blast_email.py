@@ -27,7 +27,7 @@ from django.utils import timezone
 from . import listmonk, merge_tags
 from .emails import normalize_contact_email
 from .listmonk import ListmonkError
-from .models import Blast, BlastDelivery, Channel, Contact
+from .models import Blast, BlastDelivery, Channel, Contact, SenderMailbox
 from .queries import banned
 
 logger = logging.getLogger(__name__)
@@ -140,7 +140,8 @@ def subscriber_name(contact) -> str:
 
 
 def campaign_body(blast) -> str:
-    return track_links(listmonk_text(blast.body_markdown, blast.event, markdown=True))
+    body = listmonk_text(blast.body_markdown, blast.event, markdown=True)
+    return body if (getattr(blast, "stats", None) or {}).get("warmup") else track_links(body)
 
 
 def campaign_payload(blast, list_id: int) -> dict[str, Any]:
@@ -204,6 +205,9 @@ def email_block(blast) -> Optional[str]:
         return "not_configured"
     if blast.mailbox_id is None or not blast.mailbox.enabled:
         return "mailbox_disabled"
+    if (blast.stats or {}).get("warmup"):
+        from .warmup import admission_block
+        return admission_block(blast, timezone.now())
     return None
 
 
@@ -441,11 +445,16 @@ def start_campaign(blast_id, campaign_id: int, *, now) -> str:
     """Set the campaign running unless the blast was cancelled; records ``started_at``."""
 
     with transaction.atomic():
+        from .resend_feedback import monitored_senders
+        # Feedback and admission take sender locks before blast/delivery locks.
+        list(SenderMailbox.objects.select_for_update().filter(email__in=monitored_senders()).order_by("pk"))
         blast = Blast.objects.select_for_update().get(pk=blast_id)
         if blast.status == Blast.Status.CANCELLED:
             return listmonk.CANCELLED
         if email_started(blast):
             return str(email_stats(blast).get("listmonk_status") or listmonk.RUNNING)
+        if email_block(blast):
+            return "held"
         try:
             listmonk.set_campaign_status(campaign_id, listmonk.RUNNING)
             status = listmonk.RUNNING

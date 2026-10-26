@@ -19,11 +19,13 @@ FLAG_KEYS = (
     "CRM_SENDING_ENABLED",
     "CRM_SMS_ENABLED",
     "CRM_WHATSAPP_ENABLED",
+    "CRM_WARMUP_ENABLED",
 )
 LISTMONK_BASE_URL = "LISTMONK_BASE_URL"
 LISTMONK_API_USER = "LISTMONK_API_USER"
 MESSAGING_SERVICE = "TWILIO_MESSAGING_SERVICE_SID"
-KEYS = (*FLAG_KEYS, LISTMONK_BASE_URL, LISTMONK_API_USER, MESSAGING_SERVICE)
+KEYS = (*FLAG_KEYS, LISTMONK_BASE_URL, LISTMONK_API_USER, MESSAGING_SERVICE,
+        "CRM_RESEND_MONITORED_SENDERS", "CRM_WARMUP_RUN_ID")
 
 
 def validate_single(key: str, value: str, *, optional: bool = False) -> None:
@@ -49,6 +51,12 @@ def validate_single(key: str, value: str, *, optional: bool = False) -> None:
     elif key == LISTMONK_API_USER:
         if not re.fullmatch(r"[A-Za-z0-9._@-]{1,64}", value):
             raise ValueError(f"{key} must be a listmonk API user name")
+    elif key == "CRM_RESEND_MONITORED_SENDERS":
+        if not all(re.fullmatch(r"[a-z0-9._+-]+@[a-z0-9.-]+\.[a-z]{2,}", item) for item in value.split(",")):
+            raise ValueError(f"{key} must be comma-separated email addresses")
+    elif key == "CRM_WARMUP_RUN_ID":
+        if not re.fullmatch(r"[a-z0-9-]{1,48}", value):
+            raise ValueError(f"{key} must be a lowercase run identifier")
     elif key == MESSAGING_SERVICE:
         if not re.fullmatch(r"MG[0-9a-f]{32}", value):
             raise ValueError(f"{key} must be a Twilio Messaging Service SID")

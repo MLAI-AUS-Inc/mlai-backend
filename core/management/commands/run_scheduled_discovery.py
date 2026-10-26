@@ -17,6 +17,7 @@ from content_factory.services.island_refresh_scheduler import run_island_refresh
 from crm.blasts import run_blast_dispatch_scheduler
 from crm.listmonk_sync import run_listmonk_sync_scheduler
 from crm.luma_sync import run_luma_guest_sync_scheduler
+from crm.warmup import run_warmup_scheduler
 from integrations.services.daily_discovery import (
     enqueue_scheduled_discovery,
     run_daily_discovery_scheduler,
@@ -142,6 +143,7 @@ class Command(BaseCommand):
             # Sends queued crm blasts: email through listmonk, SMS and WhatsApp
             # through Twilio. Off unless a blast channel is enabled, and
             # cache-throttled to CRM_BLAST_DISPATCH_INTERVAL_SECONDS.
+            ("crm_warmup", run_warmup_scheduler),
             ("crm_blast_dispatch", run_blast_dispatch_scheduler),
             # Polls listmonk for campaign progress, opens, clicks, bounces and
             # unsubscribes. Runs whenever listmonk is configured, throttled to

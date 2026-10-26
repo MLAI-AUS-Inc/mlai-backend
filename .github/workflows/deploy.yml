@@ -122,7 +122,7 @@ jobs:
       run: python scripts/test_without_database.py crm.tests.test_api_unit crm.tests.test_segments_unit crm.tests.test_admin_gate_unit
 
     - name: Check CRM blasts, sending domains and the listmonk client without database access
-      run: python scripts/test_without_database.py crm.tests.test_blasts_unit crm.tests.test_sending_domains_unit crm.tests.test_listmonk_unit
+      run: python scripts/test_without_database.py crm.tests.test_blasts_unit crm.tests.test_sending_domains_unit crm.tests.test_listmonk_unit crm.tests.test_resend_warmup_unit
 
     - name: Verify event discounts against disposable migration state
       run: python scripts/test_event_discounts.py roo.tests_event_discounts roo.tests_event_discount_api roo.tests_event_discount_concurrency
@@ -690,7 +690,7 @@ jobs:
       run: python manage.py test crm.tests.test_api_database crm.tests.test_segments_database crm.tests.test_admin_gate_database --verbosity 2
 
     - name: Verify CRM blasts, senders and listmonk feedback on PostgreSQL
-      run: python manage.py test crm.tests.test_blasts_database crm.tests.test_sending_database --verbosity 2
+      run: python manage.py test crm.tests.test_blasts_database crm.tests.test_sending_database crm.tests.test_resend_warmup_database --verbosity 2
 
     - name: Verify PostgreSQL search infrastructure
       run: |
@@ -1049,6 +1049,10 @@ jobs:
         COMMUNITY_CHAT_CRM_ENABLED: ${{ vars.COMMUNITY_CHAT_CRM_ENABLED || '' }}
         CRM_LUMA_SYNC_ENABLED: ${{ vars.CRM_LUMA_SYNC_ENABLED || '' }}
         CRM_SENDING_ENABLED: ${{ vars.CRM_SENDING_ENABLED || '' }}
+        CRM_WARMUP_ENABLED: ${{ vars.CRM_WARMUP_ENABLED || '' }}
+        CRM_WARMUP_RUN_ID: ${{ vars.CRM_WARMUP_RUN_ID || '' }}
+        CRM_RESEND_MONITORED_SENDERS: ${{ vars.CRM_RESEND_MONITORED_SENDERS || '' }}
+        CRM_RESEND_WEBHOOK_SECRET: ${{ secrets.CRM_RESEND_WEBHOOK_SECRET || '' }}
         CRM_SMS_ENABLED: ${{ vars.CRM_SMS_ENABLED || '' }}
         CRM_WHATSAPP_ENABLED: ${{ vars.CRM_WHATSAPP_ENABLED || '' }}
         LISTMONK_BASE_URL: ${{ vars.LISTMONK_BASE_URL || '' }}

@@ -63,7 +63,7 @@ export COMMUNITY_CHAT_STARTUP_UPDATES_ENABLED VALLEY_MCP_DOMAIN_VERIFICATION_TOK
 python3 scripts/validate_valley_mcp_deploy_config.py
 # CRM switches and delivery settings. Empty values keep the host's own, so a
 # release never switches the CRM off by omission.
-CRM_DEPLOY_SETTINGS="COMMUNITY_CHAT_CRM_ENABLED CRM_LUMA_SYNC_ENABLED CRM_SENDING_ENABLED CRM_SMS_ENABLED CRM_WHATSAPP_ENABLED LISTMONK_BASE_URL LISTMONK_API_USER TWILIO_MESSAGING_SERVICE_SID"
+CRM_DEPLOY_SETTINGS="COMMUNITY_CHAT_CRM_ENABLED CRM_LUMA_SYNC_ENABLED CRM_SENDING_ENABLED CRM_SMS_ENABLED CRM_WHATSAPP_ENABLED CRM_WARMUP_ENABLED LISTMONK_BASE_URL LISTMONK_API_USER TWILIO_MESSAGING_SERVICE_SID CRM_RESEND_MONITORED_SENDERS CRM_WARMUP_RUN_ID"
 for crm_setting in $CRM_DEPLOY_SETTINGS; do
     printf -v "$crm_setting" '%s' "${!crm_setting:-}"
     export "$crm_setting"
@@ -414,6 +414,9 @@ echo "🔐 Updating Linear channel issue credential (value redacted)..."
 install_remote_env_secret LINEAR_API_KEY "$LINEAR_API_KEY"
 if [ -n "$LISTMONK_API_TOKEN" ]; then
     install_remote_env_secret LISTMONK_API_TOKEN "$LISTMONK_API_TOKEN"
+fi
+if [ -n "${CRM_RESEND_WEBHOOK_SECRET:-}" ]; then
+    install_remote_env_secret CRM_RESEND_WEBHOOK_SECRET "$CRM_RESEND_WEBHOOK_SECRET"
 fi
 echo "🔐 Updating distinct Roo and internal service credentials (values redacted)..."
 install_remote_env_secret ROO_API_KEY "$ROO_API_KEY"

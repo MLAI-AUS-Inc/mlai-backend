@@ -73,6 +73,83 @@ python manage.py crm_backfill_luma_guests [--since YYYY-MM-DD] [--event-id ID ..
 - **Rate limits:** on a 429 it pauses for 60 seconds, up to three times per event.
 - **Failures:** failed events are listed and the command exits non-zero; re-run it to retry them.
 
+## Resend feedback and a finite email rollout
+
+`POST /api/v1/crm/webhooks/resend/` verifies the raw body against
+`CRM_RESEND_WEBHOOK_SECRET` (Svix HMAC, five-minute timestamp tolerance).
+Production's provider URL is `https://lists.mlai.au/webhooks/resend`, whose
+Nginx exact route forwards to this handler. Unlike the general API's existing
+Cloudflare Flexible ingress, the lists host uses Full TLS to the origin.
+Listmonk admin/API paths remain private.
+
+Subscribe to `email.sent`, `email.delivered`, `email.bounced`,
+`email.complained`, `email.failed`, `email.delivery_delayed` and
+`email.suppressed`. Only exact addresses in `CRM_RESEND_MONITORED_SENDERS`
+are handled. One SMTP recipient per message is required. The signing secret
+is host configuration; it is never a sending API key.
+
+Feedback receipts are append-only `CrmAuditEvent` rows (`resend_event`),
+deduplicated by the hash of Svix's message ID under sender row locks.
+Receipts store the provider email ID, sender, event and optional delivery ID,
+not the webhook body or recipient. Delivery correlation uses provider ID,
+then an unambiguous recent address/sender/subject match. Late success never
+erases a bounce or complaint. Bounces and complaints suppress the CRM contact
+and blocklist the listmonk subscriber. Suppression is retried even on duplicate
+events if the listmonk API was unavailable. Failures return 503 for Resend retry.
+
+For this small initial audience, **one real bounce, complaint, failure or
+suppressed send disables both monitored mailboxes**. Provider simulator
+addresses at `resend.dev` are explicitly excluded from this stop rule.
+Re-enabling requires operator investigation; the automation never does so.
+
+`crm_warmup` uses ordinary draft `Blast` rows with immutable planned metadata
+in `stats.warmup`. There is no new database table or migration. The single
+active run is selected by `CRM_WARMUP_RUN_ID`; `CRM_WARMUP_ENABLED` defaults off.
+
+```sh
+python manage.py crm_warmup import --actor-email sam@mlai.au --dry-run
+python manage.py crm_warmup plan --run-id mlai-20261027 --start-date 2026-10-27 --actor-email sam@mlai.au --dry-run
+# Inspect the counts, then repeat without --dry-run to save drafts.
+python manage.py crm_warmup activate --run-id mlai-20261027
+python manage.py crm_warmup status --run-id mlai-20261027
+```
+
+Import requires an approved active member, verified email, affirmative current
+profile choice and latest affirmative `CommunityMemberConsent` evidence. It
+preserves the evidence's actual timestamp and policy version, fills only blank
+profile fields and never revives CRM withdrawals, unsubscribes, bounces, complaints
+or bans. The source is checked again at queueing and campaign start. During
+the run, withdrawals in the community profile are copied back to CRM.
+
+The saved schedule assigns each person to one sender and one weekday/time,
+10am–4pm Melbourne time. Week one includes only members active within 90 days;
+weeks two and three include the full saved eligible roster. There is a rolling
+seven-day frequency cap across CRM email, one outstanding admission per sender
+per hour, the existing mailbox daily caps, and a hard maximum of 56 people.
+New opt-ins do not enlarge an already planned roster. Missed windows older than
+six hours are cancelled, not caught up in a burst. Warm-up emails have no tracked
+link redirects and use the normal unsubscribe template and headers.
+
+Activation requires signed delivered/bounced/complained simulator receipts for
+both senders within 24 hours. The server scheduler runs admission before the
+normal blast dispatcher. It pauses the run if any delivery fails, either sender
+is disabled, or a queued email lacks a terminal delivery result after one hour.
+It finishes after 21 days; it never raises caps or starts a larger campaign.
+Completion proves only the actual low-volume delivery history, not guaranteed
+inbox placement or readiness for a large mailing.
+
+The planned 27 October–16 November 2026 schedule has 41 eligible contacts,
+18 recently active: 18/41/41 messages by week, 100 total across two senders.
+The final check is on 17 November. Copy is in `crm/warmup.py`: community links,
+finding events, then ways to participate. Replies go to `hi@mlai.au`.
+
+Database-free checks: `scripts/test_without_database.py crm.tests.test_resend_warmup_unit`.
+Database regression checks: `manage.py test crm.tests.test_resend_warmup_database`.
+The user approved the unchanged 374-migration disposable test inventory on
+26 October 2026, SHA-256
+`6571effcd2fba39449b5984517314d0774d15f17e450fe1a8259d518832e1530`.
+This approval does not cover production migrations.
+
 ## CSV import
 
 ```bash
