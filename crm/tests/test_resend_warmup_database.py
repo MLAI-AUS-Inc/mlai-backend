@@ -88,6 +88,17 @@ class ResendWarmupDatabaseTests(TestCase):
         self.profile.marketing_opt_in = False; self.profile.save()
         blast.refresh_from_db()
         self.assertEqual(admission_block(blast, self.now), "consent_not_current")
+        _tick("regression", self.now + timedelta(hours=2))
+        blast.refresh_from_db()
+        self.assertEqual(blast.status, "cancelled")
+        self.assertEqual(BlastDelivery.objects.get(blast=blast).status, "unsubscribed")
+        self.assertEqual(SenderMailbox.objects.filter(enabled=True).count(), 2)
+
+    def test_removing_feedback_configuration_pauses_without_sending(self):
+        self.plan()
+        with override_settings(CRM_RESEND_WEBHOOK_SECRET=""):
+            self.assertEqual(_tick("regression", self.now)["reason"], "feedback_not_configured")
+        self.assertFalse(BlastDelivery.objects.exists())
 
     def test_provider_replays_and_late_delivery_do_not_erase_complaint(self):
         contact = self.import_contact()

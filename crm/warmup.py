@@ -189,6 +189,8 @@ def status_report(run_id):
 
 def health_problem(run_id, now):
     """Fail closed on missing feedback, errors, or stopped routes; no blind catch-up."""
+    if not getattr(settings, "CRM_RESEND_WEBHOOK_SECRET", ""):
+        return "feedback_not_configured"
     rows = BlastDelivery.objects.filter(blast__in=run_blasts(run_id), channel=Channel.EMAIL)
     if rows.filter(status__in=["failed", "undelivered", "bounced", "unknown"]).exists():
         return "delivery_failed"
@@ -257,6 +259,27 @@ def _tick(run_id, now):
         if state.get("operation") != "activated":
             return {"status": "skipped", "state": state.get("operation", "unplanned")}
         sync_community_optins()
+        # An opt-out between loading a subscriber and starting its campaign
+        # must release that held delivery, not look like lost provider feedback.
+        # Sender locks exclude campaign start while these rows are cancelled.
+        pending = run_blasts(run_id).filter(status__in=["queued", "sending"])
+        for blast in pending:
+            # A campaign start can time out after reaching listmonk. Once a
+            # campaign exists, leave that ambiguity to feedback/health checks.
+            if blast.listmonk_campaign_id or (blast.stats.get("email") or {}).get("started_at"):
+                continue
+            meta = blast.stats["warmup"]
+            contact = Contact.objects.filter(pk=meta["contact_id"]).first()
+            expired = now > datetime.fromisoformat(meta["scheduled_at"]) + MAX_LATE
+            if expired or not contact or not contact_is_opted_in(contact):
+                reason = "outside_send_window" if expired else "consent_not_current"
+                BlastDelivery.objects.filter(blast=blast, status__in=["queued", "submitting"]).update(
+                    status="unsubscribed", error_code=reason, updated_at=now)
+                blast.status, blast.last_error = Blast.Status.CANCELLED, reason
+                blast.save(update_fields=["status", "last_error", "updated_at"])
+                CrmAuditEvent.objects.create(action=CrmAuditEvent.Action.SEND,
+                    target_type="blast", target_id=str(blast.pk),
+                    detail={"operation": "cancel", "reason": reason, "run_id": run_id})
         problem = health_problem(run_id, now)
         if problem:
             pause_senders(problem, now=now)
