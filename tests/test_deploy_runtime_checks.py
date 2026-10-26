@@ -1,6 +1,8 @@
 """Execute deployed validators without credentials, services, or a database."""
 
+from datetime import datetime, timezone
 import hashlib
+import os
 from pathlib import Path
 import re
 import shlex
@@ -14,6 +16,28 @@ from scripts.validate_website_deploy_config import canonical_migration_plan, val
 
 
 DEPLOY_SCRIPT = (Path(__file__).resolve().parents[1] / "deploy.sh").read_text()
+REMOTE_HEREDOC_START = 'ssh "$DEPLOY_SSH_TARGET" <<EOF | tee "$remote_deploy_log"\n'
+
+
+def _remote_block(start, end):
+    begin = DEPLOY_SCRIPT.index(start)
+    finish = DEPLOY_SCRIPT.index(end, begin) + len(end)
+    return DEPLOY_SCRIPT[begin:finish].replace("\\$", "$")
+
+
+def _rendered_remote_script(release):
+    # Let bash expand the unquoted heredoc as the runner does, so the text
+    # under test is exactly what SSH sends to the host.
+    body = DEPLOY_SCRIPT.split(REMOTE_HEREDOC_START, 1)[1].split("\nEOF\n", 1)[0]
+    return subprocess.run(
+        ["bash", "-c", "cat <<EOF\n" + body + "\nEOF\n"],
+        env={
+            "PATH": os.environ["PATH"],
+            "APP_RELEASE": release,
+            "remote_deploy_completed": f"Remote deployment script completed for {release}.",
+        },
+        text=True, capture_output=True, check=True, timeout=5,
+    ).stdout
 
 
 class DeploymentRuntimeChecksTests(unittest.TestCase):
@@ -117,7 +141,7 @@ class DeploymentRuntimeChecksTests(unittest.TestCase):
 
     def test_final_sync_check_preserves_later_release_checks_and_candidate_cleanup(self):
         start = '    if [ "\\$bridge_worker_enabled" = "1" ]; then\n        echo "🌉 Verifying the current member sync worker..."'
-        tail = (start + DEPLOY_SCRIPT.split(start, 1)[1].split("\nEOF", 1)[0]).replace("\\$", "$")
+        tail = (start + DEPLOY_SCRIPT.split(start, 1)[1].split("\n} </dev/null\nEOF", 1)[0]).replace("\\$", "$")
         for sync_status in (0, 23):
             with self.subTest(sync_status=sync_status), tempfile.TemporaryDirectory() as directory:
                 sandbox = Path(directory)
@@ -130,6 +154,7 @@ class DeploymentRuntimeChecksTests(unittest.TestCase):
                     "web_candidate_drain_workers=synthetic-worker; rollback_tags=(synthetic-image)",
                     "calls_file=" + shlex.quote(str(calls_file)),
                     "rollback_manifest=" + shlex.quote(str(manifest)),
+                    "remote_deploy_completed=remote-release-tail-completed",
                     "docker() {",
                     "  printf 'docker %s\\n' \"$*\" >> \"$calls_file\"",
                     "  case \" $* \" in",
@@ -147,8 +172,8 @@ class DeploymentRuntimeChecksTests(unittest.TestCase):
                     "wait_for_nginx_workers_to_drain() { echo drained >> \"$calls_file\"; }",
                     # Execute the actual remote tail through stdin, as SSH does.
                     # Docker deliberately drains any inherited command stream.
+                    # The tail's own last line reports completion.
                     tail,
-                    "echo remote-release-tail-completed",
                 ])
                 result = subprocess.run(["bash"], input=script, text=True,
                     capture_output=True, timeout=5)
@@ -167,6 +192,129 @@ class DeploymentRuntimeChecksTests(unittest.TestCase):
                     self.assertIn("docker compose rm -f web-candidate", calls)
                     self.assertFalse(manifest.exists())
                     self.assertIn("remote-release-tail-completed", result.stdout)
+
+    def test_host_commands_cannot_read_the_remote_script_from_ssh_stdin(self):
+        # On 25 Oct 2026 the bridge-worker probe read the rest of this script
+        # from SSH stdin. The remote shell exited 0 without the release tail,
+        # so the migration writer pause marker was never removed. Feed the
+        # whole rendered script to bash on stdin, as SSH does. Its first host
+        # command records what it can read; the stub-only PATH then stops the
+        # script before any other host command can run.
+        remote = _rendered_remote_script("a" * 40)
+        with tempfile.TemporaryDirectory() as directory:
+            sandbox = Path(directory)
+            bin_dir = sandbox / "bin"
+            bin_dir.mkdir()
+            captured = sandbox / "git-stdin"
+            git = bin_dir / "git"
+            git.write_text('#!/bin/sh\n/bin/cat > "$CAPTURED_STDIN"\n')
+            git.chmod(0o755)
+            result = subprocess.run(
+                [shutil.which("bash")], input=remote, text=True, capture_output=True,
+                cwd=sandbox, timeout=10,
+                env={"PATH": str(bin_dir), "HOME": str(sandbox), "CAPTURED_STDIN": str(captured)},
+            )
+            self.assertEqual(result.returncode, 1, result.stderr)
+            self.assertIn("Cannot verify current main from the host", result.stderr)
+            self.assertTrue(captured.exists(), "The host main check is no longer the first host command.")
+            self.assertEqual(captured.read_text(), "")
+            self.assertNotIn("Remote deployment script completed", result.stdout)
+
+    def test_runner_fails_when_the_remote_script_stops_before_its_last_line(self):
+        runner = DEPLOY_SCRIPT[
+            DEPLOY_SCRIPT.index("remote_deploy_log=$(mktemp)"):
+            DEPLOY_SCRIPT.index("# Independently verify the release outside SSH")
+        ]
+        release = "a" * 40
+        completed = f"Remote deployment script completed for {release}."
+        probe = "🌉 Verifying the current member sync worker...\n"
+        for remote_output, remote_status, expected_status in (
+            (probe + completed + "\n", 0, 0),
+            # The 25 Oct 2026 run: the probe swallowed the script tail and the
+            # remote shell exited 0 with no further output.
+            (probe + '{"enabled": true, "stale_lanes": []}\n', 0, 1),
+            (f"Remote deployment script completed for {'b' * 40}.\n", 0, 1),
+            ("+ " + completed + "\n", 0, 1),
+            (probe, 7, 7),
+        ):
+            with self.subTest(remote_output=remote_output, remote_status=remote_status), \
+                    tempfile.TemporaryDirectory() as directory:
+                sent = Path(directory) / "sent-script"
+                script = "\n".join([
+                    # deploy.sh also sets -u; this harness leaves the runner
+                    # settings the heredoc expands undefined.
+                    "set -eo pipefail",
+                    f"APP_RELEASE={release}",
+                    "DEPLOY_SSH_TARGET=synthetic-host",
+                    "ssh() { cat > " + shlex.quote(str(sent)) + '; printf "%s" "$REMOTE_OUTPUT"; return "$REMOTE_STATUS"; }',
+                    runner,
+                    "echo runner-reached-release-check",
+                ])
+                result = subprocess.run(
+                    ["bash", "-c", script], text=True, capture_output=True, timeout=10,
+                    env={**os.environ, "TMPDIR": directory,
+                         "REMOTE_OUTPUT": remote_output, "REMOTE_STATUS": str(remote_status)},
+                )
+                self.assertEqual(result.returncode, expected_status, result.stderr)
+                self.assertEqual("runner-reached-release-check" in result.stdout, expected_status == 0)
+                self.assertEqual("ended before its final step" in result.stderr, expected_status == 1)
+                # The output log is removed on every exit path.
+                self.assertEqual([path.name for path in Path(directory).iterdir()], ["sent-script"])
+                sent_lines = sent.read_text().splitlines()
+                self.assertEqual(sent_lines[:2], ["{", "    set -euo pipefail"])
+                self.assertEqual(sent_lines[-2:], [f'    echo "{completed}"', "} </dev/null"])
+
+    def test_stale_writer_pause_is_reported_with_its_release_and_time(self):
+        describe = _remote_block("    describe_writer_pause_sentinel() {", "\n    }")
+        pause = _remote_block("    pause_runtime_writers_for_migration() {", "\n    }")
+        transition = _remote_block(
+            '    if [ "\\$migrations_pending" = "1" ]; then\n        verify_current_main_release_on_host',
+            "\n    fi\n",
+        )
+        stale_release = "3cfbea590f9a102ebc1b7092c3fb8e1b04469810"
+        paused_at = datetime(2026, 10, 25, 2, 33, 46, tzinfo=timezone.utc).timestamp()
+        for pending, marker_present in ((0, True), (0, False), (1, True)):
+            with self.subTest(pending=pending, marker_present=marker_present), \
+                    tempfile.TemporaryDirectory() as directory:
+                sandbox = Path(directory)
+                marker = sandbox / "writers-paused"
+                calls = sandbox / "calls"
+                if marker_present:
+                    marker.write_text(stale_release + "\n")
+                    os.utime(marker, (paused_at, paused_at))
+                script = "\n".join([
+                    "set -euo pipefail",
+                    "APP_RELEASE=" + "a" * 40,
+                    f"migrations_pending={pending}",
+                    "writer_pause_sentinel=" + shlex.quote(str(marker)),
+                    "calls_file=" + shlex.quote(str(calls)),
+                    "verify_current_main_release_on_host() { :; }",
+                    'compose_run_web() { printf "compose_run_web %s\\n" "$*" >> "$calls_file"; }',
+                    'docker() { printf "docker %s\\n" "$*" >> "$calls_file"; }',
+                    'systemctl() { printf "systemctl %s\\n" "$*" >> "$calls_file"; }',
+                    describe,
+                    pause,
+                    transition,
+                ])
+                result = subprocess.run(["bash", "-c", script], text=True, capture_output=True, timeout=5)
+                details = f"{marker} (release {stale_release}, written 2026-10-25 02:33:46 UTC)"
+                recorded = calls.read_text() if calls.exists() else ""
+                if pending:
+                    # The migration deploy refuses before it touches a writer
+                    # or overwrites the earlier release's marker.
+                    self.assertEqual(result.returncode, 1, result.stderr)
+                    self.assertIn("A prior migration writer pause is still active", result.stderr)
+                    self.assertIn(details, result.stderr)
+                    self.assertNotIn("Running migrations", result.stdout)
+                    self.assertEqual(recorded, "")
+                else:
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    self.assertEqual(recorded, "compose_run_web python manage.py migrate --check --noinput\n")
+                    warning = f"::warning title=Stale migration writer pause::{details} is still present."
+                    self.assertEqual(warning in result.stdout, marker_present, result.stdout)
+                    self.assertEqual("::warning" in result.stdout, marker_present)
+                self.assertEqual(marker.read_text() if marker.exists() else None,
+                                 stale_release + "\n" if marker_present else None)
 
     def test_recovery_preserves_failure_and_stops_deployment(self):
         # Use the actual trap after the outer SSH heredoc removes its escapes.

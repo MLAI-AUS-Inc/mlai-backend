@@ -64,11 +64,21 @@ release checks and until the previous Nginx workers drain. A failed code-only
 release routes to the candidate while the recorded prior image and release
 marker are restored on `web`, then routes back to the restored slot.
 
-Container health probes run with stdin closed because SSH supplies the remaining
-deployment script on that stream. A successful bridge-worker check must still be
-followed by the admin asset and upload CORS checks, candidate drain/removal, and
-rollback-image cleanup; the external release marker alone does not prove those
-steps completed.
+SSH supplies the deployment script to the host on stdin. The whole script is one
+`{ ... } </dev/null` group, so bash parses all of it before running anything
+and no host command can read the rest from stdin and cut it short. On 25 Oct
+2026, before that change, the bridge-worker probe did exactly that: the remote shell exited 0
+without the admin asset and upload CORS checks, candidate drain/removal,
+rollback-image cleanup or removal of the migration writer pause marker. The
+external release marker alone does not prove those steps completed, so the
+runner also requires the script's final "Remote deployment script completed"
+line and fails without it.
+
+`/run/mlai-backend-writers-paused` holds the release that paused writers for a
+migration. A migration deploy that finds it refuses to start, prints that
+release and the marker's time, and leaves it for operator review. A code-only
+deploy carries on but raises a "Stale migration writer pause" warning. Confirm
+every service is up and `migrate --check` is clean before removing the marker.
 
 If Nginx workers have not drained after 120 seconds, the deploy leaves the
 candidate running rather than cut off those requests. A later deployment

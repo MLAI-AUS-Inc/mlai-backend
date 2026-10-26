@@ -730,7 +730,18 @@ fi
 
 # 2. Run setup commands on the server
 echo "🔧 Configuring server..."
-ssh "$DEPLOY_SSH_TARGET" <<EOF
+# SSH hands this script to the remote shell on stdin, and bash reads stdin one
+# command at a time. A host command that reads stdin (Compose exec attaches it
+# even with -T) would swallow the rest of the script, and the shell would then
+# exit 0 having skipped every later step. On 25 Oct 2026 that skipped the
+# release tail and left the migration writer pause marker behind. Bash parses
+# the whole group below before running any of it, and the group's stdin is
+# /dev/null, so no command can reach the script text.
+remote_deploy_log=$(mktemp)
+trap 'rm -f "$remote_deploy_log"' EXIT
+remote_deploy_completed="Remote deployment script completed for $APP_RELEASE."
+ssh "$DEPLOY_SSH_TARGET" <<EOF | tee "$remote_deploy_log"
+{
     set -euo pipefail
 
     verify_current_main_release_on_host() {
@@ -1219,6 +1230,12 @@ ssh "$DEPLOY_SSH_TARGET" <<EOF
     schema_transition_started=0
     schema_transition_completed=0
     writer_pause_sentinel=/run/mlai-backend-writers-paused
+    describe_writer_pause_sentinel() {
+        local paused_release paused_at
+        paused_release=\$(head -n 1 "\$writer_pause_sentinel" 2>/dev/null || true)
+        paused_at=\$(date -u -r "\$writer_pause_sentinel" '+%Y-%m-%d %H:%M:%S UTC' 2>/dev/null || true)
+        printf '%s (release %s, written %s)' "\$writer_pause_sentinel" "\${paused_release:-unknown}" "\${paused_at:-at an unknown time}"
+    }
     writer_watchdog_units_to_restore=()
     pause_host_writer_watchdogs() {
         local units unit exec_start active_state watchdog_processes watchdog_status
@@ -1284,6 +1301,7 @@ ssh "$DEPLOY_SSH_TARGET" <<EOF
         local service container_ids container_id running
         if [ -e "\$writer_pause_sentinel" ]; then
             echo "❌ A prior migration writer pause is still active; operator review is required." >&2
+            echo "   \$(describe_writer_pause_sentinel)" >&2
             return 1
         fi
         # The host watchdog must see the pause before any Compose service is
@@ -1561,6 +1579,12 @@ ssh "$DEPLOY_SSH_TARGET" <<EOF
         compose_run_web python manage.py migrate --check --noinput
         schema_transition_completed=1
     else
+        # A code-only release never pauses writers, so a marker here was left
+        # by an earlier migration deploy. Surface it now instead of when the
+        # next migration deploy refuses to start.
+        if [ -e "\$writer_pause_sentinel" ]; then
+            echo "::warning title=Stale migration writer pause::\$(describe_writer_pause_sentinel) is still present. Host watchdogs stay stood down, and the next migration deploy will stop until an operator reviews and removes it."
+        fi
         # Confirm the migration graph still has no pending work before the new
         # binary replaces live services. This cannot apply a migration.
         compose_run_web python manage.py migrate --check --noinput
@@ -1999,7 +2023,17 @@ if slugs != expected:
     for rollback_tag in "\${rollback_tags[@]}"; do
         docker image rm "\$rollback_tag" >/dev/null 2>&1 || true
     done
+    echo "$remote_deploy_completed"
+} </dev/null
 EOF
+
+# A remote shell that stops early still exits 0, and the release check below
+# passes as soon as the new web slot serves. Neither proves the release checks,
+# candidate cleanup or writer pause cleanup ran, so require the final line too.
+if ! grep -qxF "$remote_deploy_completed" "$remote_deploy_log"; then
+    echo "❌ The remote deployment script ended before its final step; later release checks and cleanup did not run." >&2
+    exit 1
+fi
 
 # Independently verify the release outside SSH so an early remote exit can
 # never turn a skipped migration/restart into a successful deployment.
