@@ -22,6 +22,7 @@ has not been measured. No row in this register authorises data deletion.
 | Studio | mlai_studio | Recruitment and project website forms consume intake | Keep current consumer contract |
 | Victor AI intake/reporting | victor_ai | Retired by user request on 12 October 2026; historical models/admin remain | Release consumer retirement before backend endpoint removal; decide retention separately |
 | Office Manager | roo | Pilot runtime, scheduling and new-claim APIs retired; historical financial compatibility retained | Preserve ledger/provenance and migration history |
+| Contacts store and event email | crm | Added 23 October 2026: Luma guest sync runner (off by default), backfill and CSV import commands; holds contact PII and consent evidence; retention undecided | Approve the initial migration; decide retention and erasure handling before the API phase |
 | Committee weekly remuneration | roo | Automatic payout service/command retired; committee authorization remains | Preserve historical ledger entries |
 
 For each new feature, its change should identify the owning package, product

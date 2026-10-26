@@ -78,6 +78,7 @@ cookies.txt
 /docs/*.md
 /docs/**/*.md
 !/docs/studio-report-source.md
+!/docs/crm.md
 !/docs/roo-event-discounts.md
 !/docs/roo-event-discount-migration-proposal.md
 /output/event-discount-verification/

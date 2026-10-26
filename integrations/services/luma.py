@@ -385,7 +385,10 @@ class LumaAttendeeReportService:
             "next_cursor": page.get("next_cursor") or None,
         }
 
-    def list_guests(self, *, event_id: str, approval_status: str = "approved") -> List[Dict[str, Any]]:
+    def list_guests(
+        self, *, event_id: str, approval_status: Optional[str] = "approved"
+    ) -> List[Dict[str, Any]]:
+        """Return an event's guests; ``approval_status=None`` returns every status."""
         params = {
             "event_id": event_id,
             "approval_status": approval_status,

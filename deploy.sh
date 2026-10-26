@@ -61,6 +61,15 @@ VALLEY_MCP_DOMAIN_VERIFICATION_TOKEN="${VALLEY_MCP_DOMAIN_VERIFICATION_TOKEN:-}"
 export VALLEY_MCP_ENABLED VALLEY_MCP_PUBLIC_BASE_URL
 export COMMUNITY_CHAT_STARTUP_UPDATES_ENABLED VALLEY_MCP_DOMAIN_VERIFICATION_TOKEN
 python3 scripts/validate_valley_mcp_deploy_config.py
+# CRM switches and delivery settings. Empty values keep the host's own, so a
+# release never switches the CRM off by omission.
+CRM_DEPLOY_SETTINGS="COMMUNITY_CHAT_CRM_ENABLED CRM_LUMA_SYNC_ENABLED CRM_SENDING_ENABLED CRM_SMS_ENABLED CRM_WHATSAPP_ENABLED LISTMONK_BASE_URL LISTMONK_API_USER TWILIO_MESSAGING_SERVICE_SID"
+for crm_setting in $CRM_DEPLOY_SETTINGS; do
+    printf -v "$crm_setting" '%s' "${!crm_setting:-}"
+    export "$crm_setting"
+done
+LISTMONK_API_TOKEN="${LISTMONK_API_TOKEN:-}"
+python3 scripts/validate_crm_deploy_config.py
 MLAI_MCP_NATIVE_AGENTS_ENABLED="${MLAI_MCP_NATIVE_AGENTS_ENABLED:-false}"
 AGENT_RUNTIME_ENABLED="${AGENT_RUNTIME_ENABLED:-false}"
 AGENT_RUNTIME_NATIVE_ENABLED="${AGENT_RUNTIME_NATIVE_ENABLED:-false}"
@@ -403,6 +412,9 @@ if [ -n "${MLAI_CHAT_ACCOUNT_KEY_SECRET:-}" ]; then
 fi
 echo "🔐 Updating Linear channel issue credential (value redacted)..."
 install_remote_env_secret LINEAR_API_KEY "$LINEAR_API_KEY"
+if [ -n "$LISTMONK_API_TOKEN" ]; then
+    install_remote_env_secret LISTMONK_API_TOKEN "$LISTMONK_API_TOKEN"
+fi
 echo "🔐 Updating distinct Roo and internal service credentials (values redacted)..."
 install_remote_env_secret ROO_API_KEY "$ROO_API_KEY"
 install_remote_env_secret INTERNAL_API_KEY "$INTERNAL_API_KEY"
@@ -449,6 +461,11 @@ install_remote_env_value VALLEY_MCP_PUBLIC_BASE_URL "$VALLEY_MCP_PUBLIC_BASE_URL
 if [ -n "$COMMUNITY_CHAT_STARTUP_UPDATES_ENABLED" ]; then
     install_remote_env_value COMMUNITY_CHAT_STARTUP_UPDATES_ENABLED "$COMMUNITY_CHAT_STARTUP_UPDATES_ENABLED"
 fi
+for crm_setting in $CRM_DEPLOY_SETTINGS; do
+    if [ -n "${!crm_setting}" ]; then
+        install_remote_env_value "$crm_setting" "${!crm_setting}"
+    fi
+done
 if [ -n "$VALLEY_MCP_DOMAIN_VERIFICATION_TOKEN" ]; then
     install_remote_env_value VALLEY_MCP_DOMAIN_VERIFICATION_TOKEN "$VALLEY_MCP_DOMAIN_VERIFICATION_TOKEN"
 fi

@@ -73,7 +73,7 @@ jobs:
         python -m pip install --only-binary=:all: --require-hashes -r .github/requirements-ci.lock
 
     - name: Test deployment failure handling and live contract
-      run: python -m unittest tests.test_deploy_runtime_checks tests.test_message_sync_deploy_config tests.test_community_bridge_dependency_review_workflow tests.test_valley_mcp_deploy_config tests.test_native_agent_deploy_config tests.test_slack_owner_inventory_deploy_config tests.test_member_room_provisioning_contract -v
+      run: python -m unittest tests.test_deploy_runtime_checks tests.test_message_sync_deploy_config tests.test_community_bridge_dependency_review_workflow tests.test_valley_mcp_deploy_config tests.test_crm_deploy_config tests.test_native_agent_deploy_config tests.test_slack_owner_inventory_deploy_config tests.test_member_room_provisioning_contract -v
 
     - name: Check jobs delivery contracts without database access
       run: python -m unittest tests.test_jobs_delivery_unit -v
@@ -111,6 +111,18 @@ jobs:
 
     - name: Check event discount provider and worker boundaries without database access
       run: python scripts/test_without_database.py tests.test_luma_event_discounts_unit tests.test_event_discount_worker
+
+    - name: Check CRM messaging rules without database access
+      run: python scripts/test_without_database.py crm.tests.test_messaging_unit
+
+    - name: Check CRM Luma guest parsing and CSV import rules without database access
+      run: python scripts/test_without_database.py crm.tests.test_luma_guests_unit crm.tests.test_contact_import_unit crm.tests.test_phones_unit
+
+    - name: Check CRM API, segment and admin gate rules without database access
+      run: python scripts/test_without_database.py crm.tests.test_api_unit crm.tests.test_segments_unit crm.tests.test_admin_gate_unit
+
+    - name: Check CRM blasts, sending domains and the listmonk client without database access
+      run: python scripts/test_without_database.py crm.tests.test_blasts_unit crm.tests.test_sending_domains_unit crm.tests.test_listmonk_unit
 
     - name: Verify event discounts against disposable migration state
       run: python scripts/test_event_discounts.py roo.tests_event_discounts roo.tests_event_discount_api roo.tests_event_discount_concurrency
@@ -668,6 +680,18 @@ jobs:
     - name: Run Pulse source cache and Linear cursor PostgreSQL tests
       run: python manage.py test startup_updates.tests_source_cache_database --verbosity 2
 
+    - name: Verify CRM messaging on PostgreSQL
+      run: python manage.py test crm.tests.test_messaging_database --verbosity 2
+
+    - name: Verify CRM Luma guest sync and contact import on PostgreSQL
+      run: python manage.py test crm.tests.test_contact_store_database --verbosity 2
+
+    - name: Verify CRM API, segments and the admin gate on PostgreSQL
+      run: python manage.py test crm.tests.test_api_database crm.tests.test_segments_database crm.tests.test_admin_gate_database --verbosity 2
+
+    - name: Verify CRM blasts, senders and listmonk feedback on PostgreSQL
+      run: python manage.py test crm.tests.test_blasts_database crm.tests.test_sending_database --verbosity 2
+
     - name: Verify PostgreSQL search infrastructure
       run: |
         python manage.py check_org_memory_search --require-vector
@@ -1022,6 +1046,15 @@ jobs:
         COMMUNITY_CHAT_ADAPTER_URL: ${{ vars.COMMUNITY_CHAT_ADAPTER_URL }}
         COMMUNITY_CHAT_PASSWORD_AUTH_ENABLED: ${{ vars.COMMUNITY_CHAT_PASSWORD_AUTH_ENABLED || 'false' }}
         COMMUNITY_CHAT_STARTUP_UPDATES_ENABLED: ${{ vars.COMMUNITY_CHAT_STARTUP_UPDATES_ENABLED || '' }}
+        COMMUNITY_CHAT_CRM_ENABLED: ${{ vars.COMMUNITY_CHAT_CRM_ENABLED || '' }}
+        CRM_LUMA_SYNC_ENABLED: ${{ vars.CRM_LUMA_SYNC_ENABLED || '' }}
+        CRM_SENDING_ENABLED: ${{ vars.CRM_SENDING_ENABLED || '' }}
+        CRM_SMS_ENABLED: ${{ vars.CRM_SMS_ENABLED || '' }}
+        CRM_WHATSAPP_ENABLED: ${{ vars.CRM_WHATSAPP_ENABLED || '' }}
+        LISTMONK_BASE_URL: ${{ vars.LISTMONK_BASE_URL || '' }}
+        LISTMONK_API_USER: ${{ vars.LISTMONK_API_USER || '' }}
+        LISTMONK_API_TOKEN: ${{ secrets.LISTMONK_API_TOKEN || '' }}
+        TWILIO_MESSAGING_SERVICE_SID: ${{ vars.TWILIO_MESSAGING_SERVICE_SID || '' }}
         MLAI_MCP_ENABLED: ${{ vars.MLAI_MCP_ENABLED || 'false' }}
         VALLEY_MCP_UNIFIED_ALIAS_ENABLED: ${{ vars.VALLEY_MCP_UNIFIED_ALIAS_ENABLED || 'false' }}
         MLAI_MCP_COMMUNITY_ENABLED: ${{ vars.MLAI_MCP_COMMUNITY_ENABLED || 'false' }}
