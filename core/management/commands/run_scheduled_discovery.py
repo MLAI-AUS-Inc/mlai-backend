@@ -135,7 +135,9 @@ class Command(BaseCommand):
             ("monthly_update_reminders", run_monthly_update_reminder_scheduler),
             # Copies MLAI Luma guests into crm contacts. Feature-gated,
             # cache-throttled to one pass per CRM_LUMA_SYNC_INTERVAL_SECONDS,
-            # and paced under the calendar key's shared rate limit.
+            # and paced under the calendar key's shared rate limit. A pass
+            # starts no new event after crm.luma_sync.PASS_SECONDS and leaves
+            # the rest to the next tick, so it cannot stall this one.
             ("crm_luma_guest_sync", run_luma_guest_sync_scheduler),
             # Sends queued crm blasts: email through listmonk, SMS and WhatsApp
             # through Twilio. Off unless a blast channel is enabled, and
