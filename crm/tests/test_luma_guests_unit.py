@@ -189,7 +189,7 @@ class RunnerGateTests(SimpleTestCase):
 
     @override_settings(CRM_LUMA_SYNC_ENABLED=True, LUMA_API_KEY="key")
     def test_failed_events_report_partial(self):
-        summary = {"failed_events": ["evt-1"], "rate_limited": False, "events_synced": 3}
+        summary = {"failed_events": ["evt-1"], "rate_limited": False, "events_left": [], "events_synced": 3}
         with patch("crm.luma_sync.cache") as cache, patch(
             "crm.luma_sync.sync_recent_luma_guests", return_value=summary
         ):

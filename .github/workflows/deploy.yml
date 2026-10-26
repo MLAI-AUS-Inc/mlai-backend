@@ -115,8 +115,8 @@ jobs:
     - name: Check CRM messaging rules without database access
       run: python scripts/test_without_database.py crm.tests.test_messaging_unit
 
-    - name: Check CRM Luma guest parsing and CSV import rules without database access
-      run: python scripts/test_without_database.py crm.tests.test_luma_guests_unit crm.tests.test_contact_import_unit crm.tests.test_phones_unit
+    - name: Check CRM Luma guest parsing, the Luma sync pass budget and CSV import rules without database access
+      run: python scripts/test_without_database.py crm.tests.test_luma_guests_unit crm.tests.test_luma_sync_unit crm.tests.test_contact_import_unit crm.tests.test_phones_unit
 
     - name: Check CRM API, segment and admin gate rules without database access
       run: python scripts/test_without_database.py crm.tests.test_api_unit crm.tests.test_segments_unit crm.tests.test_admin_gate_unit

@@ -51,6 +51,12 @@ from .models import (
 logger = logging.getLogger(__name__)
 
 SYNC_THROTTLE_KEY = "crm:luma-guest-sync:throttle"
+# Events a pass ran out of time for, which the next scheduler tick reads.
+SYNC_RESUME_KEY = "crm:luma-guest-sync:resume"
+# The runner shares the scheduler tick, whose health file goes stale after
+# SCHEDULED_DISCOVERY_HEALTH_MAX_AGE_SECONDS, so a pass starts no new event
+# after PASS_SECONDS. The event in flight still finishes.
+PASS_SECONDS = 60
 BULK_BATCH_SIZE = 250
 _FILLABLE_FIELDS = ("first_name", "last_name", "display_name", "company", "job_title")
 _PHONE_FIELDS = ("phone", "phone_e164", "sms_status", "sms_status_changed_at")
@@ -180,19 +186,41 @@ def sync_recent_luma_guests(
     now: Optional[datetime] = None,
     recent_days: Optional[int] = None,
     limit: Optional[int] = None,
+    event_ids: Optional[list[str]] = None,
+    deadline: Optional[float] = None,
+    clock=time.monotonic,
 ) -> dict:
-    """One scheduled pass: refresh the catalogue, then the events that change."""
+    """One scheduled pass: refresh the catalogue, then the events that change.
+
+    ``event_ids`` resumes a pass that ran out of time: it reads only those
+    events, in that order, and leaves the catalogue alone. With a ``deadline``
+    (a ``clock()`` reading) no event starts after it, and ``events_left``
+    lists the ones not reached. A rejected key stops the pass, since every
+    later request would be rejected too.
+    """
 
     now = now or timezone.now()
     recent_days = settings.CRM_LUMA_SYNC_RECENT_DAYS if recent_days is None else recent_days
     limit = settings.CRM_LUMA_SYNC_MAX_EVENTS_PER_RUN if limit is None else limit
-    catalog = sync_event_catalog(service)
-    due = events_due_for_guest_sync(now=now, recent_days=recent_days, limit=limit)
+    if event_ids is None:
+        catalog = sync_event_catalog(service)
+        due = events_due_for_guest_sync(now=now, recent_days=recent_days, limit=limit)
+    else:
+        catalog = None
+        by_id = {
+            event.luma_event_id: event
+            for event in CrmEvent.objects.filter(luma_event_id__in=event_ids)
+        }
+        due = [by_id[event_id] for event_id in event_ids if event_id in by_id]
     totals: Counter = Counter()
     failed_events: list[str] = []
+    events_left: list[str] = []
     rate_limited = False
     synced = 0
-    for event in due:
+    for index, event in enumerate(due):
+        if deadline is not None and clock() >= deadline:
+            events_left = [later.luma_event_id for later in due[index:]]
+            break
         try:
             totals.update(
                 sync_event_guests(
@@ -205,6 +233,8 @@ def sync_recent_luma_guests(
             )
             synced += 1
         except LumaAPIError as exc:
+            if exc.status_code in (401, 403):
+                raise
             if exc.status_code == 429:
                 rate_limited = True
                 break
@@ -216,10 +246,11 @@ def sync_recent_luma_guests(
             failed_events.append(event.luma_event_id)
 
     summary = {
-        "events_in_catalog": len(catalog),
+        "events_in_catalog": None if catalog is None else len(catalog),
         "events_due": len(due),
         "events_synced": synced,
         "failed_events": failed_events,
+        "events_left": events_left,
         "rate_limited": rate_limited,
         **dict(totals),
     }
@@ -229,12 +260,16 @@ def sync_recent_luma_guests(
     return summary
 
 
-def run_luma_guest_sync_scheduler(*, now: Optional[datetime] = None, service=None) -> dict:
-    """Scheduler runner: self-throttled, and quiet about transient Luma errors.
+def run_luma_guest_sync_scheduler(
+    *, now: Optional[datetime] = None, service=None, clock=time.monotonic
+) -> dict:
+    """Scheduler runner: self-throttled, time-boxed, and quiet about transient Luma errors.
 
     A failed runner stops the shared scheduler process, so only a rejected key
     (which also breaks Chat Home) is reported as a failure. Outages and rate
-    limits wait for the next interval.
+    limits wait for the next interval. A slow pass would hold up every other
+    runner and let the scheduler's health file go stale, so a pass that runs
+    out of PASS_SECONDS hands its remaining events to the next tick.
     """
 
     if not getattr(settings, "CRM_LUMA_SYNC_ENABLED", False):
@@ -245,13 +280,28 @@ def run_luma_guest_sync_scheduler(*, now: Optional[datetime] = None, service=Non
         return {"status": "skipped", "reason": "throttled"}
 
     try:
-        summary = sync_recent_luma_guests(service or build_luma_service(), now=now)
+        summary = sync_recent_luma_guests(
+            service or build_luma_service(),
+            now=now,
+            event_ids=cache.get(SYNC_RESUME_KEY),
+            deadline=clock() + PASS_SECONDS,
+            clock=clock,
+        )
     except LumaAPIError as exc:
+        cache.delete(SYNC_RESUME_KEY)
         if exc.status_code in (401, 403):
             return {"status": "failed", "reason": "luma_key_rejected", "status_code": exc.status_code}
         logger.warning("crm_luma_guest_sync deferred status_code=%s", exc.status_code)
         return {"status": "deferred", "reason": "luma_unavailable", "status_code": exc.status_code}
 
+    if summary["events_left"]:
+        # Release the throttle so the rest is read a tick later, not an interval later.
+        cache.set(
+            SYNC_RESUME_KEY, summary["events_left"], timeout=settings.CRM_LUMA_SYNC_INTERVAL_SECONDS
+        )
+        cache.delete(SYNC_THROTTLE_KEY)
+    else:
+        cache.delete(SYNC_RESUME_KEY)
     status = "partial" if summary["failed_events"] or summary["rate_limited"] else "completed"
     return {"status": status, **summary}
 

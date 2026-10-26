@@ -2,13 +2,22 @@
 
 import io
 from datetime import datetime, timezone
+from unittest.mock import patch
 
-from django.test import TestCase
+from django.core.cache.backends.locmem import LocMemCache
+from django.test import TestCase, override_settings
 
 from core.models import AccountBan, User
 from crm.contact_import import apply_import, read_csv
-from crm.luma_sync import sync_event_catalog, sync_event_guests
-from crm.models import Contact, ContactConsentEvent, ContactImport, CrmEvent, EventRegistration
+from crm.luma_sync import run_luma_guest_sync_scheduler, sync_event_catalog, sync_event_guests
+from crm.models import (
+    Contact,
+    ContactConsentEvent,
+    ContactImport,
+    CrmAuditEvent,
+    CrmEvent,
+    EventRegistration,
+)
 
 NOW = datetime(2026, 10, 23, 1, 0, tzinfo=timezone.utc)
 
@@ -160,6 +169,75 @@ class LumaGuestSyncTests(TestCase):
         self.assertEqual(landline.sms_status, Contact.SmsStatus.INVALID)
         stopped = Contact.objects.get(email="stopped@example.com")
         self.assertEqual((stopped.phone_e164, stopped.sms_status), ("+61400111222", Contact.SmsStatus.OPTED_OUT))
+
+
+class SlowLuma(FakeLuma):
+    """Each guest list read takes 40 seconds of a fake clock."""
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.seconds = 0.0
+        self.catalog_calls = 0
+
+    def clock(self):
+        return self.seconds
+
+    def list_all_events(self):
+        self.catalog_calls += 1
+        return super().list_all_events()
+
+    def list_guests(self, **kwargs):
+        self.seconds += 40
+        return super().list_guests(**kwargs)
+
+
+@override_settings(
+    CRM_LUMA_SYNC_ENABLED=True,
+    CRM_LUMA_SYNC_INTERVAL_SECONDS=1800,
+    CRM_LUMA_SYNC_RECENT_DAYS=14,
+    CRM_LUMA_SYNC_MAX_EVENTS_PER_RUN=25,
+)
+class LumaSyncPassBudgetTests(TestCase):
+    def setUp(self):
+        cache = LocMemCache("crm-luma-sync-database", {})
+        for patcher in (patch("crm.luma_sync.cache", cache), patch("crm.luma_sync.PASS_SECONDS", 60)):
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        self.addCleanup(cache.clear)
+        self.luma = SlowLuma(
+            events=[
+                luma_event(
+                    event_id, start_at=f"2026-10-{day}T08:00:00Z", end_at=f"2026-10-{day}T10:00:00Z"
+                )
+                for event_id, day in (("evt-a", 25), ("evt-b", 26), ("evt-c", 27))
+            ],
+            guests={
+                event_id: [luma_guest(f"{event_id}@example.com", f"gst-{event_id}")]
+                for event_id in ("evt-a", "evt-b", "evt-c")
+            },
+        )
+
+    def run_pass(self):
+        return run_luma_guest_sync_scheduler(now=NOW, service=self.luma, clock=self.luma.clock)
+
+    def test_a_pass_out_of_time_leaves_the_rest_to_the_next_tick(self):
+        first = self.run_pass()
+        second = self.run_pass()
+        third = self.run_pass()
+
+        # evt-b starts at 40 seconds, inside the 60-second budget; evt-c would start at 80.
+        self.assertEqual((first["events_synced"], first["events_left"]), (2, ["evt-c"]))
+        self.assertEqual((second["events_synced"], second["events_left"]), (1, []))
+        self.assertEqual(third, {"status": "skipped", "reason": "throttled"})
+        self.assertEqual(self.luma.catalog_calls, 1)
+        self.assertEqual([event_id for event_id, _ in self.luma.guest_calls], ["evt-a", "evt-b", "evt-c"])
+        self.assertFalse(CrmEvent.objects.filter(guests_synced_at__isnull=True).exists())
+        self.assertEqual(Contact.objects.count(), 3)
+        passes = CrmAuditEvent.objects.filter(target_type="luma_calendar").order_by("created_at", "pk")
+        self.assertEqual(
+            [(row.detail["events_in_catalog"], row.detail["events_synced"]) for row in passes],
+            [(3, 2), (None, 1)],
+        )
 
 
 class ContactImportTests(TestCase):

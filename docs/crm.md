@@ -33,9 +33,21 @@ The `crm_luma_guest_sync` runner lives in `run_scheduled_discovery`. Each pass:
 
 1. Upserts the calendar catalogue (`list_all_events`). It reads no guest data.
 2. Picks up to `CRM_LUMA_SYNC_MAX_EVENTS_PER_RUN` events that are upcoming or ended within `CRM_LUMA_SYNC_RECENT_DAYS`, least recently synced first.
-3. Replaces each event's registrations with Luma's current guest list, all approval statuses.
+3. Replaces each event's registrations with Luma's current guest list, all approval statuses. Each event commits on its own.
 
 The runner is off unless `CRM_LUMA_SYNC_ENABLED=true`. It is cache-throttled to one pass per `CRM_LUMA_SYNC_INTERVAL_SECONDS`. Requests are spaced to `CRM_LUMA_REQUESTS_PER_MINUTE`, leaving room in the calendar key's 200/minute budget for Chat Home, Volunteer and Roo.
+
+### Pass budget
+
+The runner shares the scheduler tick with every other runner, `crm_blast_dispatch` included. The tick must finish for the scheduler to stay healthy: its health file goes stale after `SCHEDULED_DISCOVERY_HEALTH_MAX_AGE_SECONDS` (300) without a successful tick, and a deploy waits about two minutes for one. At 100 requests a minute and 100 guests a page, a full pass takes minutes. The first production pass (26 Oct 2026: 8 events, 13,462 registrations) held up the tick and failed the deploy's scheduler check.
+
+So a pass starts no new event once `PASS_SECONDS` (60, in `crm/luma_sync.py`) have passed:
+
+- **In flight:** the current event still finishes, so one very large event can overrun the budget.
+- **Hand-over:** the events not reached are returned as `events_left` and kept in the cache (`crm:luma-guest-sync:resume`), and the throttle is released.
+- **Next tick:** about a minute later, it reads only those events, in the same order, with no catalogue refresh and a fresh 60-second budget. It can hand over again, and each of these ticks reads at least one event.
+- **Finish:** the pass that reads the last of them keeps the throttle, so the next full pass starts an interval after it.
+- **Errors:** an outage or a rejected key drops the hand-over, and a rate limit ends the pass without one. The next full pass still takes the least recently synced events first.
 
 A failed runner stops the shared scheduler process, so the runner reports outcomes this way:
 
@@ -43,7 +55,8 @@ A failed runner stops the shared scheduler process, so the runner reports outcom
 | --- | --- |
 | Luma outage or rate limit | `deferred` |
 | Some events failed | `partial`, listing `failed_events` |
-| Luma rejected the key | `failed` |
+| Ran out of time | `completed` (or `partial`), listing `events_left` for the next tick |
+| Luma rejected the key, at any point in a pass | `failed` |
 
 A rejected key also breaks Chat Home.
 
@@ -333,7 +346,7 @@ A channel switched on without its credentials shows as "not configured" and send
 
 `crm.0001_initial` is additive. It creates the twelve tables above and touches no existing table. Like every migration it needs explicit approval and the `APPROVED_MIGRATION_PLAN_SHA256` cycle before deployment (see `README.md`). Tests:
 
-- `crm.tests.test_luma_guests_unit`, `crm.tests.test_contact_import_unit`, `crm.tests.test_phones_unit`, `crm.tests.test_api_unit`, `crm.tests.test_segments_unit`, `crm.tests.test_messaging_unit`, `crm.tests.test_blasts_unit` and `crm.tests.test_listmonk_unit` run without a database.
+- `crm.tests.test_luma_guests_unit`, `crm.tests.test_luma_sync_unit` (the pass budget), `crm.tests.test_contact_import_unit`, `crm.tests.test_phones_unit`, `crm.tests.test_api_unit`, `crm.tests.test_segments_unit`, `crm.tests.test_messaging_unit`, `crm.tests.test_blasts_unit` and `crm.tests.test_listmonk_unit` run without a database.
 - `crm.tests.test_contact_store_database`, `crm.tests.test_api_database`, `crm.tests.test_segments_database`, `crm.tests.test_messaging_database` and `crm.tests.test_blasts_database` run in the CI PostgreSQL job.
 
 Blasts and listmonk need no schema change: they use the tables in `crm.0001_initial`.
