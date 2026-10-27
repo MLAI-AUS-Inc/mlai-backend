@@ -2260,6 +2260,13 @@ COMMUNITY_CHAT_CRM_ENABLED = _env_is_true('COMMUNITY_CHAT_CRM_ENABLED', False)
 # listmonk API user. CRM_SENDING_ENABLED is the email kill switch; SMTP
 # credentials live only in listmonk. See docs/crm.md.
 CRM_SENDING_ENABLED = _env_is_true('CRM_SENDING_ENABLED', False)
+CRM_RESEND_WEBHOOK_SECRET = os.environ.get('CRM_RESEND_WEBHOOK_SECRET', '').strip()
+CRM_RESEND_MONITORED_SENDERS = tuple(
+    value.strip().lower() for value in os.environ.get('CRM_RESEND_MONITORED_SENDERS', '').split(',')
+    if value.strip()
+)
+CRM_WARMUP_ENABLED = _env_is_true('CRM_WARMUP_ENABLED', False)
+CRM_WARMUP_RUN_ID = os.environ.get('CRM_WARMUP_RUN_ID', '').strip()
 LISTMONK_BASE_URL = os.environ.get('LISTMONK_BASE_URL', '').strip().rstrip('/')
 LISTMONK_API_USER = os.environ.get('LISTMONK_API_USER', '').strip()
 LISTMONK_API_TOKEN = os.environ.get('LISTMONK_API_TOKEN', '').strip()

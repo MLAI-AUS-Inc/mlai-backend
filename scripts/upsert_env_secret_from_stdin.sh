@@ -20,6 +20,7 @@ case "$key" in
   ROO_API_KEY|\
   INTERNAL_API_KEY|\
   LINEAR_API_KEY|\
+  CRM_RESEND_WEBHOOK_SECRET|\
   LISTMONK_API_TOKEN) ;;
   *)
     echo "Unsupported production secret key" >&2
