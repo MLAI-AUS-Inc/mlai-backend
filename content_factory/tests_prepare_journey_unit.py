@@ -163,6 +163,27 @@ class PrepareJourneyReplayTests(SimpleTestCase):
         self.advance({"setup": self.setup_handler(captured)})
         self.assertEqual((captured[0]["article_surface_mode"], captured[0]["article_surface_url"]), ("none", "/articles"))
 
+    def test_hosted_site_stops_instead_of_dispatching_repository_setup(self):
+        """PawShare, 27 Oct: an MLAI-hosted blog retried repository setup until the route audit blocked it each time."""
+        site = SimpleNamespace(domain="fixture.test", base_path="/blog/")
+        setup = Mock(return_value={"run_id": "setup-child"})
+        with patch("content_factory.hosted_articles.active_site", return_value=site):
+            self.advance({"setup": setup, "scan": setup, "verify-access": setup})
+        setup.assert_not_called()
+        self.assertEqual(self.op.state, "cancelled")
+        self.assertEqual((self.op.receipt["status"], self.op.receipt["reason_code"]), ("not_needed", ""))
+        self.assertIn("https://fixture.test/blog/", self.op.receipt["message"])
+
+    def test_hosted_site_journey_offers_no_repository_setup(self):
+        caps = {"repositoryAccessVerified": True, "repositoryWriteVerified": True, "accountAccessVerified": True,
+                "canPublishHostedArticle": True, "hostedSite": {"state": "active", "baseUrl": "https://fixture.test/blog/"}}
+        journey = self.journey(capabilities=caps)
+        self.assertNotIn("prepare", journey["allowedActions"])
+        self.assertNotIn("setup", journey["allowedActions"])
+        self.assertIsNone(journey["nextAction"])
+        self.assertTrue(journey["capabilities"]["canPublishHostedArticle"])
+        self.assertIn("setup", self.journey(capabilities={**caps, "canPublishHostedArticle": False})["allowedActions"])
+
     def test_verified_access_with_incomplete_repository_stops_after_repeat(self):
         self.facts["repository"] = None
         handler = Mock(return_value={"status": "completed"})
