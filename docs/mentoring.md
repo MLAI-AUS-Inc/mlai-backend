@@ -55,11 +55,34 @@ Everything returns 404 `mentor_booking_disabled` while the flag is off.
 | GET, PUT `mentor/profile/` | The mentor's own profile, weekly `availability` list and optional `busy_calendar_email` |
 | POST `mentor/sessions/` | Founder request: `mentor_id` (whole number), `starts_at`, `brief`, `client_request_id`, and `expected_price` (required, the whole-number price the founder was shown) |
 | GET `mentor/sessions/?role=founder\|mentor&status=` | My sessions |
+| POST `mentor/application/check/` | Invited user checks an invite `{token}`: `state` ready, submitted or approved. 404 `invite_invalid`, 403 `invite_wrong_user`, 410 `invite_expired` or `invite_revoked` |
+| POST `mentor/application/` | Invited user submits the profile form with `token`; creates or updates their profile with `is_active` false. 409 `invite_used`, 409 `already_a_mentor` |
 | POST `mentor/sessions/<uuid>/accept/` | Mentor accepts; the founder is charged now (409 `founder_insufficient_points` and the request stays open if they cannot pay) |
 | POST `mentor/sessions/<uuid>/meeting/retry/` | Mentor asks for the Meet link again when `meeting_status` is `failed` or `unavailable` (409 `meeting_pending` while one is being made) |
 | POST `mentor/sessions/<uuid>/decline/` | Mentor declines (no points move) |
-| POST `mentor/sessions/<uuid>/cancel/` | Founder or mentor, any time before completion, even after the start (refund if charged) |
+| POST `mentor/sessions/<uuid>/cancel/` | Founder or mentor, only before the start time (refund if charged); 409 `session_started` once it has started |
 | POST `mentor/sessions/<uuid>/complete/` | Mentor marks done, only once the session has ended (payout) |
+
+### Staff-only Mentoring admin
+
+Under `mentor/admin/`, same flag, authentication and throttles. Allowed callers are a
+Chat owner or admin on a verified device, or an active Django staff or superuser
+account; anyone else gets 403 `mentoring_admin_required`. `mentor/admin/access/` is
+open to every signed-in member and returns `{"is_admin": bool}` so the client knows
+whether to show the tab.
+
+| Method and path | Purpose |
+| --- | --- |
+| GET `access/` | `{is_admin}` for the caller |
+| GET `members/?q=` | Active members by name or email (2+ characters, 10 results) |
+| GET, POST `invites/` | List (`?status=pending\|used\|expired\|revoked`) or create `{user_id}`; the create response carries `link` once, only its hash is stored |
+| POST `invites/<id>/revoke/` | Revoke an unused invite (records `revoked_by`); 409 `invite_used` if used |
+| GET `applications/?state=pending\|rejected` | Inactive profiles that came from a used invite and were never approved or paused |
+| GET `applications/<profile_id>/` | The full application |
+| POST `applications/<profile_id>/approve/`, `.../reject/` | Approve sets `is_active` and `approved_at`; reject keeps it inactive and sets `rejected_at`. Both record `reviewed_by`. 409 `not_an_application` otherwise |
+| GET `mentors/` | Active or paused mentors with price, length, location and sessions count |
+| POST `mentors/<profile_id>/pause/`, `.../unpause/` | Toggle `is_active` (sets or clears `paused_at`); existing sessions are untouched |
+| GET `sessions/?status=&problem=` | All sessions, newest first (200 max). `problem` is `meeting_failed`, `stale_pending` or `notification_failed`; each row has a `flags` list |
 
 A missing or non-integer `expected_price` returns 400 `expected_price_required`; a
 mismatch with the mentor's current price returns 400 `price_changed`. A boolean or
@@ -95,8 +118,8 @@ All movements use `PointsService`, ledger source `MANUAL`, reference type
    `mentor_charge:{session id}`. If the founder's balance is now too low the accept
    fails with 409 `founder_insufficient_points` and the session stays `requested`.
 3. Decline and expiry: no points move, because nothing was charged.
-4. Cancel (founder or mentor), any time before the session is completed, including
-   after the start: if the founder was charged, refund with key
+4. Cancel (founder or mentor), only before the session start time; from the start
+   on it is refused with 409 `session_started`. If the founder was charged, refund with key
    `mentor_release:{session id}`, restoring the purchased and earned split. Cancelling
    a request that was never accepted moves no points.
 5. Completion (mentor marks done after the session ends, or automatically 24 hours
@@ -142,7 +165,12 @@ unavailable on isolated staging (capability `google`, never called).
 - Session fields: `meet_link`, `calendar_event_id`, `meeting_status` (`pending`, `created`,
   `failed`, `unavailable`), `meeting_error` (short code such as `permission`, `network`,
   `google_off`). A failure never undoes the acceptance. The mentor can retry with
-  `POST mentor/sessions/<id>/meeting/retry/`. With Google off or on staging the status is
+  `POST mentor/sessions/<id>/meeting/retry/`. Each attempt stamps `meeting_claimed_at`; a
+  `pending` claim younger than 2 minutes (`MEETING_CLAIM_TIMEOUT_SECONDS`) still answers 409
+  `meeting_pending`, an older one (the process died after the commit) is reclaimed by the
+  retry. A retry never charges again. The session JSON reports a stale `pending` as `failed` (no write on read) so clients offer Retry. The Calendar event id is fixed per session
+  (`mlaimentor` + the session UUID hex) and stored before the insert, so a retry reuses an
+  existing event instead of inserting a second, and a cancel can always delete it. With Google off or on staging the status is
   `unavailable`.
 - Cancel after a meeting exists: the Calendar event is deleted (best effort; guests are told).
 - Slots: when the mentor has `busy_calendar_email` and Google is enabled, the slot list
@@ -219,3 +247,26 @@ Open questions that need a live test before the pilot relies on them:
 No-database suites, registered in `.github/workflows/deploy.yml`:
 `python scripts/test_without_database.py mentoring.tests.test_scheduling_unit mentoring.tests.test_google_unit mentoring.tests.test_service_unit mentoring.tests.test_dst_unit community_chat.tests.test_mentoring_views_unit`.
 Locking, constraints and real ledger rows need database tests after migration approval.
+
+## Becoming a mentor (invite only)
+
+Nobody can apply without an invite. Staff add a Mentor invite in Django admin for an
+existing user; the single-use link (`<chat url>/mentoring/apply?invite=<token>`) is
+shown once and only its SHA-256 is stored. It expires after 14 days by default and can
+be revoked from the list. The invited user, signed in as that user, fills the form
+(headline, bio, topics, price 1 to 1000 Roo default 40, session length, location,
+weekly availability, optional booking questions). Submitting creates or updates their
+profile with `is_active` false and uses up the invite. MLAI staff approve by ticking
+`is_active` on the Mentor profile in admin. Until then the applicant sees "submitted,
+MLAI will review" and no Mentor hub. An applicant cannot edit after submitting; staff
+issue a new invite if they need to resubmit.
+
+## Booking questions
+
+Each mentor can set up to 8 questions (text up to 200 characters, required or
+optional, answers up to 1000 characters) in Mentor settings (`brief_questions` on the
+profile). An empty list means the default four (stage, struggle, outcome, optional
+https link). The founder sends `brief.answers` as `[{id, answer}]` (the old
+`{stage, struggle, outcome, link}` shape still works for the default questions). The
+question text is copied onto the session with the answers (`brief_answers`), so later
+edits never change past bookings; older sessions are shown from their four old fields.

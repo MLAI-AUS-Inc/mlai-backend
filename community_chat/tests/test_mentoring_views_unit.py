@@ -144,6 +144,35 @@ class MentoringViewTests(unittest.TestCase):
         view.request = SimpleNamespace(method='GET')
         self.assertEqual(view.community_chat_throttle_scope, 'community_chat_mentoring')
 
+    @override_settings(MENTOR_BOOKING_ENABLED=True)
+    def test_application_endpoints(self):
+        self.service.check_invite.return_value = {'state': 'ready'}
+        response = self.call(views.MentorApplicationCheckView, 'post', data={'token': 't' * 30})
+        self.assertEqual((response.status_code, response.data['state']), (200, 'ready'))
+        self.service.check_invite.assert_called_once_with(self.user, 't' * 30)
+        self.service.submit_application.return_value = {'state': 'submitted'}
+        response = self.call(views.MentorApplicationView, 'post', data={'token': 'x'})
+        self.assertEqual((response.status_code, response.data), (201, {'state': 'submitted'}))
+        self.assertEqual(self.call(views.MentorApplicationView, 'post', authenticated=False).status_code, 401)
+
+    @override_settings(MENTOR_BOOKING_ENABLED=True)
+    def test_application_errors_keep_their_code_and_status(self):
+        for code, status in (('invite_wrong_user', 403), ('invite_expired', 410), ('invite_used', 409), ('invite_invalid', 404)):
+            self.service.submit_application.side_effect = MentoringError(code, 'm', status)
+            response = self.call(views.MentorApplicationView, 'post', data={'token': 'x'})
+            self.assertEqual((response.status_code, response.data['code']), (status, code))
+
+    @override_settings(MENTOR_BOOKING_ENABLED=False)
+    def test_application_is_404_while_flag_is_off(self):
+        for view in (views.MentorApplicationView, views.MentorApplicationCheckView):
+            self.assertEqual(self.call(view, 'post', data={'token': 'x'}).status_code, 404)
+        self.service.submit_application.assert_not_called()
+
+    def test_application_urls_exist(self):
+        from django.urls import reverse
+        self.assertTrue(reverse('community_chat_mentor_application').endswith('mentor/application/'))
+        self.assertTrue(reverse('community_chat_mentor_application_check').endswith('mentor/application/check/'))
+
 
 if __name__ == '__main__':
     unittest.main()

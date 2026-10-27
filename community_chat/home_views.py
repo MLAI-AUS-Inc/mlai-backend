@@ -152,6 +152,7 @@ class CommunityHomeView(APIView):
                     "meeting_rooms": bool(
                         getattr(settings, "MEETING_ROOM_BOOKING_ENABLED", False)
                     ),
+                    "staff_admin_panel": bool(getattr(settings, "STAFF_ADMIN_PANEL_ENABLED", False)),
                     "mentor_booking": bool(
                         getattr(settings, "MENTOR_BOOKING_ENABLED", False)
                     ),

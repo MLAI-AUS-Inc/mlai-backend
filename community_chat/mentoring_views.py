@@ -13,10 +13,13 @@ from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
+from mentoring.admin_service import MentoringAdminService
 from mentoring.models import MentorSession
 from mentoring.service import MentoringError, MentoringService, serialize_session
 
 from .authentication import CommunityChatAccountAuthentication
+from .permissions import account_chat_role, is_chat_admin
+from . import mentoring_admin_redaction as redacted
 from .throttles import CommunityChatScopedThrottle
 
 
@@ -96,6 +99,18 @@ class MyMentorProfileView(MentoringBaseView):
     patch = put
 
 
+class MentorApplicationCheckView(MentoringBaseView):
+    """POST because the invite token must not travel in a URL or query string."""
+
+    def post(self, request):
+        return Response(MentoringService.check_invite(request.user, _body(request).get('token')))
+
+
+class MentorApplicationView(MentoringBaseView):
+    def post(self, request):
+        return Response(MentoringService.submit_application(request.user, _body(request)), status=201)
+
+
 class MentorSessionsView(MentoringBaseView):
     def get(self, request):
         role = request.query_params.get('role', 'founder')
@@ -145,3 +160,122 @@ class MentorSessionCompleteView(MentorSessionActionView):
 
 class MentorSessionMeetingRetryView(MentorSessionActionView):
     action = 'retry_meeting'
+
+
+# ----------------------------------------------------------- staff-only admin
+
+def mentoring_admin_level(request):
+    """Staff by the rules the backend already uses: a Chat owner or admin on this
+    verified device, or an active Django staff or superuser account."""
+    if getattr(settings, 'STAFF_ADMIN_PANEL_ENABLED', False):
+        from .staff_admin_permissions import viewer_role, sections_for
+        level = sections_for(viewer_role(request)).get('mentoring')
+        return level
+    user = request.user
+    if not getattr(user, 'is_authenticated', False) or not getattr(user, 'is_active', False):
+        return None
+    if getattr(user, 'is_staff', False) or getattr(user, 'is_superuser', False):
+        return 'edit'
+    role = account_chat_role(
+        user,
+        getattr(request, 'community_chat_public_key', None),
+        getattr(request, 'community_chat_installation_id', None),
+    )
+    return 'edit' if is_chat_admin(role) else None
+
+
+def is_mentoring_admin(request):
+    level = mentoring_admin_level(request)
+    return level == 'edit' or (level == 'view' and request.method in ('GET', 'HEAD', 'OPTIONS'))
+
+
+class MentoringAdminView(MentoringBaseView):
+    """Every method needs staff; anyone else gets 403 after the flag and auth checks."""
+
+    requires_editor = False
+
+    def initial(self, request, *args, **kwargs):
+        super().initial(request, *args, **kwargs)
+        self.mentoring_level = mentoring_admin_level(request)
+        editor_only = self.requires_editor or request.method not in ('GET', 'HEAD', 'OPTIONS')
+        if self.mentoring_level is None or (editor_only and self.mentoring_level != 'edit'):
+            raise MentoringError('mentoring_admin_required', 'Mentoring admin is for MLAI staff.', 403)
+
+    def read_data(self, data, serializer):
+        return serializer(data) if self.mentoring_level == 'view' else data
+
+
+class MentoringAdminAccessView(MentoringBaseView):
+    """Tells the client whether to show the Mentoring admin tab. Never an error for members."""
+
+    def get(self, request):
+        return Response({'is_admin': is_mentoring_admin(request)})
+
+
+class MentoringAdminMembersView(MentoringAdminView):
+    requires_editor = True
+
+    def get(self, request):
+        return Response({'members': MentoringAdminService.search_members(request.query_params.get('q', ''))})
+
+
+class MentoringAdminInvitesView(MentoringAdminView):
+    def get(self, request):
+        status = request.query_params.get('status') or None
+        return Response({'invites': [self.read_data(row, redacted.invite)
+                                     for row in MentoringAdminService.list_invites(status)]})
+
+    def post(self, request):
+        return Response(MentoringAdminService.create_invite(request.user, _body(request).get('user_id')), status=201)
+
+
+class MentoringAdminInviteRevokeView(MentoringAdminView):
+    def post(self, request, invite_id):
+        return Response(MentoringAdminService.revoke_invite(request.user, invite_id))
+
+
+class MentoringAdminApplicationsView(MentoringAdminView):
+    def get(self, request):
+        state = request.query_params.get('state') or None
+        return Response({'applications': [self.read_data(row, redacted.application)
+                                          for row in MentoringAdminService.list_applications(state)]})
+
+
+class MentoringAdminApplicationView(MentoringAdminView):
+    def get(self, request, profile_id):
+        return Response(self.read_data(MentoringAdminService.get_application(profile_id), redacted.application))
+
+
+class MentoringAdminApplicationApproveView(MentoringAdminView):
+    def post(self, request, profile_id):
+        return Response(MentoringAdminService.approve_application(request.user, profile_id))
+
+
+class MentoringAdminApplicationRejectView(MentoringAdminView):
+    def post(self, request, profile_id):
+        return Response(MentoringAdminService.reject_application(request.user, profile_id))
+
+
+class MentoringAdminMentorsView(MentoringAdminView):
+    def get(self, request):
+        return Response({'mentors': [self.read_data(row, redacted.mentor)
+                                     for row in MentoringAdminService.list_mentors()]})
+
+
+class MentoringAdminMentorPauseView(MentoringAdminView):
+    paused = True
+
+    def post(self, request, profile_id):
+        return Response(MentoringAdminService.set_paused(request.user, profile_id, self.paused))
+
+
+class MentoringAdminMentorUnpauseView(MentoringAdminMentorPauseView):
+    paused = False
+
+
+class MentoringAdminSessionsView(MentoringAdminView):
+    def get(self, request):
+        return Response({'sessions': [self.read_data(row, redacted.session) for row in MentoringAdminService.list_sessions(
+            request.query_params.get('status') or None,
+            request.query_params.get('problem') or None,
+        )]})
