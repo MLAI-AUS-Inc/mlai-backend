@@ -267,6 +267,48 @@ class IncidentAuthorityReplays(SimpleTestCase):
                     }), op)
                     self.assertEqual((op.state, run.status), ("completed", "completed"))
 
+    def test_a_failed_attempt_accepts_its_own_failure_report(self):
+        # Talathrive and PawShare, 27 Oct: the run update closed the operation as
+        # failed or blocked, then generation_failed (status "error") was refused.
+        from . import website_operations as operations
+        from workflow_runs.models import ContentFactoryRun
+        identifier = uuid.uuid4()
+        binding = {"operation_id": str(identifier), "operation_attempt": 1, "deletion_epoch": 0}
+        run = SimpleNamespace(run_id="rejected-article", workflow="confirmed_topic", organization_id=30,
+            status="blocked", run_request=binding, result={})
+        op = SimpleNamespace(pk=identifier, state="failed", payload={"attempt": 1}, generation=3)
+        manager = Mock(); manager.filter.return_value.first.return_value = op
+        website = SimpleNamespace(organization_id=30, operations=manager, blockers=[], generation=3)
+        payload = {**binding, "run_id": run.run_id}
+        accepted = [
+            ("failed", {"event": "generation_failed", "status": "error"}),
+            ("blocked", {"event": "generation_failed", "status": "error"}),
+            ("blocked", {"event": "error", "status": "failed"}),
+            ("failed", {"event_type": "error"}),
+            ("blocked", {"event": "article_system_setup_preview_failed", "status": "failed"}),
+        ]
+        refused = [
+            ("completed", {"event": "generation_failed", "status": "error"}, "website_operation_terminal"),
+            ("failed", {"event": "generation_failed", "status": "running"}, "website_operation_terminal"),
+            ("failed", {"event": "article_complete", "status": "completed"}, "website_operation_terminal"),
+            ("failed", {"event": "generation_blocked", "status": "blocked"}, "website_operation_terminal"),
+            ("cancelled", {"event": "generation_failed", "status": "error"}, "website_operation_cancelled"),
+            ("failed", {"event": "generation_failed", "status": "error", "operation_attempt": 2}, "website_operation_changed"),
+        ]
+        with patch.object(ContentFactoryRun.objects, "filter") as runs:
+            runs.return_value.first.return_value = run
+            for state, changes in accepted:
+                with self.subTest(state=state, changes=changes):
+                    op.state = state
+                    self.assertIs(operations.validate_operation(website, {**payload, **changes}), op)
+                    self.assertEqual(op.state, state)
+            for state, changes, expected in refused:
+                with self.subTest(state=state, changes=changes):
+                    op.state = state
+                    with self.assertRaises(WebsiteAuthorityError) as error:
+                        operations.validate_operation(website, {**payload, **changes})
+                    self.assertEqual(error.exception.code, expected)
+
     def test_setup_success_alias_cannot_revive_a_failed_or_fenced_setup(self):
         from . import website_operations as operations
         from workflow_runs.models import ContentFactoryRun
