@@ -66,6 +66,8 @@ def project_journey(*, company_id, domain, website=None, capabilities=None, disc
         # The open setup pull request is the integration; publishing it comes before any rescan.
         reason_code = "setup_pr_unmerged"
         reason = "Your articles setup pull request is ready. Review the changes, then publish."
+    # MLAI serves a hosted site's articles; its repository is never set up for them.
+    hosted = capabilities.get("canPublishHostedArticle") is True
     running = operation and operation.get("state") in {"pending", "running", "verifying", "applying"}
     op_id = operation.get("id") if operation else None
     adapter = target.get("adapter") or target_contract.get("delivery_adapter") or proof.get("verifiedAdapter")
@@ -124,7 +126,7 @@ def project_journey(*, company_id, domain, website=None, capabilities=None, disc
         allowed.append("github-revoke")
     if website:
         allowed += ["disconnect", "reset", "purge", "reconcile", "github-revoke"]
-        if connected and write_access and write_allowed:
+        if connected and write_access and write_allowed and not hosted:
             allowed.append("prepare")
         if access:
             if not permissions_ready:
@@ -132,7 +134,8 @@ def project_journey(*, company_id, domain, website=None, capabilities=None, disc
             allowed += ["custom-contract", "ci-attestation"]
         allowed += ["scan", "pause"] if connected else ["reconnect"]
         if write_allowed and write_access:
-            allowed.append("setup")
+            if not hosted:
+                allowed.append("setup")
             if not verification_stale:
                 allowed.append("verify")
         if website.get("hasMutationHistory"):

@@ -858,6 +858,17 @@ def _advance_claimed_prepare(op, *, now, handlers):
             op.state,op.next_attempt_at="pending",now+timedelta(minutes=1)
             op.receipt.update(status="working",message="Completing the previous article credit.",user_action=None)
             return _finish_prepare(op,now=now)
+        from .hosted_articles import active_site
+        from .website_goal_runner import owns_goal
+        hosted_site = active_site(getattr(config, "organization", None))
+        if hosted_site is not None and not owns_goal(op):
+            # MLAI serves this company's articles, so a repository setup can
+            # never pass its route audit. Stop instead of dispatching one.
+            op.state, op.next_attempt_at = "cancelled", None
+            op.receipt.update(status="not_needed", reason_code="", current_step="ready",
+                blocked_step=None, user_action=None,
+                message=f"MLAI hosts your blog at https://{hosted_site.domain}{hosted_site.base_path}, so your website repository needs no articles setup.")
+            return _finish_prepare(op, now=now)
         journey = journey_for_context(context, config)
         journey = _cleanup_retry_journey(op, context, config, journey)
         from .website_goal_runner import owns_goal, goal_journey, ready

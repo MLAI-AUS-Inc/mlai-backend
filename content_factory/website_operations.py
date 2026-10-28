@@ -155,14 +155,20 @@ def validate_operation(connection, payload, *, worker_cleanup=False, restoration
             "failed": {"generation_failed", "error", "article_system_setup_failed", "article_system_setup_preview_failed"},
             "blocked": {"generation_blocked", "article_system_setup_failed", "article_system_setup_preview_failed"},
         }
-        setup_failure = event in {"article_system_setup_failed", "article_system_setup_preview_failed"}
-        same_failure = setup_failure and op.state in {"failed", "blocked"} and incoming_status in {"failed", "blocked"}
+        # A failure report from the same attempt restates the outcome the
+        # operation already recorded; it does not reopen it. Content Factory
+        # sends generation_failed with status "error" after its run update
+        # closed the operation as failed or blocked (Talathrive and PawShare,
+        # 27 Oct), so the refund decision and notification were lost.
+        failure_report = event in {"generation_failed", "error", "article_system_setup_failed", "article_system_setup_preview_failed"}
+        same_failure = (failure_report and op.state in {"failed", "blocked"}
+            and str(incoming_status or "failed").strip().lower() in {"failed", "blocked", "error"})
         review_replay = False
         if op.state == "completed" and event == "article_system_setup_revision_ready":
             from .article_review_callbacks import processed_setup_review_replay
             review_replay = processed_setup_review_replay(payload, child_id=run_id)
         publish_continuation = _approved_publish_child_continuation(connection, op, run)
-        if not review_replay and not publish_continuation and ((incoming_status and incoming_status != op.state and not same_failure) or (event and event not in terminal_events[op.state])):
+        if not review_replay and not publish_continuation and not same_failure and ((incoming_status and incoming_status != op.state) or (event and event not in terminal_events[op.state])):
             raise WebsiteAuthorityError("website_operation_terminal", "This operation is terminal. Start a new reviewed attempt.")
     if cancellation_receipt:
         if (op.action != "workflow" or op.state not in {"pending", "running", "failed", "blocked", "cancelled"}
