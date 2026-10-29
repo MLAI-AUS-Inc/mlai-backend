@@ -456,3 +456,77 @@ class PortablePreviewRearmTests(SimpleTestCase):
                 refund.assert_not_called()
                 run.save.assert_not_called()
                 self.assertNotIn("article_terminal_refund", run.result)
+
+
+class HostedPublishRenderedPreviewTests(SimpleTestCase):
+    """Hosted publish can require that the owner saw a rendered preview of this exact revision.
+
+    Content Factory's article-review read reports ``previewedRevision``: the
+    current revision when its stored preview is ready for it, "" otherwise.
+    """
+
+    def setUp(self):
+        self.run = SimpleNamespace(
+            pk=1, run_id="synthetic-draft", domain="publisher.example", github_repo="",
+            workflow="direct_generate", status="completed",
+            run_request={"delivery_mode": "content_only", "delivery_mode_confirmed": True}, result={},
+        )
+
+    def publish(self, review, reviewed="rev-1"):
+        from . import hosted_article_views
+        view = hosted_article_views.HostedArticlePublishView()
+        request = SimpleNamespace(data={"reviewedRevision": reviewed, "waivedComments": []})
+        publication = SimpleNamespace(pk=7)
+        context = SimpleNamespace(profile=SimpleNamespace(user=None))
+        with patch.object(view, "_resolve", return_value=(context, self.run, SimpleNamespace(domain="publisher.example"), None)), \
+                patch.object(views, "_latest_review_ready_component_revision", return_value=None), \
+                patch("content_factory.article_review_views.remote_review", return_value=review), \
+                patch("content_factory.article_review_views.check_approval_comments", return_value=None), \
+                patch("content_factory.article_review_views.record_review_approval") as approve, \
+                patch.object(hosted_article_views.hosted, "request_publication", return_value=publication) as queue, \
+                patch.object(hosted_article_views.hosted, "publication_payload", return_value={"status": "pending"}), \
+                patch.object(hosted_article_views, "_dispatch_hosted_publish", return_value={"queued": True}) as dispatch:
+            response = view.post(request, self.run.run_id)
+        return response, SimpleNamespace(approve=approve, queue=queue, dispatch=dispatch)
+
+    def assert_refused(self, response, effects, reason):
+        self.assertEqual((response.status_code, response.data["reason"]), (409, reason))
+        effects.queue.assert_not_called()
+        effects.approve.assert_not_called()
+        effects.dispatch.assert_not_called()
+
+    def test_flag_off_publishes_on_the_reviewed_revision_alone(self):
+        for label, review in (
+            ("older_content_factory", {"revision": "rev-1", "previewPending": False}),
+            ("no_preview", {"revision": "rev-1", "previewPending": False, "previewedRevision": ""}),
+        ):
+            with self.subTest(label):
+                response, effects = self.publish(review)
+                self.assertEqual(response.status_code, 202, response.data)
+                effects.dispatch.assert_called_once_with(effects.queue.return_value, "rev-1")
+
+    @override_settings(HOSTED_PUBLISH_REQUIRES_RENDERED_PREVIEW=True)
+    def test_flag_on_requires_a_rendered_preview_of_the_reviewed_revision(self):
+        response, effects = self.publish({"revision": "rev-1", "previewPending": False, "previewedRevision": "rev-1"})
+        self.assertEqual(response.status_code, 202, response.data)
+        effects.dispatch.assert_called_once_with(effects.queue.return_value, "rev-1")
+        for label, review in (
+            ("no_preview", {"revision": "rev-1", "previewPending": False, "previewedRevision": ""}),
+            ("older_revision_previewed", {"revision": "rev-1", "previewPending": False, "previewedRevision": "rev-0"}),
+            ("older_content_factory", {"revision": "rev-1", "previewPending": False}),
+        ):
+            with self.subTest(label):
+                response, effects = self.publish(review)
+                self.assert_refused(response, effects, "preview_required")
+                self.assertEqual(response.data["detail"], "Open the rendered preview of this version before publishing.")
+
+    @override_settings(HOSTED_PUBLISH_REQUIRES_RENDERED_PREVIEW=True)
+    def test_a_changed_review_is_still_reported_first(self):
+        for label, review, reviewed in (
+            ("pending_preview", {"revision": "rev-1", "previewPending": True, "previewedRevision": "rev-1"}, "rev-1"),
+            ("newer_revision", {"revision": "rev-2", "previewPending": False, "previewedRevision": "rev-1"}, "rev-1"),
+            ("nothing_reviewed", {"revision": "rev-1", "previewPending": False, "previewedRevision": "rev-1"}, ""),
+        ):
+            with self.subTest(label):
+                response, effects = self.publish(review, reviewed=reviewed)
+                self.assert_refused(response, effects, "review_changed")

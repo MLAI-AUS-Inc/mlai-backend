@@ -1123,6 +1123,10 @@ ARTICLES_WEBSITE_GOAL_ENROLLED_ORGANIZATIONS = tuple(
 )
 # MLAI-hosted article sites: owners publish repo-free drafts that MLAI serves on their own domain.
 ARTICLES_HOSTED_SITES_ENABLED = os.getenv('ARTICLES_HOSTED_SITES_ENABLED', 'false').lower() == 'true'
+# Hosted publish also requires Content Factory's previewedRevision (a rendered
+# preview of exactly the reviewed revision). Enable only after the portable
+# preview ladder is verified in production and clients bind viewedRevision.
+HOSTED_PUBLISH_REQUIRES_RENDERED_PREVIEW = os.getenv('HOSTED_PUBLISH_REQUIRES_RENDERED_PREVIEW', 'false').lower() == 'true'
 CONTENT_FACTORY_DEFAULT_ARTICLE_DELIVERY_MODE = os.getenv(
     'CONTENT_FACTORY_DEFAULT_ARTICLE_DELIVERY_MODE',
     'review_draft',
