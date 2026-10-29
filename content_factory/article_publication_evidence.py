@@ -19,6 +19,13 @@ HANDOFF_FIELDS = ("publish_handoff_pending", "publish_handoff_status", "publish_
 # Terminal states whose paid obligation settles through a bound worker stop.
 # A denied run is an authority refusal and settles like a failure.
 TERMINAL_REFUND_STATUSES = frozenset({"failed", "cancelled", "denied"})
+# Backend-owned settlement state. Worker snapshots and status polls can neither
+# introduce nor erase it; only the backend's own settlement paths write it.
+SETTLEMENT_RESULT_KEYS = frozenset({"article_terminal_refund", "reconciliation_refund_pending",
+    "article_settlement_attempts", "article_settlement_status", "article_settlement_owner",
+    "article_stop_attempts", "dispatch_rejection_v1"})
+# Content Factory's code for a run whose first snapshot the backend refused.
+DISPATCH_REJECTED = "dispatch_rejected"
 
 
 def mapping(value):
@@ -267,6 +274,43 @@ def denied_refund_code(run):
     return None if useful_delivery(run) or delivered_content(run) else code
 
 
+def dispatch_rejected_refund_candidate(run):
+    """A paid article run refused at its first snapshot, before any work was queued.
+
+    Content Factory fails such a run locally without a terminal callback, and
+    its stop endpoint cannot bind the backend's scope (the refused snapshot was
+    never merged), so neither the callback nor the stop path can settle it.
+    A restart that reused the charge, a goal-owned spend, or any recorded
+    effect or delivery keeps the charge.
+    """
+    from .billing_lineage import paid_article_request
+    from .incident_guards import delivered_content
+    request, result = mapping(run.run_request), mapping(run.result)
+    code = str(mapping(result.get("failure")).get("code") or result.get("error_code") or "").strip().lower()
+    restart = mapping(result.get("restart_receipt"))
+    if (run.workflow not in ARTICLE_WORKFLOWS or run.status != "failed" or code != DISPATCH_REJECTED
+            or not paid_article_request(request) or not str(request.get("client_request_id") or "").strip()
+            or str(request.get("client_request_id")).strip() == str(run.run_id or "").strip()
+            or request.get("first_article_goal_operation_id") or request.get("pending_billing_refund")
+            or result.get("dispatch_refund_processed") or request.get("roo_points_billing_status") == "refunded"
+            or result.get("restart_child_run_id") or restart.get("state") in {"pending", "running", "completed"}):
+        return False
+    return publication_state(run) == "none" and not useful_delivery(run) and not delivered_content(run)
+
+
+def dispatch_rejection_receipt(run):
+    """Content Factory's own key record that the backend refused this exact run."""
+    request, result = mapping(run.run_request), mapping(run.result)
+    receipt = mapping(result.get("dispatch_rejection_v1"))
+    if (set(receipt) != {"version", "run_id", "client_request_id", "key_status", "backend_code", "checked_at"}
+            or type(receipt.get("version")) is not int or receipt["version"] != 1
+            or receipt.get("run_id") != run.run_id or receipt.get("key_status") != "failed"
+            or receipt.get("client_request_id") != str(request.get("client_request_id") or "").strip()
+            or not isinstance(receipt.get("backend_code"), str) or not receipt["backend_code"]):
+        return None
+    return dict(receipt) if dispatch_rejected_refund_candidate(run) else None
+
+
 def refund_reconciliation_reason(run):
     """Recheck current proof immediately before credit; absence requires a stop."""
     if getattr(run, "workflow", None) not in ARTICLE_WORKFLOWS:
@@ -279,4 +323,7 @@ def refund_reconciliation_reason(run):
         return "needs_reconciliation"
     if receipt:
         return None if receipt["outcome"] == "no_article_effect" and receipt.get("delivered_value") is False else "needs_reconciliation"
+    if dispatch_rejection_receipt(run):
+        # The worker's key record proves this run never reached its queue.
+        return None
     return "stop_required"

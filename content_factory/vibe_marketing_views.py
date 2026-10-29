@@ -8248,8 +8248,10 @@ DJANGO_OWNED_ARTICLE_RESULT_PREFIXES = (
 
 
 def _merge_django_owned_article_result(local_result, remote_result):
+    from content_factory.article_publication_evidence import SETTLEMENT_RESULT_KEYS
     local = _run_mapping(local_result)
-    backend_merge_keys = {"publish_merge_intent", "merge_response", "merge_status", "merge_sha", "merged_at"}
+    # A status poll of a failed run must not erase, or invent, its refund work.
+    backend_merge_keys = {"publish_merge_intent", "merge_response", "merge_status", "merge_sha", "merged_at", *SETTLEMENT_RESULT_KEYS}
     merged = {key: value for key, value in _run_mapping(remote_result).items()
         if key not in backend_merge_keys or key in local}
     remote_quality = _run_mapping(merged.get("article_preview_quality"))
@@ -8266,7 +8268,7 @@ def _merge_django_owned_article_result(local_result, remote_result):
             ):
                 merged[key] = value
             continue
-        django_owned = key in DJANGO_OWNED_ARTICLE_RESULT_KEYS or key.startswith(
+        django_owned = key in backend_merge_keys or key in DJANGO_OWNED_ARTICLE_RESULT_KEYS or key.startswith(
             DJANGO_OWNED_ARTICLE_RESULT_PREFIXES
         )
         if not django_owned:

@@ -337,6 +337,7 @@ def run_content_factory_reconciliation_sweep(*, limit: Optional[int] = None, now
     summary["redriven"] = _redrive_fixed_runs(limit=limit, now=now)
     summary["refusal_alerts"] = report_repeated_refusals(limit=limit, now=now)
     summary["queued_denied_refunds"] = _queue_denied_article_refunds(limit=limit, now=now)
+    summary["queued_dispatch_rejected_refunds"] = _queue_dispatch_rejected_article_refunds(limit=limit, now=now)
     summary["settled_exhausted_articles"] = _settle_exhausted_article_runs(limit=limit, now=now)
     _settle_sweep_refunds(limit=limit)
     if not candidates:
@@ -724,6 +725,69 @@ def _queue_denied_article_refunds(*, limit, now):
         except Exception:
             logger.warning("content_factory_denied_refund_pending run_id=%s", run.run_id)
         count += 1
+    return count
+
+
+def _queue_dispatch_rejected_article_refunds(*, limit, now):
+    """Credit a paid run whose first snapshot the backend refused, once its key proves it.
+
+    Content Factory fails that run locally without a terminal callback, so no
+    obligation is reserved, and its stop endpoint cannot bind a scope the
+    backend never merged. Its dispatch-key record, bound to this run, is the
+    no-work proof. Any other answer keeps the charge for reconciliation.
+    """
+    from .article_publication_evidence import DISPATCH_REJECTED, dispatch_rejected_refund_candidate
+    from .run_state import ARTICLE_WORKFLOWS
+    from .vibe_marketing_views import _content_factory_remote_config, _lookup_content_factory_dispatch_by_key
+    from organizations.models import Organization
+    remote = _content_factory_remote_config()
+    if not remote["enabled"]:
+        return 0
+    count = 0
+    candidates = ContentFactoryRun.objects.filter(status="failed", workflow__in=ARTICLE_WORKFLOWS,
+        result__error_code=DISPATCH_REJECTED, updated_at__lt=now - _stale_after(),
+        result__article_terminal_refund__isnull=True).filter(
+        Q(reconciled_at__isnull=True) | Q(reconciled_at__lt=now - _probe_interval())).filter(
+        _legacy_delivery_rows("run_request")).order_by("updated_at")[:limit]
+    for candidate in candidates:
+        if not dispatch_rejected_refund_candidate(candidate):
+            continue
+        key = str(candidate.run_request["client_request_id"]).strip()
+        outcome, payload = _lookup_content_factory_dispatch_by_key(remote, key)
+        if outcome == "unknown":
+            # An unreachable worker or a key still mid-claim proves nothing.
+            ContentFactoryRun.objects.filter(pk=candidate.pk).update(reconciled_at=now)
+            continue
+        backend_code = str(payload.get("error") or "").removeprefix("backend_rejected:").strip()[:100]
+        proved = bool(outcome == "rejected" and backend_code and str(payload.get("run_id") or "") == candidate.run_id
+            and payload.get("run_status") == "failed")
+        # Same lock order as _refund_failed_run; a restart may have reused the
+        # charge, or a callback reserved the obligation, since selection.
+        with transaction.atomic():
+            if candidate.organization_id:
+                Organization.objects.select_for_update().filter(pk=candidate.organization_id).first()
+            run = ContentFactoryRun.objects.select_for_update().filter(pk=candidate.pk).first()
+            if (run is None or "article_terminal_refund" in (run.result or {}) or not dispatch_rejected_refund_candidate(run)
+                    or ContentFactoryRun.objects.filter(Q(run_request__original_billing_source_run_id=run.run_id)
+                        | Q(run_request__billing_source_run_id=run.run_id)).exists()):
+                continue
+            result = {**(run.result or {}), "reconciliation_refund_pending": True,
+                "article_terminal_refund": {"status": "pending" if proved else "needs_reconciliation",
+                    "paid_obligation": True, "job_id": run.run_id,
+                    "settlement_reason": "dispatch_rejected_without_delivery" if proved else "dispatch_rejection_unconfirmed"}}
+            if proved:
+                result["dispatch_rejection_v1"] = {"version": 1, "run_id": run.run_id, "client_request_id": key,
+                    "key_status": "failed", "backend_code": backend_code, "checked_at": now.isoformat()}
+            run.result = result
+            run.save(update_fields=["result"])
+        count += 1
+        if not proved:
+            logger.warning("content_factory_dispatch_rejected_refund_unconfirmed run_id=%s outcome=%s", run.run_id, outcome)
+            continue
+        try:
+            _refund_failed_run(run, reason=f"Article start was refused before any work began ({backend_code}).")
+        except Exception:
+            logger.warning("content_factory_dispatch_rejected_refund_pending run_id=%s", run.run_id)
     return count
 
 
