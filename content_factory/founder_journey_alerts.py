@@ -8,12 +8,15 @@ enrolment nor a website connection, so it covers every new founder.
 
 Detection writes a ``pending`` receipt; delivery posts it to the ops Slack
 channel with the alert id as ``client_msg_id`` and at most three attempts.
-Run-scoped receipts live in ``ContentFactoryRun.result['ops_alerts'][reason]``
-(protected from worker snapshots by ``service_views``); company and org scoped
-receipts live in ``OrganizationContentConfig.pillar_strategy['ops_alerts']``
-keyed by alert id (hidden from workers by ``editorial_catalog.public_strategy``).
-Receipts are written with ``QuerySet.update`` so recording an alert never looks
-like founder activity (``updated_at`` is untouched).
+Every receipt, run-scoped ones included, lives in
+``OrganizationContentConfig.pillar_strategy['ops_alerts']`` keyed by alert id
+(kept by ``editorial_catalog.merge_strategy``, hidden by ``public_strategy``).
+That index is the only thing dedupe and delivery read. Run-scoped receipts are
+also mirrored into ``ContentFactoryRun.result['ops_alerts'][reason]`` for the
+run's readers, but a status poll may replace a run's result wholesale, so the
+mirror is never trusted alone. Receipts are written with ``QuerySet.update`` so
+recording an alert never looks like founder activity (``updated_at`` is
+untouched).
 
 Without a valid channel every alert still writes one structured
 ``founder_journey_alert`` warning and its receipt becomes ``unconfigured``.
@@ -25,6 +28,7 @@ from __future__ import annotations
 import logging
 import re
 from datetime import date, datetime, time, timedelta, timezone as dt_timezone
+from types import SimpleNamespace
 from uuid import NAMESPACE_URL, uuid5
 
 from django.conf import settings
@@ -33,7 +37,7 @@ from django.db.models import Exists, Max, OuterRef, Q
 from django.urls import NoReverseMatch, reverse
 from django.utils import timezone
 
-from workflow_runs.models import ContentFactoryRun, ContentFactoryRunStep
+from workflow_runs.models import ContentFactoryRun, ContentFactoryRunStep, ContentFactoryStepStatus
 
 logger = logging.getLogger(__name__)
 
@@ -104,9 +108,10 @@ def founder_journey_alert_id(*, organization_id, alert_reason, run_id=None, comp
 def queue_founder_journey_alert(*, organization, alert_reason: str, company_id=None, run=None, details: dict | None = None) -> str:
     """Record one pending founder-journey alert idempotently and return its alert id.
 
-    The sweep delivers it. With ``run`` the receipt is stored on the run, else on
-    the org's content config (created when missing). Call this outside any
-    transaction that is about to roll back, or the receipt rolls back with it.
+    The sweep delivers it. The receipt is stored in the org's content config
+    (created when missing); with ``run`` it is also mirrored onto the run. Call
+    this outside any transaction that is about to roll back, or the receipt
+    rolls back with it.
     For ``domain_claim_disputed`` pass ``details={"claimant_user_id": user.pk}``
     so each claimant gets their own alert.
     """
@@ -125,12 +130,18 @@ def queue_founder_journey_alert(*, organization, alert_reason: str, company_id=N
         "queued_at": timezone.now().isoformat(),
         "company_id": str(company_id) if company_id else None,
         "run_id": str(run.run_id) if run is not None else None,
+        "run_pk": run.pk if run is not None else None,
         "details": safe_details,
     }
     if run is not None:
-        _queue_run_receipt(run, alert_reason, receipt)
-    else:
-        _queue_org_receipt(organization, alert_id, receipt)
+        mirrored = _receipts_in(ContentFactoryRun.objects.filter(pk=run.pk).values_list("result", flat=True).first())
+        mirrored = mirrored.get(alert_reason)
+        if isinstance(mirrored, dict) and mirrored.get("alert_id") == alert_id:
+            # A receipt only the run still holds (its index entry was lost) is adopted, never re-sent.
+            receipt = {**receipt, **mirrored}
+    stored = _queue_org_receipt(organization, alert_id, receipt)
+    if run is not None:
+        _mirror_run_receipt(run, alert_reason, stored)
     return alert_id
 
 
@@ -196,18 +207,32 @@ def run_alert_reasons(run, *, now) -> list[str]:
 
 
 def is_scheduler_run(run) -> bool:
+    """Island refresh or ``mlai_backend_scheduler`` runs, which are never alerted (IF-15)."""
     request = run.run_request if isinstance(run.run_request, dict) else {}
     return run.workflow in SCHEDULER_WORKFLOWS or request.get("request_source") == SCHEDULER_REQUEST_SOURCE
 
 
 def is_owner_cancel(run) -> bool:
-    """An owner's own cancel (IF-20 reason, or the legacy pre-BE6 shape) is not an incident."""
+    """An owner's own cancel (IF-20 reason, or the legacy pre-BE6 shapes) is not an incident.
+
+    Before BE6, ``_cancel_local_article_run`` leaves an empty error and rewrites
+    unfinished steps to 'Cancelled by user.'. Discarding a finished draft has no
+    unfinished step to rewrite, so a cancelled run whose steps all completed and
+    whose result says ``cancelled`` is treated as an owner cancel too: a system
+    stop always interrupts a step that has not completed.
+    """
     if run.status != "cancelled":
         return False
     result = run.result if isinstance(run.result, dict) else {}
     if "cancellation_reason" in result:
         return result.get("cancellation_reason") in OWNER_CANCELLATION_REASONS
-    return not (run.error or "") and run.steps.filter(message=LEGACY_OWNER_CANCEL_MESSAGE).exists()
+    if run.error or "":
+        return False
+    if run.steps.filter(message=LEGACY_OWNER_CANCEL_MESSAGE).exists():
+        return True
+    steps = run.steps.all()
+    return (result.get("cancelled") is True and steps.exists()
+            and not steps.exclude(status=ContentFactoryStepStatus.COMPLETED).exists())
 
 
 def run_action_id(result) -> str:
@@ -231,17 +256,26 @@ def _without_json_key(path, key):
 def _detect(*, now, since, limit) -> dict:
     budget = [limit]
     counts = dict.fromkeys(DETECTED_REASONS, 0)
+    # Every org's alert ids, read once per tick; kept current as this tick queues.
+    known = {org_id: set(receipts) for org_id, receipts in _receipt_index()}
+
+    def seen(organization_id, alert_id):
+        return alert_id in known.get(organization_id, ())
 
     def queue(reason, **kwargs):
-        queue_founder_journey_alert(alert_reason=reason, **kwargs)
+        alert_id = queue_founder_journey_alert(alert_reason=reason, **kwargs)
+        known.setdefault(kwargs["organization"].pk, set()).add(alert_id)
         counts[reason] += 1
         budget[0] -= 1
 
     base = (ContentFactoryRun.objects.filter(created_at__gte=since, organization__isnull=False)
             .exclude(workflow__in=SCHEDULER_WORKFLOWS)
             .filter(~Q(run_request__has_key="request_source") | ~Q(run_request__request_source=SCHEDULER_REQUEST_SOURCE)))
-    legacy_owner_cancel = (Q(status="cancelled", error="") & ~Q(result__has_key="cancellation_reason")
-        & Q(Exists(ContentFactoryRunStep.objects.filter(run=OuterRef("pk"), message=LEGACY_OWNER_CANCEL_MESSAGE))))
+    steps = ContentFactoryRunStep.objects.filter(run=OuterRef("pk"))
+    legacy_owner_cancel = (Q(status="cancelled", error="") & ~Q(result__has_key="cancellation_reason") & (
+        Q(Exists(steps.filter(message=LEGACY_OWNER_CANCEL_MESSAGE)))
+        | (Q(result__cancelled=True) & Q(Exists(steps))
+           & ~Q(Exists(steps.exclude(status=ContentFactoryStepStatus.COMPLETED))))))
     candidates = {
         "run_terminal": base.filter(status__in=TERMINAL_STATUSES).exclude(legacy_owner_cancel).filter(
             ~Q(result__has_key="cancellation_reason") | ~Q(result__cancellation_reason__in=OWNER_CANCELLATION_REASONS)),
@@ -254,37 +288,45 @@ def _detect(*, now, since, limit) -> dict:
     }
     for reason, queryset in candidates.items():
         # Ids first: results can be large, and receipts are written while we walk.
-        pks = list(queryset.filter(_without_json_key(f"result__{RECEIPTS_KEY}", reason))
-                   .order_by("created_at", "pk").values_list("pk", flat=True))
-        for pk in pks:
+        # The mirror prefilter is only a shortcut; the org index decides.
+        rows = list(queryset.filter(_without_json_key(f"result__{RECEIPTS_KEY}", reason))
+                    .order_by("created_at", "pk").values_list("pk", "organization_id", "run_id"))
+        for pk, organization_id, run_id in rows:
             if budget[0] <= 0:
                 return counts
+            if seen(organization_id, founder_journey_alert_id(
+                    organization_id=organization_id, alert_reason=reason, run_id=run_id)):
+                continue
             run = ContentFactoryRun.objects.select_related("organization").filter(pk=pk).first()
-            if run and reason in run_alert_reasons(run, now=now) and reason not in _run_receipts(run.result):
+            if run and reason in run_alert_reasons(run, now=now) and reason not in _receipts_in(run.result):
                 queue(reason, organization=run.organization, run=run)
     if budget[0] > 0:
-        _detect_companies_without_draft(now=now, since=since, budget=budget, queue=queue)
+        _detect_companies_without_draft(now=now, since=since, budget=budget, queue=queue, seen=seen)
     if budget[0] > 0:
-        _detect_waiting_website_operations(now=now, since=since, budget=budget, queue=queue)
+        _detect_waiting_website_operations(now=now, since=since, budget=budget, queue=queue, seen=seen)
     return counts
 
 
-def _detect_companies_without_draft(*, now, since, budget, queue):
+def _detect_companies_without_draft(*, now, since, budget, queue, seen):
     from founder_tools.models import VibeRaisingCompany
+    from organizations.models import Organization
     companies = (VibeRaisingCompany.objects.filter(created_at__gte=since, created_at__lte=now - NO_DRAFT_AFTER,
                                                    organization__isnull=False)
-                 .exclude(profile__user__is_staff=True).select_related("organization").order_by("created_at", "pk"))
-    for company in list(companies):
+                 .exclude(profile__user__is_staff=True).order_by("created_at", "pk")
+                 .values_list("pk", "organization_id"))
+    unalerted = [(company_id, organization_id) for company_id, organization_id in companies
+                 if not seen(organization_id, founder_journey_alert_id(
+                     organization_id=organization_id, alert_reason="no_draft_24h", company_id=company_id))]
+    for company_id, organization_id in unalerted:
         if budget[0] <= 0:
             return
-        organization = company.organization
-        alert_id = founder_journey_alert_id(organization_id=organization.pk, alert_reason="no_draft_24h", company_id=company.pk)
-        if alert_id in _org_receipts(organization.pk) or organization_has_delivered_draft(organization.pk):
+        organization = Organization.objects.filter(pk=organization_id).first()
+        if organization is None or organization_has_delivered_draft(organization_id):
             continue
-        queue("no_draft_24h", organization=organization, company_id=company.pk)
+        queue("no_draft_24h", organization=organization, company_id=company_id)
 
 
-def _detect_waiting_website_operations(*, now, since, budget, queue):
+def _detect_waiting_website_operations(*, now, since, budget, queue, seen):
     from .website_models import WebsiteConnectionOperation
     operations = (WebsiteConnectionOperation.objects.filter(state="needs_user", created_at__gte=since,
                                                              updated_at__lte=now - YOUR_TURN_AFTER)
@@ -293,54 +335,53 @@ def _detect_waiting_website_operations(*, now, since, budget, queue):
         if budget[0] <= 0:
             return
         organization = operation.connection.organization
-        alert_id = founder_journey_alert_id(organization_id=organization.pk, alert_reason="your_turn_72h")
-        if alert_id in _org_receipts(organization.pk):
+        if seen(organization.pk, founder_journey_alert_id(organization_id=organization.pk, alert_reason="your_turn_72h")):
             continue
         queue("your_turn_72h", organization=organization, details={"website_operation": operation.action})
 
 
 # --- Receipts ----------------------------------------------------------------
 
-def _run_receipts(result) -> dict:
+def _receipts_in(result) -> dict:
     receipts = (result if isinstance(result, dict) else {}).get(RECEIPTS_KEY)
     return receipts if isinstance(receipts, dict) else {}
 
 
-def _org_receipts(organization_id) -> dict:
+def _receipt_index():
+    """(organization_id, receipts) for every org holding receipts; reads only the receipt JSON."""
     from .models import OrganizationContentConfig
-    strategy = (OrganizationContentConfig.objects.filter(organization_id=organization_id)
-                .values_list("pillar_strategy", flat=True).first())
-    receipts = (strategy if isinstance(strategy, dict) else {}).get(RECEIPTS_KEY)
-    return receipts if isinstance(receipts, dict) else {}
+    rows = (OrganizationContentConfig.objects.filter(pillar_strategy__has_key=RECEIPTS_KEY)
+            .order_by("pk").values_list("organization_id", f"pillar_strategy__{RECEIPTS_KEY}"))
+    return [(organization_id, receipts if isinstance(receipts, dict) else {}) for organization_id, receipts in rows]
 
 
-def _queue_run_receipt(run, alert_reason, receipt):
-    with transaction.atomic():
-        locked = ContentFactoryRun.objects.select_for_update().filter(pk=run.pk).first()
-        if locked is None:
-            logger.warning("founder_journey_alert_run_missing alert_reason=%s run_pk=%s", alert_reason, run.pk)
-            return
-        result = dict(locked.result) if isinstance(locked.result, dict) else {}
-        receipts = dict(_run_receipts(result))
-        if alert_reason in receipts:
-            return
-        receipts[alert_reason] = receipt
-        ContentFactoryRun.objects.filter(pk=run.pk).update(result={**result, RECEIPTS_KEY: receipts})
-    # A caller that saves its in-memory run afterwards must not erase the receipt.
-    current = run.result if isinstance(run.result, dict) else {}
-    run.result = {**current, RECEIPTS_KEY: {**_run_receipts(current), alert_reason: receipt}}
-
-
-def _queue_org_receipt(organization, alert_id, receipt):
+def _queue_org_receipt(organization, alert_id, receipt) -> dict:
+    """Store ``receipt`` under ``alert_id`` unless one is there; return the stored receipt."""
     from .models import OrganizationContentConfig
     with transaction.atomic():
         config, _ = OrganizationContentConfig.objects.select_for_update().get_or_create(organization=organization)
         strategy = dict(config.pillar_strategy) if isinstance(config.pillar_strategy, dict) else {}
-        receipts = dict(strategy.get(RECEIPTS_KEY) or {}) if isinstance(strategy.get(RECEIPTS_KEY), dict) else {}
-        if alert_id in receipts:
-            return
+        receipts = dict(_receipts_in(strategy))
+        if isinstance(receipts.get(alert_id), dict):
+            return receipts[alert_id]
         receipts[alert_id] = receipt
         OrganizationContentConfig.objects.filter(pk=config.pk).update(pillar_strategy={**strategy, RECEIPTS_KEY: receipts})
+        return receipt
+
+
+def _mirror_run_receipt(run, alert_reason, receipt):
+    """Copy an index receipt onto its run (its own transaction, after the config lock is released)."""
+    with transaction.atomic():
+        locked = ContentFactoryRun.objects.select_for_update().filter(pk=run.pk).values_list("result", flat=True).first()
+        result = dict(locked) if isinstance(locked, dict) else {}
+        receipts = dict(_receipts_in(result))
+        if receipts.get(alert_reason) != receipt:
+            receipts[alert_reason] = receipt
+            ContentFactoryRun.objects.filter(pk=run.pk).update(result={**result, RECEIPTS_KEY: receipts})
+    # A caller that saves its in-memory run afterwards keeps the receipt too.
+    if hasattr(run, "result"):
+        current = run.result if isinstance(run.result, dict) else {}
+        run.result = {**current, RECEIPTS_KEY: {**_receipts_in(current), alert_reason: receipt}}
 
 
 def _safe_details(details) -> dict:
@@ -360,45 +401,32 @@ def _safe_details(details) -> dict:
 # --- Delivery ----------------------------------------------------------------
 
 class _Target:
-    """One pending receipt and how to lock, read and write it."""
+    """One pending index receipt and how to lock, read and write it."""
 
-    def __init__(self, *, kind, pk, key):
-        self.kind, self.pk, self.key = kind, pk, key
+    def __init__(self, *, organization_id, key):
+        self.organization_id, self.key = organization_id, key
 
     def lock(self):
         from .models import OrganizationContentConfig
-        if self.kind == "run":
-            row = ContentFactoryRun.objects.select_for_update().filter(pk=self.pk).first()
-            container = row.result if row is not None else None
-        else:
-            row = OrganizationContentConfig.objects.select_for_update().filter(pk=self.pk).first()
-            container = row.pillar_strategy if row is not None else None
+        row = OrganizationContentConfig.objects.select_for_update().filter(organization_id=self.organization_id).first()
+        container = row.pillar_strategy if row is not None else None
         container = dict(container) if isinstance(container, dict) else {}
-        receipt = _run_receipts(container).get(self.key)
+        receipt = _receipts_in(container).get(self.key)
         return row, container, dict(receipt) if isinstance(receipt, dict) else None
 
-    def write(self, container, receipt):
+    def write(self, row, container, receipt):
         from .models import OrganizationContentConfig
-        receipts = {**_run_receipts(container), self.key: receipt}
-        if self.kind == "run":
-            ContentFactoryRun.objects.filter(pk=self.pk).update(result={**container, RECEIPTS_KEY: receipts})
-        else:
-            OrganizationContentConfig.objects.filter(pk=self.pk).update(pillar_strategy={**container, RECEIPTS_KEY: receipts})
+        receipts = {**_receipts_in(container), self.key: receipt}
+        OrganizationContentConfig.objects.filter(pk=row.pk).update(pillar_strategy={**container, RECEIPTS_KEY: receipts})
 
 
 def _pending_targets() -> list:
-    """Every pending receipt, oldest run first; reads only the receipt JSON, not whole results."""
-    from .models import OrganizationContentConfig
-    pending = Q()
-    for reason in sorted(ALERT_REASONS):
-        pending |= Q(**{f"result__{RECEIPTS_KEY}__{reason}__state": "pending"})
-    rows = [("run", pk, receipts) for pk, receipts in ContentFactoryRun.objects.filter(pending)
-            .order_by("created_at", "pk").values_list("pk", f"result__{RECEIPTS_KEY}")]
-    rows += [("config", pk, receipts) for pk, receipts in OrganizationContentConfig.objects
-             .filter(pillar_strategy__has_key=RECEIPTS_KEY).order_by("pk").values_list("pk", f"pillar_strategy__{RECEIPTS_KEY}")]
-    return [(_Target(kind=kind, pk=pk, key=key), receipt) for kind, pk, receipts in rows
-            for key, receipt in sorted((receipts if isinstance(receipts, dict) else {}).items())
-            if isinstance(receipt, dict) and receipt.get("state") == "pending"]
+    """Every pending index receipt, oldest queued first."""
+    targets = [(_Target(organization_id=organization_id, key=key), receipt)
+               for organization_id, receipts in _receipt_index()
+               for key, receipt in receipts.items()
+               if isinstance(receipt, dict) and receipt.get("state") == "pending"]
+    return sorted(targets, key=lambda item: (str(item[1].get("queued_at") or ""), item[0].organization_id, item[0].key))
 
 
 def _deliver(*, now, limit) -> dict:
@@ -412,29 +440,31 @@ def _deliver(*, now, limit) -> dict:
         lease = _timestamp(seen.get("next_attempt_at"))
         if lease and lease > now:
             continue
+        settled = None
         with transaction.atomic():
             row, container, receipt = target.lock()
             if (row is None or receipt is None or receipt.get("state") != "pending"
                     or (lease := _timestamp(receipt.get("next_attempt_at"))) and lease > now):
                 continue
             processed += 1
-            context = _alert_context(target, row, receipt)
+            context = _alert_context(row, receipt)
             if not configured:
                 receipt.update(state="unconfigured")
-                target.write(container, receipt)
-                _log_alert(logging.WARNING, receipt, context, channel_configured=False)
                 outcome["unconfigured"] += 1
-                continue
-            if int(receipt.get("attempts") or 0) >= MAX_DELIVERY_ATTEMPTS:
+                settled = receipt
+            elif int(receipt.get("attempts") or 0) >= MAX_DELIVERY_ATTEMPTS:
                 # An interrupted final attempt never earns a fourth send.
                 receipt.update(state="failed")
-                target.write(container, receipt)
-                _log_alert(logging.WARNING, receipt, context, channel_configured=True)
                 outcome["undelivered"] += 1
-                continue
-            attempts = int(receipt.get("attempts") or 0) + 1
-            receipt.update(attempts=attempts, next_attempt_at=(now + RETRY_AFTER).isoformat())
-            target.write(container, receipt)
+                settled = receipt
+            else:
+                attempts = int(receipt.get("attempts") or 0) + 1
+                receipt.update(attempts=attempts, next_attempt_at=(now + RETRY_AFTER).isoformat())
+            target.write(row, container, receipt)
+        if settled is not None:
+            _log_alert(logging.WARNING, settled, context, channel_configured=configured)
+            _mirror_settled(settled)
+            continue
         # Slack is called outside the row lock; the receipt above is the lease.
         sent, message_id = _post(channel, alert_text(receipt, context), receipt["alert_id"])
         with transaction.atomic():
@@ -448,10 +478,26 @@ def _deliver(*, now, limit) -> dict:
             else:
                 current.update(state="failed" if attempts >= MAX_DELIVERY_ATTEMPTS else "pending")
                 outcome["undelivered"] += 1
-            target.write(container, current)
+            target.write(row, container, current)
         if current["state"] != "pending":
             _log_alert(logging.INFO if sent else logging.WARNING, current, context, channel_configured=True)
+            _mirror_settled(current)
     return outcome
+
+
+def _mirror_settled(receipt):
+    """Copy a settled run-scoped receipt onto its run, if the run still exists (after the config lock)."""
+    reason = receipt.get("alert_reason")
+    if reason not in ALERT_REASONS:
+        return
+    if receipt.get("run_pk") is not None:
+        run_pk = ContentFactoryRun.objects.filter(pk=receipt["run_pk"]).values_list("pk", flat=True).first()
+    elif receipt.get("run_id"):
+        run_pk = ContentFactoryRun.objects.filter(run_id=receipt["run_id"]).values_list("pk", flat=True).first()
+    else:
+        return
+    if run_pk is not None:
+        _mirror_run_receipt(SimpleNamespace(pk=run_pk), reason, receipt)
 
 
 def _post(channel, text, alert_id):
@@ -468,20 +514,26 @@ def _post(channel, text, alert_id):
         return False, ""
 
 
-def _alert_context(target, row, receipt) -> dict:
+def _alert_context(row, receipt) -> dict:
     """Ids and codes only: never a founder's email, name or article text."""
     from organizations.models import Organization
     org_id = getattr(row, "organization_id", None)
     domain = Organization.objects.filter(pk=org_id).values_list("domain", flat=True).first() if org_id else ""
     context = {
         "org_id": org_id, "domain": _safe(domain), "company_id": _safe(receipt.get("company_id")),
-        "run_id": "", "workflow": "", "run_status": "", "stop_code": "", "step_attempts": None, "staff_link": "",
+        "run_id": _safe(receipt.get("run_id")), "workflow": "", "run_status": "", "stop_code": "",
+        "step_attempts": None, "staff_link": "",
     }
-    if target.kind == "run":
-        context.update(run_id=_safe(row.run_id), workflow=_safe(row.workflow), run_status=_safe(row.status),
-                       stop_code=run_stop_code(row.result),
-                       step_attempts=row.steps.aggregate(value=Max("attempts"))["value"],
-                       staff_link=_admin_link("admin:workflow_runs_contentfactoryrun_change", row.pk))
+    run = None
+    if receipt.get("run_pk") is not None:
+        run = ContentFactoryRun.objects.filter(pk=receipt["run_pk"]).first()
+    elif receipt.get("run_id"):
+        run = ContentFactoryRun.objects.filter(run_id=receipt["run_id"]).first()
+    if run is not None:
+        context.update(run_id=_safe(run.run_id), workflow=_safe(run.workflow), run_status=_safe(run.status),
+                       stop_code=run_stop_code(run.result),
+                       step_attempts=run.steps.aggregate(value=Max("attempts"))["value"],
+                       staff_link=_admin_link("admin:workflow_runs_contentfactoryrun_change", run.pk))
     elif context["company_id"]:
         context["staff_link"] = _admin_link("admin:founder_tools_viberaisingcompany_change", context["company_id"])
     elif context["org_id"]:

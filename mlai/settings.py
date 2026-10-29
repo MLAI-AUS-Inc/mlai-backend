@@ -1114,7 +1114,8 @@ CONTENT_FACTORY_OPS_SLACK_CHANNEL_ID = os.getenv('CONTENT_FACTORY_OPS_SLACK_CHAN
 # alert per stuck founder run or startup, for every org (no goal enrolment or
 # website connection needed). Posts to CONTENT_FACTORY_OPS_SLACK_CHANNEL_ID and
 # always logs a 'founder_journey_alert' line, Slack configured or not. SINCE
-# bounds run/company created_at so turning it on does not replay all history.
+# bounds run/company created_at. The default replays every stuck run and startup
+# since 29 Sep at MAX_PER_TICK a minute; set SINCE to the flip date to start clean.
 ARTICLES_FOUNDER_JOURNEY_ALERTS_ENABLED = os.getenv('ARTICLES_FOUNDER_JOURNEY_ALERTS_ENABLED', 'false').lower() == 'true'
 ARTICLES_FOUNDER_JOURNEY_ALERTS_SINCE = os.getenv('ARTICLES_FOUNDER_JOURNEY_ALERTS_SINCE', '2026-09-29').strip()
 ARTICLES_FOUNDER_JOURNEY_ALERTS_MAX_PER_TICK = int(os.getenv('ARTICLES_FOUNDER_JOURNEY_ALERTS_MAX_PER_TICK', '20'))

@@ -131,6 +131,23 @@ class FounderJourneyAlertTests(FounderJourneyFixture):
         self.assertEqual(set(self.receipts(with_error)), {"run_terminal"})
         self.assertEqual(len(calls), 1)
 
+    def test_discarding_a_finished_draft_is_a_legacy_owner_cancel(self):
+        discarded = self.make_run(workflow="confirmed_topic", status="cancelled",
+                                  result={"status": "cancelled", "cancelled": True, "cleanup": {}, "warnings": []})
+        ContentFactoryRunStep.objects.create(run=discarded, step_key="write", status="completed", message="Done.")
+        interrupted = self.make_run(workflow="confirmed_topic", status="cancelled", result={"cancelled": True})
+        ContentFactoryRunStep.objects.create(run=interrupted, step_key="write", status="running", message="Writing.")
+        no_steps = self.make_run(workflow="confirmed_topic", status="cancelled", result={"cancelled": True})
+
+        _, calls = self.sweep()
+
+        self.assertEqual(self.receipts(discarded), {})
+        self.assertEqual(set(self.receipts(interrupted)), {"run_terminal"})
+        self.assertEqual(set(self.receipts(no_steps)), {"run_terminal"})
+        self.assertEqual(len(calls), 2)
+        self.assertTrue(alerts.is_owner_cancel(discarded))
+        self.assertFalse(alerts.is_owner_cancel(interrupted))
+
     def test_island_refresh_and_scheduler_runs_never_alert(self):
         island = self.make_run(workflow="island_refresh", status="denied")
         scheduled = self.make_run(workflow="topic_discovery", status="failed",
@@ -234,13 +251,65 @@ class FounderJourneyAlertTests(FounderJourneyFixture):
 
     def test_an_interrupted_final_attempt_is_never_sent_a_fourth_time(self):
         run = self.make_run(status="failed")
-        alerts.queue_founder_journey_alert(organization=self.org, alert_reason="run_terminal", run=run)
-        result = self.receipts(run) and run.result
-        result["ops_alerts"]["run_terminal"].update(attempts=3, next_attempt_at=(self.now - timedelta(minutes=1)).isoformat())
-        ContentFactoryRun.objects.filter(pk=run.pk).update(result=result)
+        alert_id = alerts.queue_founder_journey_alert(organization=self.org, alert_reason="run_terminal", run=run)
+        config = OrganizationContentConfig.objects.get(organization=self.org)
+        strategy = config.pillar_strategy
+        strategy["ops_alerts"][alert_id].update(attempts=3, next_attempt_at=(self.now - timedelta(minutes=1)).isoformat())
+        OrganizationContentConfig.objects.filter(pk=config.pk).update(pillar_strategy=strategy)
         _, calls = self.sweep()
         self.assertEqual(calls, [])
+        self.assertEqual(self.org_receipts()[alert_id]["state"], "failed")
         self.assertEqual(self.receipts(run)["run_terminal"]["state"], "failed")
+
+    def test_a_status_poll_that_replaces_the_run_result_never_causes_a_second_alert(self):
+        from . import vibe_marketing_views as views
+        autofill = self.make_run(workflow="startup_autofill", status="blocked",
+                                 result={"error_code": "PROFILE_DRAFT_UNAVAILABLE"})
+        discovery = self.make_run(workflow="auto_discovery", status="failed", error="Discovery failed.")
+        article = self.make_run(workflow="confirmed_topic", status="failed", error="Writer failed.")
+
+        _, first = self.sweep()
+        self.assertEqual(len(first), 3)
+        for run, status in ((autofill, "blocked"), (discovery, "failed"), (article, "failed")):
+            run.refresh_from_db()
+            views._sync_local_run_from_remote(run, {"status": status, "error": run.error,
+                                                    "result": {"error_code": "PROFILE_DRAFT_UNAVAILABLE", "note": "poll"}})
+        autofill.refresh_from_db()
+        self.assertEqual(autofill.result.get("note"), "poll")
+
+        _, second = self.sweep(now=self.now + timedelta(minutes=10))
+        self.assertEqual(second, [])
+        _, third = self.sweep(now=self.now + timedelta(minutes=20))
+        self.assertEqual(third, [])
+        self.assertTrue(all(receipt["state"] == "sent" for receipt in self.org_receipts().values()))
+        self.assertEqual(len(self.org_receipts()), 3)
+
+    def test_a_poll_before_delivery_still_delivers_exactly_once(self):
+        from . import vibe_marketing_views as views
+        run = self.make_run(workflow="startup_autofill", status="blocked")
+        alert_id = alerts.queue_founder_journey_alert(organization=self.org, alert_reason="startup_autofill_blocked", run=run)
+        run.refresh_from_db()
+        views._sync_local_run_from_remote(run, {"status": "blocked", "result": {"note": "poll"}})
+        run.refresh_from_db()
+        self.assertNotIn("ops_alerts", run.result)
+
+        _, calls = self.sweep()
+        self.assertEqual([call.kwargs["client_msg_id"] for call in calls], [alert_id])
+        self.assertIn(f"Run {run.run_id}. Workflow startup_autofill.", calls[0].kwargs["text"])
+        self.assertEqual(self.receipts(run)["startup_autofill_blocked"]["state"], "sent")
+        _, replay = self.sweep(now=self.now + timedelta(minutes=10))
+        self.assertEqual(replay, [])
+
+    def test_a_receipt_only_the_run_holds_is_adopted_not_resent(self):
+        run = self.make_run(status="failed")
+        alert_id = alerts.founder_journey_alert_id(organization_id=self.org.pk, alert_reason="run_terminal", run_id=run.run_id)
+        ContentFactoryRun.objects.filter(pk=run.pk).update(result={"ops_alerts": {"run_terminal": {
+            "alert_id": alert_id, "alert_reason": "run_terminal", "state": "sent", "attempts": 1, "sent_at": "x"}}})
+        run.refresh_from_db()
+        self.assertEqual(alerts.queue_founder_journey_alert(organization=self.org, alert_reason="run_terminal", run=run), alert_id)
+        self.assertEqual(self.org_receipts()[alert_id]["state"], "sent")
+        _, calls = self.sweep()
+        self.assertEqual(calls, [])
 
     def test_a_retry_after_one_failure_is_sent_with_the_same_client_msg_id(self):
         run = self.make_run(status="failed")

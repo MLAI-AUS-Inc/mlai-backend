@@ -7,6 +7,7 @@ from uuid import uuid4
 
 from django.contrib.auth import get_user_model
 from django.core.management import CommandError, call_command
+from django.db import DatabaseError, connection
 from django.test import TestCase
 
 from community_chat.onboarding_models import CommunityMemberProfile
@@ -95,7 +96,13 @@ class FounderFunnelReportTests(TestCase):
             return real(**kwargs)
 
         with patch.object(founder_funnel_report, "founder_funnel", side_effect=writes_then_reports):
-            self.report()
+            if connection.vendor == "postgresql":
+                # Production's path: the READ ONLY transaction refuses the write outright.
+                with self.assertRaises(DatabaseError):
+                    self.report()
+            else:
+                # SQLite has no READ ONLY transactions; the forced rollback discards the write.
+                self.report()
         self.assertFalse(Organization.objects.filter(domain="written-by-report.example.test").exists())
 
     def test_bad_window_is_rejected(self):
