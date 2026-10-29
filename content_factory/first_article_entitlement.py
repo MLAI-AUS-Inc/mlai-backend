@@ -678,18 +678,18 @@ def lineage_entitlement(run):
 
 
 def _queue_alert(*, organization, alert_reason, run=None) -> Optional[str]:
-    """Hand an ops alert to the founder-journey sweep, or log it while that is absent."""
+    """Hand an ops alert to the founder-journey sweep (IF-15) and return its alert id.
+
+    The sweep delivers the pending receipt. A failure to store the receipt is
+    logged and never changes the founder's response.
+    """
+    from .founder_journey_alerts import queue_founder_journey_alert
     try:
-        from .founder_journey_alerts import queue_founder_journey_alert
-    except ModuleNotFoundError as exc:
-        if exc.name != f"{__package__}.founder_journey_alerts":
-            raise  # A broken import inside the alert module must not pass silently.
-        # The alert sweep ships separately (BE2); until it merges the signal is
-        # a log line. Remove this fallback when the branches are synced.
-        logger.warning("founder_journey_alert alert_reason=%s org_id=%s run_id=%s state=unconfigured", alert_reason,
+        return queue_founder_journey_alert(organization=organization, alert_reason=alert_reason, run=run)
+    except Exception:
+        logger.exception("founder_journey_alert_queue_failed alert_reason=%s org_id=%s run_id=%s", alert_reason,
             getattr(organization, "pk", organization), getattr(run, "run_id", ""))
         return None
-    return queue_founder_journey_alert(organization=organization, alert_reason=alert_reason, run=run)
 
 
 def note_attempts_exhausted(organization) -> None:

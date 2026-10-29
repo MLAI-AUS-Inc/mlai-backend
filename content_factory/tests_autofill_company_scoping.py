@@ -7,6 +7,7 @@ pin the new contract: an implicit domain change 409s until confirmed, and
 create_new registers a sibling instead of mutating the active company.
 """
 
+import json
 from contextlib import ExitStack
 from unittest.mock import MagicMock, patch
 
@@ -16,11 +17,19 @@ from rest_framework.response import Response
 from rest_framework.test import APIClient
 
 from founder_tools.models import VibeRaisingCompany, VibeRaisingProfile
+from founder_tools.services import organization_owner_user_id
 
 User = get_user_model()
 
 AUTOFILL_URL = "/api/v1/vibe-marketing/autofill"
 _VIEWS = "content_factory.vibe_marketing_views"
+_CLAIM_ALERT = f"{_VIEWS}.queue_domain_claim_alert"
+CLAIMED_BODY = {
+    "code": "company_domain_claimed",
+    "detail": "This startup is already on MLAI.",
+    "field": "domain",
+    "canContinueWithoutDomain": True,
+}
 
 
 class AutofillCompanyScopingTests(TestCase):
@@ -138,8 +147,9 @@ class AutofillCompanyScopingTests(TestCase):
         self.assertEqual(company.organization_id, original_org_id)
         self.assertEqual(company.organization.domain, "acme-rebrand.com")
 
-    def test_autofill_never_binds_to_another_founders_domain(self):
-        from organizations.models import Organization
+    def _foreign_startup(self):
+        """Another founder's saved startup on foreign.example."""
+        from founder_tools.services import ensure_company_organization
 
         stranger = User.objects.create_user(
             email="autofill-stranger@example.com",
@@ -151,19 +161,68 @@ class AutofillCompanyScopingTests(TestCase):
         stranger_profile = VibeRaisingProfile.objects.create(
             user=stranger, role=VibeRaisingProfile.ROLE_FOUNDER
         )
-        VibeRaisingCompany.objects.create(
-            profile=stranger_profile,
-            name="Foreign Co",
-            domain="foreign.example",
-            organization=Organization.objects.create(name="Foreign", domain="foreign.example"),
+        company = VibeRaisingCompany.objects.create(
+            profile=stranger_profile, name="Foreign Co", domain="foreign.example",
         )
+        stranger_profile.active_company = company
+        stranger_profile.save(update_fields=["active_company", "updated_at"])
+        self.stranger = stranger
+        return ensure_company_organization(company)
 
-        response = self._post_autofill(
-            {"company_name": "Impostor", "domain": "foreign.example", "create_new": True}
-        )
-
+    def assert_claimed_body(self, response):
+        """The typed IF-09 refusal: carry on without the website, owner never named."""
         self.assertEqual(response.status_code, 409)
-        self.assertIn("already linked", str(response.data["detail"]))
+        self.assertEqual(response.data, CLAIMED_BODY)
+        self.assertIs(json.loads(response.content)["canContinueWithoutDomain"], True)
+        text = response.content.decode()
+        for leaked in ("already linked to another account", "Str", "Anger", "autofill-stranger@example.com"):
+            self.assertNotIn(leaked, text)
+
+    def test_autofill_never_binds_to_another_founders_domain(self):
+        organization = self._foreign_startup()
+
+        with patch(_CLAIM_ALERT) as alert:
+            response = self._post_autofill(
+                {"company_name": "Impostor", "domain": "foreign.example", "create_new": True}
+            )
+
+        self.assert_claimed_body(response)
+        alert.assert_called_once_with(organization=organization, claimant_user_id=self.user.id)
+        self.assertFalse(VibeRaisingCompany.objects.filter(profile__user=self.user).exists())
+
+    def test_a_claim_that_races_the_check_rolls_back_before_the_alert(self):
+        organization = self._foreign_startup()
+        seen = []
+
+        def alert(**kwargs):
+            # Queued only after the refused binding's company row rolled back.
+            seen.append(VibeRaisingCompany.objects.filter(profile__user=self.user).count())
+            return "alert-id"
+
+        with patch(f"{_VIEWS}.domain_is_available_to", return_value=True), \
+                patch(_CLAIM_ALERT, side_effect=alert) as queued:
+            response = self._post_autofill(
+                {"company_name": "Impostor", "domain": "foreign.example", "create_new": True}
+            )
+
+        self.assert_claimed_body(response)
+        queued.assert_called_once_with(organization=organization, claimant_user_id=self.user.id)
+        self.assertEqual(seen, [0])
+        self.assertFalse(VibeRaisingCompany.objects.filter(profile__user=self.user).exists())
+        self.assertEqual(organization_owner_user_id(organization), self.stranger.id)
+
+    def test_repeated_claims_by_one_founder_leave_one_alert_receipt(self):
+        from content_factory.models import OrganizationContentConfig
+
+        organization = self._foreign_startup()
+        for _ in range(2):
+            self.assert_claimed_body(self._post_autofill(
+                {"company_name": "Impostor", "domain": "foreign.example", "create_new": True}
+            ))
+
+        receipts = OrganizationContentConfig.objects.get(organization=organization).pillar_strategy["ops_alerts"]
+        self.assertEqual([receipt["alert_reason"] for receipt in receipts.values()], ["domain_claim_disputed"])
+        self.assertEqual(next(iter(receipts.values()))["details"], {"claimant_user_id": self.user.id})
 
     def test_same_domain_update_needs_no_confirmation(self):
         company = self._create_company()

@@ -669,3 +669,50 @@ class FirstArticleSweepTests(EntitlementFixture, TestCase):
         run = self.stale(run, state_version=5, article_cancellation_v1=self.stop_receipt(run),
             article_terminal_refund={"status": "pending"}, reconciliation_refund_pending=True)
         self.assert_released_once(run, lambda: reconciliation._settle_sweep_refunds(limit=10))
+
+
+
+@override_settings(**FREE)
+class FirstArticleOpsAlertTests(EntitlementFixture, TestCase):
+    """The entitlement's two ops alerts reach the founder-journey sweep (IF-15)."""
+
+    def setUp(self):
+        self.queue_alert = first_article._queue_alert
+        super().setUp()
+        # The fixture stubs the alert; here it records through the real helper.
+        self.alerts.side_effect = self.queue_alert
+
+    def receipts(self, org=None):
+        config = OrganizationContentConfig.objects.get(organization=org or self.org)
+        receipts = (config.pillar_strategy or {}).get("ops_alerts", {})
+        return {receipt["alert_reason"]: receipt for receipt in receipts.values()}
+
+    def test_a_third_attempt_queues_one_pending_receipt(self):
+        from .founder_journey_alerts import founder_journey_alert_id
+        for number in (1, 2):
+            payload = self.started(key=f"attempt-{number}")
+            first_article.release_entitlement_for_request(organization=self.org, request=payload, reason="test")
+        for key in ("third-request", "third-request-again"):
+            error, _ = self.start(key=key)
+            self.assertEqual((error.status_code, error.data["costPoints"]), (409, 12))
+        receipts = self.receipts()
+        self.assertEqual(list(receipts), ["first_article_attempts_exhausted"])
+        receipt = receipts["first_article_attempts_exhausted"]
+        self.assertEqual((receipt["state"], receipt["attempts"]), ("pending", 0))
+        self.assertEqual(receipt["alert_id"], founder_journey_alert_id(organization_id=self.org.pk,
+            alert_reason="first_article_attempts_exhausted", run_id=None, company_id=None, claimant_user_id=None))
+
+    @override_settings(ARTICLES_FREE_FIRST_ARTICLE_SPIKE_THRESHOLD=1)
+    def test_a_spike_queues_a_pending_receipt_after_commit(self):
+        from django.core.cache import cache
+        cache.clear()
+        with self.captureOnCommitCallbacks(execute=True):
+            self.started()
+        self.assertEqual(self.receipts()["free_cap_spike"]["state"], "pending")
+
+    def test_a_receipt_write_failure_is_logged_and_never_reaches_the_founder(self):
+        with patch("content_factory.founder_journey_alerts.queue_founder_journey_alert",
+                side_effect=RuntimeError("database unavailable")), \
+                self.assertLogs("content_factory.first_article_entitlement", "ERROR") as logs:
+            self.assertIsNone(self.queue_alert(organization=self.org, alert_reason="free_cap_spike"))
+        self.assertIn("founder_journey_alert_queue_failed alert_reason=free_cap_spike", logs.output[0])

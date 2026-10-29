@@ -155,12 +155,13 @@ from founder_tools.profile_fields import company_avatar_url
 from founder_tools.models import VibeRaisingCompany
 from founder_tools.services import (
     CompanyDomainChangeBlocked,
-    DomainOwnershipError,
+    CompanyDomainClaimedError,
     DuplicateCompanyDomainError,
     apply_company_domain_change,
     apply_shared_startup_details,
     actor_ids_for_user,
     assert_company_domain_available,
+    claimed_organization,
     domain_is_available_to,
     ensure_company_organization,
     founder_actor_id_for_user,
@@ -168,6 +169,7 @@ from founder_tools.services import (
     get_or_create_founder_profile,
     normalize_company_domain,
     normalize_company_linkedin_url,
+    queue_domain_claim_alert,
     resolve_active_company,
     string_list_from_value,
 )
@@ -15998,6 +16000,16 @@ class VibeMarketingSettingsView(APIView):
         return refreshed_context
 
 
+def _autofill_domain_claimed_response(request, exc):
+    """Refuse an autofill whose domain another founder's startup holds (IF-09).
+
+    Called outside any transaction that rolled back, so the queued
+    domain_claim_disputed alert is kept. The body never names the owner.
+    """
+    queue_domain_claim_alert(organization=exc.organization, claimant_user_id=request.user.id)
+    return exc.response()
+
+
 class VibeMarketingAutofillView(APIView):
     def post(self, request):
         profile = get_or_create_founder_profile(request.user)
@@ -16024,8 +16036,10 @@ class VibeMarketingAutofillView(APIView):
             getattr(request.user, "is_staff", False) or getattr(request.user, "is_superuser", False)
         ) and not domain_is_available_to(request.user, domain):
             # First-claim-wins tenancy: never bind a founder's autofill to a
-            # domain another founder already owns.
-            raise DomainOwnershipError()
+            # domain another founder already owns. The founder can carry on
+            # without the website, and ops hear about the dispute (IF-09).
+            return _autofill_domain_claimed_response(
+                request, CompanyDomainClaimedError(claimed_organization(domain)))
         gate_response, gate_balance = _require_roo_points_for_ai_agent(
             request.user,
             domain=domain,
@@ -16034,124 +16048,130 @@ class VibeMarketingAutofillView(APIView):
         if gate_response is not None:
             return gate_response
 
-        with transaction.atomic():
-            if draft_only:
-                from founder_tools.profile_fields import lock_research_profile
-                profile = lock_research_profile(profile)
-            company_id = _company_id_from_request(request)
-            create_new = _request_flag(request, "create_new", "createNew")
-            confirm_domain_change = _request_flag(request, "confirm_domain_change", "confirmDomainChange")
-            if company_id:
+        # Binding the company can still meet a claim that raced the check above
+        # (a confirmed domain change, or an existing organisation's history).
+        # The writes roll back first; only then is the dispute queued.
+        try:
+            with transaction.atomic():
+                if draft_only:
+                    from founder_tools.profile_fields import lock_research_profile
+                    profile = lock_research_profile(profile)
+                company_id = _company_id_from_request(request)
+                create_new = _request_flag(request, "create_new", "createNew")
+                confirm_domain_change = _request_flag(request, "confirm_domain_change", "confirmDomainChange")
+                if company_id:
+                    try:
+                        company = profile.companies.get(pk=company_id)
+                    except VibeRaisingCompany.DoesNotExist:
+                        return Response({"detail": "Company not found."}, status=status.HTTP_404_NOT_FOUND)
+                elif create_new:
+                    company = None
+                else:
+                    company = resolve_active_company(profile)
+
+                # Autofill used to adopt whatever company was active and rewrite its
+                # name/domain in place — so "researching" a second startup destroyed
+                # the first one. Changing an existing company's domain now requires
+                # an explicit confirmation (or create_new to register a sibling).
+                if company is not None:
+                    existing_domain = normalize_company_domain(company.domain)
+                    if draft_only and existing_domain != domain:
+                        return Response({"detail": "Save the changed website before researching this startup.",
+                                         "code": "startup_research_domain_unsaved", "field": "domain"},
+                                        status=status.HTTP_409_CONFLICT)
+                    if existing_domain and existing_domain != domain and not confirm_domain_change:
+                        return Response(
+                            {
+                                "detail": (
+                                    f"{company.name or 'Your current company'} is registered on "
+                                    f"'{existing_domain}'. Confirm the domain change, or register "
+                                    "this as a new company instead."
+                                ),
+                                "code": "company_domain_change_requires_confirmation",
+                                "field": "domain",
+                                "companyId": str(company.id),
+                                "companyName": company.name,
+                                "existingDomain": existing_domain,
+                                "submittedDomain": domain,
+                            },
+                            status=status.HTTP_409_CONFLICT,
+                        )
+
                 try:
-                    company = profile.companies.get(pk=company_id)
-                except VibeRaisingCompany.DoesNotExist:
-                    return Response({"detail": "Company not found."}, status=status.HTTP_404_NOT_FOUND)
-            elif create_new:
-                company = None
-            else:
-                company = resolve_active_company(profile)
+                    assert_company_domain_available(
+                        profile, domain, exclude_company_id=company.id if company else None
+                    )
+                except DuplicateCompanyDomainError as exc:
+                    from founder_tools.profile_fields import is_research_workspace
+                    if draft_only and create_new and is_research_workspace(exc.existing_company):
+                        # Recover the same owned hidden workspace if a start response
+                        # was lost. Never adopt a saved startup via createNew.
+                        company = exc.existing_company
+                    else:
+                        return Response(
+                            {"detail": str(exc), "code": "duplicate_company_domain", "field": "domain",
+                             "companyId": str(exc.existing_company.id)}, status=status.HTTP_409_CONFLICT,
+                        )
 
-            # Autofill used to adopt whatever company was active and rewrite its
-            # name/domain in place — so "researching" a second startup destroyed
-            # the first one. Changing an existing company's domain now requires
-            # an explicit confirmation (or create_new to register a sibling).
-            if company is not None:
-                existing_domain = normalize_company_domain(company.domain)
-                if draft_only and existing_domain != domain:
-                    return Response({"detail": "Save the changed website before researching this startup.",
-                                     "code": "startup_research_domain_unsaved", "field": "domain"},
-                                    status=status.HTTP_409_CONFLICT)
-                if existing_domain and existing_domain != domain and not confirm_domain_change:
-                    return Response(
-                        {
-                            "detail": (
-                                f"{company.name or 'Your current company'} is registered on "
-                                f"'{existing_domain}'. Confirm the domain change, or register "
-                                "this as a new company instead."
-                            ),
-                            "code": "company_domain_change_requires_confirmation",
-                            "field": "domain",
-                            "companyId": str(company.id),
-                            "companyName": company.name,
-                            "existingDomain": existing_domain,
-                            "submittedDomain": domain,
-                        },
-                        status=status.HTTP_409_CONFLICT,
+                if company is None:
+                    company = VibeRaisingCompany.objects.create(
+                        profile=profile,
+                        name=company_name,
+                        domain=domain,
+                        location=str(request.data.get("location") or "").strip(),
+                        abn=None if draft_mode else str(request.data.get("abn") or "").strip() or None,
+                    )
+                    if not draft_only:
+                        profile.active_company = company
+                        profile.save(update_fields=["active_company", "updated_at"])
+                    else:
+                        # Research needs an owned workspace for run scoping. It is
+                        # not a saved startup until the profile is explicitly saved.
+                        organization = ensure_company_organization(company)
+                        config = _get_config(organization)
+                        from founder_tools.profile_fields import PROFILE_KEY
+                        strategy = dict(config.pillar_strategy or {})
+                        strategy[PROFILE_KEY] = {**(strategy.get(PROFILE_KEY) or {}), "researchDraft": True}
+                        config.pillar_strategy = strategy
+                        config.save(update_fields=["pillar_strategy", "updated_at"])
+                elif not draft_only:
+                    # The founder confirmed this domain change (or it is unchanged):
+                    # rename the org in place when safe so connections/runs/updates
+                    # follow; a confirmed re-point is logged as stranding.
+                    apply_company_domain_change(company, domain, confirmed=True)
+                    company.name = company_name
+                    company.domain = domain
+                    if "location" in request.data:
+                        company.location = str(request.data.get("location") or "").strip()
+                    if not draft_mode and "abn" in request.data:
+                        set_unverified_company_abn(company, request.data.get("abn"))
+                    company.save(
+                        update_fields=[
+                            "name",
+                            "domain",
+                            "location",
+                            "abn",
+                            "registered",
+                            "acn",
+                            "entity_type_code",
+                            "abr_verified_at",
+                            "updated_at",
+                        ]
                     )
 
-            try:
-                assert_company_domain_available(
-                    profile, domain, exclude_company_id=company.id if company else None
-                )
-            except DuplicateCompanyDomainError as exc:
-                from founder_tools.profile_fields import is_research_workspace
-                if draft_only and create_new and is_research_workspace(exc.existing_company):
-                    # Recover the same owned hidden workspace if a start response
-                    # was lost. Never adopt a saved startup via createNew.
-                    company = exc.existing_company
-                else:
-                    return Response(
-                        {"detail": str(exc), "code": "duplicate_company_domain", "field": "domain",
-                         "companyId": str(exc.existing_company.id)}, status=status.HTTP_409_CONFLICT,
-                    )
+                organization = ensure_company_organization(company)
+                if organization is None:
+                    transaction.set_rollback(True)
+                    return Response({"detail": "Website domain is required for autofill."}, status=status.HTTP_400_BAD_REQUEST)
 
-            if company is None:
-                company = VibeRaisingCompany.objects.create(
-                    profile=profile,
-                    name=company_name,
-                    domain=domain,
-                    location=str(request.data.get("location") or "").strip(),
-                    abn=None if draft_mode else str(request.data.get("abn") or "").strip() or None,
-                )
-                if not draft_only:
-                    profile.active_company = company
-                    profile.save(update_fields=["active_company", "updated_at"])
-                else:
-                    # Research needs an owned workspace for run scoping. It is
-                    # not a saved startup until the profile is explicitly saved.
-                    organization = ensure_company_organization(company)
-                    config = _get_config(organization)
-                    from founder_tools.profile_fields import PROFILE_KEY
-                    strategy = dict(config.pillar_strategy or {})
-                    strategy[PROFILE_KEY] = {**(strategy.get(PROFILE_KEY) or {}), "researchDraft": True}
-                    config.pillar_strategy = strategy
-                    config.save(update_fields=["pillar_strategy", "updated_at"])
-            elif not draft_only:
-                # The founder confirmed this domain change (or it is unchanged):
-                # rename the org in place when safe so connections/runs/updates
-                # follow; a confirmed re-point is logged as stranding.
-                apply_company_domain_change(company, domain, confirmed=True)
-                company.name = company_name
-                company.domain = domain
-                if "location" in request.data:
-                    company.location = str(request.data.get("location") or "").strip()
-                if not draft_mode and "abn" in request.data:
-                    set_unverified_company_abn(company, request.data.get("abn"))
-                company.save(
-                    update_fields=[
-                        "name",
-                        "domain",
-                        "location",
-                        "abn",
-                        "registered",
-                        "acn",
-                        "entity_type_code",
-                        "abr_verified_at",
-                        "updated_at",
-                    ]
-                )
-
-            organization = ensure_company_organization(company)
-            if organization is None:
-                transaction.set_rollback(True)
-                return Response({"detail": "Website domain is required for autofill."}, status=status.HTTP_400_BAD_REQUEST)
-
-            try:
-                if not draft_only and not draft_mode:
-                    apply_shared_startup_details(user=request.user, company=company, data=request.data)
-            except ValueError as exc:
-                transaction.set_rollback(True)
-                return Response({"detail": str(exc), "field": "companyLinkedInUrl"}, status=status.HTTP_400_BAD_REQUEST)
+                try:
+                    if not draft_only and not draft_mode:
+                        apply_shared_startup_details(user=request.user, company=company, data=request.data)
+                except ValueError as exc:
+                    transaction.set_rollback(True)
+                    return Response({"detail": str(exc), "field": "companyLinkedInUrl"}, status=status.HTTP_400_BAD_REQUEST)
+        except CompanyDomainClaimedError as exc:
+            return _autofill_domain_claimed_response(request, exc)
 
         context = get_founder_company_context(
             request.user, company_id=company.id, persist_active=not draft_only
