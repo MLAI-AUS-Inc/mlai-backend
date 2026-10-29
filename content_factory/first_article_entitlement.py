@@ -357,11 +357,19 @@ def entitlement_state(organization, user, *, config=None, now=None) -> dict:
     Returns the snake_case source of ``articleCapabilities.firstArticle``:
     status available|in_progress|used|unavailable, and ``limit`` naming why it
     is unavailable (disabled, established, attempts, account or daily_cap).
+
+    With the free article off, an established publisher still reports
+    ``established`` and only a new founder reports ``disabled``: the client
+    offers the paid copy-ready primary for ``disabled`` and keeps the review
+    path for ``established``, so the flag must not blur the two.
     """
     state = {"version": 1, "status": "unavailable", "free": False, "attempts_used": 0,
         "attempts_allowed": ATTEMPTS_ALLOWED, "topic_batch_free": False, "run_id": None, "limit": None}
-    if not free_first_article_enabled() or organization is None or not getattr(organization, "pk", None):
+    if organization is None or not getattr(organization, "pk", None):
         return {**state, "limit": "disabled"}
+    if not free_first_article_enabled():
+        established = is_established_publisher(organization, config)
+        return {**state, "limit": "established" if established else "disabled"}
     now = now or timezone.now()
     rows = _rows(organization.pk)
     state["attempts_used"] = len(rows.attempts)
