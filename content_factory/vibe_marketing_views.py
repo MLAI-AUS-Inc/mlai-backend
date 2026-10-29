@@ -11290,6 +11290,7 @@ def _serialize_run(
         original_request.get("delivery_mode_explicit", original_request.get("deliveryModeExplicit"))))
     step_states = _serialize_run_steps(run, compact=compact)
     from content_factory.run_state import reliability_presentation
+    from content_factory.run_queue_position import queue_position_payload
     result = _run_mapping(run.result)
     section_issues = public_section_issues(_nested_run_result_value(result, "section_issues", "sectionIssues"))
     raw_quality = _nested_run_result_value(result, "article_preview_quality", "articlePreviewQuality")
@@ -11391,6 +11392,7 @@ def _serialize_run(
             "failureStep": result.get("failure_step"),
             "queueName": result.get("queue_name"),
             "queuedAt": result.get("queued_at"),
+            **queue_position_payload(run),
             "setupQueue": result.get("setup_queue"),
             "livePreview": live_preview,
             "articleSetupState": article_setup_state,
@@ -11467,6 +11469,7 @@ def _serialize_run(
             "failureStep": result.get("failure_step"),
             "queueName": result.get("queue_name"),
         "queuedAt": result.get("queued_at"),
+        **queue_position_payload(run),
         "setupQueue": result.get("setup_queue"),
         "contentPackage": content_package,
         "componentManifest": component_manifest,

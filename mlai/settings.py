@@ -1110,6 +1110,11 @@ CONTENT_FACTORY_SETUP_DELIVERY_ENROLLED_ORGANIZATIONS = tuple(
     if identifier.strip()
 )
 CONTENT_FACTORY_OPS_SLACK_CHANNEL_ID = os.getenv('CONTENT_FACTORY_OPS_SLACK_CHANNEL_ID', '').strip()
+# Runs content-factory's interactive queue serves at once, used only for the
+# founder-facing queue ETA. 0 (the default) shows the place in line without an
+# ETA; set it once the interactive worker pool is deployed and sized.
+_interactive_queue_slots = os.getenv('CONTENT_FACTORY_INTERACTIVE_QUEUE_SLOTS', '0').strip()
+CONTENT_FACTORY_INTERACTIVE_QUEUE_SLOTS = int(_interactive_queue_slots) if _interactive_queue_slots.isdigit() else 0
 ARTICLES_WEBSITE_STATUS_V1_ENABLED = os.getenv('ARTICLES_WEBSITE_STATUS_V1_ENABLED', 'false').lower() == 'true'
 ARTICLES_WEBSITE_CONSISTENCY_ENABLED = os.getenv('ARTICLES_WEBSITE_CONSISTENCY_ENABLED', 'false').lower() == 'true'
 ARTICLES_WEBSITE_GOAL_RUNNER_ENABLED = os.getenv('ARTICLES_WEBSITE_GOAL_RUNNER_ENABLED', 'false').lower() == 'true'
