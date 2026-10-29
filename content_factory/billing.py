@@ -198,7 +198,13 @@ def build_roo_points_authorization_payload(
     current_balance: Optional[int] = None,
     billing_status: str,
     ledger_id: Optional[object] = None,
+    entitlement: Optional[str] = None,
 ) -> dict:
+    """Build the run_request billing stamp Content Factory checks before AI work.
+
+    ``entitlement`` names the free grant behind an 'entitled' stamp (for now
+    only 'first_article'); its ledger id is the zero-point entitlement row.
+    """
     payload = {
         "roo_points_authorized": True,
         "roo_points_action": action,
@@ -216,13 +222,15 @@ def build_roo_points_authorization_payload(
         payload["roo_points_balance"] = int(current_balance)
     if ledger_id not in (None, ""):
         payload["roo_points_ledger_id"] = str(ledger_id)
+    if entitlement:
+        payload["roo_points_entitlement"] = str(entitlement)
     return payload
 
 
 def public_run_billing_receipt(run_request: dict, result: dict) -> dict:
     """Expose backend billing state for polling without payer or ledger identities."""
     billing_status = str(run_request.get("roo_points_billing_status") or "").strip()
-    if billing_status not in {"charged", "reused", "free", "gated", "refunded"}:
+    if billing_status not in {"charged", "reused", "free", "gated", "refunded", "entitled"}:
         billing_status = "unknown"
     pending = bool(
         run_request.get("pending_billing_refund") and not result.get("dispatch_refund_processed")

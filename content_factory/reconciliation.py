@@ -671,6 +671,16 @@ def _refund_failed_run(run, *, reason):
             current.save(update_fields=["result"])
             return
         request = current.run_request or {}
+        from .first_article_entitlement import entitled_request, release_entitlement
+        if entitled_request(request):
+            # A free first article has no spend to credit. Its stop releases the
+            # original attempt once; a child run of that article releases nothing.
+            released = release_entitlement(organization=current.organization_id, run=current, reason=reason)
+            current.result = {**result, "reconciliation_refund_pending": False, "article_terminal_refund": {
+                **receipt, "status": "not_required",
+                "entitlement_released": released or receipt.get("entitlement_released") is True}}
+            current.save(update_fields=["result"])
+            return None
         paid_obligation = receipt.get("paid_obligation") is True or receipt.get("billing_resolution_required") is True
         ledger = original_article_spend_for_run(current)
         refund = None

@@ -1121,6 +1121,14 @@ def _refund_content_factory_request(
         return None
 
     client_request_id = _get_client_request_id(article_request)
+    from content_factory.first_article_entitlement import entitled_request, release_entitlement_for_request
+    if entitled_request(article_request):
+        # A free first article that never started owes no credit: its original
+        # attempt is released instead (a child run's request releases nothing).
+        organization = Organization.objects.filter(domain=normalize_domain(resolved_domain)).only("pk").first()
+        if organization is not None:
+            release_entitlement_for_request(organization=organization.pk, request=article_request, reason=reason)
+        return None
     original = Ledger.objects.filter(user=user, kind="SPEND", source=CONTENT_FACTORY_LEDGER_SOURCE,
         idempotency_key=f"content_factory:charge:{client_request_id}").first()
     amount = -int(getattr(original, "delta_microroo", 0) or 0) if original else 0
@@ -1192,6 +1200,10 @@ def refund_content_factory_topic_generation_for_user(
     from roo.services import PointsService
 
     client_request_id = _get_client_request_id(article_request)
+    from content_factory.first_article_entitlement import release_topic_batch
+    if release_topic_batch(client_request_id=client_request_id):
+        # The free first topic batch never started: allow its one free re-run.
+        return None
     cost_points = _original_content_charge_points(
         user, f"content_factory:topic_generation:charge:{client_request_id}")
     if cost_points == 0:
@@ -1510,6 +1522,19 @@ def maybe_auto_refund_terminal_failure(
             return False, 0
     no_value_failure = resolved_error_code in NO_DELIVERY_REFUND_CODES and run is not None
     if not research_paid and not bool(refundable) and not no_value_failure and resolved_error_code not in AUTO_REFUND_ERROR_CODES:
+        return False, 0
+    from content_factory.first_article_entitlement import original_entitled_request
+    if run is not None and original_entitled_request(run.run_request):
+        # A free first article has no spend (cost 0), so the paid checks below
+        # would return early. Its settlement still waits for the bound worker
+        # stop; _refund_failed_run then releases the attempt once.
+        _record_terminal_article_refund(job, status='pending', error_code=resolved_error_code)
+        from content_factory.reconciliation import _refund_failed_run
+        try:
+            _refund_failed_run(run, reason=str(error_message or resolved_error_code or "Article could not complete."))
+        except Exception:
+            # The pending receipt keeps the release queued for the reconciliation sweep.
+            logger.warning('content_factory_terminal_release_pending job_id=%s', getattr(job, 'job_id', ''), exc_info=True)
         return False, 0
 
     # The status handler records the terminal job before attempting its credit.

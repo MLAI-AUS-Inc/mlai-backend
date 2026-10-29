@@ -109,6 +109,13 @@ def refund_dispatch(row, *, reason):
     from integrations.services.article_generation import (
         refund_content_factory_request_for_user, refund_content_factory_topic_generation_for_user,
     )
+    from .first_article_entitlement import release_entitlement_for_request, release_topic_batch
+    # A free first article or topic batch has cost 0 and no payer to credit.
+    # A proven no-work dispatch gives the free attempt back instead.
+    if _research_dispatch(row):
+        release_topic_batch(client_request_id=row.client_request_id, organization=row.organization_id)
+    else:
+        release_entitlement_for_request(organization=row.organization_id, request=request, reason=reason)
     payer_id = row.payload.get("billing_user_id")
     if not payer_id or not row.payload.get("request", {}).get("roo_points_cost"):
         return

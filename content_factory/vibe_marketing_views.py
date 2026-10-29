@@ -849,6 +849,10 @@ def _validate_article_start_reservation(context, payload, *, require_website=Fal
             "Verify the current articles integration before starting this article.")
 
 
+class _FreeArticleUnavailable(Exception):
+    """Roll back an article start whose free attempt could not be reserved."""
+
+
 def _charge_roo_points_for_article(request, *, context, payload: dict, goal_operation_id=None):
     # Only the internal goal dispatcher can supply this argument. HTTP/MCP body
     # fields cannot bypass the normal current-price and wallet checks.
@@ -859,8 +863,26 @@ def _charge_roo_points_for_article(request, *, context, payload: dict, goal_oper
             payload.update(first_article_goal_operation_id=str(goal_operation_id),first_article_goal_id=str(goal_operation_id))
         except WebsiteAuthorityError as exc:
             return None, None, None, Response(exc.as_dict(), status=exc.status)
-    quote_error = (_quoted_price_response(request, cost_points=get_content_factory_article_cost_points(context.organization.domain, user=request.user), require_quote=True)
+    from . import first_article_entitlement as first_article
+    # The goal path settles through its own allocation and never reads a price here.
+    article_price = (get_content_factory_article_cost_points(context.organization.domain, user=request.user)
         if goal_operation_id is None else None)
+    free_quote = False
+    if goal_operation_id is None and first_article.free_first_article_enabled():
+        # One free first article per startup. A replay of a live attempt keeps
+        # its 0 quote; an old client asking for review_draft keeps the price.
+        free_config = _get_config(context.organization)
+        free_quote = first_article.quote_is_free(organization=context.organization, user=request.user,
+            client_request_id=str(payload.get("client_request_id")
+                or _request_value(request.data, "client_request_id", "clientRequestId", default="") or "").strip(),
+            data=payload, config=free_config)
+        if not free_quote and first_article.entitlement_state(context.organization, request.user,
+                config=free_config)["limit"] == "attempts":
+            first_article.note_attempts_exhausted(context.organization)
+    quote_error = (_quoted_price_response(request, cost_points=0 if free_quote else article_price, require_quote=True)
+        if goal_operation_id is None else None)
+    if quote_error is not None and free_quote:
+        return None, None, None, quote_error
     if quote_error is not None:
         # A retry keeps the recorded debit even after a benefit expires. This
         # read only selects the quote; consent, payload and ledger ownership
@@ -921,7 +943,16 @@ def _charge_roo_points_for_article(request, *, context, payload: dict, goal_oper
                 return None, None, None, connection_error
             article_request.update(payload)
             _validate_article_start_reservation(context, payload)
-            if goal_operation_id is not None:
+            entitlement = None
+            if free_quote:
+                # Same organisation lock and transaction as the dispatch row.
+                entitlement = first_article.reserve_entitlement(organization=context.organization, user=request.user,
+                    client_request_id=client_request_id, data=article_request, config=_get_config(context.organization))
+                if entitlement is None:
+                    raise _FreeArticleUnavailable()
+            if entitlement is not None:
+                charged_user, charge_ledger, charge_amount = request.user, None, 0
+            elif goal_operation_id is not None:
                 from .website_first_article_billing import consume
                 charged_user, charge_ledger, charge_amount = consume(goal_operation_id,
                     context=context, user=request.user, payload=article_request)
@@ -935,6 +966,9 @@ def _charge_roo_points_for_article(request, *, context, payload: dict, goal_oper
                     prevalidated_admission=True,
                 )
             payload.update(
+                first_article.entitled_authorization(domain=domain, action=CONTENT_FACTORY_ACTION_ARTICLE_GENERATION,
+                    ledger=entitlement)
+                if entitlement is not None else
                 build_roo_points_authorization_payload(
                     domain=domain,
                     action=CONTENT_FACTORY_ACTION_ARTICLE_GENERATION,
@@ -946,10 +980,18 @@ def _charge_roo_points_for_article(request, *, context, payload: dict, goal_oper
                 )
             )
             payload.update(roo_points_requested_by_user_id=request.user.pk, roo_points_billing_user_id=charged_user.pk)
+            if entitlement is not None:
+                # A start-failure refund reads this request: the stamp routes it
+                # to the attempt release instead of a points credit.
+                article_request.update({key: value for key, value in payload.items() if key.startswith("roo_points_")})
             from content_factory.dispatch_outbox import reserve_dispatch
             payload["dispatch_outbox_reserved"] = True
             reserve_dispatch(organization=context.organization, payload=payload,
                 billing_user_id=charged_user.pk, actor_id=actor_id)
+    except _FreeArticleUnavailable:
+        # The free attempt went elsewhere between quote and lock (a cap, a
+        # second press or a verified site). Nothing was written: quote the price.
+        return None, None, None, _quoted_price_response(request, cost_points=article_price, require_quote=True)
     except InsufficientRooPointsError as exc:
         return None, None, None, Response(
             getattr(exc, "payload", None) or build_roo_points_payload(
@@ -7399,6 +7441,11 @@ def _cancel_local_article_run(*, run, organization, remote_data=None):
 
     with transaction.atomic():
         locked_run = ContentFactoryRun.objects.select_for_update().get(pk=run.pk)
+        # Every caller is an owner action (cancel, delete-draft cascade, discard).
+        # Settle a free first article from the pre-cancel state: released before
+        # writing started, consumed after. Its stop receipt then settles nothing.
+        from .first_article_entitlement import settle_owner_cancel
+        settle_owner_cancel(locked_run)
         from .article_publication_evidence import cancellation_result
         preserved = cancellation_result(locked_run, remote_data)
         _release_cancelled_article_keyword(organization, locked_run)
@@ -8251,7 +8298,13 @@ DJANGO_OWNED_ARTICLE_RESULT_KEYS = (
     "article_system_review_comments",
     "daily_automation_channel_warning",
     "latest_article_system_revision_response",
+    "ops_alerts",
+    "cancellation_reason",
+    "cancelled_by",
 )
+# Written by the backend itself (ops alert receipts, owner cancellation reason).
+# A saved non-empty value always wins over a worker snapshot or status poll.
+DJANGO_AUTHORITATIVE_ARTICLE_RESULT_KEYS = frozenset({"ops_alerts", "cancellation_reason", "cancelled_by"})
 DJANGO_OWNED_ARTICLE_RESULT_PREFIXES = (
     "component_feedback_",
     "publish_auto_merge",
@@ -8287,6 +8340,8 @@ def _merge_django_owned_article_result(local_result, remote_result):
         if not django_owned:
             continue
         if key in backend_merge_keys or (merged.get(key) in (None, "", {}, []) and value not in (None, "", {}, [])):
+            merged[key] = value
+        elif key in DJANGO_AUTHORITATIVE_ARTICLE_RESULT_KEYS and value not in (None, "", {}, []):
             merged[key] = value
     return merged
 
@@ -11355,6 +11410,8 @@ def _serialize_run(
     content_island = _run_content_island_payload(run)
     saved_request = _run_mapping(getattr(run, "run_request", {}))
     from content_factory.billing import public_run_billing_receipt
+    from .first_article_entitlement import entitlement_payload
+    from .run_cancellation import cancellation_payload
     billing_receipt = public_run_billing_receipt(saved_request, result)
     saved_brief = saved_request.get("editorial_brief") or saved_request.get("editorialBrief")
     editorial_snapshot = ({"schema_version": 1, "writing_run_id": run.run_id,
@@ -11420,6 +11477,8 @@ def _serialize_run(
             **reliability_presentation(result, status=run.status, workflow=run.workflow,
                                        current_step=run.current_step, resume_available=run.resume_available,
                                        approval_state=run.approval_state),
+            **entitlement_payload(run),
+            **cancellation_payload(run.result),
         }
     content_package = _content_package_from_run(run)
     artifacts = _nested_run_result_value(result, "artifacts") or []
@@ -11499,6 +11558,8 @@ def _serialize_run(
         **reliability_presentation(result, status=run.status, workflow=run.workflow,
                                    current_step=run.current_step, resume_available=run.resume_available,
                                    approval_state=run.approval_state),
+        **entitlement_payload(run),
+        **cancellation_payload(run.result),
     }
 
 
@@ -12459,8 +12520,11 @@ def _article_capabilities_for_context(context, config, *, latest_runs=None, forc
     access = _verify_github_repository_access(context, config, force=force, allow_probe=allow_probe) if account.get("saved") and getattr(config, "github_repo", "") else {}
     if evidence.get("verified") and access.get("verified") and (access.get("branch") != evidence.get("branch") or access.get("sha") != evidence.get("sha")):
         evidence = {**evidence, "verified": False, "reasonCode": "verification_stale"}
-    return article_capabilities(config, domain=context.organization.domain, user=getattr(getattr(context, "profile", None), "user", None), account=account,
-                                evidence=evidence, repository_access=access)
+    user = getattr(getattr(context, "profile", None), "user", None)
+    from .first_article_entitlement import entitlement_state
+    return article_capabilities(config, domain=context.organization.domain, user=user, account=account,
+                                evidence=evidence, repository_access=access,
+                                first_article=entitlement_state(context.organization, user, config=config))
 
 
 def _setup_blocked_response_for_generation(context, config, *, run=None, publishing=False, request_data=None):
@@ -13618,10 +13682,14 @@ def _sync_local_run_from_remote(run, remote_data):
             run.refresh_from_db()
             if stale_execution_event(run.result, remote_data, saved_status=run.status):
                 return run
-            return _sync_local_run_from_remote_locked(run, remote_data)
+            run = _sync_local_run_from_remote_locked(run, remote_data)
     except WebsiteAuthorityError:
         run.refresh_from_db()
         return run
+    # After the run lock is released: a mirrored delivery consumes the free first article.
+    from .first_article_entitlement import settle_entitlement_for_run
+    settle_entitlement_for_run(run)
+    return run
 
 
 def _sync_local_run_from_remote_locked(run, remote_data):

@@ -5,9 +5,25 @@ ARTICLE_CHARGE_PREFIX = 'content_factory:charge:'
 
 
 def paid_article_request(request):
-    """Identify a saved paid obligation without inferring one from today's price."""
+    """Identify a saved paid obligation without inferring one from today's price.
+
+    A free first article ('entitled') is not paid: its ledger id names a
+    zero-point entitlement row, which is released rather than refunded.
+    """
+    if request.get('roo_points_billing_status') == 'entitled':
+        return False
     return bool(request.get('roo_points_cost') or request.get('roo_points_ledger_id')
         or request.get('roo_points_billing_status') in {'charged', 'reused'})
+
+
+def settlement_owed_request(request):
+    """A stop without delivery owes settlement: a refund when paid, a release when free.
+
+    Only the original free attempt is released; its child runs are covered by
+    the same grant and settle nothing.
+    """
+    from .first_article_entitlement import original_entitled_request
+    return paid_article_request(request) or original_entitled_request(request)
 
 
 def _ledger_id(value):
