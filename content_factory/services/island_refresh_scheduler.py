@@ -78,12 +78,18 @@ def build_island_refresh_idempotency_key(domain, local_date) -> str:
     return f"{IDEMPOTENCY_KEY_PREFIX}{str(domain)[:room]}{tail}"
 
 
+# Backend bookkeeping (founder-journey alert receipts, offboarded owner) is not
+# strategy: a config holding only these keys has nothing to cluster.
+_PRIVATE_STRATEGY_KEYS = frozenset({"ops_alerts", "previous_owner"})
+
+
 def _has_pillar_strategy(config) -> bool:
     strategy = getattr(config, "pillar_strategy", None)
     if isinstance(strategy, dict):
         pillars = strategy.get("pillars")
         if isinstance(pillars, list):
             return bool(pillars)
+        return any(key not in _PRIVATE_STRATEGY_KEYS for key in strategy)
     return bool(strategy)
 
 
