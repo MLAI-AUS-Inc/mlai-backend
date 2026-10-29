@@ -209,9 +209,12 @@ class ClientEventsView(APIView):
             return Response(INVALID_CLIENT_EVENTS, status=status.HTTP_400_BAD_REQUEST)
         try:
             events = _validated_events(json.loads(raw_body))
-        except (InvalidClientEvent, UnicodeDecodeError, json.JSONDecodeError, RecursionError):
-            # RecursionError: a small body can still nest deeply enough to
-            # exhaust the decoder; it is malformed input like any other.
+        except (ValueError, RecursionError):
+            # ValueError covers InvalidClientEvent, UnicodeDecodeError and
+            # JSONDecodeError, and also the plain ValueError json.loads raises
+            # for an integer longer than Python's digit limit. RecursionError:
+            # a small body can still nest deeply enough to exhaust the decoder.
+            # All of these are malformed input like any other.
             return Response(INVALID_CLIENT_EVENTS, status=status.HTTP_400_BAD_REQUEST)
 
         user = getattr(request, "user", None)

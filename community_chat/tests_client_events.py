@@ -166,6 +166,15 @@ class ClientEventsViewTests(TestCase):
             self.client.post(self.url, padded, content_type="application/json")
         )
 
+    def test_an_over_long_integer_is_invalid_input_not_a_server_error(self):
+        # json.loads raises a plain ValueError (not JSONDecodeError) for an
+        # integer past Python's 4300-digit conversion limit.
+        body = '{"events": [{"status": ' + "1" * 5000 + "}]}"
+        self.assertLess(len(body), MAX_BODY_BYTES)
+        self.assert_invalid(
+            self.client.post(self.url, body, content_type="application/json")
+        )
+
     def test_anonymous_callers_are_throttled_at_sixty_a_minute(self):
         with self.assertLogs(LOGGER, level="INFO"):
             for index in range(60):

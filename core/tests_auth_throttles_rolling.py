@@ -199,11 +199,57 @@ class WorkshopLimitTests(ClockedTestCase):
                 )
             self.clock.advance(5)
 
-    def test_anonymous_bootstrap_keeps_its_ip_ceiling(self):
+    def start_desktop_sign_in(self, public_key, *, ip_limit=30):
+        enforce_bootstrap_limits(
+            request_from(),
+            action="auth-start",
+            public_key=public_key,
+            user_limit=20,
+            key_limit=10,
+            ip_limit=ip_limit,
+        )
+
+    def test_sixty_desktop_founders_on_one_ip_start_and_exchange(self):
+        # The desktop handoff is anonymous: neither step has a signed-in user,
+        # so the authenticated floor cannot be what lets the room through.
+        for index in range(60):
+            key = f"{index:064x}"
+            self.start_desktop_sign_in(key)
+            enforce_bootstrap_limits(
+                request_from(),
+                action="auth-exchange",
+                public_key=key,
+                user_limit=40,
+                key_limit=30,
+                ip_limit=60,
+            )
+            self.clock.advance(5)
+
+    def test_one_desktop_key_is_still_bounded(self):
+        key = "a" * 64
+        for _ in range(10):
+            self.start_desktop_sign_in(key)
+        with self.assertRaises(Throttled):
+            self.start_desktop_sign_in(key)
+
+    def test_desktop_sign_in_keeps_a_per_ip_ceiling(self):
+        for index in range(300):
+            self.start_desktop_sign_in(f"{index:064x}")
+        with self.assertRaises(Throttled):
+            self.start_desktop_sign_in("f" * 64)
+
+    @override_settings(AUTH_THROTTLE_IP_DEVICE_AUTH_PER_10M=5)
+    def test_desktop_sign_in_floor_is_env_overridable_but_never_lowers_a_ceiling(self):
+        for index in range(30):
+            self.start_desktop_sign_in(f"{index:064x}")
+        with self.assertRaises(Throttled):
+            self.start_desktop_sign_in("f" * 64)
+
+    def test_other_anonymous_bootstrap_actions_keep_their_ip_ceiling(self):
         for index in range(30):
             enforce_bootstrap_limits(
                 request_from(),
-                action="auth-start",
+                action="anonymous-test",
                 public_key=f"{index:064x}",
                 user_limit=20,
                 key_limit=10,
@@ -212,11 +258,44 @@ class WorkshopLimitTests(ClockedTestCase):
         with self.assertRaises(Throttled):
             enforce_bootstrap_limits(
                 request_from(),
-                action="auth-start",
+                action="anonymous-test",
                 public_key="f" * 64,
                 user_limit=20,
                 key_limit=10,
                 ip_limit=30,
+            )
+
+    @override_settings(AUTH_THROTTLE_IP_BOOTSTRAP_AUTHENTICATED_PER_10M=2)
+    def test_an_ip_refusal_leaves_the_founders_own_budget_untouched(self):
+        def invite(user_pk, key):
+            enforce_bootstrap_limits(
+                request_from(user=SimpleNamespace(pk=user_pk, is_authenticated=True)),
+                action="invite",
+                public_key=key,
+                user_limit=3,
+                key_limit=3,
+                ip_limit=2,
+            )
+
+        invite(1, "1" * 64)
+        invite(2, "2" * 64)
+        # The venue IP is full: every retry is refused and must not be counted.
+        for _ in range(10):
+            with self.assertRaises(Throttled):
+                invite(42, "4" * 64)
+        # From another network the founder still has the full per-user and
+        # per-key budget.
+        for _ in range(3):
+            enforce_bootstrap_limits(
+                request_from(
+                    "203.0.113.20",
+                    user=SimpleNamespace(pk=42, is_authenticated=True),
+                ),
+                action="invite",
+                public_key="4" * 64,
+                user_limit=3,
+                key_limit=3,
+                ip_limit=10,
             )
 
     def test_per_email_limit_blocks_the_sixth_code_in_an_hour(self):
@@ -340,3 +419,54 @@ class WorkshopSignInEndpointTests(APITestCase):
             blocked.data["detail"],
             f"Too many authentication requests. Expected available in {wait} seconds.",
         )
+
+
+DESKTOP_ORIGIN = "tauri://localhost"
+
+
+@override_settings(
+    CACHES=LOCMEM,
+    TRUSTED_PROXY_HOPS=1,
+    COMMUNITY_CHAT_ALLOWED_ORIGINS=[ORIGIN, DESKTOP_ORIGIN],
+    COMMUNITY_CHAT_FRONTEND_URL=ORIGIN,
+    COMMUNITY_CHAT_DEVICE_AUTH_ENABLED=True,
+    COMMUNITY_CHAT_DEVICE_AUTH_TTL_SECONDS=900,
+)
+class WorkshopDesktopSignInEndpointTests(APITestCase):
+    def setUp(self):
+        cache.clear()
+        self.addCleanup(cache.clear)
+
+    def start(self, private_int, *, forwarded=VENUE_IP):
+        return self.client.post(
+            reverse("community_chat_auth_start"),
+            {
+                "client_id": "mlai-chat-desktop",
+                "code_challenge": "c" * 43,
+                "device": {
+                    "installation_id": str(uuid.uuid4()),
+                    "name": "MLAI Chat · Mac",
+                    "platform": "macos",
+                    "public_key": public_key(private_int),
+                },
+                "origin": DESKTOP_ORIGIN,
+                "state": "state-" + "a" * 48,
+            },
+            format="json",
+            HTTP_ORIGIN=DESKTOP_ORIGIN,
+            HTTP_X_FORWARDED_FOR=forwarded,
+        )
+
+    def test_forty_desktop_founders_on_one_ip_can_start_sign_in(self):
+        # Before the device-auth floor the 31st start from one venue IP in
+        # ten minutes was refused with a 429.
+        for index in range(40):
+            response = self.start(100 + index)
+            self.assertEqual(response.status_code, status.HTTP_201_CREATED, (index, response.data))
+
+    def test_one_desktop_key_is_still_refused_after_ten_starts(self):
+        for _ in range(10):
+            self.assertEqual(self.start(99).status_code, status.HTTP_201_CREATED)
+        refused = self.start(99)
+        self.assertEqual(refused.status_code, status.HTTP_429_TOO_MANY_REQUESTS)
+        self.assertGreaterEqual(int(refused["Retry-After"]), 1)

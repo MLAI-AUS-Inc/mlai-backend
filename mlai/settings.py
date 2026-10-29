@@ -503,6 +503,9 @@ AUTH_THROTTLE_IP_PASSWORD_PER_10M = int(os.getenv('AUTH_THROTTLE_IP_PASSWORD_PER
 AUTH_THROTTLE_IP_BOOTSTRAP_AUTHENTICATED_PER_10M = int(
     os.getenv('AUTH_THROTTLE_IP_BOOTSTRAP_AUTHENTICATED_PER_10M', '300')
 )
+# Minimum per-IP ceiling for the anonymous desktop sign-in handoff
+# (auth/device/start and auth/device/exchange), still bounded per device key.
+AUTH_THROTTLE_IP_DEVICE_AUTH_PER_10M = int(os.getenv('AUTH_THROTTLE_IP_DEVICE_AUTH_PER_10M', '300'))
 
 REST_FRAMEWORK = {
     'DEFAULT_PERMISSION_CLASSES': [

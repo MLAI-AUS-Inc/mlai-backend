@@ -64,6 +64,14 @@ COMMUNITY_CHAT_THROTTLE_DETAIL = "Too many community chat requests."
 # authenticated caller's IP ceiling is raised to at least this many per window.
 DEFAULT_AUTHENTICATED_BOOTSTRAP_IP_FLOOR = 300
 
+# The desktop sign-in handoff (``auth/device/start`` then
+# ``auth/device/exchange``) is anonymous by design, so the authenticated floor
+# above never reaches it. Each request is still bounded per device key, and an
+# exchange also needs a code the signed-in browser approved, so these actions
+# get a room-sized per-IP floor of their own.
+DEFAULT_DEVICE_AUTH_IP_FLOOR = 300
+DEVICE_AUTH_ACTIONS = frozenset({"auth-start", "auth-exchange"})
+
 
 def client_ip(request):
     """Return the trusted client IP (see :func:`core.client_ip.trusted_client_ip`)."""
@@ -82,14 +90,21 @@ def enforce_dimension_limit(*, action, dimension, value, limit, window_seconds):
 def enforce_bootstrap_limits(request, *, action, public_key, user_limit, key_limit, ip_limit):
     """Bound device bootstrap work per account, per device key and per client IP.
 
-    Anonymous callers keep ``ip_limit`` as their only shared ceiling. A signed-in
-    caller is already bounded by ``user_limit``, so its IP ceiling is raised to
-    ``AUTH_THROTTLE_IP_BOOTSTRAP_AUTHENTICATED_PER_10M`` when that is higher.
+    A signed-in caller is already bounded by ``user_limit``, so its IP ceiling
+    is raised to ``AUTH_THROTTLE_IP_BOOTSTRAP_AUTHENTICATED_PER_10M`` when that
+    is higher. The anonymous desktop sign-in handoff (``DEVICE_AUTH_ACTIONS``)
+    is raised to ``AUTH_THROTTLE_IP_DEVICE_AUTH_PER_10M`` the same way. Other
+    anonymous callers keep ``ip_limit``.
+
+    Every dimension is checked in one call, so a refusal on any of them leaves
+    the others uncounted and a retry never spends the founder's own budget.
     """
     window = 600
     user = getattr(request, "user", None)
     user_id = getattr(user, "pk", None)
-    if user_id is not None and bool(getattr(user, "is_authenticated", False)):
+    authenticated = user_id is not None and bool(getattr(user, "is_authenticated", False))
+    limits = []
+    if authenticated:
         ip_limit = max(
             ip_limit,
             configured_limit(
@@ -97,24 +112,16 @@ def enforce_bootstrap_limits(request, *, action, public_key, user_limit, key_lim
                 DEFAULT_AUTHENTICATED_BOOTSTRAP_IP_FLOOR,
             ),
         )
-        enforce_dimension_limit(
-            action=action,
-            dimension="user",
-            value=user_id,
-            limit=user_limit,
-            window_seconds=window,
+        limits.append(RateLimit(action, "user", user_id, user_limit, window))
+    if action in DEVICE_AUTH_ACTIONS:
+        ip_limit = max(
+            ip_limit,
+            configured_limit("AUTH_THROTTLE_IP_DEVICE_AUTH_PER_10M", DEFAULT_DEVICE_AUTH_IP_FLOOR),
         )
-    enforce_dimension_limit(
-        action=action,
-        dimension="public-key",
-        value=public_key,
-        limit=key_limit,
-        window_seconds=window,
-    )
-    enforce_dimension_limit(
-        action=action,
-        dimension="ip",
-        value=client_ip(request),
-        limit=ip_limit,
-        window_seconds=window,
+    limits.append(RateLimit(action, "public-key", public_key, key_limit, window))
+    limits.append(RateLimit(action, "ip", client_ip(request), ip_limit, window))
+    enforce_rate_limits(
+        limits,
+        namespace=COMMUNITY_CHAT_RATE_NAMESPACE,
+        detail=COMMUNITY_CHAT_THROTTLE_DETAIL,
     )
