@@ -8828,9 +8828,14 @@ def _merge_django_owned_run_request(existing_request, incoming_request):
               and (key not in {"setup_delivery_v1","article_delivery_v1","workflow_order_v1"} or key in existing)}
     merged = {key: value for key, value in merged.items()
               if not (key.startswith("roo_points_") or key in {"article_publish_approval_receipt", "article_publish_approval_revoked", "website_access_lost", "first_article_goal_operation_id", "first_article_goal_id"}) or key in existing}
+    def unset_as_none(value):
+        # A content-only draft is saved with github_repo "" and the worker
+        # reports the same absent repository as null.
+        return None if value == "" else value
+
     for key, value in existing.items():
         if key in immutable:
-            if key in incoming and canonical_bytes(incoming[key]) != canonical_bytes(value):
+            if key in incoming and canonical_bytes(unset_as_none(incoming[key])) != canonical_bytes(unset_as_none(value)):
                 raise EditorialRunConflict("Worker snapshots cannot change original article identity or delivery consent")
             merged[key] = deepcopy(value)
             continue
