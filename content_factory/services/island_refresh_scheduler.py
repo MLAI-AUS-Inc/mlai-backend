@@ -17,6 +17,7 @@ from datetime import timedelta
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from django.conf import settings
+from django.db import transaction
 from django.utils import timezone
 
 from content_factory.models import (
@@ -24,6 +25,7 @@ from content_factory.models import (
     ContentIslandRefreshDispatch,
     ContentIslandRefreshDispatchStatus,
     OrganizationContentConfig,
+    ResearchedKeyword,
     SemanticCluster,
 )
 from integrations.services.article_generation import (
@@ -117,6 +119,19 @@ def _eligible_configs() -> list:
             or _has_pillar_strategy(config)
         )
     ]
+
+
+def _seed_cold_start_islands(organization) -> int:
+    """Seed an org's first islands from its pillars, as a refresh's load step would."""
+    from content_factory.content_islands import seed_islands_from_bootstrap_pillars
+    try:
+        with transaction.atomic():
+            if ContentIsland.objects.filter(organization=organization).exists():
+                return 0
+            return len(seed_islands_from_bootstrap_pillars(organization) or [])
+    except Exception:
+        logger.exception("Island seeding failed for %s.", organization.domain)
+        return 0
 
 
 def _fail_stuck_dispatches(now) -> int:
@@ -215,8 +230,9 @@ def run_island_refresh_scheduler(*, now=None) -> dict:
     local_hour = int(getattr(settings, "CONTENT_ISLANDS_REFRESH_LOCAL_HOUR", 6) or 0)
     max_per_tick = int(getattr(settings, "CONTENT_ISLANDS_REFRESH_MAX_PER_TICK", 3) or 0)
 
-    dispatched = existing = not_due = failed = deferred = 0
+    dispatched = existing = not_due = failed = deferred = skipped_no_keywords = seeded = 0
     results: list = []
+    keyword_org_ids = set(ResearchedKeyword.objects.values_list("organization_id", flat=True).distinct())
     for config in _eligible_configs():
         organization = config.organization
         from integrations.services.daily_research_policy import pause_if_unanswered
@@ -231,6 +247,15 @@ def run_island_refresh_scheduler(*, now=None) -> dict:
             organization=organization, local_date=local_date
         ).exists():
             existing += 1
+            continue
+        if organization.pk not in keyword_org_ids:
+            # content-factory fails a refresh with NO_KEYWORDS when nothing has
+            # been researched, so these orgs failed every night (29 Oct 2026
+            # audit). The run's one useful effect for a cold-start org was
+            # seeding its first islands from the pillars; do that here and
+            # dispatch once research has produced keywords to cluster.
+            seeded += _seed_cold_start_islands(organization)
+            skipped_no_keywords += 1
             continue
         if max_per_tick and dispatched >= max_per_tick:
             deferred += 1
@@ -260,6 +285,8 @@ def run_island_refresh_scheduler(*, now=None) -> dict:
         "deferred": deferred,
         "failed": failed,
         "stuck_failed": stuck_failed,
+        "skipped_no_keywords": skipped_no_keywords,
+        "seeded": seeded,
         "results": results,
     }
 
