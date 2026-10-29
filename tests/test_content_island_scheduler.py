@@ -60,8 +60,16 @@ def _accepted(run_id="island-refresh-run-1"):
 
 
 class IslandRefreshSchedulerTestCase(TestCase):
-    def make_org(self, domain, *, timezone_name="Australia/Melbourne", islands=0, strategy=None, clusters=0):
+    def make_org(self, domain, *, timezone_name="Australia/Melbourne", islands=0, strategy=None, clusters=0,
+                 keywords=1):
         organization = Organization.objects.create(name=domain, domain=domain)
+        for index in range(keywords):
+            ResearchedKeyword.objects.create(
+                organization=organization,
+                keyword=f"{domain} researched {index}",
+                keyword_normalized=f"{domain} researched {index}",
+                volume=300,
+            )
         OrganizationContentConfig.objects.create(
             organization=organization,
             default_timezone=timezone_name,
@@ -272,7 +280,7 @@ class IslandRefreshEligibilityTests(IslandRefreshSchedulerTestCase):
             ContentIslandRefreshDispatch.objects.values_list("organization__domain", flat=True)
         )
 
-    def test_a_cold_start_org_with_only_a_pillar_strategy_is_eligible(self):
+    def test_a_cold_start_org_with_a_pillar_strategy_and_keywords_is_eligible(self):
         self.make_org(
             "cold-start.com",
             strategy={"pillars": [{"name": "AI Startup Fundraising", "keyword": "ai startup fundraising"}]},
@@ -280,8 +288,17 @@ class IslandRefreshEligibilityTests(IslandRefreshSchedulerTestCase):
 
         self.assertEqual(self._dispatched_domains(), ["cold-start.com"])
 
+    def test_a_pillar_strategy_without_researched_keywords_is_skipped(self):
+        self.make_org(
+            "no-keywords.com",
+            strategy={"pillars": [{"name": "AI Startup Fundraising", "keyword": "ai startup fundraising"}]},
+            keywords=0,
+        )
+
+        self.assertEqual(self._dispatched_domains(), [])
+
     def test_a_cluster_backed_org_with_no_islands_is_eligible(self):
-        self.make_org("clustered.com", clusters=1)
+        self.make_org("clustered.com", clusters=1, keywords=0)
 
         self.assertEqual(self._dispatched_domains(), ["clustered.com"])
 

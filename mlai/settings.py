@@ -1470,6 +1470,11 @@ CONTENT_ISLANDS_REFRESH_LOCAL_HOUR = int(
 CONTENT_ISLANDS_REFRESH_MAX_PER_TICK = int(
     os.environ.get("CONTENT_ISLANDS_REFRESH_MAX_PER_TICK", "3") or 3
 )
+# Scheduled founder workshops: a JSON list of {"start": ISO8601, "end": ISO8601}.
+# Nightly island refreshes dispatch nothing while now is inside a window, so
+# workshop research and first articles do not queue behind batch work. Parsed
+# by the island refresh scheduler, which logs and ignores malformed entries.
+ARTICLES_WORKSHOP_WINDOWS = os.environ.get("ARTICLES_WORKSHOP_WINDOWS", "[]").strip() or "[]"
 # An emerging island becomes visible only once it carries this much demand.
 CONTENT_ISLANDS_PROMOTION_MIN_KEYWORDS = int(
     os.environ.get("CONTENT_ISLANDS_PROMOTION_MIN_KEYWORDS", "5") or 5
