@@ -452,6 +452,7 @@ jobs:
           integrations.tests_github_ci_evidence \
           content_factory.tests_activation_connections \
           content_factory.tests_hosted_articles \
+          content_factory.tests_preview_domain_claim \
           content_factory.tests_website_portable \
           content_factory.tests_website_portable_wire \
           integrations.tests_content_factory_website_reads \
