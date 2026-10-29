@@ -557,6 +557,11 @@ REST_FRAMEWORK = {
         'community_chat_slack_delete': os.getenv(
             'COMMUNITY_CHAT_SLACK_DELETE_RATE', '20/minute'
         ),
+        # Founder copy fallback telemetry (community_chat.client_events):
+        # per signed-in account, or per trusted client IP when anonymous, plus
+        # a per-IP ceiling that applies to every caller.
+        'community_chat_client_events': os.getenv('COMMUNITY_CHAT_CLIENT_EVENTS_RATE', '60/minute'),
+        'community_chat_client_events_ip': os.getenv('COMMUNITY_CHAT_CLIENT_EVENTS_IP_RATE', '600/minute'),
     }
 }
 
