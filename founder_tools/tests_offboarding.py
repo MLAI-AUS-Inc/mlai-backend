@@ -111,17 +111,25 @@ class CompanyOffboardingTests(TestCase):
         self.assertFalse(ExternalServiceConnection.objects.filter(organization=organization).exists())
         self.assertFalse(GoogleConnection.objects.filter(organization=organization).exists())
         self.assertFalse(MonthlyUpdateDraft.objects.filter(organization=organization).exists())
-        self.assertFalse(OrganizationContentConfig.objects.filter(organization=organization).exists())
+        # The purged config is replaced by only the previous-owner record.
+        config = OrganizationContentConfig.objects.get(organization=organization)
+        self.assertEqual(set(config.pillar_strategy), {"previous_owner"})
+        self.assertEqual(config.pillar_strategy["previous_owner"]["user_id"], self.user.id)
         # Organisation and its domain remain reserved until ownership review.
         self.assertTrue(Organization.objects.filter(pk=organization.pk).exists())
 
-        # An absent company owner does not authorise reuse of retained history.
-        again = self.client.post(
+        # An absent company owner does not authorise another founder to reuse
+        # retained history (the founder who deleted it may; tests_domain_claims).
+        stranger = User.objects.create_user(email="offboard-stranger@example.com", role="participant")
+        stranger_client = APIClient()
+        stranger_client.force_authenticate(user=stranger)
+        again = stranger_client.post(
             "/api/v1/founder-tools/companies/",
             {"name": "Acme Again", "domain": "acme.com", "registered": True},
             format="json",
         )
         self.assertEqual(again.status_code, 409)
+        self.assertEqual(again.data["code"], "company_domain_claimed")
 
     def test_delete_repoints_active_company_to_a_sibling(self):
         company_a = self._create_company("Alpha", "alpha.example")

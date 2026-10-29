@@ -160,13 +160,13 @@ class ProfileSaveRegistrationTests(SimpleTestCase):
              patch.object(views, "set_unverified_company_abn") as set_abn, \
              patch.object(views, "FounderCompanySerializer", return_value=Obj(data={"name": "New name"})):
             profiles.return_value.get.return_value = profile
-            response = views.FounderToolsCompanyView.post.__wrapped__(views.FounderToolsCompanyView(),
+            response = views.FounderToolsCompanyView()._save_company(
                 Obj(user=Obj(), data={"companyId": str(company_id), "name": "New name"}))
             self.assertEqual(response.status_code, 200)
             self.assertEqual((company.abn, company.acn, company.registered), ("saved-abn", "saved-acn", True))
             verify.assert_not_called()
             set_abn.assert_not_called()
-            views.FounderToolsCompanyView.post.__wrapped__(views.FounderToolsCompanyView(),
+            views.FounderToolsCompanyView()._save_company(
                 Obj(user=Obj(), data={"companyId": str(company_id), "name": "New name", "abn": ""}))
             set_abn.assert_called_once_with(company, None)
             verify.assert_called_once_with(company, abn="saved-abn", acn=None)
