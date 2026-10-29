@@ -452,6 +452,7 @@ jobs:
           integrations.tests_github_ci_evidence \
           content_factory.tests_activation_connections \
           content_factory.tests_founder_journey_alerts \
+          content_factory.tests_founder_funnel_report \
           content_factory.tests_hosted_articles \
           content_factory.tests_website_portable \
           content_factory.tests_website_portable_wire \
