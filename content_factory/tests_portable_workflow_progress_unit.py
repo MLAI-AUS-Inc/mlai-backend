@@ -195,15 +195,17 @@ class PortablePreviewRearmTests(SimpleTestCase):
             result={}, save=Mock(),
         )
 
-    def artifacts(self):
+    def artifacts(self, *, published=False):
         stack = ExitStack()
         stack.enter_context(patch.object(views, "_content_package_from_run", return_value={"contentPackaged": True}))
         stack.enter_context(patch.object(views, "_component_manifest_from_run", return_value={"components": [{"id": "title"}]}))
+        stack.enter_context(patch.object(views, "_portable_draft_published_hosted", return_value=published))
         return stack
 
-    def with_preview(self, live_preview, **changes):
-        result = {} if live_preview is None else {"livePreview": live_preview}
-        return SimpleNamespace(**{**vars(self.run), "result": result, "save": Mock(), **changes})
+    def with_preview(self, live_preview, *, result=None, **changes):
+        stored = {} if live_preview is None else {"livePreview": live_preview}
+        return SimpleNamespace(**{**vars(self.run), "result": {**stored, **(result or {})}, "save": Mock(),
+                                  "updated_at": timezone.now(), **changes})
 
     LEGACY_NOT_AVAILABLE = {
         "available": False, "status": "not_available", "retryable": False,
@@ -244,9 +246,27 @@ class PortablePreviewRearmTests(SimpleTestCase):
             **changes,
         }
 
+    def attempt_proof(self, **attempt):
+        """The ready build's proof with its ladder attempt (same nonce) carrying ``attempt``."""
+        proof = self.ready()["proof"]
+        ladder = {**proof["previewLadder"], "attempts": [
+            {"rung": "exact", "nonce": "f" * 32, "outcome": "failed"},
+            {"rung": "exact", "nonce": proof["hostedBuild"], "outcome": "ready", **attempt},
+        ]}
+        return {**proof, "previewLadder": ladder}
+
+    def last_resort_shell(self, **changes):
+        """The shell Content Factory serves once every Cloudflare rung failed through all 3 automatic retries."""
+        failed = [{"rung": rung, "nonce": "", "outcome": "failed"} for rung in ("exact", "snapshot", "template")]
+        return self.shell(proof={"articleReviewRevision": "rev-1", "previewRung": "shell", "previewLadder": {
+            "revision": "rev-1", "cycle": 4, "autoRetryCount": 3,
+            "attempts": [*failed, {"rung": "shell", "nonce": "", "outcome": "ready"}]}}, **changes)
+
     def test_auto_prepare_matrix_for_portable_and_repository_drafts(self):
         past = (timezone.now() - timedelta(minutes=1)).isoformat()
         future = (timezone.now() + timedelta(minutes=30)).isoformat()
+        long_ago = (timezone.now() - timedelta(hours=200)).isoformat()
+        recent = (timezone.now() - timedelta(hours=2)).isoformat()
         ready = {"available": True, "status": "running", "previewMode": "platform_deployment", "previewRung": "exact",
                  "previewUrl": "https://cf-synthetic.mlai-review-static.pages.dev/blog/draft/"}
         ladder_failed = {
@@ -291,6 +311,19 @@ class PortablePreviewRearmTests(SimpleTestCase):
             ("shell_past_expiry", self.shell(expiresAt=past), True, False),
             # A hosted build's expiresAt is its build deadline, never the preview's expiry.
             ("hosted_build_deadline_passed", self.ready(previewExpiresAt="", expiresAt=past), False, False),
+            # A hosted build stored with no previewExpiresAt (built before the ladder, or read before
+            # Content Factory recorded it ready) expires as preview_ladder.previewed_revision counts it.
+            ("hosted_no_expiry_started_200h_ago", self.ready(previewExpiresAt="", startedAt=long_ago), True, False),
+            ("hosted_no_expiry_dispatched_200h_ago", self.ready(previewExpiresAt="", proof={
+                **self.ready()["proof"], "builderDispatchedAt": long_ago}), True, False),
+            ("hosted_no_expiry_started_2h_ago", self.ready(previewExpiresAt="", startedAt=recent), False, False),
+            ("hosted_no_expiry_ready_170h_ago", self.ready(previewExpiresAt="", startedAt=recent, proof=self.attempt_proof(
+                readyAt=(timezone.now() - timedelta(hours=170)).isoformat())), True, False),
+            ("hosted_no_expiry_attempt_expiry_later", self.ready(previewExpiresAt="", startedAt=long_ago, proof=self.attempt_proof(
+                previewExpiresAt=future)), False, False),
+            # CF restarts every rung and its retries for an expired last-resort shell: the owner's Retry asks.
+            ("last_resort_shell_past_expiry", self.last_resort_shell(expiresAt=past), False, False),
+            ("last_resort_shell_before_expiry", self.last_resort_shell(), False, False),
             # The backend's own floor on automatic starts (autoStartAt), backing off while nothing answers.
             ("transport_failure_just_asked", {**transport, "autoStartCount": 1, "autoStartAt": (
                 timezone.now() - timedelta(seconds=10)).isoformat()}, False, False),
@@ -511,6 +544,220 @@ class PortablePreviewRearmTests(SimpleTestCase):
         calls = self.poll(self.with_preview(failed), lambda method: building, minutes=1, every_seconds=20)
         self.assertEqual([method for method, _seconds in calls], ["POST", "GET", "GET"])
 
+    BUILDING = {"available": False, "status": "building", "previewMode": "platform_deployment", "previewRung": "exact",
+                "proof": {"hostedBuild": "c" * 32, "articleReviewRevision": "rev-2",
+                          "previewLadder": {"revision": "rev-2", "cycle": 2, "autoRetryCount": 0, "attempts": []}}}
+
+    def test_a_hosted_build_without_a_recorded_expiry_is_rebuilt_after_160_hours(self):
+        """Pre-ladder hosted previews, and builds read before the ladder recorded them ready, have no previewExpiresAt."""
+        stale = self.ready(previewExpiresAt="", startedAt=(timezone.now() - timedelta(hours=200)).isoformat())
+        calls = self.poll(self.with_preview(stale), lambda method: self.BUILDING, minutes=1, every_seconds=20)
+        self.assertEqual([method for method, _seconds in calls], ["POST", "GET", "GET"])
+        # A Content Factory that cannot see the expiry either answers the same preview: that is no
+        # progress, so the floor backs off instead of asking once a minute on every read.
+        self.assertEqual(self.poll(self.with_preview(stale), stale, minutes=30),
+                         [("POST", 0), ("POST", 60), ("POST", 360), ("POST", 1260)])
+
+    def test_a_ready_preview_of_an_older_revision_is_rearmed(self):
+        """The draft's review revision moved on (Content Factory's run result, mirrored here) under a ready preview."""
+        edited = {"article_review_revision": "rev-2"}
+        calls = self.poll(self.with_preview(self.ready(), result=edited), lambda method: self.BUILDING,
+                          minutes=1, every_seconds=20)
+        self.assertEqual([method for method, _seconds in calls], ["POST", "GET", "GET"])
+        # Content Factory may know a newer revision than this backend: when it answers with the
+        # same preview, that revision is not asked about again.
+        run = self.with_preview(self.ready(), result=edited)
+        self.assertEqual(self.poll(run, self.ready(), minutes=30), [("POST", 0)])
+        self.assertEqual(run.result["livePreview"]["autoStartRevision"], "rev-2")
+        with self.subTest("an exhausted ladder of the earlier revision"):
+            exhausted = self.exhausted(autoRetry=False, proof={**self.exhausted()["proof"], "articleReviewRevision": "rev-1"})
+            self.assertEqual(self.poll(self.with_preview(exhausted, result=edited), exhausted, minutes=30), [("POST", 0)])
+        for label, result in (("same_revision", {"article_review_revision": "rev-1"}), ("unknown_revision", {})):
+            with self.subTest(label):
+                self.assertEqual(self.poll(self.with_preview(self.ready(), result=result), AssertionError, minutes=5), [])
+
+    def test_an_expired_last_resort_shell_is_left_to_the_owners_retry(self):
+        """Content Factory would restart every Cloudflare rung and reset its automatic retries."""
+        expired = self.last_resort_shell(expiresAt=(timezone.now() - timedelta(minutes=10)).isoformat())
+        self.assertEqual(self.poll(self.with_preview(expired), AssertionError, minutes=30), [])
+        # A shell that is an ordinary rung (snapshot rungs off) is rebuilt on expiry as before.
+        ordinary = self.shell(expiresAt=(timezone.now() - timedelta(minutes=10)).isoformat())
+        calls = self.poll(self.with_preview(ordinary), lambda method: self.BUILDING, minutes=1, every_seconds=20)
+        self.assertEqual(calls[0], ("POST", 0))
+
+    def test_a_published_hosted_article_is_not_rebuilt(self):
+        past = (timezone.now() - timedelta(hours=1)).isoformat()
+        for label, stored, result in (
+            ("expired", self.ready(previewExpiresAt=past), {}),
+            ("missing", None, {}),
+            ("legacy_refusal", self.LEGACY_REFUSAL, {}),
+            ("failed_rung", {**self.exhausted(), "proof": {**self.exhausted()["proof"], "previewLadderExhausted": False}}, {}),
+            ("older_revision", self.ready(), {"article_review_revision": "rev-2"}),
+        ):
+            with self.subTest(label), self.artifacts(published=True):
+                self.assertFalse(views._article_preview_should_auto_prepare(self.with_preview(stored, result=result)))
+            with self.subTest(label + "_unpublished"), self.artifacts():
+                self.assertTrue(views._article_preview_should_auto_prepare(self.with_preview(stored, result=result)))
+        with self.artifacts(published=True):
+            # A build already running is still read back until it settles.
+            self.assertTrue(views._article_preview_should_refresh(self.with_preview(self.BUILDING)))
+
+    def test_published_means_a_queued_rendering_deployed_or_live_publication(self):
+        from .hosted_article_models import HostedArticlePublication
+        with patch.object(HostedArticlePublication.objects, "filter") as rows:
+            rows.return_value.exists.return_value = True
+            self.assertTrue(views._portable_draft_published_hosted(self.run))
+        rows.assert_called_once_with(run_id="synthetic-draft", status__in=("pending", "rendering", "deployed", "live"))
+
+    def poll_through_persist(self, run, *, post, get, minutes, every_seconds=2.5):
+        """Read run detail through the real Content Factory call and the real locked persist.
+
+        ``post`` and ``get`` are what the HTTP call does: an exception to raise,
+        or a (status code, JSON) answer. Returns each HTTP attempt as (method,
+        seconds since the first read).
+        """
+        start = timezone.now()
+        clock = [start]
+        attempts = []
+
+        def http(method, reply):
+            attempts.append((method, round((clock[0] - start).total_seconds())))
+            if isinstance(reply, BaseException):
+                raise reply
+            status_code, body = reply
+            return SimpleNamespace(status_code=status_code, content=b"{}", json=lambda: dict(body), text="")
+
+        with self.artifacts(), patch.object(views.timezone, "now", side_effect=lambda: clock[0]), \
+                patch.object(views, "_content_factory_remote_config", return_value={"enabled": True, "base_url": "http://cf.invalid"}), \
+                patch.object(views, "_content_factory_headers", return_value={}), \
+                patch.object(views, "require_unlocked_remote_call", return_value=None), \
+                patch.object(views.http_client, "post", side_effect=lambda url, **kwargs: http("POST", post)), \
+                patch.object(views.http_client, "get", side_effect=lambda url, **kwargs: http("GET", get)), \
+                patch.object(views.transaction, "atomic", return_value=nullcontext()), \
+                patch.object(views.ContentFactoryRun.objects, "select_for_update") as locked:
+            locked.return_value.get.return_value = run
+            while clock[0] - start < timedelta(minutes=minutes):
+                self.assertIs(views._ensure_article_live_preview(run), run)
+                clock[0] += timedelta(seconds=every_seconds)
+        return attempts
+
+    def test_a_timed_out_content_factory_backs_off_through_the_read_back(self):
+        """A timed-out start reads as "starting", and its GET read-back once dropped the floor's stamps."""
+        from integrations import http_client
+        for label, error in (("connect_timeout", http_client.exceptions.ConnectTimeout("connect timed out")),
+                             ("read_timeout", http_client.exceptions.ReadTimeout("read timed out"))):
+            with self.subTest(label):
+                run = self.with_preview(None)
+                attempts = self.poll_through_persist(run, post=error, get=error, minutes=30)
+                # One timed-out start and one read-back, then again after 1, 5 and 15 more minutes.
+                self.assertEqual(attempts, [("POST", 0), ("GET", 2), ("POST", 60), ("GET", 62),
+                                            ("POST", 360), ("GET", 362), ("POST", 1260), ("GET", 1262)])
+                self.assertEqual(run.result["livePreview"]["autoStartCount"], 4)
+
+    def test_a_failed_read_back_keeps_the_ladder_building_for_chat(self):
+        """One failed Content Factory call once turned a ladder build into an unpreviewed "Draft ready"."""
+        from integrations import http_client
+        run = self.with_preview(dict(self.BUILDING))
+        attempts = self.poll_through_persist(run, post=http_client.exceptions.ConnectionError("Connection refused"),
+                                             get=http_client.exceptions.ConnectionError("Connection refused"), minutes=10)
+        self.assertEqual(attempts, [("GET", 0), ("POST", 2), ("POST", 62), ("POST", 362)])
+        serialized = views._live_preview_from_run(run)
+        self.assertEqual((serialized["status"], serialized["error"]), ("failed", "Connection refused"))
+        self.assertEqual(serialized["proof"]["previewLadder"], self.BUILDING["proof"]["previewLadder"])
+        self.assertEqual(serialized["proof"]["previewRung"], "exact")
+        self.assertEqual(views._article_preview_unavailable_reason(run), "")
+
+    def test_backend_stand_ins_keep_the_ladder_marker_and_real_answers_replace_it(self):
+        ladder = self.BUILDING["proof"]["previewLadder"]
+        blocked = {**views._blocked_worker_payload(workflow="article_generation", technical_error="disabled", retryable=True),
+                   "available": False}
+        stand_ins = (
+            ("transport", {"available": False, "status": "failed", "error": "timed out", "errors": ["timed out"], "retryable": True}),
+            ("start_timeout", {"available": False, "status": "starting", "previewUrl": "", "error": "", "errors": [],
+                               "errorCode": "preview_start_timeout", "error_code": "preview_start_timeout", "retryable": True}),
+            ("cf_503", {"available": False, "status": "failed", "error": "Bad gateway", "errors": ["Bad gateway"],
+                        "content_factory_status_code": 503, "content_factory_response": {}, "retryable": True}),
+            ("blocked", blocked),
+        )
+        for label, raw in stand_ins:
+            with self.subTest(label):
+                current = SimpleNamespace(pk=1, result={"livePreview": dict(self.BUILDING)}, updated_at=timezone.now(), save=Mock())
+                self.persist(self.with_preview(dict(self.BUILDING)), current, dict(raw))
+                stored = current.result["livePreview"]
+                self.assertEqual(stored["proof"]["previewLadder"], ladder)
+                self.assertEqual(stored["proof"]["previewRung"], "exact")
+                self.assertEqual({key: stored[key] for key in raw if key != "proof"},
+                                 {key: value for key, value in raw.items() if key != "proof"})
+        answers = (
+            ("cf_409", {"available": False, "status": "failed", "error": "Refused", "content_factory_status_code": 409,
+                        "content_factory_response": {}, "retryable": False}),
+            ("cf_400", {"available": False, "status": "failed", "error": "Bad request", "content_factory_status_code": 400,
+                        "content_factory_response": {}, "retryable": False}),
+            ("cf_2xx", {**self.LEGACY_NOT_AVAILABLE, "previewMode": "content_only"}),
+        )
+        for label, raw in answers:
+            with self.subTest(label):
+                current = SimpleNamespace(pk=1, result={"livePreview": dict(self.BUILDING)}, updated_at=timezone.now(), save=Mock())
+                self.persist(self.with_preview(dict(self.BUILDING)), current, dict(raw))
+                self.assertNotIn("previewLadder", current.result["livePreview"].get("proof") or {})
+        with self.subTest("no ladder stored"):
+            current = SimpleNamespace(pk=1, result={"livePreview": self.LEGACY_REFUSAL}, updated_at=timezone.now(), save=Mock())
+            self.persist(self.with_preview(self.LEGACY_REFUSAL), current, dict(stand_ins[0][1]))
+            self.assertNotIn("proof", current.result["livePreview"])
+
+    def test_answers_without_ladder_state_keep_the_floor_stamps(self):
+        stamps = {"autoStartAt": timezone.now().isoformat(), "autoStartCount": 3,
+                  "autoStartRearmedAt": timezone.now().isoformat(), "autoStartRevision": "rev-2"}
+        for label, raw, kept in (
+            ("transport", {"available": False, "status": "failed", "error": "timed out", "retryable": True}, True),
+            ("legacy_answer", dict(self.LEGACY_NOT_AVAILABLE), True),
+            ("ladder_answer", dict(self.BUILDING), False),
+            ("stamped_start", {"available": False, "status": "failed", "error": "x", "autoStartAt": "2026-10-30T00:00:00+00:00",
+                               "autoStartCount": 1}, False),
+        ):
+            with self.subTest(label):
+                current = SimpleNamespace(pk=1, result={"livePreview": {**self.LEGACY_REFUSAL, **stamps}},
+                                          updated_at=timezone.now(), save=Mock())
+                self.persist(self.with_preview(self.LEGACY_REFUSAL), current, raw)
+                stored = current.result["livePreview"]
+                if kept:
+                    self.assertEqual({key: stored.get(key) for key in stamps}, stamps)
+                else:
+                    self.assertNotEqual({key: stored.get(key) for key in stamps}, stamps)
+
+    def test_a_publish_without_a_rendered_preview_asks_the_ladder_for_it(self):
+        """Allowing AI on a field changes the revision with no rebuild this backend can see."""
+        stored = []
+
+        def persist(current, payload):
+            stored.append(payload)
+            return current
+
+        for label, run, changes, asked in (
+            ("ready", self.with_preview(self.ready(), result={"article_review_revision": "rev-1"}), {}, True),
+            ("missing", self.with_preview(None), {}, True),
+            ("just_asked", self.with_preview({**self.ready(), "autoStartAt": timezone.now().isoformat(), "autoStartCount": 1}), {}, False),
+            ("repository_draft", self.with_preview(self.ready()), {"github_repo": "owner/site"}, False),
+        ):
+            with self.subTest(label), self.artifacts(), \
+                    patch.object(views, "_call_content_factory_live_preview", return_value=dict(self.BUILDING)) as dispatch, \
+                    patch.object(views, "_persist_live_preview_payload", side_effect=persist):
+                for key, value in changes.items():
+                    setattr(run, key, value)
+                stored.clear()
+                views._start_portable_preview_of_unpreviewed_revision(run)
+                if asked:
+                    dispatch.assert_called_once_with(run_id=run.run_id, method="POST", payload={"force": False})
+                    self.assertTrue(stored[0]["autoStartAt"])
+                    self.assertEqual(stored[0]["previewRung"], "exact")
+                    self.assertEqual(stored[0].get("autoStartRevision"), run.result.get("article_review_revision"))
+                else:
+                    dispatch.assert_not_called()
+        with override_settings(CONTENT_FACTORY_PORTABLE_PREVIEW_REARM=False), self.artifacts(), \
+                patch.object(views, "_call_content_factory_live_preview") as dispatch:
+            views._start_portable_preview_of_unpreviewed_revision(self.with_preview(None))
+        dispatch.assert_not_called()
+
     def test_every_automatic_start_logs_the_rearm_line(self):
         """Spec section 5 step 3 greps for this line; 1d1aebc0 may have no stored preview at all."""
         run = self.with_preview(None)
@@ -676,7 +923,7 @@ class HostedPublishRenderedPreviewTests(SimpleTestCase):
             run_request={"delivery_mode": "content_only", "delivery_mode_confirmed": True}, result={},
         )
 
-    def publish(self, review, reviewed="rev-1"):
+    def publish(self, review, reviewed="rev-1", start_error=None):
         from . import hosted_article_views
         view = hosted_article_views.HostedArticlePublishView()
         request = SimpleNamespace(data={"reviewedRevision": reviewed, "waivedComments": []})
@@ -689,15 +936,21 @@ class HostedPublishRenderedPreviewTests(SimpleTestCase):
                 patch("content_factory.article_review_views.record_review_approval") as approve, \
                 patch.object(hosted_article_views.hosted, "request_publication", return_value=publication) as queue, \
                 patch.object(hosted_article_views.hosted, "publication_payload", return_value={"status": "pending"}), \
-                patch.object(hosted_article_views, "_dispatch_hosted_publish", return_value={"queued": True}) as dispatch:
+                patch.object(hosted_article_views, "_dispatch_hosted_publish", return_value={"queued": True}) as dispatch, \
+                patch.object(views, "_start_portable_preview_of_unpreviewed_revision", side_effect=start_error) as start:
             response = view.post(request, self.run.run_id)
-        return response, SimpleNamespace(approve=approve, queue=queue, dispatch=dispatch)
+        return response, SimpleNamespace(approve=approve, queue=queue, dispatch=dispatch, start=start)
 
     def assert_refused(self, response, effects, reason):
         self.assertEqual((response.status_code, response.data["reason"]), (409, reason))
         effects.queue.assert_not_called()
         effects.approve.assert_not_called()
         effects.dispatch.assert_not_called()
+        if reason == "preview_required":
+            # Content Factory's ladder is asked for this revision's preview (a no-op unless it previews portable drafts).
+            effects.start.assert_called_once_with(self.run)
+        else:
+            effects.start.assert_not_called()
 
     def test_flag_off_publishes_on_the_reviewed_revision_alone(self):
         for label, review in (
@@ -708,12 +961,19 @@ class HostedPublishRenderedPreviewTests(SimpleTestCase):
                 response, effects = self.publish(review)
                 self.assertEqual(response.status_code, 202, response.data)
                 effects.dispatch.assert_called_once_with(effects.queue.return_value, "rev-1")
+                effects.start.assert_not_called()
 
     @override_settings(HOSTED_PUBLISH_REQUIRES_RENDERED_PREVIEW=True)
     def test_flag_on_requires_a_rendered_preview_of_the_reviewed_revision(self):
         response, effects = self.publish({"revision": "rev-1", "previewPending": False, "previewedRevision": "rev-1"})
         self.assertEqual(response.status_code, 202, response.data)
         effects.dispatch.assert_called_once_with(effects.queue.return_value, "rev-1")
+        effects.start.assert_not_called()
+        with self.assertLogs("content_factory.hosted_article_views", level="ERROR"):
+            response, effects = self.publish({"revision": "rev-1", "previewPending": False, "previewedRevision": ""},
+                                             start_error=RuntimeError("Content Factory is down"))
+        # A failed ask never hides the refusal.
+        self.assert_refused(response, effects, "preview_required")
         for label, review in (
             ("no_preview", {"revision": "rev-1", "previewPending": False, "previewedRevision": ""}),
             ("older_revision_previewed", {"revision": "rev-1", "previewPending": False, "previewedRevision": "rev-0"}),

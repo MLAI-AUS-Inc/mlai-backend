@@ -4702,6 +4702,7 @@ def _live_preview_fallback_ready(payload):
 @guarded_local_run_write
 def _persist_live_preview_payload(run, payload):
     if isinstance(payload, dict) and payload:
+        raw = payload
         payload = _normalize_live_preview_payload(payload)
         payload = _rewrite_live_preview_payload_for_browser(run.run_id, payload)
         if _portable_preview_rearm_enabled() and run.workflow in ARTICLE_WORKFLOWS and getattr(run, "pk", None):
@@ -4710,7 +4711,9 @@ def _persist_live_preview_payload(run, payload):
             # alone onto the locked current row so none of them is lost.
             with transaction.atomic():
                 current = ContentFactoryRun.objects.select_for_update().get(pk=run.pk)
-                current.result = {**_run_mapping(current.result), "livePreview": payload}
+                stored = _stored_live_preview(current)
+                current.result = {**_run_mapping(current.result),
+                                  "livePreview": _portable_live_preview_to_store(stored, raw, payload)}
                 current.save(update_fields=["result", "updated_at"])
             run.result, run.updated_at = current.result, current.updated_at
             return run
@@ -4954,22 +4957,155 @@ def _portable_auto_start_count(stored) -> int:
         return 0
 
 
-def _portable_live_preview_expired(stored, now) -> bool:
-    """A ready preview whose time has run out, which Content Factory only notices when asked.
+# The backend's own bookkeeping on a stored portable preview. It is never
+# serialized; answers that carry no ladder state keep it (see
+# _portable_live_preview_to_store).
+PORTABLE_AUTO_START_STAMPS = ("autoStartAt", "autoStartCount", "autoStartRearmedAt", "autoStartRevision")
+# Content Factory's preview_ladder.PREVIEW_TTL and MAX_AUTO_RETRIES.
+PORTABLE_PREVIEW_TTL = timedelta(hours=160)
+PORTABLE_LADDER_MAX_AUTO_RETRIES = 3
+# Every key of the payloads _call_content_factory_live_preview makes up for a
+# transport failure or a start timeout, when Content Factory gave no answer.
+PORTABLE_TRANSPORT_STAND_IN_KEYS = frozenset({
+    "available", "status", "previewUrl", "error", "errors", "errorCode", "error_code", "retryable",
+})
 
-    The ladder records ``previewExpiresAt`` (Cloudflare previews). The saved-HTML
-    shell has no hosted build and keeps the local session's ``expiresAt``.
+
+def _portable_ladder_record(stored):
+    proof = _run_mapping(stored.get("proof"))
+    return _run_mapping(proof.get("previewLadder") or proof.get("preview_ladder"))
+
+
+def _portable_live_preview_expiry(stored):
+    """When this stored preview stops being served, as Content Factory counts it, or None.
+
+    The ladder records ``previewExpiresAt`` (Cloudflare previews). A hosted
+    build whose copy here has none (built before the ladder, or read before
+    Content Factory recorded the build as ready) lives as long as
+    ``preview_ladder.previewed_revision`` allows: its attempt's expiry, else
+    160 hours from when it was ready, started, or dispatched. The saved-HTML
+    shell has no hosted build and keeps the local session's ``expiresAt``; a
+    hosted build's own ``expiresAt`` is its build deadline.
     """
     proof = _run_mapping(stored.get("proof"))
-    expires = (
+    moment = _parse_handoff_timestamp(
         stored.get("previewExpiresAt") or stored.get("preview_expires_at")
         or proof.get("previewExpiresAt") or proof.get("preview_expires_at") or ""
     )
+    if moment is not None:
+        return moment
     preview_mode = str(stored.get("previewMode") or stored.get("preview_mode") or "").strip()
-    if not expires and preview_mode == "content_only" and not proof.get("hostedBuild"):
-        expires = stored.get("expiresAt") or stored.get("expires_at") or ""
-    moment = _parse_handoff_timestamp(expires)
+    nonce = proof.get("hostedBuild")
+    if nonce and preview_mode == "platform_deployment":
+        attempts = _portable_ladder_record(stored).get("attempts")
+        attempt = next((item for item in reversed(attempts if isinstance(attempts, list) else [])
+                        if isinstance(item, dict) and item.get("nonce") == nonce), {})
+        moment = _parse_handoff_timestamp(attempt.get("previewExpiresAt"))
+        if moment is None:
+            began = _parse_handoff_timestamp(
+                attempt.get("readyAt") or stored.get("startedAt") or stored.get("started_at")
+                or proof.get("builderDispatchedAt") or proof.get("builder_dispatched_at")
+            )
+            moment = began + PORTABLE_PREVIEW_TTL if began is not None else None
+        return moment
+    if preview_mode == "content_only" and not nonce:
+        return _parse_handoff_timestamp(stored.get("expiresAt") or stored.get("expires_at"))
+    return None
+
+
+def _portable_live_preview_expired(stored, now) -> bool:
+    """A ready preview whose time has run out, which Content Factory only notices when asked."""
+    moment = _portable_live_preview_expiry(stored)
     return moment is not None and moment <= now
+
+
+def _portable_last_resort_shell(stored) -> bool:
+    """The saved-HTML shell Content Factory shows once every automatic retry of its Cloudflare rungs failed.
+
+    Content Factory answers that shell's expiry with a whole new cycle from
+    rung 1 and resets its automatic retries, so only the owner's Retry asks
+    again (``preview_ladder._plan``).
+    """
+    proof = _run_mapping(stored.get("proof"))
+    rung = str(stored.get("previewRung") or stored.get("preview_rung") or proof.get("previewRung") or "").strip()
+    try:
+        retries = int(_portable_ladder_record(stored).get("autoRetryCount") or 0)
+    except (TypeError, ValueError):
+        retries = 0
+    return rung == "shell" and retries >= PORTABLE_LADDER_MAX_AUTO_RETRIES
+
+
+def _known_article_review_revision(run) -> str:
+    """The draft's review revision as Content Factory last reported it (its run result, mirrored here)."""
+    return str(_run_mapping(run.result).get("article_review_revision") or "").strip()
+
+
+def _portable_preview_revision_stale(run, stored) -> bool:
+    """The stored preview shows an earlier review revision than the draft's.
+
+    Content Factory's ladder moves to a new revision only inside a start, so a
+    start is what lets it build the current one. Each revision is asked once:
+    Content Factory may know a newer revision than this backend does.
+    """
+    known = _known_article_review_revision(run)
+    shown = str(_run_mapping(stored.get("proof")).get("articleReviewRevision") or "").strip()
+    return bool(known and shown and known != shown and stored.get("autoStartRevision") != known)
+
+
+def _portable_draft_published_hosted(run) -> bool:
+    """This draft is published, or being published, on its MLAI-hosted blog."""
+    from .hosted_article_models import HostedArticlePublication
+
+    statuses = (HostedArticlePublication.Status.PENDING, *HostedArticlePublication.RENDERED)
+    return HostedArticlePublication.objects.filter(run_id=run.run_id, status__in=statuses).exists()
+
+
+def _backend_live_preview_stand_in(payload) -> bool:
+    """A payload this backend made up because Content Factory gave no preview answer.
+
+    A transport failure or start timeout, a Content Factory 5xx, or a disabled
+    or unreachable Content Factory (``_blocked_worker_payload``). Content
+    Factory's own 4xx refusals are its answer, not a stand-in.
+    """
+    if not isinstance(payload, dict) or not payload or _live_preview_ladder_present(payload):
+        return False
+    if payload.get("content_factory_dispatch_blocked") is True:
+        return True
+    status_code = payload.get("content_factory_status_code")
+    if status_code is not None:
+        return isinstance(status_code, int) and status_code >= 500
+    keys = set(payload) - set(PORTABLE_AUTO_START_STAMPS)
+    return keys <= PORTABLE_TRANSPORT_STAND_IN_KEYS and str(payload.get("status") or "") in {"failed", "starting"}
+
+
+def _portable_live_preview_to_store(stored, raw, payload):
+    """``payload`` (normalized from ``raw``) as it is stored over ``stored``.
+
+    An answer that carries no ladder state keeps the backend's floor stamps, so
+    a failed GET read-back cannot erase the backoff of the starts before it.
+    One of the backend's own stand-ins over a ladder preview also keeps the
+    ladder's marker (its record and rung, add-only in proof), so the preview
+    stays one the ladder builds instead of reading as a finished, unpreviewed
+    draft for one failed call.
+    """
+    if not isinstance(raw, dict) or _live_preview_ladder_present(raw):
+        return payload
+    kept = dict(payload)
+    if not any(key in raw for key in PORTABLE_AUTO_START_STAMPS):
+        kept.update({key: stored[key] for key in PORTABLE_AUTO_START_STAMPS if key in stored})
+    if _backend_live_preview_stand_in(raw) and _live_preview_ladder_present(stored):
+        stored_proof = _run_mapping(stored.get("proof"))
+        marker = {}
+        ladder = _portable_ladder_record(stored)
+        if ladder:
+            marker["previewLadder"] = copy.deepcopy(ladder)
+        rung = stored.get("previewRung") or stored.get("preview_rung") or stored_proof.get("previewRung")
+        if isinstance(rung, str) and rung.strip():
+            marker["previewRung"] = rung
+        if stored_proof.get("previewLadderExhausted") is True:
+            marker["previewLadderExhausted"] = True
+        kept["proof"] = {**marker, **_run_mapping(kept.get("proof"))}
+    return kept
 
 
 def _portable_legacy_preview_refusal(stored) -> bool:
@@ -5000,7 +5136,12 @@ def _portable_article_preview_rearm_due(run, stored, now) -> bool:
     preview_status = str(live_preview.get("status") or "").strip().lower()
     if preview_status in {"not_started", "queued", "expired"}:
         return True
+    if _portable_preview_revision_stale(run, stored):
+        return True
     if live_preview.get("available") and live_preview.get("previewUrl"):
+        if _portable_last_resort_shell(stored):
+            # Its expiry would restart every Cloudflare rung and their retries.
+            return False
         # Content Factory starts a new cycle for a preview past its expiry.
         return _portable_live_preview_expired(stored, now)
     ladder = _live_preview_ladder_present(stored)
@@ -5040,31 +5181,72 @@ def _portable_article_preview_should_rearm(run):
     ``autoRetry`` come from Content Factory and only stop this side asking early.
     The backend's own floor (``autoStartAt``) bounds what Content Factory's
     reservation cannot: starts that never reach it, or that it answers without
-    ladder state.
+    ladder state. An article already published on its hosted blog is not
+    rebuilt unless the owner asks.
     """
     stored = _stored_live_preview(run)
     now = timezone.now()
-    return _portable_article_preview_rearm_due(run, stored, now) and not _portable_auto_start_throttled(stored, now)
+    return (
+        _portable_article_preview_rearm_due(run, stored, now)
+        and not _portable_auto_start_throttled(stored, now)
+        and not _portable_draft_published_hosted(run)
+    )
 
 
-def _stamp_portable_auto_start(previous, answer, *, legacy_rearm):
+def _stamp_portable_auto_start(previous, answer, *, legacy_rearm, revision=""):
     """The payload to store after an automatic portable start, stamped with when it was sent.
 
     An empty answer (an approved draft that Content Factory never previewed)
-    keeps the stored payload, so the stamp still bounds the next start.
+    keeps the stored payload, so the stamp still bounds the next start. The
+    backoff restarts only when the ladder answered with a preview that is not
+    already past its expiry; ``revision`` is the review revision this start
+    asked for.
     """
     answer = answer if isinstance(answer, dict) else {}
-    ladder_answer = bool(answer) and _live_preview_ladder_present(answer)
-    now = timezone.now().isoformat()
+    moment = timezone.now()
+    progressed = (
+        bool(answer) and _live_preview_ladder_present(answer)
+        and not (answer.get("available") and _portable_live_preview_expired(answer, moment))
+    )
+    now = moment.isoformat()
     count = 1
-    if previous.get("autoStartAt") and not ladder_answer:
+    if previous.get("autoStartAt") and not progressed:
         count = min(_portable_auto_start_count(previous) + 1, 99)
     stamped = {**(answer or previous), "autoStartAt": now, "autoStartCount": count}
-    if answer.get("content_factory_status_code") or (legacy_rearm and not ladder_answer):
+    if revision:
+        stamped["autoStartRevision"] = revision
+    if answer.get("content_factory_status_code") or (legacy_rearm and not _live_preview_ladder_present(answer)):
         # Content Factory refused this start (non-2xx), or answered a legacy
-        # re-arm without its ladder. A founder's Retry replaces the stamp.
+        # re-arm without its ladder. A founder's Retry that the ladder answers
+        # replaces the stamp.
         stamped["autoStartRearmedAt"] = now
     return stamped
+
+
+def _start_portable_preview_of_unpreviewed_revision(run):
+    """Hosted publish found no rendered preview of the reviewed revision: ask the ladder for one.
+
+    Content Factory's ladder moves to a new review revision only inside a
+    start, and some revisions (allowing AI changes to a field) change with no
+    rebuild this backend can see. The owner's publish attempt is that start,
+    under the same floor as the automatic ones.
+    """
+    if not (_portable_preview_rearm_enabled() and _portable_article_preview_run(run)):
+        return run
+    previous = _stored_live_preview(run)
+    if _portable_auto_start_throttled(previous, timezone.now()):
+        return run
+    logger.info(
+        "content_factory_live_preview_rearm run_id=%s workflow=%s previous_status=%s previous_status_code=%s trigger=publish",
+        run.run_id,
+        run.workflow,
+        (previous.get("status") or "") if previous else "missing",
+        previous.get("content_factory_status_code"),
+    )
+    payload = _call_content_factory_live_preview(run_id=run.run_id, method="POST", payload={"force": False})
+    payload = _stamp_portable_auto_start(previous, payload, legacy_rearm=False,
+                                         revision=_known_article_review_revision(run))
+    return _persist_live_preview_payload(run, payload)
 
 
 def _article_preview_should_auto_prepare(run):
@@ -5231,7 +5413,8 @@ def _ensure_article_live_preview(run):
             payload.get("error"),
         )
     if portable_rearm:
-        payload = _stamp_portable_auto_start(previous, payload, legacy_rearm=legacy_rearm)
+        payload = _stamp_portable_auto_start(previous, payload, legacy_rearm=legacy_rearm,
+                                             revision=_known_article_review_revision(run))
     return _persist_live_preview_payload(run, payload)
 
 

@@ -143,7 +143,12 @@ class HostedArticlePublishView(APIView):
         if (getattr(settings, "HOSTED_PUBLISH_REQUIRES_RENDERED_PREVIEW", False) is True
                 and str(review.get("previewedRevision") or "") != reviewed):
             # Content Factory names the revision its current rendered preview
-            # shows. A Content Factory without that field fails closed.
+            # shows. A Content Factory without that field fails closed, and
+            # its preview ladder is asked for this revision's preview.
+            try:
+                views._start_portable_preview_of_unpreviewed_revision(run)
+            except Exception:
+                logger.exception("hosted_publish_preview_start_failed run_id=%s", run.run_id)
             return Response({"reason": "preview_required", "detail": "Open the rendered preview of this version before publishing."}, status=409)
         blocked = check_approval_comments(run, data)
         if blocked is not None:
