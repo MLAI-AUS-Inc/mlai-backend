@@ -8758,11 +8758,11 @@ def _merge_django_owned_run_result(existing_result, incoming_result):
     Approval and billing receipts remain authoritative even when reflected back.
     """
 
+    from content_factory.article_publication_evidence import SETTLEMENT_RESULT_KEYS
     existing = existing_result if isinstance(existing_result, dict) else {}
     incoming = incoming_result if isinstance(incoming_result, dict) else {}
     backend_merge_keys = {"publish_merge_intent", "merge_response", "merge_status", "merged_at", "article_review_updates", "delivery_v1",
-        "article_terminal_refund", "reconciliation_refund_pending", "article_settlement_attempts",
-        "article_settlement_status", "article_settlement_owner", "article_cancellation_v1", "article_stop_attempts"}
+        "article_cancellation_v1", *SETTLEMENT_RESULT_KEYS}
     # Backend-authored receipts a worker snapshot never replaces: a non-empty local
     # value always wins (founder-journey alert receipts, cancellation reason/actor).
     local_wins_keys = {"ops_alerts", "cancellation_reason", "cancelled_by"}
