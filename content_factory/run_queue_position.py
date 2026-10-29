@@ -37,6 +37,9 @@ logger = logging.getLogger(__name__)
 INTERACTIVE_QUEUE_CLASS = "interactive"
 STARTUP_AUTOFILL_ACTION = "startup_autofill"
 TOPIC_DISCOVERY_ACTION = "topic_discovery"
+# These mirror first_article_entitlement.BILLING_STATUS and ENTITLEMENT (P0.2,
+# p0/free-first-article). That module is not on this branch, so they are kept
+# as literals here; import them from there once both have landed.
 ENTITLED_BILLING_STATUS = "entitled"
 FIRST_ARTICLE_ENTITLEMENT = "first_article"
 # Gate actions an entitled first-article lineage is billed under (IF-01/IF-02).
