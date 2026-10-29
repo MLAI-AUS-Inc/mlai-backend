@@ -3266,6 +3266,9 @@ def _article_restart_available(run):
         return False
     if run.status not in {ContentFactoryRunStatus.BLOCKED, ContentFactoryRunStatus.FAILED, ContentFactoryRunStatus.DENIED} and not _article_content_only_preview_not_available(run):
         return False
+    from content_factory.article_publication_evidence import refund_owns_charge
+    if refund_owns_charge(run):
+        return False
     title, keyword = _article_draft_title_keyword(run)
     return bool(title or keyword)
 
@@ -7647,6 +7650,12 @@ def _reserve_article_restart(*, run, context, payload, receipt):
         previous = (current.result or {}).get("restart_receipt") or {}
         if previous.get("state") in {"pending", "running"}:
             return Response({"code": "restart_pending", "detail": "Your restart is already being confirmed. This page will update.",
+                             "runId": run.run_id, "charged": False}, status=status.HTTP_409_CONFLICT)
+        from content_factory.article_publication_evidence import refund_owns_charge
+        if refund_owns_charge(current):
+            # The refund sweep holds this lock while it reserves the credit. A
+            # replacement reusing the same payment would deliver on refunded points.
+            return Response({"code": "roo_points_billing_refunded", "detail": "This draft's Roo points are being refunded. Start a new paid draft.",
                              "runId": run.run_id, "charged": False}, status=status.HTTP_409_CONFLICT)
         previous_actions = (current.result or {}).get("user_action_count")
         receipt["user_action_count"] = (max(0, previous_actions) if type(previous_actions) is int else 0) + 1

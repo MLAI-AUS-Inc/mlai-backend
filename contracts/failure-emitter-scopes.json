@@ -1983,6 +1983,32 @@
     {
       "adapter": "nonfailure_category",
       "allowed_codes_ref": "contracts/failure-codes.json#/codes",
+      "category": "retained financial refund observation for a failed article run with no way to continue; no new causal classification",
+      "expression": "code[:100]",
+      "field": "error_code",
+      "function": "_queue_unrecoverable_article_refunds",
+      "owner": "backend.reconciliation",
+      "path": "content_factory/reconciliation.py",
+      "site_sha256": "d7730f66fa3eede5990c35a0fa07b6a211a4a5c10a29634c7368f3e7e413aa1a",
+      "source": "retained financial refund observation for a failed article run with no way to continue; no new causal classification",
+      "test": "content_factory.tests_article_publication_evidence_unit.UnrecoverableFailureRefundTests.test_no_recovery_failure_reserves_credit_stops_worker_and_refunds_original_spend"
+    },
+    {
+      "adapter": "nonfailure_category",
+      "allowed_codes_ref": "contracts/failure-codes.json#/codes",
+      "category": "owner/company/billing/measurement request schema; not a causal Articles run failure",
+      "expression": "'roo_points_billing_refunded'",
+      "field": "code",
+      "function": "_reserve_article_restart",
+      "owner": "backend.vibe_marketing",
+      "path": "content_factory/vibe_marketing_views.py",
+      "site_sha256": "200b702e6ccfb486bac324da85822c044f3ae36d2490ec533a83d3cb4cea0a34",
+      "source": "owner/company/billing/measurement request schema; not a causal Articles run failure",
+      "test": "content_factory.tests_article_publication_evidence_unit.UnrecoverableFailureRefundTests.test_restart_cannot_reuse_a_charge_the_refund_owns"
+    },
+    {
+      "adapter": "nonfailure_category",
+      "allowed_codes_ref": "contracts/failure-codes.json#/codes",
       "category": "owner/company/billing/measurement request schema; not a causal Articles run failure",
       "expression": "'content_factory_refund_pending'",
       "field": "code",
