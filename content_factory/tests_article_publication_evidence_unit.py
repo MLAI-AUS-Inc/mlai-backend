@@ -920,3 +920,196 @@ class ArticleCancellationSettlementTests(SimpleTestCase):
             reconciliation._settle_sweep_refunds(limit=10)
         self.assertIn("denied", select.call_args.kwargs["status__in"])
         settle.assert_called_once_with(self.run, reason="run_reconciliation_failed")
+
+
+class DispatchRejectedRefundTests(SimpleTestCase):
+    """PawShare run 1433c2cf (29 Oct 2026): the backend refused Content Factory's first snapshot.
+
+    Content Factory failed the run locally with "Dispatch rejected by backend"
+    and sent no terminal callback, so its 12-point charge was never reserved.
+    """
+
+    KEY = "vibe-article-job:221caeaa"
+
+    def setUp(self):
+        self.run = SimpleNamespace(pk=31, run_id="1433c2cf-pawshare", organization_id=124, domain="pawshare.test",
+            workflow="article_generation", github_repo="", status="failed", current_step="dispatch_rejected",
+            approval_state="not_required", resume_available=False, acceptance_summary={}, verification_summary={},
+            error="Dispatch rejected by backend: editorial_run_conflict", save=Mock(), run_request={
+                "client_request_id": self.KEY, "domain": "pawshare.test", "github_repo": "",
+                "delivery_mode": "content_only", "delivery_mode_confirmed": True,
+                "roo_points_cost": 12, "roo_points_ledger_id": "5474", "roo_points_billing_status": "charged"},
+            # What a status poll records from Content Factory's local receipt.
+            result={"status": "failed", "error_code": "dispatch_rejected", "backend_code": "editorial_run_conflict"})
+        # Content Factory's GET /api/runs/lookup reply for the refused key.
+        self.key_record = {"client_request_id": self.KEY, "run_id": self.run.run_id, "job_id": self.run.run_id,
+            "key_status": "failed", "workflow": "direct_generate", "endpoint": "article", "domain": "pawshare.test",
+            "attempt": 1, "error": "backend_rejected:editorial_run_conflict", "run_status": "failed", "status": "failed"}
+
+    def queue(self, *, lookup=None, lookup_error=None, child_exists=False):
+        from datetime import timedelta
+        from . import reconciliation
+        self.run.updated_at, self.run.reconciled_at = timezone.now() - timedelta(hours=1), None
+        rows = Mock()
+        rows.filter.return_value = rows
+        rows.order_by.return_value = rows
+        rows.exists.return_value = child_exists
+        rows.__getitem__ = Mock(return_value=[self.run])
+        body = self.key_record if lookup is None else lookup
+        response = SimpleNamespace(status_code=body.pop("_status", 200), content=b"{}", json=lambda: body)
+        spend = SimpleNamespace(user=SimpleNamespace(pk=5), idempotency_key=f"content_factory:charge:{self.KEY}",
+            created_by_slack_id="U-payer")
+        with patch.object(reconciliation.ContentFactoryRun.objects, "filter", return_value=rows) as select, \
+                patch.object(reconciliation.ContentFactoryRun.objects, "select_for_update") as locked, \
+                patch.object(reconciliation.transaction, "atomic", return_value=nullcontext()), \
+                patch("organizations.models.Organization.objects.select_for_update"), \
+                patch.object(views, "_content_factory_remote_config", return_value={"enabled": True, "base_url": "https://cf.test"}), \
+                patch.object(views.http_client, "get", return_value=response, side_effect=lookup_error) as remote, \
+                patch("content_factory.billing_lineage.original_article_spend_for_run", return_value=spend), \
+                patch("integrations.services.article_generation.refund_content_factory_request_for_user",
+                    return_value=SimpleNamespace(pk=6001)) as credit:
+            locked.return_value.filter.return_value.first.return_value = self.run
+            queued = reconciliation._queue_dispatch_rejected_article_refunds(limit=10, now=timezone.now())
+        return SimpleNamespace(queued=queued, select=select, rows=rows, remote=remote, credit=credit)
+
+    def test_refused_first_snapshot_has_no_settlement_without_key_proof(self):
+        from .article_publication_evidence import refund_reconciliation_reason
+        # The stop is the only proof today, and the worker cannot bind a
+        # scope the backend never merged, so the obligation stays stranded.
+        self.assertEqual(refund_reconciliation_reason(self.run), "stop_required")
+
+    def test_refused_first_snapshot_credits_original_spend_once_key_proves_refusal(self):
+        outcome = self.queue()
+        self.assertEqual(outcome.queued, 1)
+        selection = outcome.select.call_args_list[0].kwargs
+        self.assertEqual((selection["status"], selection["result__error_code"]), ("failed", "dispatch_rejected"))
+        self.assertTrue(selection["result__article_terminal_refund__isnull"])
+        self.assertEqual(outcome.remote.call_args.kwargs["params"], {"client_request_id": self.KEY})
+        outcome.credit.assert_called_once()
+        self.assertEqual(outcome.credit.call_args.kwargs["article_request"]["client_request_id"], self.KEY)
+        self.assertEqual(outcome.credit.call_args.kwargs["user"].pk, 5)
+        receipt = self.run.result["article_terminal_refund"]
+        self.assertEqual((receipt["status"], receipt["refund_ledger_id"]), ("refunded", "6001"))
+        self.assertTrue(receipt["paid_obligation"])
+        self.assertEqual(receipt["settlement_reason"], "dispatch_rejected_without_delivery")
+        self.assertFalse(self.run.result["reconciliation_refund_pending"])
+        proof = self.run.result["dispatch_rejection_v1"]
+        self.assertEqual((proof["run_id"], proof["client_request_id"], proof["backend_code"]),
+            (self.run.run_id, self.KEY, "editorial_run_conflict"))
+        # A settled obligation is never selected again.
+        self.run.save.reset_mock()
+        self.assertEqual(self.queue().queued, 0)
+        self.run.save.assert_not_called()
+
+    def test_unproved_key_record_keeps_charge_for_reconciliation(self):
+        cases = (
+            # A later attempt reclaimed the key and started another run.
+            ("reclaimed", {**self.key_record, "key_status": "dispatched", "run_id": "replacement-run", "error": None}),
+            ("other_run", {**self.key_record, "run_id": "other-run"}),
+            ("not_backend_refusal", {**self.key_record, "error": "article_admission:INTERNAL_ERROR"}),
+            ("worker_not_failed", {**self.key_record, "run_status": "running"}),
+            ("never_received", {"detail": "No dispatch for client_request_id", "_status": 404}),
+        )
+        for label, lookup in cases:
+            with self.subTest(label):
+                self.setUp()
+                outcome = self.queue(lookup=deepcopy(lookup))
+                self.assertEqual(outcome.queued, 1)
+                outcome.credit.assert_not_called()
+                receipt = self.run.result["article_terminal_refund"]
+                self.assertEqual((receipt["status"], receipt["settlement_reason"]),
+                    ("needs_reconciliation", "dispatch_rejection_unconfirmed"))
+                self.assertTrue(receipt["paid_obligation"])
+                self.assertTrue(self.run.result["reconciliation_refund_pending"])
+                self.assertNotIn("dispatch_rejection_v1", self.run.result)
+
+    def test_unreachable_worker_retries_later_without_reserving(self):
+        outcome = self.queue(lookup_error=views.http_client.RequestException("timeout"))
+        self.assertEqual(outcome.queued, 0)
+        outcome.credit.assert_not_called()
+        self.run.save.assert_not_called()
+        self.assertNotIn("article_terminal_refund", self.run.result)
+        self.assertIn("reconciled_at", outcome.rows.update.call_args.kwargs)
+
+    def test_reused_charge_effect_delivery_or_settled_payment_keeps_charge(self):
+        cases = (
+            ("restart_pending", {"restart_receipt": {"state": "pending", "reused_authorization": "reserved"}}, {}),
+            ("restart_completed", {"restart_receipt": {"state": "completed"}, "restart_child_run_id": "child"}, {}),
+            ("unexplained_pr", {"pr_url": "https://github.com/pawshare/site/pull/3"}, {}),
+            ("draft_body", {"markdown": "Saved reviewable draft"}, {}),
+            ("packaged", {"content_package": {"content_packaged": True}}, {}),
+            ("other_failure", {"error_code": "editorial_run_conflict"}, {}),
+            ("unpaid", {}, {"roo_points_cost": None, "roo_points_ledger_id": None, "roo_points_billing_status": "free"}),
+            ("refunded", {}, {"roo_points_billing_status": "refunded"}),
+            ("dispatch_refund_owned", {}, {"pending_billing_refund": {"kind": "article_generation"}}),
+            ("goal_child", {}, {"first_article_goal_operation_id": "prepare-7"}),
+        )
+        for label, result, request in cases:
+            with self.subTest(label):
+                self.setUp()
+                self.run.result.update(result)
+                self.run.run_request.update(request)
+                outcome = self.queue()
+                self.assertEqual(outcome.queued, 0)
+                outcome.remote.assert_not_called()
+                outcome.credit.assert_not_called()
+                self.run.save.assert_not_called()
+                self.assertNotIn("article_terminal_refund", self.run.result)
+        with self.subTest("token_keyed"):
+            self.setUp()
+            self.run.run_id = self.KEY
+            self.assertEqual(self.queue().queued, 0)
+        with self.subTest("child_reused_charge"):
+            # A child run bills through this run's charge.
+            self.setUp()
+            outcome = self.queue(child_exists=True)
+            self.assertEqual(outcome.queued, 0)
+            outcome.credit.assert_not_called()
+            self.run.save.assert_not_called()
+            self.assertNotIn("article_terminal_refund", self.run.result)
+
+    def test_forged_or_mismatched_rejection_proof_never_credits(self):
+        from .article_publication_evidence import refund_reconciliation_reason
+        valid = {"version": 1, "run_id": self.run.run_id, "client_request_id": self.KEY, "key_status": "failed",
+            "backend_code": "editorial_run_conflict", "checked_at": "2026-10-29T05:00:00+00:00"}
+        self.run.result["dispatch_rejection_v1"] = valid
+        self.assertIsNone(refund_reconciliation_reason(self.run))
+        for label, change in (("run", {"run_id": "other"}), ("key", {"client_request_id": "other-key"}),
+                ("status", {"key_status": "dispatched"}), ("code", {"backend_code": ""}),
+                ("extra", {"amount": 12}), ("version", {"version": 2})):
+            with self.subTest(label):
+                self.run.result["dispatch_rejection_v1"] = {**valid, **change}
+                self.assertEqual(refund_reconciliation_reason(self.run), "stop_required")
+        self.run.result["dispatch_rejection_v1"] = valid
+        self.run.result["publication_evidence_v1"] = {"purpose": "article", "state": "observed"}
+        self.assertEqual(refund_reconciliation_reason(self.run), "needs_reconciliation")
+
+    def test_status_poll_cannot_erase_or_invent_refund_work(self):
+        owned = {"article_terminal_refund": {"status": "pending", "paid_obligation": True},
+            "reconciliation_refund_pending": True, "dispatch_rejection_v1": {"version": 1}}
+        remote = {"status": "failed", "error_code": "dispatch_rejected", "backend_code": "editorial_run_conflict"}
+        merged = views._merge_django_owned_article_result({**self.run.result, **owned}, remote)
+        self.assertEqual({key: merged.get(key) for key in owned}, owned)
+        invented = views._merge_django_owned_article_result(self.run.result, {**remote,
+            "article_terminal_refund": {"status": "refunded"}, "dispatch_rejection_v1": {"version": 1}})
+        self.assertNotIn("article_terminal_refund", invented)
+        self.assertNotIn("dispatch_rejection_v1", invented)
+
+    def test_worker_snapshot_cannot_invent_dispatch_rejection_proof(self):
+        from .service_views import _merge_django_owned_run_result
+        proof = {"dispatch_rejection_v1": {"version": 1, "run_id": self.run.run_id}}
+        self.assertEqual(_merge_django_owned_run_result({}, proof), {})
+        self.assertEqual(_merge_django_owned_run_result(proof, {"dispatch_rejection_v1": None}), proof)
+
+    def test_refund_sweep_retries_a_pending_dispatch_rejection(self):
+        from . import reconciliation
+        self.run.result.update(article_terminal_refund={"status": "pending", "paid_obligation": True},
+            reconciliation_refund_pending=True)
+        rows = Mock()
+        rows.filter.return_value = rows
+        rows.__getitem__ = Mock(return_value=[self.run])
+        with patch.object(reconciliation.ContentFactoryRun.objects, "filter", return_value=rows) as select, \
+                patch.object(reconciliation, "_refund_failed_run") as settle:
+            reconciliation._settle_sweep_refunds(limit=10)
+        self.assertIn("failed", select.call_args.kwargs["status__in"])
+        settle.assert_called_once_with(self.run, reason="run_reconciliation_failed")
