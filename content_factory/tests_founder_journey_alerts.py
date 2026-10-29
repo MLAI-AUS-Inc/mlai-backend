@@ -12,7 +12,10 @@ from founder_tools.models import VibeRaisingCompany, VibeRaisingProfile
 from organizations.models import Organization
 from workflow_runs.models import ContentFactoryRun, ContentFactoryRunStep
 from . import founder_journey_alerts as alerts
+from .editorial_catalog import merge_strategy, public_strategy
 from .models import OrganizationContentConfig
+from .service_views import _merge_django_owned_run_result
+from .services import island_refresh_scheduler
 from .website_models import WebsiteConnection
 
 CHANNEL = "C0000000000"
@@ -357,6 +360,63 @@ class QueueFounderJourneyAlertTests(FounderJourneyFixture):
         _, calls = self.sweep()
         self.assertIn(f"https://api.example.test/admin/founder_tools/viberaisingcompany/{self.company.pk}/change/",
                       calls[0].kwargs["text"])
+
+
+class PrivateStrategyKeyTests(FounderJourneyFixture):
+    def test_merge_strategy_keeps_and_public_strategy_hides_backend_receipts(self):
+        existing = {"pillars": [{"slug": "a"}], "ops_alerts": {"id": {"state": "sent"}},
+                    "previous_owner": {"user_id": 7, "company_id": 3}}
+        merged = merge_strategy(existing, {"pillars": [{"slug": "b"}], "ops_alerts": {}, "previous_owner": None})
+        self.assertEqual(merged["ops_alerts"], existing["ops_alerts"])
+        self.assertEqual(merged["previous_owner"], existing["previous_owner"])
+        self.assertEqual(merged["pillars"], [{"slug": "b"}])
+        self.assertNotIn("ops_alerts", merge_strategy({}, {"ops_alerts": {"forged": {}}}))
+        visible = public_strategy(merged)
+        self.assertNotIn("ops_alerts", visible)
+        self.assertNotIn("previous_owner", visible)
+        self.assertEqual(visible["pillars"], [{"slug": "b"}])
+
+    def test_a_config_holding_only_private_keys_is_not_island_refresh_eligible(self):
+        alerts.queue_founder_journey_alert(organization=self.org, alert_reason="free_cap_spike")
+        config = OrganizationContentConfig.objects.get(organization=self.org)
+        config.pillar_strategy = {**config.pillar_strategy, "previous_owner": {"user_id": 1}}
+        config.save(update_fields=["pillar_strategy"])
+        self.assertNotIn(config.pk, {item.pk for item in island_refresh_scheduler._eligible_configs()})
+
+        config.pillar_strategy = {**config.pillar_strategy, "topics": ["kept eligible"]}
+        config.save(update_fields=["pillar_strategy"])
+        self.assertIn(config.pk, {item.pk for item in island_refresh_scheduler._eligible_configs()})
+
+    def test_worker_snapshot_keeps_backend_receipts_and_cancel_reasons(self):
+        existing = {"ops_alerts": {"run_terminal": {"state": "sent"}}, "cancellation_reason": "owner_cancelled",
+                    "cancelled_by": "owner", "status": "cancelled"}
+        for incoming in ({"status": "cancelled"},
+                         {"status": "cancelled", "ops_alerts": {}, "cancellation_reason": "", "cancelled_by": None},
+                         {"status": "cancelled", "ops_alerts": {"run_terminal": {"state": "pending"}},
+                          "cancellation_reason": "unspecified", "cancelled_by": "system"}):
+            merged = _merge_django_owned_run_result(existing, incoming)
+            self.assertEqual(merged["ops_alerts"], existing["ops_alerts"])
+            self.assertEqual((merged["cancellation_reason"], merged["cancelled_by"]), ("owner_cancelled", "owner"))
+        worker_reason = _merge_django_owned_run_result({}, {"cancellation_reason": "worker_heartbeat_lost", "cancelled_by": "system"})
+        self.assertEqual(worker_reason["cancellation_reason"], "worker_heartbeat_lost")
+
+    @override_settings(ROO_API_KEY="synthetic-test-key", INTERNAL_API_KEY="synthetic-test-key")
+    def test_a_cf_run_put_snapshot_keeps_receipts_and_cancel_reasons(self):
+        from tests.website_fixtures import CallbackFixtureClient
+        run = self.make_run(workflow="repo_scan", status="failed",
+                            result={"status": "failed", "cancellation_reason": "unspecified", "cancelled_by": "system"})
+        alerts.queue_founder_journey_alert(organization=self.org, alert_reason="run_terminal", run=run)
+        client = CallbackFixtureClient()
+        client.credentials(HTTP_X_API_KEY="synthetic-test-key")
+        response = client.put(f"/api/content-factory/runs/{run.run_id}/", {
+            "run_id": run.run_id, "workflow": run.workflow, "domain": run.domain, "status": "failed",
+            "current_step": "scan", "result": {"status": "failed", "error_code": "REPOSITORY_SCAN_FAILED"}, "step_states": {},
+        }, format="json")
+        self.assertIn(response.status_code, {200, 201}, response.content)
+        run.refresh_from_db()
+        self.assertEqual(run.result["error_code"], "REPOSITORY_SCAN_FAILED")
+        self.assertIn("run_terminal", run.result["ops_alerts"])
+        self.assertEqual((run.result["cancellation_reason"], run.result["cancelled_by"]), ("unspecified", "system"))
 
 
 class FailureContractTests(TestCase):
