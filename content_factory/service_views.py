@@ -9147,9 +9147,13 @@ def _apply_cancellation_receipt(run_id, payload):
             preserved = cancellation_result(run, incoming)
         except (ValueError, TypeError):
             return Response({"code": "cancellation_scope_mismatch", "run_id": run_id}, status=409)
+        # Why it stopped and who asked (IF-20): the backend's own saved value wins
+        # over the worker's; a receipt carrying neither records unspecified/system.
+        from .run_cancellation import receipt_cancellation_fields
+        reasons = receipt_cancellation_fields(preserved, incoming)
         run.status, run.current_step, run.resume_available = "cancelled", "cancelled", False
         run.error = str(payload.get("error") or run.error or "Cancelled.")[:2000]
-        run.result = {**preserved, **metadata, "status": "cancelled", "cancelled": True,
+        run.result = {**preserved, **metadata, **reasons, "status": "cancelled", "cancelled": True,
             "cancellation_receipt": {"status": "recorded", "received_at": timezone.now().isoformat(), "repository_authority": False}}
         run.save(update_fields=["status", "current_step", "resume_available", "error", "result", "updated_at"])
         observe_workflow_status(run, {"status": "cancelled"})
