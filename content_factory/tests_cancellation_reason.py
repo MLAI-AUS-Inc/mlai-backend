@@ -17,11 +17,14 @@ from uuid import uuid4
 from django.test import SimpleTestCase, TestCase, override_settings
 from django.utils import timezone
 
+from roo.models import Ledger
 from workflow_runs.models import ContentFactoryRun, ContentFactoryRunStep
 
 from . import founder_journey_alerts as alerts
 from . import reconciliation
 from . import vibe_marketing_views as views
+from .dispatch_models import ContentFactoryDispatchOutbox
+from .dispatch_outbox import process_dispatch_outbox
 from .run_cancellation import (
     DRAFT_DELETED_AT_KEY,
     cancellation_payload,
@@ -30,7 +33,7 @@ from .run_cancellation import (
     receipt_cancellation_fields,
 )
 from .service_views import _apply_cancellation_receipt, _merge_django_owned_run_result
-from .tests_first_article_entitlement import FREE, EntitlementFixture
+from .tests_first_article_entitlement import FREE, EntitlementFixture, keys
 
 CHANNEL = "C0000000000"
 ALERTS = {"ARTICLES_FOUNDER_JOURNEY_ALERTS_ENABLED": True, "ARTICLES_FOUNDER_JOURNEY_ALERTS_SINCE": "2026-01-01",
@@ -323,3 +326,93 @@ class CancellationAlertTests(EntitlementFixture, TestCase):
         self.assertEqual(len([call for call in calls if call.kwargs["client_msg_id"]
             == silent.result["ops_alerts"]["run_terminal"]["alert_id"]]), 1)
         self.assertEqual(self.sweep(), [])
+
+
+@override_settings(**FREE, **ALERTS)
+class NoWorkDispatchRowTests(EntitlementFixture, TestCase):
+    """The prod 'never received' and 'dispatch_rejected editorial_run_conflict' rows.
+
+    Each one tells ops once and gives a free first article its attempt back once,
+    however many times the sweeps and polls replay it.
+    """
+
+    def sweep_alerts(self):
+        with patch("integrations.services.slack.SlackService.get_client") as client:
+            client.return_value.chat_postMessage.return_value = {"ok": True, "ts": "1700000000.000001"}
+            alerts.run_founder_journey_alert_sweep(now=timezone.now())
+        return client.return_value.chat_postMessage.call_args_list
+
+    def assert_released_once(self):
+        self.assertEqual(keys(self.org), ["attempt:1", "attempt:1:released"])
+        self.assertFalse(Ledger.objects.filter(kind__in=["SPEND", "REFUND"]).exists())
+
+    def assert_alerted_once(self, run):
+        first = self.sweep_alerts()
+        run.refresh_from_db()
+        alert_id = run.result["ops_alerts"]["run_terminal"]["alert_id"]
+        self.assertEqual([call.kwargs["client_msg_id"] for call in first].count(alert_id), 1)
+        self.assertEqual(self.sweep_alerts(), [])
+
+    def test_a_dispatch_content_factory_never_received_alerts_and_releases_once(self):
+        payload = self.started()
+        key = payload["client_request_id"]
+        run = ContentFactoryRun.objects.create(run_id=key, workflow="article_generation", domain=self.org.domain,
+            organization=self.org, status="queued", current_step="queued",
+            run_request={**payload, "dispatch_pending_resolution": True}, result={})
+        ContentFactoryRun.objects.filter(pk=run.pk).update(created_at=timezone.now() - timedelta(minutes=10))
+        run.refresh_from_db()
+        row = ContentFactoryDispatchOutbox.objects.get(client_request_id=key)
+        row.state, row.next_attempt_at = "awaiting_resolution", timezone.now() - timedelta(minutes=1)
+        row.save(update_fields=["state", "next_attempt_at"])
+        absent = ("not_received", {"detail": "No dispatch with that key."})
+        with patch.object(views, "_content_factory_remote_config", return_value={"enabled": True,
+                "base_url": "https://cf.example.test"}), \
+                patch.object(views, "_lookup_content_factory_dispatch_by_key", return_value=absent):
+            for _ in range(2):
+                process_dispatch_outbox(now=timezone.now() + timedelta(hours=1))
+                polled = ContentFactoryRun.objects.get(pk=run.pk)
+                if views._run_pending_remote_dispatch(polled):  # as the status poll does
+                    views._resolve_dispatch_token_run(polled)
+                reconciliation._settle_sweep_refunds(limit=10)
+        row.refresh_from_db()
+        run.refresh_from_db()
+        self.assertEqual((row.state, row.last_error), ("failed", "dispatch_never_received"))
+        self.assertEqual((run.status, run.result["error_code"]), ("failed", "dispatch_child_missing"))
+        self.assertIn("did not receive", run.error)
+        self.assert_released_once()
+        self.assert_alerted_once(run)
+
+    def test_a_dispatch_rejected_editorial_run_conflict_alerts_and_releases_once(self):
+        payload = self.started()
+        run = self.make_run(payload, status="failed", step="dispatch_rejected",
+            result={"status": "failed", "error_code": "dispatch_rejected", "backend_code": "editorial_run_conflict"})
+        run.error = "Dispatch rejected by backend: editorial_run_conflict"
+        run.save(update_fields=["error"])
+        ContentFactoryRun.objects.filter(pk=run.pk).update(updated_at=timezone.now() - timedelta(hours=2))
+        row = ContentFactoryDispatchOutbox.objects.get(client_request_id=payload["client_request_id"])
+        row.state, row.last_error = "refund_pending", "dispatch_rejected"
+        row.save(update_fields=["state", "last_error"])
+        record = {"run_id": run.run_id, "run_status": "failed", "error": "backend_rejected:editorial_run_conflict"}
+        with patch.object(views, "_content_factory_remote_config", return_value={"enabled": True}), \
+                patch.object(views, "_lookup_content_factory_dispatch_by_key", return_value=("rejected", record)):
+            for _ in range(2):
+                process_dispatch_outbox(now=timezone.now() + timedelta(hours=1))
+                reconciliation._queue_dispatch_rejected_article_refunds(limit=10, now=timezone.now())
+                reconciliation._settle_sweep_refunds(limit=10)
+        row.refresh_from_db()
+        self.assertEqual(row.state, "failed")
+        self.assert_released_once()
+        self.assert_alerted_once(run)
+
+
+class EditorialRunConflictLogTests(TestCase):
+    def test_a_refused_worker_snapshot_names_the_guard_in_the_log(self):
+        from . import service_views
+        from .editorial_run_state import EditorialRunConflict
+        guard = "Worker snapshots cannot change original article identity or delivery consent"
+        with patch.object(service_views, "_sync_content_factory_run_snapshot", side_effect=EditorialRunConflict(guard)), \
+                self.assertLogs("content_factory.service_views", level="WARNING") as logs:
+            response = service_views._apply_run_snapshot("run-conflict", {"workflow": "article_generation",
+                "status": "running", "domain": "conflict.example.test"})
+        self.assertEqual((response.status_code, response.data["code"]), (409, "editorial_run_conflict"))
+        self.assertIn(f"run_id=run-conflict workflow=article_generation guard={guard}", "\n".join(logs.output))

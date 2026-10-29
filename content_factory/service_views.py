@@ -9240,6 +9240,10 @@ def _apply_run_snapshot(run_id, payload, *, ack=False):
             )
             break
         except EditorialRunConflict as exc:
+            # Content Factory keeps only the code when it fails the run, so name
+            # the guard here (a fixed message, never article or founder text).
+            logger.warning("content_factory_editorial_run_conflict run_id=%s workflow=%s guard=%s",
+                run_id, str(data.get("workflow") or "")[:80], str(exc)[:200])
             return Response(
                 {"error": "editorial_run_conflict", "code": "editorial_run_conflict", "detail": str(exc), "run_id": run_id},
                 status=status.HTTP_409_CONFLICT,
