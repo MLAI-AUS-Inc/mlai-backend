@@ -131,6 +131,29 @@ class PreviewDomainClaimTests(TestCase):
         self.owner.save(update_fields=["email"])
         self.assertEqual(self.basis("brand.example.test"), "none")
 
+    def test_a_code_counts_only_while_the_account_is_unsaved_since_it_was_requested(self):
+        # R2-BEB-1: the outbox mails the address the account holds at delivery, not the one typed for the code.
+        self.prove_mailbox(self.owner, "ceo@brand.example.test")
+        self.assertEqual(self.basis("brand.example.test"), "email_domain")
+        for email in ("elsewhere@gmail.com", "ceo@brand.example.test"):  # PATCH /profile away and back
+            self.owner.email = email
+            self.owner.save()
+        self.assertEqual(self.basis("brand.example.test"), "none")
+        self.prove_mailbox(self.owner, "ceo@brand.example.test")
+        self.assertEqual(self.basis("brand.example.test"), "email_domain")
+
+    def test_a_co_founder_whose_other_company_has_no_website_says_nothing_about_the_domain(self):
+        # R2-BEB-3: organisations are single-owner, so a co-founder's company row lives in another organisation.
+        self.prove_mailbox(self.owner, "sam@brand.example.test")
+        cofounder = get_user_model().objects.create_user(email="jo@brand.example.test", email_verified_at=timezone.now())
+        profile = VibeRaisingProfile.objects.create(user=cofounder, role="founder")
+        placeholder = Organization.objects.create(domain="startup-12.invalid", name="Synthetic placeholder")
+        VibeRaisingCompany.objects.create(profile=profile, organization=placeholder, domain="", name="Synthetic co-founder")
+        self.assertEqual(self.basis("brand.example.test"), "email_domain")
+        side = Organization.objects.create(domain="jo-side.example.test", name="Synthetic side project")
+        VibeRaisingCompany.objects.create(profile=profile, organization=side, domain=side.domain, name="Synthetic side project")
+        self.assertEqual(self.basis("brand.example.test"), "none")
+
     def test_an_email_only_counts_for_the_runs_requester_while_they_belong_to_its_organisation(self):
         self.prove_mailbox(self.owner, "founder@brand.example.test")
         for requester in (None, "", "not-a-user", True, 10 ** 30, self.owner.pk + 1000):
@@ -183,7 +206,6 @@ class PreviewDomainClaimTests(TestCase):
             self.assertEqual(self.basis(domain), "none", domain)
         # Nor do the claim run's own records reach a site another organisation holds.
         copy = WebsiteConnection.objects.create(organization=self.org, github_repo="example/copy", site_url="rival.example.test")
-        self.deployed(copy, "rival.example.test")
         self.deployed(copy, "rival-blog.example.test")
         self.prove_mailbox(self.owner, "founder@rival.example.test")
         VibeRaisingCompany.objects.create(profile=self.owner.vibe_raising_profile, organization=self.org,
@@ -195,6 +217,25 @@ class PreviewDomainClaimTests(TestCase):
         self.assertEqual(self.basis("rival-blog.example.test", run_id="rival-run"), "hosted_site")
         self.assertEqual(self.basis(self.org.domain, run_id="rival-run"), "none")
         self.assertEqual(self.basis(self.org.domain), "org_website")
+
+    def test_a_website_another_organisation_only_typed_never_takes_a_hosted_site_or_receipt(self):
+        # R2-BEB-2: any account can save blog.<domain>, or the domain with a trailing dot, as its website.
+        domain = "brand.example.test"
+        self.prove_mailbox(self.owner, f"founder@{domain}")
+        self.assertEqual(self.basis(domain), "email_domain")
+        for squat in (f"blog.{domain}", f"{domain}."):
+            Organization.objects.create(domain=squat, name=f"Synthetic {squat}")
+        self.assertEqual(self.basis(domain), "none")
+        connection = WebsiteConnection.objects.create(organization=self.org, github_repo="example/brand", site_url=domain)
+        self.deployed(connection, domain)
+        self.assertEqual(self.basis(domain), "website_connection")
+        site = HostedArticleSite.objects.create(organization=self.org, domain=domain, state="active")
+        self.assertEqual(self.basis(domain), "hosted_site")
+        # An MLAI-hosted site another organisation holds at a child still outranks both.
+        agency, _agency_owner, _agency_run = self.tenant("agency.example.test", "agency-run")
+        HostedArticleSite.objects.create(organization=agency, domain=f"shop.{domain}", state="active")
+        self.assertEqual(self.basis(domain), "none")
+        self.assertEqual(self.basis(site.domain, run_id="agency-run"), "none")
 
     def test_a_run_without_an_organisation_resolves_it_from_the_runs_domain(self):
         run = ContentFactoryRun.objects.create(run_id="unscoped-run", domain="orphan.example.test", workflow="direct_generate",

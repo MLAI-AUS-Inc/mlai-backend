@@ -18,7 +18,7 @@ from content_factory.preview_domain_claim import (PreviewDomainClaimServiceView,
 
 KEY = "synthetic-test-key"
 NOW = datetime(2026, 10, 30, tzinfo=dt_timezone.utc)
-LOOKUPS = {"in", "isnull", "icontains", "iendswith"}
+LOOKUPS = {"in", "isnull", "icontains", "iendswith", "gte", "lt"}
 
 
 def _value(row, parts):
@@ -45,6 +45,8 @@ def _match(row, key, want):
         return isinstance(got, str) and want.lower() in got.lower()
     if lookup == "iendswith":
         return isinstance(got, str) and got.lower().endswith(want.lower())
+    if lookup in {"gte", "lt"}:
+        return got is not None and (got >= want if lookup == "gte" else got < want)
     return _same(got, want)
 
 
@@ -97,7 +99,9 @@ class World:
         return org
 
     def founder(self, org, email, *, verified=True):
-        user = NS(pk=next(self.ids), is_active=True, email=email, email_verified_at=NOW if verified else None)
+        # Joined a month ago and last saved (profile, address) a day ago.
+        user = NS(pk=next(self.ids), is_active=True, email=email, email_verified_at=NOW if verified else None,
+                  date_joined=NOW - timedelta(days=30), updated_at=NOW - timedelta(days=1))
         self.users.append(user)
         self.company(org, user)
         return user
@@ -127,9 +131,9 @@ class World:
                                   generation=connection.generation if generation is None else generation,
                                   receipt=receipt))
 
-    def code(self, user, email, *, consumed=True):
-        self.challenges.append(NS(user=user, email_digest=claims.email_digest(email),
-                                  consumed_at=NOW if consumed else None))
+    def code(self, user, email, *, consumed=True, requested=NOW):
+        self.challenges.append(NS(user=user, email_digest=claims.email_digest(email), created_at=requested,
+                                  consumed_at=requested + timedelta(minutes=1) if consumed else None))
 
     def basis(self, run_id, domain):
         managers = ((claims.ContentFactoryRun, self.runs), (claims.Organization, self.orgs),
@@ -175,6 +179,26 @@ class DomainMatchingTests(SimpleTestCase):
         for host in ("com.au", "co.uk", "nsw.au", "github.io", "pages.dev", "health.nsw.gov.au", "unimelb.edu.au", "mit.edu",
                      "ox.ac.uk", "qc.ca", "gr.jp"):
             self.assertEqual(registrable_domain(host), "", host)
+
+    def test_startup_names_on_vanity_country_domains_are_registrable(self):
+        # R2-BEB-4: the wide second-level list (vic, id, lg, act, info, go, conf, wa, nt, me) is for .au, .jp, .uk, ...
+        for host in ("vic.ai", "id.me", "lg.ai", "act.io", "info.ai", "go.co", "conf.io", "wa.io", "nt.io", "me.co",
+                     "acme.io", "acme.ai", "acme.co", "acme.me", "acme.sh", "acme.gg", "acme.vc", "acme.so", "acme.tv"):
+            self.assertEqual(registrable_domain(host), host, host)
+            self.assertEqual(registrable_domain(f"blog.{host}"), host, host)
+        for suffix in ("com.ai", "off.ai", "com.io", "org.io", "com.co", "info.co", "nom.co", "co.me", "its.me", "com.sh",
+                       "co.gg", "me.so", "co.im", "per.la", "gov.io", "edu.co", "go.pw"):
+            self.assertEqual(registrable_domain(suffix), "", suffix)
+        self.assertEqual(registrable_domain("shop.acme.com.ai"), "acme.com.ai")
+        self.assertEqual(registrable_domain("x.acme.ltd.co.im"), "acme.ltd.co.im")
+        self.assertEqual(registrable_domain("ltd.co.im"), "")
+        self.assertEqual(registrable_domain("x.agency.gov.io"), "")
+        # The wide list still holds everywhere else.
+        for host, registrable in (("x.acme.vic.au", "acme.vic.au"), ("acme.id.au", "acme.id.au"), ("acme.lg.jp", ""),
+                                  ("acme.me.uk", "acme.me.uk"), ("acme.co.nz", "acme.co.nz"), ("acme.on.ca", "acme.on.ca")):
+            self.assertEqual(registrable_domain(host), registrable, host)
+        for suffix in ("vic.au", "id.au", "me.uk", "info.pl", "conf.au"):
+            self.assertEqual(registrable_domain(suffix), "", suffix)
 
     def test_one_tenant_of_a_nested_shared_root_never_covers_the_others(self):
         for root, tenant in (("up.railway.app", "x.up.railway.app"), ("my.canva.site", "x.my.canva.site"),
@@ -307,6 +331,49 @@ class ClaimBasisTests(SimpleTestCase):
         self.owner.email_verified_at = None
         self.assertEqual(self.basis("brand.example.com"), "none")
 
+    def test_a_code_mailed_to_the_address_held_at_delivery_never_proves_the_typed_one(self):
+        # R2-BEB-1: a challenge records the typed address, but the outbox mails user.email at delivery.
+        world = World()
+        org = world.org("victim-brand.com")  # first claim of a typed website
+        attacker = world.founder(org, "attacker@gmail.com")
+        world.run("attack-run", org, attacker)
+        requested = NOW - timedelta(minutes=10)
+        attacker.email, attacker.updated_at = "ceo@victim-brand.com", requested - timedelta(seconds=5)  # PATCH /profile
+        world.code(attacker, "ceo@victim-brand.com", requested=requested)  # a code for the typed address
+        attacker.updated_at = requested + timedelta(seconds=1)  # PATCH back to attacker@gmail.com before delivery
+        # The code reaches attacker@gmail.com; the attacker consumes it and PATCHes the address back.
+        attacker.updated_at = requested + timedelta(minutes=2)
+        # Only the typed website is left, which Content Factory never copies by default.
+        self.assertEqual(world.basis("attack-run", "victim-brand.com"), "org_website")
+        # Swapping back before consuming the code changes nothing either.
+        attacker.updated_at = requested + timedelta(seconds=30)
+        self.assertEqual(world.basis("attack-run", "victim-brand.com"), "org_website")
+        # Without the swaps, the same code is proof.
+        attacker.updated_at = requested - timedelta(seconds=5)
+        self.assertEqual(world.basis("attack-run", "victim-brand.com"), "email_domain")
+
+    def test_a_code_counts_only_while_the_account_is_unsaved_since_it_was_requested(self):
+        self.prove_mailbox("founder@brand.example.com")
+        self.assertEqual(self.basis("brand.example.com"), "email_domain")
+        self.owner.updated_at = NOW + timedelta(hours=1)  # any later profile or admin save
+        self.assertEqual(self.basis("brand.example.com"), "none")
+        self.world.code(self.owner, self.owner.email, requested=NOW + timedelta(hours=2))
+        self.assertEqual(self.basis("brand.example.com"), "email_domain")
+        # An account never saved since updated_at existed has only sign-up codes to go on.
+        self.owner.updated_at = None
+        self.assertEqual(self.basis("brand.example.com"), "none")
+
+    def test_a_sign_up_code_counts_whatever_was_saved_since(self):
+        # A sign-up code is requested before the account exists and mailed to the typed address itself.
+        self.owner.email = "founder@brand.example.com"
+        self.world.code(self.owner, self.owner.email, requested=self.owner.date_joined - timedelta(minutes=5))
+        self.owner.updated_at = NOW
+        self.assertEqual(self.basis("brand.example.com"), "email_domain")
+        self.owner.updated_at = None
+        self.assertEqual(self.basis("brand.example.com"), "email_domain")
+        self.owner.email = "founder@other-brand.example.com"
+        self.assertEqual(self.basis("other-brand.example.com"), "none")
+
     def test_an_unconsumed_code_or_another_users_code_proves_nothing(self):
         self.owner.email = "founder@brand.example.com"
         self.world.code(self.owner, self.owner.email, consumed=False)
@@ -337,6 +404,24 @@ class ClaimBasisTests(SimpleTestCase):
         self.world.founder(other, "member@BRAND.example.com")
         self.assertEqual(self.basis("brand.example.com"), "none")
 
+    def test_a_co_founder_whose_other_company_has_no_website_says_nothing_about_the_domain(self):
+        # R2-BEB-3: orgs are single-owner, so a co-founder's own company row lives in another organisation.
+        self.prove_mailbox("sam@acme-robotics.com.au")
+        cofounder = self.world.founder(self.world.org("startup-12.invalid"), "jo@acme-robotics.com.au")
+        self.world.company(self.world.org(""), cofounder)
+        self.assertEqual(self.basis("acme-robotics.com.au"), "email_domain")
+        # A founder with a website of their own elsewhere does mark a shared mail domain.
+        self.world.company(self.world.org("jo-side-project.example.net"), cofounder)
+        self.assertEqual(self.basis("acme-robotics.com.au"), "none")
+
+    def test_many_members_on_one_mail_domain_mark_a_provider_whatever_their_organisations(self):
+        self.prove_mailbox("founder@brand.example.com")
+        for index in range(claims.MEMBERS_READ - 1):
+            self.world.founder(self.world.org(f"startup-{index}.invalid"), f"member{index}@brand.example.com")
+        self.assertEqual(self.basis("brand.example.com"), "email_domain")
+        self.world.founder(self.world.org("startup-last.invalid"), "last@brand.example.com")
+        self.assertEqual(self.basis("brand.example.com"), "none")
+
     def test_free_mail_addresses_and_mail_providers_typed_as_websites_prove_nothing(self):
         # BEB-3: a genuine mailbox at a provider never claims the provider's own site.
         for provider in ("web.de", "orange.fr", "naver.com", "comcast.net", "yahoo.co.jp", "hotmail.fr", "yandex.ru",
@@ -345,11 +430,32 @@ class ClaimBasisTests(SimpleTestCase):
             org = world.org(provider)
             owner = world.founder(org, f"someone@{provider}")
             world.code(owner, owner.email)
-            world.site(org, provider)
-            world.receipt(world.connection(org), f"https://{provider}/articles")
             world.run("provider-run", org, owner)
             self.assertEqual(world.basis("provider-run", provider), "none", provider)
             self.assertEqual(world.basis("provider-run", f"mail.{provider}"), "none", provider)
+
+    def test_a_listed_mail_provider_is_refused_even_with_a_hosted_site_or_receipt(self):
+        for provider in ("web.de", "comcast.net", "gmail.com", "bigpond.net.au", "mail.gmail.com", "mail.com"):
+            world = World()
+            org = world.org(provider)
+            world.site(org, provider)
+            world.receipt(world.connection(org), f"https://{provider}/articles")
+            world.run("provider-run", org)
+            self.assertEqual(world.basis("provider-run", provider), "none", provider)
+
+    def test_a_mail_brand_word_refuses_only_the_weak_bases(self):
+        # R2-BEB-4: inbox.ai or orange.ai may be a startup; a hosted site or live receipt proves it is.
+        for domain in ("inbox.ai", "live.ai", "email.app", "mail.app", "orange.ai", "excite.ai", "zoho.com"):
+            world = World()
+            org = world.org(domain)
+            owner = world.founder(org, f"founder@{domain}")
+            world.code(owner, owner.email)
+            world.run("brand-run", org, owner)
+            self.assertEqual(world.basis("brand-run", domain), "none", domain)
+            world.receipt(world.connection(org), f"https://{domain}/articles")
+            self.assertEqual(world.basis("brand-run", domain), "website_connection", domain)
+            world.site(org, domain)
+            self.assertEqual(world.basis("brand-run", domain), "hosted_site", domain)
 
     def test_the_organisations_saved_website_is_the_weakest_basis(self):
         self.assertEqual(self.basis("pawshare.example.com"), "org_website")
@@ -379,9 +485,39 @@ class ClaimBasisTests(SimpleTestCase):
             world = World()
             world.org(stored)
             attacker = world.org("tenant-brand.com")
+            attacker_owner = world.founder(attacker, "ceo@tenant-brand.com")
+            world.code(attacker_owner, attacker_owner.email)
+            world.run("attacker-run", attacker, attacker_owner)
+            self.assertEqual(world.basis("attacker-run", "tenant-brand.com"), "none", stored)
+            # A hosted site under any spelling outranks even a live-deployment receipt.
+            world = World()
+            world.site(world.org("rival-brand.example.net"), stored)
+            attacker = world.org("tenant-brand.com")
             world.receipt(world.connection(attacker), "https://tenant-brand.com/articles")
             world.run("attacker-run", attacker)
             self.assertEqual(world.basis("attacker-run", "tenant-brand.com"), "none", stored)
+
+    def test_a_website_another_organisation_only_typed_never_takes_a_hosted_site_or_receipt(self):
+        # R2-BEB-2: any free account can save blog.<domain>, or the domain with a trailing dot or port, as its website.
+        for squat in ("blog.pawshareclub.com", "x.pawshareclub.com", "www2.pawshareclub.com", "pawshareclub.com.",
+                      "pawshareclub.com:443"):
+            world = World()
+            org = world.org("pawshareclub.com")
+            owner = world.founder(org, "founder@pawshareclub.com")
+            world.code(owner, owner.email)
+            world.run("pawshare-run", org, owner)
+            self.assertEqual(world.basis("pawshare-run", "pawshareclub.com"), "email_domain", squat)
+            world.org(squat)
+            # The weak bases yield to the other tenant ...
+            self.assertEqual(world.basis("pawshare-run", "pawshareclub.com"), "none", squat)
+            # ... the strong ones do not.
+            world.receipt(world.connection(org), "https://pawshareclub.com/blog")
+            self.assertEqual(world.basis("pawshare-run", "pawshareclub.com"), "website_connection", squat)
+            world.site(org, "pawshareclub.com")
+            self.assertEqual(world.basis("pawshare-run", "pawshareclub.com"), "hosted_site", squat)
+            # An operator-created hosted site of another organisation at a child still outranks both.
+            world.site(world.org("agency.example.net"), "shop.pawshareclub.com", state="archived")
+            self.assertEqual(world.basis("pawshare-run", "pawshareclub.com"), "none", squat)
 
     def test_a_parent_or_child_held_by_another_organisation_blocks_the_claim(self):
         rival = self.world.org("shop.acme-group.com")

@@ -4,7 +4,9 @@ There is no public suffix list or free-mail list in this repository, so these
 are hand-kept. Every list only narrows a claim: a missing entry can let one
 record cover more than one site, while an extra entry costs at most a template
 preview instead of a snapshot. Add to them freely; never remove an entry to
-make a claim pass.
+make a claim pass. ``VANITY_CC_SECOND_LEVEL`` is the one exception: it replaces
+the wide second-level list on a country domain, so only add a country there
+with every second level its registry keeps.
 """
 
 
@@ -20,6 +22,19 @@ RESERVED_TLDS = _words("arpa internal invalid local localhost onion")
 CC_SECOND_LEVEL = _words("""
     ac act asn co com conf csiro ed edu go gob gouv gov govt gr gv id info lg ltd me mil ne net nom nsw nt or org plc
     qld sa sch tas vic wa""")
+
+# Country domains startups use as generic names (.ai, .io, .co, .me, ...). Their
+# registries keep only these second levels, so on these the wider list above
+# would refuse real startups (vic.ai, id.me, act.io, go.co). Each set adds the
+# registry's own second levels to the common ones.
+_CC_COMMON_SECOND_LEVEL = "ac co com edu gov mil net org"
+VANITY_CC_SECOND_LEVEL = {tld: _words(f"{_CC_COMMON_SECOND_LEVEL} {extra}") for tld, extra in {
+    "ac": "", "ag": "nom", "ai": "off", "bz": "", "cc": "", "co": "arts firm info int nom rec web", "cx": "", "fm": "",
+    "gd": "", "gg": "", "gl": "", "gs": "", "im": "ltd plc tt tv", "io": "", "is": "int", "la": "info int per",
+    "ly": "id med plc sch", "me": "its priv", "ms": "", "mu": "or", "nu": "", "pw": "belau ed go ne or", "sc": "",
+    "sh": "", "so": "me", "st": "consulado embaixada principe saotome store", "sx": "", "tc": "", "to": "", "tv": "",
+    "vc": "", "vg": "", "ws": "",
+}.items()}
 
 # Government and education namespaces have deeper public suffixes (nsw.gov.au,
 # k12.ca.us) that cannot be told apart without the full list, so they are never claimed.
@@ -71,7 +86,8 @@ SHARED_HOST_SUFFIXES = _words("""
     sytes.net zapto.org
     ae.org africa.com br.com cn.com co.com com.de com.se de.com eu.com eu.org gb.com gb.net hu.com hu.net in.net it.com
     jp.net jpn.com kr.com mex.com no.com pp.ua qc.com ru.com sa.com se.net uk.com uk.net us.com us.org uy.com za.com
-    za.net za.org""")
+    za.net za.org
+    ltd.co.im plc.co.im""")
 
 # A platform whose brand sits on many country domains (blogspot.com.au,
 # blogspot.co.uk, ...): each customer is one label below whichever it is.

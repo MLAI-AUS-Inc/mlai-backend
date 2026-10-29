@@ -15,14 +15,25 @@ The bases, strongest first:
   pages over pinned HTTPS and finding the repository CI's sealed artifact
   digest there, so it proves the connection deploys that domain. A connection's
   typed ``site_url`` proves nothing and is not read.
-- ``email_domain``: the run's requester proved, by a consumed email code, that
-  they hold their current address, the address is on the domain, the domain is
-  not a mail provider, and no other organisation has verified members on it.
-  Proof does not expire: someone who leaves a company keeps it until their
-  address changes. That is accepted because the claim is only ever asked for the
-  run's own organisation's domain, and another tenant's domain is refused.
+- ``email_domain``: the run's requester received an email code at their current
+  address, the address is on the domain, the domain is not a mail provider, and
+  no other organisation with a website of its own has verified members on it.
+  A code is mailed to the address the account holds at delivery, not the one
+  typed when it was requested, so it counts only when the account has not been
+  saved since it was requested (see ``_code_received_at``). Proof does not
+  expire: someone who leaves a company keeps it until their address changes.
+  That is accepted because the claim is only ever asked for the run's own
+  organisation's domain, and a domain another tenant saved is refused.
 - ``org_website``: the organisation's saved website. It is typed and
   first-claim-wins, so it proves nothing; Content Factory excludes it by default.
+
+What refuses a claim depends on the basis. A listed mail provider, and an
+MLAI-hosted site of another organisation at the domain, a parent or a child,
+refuse every basis. A website another organisation merely saved (typed,
+first-claim), and a mail brand on any country domain (``hotmail.fr``), refuse
+only ``email_domain`` and ``org_website``: neither can take an operator-created
+hosted site or a passed live-deployment receipt away from the organisation
+that holds it.
 
 There is no public suffix list in this repository, so domain matching is
 deliberately narrow (see ``preview_domain_lists``). A record covers a domain
@@ -54,7 +65,8 @@ from workflow_runs.models import ContentFactoryRun
 from .hosted_article_models import HostedArticleSite
 from .preview_domain_lists import (CC_SECOND_LEVEL, FREE_MAIL_BRANDS, FREE_MAIL_DOMAINS, REGIONAL_SECOND_LEVEL,
                                    RESERVED_TLDS, SHARED_HOST_BRANDS, SHARED_HOST_SUFFIXES,
-                                   UNCLAIMABLE_ROOTS, UNCLAIMABLE_SECOND_LEVEL, UNCLAIMABLE_TLDS)
+                                   UNCLAIMABLE_ROOTS, UNCLAIMABLE_SECOND_LEVEL, UNCLAIMABLE_TLDS,
+                                   VANITY_CC_SECOND_LEVEL)
 from .website_models import WebsiteConnection, WebsiteConnectionOperation
 
 logger = logging.getLogger(__name__)
@@ -69,6 +81,8 @@ TLD = re.compile(r"[a-z]{2,63}|xn--[a-z0-9-]{1,59}")
 STORED_HOST = re.compile(r"(?:[a-z][a-z0-9+.-]*://)?(?:[^@/?#]*@)?([^/:?#\s]+)")
 # The newest live-deployment receipts read per claim; every one comes from verify_live_deployment.
 RECEIPTS_READ = 100
+# The most other-organisation members read per mail domain; reaching it marks a mail provider.
+MEMBERS_READ = 200
 USABLE_CONNECTION_STATES = (WebsiteConnection.State.CONNECTED, WebsiteConnection.State.PAUSED)
 
 
@@ -118,7 +132,8 @@ def _public_suffix_depth(labels) -> int:
     tld = labels[-1]
     if len(tld) != 2 or len(labels) < 2:
         return 1
-    if labels[-2] in CC_SECOND_LEVEL or labels[-2] in REGIONAL_SECOND_LEVEL.get(tld, ()):
+    second_levels = VANITY_CC_SECOND_LEVEL.get(tld, CC_SECOND_LEVEL)
+    if labels[-2] in second_levels or labels[-2] in REGIONAL_SECOND_LEVEL.get(tld, ()):
         return 0 if labels[-2] in UNCLAIMABLE_SECOND_LEVEL else 2
     # Geographic .us names (ca.us, k12.ca.us) belong to governments and schools.
     if tld == "us" and len(labels[-2]) == 2:
@@ -193,31 +208,36 @@ def _stored_host(value) -> str:
     return public_host(match.group(1)) if match else ""
 
 
-def _claimed_by_another_organization(host: str, organization) -> bool:
-    """Another MLAI organisation holds this site, a parent of it up to its registrable domain, or a child of it.
-
-    Every stored spelling counts (ports, trailing dots, schemes, Unicode), so
-    the candidates are read by the registrable name and compared once normalized.
-    """
+def _held(host: str, stored_domains) -> bool:
+    """True when a stored domain is ``host``, a parent of it up to its registrable domain, or a child of it."""
     registrable, names, name = registrable_domain(host), set(), host
     while True:
         names.add(name)
         if name == registrable or "." not in name:
             break
         name = name.split(".", 1)[1]
-
-    def held(stored) -> bool:
+    for stored in stored_domains:
         stored = _stored_host(stored)
-        return bool(stored) and (stored in names or stored.endswith("." + host))
-
-    for spelling in _spellings([registrable]):
-        rivals = Organization.objects.filter(domain__icontains=spelling).exclude(pk=organization.pk)
-        if any(held(domain) for domain in rivals.values_list("domain", flat=True)):
-            return True
-        sites = HostedArticleSite.objects.filter(domain__icontains=spelling).exclude(organization=organization)
-        if any(held(domain) for domain in sites.values_list("domain", flat=True)):
+        if stored and (stored in names or stored.endswith("." + host)):
             return True
     return False
+
+
+def _held_by_rival(host: str, records, **others) -> bool:
+    # Every stored spelling counts (ports, trailing dots, schemes, Unicode), so the
+    # candidates are read by the registrable name and compared once normalized.
+    return any(_held(host, records.filter(domain__icontains=spelling).exclude(**others).values_list("domain", flat=True))
+               for spelling in _spellings([registrable_domain(host)]))
+
+
+def _rival_hosted_site(host: str, organization) -> bool:
+    """Another organisation has an MLAI-hosted article site (operators create these) at this site, a parent or a child."""
+    return _held_by_rival(host, HostedArticleSite.objects, organization=organization)
+
+
+def _rival_website(host: str, organization) -> bool:
+    """Another organisation saved this site, a parent or a child as its own typed, first-claim website."""
+    return _held_by_rival(host, Organization.objects, pk=organization.pk)
 
 
 def _run_owner(run, organization):
@@ -241,8 +261,45 @@ def _deployment_proven(organization, host: str) -> bool:
                and covers(receipt.get("public_url"), host) for receipt in receipts)
 
 
+def _code_received_at(owner, email: str) -> bool:
+    """The owner received a consumed email code at ``email``, their current address.
+
+    A challenge records the address typed when the code was requested, but the
+    outbox mails the code to whatever address the account holds at delivery, and
+    email_verified_at is stamped once and survives an address change. So a code
+    counts only when the account has not been saved since it was requested:
+    every profile or admin change of address saves the account, which stamps
+    ``updated_at``, so the address was the same at request, delivery and now. A
+    sign-up code also counts: it was requested before the account existed and
+    mailed to the typed address itself.
+    """
+    codes = CommunityChatEmailCodeChallenge.objects.filter(user=owner, email_digest=email_digest(email),
+                                                           consumed_at__isnull=False)
+    if owner.updated_at is not None and codes.filter(created_at__gte=owner.updated_at).exists():
+        return True
+    return owner.date_joined is not None and codes.filter(created_at__lt=owner.date_joined).exists()
+
+
+def _shared_mail_domain(owner, organization, spellings) -> bool:
+    """Verified founders of other organisations that have websites of their own hold addresses on this domain.
+
+    That marks a mail provider, not one company. A founder whose other company
+    has no website (a placeholder ``startup-<pk>.invalid`` organisation, as a
+    co-founder's usually is) says nothing about the domain.
+    """
+    for spelling in spellings:
+        domains = list(VibeRaisingCompany.objects.filter(
+            profile__user__email__iendswith="@" + spelling, profile__user__email_verified_at__isnull=False,
+            organization__isnull=False).exclude(organization=organization).exclude(profile__user=owner)
+            .values_list("organization__domain", flat=True)[:MEMBERS_READ])
+        # So many members on one domain is a provider whatever their organisations are.
+        if len(domains) >= MEMBERS_READ or any(_stored_host(domain) for domain in domains):
+            return True
+    return False
+
+
 def _mailbox_proven(owner, organization, host: str) -> bool:
-    """The owner holds their current address, on ``host`` or a parent, at a domain one organisation uses."""
+    """The owner received a code at their current address, on ``host`` or a parent, at a domain one organisation uses."""
     email = str(owner.email or "")
     if owner.email_verified_at is None or email.count("@") != 1:
         return False
@@ -250,38 +307,32 @@ def _mailbox_proven(owner, organization, host: str) -> bool:
     domain = public_host(stored_domain)
     if not domain or free_mail(domain) or not covers(domain, host):
         return False
-    # email_verified_at is stamped once and survives an address change, so only a
-    # consumed code sent to this exact address proves the mailbox.
-    if not CommunityChatEmailCodeChallenge.objects.filter(
-            user=owner, email_digest=email_digest(email), consumed_at__isnull=False).exists():
-        return False
-    # Verified members of other organisations on the same domain mark a mail provider, not one company.
-    for spelling in sorted({stored_domain, domain}):
-        if VibeRaisingCompany.objects.filter(
-                profile__user__email__iendswith="@" + spelling, profile__user__email_verified_at__isnull=False,
-                organization__isnull=False).exclude(organization=organization).exclude(profile__user=owner).exists():
-            return False
-    return True
+    return _code_received_at(owner, email) and not _shared_mail_domain(owner, organization, sorted({stored_domain, domain}))
 
 
 def claim_basis(run_id: str, host: str) -> str:
     """The strongest record showing the run's organisation controls ``host``, or "none".
 
     Only the run's own organisation's records count, and a site another
-    organisation holds is never claimed, so a run cannot reach another tenant's site.
+    organisation holds by an equal or stronger record is never claimed, so a run
+    cannot reach another tenant's site.
     """
     run = ContentFactoryRun.objects.filter(run_id=run_id).first()
     organization = _run_organization(run) if run is not None else None
-    # A mail provider's own site is never a tenant's, whatever was typed as its website.
-    if (organization is None or not registrable_domain(host) or free_mail(host)
-            or _claimed_by_another_organization(host, organization)):
+    # A listed mail provider's own site is never a tenant's, whatever was saved as its website.
+    if (organization is None or not registrable_domain(host) or _under(host, FREE_MAIL_DOMAINS)
+            or _rival_hosted_site(host, organization)):
         return NONE
+    # Operator-created sites and live-deployment receipts prove control by themselves.
     sites = HostedArticleSite.objects.filter(
         organization=organization, state__in=[HostedArticleSite.State.ACTIVE, HostedArticleSite.State.DRAFT])
     if any(covers(domain, host) for domain in sites.values_list("domain", flat=True)):
         return "hosted_site"
     if _deployment_proven(organization, host):
         return "website_connection"
+    # The weak bases never claim a mail brand's site or one another organisation saved.
+    if free_mail(host) or _rival_website(host, organization):
+        return NONE
     owner = _run_owner(run, organization)
     if owner is not None and _mailbox_proven(owner, organization, host):
         return "email_domain"
