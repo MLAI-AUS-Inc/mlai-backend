@@ -13,15 +13,16 @@ A refresh reclusters the org's researched keywords, and content-factory fails it
 with "No researched keywords" when its load step finds none. So only seedable
 orgs (islands, clusters or a pillar strategy) with at least one researched
 keyword are dispatched; seedable orgs without keywords are counted as
-``skipped_no_keywords`` and never failed or denied. This drops the old
-cold-start path: content-factory's DataForSEO expansion of pillar-seeded islands
-runs before that load step and could write an org's first keywords, but when it
-found none that cleared its volume and difficulty bars the run failed. A
-cold-start org now gets its first keywords from topic discovery (its first
-topic batch) and is refreshed from the next night after that. Orgs with keywords but nothing seedable stay ineligible, as
-before. The dispatch is organization scoped (no website connection), so an org
-with keywords and no connection still refreshes. During scheduled founder
-workshops (``ARTICLES_WORKSHOP_WINDOWS``) nothing is dispatched.
+``skipped_no_keywords`` and never dispatched, failed or denied. A cold-start org
+(a pillar strategy, no islands yet) still gets its first islands: the
+scheduler seeds them from its pillars itself, which was the refresh's one useful
+effect for such an org, and counts them as ``seeded``. It gets its first
+keywords from topic discovery (its first topic batch) and is refreshed from the
+next due tick after that. Orgs with keywords but nothing seedable stay
+ineligible, as before. The dispatch is organization scoped (no website
+connection), so an org with keywords and no connection still refreshes. During
+scheduled founder workshops (``ARTICLES_WORKSHOP_WINDOWS``) nothing is
+dispatched.
 """
 from __future__ import annotations
 
@@ -32,6 +33,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from django.conf import settings
 from django.core.cache import cache
+from django.db import transaction
 from django.utils import timezone
 from django.utils.dateparse import parse_datetime
 
@@ -100,12 +102,21 @@ def build_island_refresh_idempotency_key(domain, local_date) -> str:
     return f"{IDEMPOTENCY_KEY_PREFIX}{str(domain)[:room]}{tail}"
 
 
+# Backend bookkeeping (founder-journey alert receipts, offboarded owner) and the
+# startup's own profile details (founders, research marker) are not strategy: a
+# config holding only these keys has nothing to cluster. A new startup records
+# its founder in startup_profile_details, and an offboarded org keeps only
+# previous_owner, so neither becomes refresh-eligible on that alone.
+_PRIVATE_STRATEGY_KEYS = frozenset({"ops_alerts", "previous_owner", "startup_profile_details"})
+
+
 def _has_pillar_strategy(config) -> bool:
     strategy = getattr(config, "pillar_strategy", None)
     if isinstance(strategy, dict):
         pillars = strategy.get("pillars")
         if isinstance(pillars, list):
             return bool(pillars)
+        return any(key not in _PRIVATE_STRATEGY_KEYS for key in strategy)
     return bool(strategy)
 
 
@@ -170,6 +181,19 @@ def _partition_configs() -> tuple[list, list]:
 def _eligible_configs() -> list:
     """Every seedable org with researched keywords to recluster."""
     return _partition_configs()[0]
+
+
+def _seed_cold_start_islands(organization) -> int:
+    """Seed an org's first islands from its pillars, as a refresh's load step would."""
+    from content_factory.content_islands import seed_islands_from_bootstrap_pillars
+    try:
+        with transaction.atomic():
+            if ContentIsland.objects.filter(organization=organization).exists():
+                return 0
+            return len(seed_islands_from_bootstrap_pillars(organization) or [])
+    except Exception:
+        logger.exception("Island seeding failed for %s.", organization.domain)
+        return 0
 
 
 def _log_skipped_no_keywords(config, *, now) -> None:
@@ -341,12 +365,11 @@ def run_island_refresh_scheduler(*, now=None) -> dict:
     local_hour = int(getattr(settings, "CONTENT_ISLANDS_REFRESH_LOCAL_HOUR", 6) or 0)
     max_per_tick = int(getattr(settings, "CONTENT_ISLANDS_REFRESH_MAX_PER_TICK", 3) or 0)
 
-    dispatched = existing = not_due = failed = deferred = 0
+    dispatched = existing = not_due = failed = deferred = skipped_no_keywords = seeded = 0
     results: list = []
-    eligible, skipped_no_keywords = _partition_configs()
-    for config in skipped_no_keywords:
-        _log_skipped_no_keywords(config, now=now)
-    for config in eligible:
+    eligible, skipped = _partition_configs()
+    keyword_org_ids = {config.organization_id for config in eligible}
+    for config in sorted([*eligible, *skipped], key=lambda item: item.organization_id):
         organization = config.organization
         from integrations.services.daily_research_policy import pause_if_unanswered
         if pause_if_unanswered(organization, now=now):
@@ -360,6 +383,16 @@ def run_island_refresh_scheduler(*, now=None) -> dict:
             organization=organization, local_date=local_date
         ).exists():
             existing += 1
+            continue
+        if organization.pk not in keyword_org_ids:
+            # content-factory fails a refresh with NO_KEYWORDS when nothing has
+            # been researched, so these orgs failed every night (29 Oct 2026
+            # audit). The run's one useful effect for a cold-start org was
+            # seeding its first islands from the pillars; do that here and
+            # dispatch once research has produced keywords to cluster.
+            _log_skipped_no_keywords(config, now=now)
+            seeded += _seed_cold_start_islands(organization)
+            skipped_no_keywords += 1
             continue
         if max_per_tick and dispatched >= max_per_tick:
             deferred += 1
@@ -388,8 +421,9 @@ def run_island_refresh_scheduler(*, now=None) -> dict:
         "not_due": not_due,
         "deferred": deferred,
         "failed": failed,
-        "skipped_no_keywords": len(skipped_no_keywords),
         "stuck_failed": stuck_failed,
+        "skipped_no_keywords": skipped_no_keywords,
+        "seeded": seeded,
         "results": results,
     }
 

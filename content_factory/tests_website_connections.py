@@ -1261,6 +1261,35 @@ class WebsiteReviewRegressionTests(WebsiteDatabaseFixture, TestCase):
         self.assertEqual(self.website.state, 'disconnected')
 
     @patch('content_factory.website_connections.verify_repository_access')
+    def test_reconnecting_a_connected_website_keeps_its_setup_and_running_work(self, verify):
+        # 29 Oct 2026 audit: "Reconnect website" on a connected site bumped the
+        # generation, cancelled running work and cleared publish targets.
+        verify.return_value = {'repository_id': 123, 'github_repo': 'example/site', 'installation_id': '46', 'branch': 'main'}
+        running = WebsiteConnectionOperation.objects.create(connection=self.website, generation=self.website.generation,
+            action='setup', state='running', idempotency_key='running-setup')
+        generation = self.website.generation
+        connection = bind_website(self.config, user=None, repo='example/site', app_root=self.website.app_root,
+            branch=self.website.branch, site_url=self.website.site_url, reconnect=True, expected=self.binding)
+        self.assertEqual(connection.pk, self.website.pk)
+        self.website.refresh_from_db(); running.refresh_from_db(); self.config.refresh_from_db()
+        self.assertEqual((self.website.generation, self.website.state, self.website.installation_id), (generation, 'connected', '46'))
+        self.assertEqual(running.state, 'running')
+        self.assertEqual(self.config.publish_targets, [{'target_id': 'native'}])
+        self.assertTrue(self.config.auto_publish)
+        self.assertTrue(self.website.capabilities['publishingReady'])
+
+    @patch('content_factory.website_connections.verify_repository_access')
+    def test_reconnecting_a_paused_website_still_starts_a_new_generation(self, verify):
+        verify.return_value = {'repository_id': 123, 'github_repo': 'example/site', 'installation_id': '45', 'branch': 'main'}
+        transition_connection(self.config, action='pause', expected=self.binding)
+        self.website.refresh_from_db()
+        paused_generation = self.website.generation
+        bind_website(self.config, user=None, repo='example/site', app_root=self.website.app_root, branch=self.website.branch,
+            site_url=self.website.site_url, reconnect=True, expected=contract_for(self.website))
+        self.website.refresh_from_db()
+        self.assertEqual((self.website.state, self.website.generation), ('connected', paused_generation + 1))
+
+    @patch('content_factory.website_connections.verify_repository_access')
     def test_explicit_default_branch_selection_rebinds_custom_branch(self, verify):
         self.website.branch = 'custom'; self.website.save()
         verify.return_value = {'repository_id': 123, 'github_repo': 'example/site', 'installation_id': '45', 'branch': 'main'}

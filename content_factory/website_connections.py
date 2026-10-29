@@ -771,7 +771,16 @@ def bind_website(config, *, user, repo, app_root="", branch="", site_url="", rec
                 raise WebsiteAuthorityError("website_connection_changed", "The connection changed during authorization. Refresh and retry.")
         same = bool(current and current.repository_id == metadata["repository_id"] and current.app_root == app_root
                     and current.branch == (branch or metadata["branch"]) and current.site_url == (site_url or config.organization.domain))
-        if same and current.state == "connected" and not reconnect:
+        if same and current.state == "connected":
+            if reconnect:
+                # "Reconnect website" on a website that is still connected to the
+                # same repository and target only refreshes the GitHub
+                # authorization. Running it as a lifecycle transition cancelled
+                # in-flight runs and held goals and cleared publish targets,
+                # auto-publish and discovery. "Reset saved setup" starts over.
+                current.installation_id = metadata["installation_id"]
+                current.authorized_by = user
+                current.save(update_fields=["installation_id", "authorized_by", "updated_at"])
             return current
         if same and current.state != "connected" and not reconnect:
             raise WebsiteAuthorityError("website_reconnect_required", "Explicitly reconnect this website before continuing.")

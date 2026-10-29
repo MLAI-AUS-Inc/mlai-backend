@@ -60,21 +60,21 @@ def _accepted(run_id="island-refresh-run-1"):
 
 
 class IslandRefreshSchedulerTestCase(TestCase):
-    def make_org(self, domain, *, timezone_name="Australia/Melbourne", islands=0, strategy=None, clusters=0,
-                 keywords=1):
+    def make_org(self, domain, *, timezone_name="Australia/Melbourne", islands=0, strategy=None, clusters=0, keywords=None):
         organization = Organization.objects.create(name=domain, domain=domain)
-        for index in range(keywords):
+        OrganizationContentConfig.objects.create(
+            organization=organization,
+            default_timezone=timezone_name,
+            pillar_strategy=strategy or {},
+        )
+        # An org with islands has usually been researched; clusters add their own keywords.
+        for index in range(1 if keywords is None and islands else keywords or 0):
             ResearchedKeyword.objects.create(
                 organization=organization,
                 keyword=f"{domain} researched {index}",
                 keyword_normalized=f"{domain} researched {index}",
                 volume=300,
             )
-        OrganizationContentConfig.objects.create(
-            organization=organization,
-            default_timezone=timezone_name,
-            pillar_strategy=strategy or {},
-        )
         for index in range(islands):
             ContentIsland.objects.create(
                 organization=organization,
@@ -280,13 +280,37 @@ class IslandRefreshEligibilityTests(IslandRefreshSchedulerTestCase):
             ContentIslandRefreshDispatch.objects.values_list("organization__domain", flat=True)
         )
 
-    def test_a_cold_start_org_with_a_pillar_strategy_and_keywords_is_eligible(self):
-        self.make_org(
+    def test_a_cold_start_org_with_only_a_pillar_strategy_is_seeded_without_a_run(self):
+        # 29 Oct 2026 audit: content-factory fails every refresh with NO_KEYWORDS
+        # until research runs, so the scheduler seeds the islands itself.
+        organization = self.make_org(
             "cold-start.com",
             strategy={"pillars": [{"name": "AI Startup Fundraising", "keyword": "ai startup fundraising"}]},
         )
+        with patch(
+            "content_factory.content_islands.seed_islands_from_bootstrap_pillars", return_value=["seeded"]
+        ) as seed, patch(POST_HELPER, return_value=_accepted()) as post:
+            result = run_island_refresh_scheduler(now=DUE_NOW)
 
-        self.assertEqual(self._dispatched_domains(), ["cold-start.com"])
+        seed.assert_called_once_with(organization)
+        post.assert_not_called()
+        self.assertEqual((result["skipped_no_keywords"], result["seeded"], result["dispatched"]), (1, 1, 0))
+        self.assertFalse(ContentIslandRefreshDispatch.objects.exists())
+
+    def test_an_islanded_org_without_keywords_is_not_dispatched_or_reseeded(self):
+        self.make_org("islanded.com", islands=1, keywords=0)
+        with patch("content_factory.content_islands.seed_islands_from_bootstrap_pillars") as seed:
+            self.assertEqual(self._dispatched_domains(), [])
+        seed.assert_not_called()
+
+    def test_an_org_is_dispatched_once_research_has_produced_keywords(self):
+        self.make_org(
+            "researched.com",
+            strategy={"pillars": [{"name": "AI Startup Fundraising", "keyword": "ai startup fundraising"}]},
+            keywords=2,
+        )
+
+        self.assertEqual(self._dispatched_domains(), ["researched.com"])
 
     def test_a_pillar_strategy_without_researched_keywords_is_skipped(self):
         self.make_org(

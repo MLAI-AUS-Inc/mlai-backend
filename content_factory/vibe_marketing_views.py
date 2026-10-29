@@ -3266,6 +3266,9 @@ def _article_restart_available(run):
         return False
     if run.status not in {ContentFactoryRunStatus.BLOCKED, ContentFactoryRunStatus.FAILED, ContentFactoryRunStatus.DENIED} and not _article_content_only_preview_not_available(run):
         return False
+    from content_factory.article_publication_evidence import refund_owns_charge
+    if refund_owns_charge(run):
+        return False
     title, keyword = _article_draft_title_keyword(run)
     return bool(title or keyword)
 
@@ -7648,6 +7651,12 @@ def _reserve_article_restart(*, run, context, payload, receipt):
         if previous.get("state") in {"pending", "running"}:
             return Response({"code": "restart_pending", "detail": "Your restart is already being confirmed. This page will update.",
                              "runId": run.run_id, "charged": False}, status=status.HTTP_409_CONFLICT)
+        from content_factory.article_publication_evidence import refund_owns_charge
+        if refund_owns_charge(current):
+            # The refund sweep holds this lock while it reserves the credit. A
+            # replacement reusing the same payment would deliver on refunded points.
+            return Response({"code": "roo_points_billing_refunded", "detail": "This draft's Roo points are being refunded. Start a new paid draft.",
+                             "runId": run.run_id, "charged": False}, status=status.HTTP_409_CONFLICT)
         previous_actions = (current.result or {}).get("user_action_count")
         receipt["user_action_count"] = (max(0, previous_actions) if type(previous_actions) is int else 0) + 1
         receipt["dispatch_payload"] = {key: value for key, value in payload.items() if key not in SECRET_KEYS}
@@ -8248,8 +8257,10 @@ DJANGO_OWNED_ARTICLE_RESULT_PREFIXES = (
 
 
 def _merge_django_owned_article_result(local_result, remote_result):
+    from content_factory.article_publication_evidence import SETTLEMENT_RESULT_KEYS
     local = _run_mapping(local_result)
-    backend_merge_keys = {"publish_merge_intent", "merge_response", "merge_status", "merge_sha", "merged_at"}
+    # A status poll of a failed run must not erase, or invent, its refund work.
+    backend_merge_keys = {"publish_merge_intent", "merge_response", "merge_status", "merge_sha", "merged_at", *SETTLEMENT_RESULT_KEYS}
     merged = {key: value for key, value in _run_mapping(remote_result).items()
         if key not in backend_merge_keys or key in local}
     remote_quality = _run_mapping(merged.get("article_preview_quality"))
@@ -8266,7 +8277,7 @@ def _merge_django_owned_article_result(local_result, remote_result):
             ):
                 merged[key] = value
             continue
-        django_owned = key in DJANGO_OWNED_ARTICLE_RESULT_KEYS or key.startswith(
+        django_owned = key in backend_merge_keys or key in DJANGO_OWNED_ARTICLE_RESULT_KEYS or key.startswith(
             DJANGO_OWNED_ARTICLE_RESULT_PREFIXES
         )
         if not django_owned:
