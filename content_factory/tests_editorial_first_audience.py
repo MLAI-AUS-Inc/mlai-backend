@@ -232,6 +232,10 @@ class CountryFromLocationTests(TestCase):
             ("", "AU"), ("Melbourne, Australia", "AU"), ("Sydney NSW", "AU"), ("Newcastle, New South Wales", "AU"),
             ("Auckland, New Zealand", "NZ"), ("London, UK", "GB"), ("uk", "GB"), ("US", "US"), ("SA", "AU"),
             ("Made by us in Brisbane", "AU"), ("Somewhere unknown", "AU"), ("Singapore", "SG"),
+            # A country or province named anywhere beats a city shared with Australia.
+            ("Victoria, BC, Canada", "CA"), ("Victoria, BC", "CA"), ("Perth, Scotland", "GB"),
+            ("Sydney, Nova Scotia", "CA"), ("Melbourne, Victoria", "AU"), ("Cardiff, Wales", "GB"),
+            ("Belfast, Northern Ireland", "GB"), ("Wellington NSW", "AU"),
         ):
             with self.subTest(location=location):
                 self.assertEqual(country_from_location(location), expected)

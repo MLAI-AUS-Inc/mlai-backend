@@ -35,24 +35,51 @@ NAME_MAX = 80
 NAME_WORDS = 6
 
 # Free-text startup locations ("Melbourne, Australia", "Auckland NZ") mapped to
-# ISO 3166 alpha-2 markets. Ambiguous short words ("us", "act") count only as
-# the whole location. Unknown text keeps the Australian default.
-_COUNTRY_TERMS = (
-    ("AU", ("australia", "new south wales", "victoria", "queensland", "tasmania", "nsw", "vic",
-            "qld", "tas", "sydney", "melbourne", "brisbane", "perth", "adelaide", "hobart",
-            "canberra", "darwin", "gold coast")),
-    ("NZ", ("new zealand", "aotearoa", "nz", "auckland", "wellington", "christchurch")),
-    ("GB", ("united kingdom", "uk", "england", "scotland", "wales", "northern ireland", "london", "britain")),
-    ("US", ("united states", "usa", "new york", "san francisco", "california")),
-    ("CA", ("canada", "toronto", "vancouver", "montreal")),
-    ("SG", ("singapore",)),
-    ("IN", ("india", "bengaluru", "bangalore", "mumbai", "delhi")),
-    ("IE", ("ireland", "dublin")),
-)
+# ISO 3166 alpha-2 markets. Country, state and province names are matched
+# first, then state abbreviations, then cities, because cities repeat across markets
+# ("Perth, Scotland", "Victoria, BC, Canada"). Within a tier the longest term
+# wins, so "New South Wales" is not read as "Wales". Ambiguous short words
+# ("us", "act") count only as the whole location. Unknown text keeps the
+# Australian default.
+_REGION_TERMS = {
+    "AU": ("australia", "new south wales", "queensland", "tasmania", "western australia", "south australia",
+           "northern territory", "australian capital territory"),
+    "NZ": ("new zealand", "aotearoa"),
+    "GB": ("united kingdom", "england", "scotland", "wales", "northern ireland", "britain"),
+    "US": ("united states", "usa", "california", "florida", "texas"),
+    "CA": ("canada", "british columbia", "ontario", "quebec", "alberta", "nova scotia"),
+    "SG": ("singapore",),
+    "IN": ("india",),
+    "IE": ("ireland",),
+}
+_ABBREVIATION_TERMS = {
+    "AU": ("nsw", "vic", "qld", "tas"),
+    "NZ": ("nz",),
+    "GB": ("uk",),
+    "CA": ("bc",),
+}
+_PLACE_TERMS = {
+    "AU": ("victoria", "sydney", "melbourne", "brisbane", "perth", "adelaide", "hobart", "canberra", "darwin",
+           "gold coast"),
+    "NZ": ("auckland", "wellington", "christchurch"),
+    "GB": ("london",),
+    "US": ("new york", "san francisco"),
+    "CA": ("toronto", "vancouver", "montreal"),
+    "IN": ("bengaluru", "bangalore", "mumbai", "delhi"),
+    "IE": ("dublin",),
+}
 _WHOLE_LOCATION = {
     "au": "AU", "sa": "AU", "wa": "AU", "nt": "AU", "act": "AU", "nz": "NZ", "uk": "GB", "gb": "GB",
     "us": "US", "ca": "CA", "sg": "SG", "in": "IN", "ie": "IE",
 }
+
+
+def _longest_first(table):
+    return sorted(((term, code) for code, terms in table.items() for term in terms),
+                  key=lambda pair: len(pair[0]), reverse=True)
+
+
+_LOCATION_TIERS = tuple(_longest_first(table) for table in (_REGION_TERMS, _ABBREVIATION_TERMS, _PLACE_TERMS))
 
 
 def country_from_location(location) -> str:
@@ -61,9 +88,10 @@ def country_from_location(location) -> str:
     if words in _WHOLE_LOCATION:
         return _WHOLE_LOCATION[words]
     text = f" {words} "
-    for code, terms in _COUNTRY_TERMS:
-        if any(f" {term} " in text for term in terms):
-            return code
+    for tier in _LOCATION_TIERS:
+        for term, code in tier:
+            if f" {term} " in text:
+                return code
     return DEFAULT_COUNTRY
 
 
