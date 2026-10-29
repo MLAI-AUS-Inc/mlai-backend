@@ -1113,3 +1113,212 @@ class DispatchRejectedRefundTests(SimpleTestCase):
             reconciliation._settle_sweep_refunds(limit=10)
         self.assertIn("failed", select.call_args.kwargs["status__in"])
         settle.assert_called_once_with(self.run, reason="run_reconciliation_failed")
+
+
+class UnrecoverableFailureRefundTests(SimpleTestCase):
+    """PawShare run 9f479633 (29 Oct 2026): plan_article failed with CORPUS_INCOMPLETE.
+
+    The failure needs a user action the run cannot offer: no resume, retry or
+    scheduled recovery. Nothing reserved its 12-point charge, and the content-only
+    draft's stop receipt could not bind its scope, so the charge stayed forever.
+    """
+
+    KEY = "vibe-article-job:9f479633"
+
+    def setUp(self):
+        self.run = SimpleNamespace(pk=41, run_id="9f479633-pawshare", organization_id=124, domain="pawshare.test",
+            workflow="article_generation", github_repo="", status="failed", current_step="plan_article",
+            approval_state="not_required", resume_available=False, acceptance_summary={}, verification_summary={},
+            error="The saved operation requires the recorded recovery action.", save=Mock(), run_request={
+                "client_request_id": self.KEY, "domain": "pawshare.test", "github_repo": "",
+                "delivery_mode": "content_only", "delivery_mode_confirmed": True,
+                "roo_points_cost": 12, "roo_points_ledger_id": "5481", "roo_points_billing_status": "charged"},
+            result={"status": "failed", "generation": 0, "state_version": 4, "error_code": "CORPUS_INCOMPLETE",
+                "requires_user_action": True, "retryable": False, "retry_available": False, "recovery": {},
+                "recovery_intents": {}, "failure": {"version": 1, "code": "CORPUS_INCOMPLETE", "step": "plan_article",
+                    "retryable": False, "requires_user_action": True, "retry_policy": "explicit_action",
+                    "next_action": "restore_complete_production_corpus"}})
+
+    def worker_receipt(self, **changes):
+        """Content Factory's stop receipt: its request model records each unset scope key as null."""
+        from hashlib import sha256
+        from .website_failure_contract import canonical_bytes
+        scope = {"website_connection_id": None, "connection_generation": None, "connection_target_id": None,
+            "repository_id": None, "github_repo": None, "expected_source_sha": None, "operation_id": None,
+            "operation_attempt": None, "deletion_epoch": None, "client_request_id": self.KEY}
+        receipt = {"version": 1, "purpose": "article_cancellation", "run_id": self.run.run_id, "goal_id": None,
+            "scope": {**scope, **changes.pop("scope", {})}, "generation": 0, "state_version": 5,
+            "outcome": "no_article_effect", "cancelled": True, "delivered_value": False,
+            "watermark": {"operation_id": None, "attempt": None, "cancelled": True}, **changes}
+        receipt["receipt_id"] = sha256(canonical_bytes(receipt)).hexdigest()
+        return receipt
+
+    def queue(self, *, child_exists=False):
+        from datetime import timedelta
+        from . import reconciliation
+        self.run.updated_at, self.run.reconciled_at = timezone.now() - timedelta(hours=1), None
+        rows = Mock()
+        rows.filter.return_value = rows
+        rows.order_by.return_value = rows
+        rows.exists.return_value = child_exists
+        rows.__getitem__ = Mock(return_value=[self.run])
+        with patch.object(reconciliation.ContentFactoryRun.objects, "filter", return_value=rows) as select, \
+                patch.object(reconciliation.ContentFactoryRun.objects, "select_for_update") as locked, \
+                patch.object(reconciliation.transaction, "atomic", return_value=nullcontext()), \
+                patch("organizations.models.Organization.objects.select_for_update"), \
+                patch("content_factory.billing_lineage.original_article_spend_for_run") as resolve:
+            locked.return_value.filter.return_value.first.return_value = self.run
+            queued = reconciliation._queue_unrecoverable_article_refunds(limit=10, now=timezone.now())
+        resolve.assert_not_called()
+        return SimpleNamespace(queued=queued, select=select)
+
+    def stop(self, receipt):
+        from datetime import timedelta
+        from . import reconciliation, service_views
+        self.run.updated_at, self.run.reconciled_at = timezone.now() - timedelta(hours=1), None
+        rows = Mock()
+        rows.filter.return_value = rows
+        rows.order_by.return_value = rows
+        rows.__getitem__ = Mock(return_value=[self.run])
+        def claim(**changes):
+            self.run.result, self.run.reconciled_at = changes["result"], changes["reconciled_at"]
+            return 1
+        rows.update.side_effect = claim
+        with patch.object(reconciliation.ContentFactoryRun.objects, "filter", return_value=rows), \
+                patch.object(reconciliation.ContentFactoryRun.objects, "select_for_update") as locked, \
+                patch.object(reconciliation.transaction, "atomic", return_value=nullcontext()), \
+                patch.object(views, "_call_content_factory_run_action", return_value={"article_cancellation_v1": receipt}) as remote, \
+                patch.object(service_views, "_serialize_content_factory_run", side_effect=lambda run: {"status": run.status}), \
+                patch("content_factory.website_operations.observe_workflow_status"):
+            locked.return_value.filter.return_value.first.return_value = self.run
+            settled = reconciliation._settle_exhausted_article_runs(limit=10, now=timezone.now())
+        return SimpleNamespace(settled=settled, remote=remote)
+
+    def credit(self):
+        from . import reconciliation
+        spend = SimpleNamespace(user=SimpleNamespace(pk=5), idempotency_key=f"content_factory:charge:{self.KEY}",
+            created_by_slack_id="U-payer")
+        with patch.object(reconciliation.transaction, "atomic", return_value=nullcontext()), \
+                patch("organizations.models.Organization.objects.select_for_update"), \
+                patch.object(views.ContentFactoryRun.objects, "select_for_update") as locked, \
+                patch("content_factory.billing_lineage.original_article_spend_for_run", return_value=spend), \
+                patch("integrations.services.article_generation.refund_content_factory_request_for_user",
+                    return_value=SimpleNamespace(pk=6101)) as credit:
+            locked.return_value.filter.return_value.first.return_value = self.run
+            reconciliation._refund_failed_run(self.run, reason="run_reconciliation_failed")
+        return credit
+
+    def test_no_recovery_failure_reserves_credit_stops_worker_and_refunds_original_spend(self):
+        from .article_publication_evidence import exhausted_article_candidate
+        from .website_cancellation_retirement import expected_article_cancellation
+        outcome = self.queue()
+        self.assertEqual(outcome.queued, 1)
+        selection = outcome.select.call_args_list[0].kwargs
+        self.assertEqual((selection["status"], selection["resume_available"]), ("failed", False))
+        self.assertTrue(selection["result__article_terminal_refund__isnull"])
+        receipt = self.run.result["article_terminal_refund"]
+        self.assertEqual((receipt["status"], receipt["error_code"], receipt["settlement_reason"]),
+            ("stop_required", "CORPUS_INCOMPLETE", "failed_without_recovery"))
+        self.assertTrue(receipt["paid_obligation"])
+        self.assertTrue(exhausted_article_candidate(self.run))
+        # The worker's stop is still the only no-delivery proof.
+        stopped = self.stop(self.worker_receipt())
+        self.assertEqual(stopped.settled, 1)
+        payload = stopped.remote.call_args.kwargs["payload"]
+        self.assertEqual(payload["reason"], "article_terminal_no_value")
+        self.assertEqual(payload["expected_cancellation_v1"], expected_article_cancellation(self.run))
+        self.assertEqual(self.run.status, "cancelled")
+        self.assertEqual(self.run.result["article_terminal_refund"]["status"], "pending")
+        self.assertTrue(self.run.result["reconciliation_refund_pending"])
+        credit = self.credit()
+        credit.assert_called_once()
+        self.assertEqual(credit.call_args.kwargs["article_request"]["client_request_id"], self.KEY)
+        self.assertEqual((self.run.result["article_terminal_refund"]["status"],
+            self.run.result["article_terminal_refund"]["refund_ledger_id"]), ("refunded", "6101"))
+        self.assertFalse(self.run.result["reconciliation_refund_pending"])
+        # A settled obligation is never reserved again.
+        self.run.save.reset_mock()
+        self.assertEqual(self.queue().queued, 0)
+        self.run.save.assert_not_called()
+
+    def test_content_only_stop_receipt_binds_unset_scope_but_not_a_different_one(self):
+        from .article_publication_evidence import cancellation_receipt
+        self.assertEqual(cancellation_receipt(self.run, {"article_cancellation_v1": self.worker_receipt()})["outcome"],
+            "no_article_effect")
+        for label, scope in (("repository", {"github_repo": "pawshare/site"}), ("connection", {"website_connection_id": "c-1"}),
+                ("explicit_root", {"app_root": ""}), ("other_key", {"client_request_id": "another-charge"})):
+            with self.subTest(label), self.assertRaises(ValueError):
+                cancellation_receipt(self.run, {"article_cancellation_v1": self.worker_receipt(scope=scope)})
+
+    def test_recoverable_delivered_reused_or_unpaid_failure_keeps_charge(self):
+        from .article_publication_evidence import unrecoverable_refund_code
+        cases = (
+            ("resumable", {}, {}, {"resume_available": True}),
+            ("retryable", {"retryable": True, "failure": {**self.run.result["failure"], "retryable": True}}, {}, {}),
+            ("no_user_action", {"requires_user_action": False,
+                "failure": {**self.run.result["failure"], "requires_user_action": False}}, {}, {}),
+            ("retry_offered", {"retry_available": True}, {}, {}),
+            ("recovery_scheduled", {"recovery": {"state": "pending", "step": "plan_article"}}, {}, {}),
+            ("recovery_intent", {"recovery_intents": {"plan_article": {"state": "pending"}}}, {}, {}),
+            ("owner_action_code", {"failure": {**self.run.result["failure"], "code": "AUTH_REQUIRED"}}, {}, {}),
+            ("repairable_code", {"failure": {**self.run.result["failure"], "code": "ARTICLE_SEED_SCAFFOLD_FAILED"}}, {}, {}),
+            ("unregistered_code", {"failure": {**self.run.result["failure"], "code": "NOT_A_REGISTERED_CODE"}}, {}, {}),
+            ("restart_pending", {"restart_receipt": {"state": "pending", "reused_authorization": "reserved"}}, {}, {}),
+            ("restart_completed", {"restart_receipt": {"state": "completed"}, "restart_child_run_id": "child"}, {}, {}),
+            ("draft_body", {"markdown": "Saved reviewable draft"}, {}, {}),
+            ("packaged", {"content_package": {"content_packaged": True}}, {}, {}),
+            ("unexplained_pr", {"pr_url": "https://github.com/pawshare/site/pull/3"}, {}, {}),
+            ("unpaid", {}, {"roo_points_cost": None, "roo_points_ledger_id": None, "roo_points_billing_status": "free"}, {}),
+            ("refunded", {}, {"roo_points_billing_status": "refunded"}, {}),
+            ("dispatch_refund_owned", {}, {"pending_billing_refund": {"kind": "article_generation"}}, {}),
+            ("goal_child", {}, {"first_article_goal_operation_id": "prepare-7"}, {}),
+            ("blocked", {}, {}, {"status": "blocked"}),
+        )
+        for label, result, request, fields in cases:
+            with self.subTest(label):
+                self.setUp()
+                self.run.result.update(result)
+                self.run.run_request.update(request)
+                for key, value in fields.items():
+                    setattr(self.run, key, value)
+                self.assertIsNone(unrecoverable_refund_code(self.run))
+                self.assertEqual(self.queue().queued, 0)
+                self.run.save.assert_not_called()
+                self.assertNotIn("article_terminal_refund", self.run.result)
+        with self.subTest("child_reused_charge"):
+            # A replacement bills through this run's charge.
+            self.setUp()
+            self.assertEqual(self.queue(child_exists=True).queued, 0)
+            self.run.save.assert_not_called()
+            self.assertNotIn("article_terminal_refund", self.run.result)
+
+    def test_restart_cannot_reuse_a_charge_the_refund_owns(self):
+        self.run.result["article_terminal_refund"] = {"status": "stop_required", "paid_obligation": True}
+        with patch.object(views, "_article_draft_title_keyword", return_value=("Dog beach playdates", "dog beach")):
+            self.assertFalse(views._article_restart_available(self.run))
+            for status in ("not_required", "needs_reconciliation"):
+                # A stop that never seals must not strand the draft without a restart.
+                self.run.result["article_terminal_refund"]["status"] = status
+                self.assertTrue(views._article_restart_available(self.run))
+        self.run.result["article_terminal_refund"]["status"] = "stop_required"
+        with patch.object(views.transaction, "atomic", return_value=nullcontext()), \
+                patch.object(views.Organization.objects, "select_for_update"), \
+                patch.object(views.ContentFactoryRun.objects, "select_for_update") as locked:
+            locked.return_value.get.return_value = self.run
+            response = views._reserve_article_restart(run=self.run, context=SimpleNamespace(organization=SimpleNamespace(pk=124)),
+                payload={"topic": "Dog beach playdates"}, receipt={"state": "pending"})
+        self.assertEqual((response.status_code, response.data["code"]), (409, "roo_points_billing_refunded"))
+        self.run.save.assert_not_called()
+        self.assertNotIn("restart_receipt", self.run.result)
+
+    def test_stop_cannot_credit_a_charge_a_restart_already_reused(self):
+        from .article_publication_evidence import cancellation_result, refund_reconciliation_reason
+        self.run.result["article_terminal_refund"] = {"status": "stop_required", "paid_obligation": True}
+        self.run.result.update(restart_receipt={"state": "completed"}, restart_child_run_id="replacement")
+        self.run.result = cancellation_result(self.run, {"article_cancellation_v1": self.worker_receipt()})
+        self.run.status = "cancelled"
+        self.assertEqual(refund_reconciliation_reason(self.run), "needs_reconciliation")
+        credit = self.credit()
+        credit.assert_not_called()
+        self.assertEqual(self.run.result["article_terminal_refund"]["status"], "needs_reconciliation")
+        self.assertTrue(self.run.result["reconciliation_refund_pending"])

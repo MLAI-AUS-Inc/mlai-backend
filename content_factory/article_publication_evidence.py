@@ -26,6 +26,9 @@ SETTLEMENT_RESULT_KEYS = frozenset({"article_terminal_refund", "reconciliation_r
     "article_stop_attempts", "dispatch_rejection_v1"})
 # Content Factory's code for a run whose first snapshot the backend refused.
 DISPATCH_REJECTED = "dispatch_rejected"
+# Refund states that own the original payment. A quarantined obligation does not:
+# its stop may never seal, and a later credit rechecks restart reuse itself.
+REFUND_OWNED_STATUSES = frozenset({"pending", "stop_required", "refunded"})
 
 
 def mapping(value):
@@ -38,6 +41,19 @@ def original_scope(run):
     return {key: request[key] for key in SCOPE_FIELDS if key in request}
 
 
+def comparable_scope(scope):
+    """Compare unset scope as unset; an explicit empty app root or branch stays distinct.
+
+    Django saves a content-only draft without connection keys and with
+    github_repo "". Content Factory's request model records each as null, so a
+    byte-for-byte compare refused every content-only stop receipt. Content
+    Factory applies the same rule to the backend's expected cancellation.
+    """
+    if not isinstance(scope, dict):
+        return scope
+    return {key: value for key, value in scope.items() if value is not None and (key != "github_repo" or value != "")}
+
+
 def original_goal(run):
     request = mapping(run.run_request)
     values = [value for value in (request.get("first_article_goal_id"), request.get("strategy_goal_id"),
@@ -48,8 +64,8 @@ def original_goal(run):
 
 
 def _bound(run, receipt):
-    return (type(receipt.get("version")) is int and receipt["version"] == 1
-        and receipt.get("run_id") == run.run_id and canonical_bytes(receipt.get("scope")) == canonical_bytes(original_scope(run))
+    return (type(receipt.get("version")) is int and receipt["version"] == 1 and receipt.get("run_id") == run.run_id
+        and canonical_bytes(comparable_scope(receipt.get("scope"))) == canonical_bytes(comparable_scope(original_scope(run)))
         and "goal_id" in receipt and receipt["goal_id"] == original_goal(run))
 
 
@@ -311,11 +327,58 @@ def dispatch_rejection_receipt(run):
     return dict(receipt) if dispatch_rejected_refund_candidate(run) else None
 
 
+def restart_reused_charge(run):
+    """A replacement draft reserved or took this run's payment; crediting it too would pay twice."""
+    result = mapping(run.result)
+    return bool(result.get("restart_child_run_id")) or mapping(result.get("restart_receipt")).get("state") in {
+        "pending", "running", "completed"}
+
+
+def refund_owns_charge(run):
+    """A recorded refund obligation owns this payment until it settles; a restart cannot reuse it."""
+    return mapping(mapping(run.result).get("article_terminal_refund")).get("status") in REFUND_OWNED_STATUSES
+
+
+def unrecoverable_refund_code(run):
+    """Name the no-recovery failure that makes a paid failed article run owe its charge back.
+
+    Content Factory marks every non-retryable failure as needing user action.
+    When the code's registry contract is a stop with no recovery action, and
+    the run has no resume, retry or scheduled recovery, nothing continues this
+    run (PawShare run 9f479633, CORPUS_INCOMPLETE at plan_article, 29 Oct 2026).
+    No callback reserves that credit. Recorded effects, delivery or a restart
+    that reused the charge keep it; the credit itself still needs a stop.
+    """
+    from .billing_lineage import paid_article_request
+    from .incident_guards import delivered_content
+    from .website_failure_contract import load_registry
+    request, result = mapping(run.run_request), mapping(run.result)
+    failure = mapping(result.get("failure"))
+    if (run.workflow not in ARTICLE_WORKFLOWS or run.status != "failed" or run.resume_available
+            or not paid_article_request(request) or request.get("first_article_goal_operation_id")
+            or request.get("pending_billing_refund") or request.get("roo_points_billing_status") == "refunded"
+            or restart_reused_charge(run)):
+        return None
+    if (failure.get("requires_user_action", result.get("requires_user_action")) is not True
+            or failure.get("retryable", result.get("retryable")) is not False or result.get("retry_available") is True
+            or mapping(result.get("recovery")).get("state") == "pending"
+            or any(mapping(intent).get("state") == "pending" for intent in mapping(result.get("recovery_intents")).values())):
+        return None
+    code = str(failure.get("code") or result.get("error_code") or "").strip()
+    entry = load_registry()["by_code"].get(code) or {}
+    if entry.get("retry_policy") != "stop_contract" or entry.get("action_id") is not None:
+        return None
+    if publication_state(run) in {"article", "unknown"} or useful_delivery(run) or delivered_content(run):
+        return None
+    return code
+
+
 def refund_reconciliation_reason(run):
     """Recheck current proof immediately before credit; absence requires a stop."""
     if getattr(run, "workflow", None) not in ARTICLE_WORKFLOWS:
         return None
-    if run.status not in TERMINAL_REFUND_STATUSES or publication_state(run) in {"article", "unknown"} or useful_delivery(run):
+    if (run.status not in TERMINAL_REFUND_STATUSES or publication_state(run) in {"article", "unknown"} or useful_delivery(run)
+            or restart_reused_charge(run)):
         return "needs_reconciliation"
     try:
         receipt = cancellation_receipt(run, run.result)

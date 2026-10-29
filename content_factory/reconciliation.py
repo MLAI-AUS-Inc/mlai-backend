@@ -338,6 +338,7 @@ def run_content_factory_reconciliation_sweep(*, limit: Optional[int] = None, now
     summary["refusal_alerts"] = report_repeated_refusals(limit=limit, now=now)
     summary["queued_denied_refunds"] = _queue_denied_article_refunds(limit=limit, now=now)
     summary["queued_dispatch_rejected_refunds"] = _queue_dispatch_rejected_article_refunds(limit=limit, now=now)
+    summary["queued_unrecoverable_refunds"] = _queue_unrecoverable_article_refunds(limit=limit, now=now)
     summary["settled_exhausted_articles"] = _settle_exhausted_article_runs(limit=limit, now=now)
     _settle_sweep_refunds(limit=limit)
     if not candidates:
@@ -724,6 +725,46 @@ def _queue_denied_article_refunds(*, limit, now):
             _refund_failed_run(run, reason=f"Article run was refused before delivery ({code}).")
         except Exception:
             logger.warning("content_factory_denied_refund_pending run_id=%s", run.run_id)
+        count += 1
+    return count
+
+
+def _queue_unrecoverable_article_refunds(*, limit, now):
+    """Reserve the credit of a paid run that failed with no way to continue; its stop still decides.
+
+    Such a failure needs a user action the run cannot offer, and no callback
+    reserves its obligation. The exhausted-run sweep then obtains the worker's
+    bound stop receipt before ``_refund_failed_run`` credits.
+    """
+    from .article_publication_evidence import unrecoverable_refund_code
+    from .run_state import ARTICLE_WORKFLOWS
+    from organizations.models import Organization
+    count = 0
+    candidates = ContentFactoryRun.objects.filter(status="failed", workflow__in=ARTICLE_WORKFLOWS, resume_available=False,
+        updated_at__lt=now - _stale_after(), result__article_terminal_refund__isnull=True).filter(
+        _legacy_delivery_rows("run_request")).order_by("updated_at")[:limit]
+    for candidate in candidates:
+        code = unrecoverable_refund_code(candidate)
+        if not code:
+            continue
+        # Same lock order as _refund_failed_run and a restart's reservation; a
+        # callback, effect or replacement draft may have arrived since selection.
+        with transaction.atomic():
+            if candidate.organization_id:
+                Organization.objects.select_for_update().filter(pk=candidate.organization_id).first()
+            run = ContentFactoryRun.objects.select_for_update().filter(pk=candidate.pk).first()
+            if (run is None or "article_terminal_refund" in (run.result or {}) or unrecoverable_refund_code(run) != code
+                    or ContentFactoryRun.objects.filter(Q(run_request__original_billing_source_run_id=run.run_id)
+                        | Q(run_request__billing_source_run_id=run.run_id)).exists()):
+                continue
+            run.result = {**(run.result or {}), "reconciliation_refund_pending": True,
+                "article_terminal_refund": {"status": "pending", "paid_obligation": True, "job_id": run.run_id,
+                    "error_code": code[:100], "settlement_reason": "failed_without_recovery"}}
+            run.save(update_fields=["result"])
+        try:
+            _refund_failed_run(run, reason=f"Article run failed with no way to continue ({code}).")
+        except Exception:
+            logger.warning("content_factory_unrecoverable_refund_pending run_id=%s", run.run_id)
         count += 1
     return count
 
