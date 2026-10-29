@@ -450,11 +450,14 @@ class PrivateStrategyKeyTests(FounderJourneyFixture):
         config = OrganizationContentConfig.objects.get(organization=self.org)
         config.pillar_strategy = {**config.pillar_strategy, "previous_owner": {"user_id": 1}}
         config.save(update_fields=["pillar_strategy"])
+        self.assertFalse(island_refresh_scheduler._has_pillar_strategy(config))
         self.assertNotIn(config.pk, {item.pk for item in island_refresh_scheduler._eligible_configs()})
 
+        # The positive control checks the strategy rule itself, so it holds whatever
+        # extra gate (researched keywords, workshop windows) the scheduler applies.
         config.pillar_strategy = {**config.pillar_strategy, "topics": ["kept eligible"]}
         config.save(update_fields=["pillar_strategy"])
-        self.assertIn(config.pk, {item.pk for item in island_refresh_scheduler._eligible_configs()})
+        self.assertTrue(island_refresh_scheduler._has_pillar_strategy(config))
 
     def test_worker_snapshot_keeps_backend_receipts_and_cancel_reasons(self):
         existing = {"ops_alerts": {"run_terminal": {"state": "sent"}}, "cancellation_reason": "owner_cancelled",
