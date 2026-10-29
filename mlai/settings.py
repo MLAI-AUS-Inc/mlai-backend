@@ -1110,11 +1110,6 @@ CONTENT_FACTORY_SETUP_DELIVERY_ENROLLED_ORGANIZATIONS = tuple(
     if identifier.strip()
 )
 CONTENT_FACTORY_OPS_SLACK_CHANNEL_ID = os.getenv('CONTENT_FACTORY_OPS_SLACK_CHANNEL_ID', '').strip()
-# Runs content-factory's interactive queue serves at once, used only for the
-# founder-facing queue ETA. 0 (the default) shows the place in line without an
-# ETA; set it once the interactive worker pool is deployed and sized.
-_interactive_queue_slots = os.getenv('CONTENT_FACTORY_INTERACTIVE_QUEUE_SLOTS', '0').strip()
-CONTENT_FACTORY_INTERACTIVE_QUEUE_SLOTS = int(_interactive_queue_slots) if _interactive_queue_slots.isdigit() else 0
 ARTICLES_WEBSITE_STATUS_V1_ENABLED = os.getenv('ARTICLES_WEBSITE_STATUS_V1_ENABLED', 'false').lower() == 'true'
 ARTICLES_WEBSITE_CONSISTENCY_ENABLED = os.getenv('ARTICLES_WEBSITE_CONSISTENCY_ENABLED', 'false').lower() == 'true'
 ARTICLES_WEBSITE_GOAL_RUNNER_ENABLED = os.getenv('ARTICLES_WEBSITE_GOAL_RUNNER_ENABLED', 'false').lower() == 'true'
@@ -1480,6 +1475,11 @@ CONTENT_ISLANDS_REFRESH_MAX_PER_TICK = int(
 # workshop research and first articles do not queue behind batch work. Parsed
 # by the island refresh scheduler, which logs and ignores malformed entries.
 ARTICLES_WORKSHOP_WINDOWS = os.environ.get("ARTICLES_WORKSHOP_WINDOWS", "[]").strip() or "[]"
+# Runs content-factory's interactive queue serves at once, used only for the
+# founder-facing queue ETA. 0 (the default) shows the place in line without an
+# ETA; set it once the interactive worker pool is deployed and sized.
+_interactive_queue_slots = os.getenv('CONTENT_FACTORY_INTERACTIVE_QUEUE_SLOTS', '0').strip()
+CONTENT_FACTORY_INTERACTIVE_QUEUE_SLOTS = int(_interactive_queue_slots) if _interactive_queue_slots.isdigit() else 0
 # An emerging island becomes visible only once it carries this much demand.
 CONTENT_ISLANDS_PROMOTION_MIN_KEYWORDS = int(
     os.environ.get("CONTENT_ISLANDS_PROMOTION_MIN_KEYWORDS", "5") or 5
