@@ -17,15 +17,18 @@ from .serializers import (
 )
 from .services import (
     CompanyDomainChangeBlocked,
-    DomainOwnershipError,
+    CompanyDomainClaimedError,
     DuplicateCompanyDomainError,
     apply_company_domain_change,
     apply_shared_startup_details,
     assert_company_domain_available,
+    claimed_organization,
     domain_is_available_to,
     ensure_company_organization,
     get_or_create_founder_profile,
     offboard_company,
+    queue_domain_claim_alert,
+    seed_new_company_founder_and_author,
     set_active_company,
 )
 from vibe_raising.registration import (
@@ -100,8 +103,18 @@ class FounderToolsCompanyView(APIView):
         companies = visible_companies(profile.companies.select_related("organization").all())
         return Response(FounderCompanySerializer(companies, many=True).data, status=status.HTTP_200_OK)
 
-    @transaction.atomic
     def post(self, request):
+        # The claim check can fail after company rows were written (binding to
+        # an existing organisation), so the save runs in its own transaction and
+        # the ops alert is queued only once that transaction has rolled back.
+        try:
+            with transaction.atomic():
+                return self._save_company(request)
+        except CompanyDomainClaimedError as exc:
+            queue_domain_claim_alert(organization=exc.organization, claimant_user_id=request.user.id)
+            return exc.response()
+
+    def _save_company(self, request):
         profile = get_or_create_founder_profile(request.user)
         profile = VibeRaisingProfile.objects.select_for_update().get(pk=profile.pk)
         if profile.role != VibeRaisingProfile.ROLE_FOUNDER:
@@ -121,6 +134,8 @@ class FounderToolsCompanyView(APIView):
             if key in data
         }
 
+        # A new company, or the first save of an unsaved research workspace.
+        first_save = False
         try:
             if company_id:
                 company = get_object_or_404(VibeRaisingCompany, pk=company_id, profile=profile)
@@ -128,12 +143,13 @@ class FounderToolsCompanyView(APIView):
                 from .profile_fields import is_research_workspace
                 from .services import find_company_with_domain
                 provisional = find_company_with_domain(profile, plain_fields.get("domain"))
-                company = (provisional if provisional and is_research_workspace(provisional)
-                           else VibeRaisingCompany(profile=profile))
+                reuse = bool(provisional and is_research_workspace(provisional))
+                company = provisional if reuse else VibeRaisingCompany(profile=profile)
+                first_save = True
             else:
-                company = profile.companies.filter(name__iexact=data["name"]).first() or VibeRaisingCompany(
-                    profile=profile
-                )
+                company = profile.companies.filter(name__iexact=data["name"]).first()
+                first_save = company is None
+                company = company or VibeRaisingCompany(profile=profile)
 
             if "domain" in plain_fields:
                 assert_company_domain_available(
@@ -150,7 +166,7 @@ class FounderToolsCompanyView(APIView):
                     and not is_admin
                     and not domain_is_available_to(request.user, plain_fields["domain"])
                 ):
-                    raise DomainOwnershipError()
+                    raise CompanyDomainClaimedError(claimed_organization(plain_fields["domain"]))
                 if plain_fields["domain"]:
                     # Rename the org in place when safe; otherwise a re-point
                     # strands the old org's data and needs confirmation.
@@ -200,6 +216,8 @@ class FounderToolsCompanyView(APIView):
 
         ensure_company_organization(company)
         apply_shared_startup_details(user=request.user, company=company, data=data)
+        if first_save:
+            seed_new_company_founder_and_author(user=request.user, company=company)
         if profile.active_company_id is None:
             set_active_company(profile, company)
         company.refresh_from_db()

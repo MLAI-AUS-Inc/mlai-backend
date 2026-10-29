@@ -324,7 +324,8 @@ class SettingsCompanyScopingTests(TestCase):
                     "companyId":str(self.company_b.id),"domain":target.domain,
                     "confirmDomainChange":confirmed},format="json")
                 self.assertEqual(response.status_code,409)
-                self.assertIn("already linked",str(response.data["detail"]))
+                self.assertEqual(str(response.data["code"]),"company_domain_claimed")
+                self.assertEqual(str(response.data["detail"]),"This startup is already on MLAI.")
                 self.company_b.refresh_from_db()
                 self.assertEqual(self.company_b.organization_id,original)
 

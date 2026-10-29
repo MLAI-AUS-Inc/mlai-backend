@@ -420,6 +420,9 @@ jobs:
           founder_tools.tests \
           founder_tools.tests_domain_change \
           founder_tools.tests_offboarding \
+          founder_tools.tests_company_create_seed \
+          founder_tools.tests_domain_claims \
+          content_factory.tests_editorial_first_audience \
           startup_updates.tests_covers \
           startup_updates.tests_founder_metrics \
           startup_updates.tests_update_identity \

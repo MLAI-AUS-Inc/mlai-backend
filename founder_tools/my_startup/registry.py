@@ -19,6 +19,7 @@ MARKETING_VIEWS = frozenset(
         "EditorialBriefSuggestionView",
         "EditorialCatalogApprovalView",
         "EditorialCatalogView",
+        "EditorialFirstAudienceView",
         "HostedArticlePublishView",
         "VibeMarketingAbnLookupView",
         "VibeMarketingArticleSetupAcceptView",
