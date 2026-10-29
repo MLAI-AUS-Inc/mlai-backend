@@ -11,7 +11,7 @@ from .github_repository_views import VibeMarketingGitHubRepositoryView
 from .island_research_views import ContentIslandResearchView, ContentIslandResearchAdoptView
 
 from .admin_views import VibeMarketingAdminUsageView
-from .editorial_views import EditorialCatalogApprovalView, EditorialCatalogView, EditorialBriefSuggestionView, EditorialArticlesView
+from .editorial_views import EditorialCatalogApprovalView, EditorialCatalogView, EditorialBriefSuggestionView, EditorialArticlesView, EditorialFirstAudienceView
 from .notification_channel_views import (
     VibeMarketingNotificationChannelDeliveryView,
     VibeMarketingNotificationChannelDetailView,
@@ -98,6 +98,8 @@ urlpatterns = [
     path("editorial-catalog/", EditorialCatalogView.as_view(), name="vibe-marketing-editorial-catalog"),
     path("editorial-catalog/approve", EditorialCatalogApprovalView.as_view(), name="vibe-marketing-editorial-catalog-approve-no-slash"),
     path("editorial-catalog/approve/", EditorialCatalogApprovalView.as_view(), name="vibe-marketing-editorial-catalog-approve"),
+    path("editorial-catalog/first-audience", EditorialFirstAudienceView.as_view(), name="vibe-marketing-editorial-first-audience-no-slash"),
+    path("editorial-catalog/first-audience/", EditorialFirstAudienceView.as_view(), name="vibe-marketing-editorial-first-audience"),
     path("admin/usage/", VibeMarketingAdminUsageView.as_view(), name="vibe-marketing-admin-usage"),
     path("analytics/", include("content_analytics.urls")),
     path("bootstrap/", VibeMarketingBootstrapView.as_view(), name="vibe-marketing-bootstrap"),
