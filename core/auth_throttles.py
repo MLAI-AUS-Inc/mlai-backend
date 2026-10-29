@@ -4,10 +4,12 @@ import time
 from django.core.cache import cache
 from rest_framework.exceptions import Throttled
 
+from .client_ip import trusted_client_ip
+
 
 def client_ip(request):
-    forwarded = str(request.META.get('HTTP_X_FORWARDED_FOR') or '').split(',', 1)[0].strip()
-    return forwarded or str(request.META.get('REMOTE_ADDR') or 'unknown')
+    """Return the trusted client IP (see :func:`core.client_ip.trusted_client_ip`)."""
+    return trusted_client_ip(request)
 
 
 def _enforce_limit(*, action, dimension, value, limit, window_seconds):

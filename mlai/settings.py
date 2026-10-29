@@ -487,6 +487,11 @@ GMAIL_METADATA_PAGE_DEADLINE_SECONDS = float(os.getenv('GMAIL_METADATA_PAGE_DEAD
 
 AUTH_USER_MODEL = 'core.User'
 
+# Client IP for rate limits (core.client_ip.trusted_client_ip): the number of
+# proxies in front of Django that write X-Forwarded-For. Production nginx sets
+# X-Forwarded-For to $remote_addr (the CF-Connecting-IP real IP), so the
+# rightmost entry is the trusted one. 0 ignores the header and uses REMOTE_ADDR.
+TRUSTED_PROXY_HOPS = int(os.getenv('TRUSTED_PROXY_HOPS', '1'))
 REST_FRAMEWORK = {
     'DEFAULT_PERMISSION_CLASSES': [
         'rest_framework.permissions.IsAuthenticated',

@@ -5,6 +5,8 @@ from django.core.cache import cache
 from rest_framework.exceptions import Throttled
 from rest_framework.throttling import ScopedRateThrottle
 
+from core.client_ip import trusted_client_ip
+
 
 class CommunityChatScopedThrottle(ScopedRateThrottle):
     scope_attr = "community_chat_throttle_scope"
@@ -56,8 +58,8 @@ class SlackSnapshotAccountThrottle(CommunityChatScopedThrottle):
 
 
 def client_ip(request):
-    forwarded = str(request.META.get("HTTP_X_FORWARDED_FOR") or "").split(",", 1)[0].strip()
-    return forwarded or str(request.META.get("REMOTE_ADDR") or "unknown")
+    """Return the trusted client IP (see :func:`core.client_ip.trusted_client_ip`)."""
+    return trusted_client_ip(request)
 
 
 def enforce_dimension_limit(*, action, dimension, value, limit, window_seconds):
