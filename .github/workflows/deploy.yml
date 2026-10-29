@@ -812,6 +812,7 @@ jobs:
           integrations.tests_startup_updates.StartupUpdateSlackLineagePostgresTests \
           content_factory.tests_website_connections.WebsiteConcurrentDisconnectTests \
           content_factory.tests_one_click_database \
+          content_factory.tests_free_setup_research \
           content_factory.tests_website_goal_audit_database \
           content_factory.tests_website_reentry \
           --verbosity 2

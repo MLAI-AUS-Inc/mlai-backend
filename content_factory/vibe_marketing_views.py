@@ -727,8 +727,12 @@ def _roo_points_response(*, domain: str, action: str, current_balance: int, cost
 
 
 def _require_roo_points_for_ai_agent(user, *, domain: str, action: str):
-    from content_factory.billing import FREE_SETUP_ACTIONS
-    if action in FREE_SETUP_ACTIONS:
+    from content_factory.billing import FREE_SETUP_RESEARCH_ACTIONS, enforce_free_setup_daily_cap, free_setup_actions
+    if action in free_setup_actions():
+        # Only the named free actions skip the floor. Every other AI action
+        # still needs 6 points even though its quoted cost is 0.
+        if action in FREE_SETUP_RESEARCH_ACTIONS:
+            enforce_free_setup_daily_cap(user, action)
         return None, None
     required_points = get_content_factory_ai_agent_required_points(domain)
     if required_points <= 0:
@@ -745,8 +749,8 @@ def _require_roo_points_for_ai_agent(user, *, domain: str, action: str):
 
 
 def _mark_roo_points_gate_authorized(payload: dict, *, domain: str, action: str, current_balance: int | None) -> None:
-    from content_factory.billing import FREE_SETUP_ACTIONS
-    free = action in FREE_SETUP_ACTIONS or is_free_content_factory_domain(domain)
+    from content_factory.billing import free_setup_actions
+    free = action in free_setup_actions() or is_free_content_factory_domain(domain)
     payload.update(
         build_roo_points_authorization_payload(
             domain=domain,
