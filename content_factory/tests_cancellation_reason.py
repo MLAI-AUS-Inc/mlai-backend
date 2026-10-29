@@ -23,6 +23,7 @@ from . import founder_journey_alerts as alerts
 from . import reconciliation
 from . import vibe_marketing_views as views
 from .run_cancellation import (
+    DRAFT_DELETED_AT_KEY,
     cancellation_payload,
     cancellation_request_fields,
     normalize_cancellation,
@@ -128,6 +129,68 @@ class OwnerCancelReasonTests(EntitlementFixture, TestCase):
         self.assertEqual((self.bodies[run.run_id]["cancellation_reason"], self.bodies[run.run_id]["cancelled_by"]),
             ("owner_cancelled", "owner"))
         self.assertEqual((response.data["cancellationReason"], response.data["cancelledBy"]), ("owner_cancelled", "owner"))
+
+    def test_draft_delete_cancels_live_members_and_keeps_finished_siblings(self):
+        now = timezone.now()
+        failed = self.article(status="failed", step="plan_article", error_code="CORPUS_INCOMPLETE")
+        failed.error = "The corpus was incomplete."
+        failed.save(update_fields=["error"])
+        delivered = self.article(status="completed", step="finalize")
+        blocked = self.article(status="blocked", step="assemble_article")
+        earlier_stop = self.article(status="cancelled", step="cancelled", cancellation_reason="system_stop",
+            cancelled_by="system")
+        pressed = self.article(status="awaiting_approval", step="await_review")
+        unrelated = self.article(keyword="another topic")
+        for age, run in enumerate((pressed, blocked, delivered, failed, earlier_stop)):
+            ContentFactoryRun.objects.filter(pk=run.pk).update(updated_at=now - timedelta(minutes=age))
+        kept = {}
+        for run in (failed, delivered, earlier_stop):
+            run.refresh_from_db()
+            kept[run.pk] = (run.status, run.error, run.current_step, run.updated_at)
+
+        response = self.control(pressed, {"cancel_group": True})
+
+        self.assertEqual(response.status_code, 202)
+        self.assertCountEqual(response.data["cancelledRunIds"], [pressed.run_id, blocked.run_id])
+        for run in (pressed, blocked):
+            run.refresh_from_db()
+            self.assertEqual((run.status, run.error), ("cancelled", ""))
+            self.assertEqual((run.result["cancellation_reason"], run.result["cancelled_by"]), ("draft_deleted", "owner"))
+            self.assertEqual(self.bodies[run.run_id]["cancellation_reason"], "draft_deleted")
+        for run in (failed, delivered, earlier_stop):
+            run.refresh_from_db()
+            # Refund and alert sweeps keyed on updated_at see the run as before.
+            self.assertEqual((run.status, run.error, run.current_step, run.updated_at), kept[run.pk])
+            self.assertNotIn(run.run_id, self.bodies)
+        self.assertEqual(failed.result["error_code"], "CORPUS_INCOMPLETE")
+        self.assertEqual(earlier_stop.result["cancellation_reason"], "system_stop")
+        unrelated.refresh_from_db()
+        self.assertEqual(unrelated.status, "running")
+        # The kept siblings do not come back as the card the owner just deleted.
+        self.assertTrue(delivered.result[DRAFT_DELETED_AT_KEY])
+        drafts = views._recent_article_drafts(self.org)
+        self.assertEqual([draft["runId"] for draft in drafts], [unrelated.run_id])
+        # A worker snapshot of a kept sibling keeps it hidden.
+        merged = views._merge_django_owned_article_result(delivered.result, {"status": "completed"})
+        self.assertEqual(merged[DRAFT_DELETED_AT_KEY], delivered.result[DRAFT_DELETED_AT_KEY])
+        merged = _merge_django_owned_run_result(delivered.result, {"status": "completed"})
+        self.assertEqual(merged[DRAFT_DELETED_AT_KEY], delivered.result[DRAFT_DELETED_AT_KEY])
+
+    def test_deleting_a_delivered_draft_cancels_the_card_that_was_pressed(self):
+        delivered = self.article(status="completed", step="finalize")
+        response = self.control(delivered, {"cancel_group": True})
+        self.assertEqual(response.data["cancelledRunIds"], [delivered.run_id])
+        delivered.refresh_from_db()
+        self.assertEqual((delivered.status, delivered.result["cancellation_reason"]), ("cancelled", "draft_deleted"))
+
+    def test_a_delete_the_worker_refuses_hides_nothing(self):
+        delivered = self.article(status="completed", step="finalize")
+        pressed = self.article(status="running", step="draft_section:intro")
+        self.remote.side_effect = lambda **kwargs: {"error": "Still writing.", "content_factory_status_code": 409}
+        response = self.control(pressed, {"cancel_group": True})
+        self.assertEqual(response.status_code, 409)
+        delivered.refresh_from_db()
+        self.assertNotIn(DRAFT_DELETED_AT_KEY, delivered.result)
 
     def test_a_cancel_with_no_reason_records_unspecified_with_system_wording(self):
         run = self.article()

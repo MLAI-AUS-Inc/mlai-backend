@@ -25,6 +25,14 @@ OWNER_CANCELLATION_REASONS = frozenset({"owner_cancelled", "draft_deleted", "art
 OWNER_STEP_MESSAGE = "Cancelled by user."
 SYSTEM_STEP_MESSAGE = "Stopped."
 
+# Deleting a draft card leaves these siblings as they are: a delivered draft,
+# a failure (with its code and any refund owed) or an earlier stop is history,
+# not work to cancel. The run the owner pressed delete on is always cancelled.
+DRAFT_DELETE_KEEPS_STATUSES = frozenset({"completed", "failed", "denied", "cancelled"})
+# Set on a sibling the delete kept, so the drafts list does not show it again
+# in place of the card the owner deleted. Backend-owned: snapshots keep it.
+DRAFT_DELETED_AT_KEY = "draft_deleted_at"
+
 
 def _text(value) -> str:
     return value.strip().casefold() if isinstance(value, str) else ""

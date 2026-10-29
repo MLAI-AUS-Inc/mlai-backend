@@ -8738,6 +8738,7 @@ _DJANGO_OWNED_RUN_RESULT_KEYS = frozenset(
         "ops_alerts",
         "cancellation_reason",
         "cancelled_by",
+        "draft_deleted_at",
     }
 )
 _DJANGO_OWNED_RUN_RESULT_PREFIXES = (

@@ -33,6 +33,8 @@ from .website_views import guarded_owner_operation
 from .website_comment_action_audit import capture as observe_comment_intent, after_transaction as observe_comment_dispatch
 from .portable_drafts import has_connected_website, original_portable_run, website_preview_delivery_mode
 from .run_cancellation import (
+    DRAFT_DELETE_KEEPS_STATUSES,
+    DRAFT_DELETED_AT_KEY,
     cancellation_payload,
     cancellation_request_fields,
     normalize_cancellation,
@@ -3395,6 +3397,9 @@ def _article_restart_available(run):
 
 def _serialize_article_draft(run, *, written_keys):
     if run.workflow not in ARTICLE_WORKFLOWS or run.status == ContentFactoryRunStatus.CANCELLED:
+        return None
+    if _run_mapping(run.result).get(DRAFT_DELETED_AT_KEY):
+        # A finished attempt kept when the owner deleted its draft card.
         return None
     # Once a topic has a WrittenArticle it has graduated into the publish
     # lifecycle and lives in "recent articles", so it must not also appear as a
@@ -8389,6 +8394,7 @@ DJANGO_OWNED_ARTICLE_RESULT_KEYS = (
     "ops_alerts",
     "cancellation_reason",
     "cancelled_by",
+    DRAFT_DELETED_AT_KEY,
 )
 # Written by the backend itself (ops alert receipts, owner cancellation reason).
 # A saved non-empty value always wins over a worker snapshot or status poll.
@@ -8569,6 +8575,27 @@ def _article_draft_group_members(run, organization):
     if all(member.pk != run.pk for member in group):
         group.append(run)
     return group
+
+
+def _hide_kept_draft_siblings(siblings):
+    """Hide the finished siblings a draft delete kept, without changing their outcome.
+
+    Their status, error and billing state stay as they are. Only the drafts
+    list stops showing them, so the deleted card does not come back as an
+    older attempt. ``updated_at`` is left alone so refund and alert sweeps
+    keyed on it see the run exactly as before.
+    """
+    now = timezone.now().isoformat()
+    for sibling in siblings:
+        with transaction.atomic():
+            locked = ContentFactoryRun.objects.select_for_update().filter(pk=sibling.pk).first()
+            if locked is None:
+                continue
+            result = dict(_run_mapping(locked.result))
+            if result.get(DRAFT_DELETED_AT_KEY):
+                continue
+            result[DRAFT_DELETED_AT_KEY] = now
+            ContentFactoryRun.objects.filter(pk=locked.pk).update(result=sanitize_json_for_postgres(result))
 
 
 def _run_delivery_mode(run):
@@ -19120,7 +19147,13 @@ def control_article_run(*, user, context, run, action, data, run_id=None, goal_o
 
         if bool(payload.get("cancel_group") or payload.get("cancelGroup")):
             from .draft_pull_request_cleanup import blocked_detail, close_draft_pull_request
-            members = _article_draft_group_members(run, context.organization)
+            # The owner deleted this draft card: cancel the run they pressed and
+            # every sibling still going. Delivered, failed and earlier-stopped
+            # siblings keep their outcome; they are only hidden from the drafts list.
+            group = _article_draft_group_members(run, context.organization)
+            members = [member for member in group
+                if member.pk == run.pk or member.status not in DRAFT_DELETE_KEEPS_STATUSES]
+            kept_siblings = [member for member in group if member not in members]
             payload.update(cancellation_request_fields("draft_deleted", "owner"))
             config = _get_config(context.organization)
             cancelled_ids = []
@@ -19160,6 +19193,8 @@ def control_article_run(*, user, context, run, action, data, run_id=None, goal_o
                     protected_ids.append(member.run_id)
                     continue
                 cancelled_ids.append(member.run_id)
+            if run.run_id in cancelled_ids:
+                _hide_kept_draft_siblings(kept_siblings)
 
             if not cancelled_ids and protected_ids:
                 detail = (

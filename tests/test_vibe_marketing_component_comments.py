@@ -2168,14 +2168,12 @@ class VibeMarketingComponentCommentTests(_PublishRetryApprovalFixture, TestCase)
             )
 
         self.assertEqual(response.status_code, 202)
-        self.assertEqual(
-            sorted(response.data["cancelledRunIds"]),
-            sorted([cancellable_one.run_id, cancellable_two.run_id]),
-        )
+        # A failed sibling keeps its failure (IF-20): it is hidden, not cancelled.
+        self.assertEqual(response.data["cancelledRunIds"], [cancellable_one.run_id])
         self.assertEqual(response.data["protectedRunIds"], [protected.run_id])
         self.assertEqual(checked_pull_requests, ["https://github.com/MLAI-AUS-Inc/mlai-au/pull/77"])
         self.assertTrue(any(cancellable_one.run_id in url for url in cancelled_urls))
-        self.assertTrue(any(cancellable_two.run_id in url for url in cancelled_urls))
+        self.assertFalse(any(cancellable_two.run_id in url for url in cancelled_urls))
         # Closing the PR permits a stop request, but its untyped reply cannot
         # establish cancellation or erase the attempt's external evidence.
         self.assertTrue(any(protected.run_id in url for url in cancelled_urls))
@@ -2184,7 +2182,8 @@ class VibeMarketingComponentCommentTests(_PublishRetryApprovalFixture, TestCase)
         cancellable_two.refresh_from_db()
         protected.refresh_from_db()
         self.assertEqual(cancellable_one.status, ContentFactoryRunStatus.CANCELLED)
-        self.assertEqual(cancellable_two.status, ContentFactoryRunStatus.CANCELLED)
+        self.assertEqual(cancellable_two.status, ContentFactoryRunStatus.FAILED)
+        self.assertTrue(cancellable_two.result["draft_deleted_at"])
         self.assertEqual(protected.status, ContentFactoryRunStatus.BLOCKED)
         self.assertEqual(protected.result["draft_pr_url"], "https://github.com/MLAI-AUS-Inc/mlai-au/pull/77")
         self.assertNotIn("reconciliation_refund_pending", protected.result)
