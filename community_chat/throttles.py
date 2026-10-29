@@ -1,10 +1,8 @@
 import hashlib
-import time
 
-from django.core.cache import cache
-from rest_framework.exceptions import Throttled
 from rest_framework.throttling import ScopedRateThrottle
 
+from core.auth_throttles import RateLimit, configured_limit, enforce_rate_limits
 from core.client_ip import trusted_client_ip
 
 
@@ -57,32 +55,48 @@ class SlackSnapshotAccountThrottle(CommunityChatScopedThrottle):
     scope_attr = "slack_snapshot_account_throttle_scope"
 
 
+COMMUNITY_CHAT_RATE_NAMESPACE = "community-chat-rate-v2"
+COMMUNITY_CHAT_THROTTLE_DETAIL = "Too many community chat requests."
+
+# Device enrolment (challenge, invite, confirm and so on) for a signed-in
+# account is already bounded per account and per device key. Its per-IP
+# backstop must not refuse a room of founders on one venue network, so an
+# authenticated caller's IP ceiling is raised to at least this many per window.
+DEFAULT_AUTHENTICATED_BOOTSTRAP_IP_FLOOR = 300
+
+
 def client_ip(request):
     """Return the trusted client IP (see :func:`core.client_ip.trusted_client_ip`)."""
     return trusted_client_ip(request)
 
 
 def enforce_dimension_limit(*, action, dimension, value, limit, window_seconds):
-    bucket = int(time.time()) // window_seconds
-    opaque = hashlib.sha256(f"{action}:{dimension}:{value}".encode("utf-8")).hexdigest()
-    key = f"community-chat-rate:{opaque}:{bucket}"
-    if cache.add(key, 1, timeout=window_seconds + 5):
-        return
-    try:
-        count = cache.incr(key)
-    except ValueError:
-        cache.set(key, 1, timeout=window_seconds + 5)
-        count = 1
-    if count > limit:
-        wait = window_seconds - (int(time.time()) % window_seconds)
-        raise Throttled(wait=max(wait, 1), detail="Too many community chat requests.")
+    """Admit one request against a single rolling-window limit or raise ``Throttled``."""
+    enforce_rate_limits(
+        [RateLimit(action, dimension, value, limit, window_seconds)],
+        namespace=COMMUNITY_CHAT_RATE_NAMESPACE,
+        detail=COMMUNITY_CHAT_THROTTLE_DETAIL,
+    )
 
 
 def enforce_bootstrap_limits(request, *, action, public_key, user_limit, key_limit, ip_limit):
+    """Bound device bootstrap work per account, per device key and per client IP.
+
+    Anonymous callers keep ``ip_limit`` as their only shared ceiling. A signed-in
+    caller is already bounded by ``user_limit``, so its IP ceiling is raised to
+    ``AUTH_THROTTLE_IP_BOOTSTRAP_AUTHENTICATED_PER_10M`` when that is higher.
+    """
     window = 600
     user = getattr(request, "user", None)
     user_id = getattr(user, "pk", None)
     if user_id is not None and bool(getattr(user, "is_authenticated", False)):
+        ip_limit = max(
+            ip_limit,
+            configured_limit(
+                "AUTH_THROTTLE_IP_BOOTSTRAP_AUTHENTICATED_PER_10M",
+                DEFAULT_AUTHENTICATED_BOOTSTRAP_IP_FLOOR,
+            ),
+        )
         enforce_dimension_limit(
             action=action,
             dimension="user",
