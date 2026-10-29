@@ -1125,7 +1125,10 @@ ARTICLES_WEBSITE_GOAL_ENROLLED_ORGANIZATIONS = tuple(
 ARTICLES_HOSTED_SITES_ENABLED = os.getenv('ARTICLES_HOSTED_SITES_ENABLED', 'false').lower() == 'true'
 # Hosted publish also requires Content Factory's previewedRevision (a rendered
 # preview of exactly the reviewed revision). Enable only after the portable
-# preview ladder is verified in production and clients bind viewedRevision.
+# preview ladder is verified in production, clients bind viewedRevision, and
+# Content Factory's snapshot rungs (CONTENT_FACTORY_SNAPSHOT_PREVIEW) cover every
+# hosted domain: the saved-HTML shell, the last rung while they are off, never
+# counts, so a hosted site whose own build fails could not publish at all.
 HOSTED_PUBLISH_REQUIRES_RENDERED_PREVIEW = os.getenv('HOSTED_PUBLISH_REQUIRES_RENDERED_PREVIEW', 'false').lower() == 'true'
 CONTENT_FACTORY_DEFAULT_ARTICLE_DELIVERY_MODE = os.getenv(
     'CONTENT_FACTORY_DEFAULT_ARTICLE_DELIVERY_MODE',

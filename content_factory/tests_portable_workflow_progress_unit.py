@@ -205,6 +205,34 @@ class PortablePreviewRearmTests(SimpleTestCase):
         result = {} if live_preview is None else {"livePreview": live_preview}
         return SimpleNamespace(**{**vars(self.run), "result": result, "save": Mock(), **changes})
 
+    LEGACY_NOT_AVAILABLE = {
+        "available": False, "status": "not_available", "retryable": False,
+        "previewUnavailableReason": "content_only_no_render_artifact",
+        "proof": {"previewUnavailableReason": "content_only_no_render_artifact"},
+    }
+
+    def ready(self, **changes):
+        """A ready Cloudflare preview of the ladder (rung 1) and its expiry."""
+        return {
+            "available": True, "status": "running", "previewMode": "platform_deployment", "previewRung": "exact",
+            "previewUrl": "https://cf-synthetic.mlai-review-static.pages.dev/blog/draft/",
+            "previewExpiresAt": (timezone.now() + timedelta(hours=100)).isoformat(),
+            "proof": {"hostedBuild": "a" * 32, "articleReviewRevision": "rev-1",
+                      "previewLadder": {"revision": "rev-1", "cycle": 1, "autoRetryCount": 0, "attempts": []}},
+            **changes,
+        }
+
+    def shell(self, **changes):
+        """The saved-HTML shell rung: a local session that lapses after its own expiresAt."""
+        return {
+            "available": True, "status": "running", "previewMode": "content_only", "previewRung": "shell",
+            "previewUrl": "/api/runs/synthetic-draft/live-preview/proxy/blog/draft?cfInspector=1",
+            "expiresAt": (timezone.now() + timedelta(minutes=30)).isoformat(), "previewExpiresAt": "",
+            "proof": {"articleReviewRevision": "rev-1",
+                      "previewLadder": {"revision": "rev-1", "cycle": 1, "autoRetryCount": 0, "attempts": []}},
+            **changes,
+        }
+
     def exhausted(self, **changes):
         """Content Factory's payload once every rung of a cycle has failed."""
         return {
@@ -221,6 +249,14 @@ class PortablePreviewRearmTests(SimpleTestCase):
         future = (timezone.now() + timedelta(minutes=30)).isoformat()
         ready = {"available": True, "status": "running", "previewMode": "platform_deployment", "previewRung": "exact",
                  "previewUrl": "https://cf-synthetic.mlai-review-static.pages.dev/blog/draft/"}
+        ladder_failed = {
+            "available": False, "status": "failed", "retryable": False, "previewMode": "platform_deployment",
+            "previewRung": "exact", "autoRetry": True, "nextRetryAt": "",
+            "proof": {"hostedBuild": "b" * 32, "previewLadder": {"cycle": 1, "attempts": []}, "previewLadderExhausted": False},
+        }
+        # Content Factory lists the ladder's fields, empty, on payloads no ladder produced.
+        empty_ladder_keys = {"previewRung": "", "previewFallback": [], "autoRetry": None, "nextRetryAt": ""}
+        transport = {"available": False, "status": "failed", "error": "timed out", "retryable": True}
         cases = (
             # label, stored livePreview, portable draft, repository draft (today's rule)
             ("missing", None, True, True),
@@ -235,10 +271,43 @@ class PortablePreviewRearmTests(SimpleTestCase):
             ("transport_failure", {"available": False, "status": "failed", "error": "timed out", "retryable": True}, True, False),
             ("legacy_refusal", self.LEGACY_REFUSAL, True, False),
             ("legacy_refusal_rearmed", {**self.LEGACY_REFUSAL, "autoStartRearmedAt": past}, False, False),
-            ("ladder_refusal", {**self.LEGACY_REFUSAL, "previewRung": ""}, False, False),
+            ("legacy_refusal_with_empty_ladder_keys", {**self.LEGACY_REFUSAL, **empty_ladder_keys}, True, False),
             ("other_refusal", {**self.LEGACY_REFUSAL, "content_factory_status_code": 400}, False, False),
+            # Older content-only drafts stored Content Factory's 2xx not_available (no render artifact).
+            ("legacy_not_available", self.LEGACY_NOT_AVAILABLE, True, True),
+            ("legacy_not_available_rearmed", {**self.LEGACY_NOT_AVAILABLE, "autoStartRearmedAt": past}, False, True),
+            ("legacy_artifacts_unavailable", {"available": False, "status": "failed", "retryable": False,
+                                              "error": "No portable artifacts.",
+                                              "errorCode": "portable_preview_artifacts_unavailable"}, True, False),
+            # A failed rung that is not the end of the cycle: only Content Factory's start moves it on.
+            ("ladder_failed_not_exhausted", ladder_failed, True, False),
             ("building", {"available": False, "status": "building", "previewRung": "exact"}, False, True),
             ("ready", ready, False, False),
+            ("ready_before_expiry", self.ready(), False, False),
+            ("ready_past_expiry", self.ready(previewExpiresAt=past), True, False),
+            ("ready_past_expiry_in_proof", self.ready(previewExpiresAt="", proof={
+                **self.ready()["proof"], "previewExpiresAt": past}), True, False),
+            ("shell_before_expiry", self.shell(), False, False),
+            ("shell_past_expiry", self.shell(expiresAt=past), True, False),
+            # A hosted build's expiresAt is its build deadline, never the preview's expiry.
+            ("hosted_build_deadline_passed", self.ready(previewExpiresAt="", expiresAt=past), False, False),
+            # The backend's own floor on automatic starts (autoStartAt), backing off while nothing answers.
+            ("transport_failure_just_asked", {**transport, "autoStartCount": 1, "autoStartAt": (
+                timezone.now() - timedelta(seconds=10)).isoformat()}, False, False),
+            ("transport_failure_asked_2m_ago", {**transport, "autoStartCount": 1, "autoStartAt": (
+                timezone.now() - timedelta(minutes=2)).isoformat()}, True, False),
+            ("transport_failure_asked_twice_2m_ago", {**transport, "autoStartCount": 2, "autoStartAt": (
+                timezone.now() - timedelta(minutes=2)).isoformat()}, False, False),
+            ("transport_failure_asked_5x_14m_ago", {**transport, "autoStartCount": 5, "autoStartAt": (
+                timezone.now() - timedelta(minutes=14)).isoformat()}, False, False),
+            ("transport_failure_asked_5x_16m_ago", {**transport, "autoStartCount": 5, "autoStartAt": (
+                timezone.now() - timedelta(minutes=16)).isoformat()}, True, False),
+            ("queued_just_asked", {"available": False, "status": "queued", "previewRung": "snapshot",
+                                   "autoStartAt": (timezone.now() - timedelta(seconds=30)).isoformat(),
+                                   "autoStartCount": 5}, False, True),
+            ("queued_asked_a_minute_ago", {"available": False, "status": "queued", "previewRung": "snapshot",
+                                           "autoStartAt": (timezone.now() - timedelta(seconds=61)).isoformat(),
+                                           "autoStartCount": 5}, True, True),
         )
         for label, live_preview, portable, repository in cases:
             with self.subTest(label), self.artifacts():
@@ -250,9 +319,15 @@ class PortablePreviewRearmTests(SimpleTestCase):
 
     @override_settings(CONTENT_FACTORY_PORTABLE_PREVIEW_REARM=False)
     def test_flag_off_keeps_todays_auto_prepare_rule(self):
+        past = (timezone.now() - timedelta(minutes=1)).isoformat()
         for label, live_preview, expected in (
             ("legacy_refusal", self.LEGACY_REFUSAL, False),
+            ("legacy_not_available", self.LEGACY_NOT_AVAILABLE, True),
             ("failed_retry_due", self.exhausted(), False),
+            ("ladder_failed_not_exhausted", self.exhausted(retryable=False, proof={"previewLadderExhausted": False}), False),
+            ("ready_past_expiry", self.ready(previewExpiresAt=past), False),
+            ("shell_past_expiry", self.shell(expiresAt=past), False),
+            ("queued_just_asked", {"available": False, "status": "queued", "autoStartAt": past}, True),
             ("building", {"available": False, "status": "building"}, True),
             ("missing", None, True),
         ):
@@ -320,6 +395,130 @@ class PortablePreviewRearmTests(SimpleTestCase):
         dispatch, _ = self.ensure(run, {"available": False, "status": "building", "previewRung": "exact"})
         dispatch.assert_called_once_with(run_id=run.run_id, method="POST", payload={"force": False})
 
+    def poll(self, run, answer, *, minutes, every_seconds=2.5):
+        """Read run detail at chat's fastest poll for ``minutes`` of simulated time.
+
+        ``answer`` is Content Factory's reply, or a callable of the method. The
+        stand-in persist skips an empty payload, as the real one does. Returns
+        each Content Factory call as (method, seconds since the first read).
+        """
+        start = timezone.now()
+        clock = [start]
+        calls = []
+
+        def call(run_id, method="GET", payload=None):
+            self.assertEqual(run_id, run.run_id)
+            if method == "POST":
+                self.assertEqual(payload, {"force": False})
+            calls.append((method, round((clock[0] - start).total_seconds())))
+            reply = answer(method) if callable(answer) else answer
+            return dict(reply) if isinstance(reply, dict) else reply
+
+        def persist(current, payload):
+            if isinstance(payload, dict) and payload:
+                current.result = {**current.result, "livePreview": views._normalize_live_preview_payload(payload)}
+            return current
+
+        with self.artifacts(), patch.object(views.timezone, "now", side_effect=lambda: clock[0]), \
+                patch.object(views, "scoped_run_contract", side_effect=AssertionError("No repository authority")), \
+                patch.object(views, "_call_content_factory_live_preview", side_effect=call), \
+                patch.object(views, "_persist_live_preview_payload", side_effect=persist):
+            while clock[0] - start < timedelta(minutes=minutes):
+                self.assertIs(views._ensure_article_live_preview(run), run)
+                clock[0] += timedelta(seconds=every_seconds)
+        return calls
+
+    def test_backend_made_failures_back_off_instead_of_asking_on_every_poll(self):
+        """A Content Factory outage once drove one POST per 2.5 s poll per open draft, indefinitely."""
+        blocked = {**views._blocked_worker_payload(workflow="article_generation", technical_error="disabled", retryable=True),
+                   "available": False}
+        for label, answer in (
+            ("cf_503", {"available": False, "status": "failed", "error": "Service Unavailable",
+                        "content_factory_status_code": 503, "content_factory_response": {}, "retryable": True}),
+            ("transport", {"available": False, "status": "failed", "error": "Connection refused", "retryable": True}),
+            ("cf_disabled", blocked),
+        ):
+            with self.subTest(label):
+                run = self.with_preview(None)
+                calls = self.poll(run, answer, minutes=30)
+                # One start, then one after 1, 5 and 15 more minutes.
+                self.assertEqual(calls, [("POST", 0), ("POST", 60), ("POST", 360), ("POST", 1260)])
+                self.assertEqual(run.result["livePreview"]["autoStartCount"], 4)
+
+    def test_a_queued_ladder_is_asked_at_most_once_a_minute(self):
+        queued = {"available": False, "status": "queued", "previewUrl": "", "retryable": True, "error": "",
+                  "previewRung": "snapshot", "previewFidelity": "live_article_layout", "nextRetryAt": "", "autoRetry": True,
+                  "proof": {"previewLadder": {"revision": "rev-1", "cycle": 1, "autoRetryCount": 0, "attempts": []},
+                            "previewLadderExhausted": False}}
+        calls = self.poll(self.with_preview(None), queued, minutes=10)
+        self.assertEqual(calls, [("POST", 60 * minute) for minute in range(10)])
+
+    def test_a_ladder_answer_restarts_the_backoff(self):
+        streak = {"available": False, "status": "failed", "retryable": True, "autoStartCount": 3,
+                  "autoStartAt": timezone.now().isoformat()}
+        building = {"available": False, "status": "building", "previewRung": "exact",
+                    "proof": {"previewLadder": {"cycle": 1, "attempts": []}}}
+        self.assertEqual(views._stamp_portable_auto_start(streak, building, legacy_rearm=False)["autoStartCount"], 1)
+        self.assertEqual(views._stamp_portable_auto_start(streak, {"available": False, "status": "failed"},
+                                                          legacy_rearm=False)["autoStartCount"], 4)
+
+    def test_an_empty_answer_still_bounds_the_next_start(self):
+        """Content Factory answers 200 {} for an approved draft it never previewed."""
+        run = self.with_preview(self.LEGACY_REFUSAL)
+        self.assertEqual(self.poll(run, {}, minutes=30), [("POST", 0)])
+        stored = run.result["livePreview"]
+        self.assertTrue(stored["autoStartRearmedAt"])
+        self.assertEqual({key: stored[key] for key in self.LEGACY_REFUSAL}, self.LEGACY_REFUSAL)
+
+        run = self.with_preview(None)
+        self.assertEqual(self.poll(run, {}, minutes=30), [("POST", 0), ("POST", 60), ("POST", 360), ("POST", 1260)])
+        self.assertEqual(views._live_preview_from_run(run)["status"], "not_started")
+
+    def test_a_legacy_not_available_draft_is_rearmed_once(self):
+        """Older content-only drafts stored a 2xx, non-retryable not_available that the ladder now previews."""
+        run = self.with_preview(self.LEGACY_NOT_AVAILABLE)
+        # A Content Factory without the ladder answers the same: asked once, then stamped.
+        self.assertEqual(self.poll(run, self.LEGACY_NOT_AVAILABLE, minutes=30), [("POST", 0)])
+        self.assertTrue(run.result["livePreview"]["autoStartRearmedAt"])
+        # The ladder answers with its first rung, which is then read back.
+        building = {"available": False, "status": "building", "previewMode": "platform_deployment", "previewRung": "exact",
+                    "proof": {"hostedBuild": "a" * 32, "previewLadder": {"cycle": 1, "attempts": []}}}
+        run = self.with_preview(self.LEGACY_NOT_AVAILABLE)
+        calls = self.poll(run, lambda method: building, minutes=1, every_seconds=20)
+        self.assertEqual([method for method, _seconds in calls], ["POST", "GET", "GET"])
+        self.assertNotIn("autoStartRearmedAt", run.result["livePreview"])
+
+    def test_an_expired_ready_preview_starts_a_new_cycle(self):
+        """A ready preview is stored as ready; past its expiry only a start lets Content Factory rebuild it."""
+        past = (timezone.now() - timedelta(hours=10)).isoformat()
+        building = {"available": False, "status": "building", "previewMode": "platform_deployment", "previewRung": "exact",
+                    "proof": {"hostedBuild": "c" * 32, "previewLadder": {"cycle": 2, "attempts": []}}}
+        for label, stored in (("cloudflare", self.ready(previewExpiresAt=past)), ("shell", self.shell(expiresAt=past))):
+            with self.subTest(label):
+                run = self.with_preview(stored)
+                calls = self.poll(run, lambda method: building, minutes=1, every_seconds=20)
+                self.assertEqual([method for method, _seconds in calls], ["POST", "GET", "GET"])
+        with self.subTest("before_expiry"):
+            self.assertEqual(self.poll(self.with_preview(self.ready()), AssertionError, minutes=5), [])
+
+    def test_a_failed_rung_that_does_not_end_the_cycle_is_moved_on(self):
+        failed = {"available": False, "status": "failed", "retryable": False, "previewRung": "snapshot",
+                  "errorCode": "platform_preview_failed", "autoRetry": True, "nextRetryAt": "",
+                  "proof": {"hostedBuild": "b" * 32, "previewLadder": {"cycle": 1, "attempts": []},
+                            "previewLadderExhausted": False}}
+        building = {"available": False, "status": "building", "previewRung": "template",
+                    "proof": {"hostedBuild": "d" * 32, "previewLadder": {"cycle": 1, "attempts": []}}}
+        calls = self.poll(self.with_preview(failed), lambda method: building, minutes=1, every_seconds=20)
+        self.assertEqual([method for method, _seconds in calls], ["POST", "GET", "GET"])
+
+    def test_every_automatic_start_logs_the_rearm_line(self):
+        """Spec section 5 step 3 greps for this line; 1d1aebc0 may have no stored preview at all."""
+        run = self.with_preview(None)
+        with self.assertLogs(views.logger, level="INFO") as logs:
+            self.ensure(run, {"available": False, "status": "building", "previewRung": "exact"})
+        self.assertTrue(any("content_factory_live_preview_rearm run_id=synthetic-draft" in line
+                            and "previous_status=missing" in line for line in logs.output), logs.output)
+
     @override_settings(CONTENT_FACTORY_PORTABLE_PREVIEW_REARM=False)
     def test_flag_off_leaves_a_stored_refusal_final(self):
         run = self.with_preview(self.LEGACY_REFUSAL)
@@ -364,9 +563,14 @@ class PortablePreviewRearmTests(SimpleTestCase):
                   "previewUnavailableReason": "content_only_no_render_artifact"}
         cases = (
             ("legacy", legacy, "content_only_no_render_artifact", True),
-            ("rung", {**legacy, "previewRung": ""}, "", False),
+            # Content Factory lists the ladder's fields, empty, on every payload: that is no ladder.
+            ("empty_ladder_keys", {**legacy, "previewRung": "", "preview_rung": "", "previewFallback": [],
+                                   "autoRetry": None, "proof": {"previewUnavailableReason": "content_only_no_render_artifact"}},
+             "content_only_no_render_artifact", True),
+            ("rung", {**legacy, "previewRung": "exact"}, "", False),
             ("snake_rung", {**legacy, "preview_rung": "exact"}, "", False),
             ("proof_ladder", {**legacy, "proof": {"previewLadder": {"cycle": 1}}}, "", False),
+            ("proof_exhausted", {**legacy, "proof": {"previewLadderExhausted": True}}, "", False),
         )
         with patch.object(views, "_article_draft_title_keyword", return_value=("Dog beach playdates", "dog beach")):
             for label, live_preview, reason, unavailable in cases:
