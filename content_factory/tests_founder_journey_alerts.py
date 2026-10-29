@@ -448,7 +448,8 @@ class PrivateStrategyKeyTests(FounderJourneyFixture):
     def test_a_config_holding_only_private_keys_is_not_island_refresh_eligible(self):
         alerts.queue_founder_journey_alert(organization=self.org, alert_reason="free_cap_spike")
         config = OrganizationContentConfig.objects.get(organization=self.org)
-        config.pillar_strategy = {**config.pillar_strategy, "previous_owner": {"user_id": 1}}
+        config.pillar_strategy = {**config.pillar_strategy, "previous_owner": {"user_id": 1},
+                                  "startup_profile_details": {"founderProfiles": []}}
         config.save(update_fields=["pillar_strategy"])
         self.assertFalse(island_refresh_scheduler._has_pillar_strategy(config))
         self.assertNotIn(config.pk, {item.pk for item in island_refresh_scheduler._eligible_configs()})
