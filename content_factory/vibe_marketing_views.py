@@ -3232,9 +3232,24 @@ def _article_draft_action(run):
     return "continue", "Continue"
 
 
+def _portable_preview_rearm_enabled() -> bool:
+    return getattr(settings, "CONTENT_FACTORY_PORTABLE_PREVIEW_REARM", False) is True
+
+
+def _live_preview_ladder_present(live_preview) -> bool:
+    """Content Factory's preview ladder owns this preview's attempts and retries."""
+    proof = _run_mapping(live_preview.get("proof"))
+    return any(key in live_preview for key in ("previewRung", "preview_rung")) or any(
+        key in proof for key in ("previewLadder", "preview_ladder"))
+
+
 def _article_preview_unavailable_reason(run) -> str:
     result = _run_mapping(run.result)
     live_preview = _run_mapping(result.get("livePreview") or result.get("live_preview"))
+    if _portable_preview_rearm_enabled() and _live_preview_ladder_present(live_preview):
+        # The ladder is still building or retrying, so no reason is final. This
+        # also ends the content-only Restart offer that would reuse the payment.
+        return ""
     proof = _run_mapping(live_preview.get("proof"))
     native_failure = _run_mapping(live_preview.get("nativePreviewFailure") or live_preview.get("native_preview_failure"))
     return str(
@@ -3965,10 +3980,27 @@ def _should_augment_article_review_manifest(run):
     )
 
 
+# Content Factory's preview ladder fields: camelCase, snake_case alias, empty value.
+LIVE_PREVIEW_LADDER_FIELDS = (
+    ("previewRung", "preview_rung", ""),
+    ("previewFidelity", "preview_fidelity", ""),
+    ("templateSourceUrl", "template_source_url", ""),
+    ("previewFallback", "preview_fallback", []),
+    ("previewExpiresAt", "preview_expires_at", ""),
+    ("nextRetryAt", "next_retry_at", ""),
+    ("autoRetry", "auto_retry", None),
+    ("failureReason", "failure_reason", ""),
+)
+
+
 def _normalize_live_preview_payload(payload):
     if not isinstance(payload, dict):
         return {}
     normalized = dict(payload)
+    if _portable_preview_rearm_enabled():
+        for camel, snake, _empty in LIVE_PREVIEW_LADDER_FIELDS:
+            if camel not in normalized and snake in normalized:
+                normalized[camel] = normalized[snake]
     platform_status = str(normalized.get("platformStatus") or normalized.get("platform_status") or "").strip().lower()
     available = bool(normalized.get("available"))
     native_failure = normalized.get("nativePreviewFailure") or normalized.get("native_preview_failure") or {}
@@ -4015,7 +4047,7 @@ def _live_preview_from_run(run):
         or proof.get("preview_unavailable_reason")
         or ""
     ).strip()
-    return {
+    serialized = {
         "available": bool(payload.get("available")),
         "status": payload.get("status") or "not_started",
         "previewUrl": payload.get("previewUrl") or payload.get("preview_url") or "",
@@ -4077,6 +4109,15 @@ def _live_preview_from_run(run):
         "builderWorkflow": payload.get("builderWorkflow") or payload.get("builder_workflow") or "",
         "builderRunUrl": payload.get("builderRunUrl") or payload.get("builder_run_url") or "",
     }
+    if _portable_preview_rearm_enabled():
+        # The ladder's rung, fidelity and retry schedule; proof (previewLadder) passes through whole.
+        for camel, _snake, empty in LIVE_PREVIEW_LADDER_FIELDS:
+            value = payload.get(camel)
+            if empty is None:
+                serialized[camel] = value if isinstance(value, bool) else None
+            else:
+                serialized[camel] = value if isinstance(value, type(empty)) else empty
+    return serialized
 
 
 def _content_factory_live_preview_proxy_prefix(run_id):
@@ -4654,6 +4695,16 @@ def _persist_live_preview_payload(run, payload):
     if isinstance(payload, dict) and payload:
         payload = _normalize_live_preview_payload(payload)
         payload = _rewrite_live_preview_payload_for_browser(run.run_id, payload)
+        if _portable_preview_rearm_enabled() and run.workflow in ARTICLE_WORKFLOWS and getattr(run, "pk", None):
+            # This run was loaded before the Content Factory call, and a status
+            # mirror may have saved newer result keys since. Write livePreview
+            # alone onto the locked current row so none of them is lost.
+            with transaction.atomic():
+                current = ContentFactoryRun.objects.select_for_update().get(pk=run.pk)
+                current.result = {**_run_mapping(current.result), "livePreview": payload}
+                current.save(update_fields=["result", "updated_at"])
+            run.result, run.updated_at = current.result, current.updated_at
+            return run
         result = dict(run.result or {})
         result["livePreview"] = payload
         update_fields = ["result", "updated_at"]
@@ -4871,6 +4922,47 @@ def _persist_live_preview_payload(run, payload):
     return run
 
 
+# Content Factory answers a portable preview GET with the ladder attempt in progress.
+PORTABLE_LIVE_PREVIEW_REFRESH_STATUSES = {"preparing", "building", "dispatched", "starting", "running"}
+
+
+def _stored_live_preview(run):
+    result = _run_mapping(run.result)
+    return _run_mapping(result.get("livePreview") or result.get("live_preview"))
+
+
+def _portable_article_preview_should_rearm(run):
+    """Ask Content Factory's ladder again; it owns the cycle, the backoff and de-duplication.
+
+    A start is always ``force: false``, so Content Factory returns the current
+    attempt instead of dispatching another one. ``nextRetryAt`` and
+    ``autoRetry`` come from Content Factory and only stop this side asking early.
+    """
+    stored = _stored_live_preview(run)
+    if not stored:
+        return True
+    live_preview = _live_preview_from_run(run)
+    preview_status = str(live_preview.get("status") or "").strip().lower()
+    if preview_status in {"not_started", "queued", "expired"}:
+        return True
+    if live_preview.get("available") and live_preview.get("previewUrl"):
+        return False
+    if preview_status in {"failed", "blocked"} and live_preview.get("retryable"):
+        # "blocked" is this backend's own retryable stand-in for an unreachable
+        # Content Factory (_blocked_worker_payload), like a transport failure.
+        if live_preview.get("autoRetry") is False:
+            return False
+        next_retry_at = _parse_handoff_timestamp(live_preview.get("nextRetryAt"))
+        return next_retry_at is None or next_retry_at <= timezone.now()
+    # A refusal stored before the ladder existed (PawShare run 1d1aebc0's 409)
+    # is asked once more; a refused re-arm is stamped and not asked again.
+    return bool(
+        stored.get("content_factory_status_code") == 409
+        and not _live_preview_ladder_present(stored)
+        and not stored.get("autoStartRearmedAt")
+    )
+
+
 def _article_preview_should_auto_prepare(run):
     if not run or run.workflow not in ARTICLE_WORKFLOWS:
         return False
@@ -4878,6 +4970,8 @@ def _article_preview_should_auto_prepare(run):
         return False
     if not _component_manifest_from_run(run):
         return False
+    if _portable_preview_rearm_enabled() and _portable_article_preview_run(run):
+        return _portable_article_preview_should_rearm(run)
 
     live_preview = _live_preview_from_run(run)
     if live_preview.get("available") and live_preview.get("previewUrl"):
@@ -4900,6 +4994,11 @@ def _article_preview_should_refresh(run):
     live_preview = _live_preview_from_run(run)
     if live_preview.get("available") and live_preview.get("previewUrl"):
         return False
+    if _portable_preview_rearm_enabled() and _portable_article_preview_run(run):
+        # A ladder attempt in progress is read back, even when it records an
+        # earlier rung's error; only Content Factory's GET settles it.
+        preview_status = str(live_preview.get("status") or "").strip().lower()
+        return not live_preview.get("available") and preview_status in PORTABLE_LIVE_PREVIEW_REFRESH_STATUSES
     if live_preview.get("error"):
         return False
     preview_status = str(live_preview.get("status") or "").strip().lower()
@@ -4999,6 +5098,16 @@ def _ensure_article_live_preview(run):
         return _persist_live_preview_payload(run, payload)
     if not _article_preview_should_auto_prepare(run):
         return run
+    portable_rearm = _portable_preview_rearm_enabled() and _portable_article_preview_run(run)
+    previous = _stored_live_preview(run) if portable_rearm else {}
+    if previous:
+        logger.info(
+            "content_factory_live_preview_rearm run_id=%s workflow=%s previous_status=%s previous_status_code=%s",
+            run.run_id,
+            run.workflow,
+            previous.get("status"),
+            previous.get("content_factory_status_code"),
+        )
     logger.info(
         "content_factory_live_preview_auto_start run_id=%s workflow=%s",
         run.run_id,
@@ -5016,6 +5125,10 @@ def _ensure_article_live_preview(run):
             run.workflow,
             payload.get("error"),
         )
+    if portable_rearm and isinstance(payload, dict) and payload.get("content_factory_status_code"):
+        # Content Factory refused this automatic start (non-2xx). The stamp
+        # keeps the legacy re-arm to one attempt; a founder's Retry replaces it.
+        payload = {**payload, "autoStartRearmedAt": timezone.now().isoformat()}
     return _persist_live_preview_payload(run, payload)
 
 

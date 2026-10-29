@@ -1092,6 +1092,10 @@ CONTENT_FACTORY_PREVIEW_LINK_TTL_SECONDS = int(
 CONTENT_FACTORY_LIVE_PREVIEW_START_READ_TIMEOUT_SECONDS = int(
     os.getenv('CONTENT_FACTORY_LIVE_PREVIEW_START_READ_TIMEOUT_SECONDS', '20')
 )
+# Completed portable drafts ask Content Factory's preview ladder again after a
+# refusal, failure or expiry. Content Factory owns retry timing; enable only
+# after its ladder is deployed.
+CONTENT_FACTORY_PORTABLE_PREVIEW_REARM = os.getenv('CONTENT_FACTORY_PORTABLE_PREVIEW_REARM', 'false').lower() == 'true'
 CONTENT_FACTORY_API_KEY = os.getenv('CONTENT_FACTORY_API_KEY')
 # Articles B1/B5 receivers ship disabled; release approval and qualifying zoo
 # evidence are required before enrolling customer operations.
