@@ -22,6 +22,7 @@ from datetime import datetime, timedelta, timezone as datetime_timezone
 from typing import Optional
 
 from django.conf import settings
+from django.core.cache import cache
 from django.db.models import Max, Min
 from django.utils import timezone
 from django.utils.dateparse import parse_datetime
@@ -57,6 +58,10 @@ QUEUE_POSITION_MAX_CANDIDATES = 500
 ETA_MIN_SAMPLES = 5
 ETA_SAMPLE_WINDOW = timedelta(days=7)
 ETA_MAX_SAMPLES = 50
+# Status polls serialize every queued run every few seconds, so the median is
+# cached per queue rather than re-aggregated on each poll.
+ETA_MEDIAN_CACHE_PREFIX = "content-factory:queue-eta-median:"
+ETA_MEDIAN_CACHE_SECONDS = 60
 
 
 def interactive_queue_class(payload) -> Optional[str]:
@@ -134,6 +139,28 @@ def interactive_queue_slots() -> int:
         return 0
 
 
+def _cached_median_run_seconds(queue_name: str, *, now: datetime) -> Optional[float]:
+    """``_median_run_seconds`` cached per queue for ``ETA_MEDIAN_CACHE_SECONDS``.
+
+    The cached value is wrapped so "too few samples" (None) is cached too. A
+    cache outage falls back to computing the median directly.
+    """
+    key = f"{ETA_MEDIAN_CACHE_PREFIX}{queue_name}"
+    try:
+        cached = cache.get(key)
+    except Exception:
+        logger.warning("Queue ETA median cache is unavailable; computing it directly.", exc_info=True)
+        return _median_run_seconds(queue_name, now=now)
+    if isinstance(cached, dict) and "median" in cached:
+        return cached["median"]
+    median = _median_run_seconds(queue_name, now=now)
+    try:
+        cache.set(key, {"median": median}, ETA_MEDIAN_CACHE_SECONDS)
+    except Exception:
+        logger.warning("Queue ETA median cache is unavailable; not caching it.", exc_info=True)
+    return median
+
+
 def _median_run_seconds(queue_name: str, *, now: datetime) -> Optional[float]:
     """Median working time of recently completed runs on ``queue_name``, or None below the sample floor."""
     from workflow_runs.models import ContentFactoryRun
@@ -163,7 +190,8 @@ def queue_position_payload(run, *, now=None) -> dict:
 
     While ``run.status`` is ``queued`` and content-factory has mirrored its
     ``queue_name`` and ``queued_at``, returns ``queuePosition`` (1-based),
-    ``queueAhead``, ``queueEtaSeconds`` (null until an ETA is meaningful) and
+    ``queueAhead``, ``queueEtaSeconds`` (null when the ETA is off, below the
+    sample floor, or for the run at the front of the line) and
     ``queueObservedAt``. Runs ahead are other queued runs on the same queue with
     an earlier ``queued_at`` inside the last two hours.
     """
@@ -194,10 +222,12 @@ def queue_position_payload(run, *, now=None) -> dict:
         if other_queued_at is not None and window_start <= other_queued_at < queued_at:
             ahead += 1
 
+    # The front of the line has no wait to estimate: its ETA stays null (the
+    # client then shows only the place in line), and no median is read for it.
     eta_seconds = None
     slots = interactive_queue_slots()
-    if slots:
-        median = _median_run_seconds(queue_name, now=now)
+    if slots and ahead:
+        median = _cached_median_run_seconds(queue_name, now=now)
         if median is not None:
             eta_seconds = int(math.ceil(ahead / slots) * median)
 

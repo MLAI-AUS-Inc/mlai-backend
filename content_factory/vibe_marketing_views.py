@@ -14149,7 +14149,8 @@ def _queue_content_factory_run_authorized(*, endpoint, workflow, context, config
                         organization=context.organization, workflow=workflow, actor_id=actor_id, payload=payload)
             try:
                 post_attempted = True
-                response = http_client.post(url, json=payload, headers=_content_factory_headers(), timeout=(3, 10))
+                from content_factory.run_queue_position import with_interactive_queue_class
+                response = http_client.post(url, json=with_interactive_queue_class(payload), headers=_content_factory_headers(), timeout=(3, 10))
                 request_exception = None
             except http_client.RequestException as exc:
                 request_exception = exc

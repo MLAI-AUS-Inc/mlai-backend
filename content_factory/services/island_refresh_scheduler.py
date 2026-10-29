@@ -7,16 +7,21 @@ unique constraint is the idempotency record, so once today's row exists a tick i
 a cheap existence check per org.
 
 The refresh is free (no Roo charge) and sends no notification, so unlike the
-discovery loops it can serve cold-start web orgs that have no Slack owner and no
-automations - they are exactly the orgs whose graph would otherwise never grow.
+discovery loops it serves web orgs that have no Slack owner and no automations.
 
 A refresh reclusters the org's researched keywords, and content-factory fails it
-outright when there are none. So only orgs with at least one researched keyword
-are dispatched; seedable orgs without keywords are counted as
-``skipped_no_keywords`` and never failed or denied. The dispatch is organization
-scoped (no website connection), so an org with keywords and no connection still
-refreshes. During scheduled founder workshops (``ARTICLES_WORKSHOP_WINDOWS``)
-nothing is dispatched.
+with "No researched keywords" when its load step finds none. So only seedable
+orgs (islands, clusters or a pillar strategy) with at least one researched
+keyword are dispatched; seedable orgs without keywords are counted as
+``skipped_no_keywords`` and never failed or denied. This drops the old
+cold-start path: content-factory's DataForSEO expansion of pillar-seeded islands
+runs before that load step and could write an org's first keywords, but when it
+found none that cleared its volume and difficulty bars the run failed. A
+cold-start org now gets its first keywords from topic discovery (its first
+topic batch) and is refreshed from the next night after that. Orgs with keywords but nothing seedable stay ineligible, as
+before. The dispatch is organization scoped (no website connection), so an org
+with keywords and no connection still refreshes. During scheduled founder
+workshops (``ARTICLES_WORKSHOP_WINDOWS``) nothing is dispatched.
 """
 from __future__ import annotations
 
@@ -131,8 +136,9 @@ def _partition_configs() -> tuple[list, list]:
     """Split seedable orgs into (eligible, skipped_no_keywords).
 
     Eligible orgs have at least one researched keyword (see
-    ``has_researched_keywords``). Seedable orgs without one would only fail in
-    content-factory with "No researched keywords", so they are skipped.
+    ``has_researched_keywords``). Seedable orgs without one are skipped: their
+    refresh could only complete if DataForSEO expansion happened to write the
+    first keywords, and otherwise fails with "No researched keywords".
     """
     configs = list(
         OrganizationContentConfig.objects.select_related("organization").order_by("organization_id")

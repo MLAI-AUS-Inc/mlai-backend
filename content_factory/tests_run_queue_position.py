@@ -3,6 +3,8 @@ from datetime import datetime, timedelta, timezone as datetime_timezone
 from types import SimpleNamespace
 from unittest.mock import patch
 
+from django.contrib.auth import get_user_model
+from django.core.cache import cache
 from django.test import SimpleTestCase, TestCase, override_settings
 
 from content_factory.billing import build_roo_points_authorization_payload
@@ -168,6 +170,65 @@ class QueueClassCallSiteTests(TestCase):
         self.assertNotIn("queue_class", row.payload["request"])
 
 
+class _WebResponse(_Response):
+    @property
+    def content(self):
+        return b"{}"
+
+
+@override_settings(CONTENT_FACTORY_URL="https://cf.example.test", CONTENT_FACTORY_API_KEY="secret-key", IS_LOCAL_ENV=False)
+class WebStartQueueClassTests(TestCase):
+    """Founder web starts POST through _queue_content_factory_run_authorized, so the class is attached there too."""
+
+    def setUp(self):
+        self.user = get_user_model().objects.create_user(email="queue-class@example.com", password="password")
+        self.organization = Organization.objects.create(name="Founder", domain="founder.example.com")
+        self.config = OrganizationContentConfig.objects.create(organization=self.organization)
+        self.context = SimpleNamespace(profile=SimpleNamespace(user=self.user), organization=self.organization)
+
+    def _post_body(self, *, endpoint, workflow, payload):
+        from content_factory import vibe_marketing_views as views
+
+        with patch("content_factory.vibe_marketing_views.http_client.post",
+                   return_value=_WebResponse(status_code=202, payload={"run_id": f"cf-{endpoint}-1", "status": "queued"})) as post, \
+                patch("content_factory.vibe_marketing_views._refresh_article_editorial_payload", return_value=None):
+            views._queue_content_factory_run(endpoint=endpoint, workflow=workflow, context=self.context,
+                                             config=self.config, payload=payload)
+        post.assert_called_once()
+        return post.call_args.kwargs["json"]
+
+    def test_a_web_autofill_start_asks_for_the_interactive_queue(self):
+        payload = {"domain": "founder.example.com", "request_source": "ai_solopreneur", "persist": False,
+                   **_gate("startup_autofill", billing_status="free")}
+        body = self._post_body(endpoint="autofill", workflow="startup_autofill", payload=payload)
+        self.assertEqual(body["queue_class"], "interactive")
+        self.assertNotIn("queue_class", payload)
+
+    def test_an_entitled_web_first_article_asks_for_the_interactive_queue(self):
+        payload = {"domain": "founder.example.com", "target_keyword": "ai grants", "delivery_mode": "content_only",
+                   **_entitled("article_generation")}
+        body = self._post_body(endpoint="article", workflow="article_generation", payload=payload)
+        self.assertEqual(body["queue_class"], "interactive")
+
+    def test_an_entitled_web_first_topic_batch_asks_for_the_interactive_queue(self):
+        payload = {"domain": "founder.example.com", "requested_topic_count": 4,
+                   **_entitled("content_island_topic_generation")}
+        body = self._post_body(endpoint="discovery", workflow="auto_discovery", payload=payload)
+        self.assertEqual(body["queue_class"], "interactive")
+
+    def test_a_web_article_outside_the_entitlement_keeps_the_default_queue(self):
+        payload = {"domain": "founder.example.com", "target_keyword": "ai grants", "delivery_mode": "content_only",
+                   **_gate("article_generation", billing_status="gated")}
+        body = self._post_body(endpoint="article", workflow="article_generation", payload=payload)
+        self.assertNotIn("queue_class", body)
+
+    def test_paid_island_research_never_gets_a_class(self):
+        payload = {"domain": "founder.example.com", "island_research_brief": {"topic": "grants"},
+                   "requested_topic_count": 1, **_entitled("content_island_topic_generation")}
+        body = self._post_body(endpoint="island-research", workflow="island_refresh", payload=payload)
+        self.assertNotIn("queue_class", body)
+
+
 def _queued(run_id, *, queue_name="interactive", queued_at, status="queued", updated_at=None):
     run = ContentFactoryRun.objects.create(
         run_id=run_id, workflow="startup_autofill", domain="founder.example.com", status=status,
@@ -188,6 +249,11 @@ def _completed(run_id, *, seconds, queue_name="interactive", finished=NOW - time
 
 
 class QueuePositionTests(TestCase):
+    def setUp(self):
+        # The ETA median is cached per queue; start every test from an empty cache.
+        cache.clear()
+        self.addCleanup(cache.clear)
+
     def test_position_counts_earlier_runs_on_the_same_queue_within_two_hours(self):
         me = _queued("me", queued_at=NOW - timedelta(minutes=10))
         _queued("ahead-1", queued_at=NOW - timedelta(minutes=30))
@@ -252,6 +318,47 @@ class QueuePositionTests(TestCase):
         # 3 ahead on 2 slots is 2 waves; the median sample is 300 s.
         self.assertEqual(payload["queueAhead"], 3)
         self.assertEqual(payload["queueEtaSeconds"], 600)
+
+    @override_settings(CONTENT_FACTORY_INTERACTIVE_QUEUE_SLOTS=2)
+    def test_the_front_of_the_line_has_no_eta_and_reads_no_median(self):
+        for index in range(6):
+            _completed(f"done-{index}", seconds=300)
+        me = _queued("me", queued_at=NOW - timedelta(minutes=1))
+        with patch("content_factory.run_queue_position._median_run_seconds") as median:
+            payload = queue_position_payload(me, now=NOW)
+        median.assert_not_called()
+        self.assertEqual((payload["queuePosition"], payload["queueAhead"]), (1, 0))
+        self.assertIsNone(payload["queueEtaSeconds"])
+
+    @override_settings(CONTENT_FACTORY_INTERACTIVE_QUEUE_SLOTS=2)
+    def test_the_median_is_cached_per_queue_between_polls(self):
+        _queued("ahead", queued_at=NOW - timedelta(minutes=20))
+        me = _queued("me", queued_at=NOW - timedelta(minutes=10))
+        with patch("content_factory.run_queue_position._median_run_seconds", return_value=240.0) as median:
+            first = queue_position_payload(me, now=NOW)
+            second = queue_position_payload(me, now=NOW)
+        median.assert_called_once()
+        self.assertEqual(first["queueEtaSeconds"], 240)
+        self.assertEqual(second["queueEtaSeconds"], 240)
+
+    @override_settings(CONTENT_FACTORY_INTERACTIVE_QUEUE_SLOTS=2)
+    def test_too_few_samples_is_cached_too(self):
+        _queued("ahead", queued_at=NOW - timedelta(minutes=20))
+        me = _queued("me", queued_at=NOW - timedelta(minutes=10))
+        with patch("content_factory.run_queue_position._median_run_seconds", return_value=None) as median:
+            queue_position_payload(me, now=NOW)
+            payload = queue_position_payload(me, now=NOW)
+        median.assert_called_once()
+        self.assertIsNone(payload["queueEtaSeconds"])
+
+    @override_settings(CONTENT_FACTORY_INTERACTIVE_QUEUE_SLOTS=2)
+    def test_a_cache_outage_still_gives_an_eta(self):
+        _queued("ahead", queued_at=NOW - timedelta(minutes=20))
+        me = _queued("me", queued_at=NOW - timedelta(minutes=10))
+        with patch("content_factory.run_queue_position.cache.get", side_effect=RuntimeError("redis down")), \
+                patch("content_factory.run_queue_position._median_run_seconds", return_value=120.0):
+            payload = queue_position_payload(me, now=NOW)
+        self.assertEqual(payload["queueEtaSeconds"], 120)
 
     def test_a_cf_mirrored_queued_snapshot_yields_a_position(self):
         """Feed the helper the shape content-factory mirrors while a busy queue holds the run."""
