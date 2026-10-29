@@ -239,7 +239,8 @@ class FirstArticleStartTests(EntitlementFixture, TestCase):
         self.assertEqual(capabilities["prices"]["article"], 0)
         self.assertEqual((capabilities["prices"]["researchTopic"], capabilities["prices"]["research"]), (0, 0))
         self.assertEqual(capabilities["firstArticle"], {"version": 1, "status": "available", "free": True,
-            "attemptsUsed": 0, "attemptsAllowed": 2, "topicBatchFree": True, "runId": None, "limit": None})
+            "attemptsUsed": 0, "attemptsAllowed": 2, "topicBatchFree": True, "runId": None, "limit": None,
+            "deliveryMode": "content_only"})
         with override_settings(ARTICLES_FREE_FIRST_ARTICLE_ENABLED=False):
             paid = article_capabilities(config, domain=self.org.domain, user=self.user, first_article=self.state())
         self.assertEqual(paid["prices"]["article"], 12)
@@ -259,27 +260,61 @@ class FirstArticleSettlementTests(EntitlementFixture, TestCase):
         self.assertEqual(first_article.entitlement_payload(run), {"entitlementStatus": "consumed",
             "entitlementRetryAvailable": False})
 
+    def cancel(self, run, *, receipt=True):
+        """The owner's local cancel, with Content Factory's bound stop receipt or none."""
+        remote = {"article_cancellation_v1": self.stop_receipt(run)} if receipt else {}
+        return views._cancel_local_article_run(run=run, organization=self.org, remote_data=remote)
+
     def test_owner_cancel_before_writing_releases_and_after_writing_consumes(self):
         early = self.make_run(self.started(), step="research_topic")
-        first_article.settle_owner_cancel(early)
+        self.cancel(early)
         self.assertEqual(keys(self.org), ["attempt:1", "attempt:1:released"])
         self.assertEqual(first_article.entitlement_payload(early), {"entitlementStatus": "released",
             "entitlementRetryAvailable": True})
         late = self.make_run(self.started(key="second-try"), step="draft_section:introduction")
-        first_article.settle_owner_cancel(late)
+        self.cancel(late)
         self.assertIn("consumed", keys(self.org))
         self.assertEqual(self.state()["status"], "used")
 
-    def test_child_runs_never_settle_the_entitlement(self):
+    def test_owner_delete_of_a_failed_free_draft_does_not_use_it_up(self):
+        # PawShare-style: the free draft failed at plan_article and delivered nothing.
+        run = self.make_run(self.started(), status="failed", step="plan_article")
+        self.cancel(run)
+        self.assertEqual(keys(self.org), ["attempt:1", "attempt:1:released"])
+        self.assertEqual(self.state()["status"], "available")
+
+    def test_owner_cancel_without_a_stop_receipt_waits_for_the_stop_sweep(self):
+        # The worker may still be running: a release now could run two free drafts at once.
+        run = self.make_run(self.started(), step="research_topic")
+        cancelled = self.cancel(run, receipt=False)
+        self.assertEqual(keys(self.org), ["attempt:1"])
+        self.assertEqual((cancelled.result["article_terminal_refund"]["status"],
+            cancelled.result["reconciliation_refund_pending"]), ("stop_required", True))
+        from .article_publication_evidence import exhausted_article_candidate
+        self.assertTrue(exhausted_article_candidate(cancelled))
+        from .billing import public_run_billing_receipt
+        # Nothing was paid, so the client never sees a refund on the way.
+        self.assertEqual(public_run_billing_receipt(cancelled.run_request, cancelled.result),
+            {"billingStatus": "entitled", "refundStatus": "none"})
+        # The sweep's stop then releases the attempt once.
+        from .article_publication_evidence import cancellation_result
+        cancelled.result = cancellation_result(cancelled, {"article_cancellation_v1": self.stop_receipt(cancelled)})
+        self.assertEqual(keys(self.org), ["attempt:1", "attempt:1:released"])
+
+    def test_a_lineage_stop_never_releases_while_another_run_of_it_is_going(self):
         payload = self.started()
         parent = self.make_run(payload)
         child = self.make_run({**payload, "original_billing_source_run_id": parent.run_id}, status="failed")
         self.assertFalse(first_article.release_entitlement(organization=None, run=child, reason="revision_failed"))
-        self.assertFalse(first_article.consume_entitlement(organization=None, run=child))
         first_article.settle_owner_cancel(child)
         self.assertEqual(keys(self.org), ["attempt:1"])
         # The child is still covered by its parent's live attempt.
         self.assertEqual(first_article.lineage_entitlement(child).pk, int(payload["roo_points_ledger_id"]))
+        # Once the last run of the lineage stops without a draft, the attempt is given back.
+        parent.status = "failed"
+        parent.save(update_fields=["status"])
+        self.assertTrue(first_article.release_entitlement(organization=None, run=parent, reason="worker_lost"))
+        self.assertEqual(keys(self.org), ["attempt:1", "attempt:1:released"])
 
     def test_delivery_after_release_writes_nothing_and_still_counts_as_used(self):
         run = self.make_run(self.started())
@@ -383,26 +418,75 @@ class EntitledChildRunTests(EntitlementFixture, TestCase):
             failure_detail="Start a new article.")
         return error, payload
 
-    def test_restart_of_a_live_attempt_runs_on_its_grant_and_settles_nothing(self):
+    def test_restart_of_a_live_attempt_runs_on_its_grant_and_its_delivery_is_the_free_article(self):
         original = self.started()
-        run = self.make_run(original, status="failed")
+        run = self.make_run(original, status="failed", step="draft_section:intro")
         error, payload = self.reuse(run)
         self.assertIsNone(error)
         self.assertEqual((payload["roo_points_billing_status"], payload["roo_points_entitlement"],
             payload["roo_points_cost"], payload["roo_points_ledger_id"], payload["original_billing_source_run_id"]),
             ("entitled", "first_article", 0, original["roo_points_ledger_id"], run.run_id))
-        child = self.make_run({**original, **payload}, status="completed")
+        child = self.make_run({**original, **payload, "client_request_id": "restart-1"}, status="completed",
+            step="finalize")
         first_article.settle_entitlement_for_run(child)
-        self.assertEqual(keys(self.org), ["attempt:1"])
+        self.assertEqual(keys(self.org), ["attempt:1", "consumed"])
+        self.assertEqual((self.state()["status"], self.state()["run_id"]), ("used", child.run_id))
+        self.assertEqual(first_article.entitlement_payload(child)["entitlementStatus"], "consumed")
+        # The failed original can no longer give the attempt back.
+        self.assertFalse(first_article.release_entitlement(organization=None, run=run, reason="late_failure"))
         # A consumed attempt still covers comment revisions of the delivered article.
-        first_article.settle_entitlement_for_run(self.make_run(original, status="completed"))
         self.assertIsNone(self.reuse(child)[0])
+
+    def test_deleting_the_failed_original_after_its_restart_delivered_keeps_it_used(self):
+        original = self.started()
+        run = self.make_run(original, status="failed", step="research_topic")
+        _error, payload = self.reuse(run)
+        child = self.make_run({**original, **payload, "client_request_id": "restart-1"}, status="completed",
+            step="finalize")
+        first_article.settle_entitlement_for_run(child)
+        views._cancel_local_article_run(run=run, organization=self.org,
+            remote_data={"article_cancellation_v1": self.stop_receipt(run)})
+        self.assertEqual(keys(self.org), ["attempt:1", "consumed"])
+        self.assertEqual(self.state()["status"], "used")
+
+    def test_the_failed_original_waits_for_its_running_restart(self):
+        original = self.started()
+        run = self.make_run(original, status="failed", step="research_topic")
+        _error, payload = self.reuse(run)
+        child = self.make_run({**original, **payload, "client_request_id": "restart-1"}, status="running")
+        views._cancel_local_article_run(run=run, organization=self.org,
+            remote_data={"article_cancellation_v1": self.stop_receipt(run)})
+        self.assertEqual(keys(self.org), ["attempt:1"])
+        self.assertEqual((self.state()["status"], self.state()["run_id"]), ("in_progress", child.run_id))
+        # The restart then stops without a draft: as the last run it releases.
+        views._cancel_local_article_run(run=child, organization=self.org,
+            remote_data={"article_cancellation_v1": self.stop_receipt(child)})
+        self.assertEqual(keys(self.org), ["attempt:1", "attempt:1:released"])
+
+    def test_a_comment_on_the_free_draft_revises_without_the_balance_floor(self):
+        from . import article_review_views
+        original = self.started()
+        run = self.make_run(original, status="completed", step="finalize")
+        first_article.settle_entitlement_for_run(run)
+        payload = {"commentIds": ["comment-1"]}
+        context = SimpleNamespace(organization=self.org)
+        with patch.object(views, "_setup_blocked_response_for_generation", return_value=None), \
+                patch.object(views, "_revision_editorial_payload_from_run", return_value=({}, None)), \
+                patch.object(views, "_require_roo_points_for_ai_agent") as gate:
+            self.assertIsNone(article_review_views._revision_authorization(SimpleNamespace(user=self.user), context,
+                run, payload))
+        gate.assert_not_called()
+        self.assertEqual((payload["roo_points_billing_status"], payload["roo_points_ledger_id"],
+            payload["original_billing_source_run_id"]), ("entitled", original["roo_points_ledger_id"], run.run_id))
+        self.assertEqual(keys(self.org), ["attempt:1", "consumed"])
+
 
     def test_restart_of_a_released_attempt_is_refused(self):
         run = self.make_run(self.started(), status="cancelled")
         first_article.release_entitlement(organization=None, run=run, reason="owner_cancelled")
         error, payload = self.reuse(run)
         self.assertEqual((error.status_code, error.data["code"]), (409, "roo_points_billing_required"))
+        self.assertEqual(error.data["detail"], "This free draft was stopped. Start a new article instead.")
         self.assertEqual(payload, {})
 
     def test_revising_the_free_article_skips_the_balance_floor(self):
@@ -483,6 +567,32 @@ class FreeFirstTopicBatchTests(EntitlementFixture, TestCase):
         error = self.research(key="topics-other", org=other)[2]
         self.assertEqual(error.data["costPoints"], 4)
 
+    def test_a_failed_free_batch_gets_one_free_rerun(self):
+        from integrations.services.article_generation import maybe_auto_refund_terminal_failure
+        for island in ("pet-insurance", ""):
+            org = self.make_org(f"topics-{island or 'plain'}.example.test")
+            user = User.objects.create_user(email=f"owner@{org.domain}")
+            self.user = user
+            with self.subTest(island=island or None):
+                payload, _request, error = self.research(key="topics-1", org=org, island=island)
+                self.assertIsNone(error)
+                run = ContentFactoryRun.objects.create(run_id=f"research-{org.pk}", workflow="auto_discovery",
+                    domain=org.domain, organization=org, status="failed", run_request=payload, result={})
+                # Content Factory's callback job: with and without the billing stamp in its copy.
+                meta = dict(payload) if island else {}
+                job = SimpleNamespace(job_id=run.run_id, domain=org.domain, request_meta=meta, billing_status="",
+                    billing_amount=0, client_request_id=payload["client_request_id"])
+                for _ in range(2):
+                    self.assertEqual(maybe_auto_refund_terminal_failure(job, error_code="EMPTY_RESEARCH_RESULT",
+                        error_message="Research failed.", refundable=True), (False, 0))
+                self.assertEqual(keys(org), ["topics", "topics:released"])
+                run.refresh_from_db()
+                # A research run never gets an article refund receipt.
+                self.assertNotIn("article_terminal_refund", run.result)
+                self.assertTrue(first_article.topic_batch_free(org, user))
+                self.assertIsNone(self.research(key="topics-rerun", org=org, island=island)[2])
+                self.assertEqual(keys(org), ["topics", "topics:released", "topics:retry"])
+
     def test_a_batch_that_never_started_gets_one_free_rerun(self):
         from integrations.services.article_generation import refund_content_factory_topic_generation_for_user
         _payload, request, _error = self.research(key="topics-1")
@@ -494,3 +604,68 @@ class FreeFirstTopicBatchTests(EntitlementFixture, TestCase):
         self.assertIsNone(self.research(key="topics-rerun")[2])
         self.assertEqual(keys(self.org), ["topics", "topics:released", "topics:retry"])
         self.assertEqual(self.research(key="topics-third")[2].data["costPoints"], 4)
+
+@override_settings(**FREE)
+class FirstArticleSweepTests(EntitlementFixture, TestCase):
+    """Every #1234 refund sweep releases a free original run once, and never credits."""
+
+    def stale(self, run, **result):
+        run.result = {**run.result, **result}
+        run.save(update_fields=["result"])
+        from datetime import timedelta
+        from django.utils import timezone
+        ContentFactoryRun.objects.filter(pk=run.pk).update(updated_at=timezone.now() - timedelta(hours=2))
+        run.refresh_from_db()
+        return run
+
+    def assert_released_once(self, run, sweep):
+        for _ in range(2):
+            sweep()
+        run.refresh_from_db()
+        self.assertEqual(keys(self.org), ["attempt:1", "attempt:1:released"])
+        receipt = run.result["article_terminal_refund"]
+        self.assertEqual((receipt["status"], receipt["entitlement_released"]), ("not_required", True))
+        self.assertFalse(receipt.get("paid_obligation", False))
+        self.assertFalse(run.result["reconciliation_refund_pending"])
+        self.assertFalse(Ledger.objects.filter(kind__in=["SPEND", "REFUND"]).exists())
+
+    def test_denied_sweep(self):
+        from django.utils import timezone
+        from . import reconciliation
+        run = self.make_run(self.started(), status="denied", step="plan_article")
+        run = self.stale(run, error_code="website_source_changed", state_version=5,
+            article_cancellation_v1=self.stop_receipt(run))
+        self.assert_released_once(run, lambda: reconciliation._queue_denied_article_refunds(limit=10,
+            now=timezone.now()))
+
+    def test_unrecoverable_sweep(self):
+        from django.utils import timezone
+        from . import reconciliation
+        run = self.make_run(self.started(), status="failed", step="plan_article")
+        run.resume_available = False
+        run.save(update_fields=["resume_available"])
+        run = self.stale(run, state_version=5, error_code="CORPUS_INCOMPLETE", requires_user_action=True,
+            retryable=False, retry_available=False, article_cancellation_v1=self.stop_receipt(run),
+            failure={"version": 1, "code": "CORPUS_INCOMPLETE", "step": "plan_article", "retryable": False,
+                "requires_user_action": True, "retry_policy": "explicit_action"})
+        self.assert_released_once(run, lambda: reconciliation._queue_unrecoverable_article_refunds(limit=10,
+            now=timezone.now()))
+
+    def test_dispatch_rejected_sweep(self):
+        from django.utils import timezone
+        from . import reconciliation
+        payload = self.started()
+        run = self.make_run(payload, status="failed", step="fetch_org_config")
+        run = self.stale(run, error_code="dispatch_rejected", status="failed")
+        record = {"run_id": run.run_id, "run_status": "failed", "error": "backend_rejected:editorial_run_conflict"}
+        with patch.object(views, "_content_factory_remote_config", return_value={"enabled": True}), \
+                patch.object(views, "_lookup_content_factory_dispatch_by_key", return_value=("rejected", record)):
+            self.assert_released_once(run, lambda: reconciliation._queue_dispatch_rejected_article_refunds(limit=10,
+                now=timezone.now()))
+
+    def test_pending_settlement_sweep(self):
+        from . import reconciliation
+        run = self.make_run(self.started(), status="failed", step="research_topic")
+        run = self.stale(run, state_version=5, article_cancellation_v1=self.stop_receipt(run),
+            article_terminal_refund={"status": "pending"}, reconciliation_refund_pending=True)
+        self.assert_released_once(run, lambda: reconciliation._settle_sweep_refunds(limit=10))

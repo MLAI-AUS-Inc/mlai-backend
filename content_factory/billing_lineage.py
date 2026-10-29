@@ -19,8 +19,9 @@ def paid_article_request(request):
 def settlement_owed_request(request):
     """A stop without delivery owes settlement: a refund when paid, a release when free.
 
-    Only the original free attempt is released; its child runs are covered by
-    the same grant and settle nothing.
+    The refund sweeps queue only the original free run. A restart or revision
+    on the same grant settles through its own stop or failure callback, and
+    releases only as the last run of the lineage without a delivery.
     """
     from .first_article_entitlement import original_entitled_request
     return paid_article_request(request) or original_entitled_request(request)

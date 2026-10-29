@@ -42,32 +42,52 @@ def normalized_account_key(user) -> str:
     return f"email:{email}" if email else f"user:{getattr(user, 'pk', '')}"
 
 
-def enforce_free_setup_daily_cap(user, action: str, *, now: Optional[float] = None) -> None:
-    """Allow a free setup research action at most N times per account in 24 hours.
-
-    The window rolls: each use is remembered for 24 hours. A cap of 0 turns the
-    limit off. Over the cap this raises DRF ``Throttled`` (429 + Retry-After),
-    so no new failure code is introduced.
-    """
+def _free_setup_uses(user, action: str, now: Optional[float]):
+    """Return (cap, cache key, current time, uses in the rolling window) for an account."""
     import hashlib
     import time
 
     from django.conf import settings
     from django.core.cache import cache
-    from rest_framework.exceptions import Throttled
 
     setting = FREE_SETUP_RESEARCH_CAP_SETTINGS.get(action)
     cap = int(getattr(settings, setting, 0) or 0) if setting else 0
-    if cap <= 0:
-        return
     current = time.time() if now is None else float(now)
     digest = hashlib.sha256(normalized_account_key(user).encode("utf-8")).hexdigest()
     key = f"content_factory:free_setup:{action}:{digest}"
     window = FREE_SETUP_RESEARCH_WINDOW_SECONDS
     recent = sorted(stamp for stamp in (cache.get(key) or []) if isinstance(stamp, (int, float)) and current - stamp < window)
-    if len(recent) >= cap:
-        raise Throttled(wait=max(1, int(recent[len(recent) - cap] + window - current) + 1))
-    cache.set(key, [*recent, current], timeout=window)
+    return cap, key, current, recent
+
+
+def check_free_setup_daily_cap(user, action: str, *, now: Optional[float] = None) -> None:
+    """Refuse a free setup research action once the account used its N per rolling 24 hours.
+
+    Checking records nothing: a request that never starts research (a reused
+    run, a confirmation 409, a validation error, a queue failure) costs no use.
+    A cap of 0 turns the limit off. Over the cap this raises DRF ``Throttled``
+    (429 + Retry-After), so no new failure code is introduced.
+    """
+    from rest_framework.exceptions import Throttled
+
+    cap, _key, current, recent = _free_setup_uses(user, action, now)
+    if cap > 0 and len(recent) >= cap:
+        raise Throttled(wait=max(1, int(recent[len(recent) - cap] + FREE_SETUP_RESEARCH_WINDOW_SECONDS - current) + 1))
+
+
+def record_free_setup_use(user, action: str, *, now: Optional[float] = None) -> None:
+    """Remember one free setup research run for the account's rolling 24 hour cap."""
+    from django.core.cache import cache
+
+    cap, key, current, recent = _free_setup_uses(user, action, now)
+    if cap > 0:
+        cache.set(key, [*recent, current], timeout=FREE_SETUP_RESEARCH_WINDOW_SECONDS)
+
+
+def enforce_free_setup_daily_cap(user, action: str, *, now: Optional[float] = None) -> None:
+    """Check the cap and record one use (a run that is certain to start)."""
+    check_free_setup_daily_cap(user, action, now=now)
+    record_free_setup_use(user, action, now=now)
 
 
 def get_content_factory_setup_cost_points(domain: Optional[str]) -> int:
@@ -232,7 +252,9 @@ def public_run_billing_receipt(run_request: dict, result: dict) -> dict:
     billing_status = str(run_request.get("roo_points_billing_status") or "").strip()
     if billing_status not in {"charged", "reused", "free", "gated", "refunded", "entitled"}:
         billing_status = "unknown"
-    pending = bool(
+    # A free first article owes no refund. While its release waits for the
+    # worker's stop it is still not a refund on the way.
+    pending = billing_status != "entitled" and bool(
         run_request.get("pending_billing_refund") and not result.get("dispatch_refund_processed")
         or result.get("reconciliation_refund_pending")
     )

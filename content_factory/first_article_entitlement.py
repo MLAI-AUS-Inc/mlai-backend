@@ -18,9 +18,15 @@ An attempt's reference_id is the ledger reference of its original request id,
 so a replay or transport retry finds the same row, and a consumed or released
 row carries the reference of the attempt it settles. The state is derived from
 these rows only: each attempt is reserved, then exactly one of consumed or
-released, and both are terminal. Only the original attempt run settles it.
-Revisions, restarts, re-pins, resumes and comments run on its stamp and never
-consume or release it.
+released, and both are terminal.
+
+An attempt's lineage is every article run stamped with its row id: the
+original run plus the restarts, re-pins, resumes, comments and revisions that
+run on its grant. A delivery anywhere in the lineage consumes the attempt (a
+restart that delivers after its original failed is the free article). A stop
+without delivery releases it only when no run of the lineage has delivered and
+no other run of it is still going, so a failed original whose restart is
+running, or whose restart already delivered, never gives the attempt back.
 """
 from __future__ import annotations
 
@@ -56,16 +62,26 @@ TOPIC_ACTIONS = frozenset({"content_island_topic_generation", "topic_discovery"}
 # plan_article in backend/harness/artifacts.py _STEP_DURATION_PHASE_RULES).
 # A stop after one of these used model spend on writing, so an owner cancel
 # consumes the free article instead of releasing it.
+# The article kit, directory and repair steps (ARTICLE_STEP_LABELS) and the
+# revision steps (ARTICLE_REVISION_STEPS) spend on writing too.
 WRITING_STEPS = frozenset({
-    "plan_article", "assemble_article", "generate_directory_sources", "integrate_directory_sources",
-    "prepare_seed_article_sources", "plan_resource_asset", "generate_resource_pdf", "generate_content_images",
-    "package_content_delivery", "render_article", "validate_render_dependencies", "prepare_bootstrap_publish_target",
-    "prove_publish_surface", "verify_static", "verify_build", "package_publish_bundle", "publish_preview_draft",
-    "acquire_preview_artifact", "verify_browser", "review_visual_style", "await_publish_approval", "await_review",
-    "finalize",
+    "plan_article", "assemble_article", "compose_article_kit", "generate_directory_sources",
+    "integrate_directory_sources", "audit_directory_sources", "repair_directory_source_slots",
+    "refresh_directory_source_quality", "prepare_seed_article_sources", "plan_resource_asset", "generate_resource_pdf",
+    "generate_content_images", "package_content_delivery", "render_article", "validate_render_dependencies",
+    "prepare_bootstrap_publish_target", "prove_publish_surface", "verify_static", "verify_build",
+    "package_publish_bundle", "publish_preview_draft", "acquire_preview_artifact", "verify_browser",
+    "review_visual_style", "repair_build_failure", "repair_browser_failure", "repair_visual_style",
+    "load_revision_context", "apply_component_feedback", "validate_component_boundaries", "await_publish_approval",
+    "await_review", "finalize",
 })
 WRITING_STEP_PREFIXES = ("draft_section:", "ground_section:")
 NOT_STARTED_STATUSES = frozenset({"queued", "pending"})
+# A run in one of these has stopped. Anything else (queued, running, awaiting
+# a confirmation or approval) may still write or deliver.
+STOPPED_STATUSES = frozenset({"completed", "failed", "cancelled", "denied", "blocked"})
+# Failure stops: an owner cancel of such a run settles like its failure would.
+FAILED_STATUSES = frozenset({"failed", "cancelled", "denied"})
 
 _KEY_PREFIX = "content_factory:first_article:org:"
 _KEY = re.compile(r"^content_factory:first_article:org:(\d+):(attempt:(\d+)(:released)?|consumed|topics(:released|:retry)?)$")
@@ -242,24 +258,25 @@ def original_entitled_request(request) -> bool:
 
 
 def _matching_attempt(rows: _Rows, request):
-    """Return (number, row) for the original attempt this request started, else (None, None).
+    """Return (number, row) for the attempt covering this request, else (None, None).
 
-    A request without a stamp (a refund path's article_request) is matched by
-    its original request id alone. A stamped request must also name that row.
+    A stamped request (the original run or any run of its lineage) names its
+    attempt row. A request without a stamp (a start-failure refund's
+    article_request) can only be the original, matched by its request id.
     """
     request = _mapping(request)
+    stamp = str(request.get("roo_points_ledger_id") or "").strip()
+    if stamp:
+        if not entitled_request(request):
+            return None, None
+        return next(((number, row) for number, row in sorted(rows.attempts.items()) if str(row.pk) == stamp),
+            (None, None))
     if request.get("original_billing_source_run_id"):
         return None, None
     key = str(request.get("client_request_id") or "").strip()
     if not key:
         return None, None
-    number, row = rows.attempt_for_reference(_reference(key))
-    stamp = str(request.get("roo_points_ledger_id") or "").strip()
-    if row is None or (stamp and stamp != str(row.pk)):
-        return None, None
-    if stamp and not entitled_request(request):
-        return None, None
-    return number, row
+    return rows.attempt_for_reference(_reference(key))
 
 
 def _delivered(run) -> bool:
@@ -267,16 +284,38 @@ def _delivered(run) -> bool:
     return getattr(run, "status", None) == "completed" or useful_delivery(run)
 
 
-def _original_runs(organization_id):
+def _entitled_runs(organization_id, attempt=None):
+    """Article runs on the free grant (oldest first), optionally one attempt's lineage."""
     from workflow_runs.models import ContentFactoryRun
     from .run_state import ARTICLE_WORKFLOWS
     runs = ContentFactoryRun.objects.filter(organization_id=organization_id, workflow__in=ARTICLE_WORKFLOWS,
-        run_request__roo_points_entitlement=ENTITLEMENT).order_by("created_at", "id")
-    return [run for run in runs if original_entitled_request(run.run_request)]
+        run_request__roo_points_entitlement=ENTITLEMENT)
+    if attempt is not None:
+        runs = runs.filter(run_request__roo_points_ledger_id=str(attempt.pk))
+    return [run for run in runs.order_by("created_at", "id") if entitled_request(run.run_request)]
 
 
 def _run_for_attempt(runs, row):
-    return next((run for run in runs if str(_mapping(run.run_request).get("roo_points_ledger_id") or "") == str(row.pk)), None)
+    """The newest run of this attempt's lineage (a restart after its failed original)."""
+    lineage = [run for run in runs if str(_mapping(run.run_request).get("roo_points_ledger_id") or "") == str(row.pk)]
+    return lineage[-1] if lineage else None
+
+
+def _release_blocked(organization_id, attempt, *, run=None, client_request_id="") -> bool:
+    """Whether the attempt's lineage forbids a release.
+
+    Any delivered run keeps the free article used. Another run still going
+    (a restart of a failed original) may yet deliver, so the attempt stays
+    reserved until the last run of the lineage stops.
+    """
+    for other in _entitled_runs(organization_id, attempt):
+        if _delivered(other):
+            return True
+        same = (run is not None and other.pk == getattr(run, "pk", None)) or (client_request_id
+            and str(_mapping(other.run_request).get("client_request_id") or "").strip() == client_request_id)
+        if not same and str(other.status or "") not in STOPPED_STATUSES:
+            return True
+    return False
 
 
 def is_established_publisher(organization, config=None) -> bool:
@@ -326,7 +365,9 @@ def entitlement_state(organization, user, *, config=None, now=None) -> dict:
     now = now or timezone.now()
     rows = _rows(organization.pk)
     state["attempts_used"] = len(rows.attempts)
-    runs = _original_runs(organization.pk)
+    runs = _entitled_runs(organization.pk)
+    # Any run on the grant counts: a restart that delivered after its failed
+    # original, or a late delivery after a release.
     delivered = next((run for run in runs if _delivered(run)), None)
     if rows.consumed is not None or delivered is not None:
         # A late delivery of a released attempt still counts as the free article.
@@ -354,6 +395,9 @@ def reserve_allowed(data, config) -> bool:
     """Reserve only for a 0 quote on a confirmed copy-ready draft (or a verified site).
 
     Older desktops default to review_draft; their 0 quote must not spend an attempt.
+    A verified site makes a startup established, so today only a confirmed
+    content_only request reserves. The site branch keeps this guard as IF-07
+    states it, so narrowing the established rule later cannot open review_draft.
     """
     from .portable_drafts import has_connected_website
     data = _mapping(data)
@@ -402,10 +446,10 @@ def reserve_entitlement(*, organization, user, client_request_id, data, config):
 
 
 def consume_entitlement(*, organization, run) -> bool:
-    """Consume the original attempt this run started; idempotent and never after a release."""
+    """Consume the attempt covering this run's lineage; idempotent and never after a release."""
     organization_id = _organization_id(organization, run)
     request = _mapping(getattr(run, "run_request", None))
-    if organization_id is None or not original_entitled_request(request):
+    if organization_id is None or not entitled_request(request):
         return False
     with transaction.atomic():
         rows, number, attempt = _lock_attempt(organization_id, request)
@@ -425,9 +469,16 @@ def consume_entitlement(*, organization, run) -> bool:
 
 
 def release_entitlement(*, organization, run, reason) -> bool:
-    """Release the original attempt after a stop without delivery; True only the first time."""
-    return release_entitlement_for_request(organization=_organization_id(organization, run),
-        request=getattr(run, "run_request", None), reason=reason, run_id=getattr(run, "run_id", ""))
+    """Release the attempt after this run stopped without delivery; True only the first time.
+
+    Any run of the lineage may release it, but only once none of them has
+    delivered and no other one is still going.
+    """
+    organization_id = _organization_id(organization, run)
+    request = _mapping(getattr(run, "run_request", None))
+    if organization_id is None or not entitled_request(request):
+        return False
+    return _release(organization_id, request, reason=reason, run=run, run_id=getattr(run, "run_id", ""))
 
 
 def release_entitlement_for_request(*, organization, request, reason, run_id="") -> bool:
@@ -438,9 +489,18 @@ def release_entitlement_for_request(*, organization, request, reason, run_id="")
         return False
     if request.get("roo_points_ledger_id") and not original_entitled_request(request):
         return False
+    return _release(organization_id, request, reason=reason, run_id=run_id,
+        client_request_id=str(request.get("client_request_id") or "").strip())
+
+
+def _release(organization_id, request, *, reason, run=None, run_id="", client_request_id="") -> bool:
     with transaction.atomic():
         rows, number, attempt = _lock_attempt(organization_id, request)
         if attempt is None or rows.attempt_state(number) != "reserved":
+            return False
+        if _release_blocked(organization_id, attempt, run=run, client_request_id=client_request_id):
+            logger.info("first_article_entitlement_release_held org_id=%s attempt=%s run_id=%s", organization_id,
+                number, run_id)
             return False
         _write(organization_id=organization_id, suffix=f"attempt:{number}:released", user=attempt.user,
             reference_id=attempt.reference_id)
@@ -450,8 +510,8 @@ def release_entitlement_for_request(*, organization, request, reason, run_id="")
 
 
 def settle_entitlement_for_run(run) -> None:
-    """Consume the free article once its original run has delivered a draft (idempotent)."""
-    if run is None or not original_entitled_request(getattr(run, "run_request", None)) or not _delivered(run):
+    """Consume the free article once any run of its lineage has delivered a draft (idempotent)."""
+    if run is None or not entitled_request(getattr(run, "run_request", None)) or not _delivered(run):
         return
     consume_entitlement(organization=None, run=run)
 
@@ -463,17 +523,40 @@ def writing_started(run) -> bool:
         and (step in WRITING_STEPS or step.startswith(WRITING_STEP_PREFIXES)))
 
 
-def settle_owner_cancel(run) -> None:
-    """An owner stop releases the attempt before writing, and consumes it once writing started.
+def settle_owner_cancel(run, remote_data=None) -> Optional[str]:
+    """Settle the free article for an owner cancel, from the run's pre-cancel state.
 
+    A delivered run, or a run still going after writing started, consumes the
+    attempt: the writing spend is the free article. Otherwise the attempt is
+    released only on Content Factory's bound no-effect stop receipt, which the
+    caller's cancellation_result applies. A failed run that stopped at a
+    writing step settles like its failure did and is never consumed here.
+    Without a valid receipt (a transport error, an older worker) the worker
+    may still be writing, so this returns "stop_required": the caller keeps
+    the attempt reserved and queues the exhausted-run sweep to obtain the stop.
     Call before the local cancel overwrites the run's status and current step.
     """
-    if run is None or not original_entitled_request(getattr(run, "run_request", None)):
-        return
-    if _delivered(run) or writing_started(run):
+    if run is None or not entitled_request(getattr(run, "run_request", None)):
+        return None
+    if _delivered(run):
         consume_entitlement(organization=None, run=run)
-    else:
-        release_entitlement(organization=None, run=run, reason="owner_cancelled")
+        return None
+    from .article_publication_evidence import cancellation_receipt
+    try:
+        receipt = cancellation_receipt(run, remote_data if isinstance(remote_data, dict) else {})
+    except (ValueError, TypeError):
+        receipt = None
+    if receipt is not None and receipt.get("delivered_value") is True:
+        consume_entitlement(organization=None, run=run)
+        return None
+    if writing_started(run) and str(getattr(run, "status", "") or "") not in FAILED_STATUSES:
+        consume_entitlement(organization=None, run=run)
+        return None
+    if receipt is not None or lineage_entitlement(run) is None:
+        return None
+    rows = _rows(run.organization_id)
+    number, _attempt = _matching_attempt(rows, run.run_request)
+    return "stop_required" if number is not None and rows.attempt_state(number) == "reserved" else None
 
 
 def entitlement_payload(run) -> dict:
@@ -598,8 +681,11 @@ def _queue_alert(*, organization, alert_reason, run=None) -> Optional[str]:
     """Hand an ops alert to the founder-journey sweep, or log it while that is absent."""
     try:
         from .founder_journey_alerts import queue_founder_journey_alert
-    except ImportError:
-        # The alert sweep ships separately; until it merges the signal is a log line.
+    except ModuleNotFoundError as exc:
+        if exc.name != f"{__package__}.founder_journey_alerts":
+            raise  # A broken import inside the alert module must not pass silently.
+        # The alert sweep ships separately (BE2); until it merges the signal is
+        # a log line. Remove this fallback when the branches are synced.
         logger.warning("founder_journey_alert alert_reason=%s org_id=%s run_id=%s state=unconfigured", alert_reason,
             getattr(organization, "pk", organization), getattr(run, "run_id", ""))
         return None

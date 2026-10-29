@@ -55,7 +55,6 @@ class FreeSetupGateTests(SimpleTestCase):
                 self.assertEqual((payload["roo_points_billing_status"], payload["roo_points_required"],
                     payload["roo_points_cost"], payload["roo_points_authorized"]), ("free", 0, 0, True))
                 self.assertNotIn("roo_points_ledger_id", payload)
-        self.balance.assert_not_called()
 
     def test_other_ai_actions_keep_the_six_point_floor(self):
         # Every gated action quotes 0 today; a cost-0 bypass would have removed
@@ -110,16 +109,30 @@ class FreeSetupDailyCapTests(SimpleTestCase):
             for second in range(10):
                 enforce_free_setup_daily_cap(founder, "website_baseline", now=20 + second)
 
-    def test_gate_applies_the_cap_only_to_free_research(self):
+    def test_gate_checks_the_cap_only_for_the_free_waiver_and_records_nothing(self):
         user = SimpleNamespace(pk=9, email="cap@example.test")
         with patch.object(views, "_roo_points_balance_for_user", return_value=0):
+            # Checking is free: requests that never start research cost no use.
+            for _ in range(5):
+                self.assertEqual(views._require_roo_points_for_ai_agent(user, domain="new.test",
+                    action="website_baseline"), (None, None))
+            started = SimpleNamespace(status="queued")
             for _ in range(2):
-                views._require_roo_points_for_ai_agent(user, domain="new.test", action="website_baseline")
+                views._record_free_setup_research(user, action="website_baseline", gate_balance=None, run=started)
+            # A run that failed to queue is not counted either.
+            views._record_free_setup_research(user, action="website_baseline", gate_balance=None,
+                run=SimpleNamespace(status="failed"))
             with self.assertRaises(Throttled):
                 views._require_roo_points_for_ai_agent(user, domain="new.test", action="website_baseline")
             # Setup work that was already free is never capped.
             for _ in range(10):
                 self.assertEqual(views._require_roo_points_for_ai_agent(user, domain="new.test", action="repo_scan"), (None, None))
+        # A founder with points keeps today's uncapped path and is never counted.
+        with patch.object(views, "_roo_points_balance_for_user", return_value=500):
+            for _ in range(10):
+                self.assertEqual(views._require_roo_points_for_ai_agent(user, domain="new.test",
+                    action="website_baseline"), (None, 500))
+                views._record_free_setup_research(user, action="website_baseline", gate_balance=500, run=started)
 
 
 class InsufficientPointsCopyTests(SimpleTestCase):
@@ -178,6 +191,18 @@ class FreeBaselineViewTests(TestCase):
         self.assertEqual((queued[0]["roo_points_billing_status"], queued[0]["roo_points_required"]), ("free", 0))
         self.assertEqual(limited.status_code, 429)
         self.assertGreater(int(limited["Retry-After"]), 0)
+
+    def test_a_baseline_that_failed_to_queue_does_not_use_up_the_cap(self):
+        statuses = iter(["failed", "failed", "queued", "queued"])
+
+        def queue(**kwargs):
+            return SimpleNamespace(run_id="baseline", status=next(statuses))
+
+        with patch.object(views, "_queue_content_factory_run", side_effect=queue):
+            codes = [self.post().status_code for _ in range(4)]
+            limited = self.post()
+        self.assertEqual(codes, [202, 202, 202, 202])
+        self.assertEqual(limited.status_code, 429)
 
     @override_settings(ARTICLES_FREE_SETUP_RESEARCH_ENABLED=False)
     def test_flag_off_zero_balance_baseline_is_refused(self):

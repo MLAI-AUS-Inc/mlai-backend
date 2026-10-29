@@ -121,6 +121,7 @@ class StartupProfileDraftUnitTests(unittest.TestCase):
             "_camel_list": lambda value: list(value or []),
             "CONTENT_FACTORY_REQUEST_SOURCE": "founder_tools",
             "_mark_roo_points_gate_authorized": Mock(),
+            "_record_free_setup_research": Mock(),
             "_queue_content_factory_run": self.queue,
             "logger": Mock(),
         })

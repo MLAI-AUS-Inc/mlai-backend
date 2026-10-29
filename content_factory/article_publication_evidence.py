@@ -243,7 +243,7 @@ def cancellation_result(run, payload):
         request = mapping(run.run_request)
         if entitled_request(request):
             # A free first article owes no credit: the stop releases its
-            # attempt (original run only; a child run releases nothing).
+            # attempt, unless another run of its lineage delivered or is going.
             released = release_entitlement(organization=None, run=run, reason="cancelled_without_delivery")
             result["article_terminal_refund"] = {**previous, "status": "not_required", "job_id": run.run_id,
                 "entitlement_released": released or previous.get("entitlement_released") is True,

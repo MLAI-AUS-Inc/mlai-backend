@@ -219,17 +219,24 @@ def durable_integration_evidence(config, connection, *, now=None):
 
 
 def first_article_capability(state):
-    """Project the first-article entitlement state as ``articleCapabilities.firstArticle``."""
+    """Project the first-article entitlement state as ``articleCapabilities.firstArticle``.
+
+    ``deliveryMode`` names the only start the 0 price covers: a confirmed
+    copy-ready (content_only) draft. Any other delivery mode is quoted the
+    normal article price.
+    """
     return {"version": state["version"], "status": state["status"], "free": bool(state["free"]),
         "attemptsUsed": state["attempts_used"], "attemptsAllowed": state["attempts_allowed"],
-        "topicBatchFree": bool(state["topic_batch_free"]), "runId": state["run_id"], "limit": state["limit"]}
+        "topicBatchFree": bool(state["topic_batch_free"]), "runId": state["run_id"], "limit": state["limit"],
+        "deliveryMode": "content_only"}
 
 
 def article_capabilities(config, *, domain="", user=None, account=None, evidence=None, repository_access=None, first_article=None):
     """Return the versioned, action-specific client projection, failing closed.
 
     ``first_article`` is the entitlement state from first_article_entitlement;
-    when it is free, the article (or first topic batch) price is 0.
+    when it is free, the article price (for a copy-ready start only) or the
+    first topic batch price is 0.
     """
     account = account or github_account_state(config)
     evidence = evidence or integration_evidence(config)

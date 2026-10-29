@@ -727,17 +727,21 @@ def _roo_points_response(*, domain: str, action: str, current_balance: int, cost
 
 
 def _require_roo_points_for_ai_agent(user, *, domain: str, action: str):
-    from content_factory.billing import FREE_SETUP_RESEARCH_ACTIONS, enforce_free_setup_daily_cap, free_setup_actions
-    if action in free_setup_actions():
-        # Only the named free actions skip the floor. Every other AI action
-        # still needs 6 points even though its quoted cost is 0.
-        if action in FREE_SETUP_RESEARCH_ACTIONS:
-            enforce_free_setup_daily_cap(user, action)
+    from content_factory.billing import FREE_SETUP_RESEARCH_ACTIONS, check_free_setup_daily_cap, free_setup_actions
+    free_research = action in FREE_SETUP_RESEARCH_ACTIONS and action in free_setup_actions()
+    if action in free_setup_actions() and not free_research:
         return None, None
+    # Only the named free actions skip the floor. Every other AI action
+    # still needs 6 points even though its quoted cost is 0.
     required_points = get_content_factory_ai_agent_required_points(domain)
     if required_points <= 0:
         return None, None
     current_balance = _roo_points_balance_for_user(user)
+    if free_research and current_balance < required_points:
+        # The free waiver for founders below the floor, capped per account.
+        # A founder with points keeps today's uncapped path.
+        check_free_setup_daily_cap(user, action)
+        return None, None
     if current_balance < required_points:
         return _roo_points_response(
             domain=domain,
@@ -746,6 +750,19 @@ def _require_roo_points_for_ai_agent(user, *, domain: str, action: str):
             cost_points=0,
         ), current_balance
     return None, current_balance
+
+
+def _record_free_setup_research(user, *, action: str, gate_balance, run) -> None:
+    """Count a started free setup research run against the account's daily cap.
+
+    The gate returns no balance only when the free waiver let the request
+    through; a run that failed to queue costs the founder no use.
+    """
+    from content_factory.billing import FREE_SETUP_RESEARCH_ACTIONS, free_setup_actions, record_free_setup_use
+    if (gate_balance is not None or action not in FREE_SETUP_RESEARCH_ACTIONS or action not in free_setup_actions()
+            or run is None or getattr(run, "status", None) in FAILED_RUN_STATUSES):
+        return
+    record_free_setup_use(user, action)
 
 
 def _mark_roo_points_gate_authorized(payload: dict, *, domain: str, action: str, current_balance: int | None) -> None:
@@ -1232,12 +1249,14 @@ def _reuse_roo_points_authorization_for_article_job(*, run, payload: dict, domai
     from . import first_article_entitlement as first_article
     if first_article.entitled_request(run_request):
         # A free first article's restarts, re-pins, resumes and comments run on
-        # its grant while that attempt is live (reserved or consumed). They never
-        # settle it. A released attempt covers nothing: start a new article.
+        # its grant while that attempt is live (reserved or consumed). A delivery
+        # by one of them consumes it; a stop releases it only as the lineage's
+        # last run. A released attempt covers nothing: start a new article,
+        # which is free again while a second attempt remains.
         grant = first_article.lineage_entitlement(run)
         if grant is None:
-            return Response({"detail": failure_detail, "code": "roo_points_billing_required"},
-                status=status.HTTP_409_CONFLICT)
+            return Response({"detail": "This free draft was stopped. Start a new article instead.",
+                "code": "roo_points_billing_required"}, status=status.HTTP_409_CONFLICT)
         payload.update(first_article.entitled_authorization(domain=domain,
             action=CONTENT_FACTORY_ACTION_ARTICLE_GENERATION, ledger=grant))
         payload["original_billing_source_run_id"] = run.run_id
@@ -7489,12 +7508,17 @@ def _cancel_local_article_run(*, run, organization, remote_data=None):
     with transaction.atomic():
         locked_run = ContentFactoryRun.objects.select_for_update().get(pk=run.pk)
         # Every caller is an owner action (cancel, delete-draft cascade, discard).
-        # Settle a free first article from the pre-cancel state: released before
-        # writing started, consumed after. Its stop receipt then settles nothing.
+        # Settle a free first article from the pre-cancel state: consumed once
+        # writing started on a live run, released by the bound no-effect stop
+        # below otherwise, and held for the stop sweep when no stop came back.
         from .first_article_entitlement import settle_owner_cancel
-        settle_owner_cancel(locked_run)
+        entitlement_hold = settle_owner_cancel(locked_run, remote_data)
         from .article_publication_evidence import cancellation_result
         preserved = cancellation_result(locked_run, remote_data)
+        if entitlement_hold == "stop_required" and "article_terminal_refund" not in preserved:
+            # The exhausted-run sweep asks the worker for its stop, then releases.
+            preserved = {**preserved, "reconciliation_refund_pending": True, "article_terminal_refund": {
+                "status": "stop_required", "job_id": locked_run.run_id, "settlement_reason": "cancelled_without_stop"}}
         _release_cancelled_article_keyword(organization, locked_run)
         locked_run.steps.exclude(status=ContentFactoryStepStatus.COMPLETED).update(
             status=ContentFactoryStepStatus.CANCELLED,
@@ -16213,6 +16237,7 @@ class VibeMarketingAutofillView(APIView):
             config=config,
             payload=payload,
         )
+        _record_free_setup_research(request.user, action="startup_autofill", gate_balance=gate_balance, run=run)
         return _autofill_start_response(
             run, reused_active_run=False, research_company_id=company.id
         )
@@ -16290,6 +16315,7 @@ class VibeMarketingBaselineView(APIView):
             config=config,
             payload=payload,
         )
+        _record_free_setup_research(request.user, action="website_baseline", gate_balance=gate_balance, run=run)
         if run.status == ContentFactoryRunStatus.COMPLETED:
             _persist_baseline_snapshot_from_payload(organization=context.organization, run=run)
         return Response({"run_id": run.run_id, "runId": run.run_id, "status": run.status}, status=status.HTTP_202_ACCEPTED)
@@ -19267,7 +19293,7 @@ def control_article_run(*, user, context, run, action, data, run_id=None, goal_o
     revision_grant = first_article.lineage_entitlement(run) if action == "revise" else None
     if revision_grant is not None:
         # Revising the free first article runs on its live grant: no balance
-        # floor, and the revision never consumes or releases the attempt.
+        # floor. The delivered article already consumed the attempt.
         payload.update(first_article.entitled_authorization(domain=context.organization.domain,
             action=CONTENT_FACTORY_ACTION_ARTICLE_GENERATION, ledger=revision_grant))
         payload["original_billing_source_run_id"] = run.run_id
