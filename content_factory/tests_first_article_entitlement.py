@@ -223,7 +223,7 @@ class FirstArticleStartTests(EntitlementFixture, TestCase):
         cache.clear()
         with self.captureOnCommitCallbacks(execute=True):
             self.started()
-        self.alerts.assert_any_call(organization=self.org, alert_reason="free_cap_spike")
+        self.alerts.assert_any_call(organization=self.org, alert_reason="free_cap_spike", run=None)
         self.alerts.reset_mock()
         # Child runs of the free article count too, but ops hear once an hour.
         run = self.make_run({**self.charged[2], "original_billing_source_run_id": "parent"})
@@ -709,6 +709,27 @@ class FirstArticleOpsAlertTests(EntitlementFixture, TestCase):
         with self.captureOnCommitCallbacks(execute=True):
             self.started()
         self.assertEqual(self.receipts()["free_cap_spike"]["state"], "pending")
+
+    @override_settings(ARTICLES_FREE_FIRST_ARTICLE_SPIKE_THRESHOLD=1)
+    def test_a_repeat_spike_from_one_org_in_a_later_hour_is_its_own_alert(self):
+        from django.core.cache import cache
+        payload = self.started()
+        runs = []
+        for _hour in (1, 2):
+            # A new hour: the hourly guard is fresh, and the same org trips it again.
+            cache.clear()
+            run = self.make_run({**payload, "original_billing_source_run_id": "parent"})
+            with self.captureOnCommitCallbacks(execute=True):
+                first_article.note_entitled_child_run(run)
+            runs.append(run)
+        config = OrganizationContentConfig.objects.get(organization=self.org)
+        spikes = [receipt for receipt in config.pillar_strategy["ops_alerts"].values()
+                  if receipt["alert_reason"] == "free_cap_spike"]
+        self.assertEqual(sorted(receipt["run_id"] for receipt in spikes), sorted(run.run_id for run in runs))
+        self.assertEqual({receipt["state"] for receipt in spikes}, {"pending"})
+        for run in runs:
+            run.refresh_from_db()
+            self.assertEqual(run.result["ops_alerts"]["free_cap_spike"]["state"], "pending")
 
     def test_a_receipt_write_failure_is_logged_and_never_reaches_the_founder(self):
         with patch("content_factory.founder_journey_alerts.queue_founder_journey_alert",

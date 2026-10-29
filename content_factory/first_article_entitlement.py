@@ -703,8 +703,13 @@ def _recent_child_runs(since) -> int:
         run_request__original_billing_source_run_id__isnull=False).count()
 
 
-def _check_spike(organization) -> None:
-    """Tell ops once an hour when free reservations and their child runs pass the threshold."""
+def _check_spike(organization, run=None) -> None:
+    """Tell ops once an hour when free reservations and their child runs pass the threshold.
+
+    A child run that trips it is passed as ``run``, so each such spike gets its
+    own alert slot (IF-15) and a repeat by the same organisation on a later day
+    is delivered rather than folded into its first receipt.
+    """
     threshold = int(getattr(settings, "ARTICLES_FREE_FIRST_ARTICLE_SPIKE_THRESHOLD", 0) or 0)
     if threshold <= 0:
         return
@@ -717,14 +722,14 @@ def _check_spike(organization) -> None:
     if not cache.add(f"first_article_entitlement_spike:{now:%Y%m%d%H}", 1, timeout=3600):
         return
     logger.warning("first_article_entitlement_spike work_last_hour=%s threshold=%s", count, threshold)
-    _queue_alert(organization=organization, alert_reason="free_cap_spike")
+    _queue_alert(organization=organization, alert_reason="free_cap_spike", run=run)
 
 
 def note_entitled_child_run(run) -> None:
     """Count a revision, restart or comment run of the free article toward the spike alert."""
     organization = getattr(run, "organization", None)
     if organization is not None:
-        transaction.on_commit(lambda: _check_spike(organization), robust=True)
+        transaction.on_commit(lambda: _check_spike(organization, run=run), robust=True)
 
 
 def request_namespace(request, *, organization_id=None, run_id=""):

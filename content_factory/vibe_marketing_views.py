@@ -15805,7 +15805,11 @@ class VibeMarketingSettingsView(APIView):
             if isinstance(prepared, Response):
                 return prepared
             self.prepared_authors = prepared
-        saved = self._save_settings(request)
+        try:
+            saved = self._save_settings(request)
+        except CompanyDomainClaimedError as exc:
+            # The settings transaction has rolled back, so the alert is kept (IF-09).
+            return _domain_claimed_response(request, exc)
         if isinstance(saved, Response):
             return saved
         # Full bootstrap may reconcile a setup PR through the worker. Commit
@@ -16000,8 +16004,8 @@ class VibeMarketingSettingsView(APIView):
         return refreshed_context
 
 
-def _autofill_domain_claimed_response(request, exc):
-    """Refuse an autofill whose domain another founder's startup holds (IF-09).
+def _domain_claimed_response(request, exc):
+    """Refuse a startup save or autofill whose domain another founder's startup holds (IF-09).
 
     Called outside any transaction that rolled back, so the queued
     domain_claim_disputed alert is kept. The body never names the owner.
@@ -16038,7 +16042,7 @@ class VibeMarketingAutofillView(APIView):
             # First-claim-wins tenancy: never bind a founder's autofill to a
             # domain another founder already owns. The founder can carry on
             # without the website, and ops hear about the dispute (IF-09).
-            return _autofill_domain_claimed_response(
+            return _domain_claimed_response(
                 request, CompanyDomainClaimedError(claimed_organization(domain)))
         gate_response, gate_balance = _require_roo_points_for_ai_agent(
             request.user,
@@ -16171,7 +16175,7 @@ class VibeMarketingAutofillView(APIView):
                     transaction.set_rollback(True)
                     return Response({"detail": str(exc), "field": "companyLinkedInUrl"}, status=status.HTTP_400_BAD_REQUEST)
         except CompanyDomainClaimedError as exc:
-            return _autofill_domain_claimed_response(request, exc)
+            return _domain_claimed_response(request, exc)
 
         context = get_founder_company_context(
             request.user, company_id=company.id, persist_active=not draft_only

@@ -330,6 +330,35 @@ class SettingsCompanyScopingTests(TestCase):
         self.assertEqual(self.company_b.organization_id, original_org_id)
         self.assertEqual(self.company_b.organization.domain, "beta-rebrand.com")
 
+    def test_settings_claiming_another_founders_domain_alerts_ops_once(self):
+        from content_factory.models import OrganizationContentConfig
+        from founder_tools.services import ensure_company_organization
+
+        stranger = User.objects.create_user(email="settings-stranger@example.com", first_name="Str", last_name="Anger")
+        stranger_profile = VibeRaisingProfile.objects.create(user=stranger, role=VibeRaisingProfile.ROLE_FOUNDER)
+        foreign = VibeRaisingCompany.objects.create(profile=stranger_profile, name="Foreign Co", domain="foreign.example")
+        organization = ensure_company_organization(foreign)
+        original_org_id = self.company_b.organization_id
+
+        for _ in range(2):
+            with patch(f"{_VIEWS}._serialize_bootstrap", return_value={}):
+                response = self.client.put(
+                    "/api/v1/vibe-marketing/settings",
+                    {"companyId": str(self.company_b.id), "companyName": "Beta Corp", "domain": "foreign.example"},
+                    format="json",
+                )
+            self.assertEqual(response.status_code, 409)
+            self.assertEqual(response.data, CLAIMED_BODY)
+            for leaked in ("already linked to another account", "Str", "Anger", "settings-stranger@example.com"):
+                self.assertNotIn(leaked, response.content.decode())
+
+        receipts = OrganizationContentConfig.objects.get(organization=organization).pillar_strategy["ops_alerts"]
+        self.assertEqual([receipt["alert_reason"] for receipt in receipts.values()], ["domain_claim_disputed"])
+        self.assertEqual(next(iter(receipts.values()))["details"], {"claimant_user_id": self.user.id})
+        self.company_b.refresh_from_db()
+        self.assertEqual((self.company_b.domain, self.company_b.organization_id), ("beta.com", original_org_id))
+        self.assertEqual(organization_owner_user_id(organization), stranger.id)
+
     def test_settings_unsafe_domain_edit_requires_confirmation(self):
         from integrations.models import GoogleConnection
 
