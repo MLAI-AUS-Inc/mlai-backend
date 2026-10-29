@@ -28,6 +28,7 @@ from .dispatch_outbox import process_dispatch_outbox
 from .run_cancellation import (
     DRAFT_DELETED_AT_KEY,
     cancellation_payload,
+    hidden_by_draft_delete,
     cancellation_request_fields,
     normalize_cancellation,
     receipt_cancellation_fields,
@@ -69,6 +70,19 @@ class CancellationFieldTests(SimpleTestCase):
         self.assertEqual(set(fields), {"cancellation_reason", "cancelled_by"})
         self.assertFalse({"code", "error_code", "reason_code"} & set(fields))
 
+    def test_both_backend_owned_key_lists_spell_the_draft_deleted_key_as_a_literal(self):
+        # AST-extracted merge tests exec these tuples without the module imports.
+        from . import service_views
+        self.assertIn(DRAFT_DELETED_AT_KEY, views.DJANGO_OWNED_ARTICLE_RESULT_KEYS)
+        self.assertIn(DRAFT_DELETED_AT_KEY, service_views._DJANGO_OWNED_RUN_RESULT_KEYS)
+
+    def test_a_kept_attempt_is_hidden_only_while_it_stays_finished(self):
+        hidden = {DRAFT_DELETED_AT_KEY: "2026-10-30T00:00:00+00:00"}
+        for status in ("completed", "failed", "denied", "cancelled"):
+            self.assertTrue(hidden_by_draft_delete(status, hidden))
+        self.assertFalse(hidden_by_draft_delete("running", hidden))
+        self.assertFalse(hidden_by_draft_delete("completed", {}))
+
 
 class EveryBackendCancelPassesAReasonTests(SimpleTestCase):
     """Regression: no backend call site can produce a codeless local article cancel again."""
@@ -92,6 +106,58 @@ class EveryBackendCancelPassesAReasonTests(SimpleTestCase):
         for name, line, keywords in calls:
             with self.subTest(site=f"{name}:{line}"):
                 self.assertLessEqual({"cancellation_reason", "cancelled_by"}, keywords)
+
+    # Cancel calls that never stop an article run, so IF-20 does not label them.
+    NON_ARTICLE_CANCEL_SITES = {
+        ("community_chat/my_startup_views.py", "post"),  # forwards to control_article_run
+        ("content_factory/island_research_cancel.py", "cancel_island_research"),  # island research
+        # Non-article branch only (articles go through _stop_stalled_article); its
+        # body is pinned by tests_reconciliation_unit, and "worker_heartbeat_lost"
+        # is already an allowlisted reason Content Factory records as is.
+        ("content_factory/reconciliation.py", "recover_stalled_run"),
+        ("content_factory/vibe_marketing_views.py", "_supersede_stale_scan_runs"),  # repo scans
+        ("content_factory/vibe_marketing_views.py", "_delete_article_setup_scaffold_branches"),  # setup builds
+        ("integrations/services/valley_harness.py", "cancel_valley_run"),  # Valley harness, not Content Factory
+    }
+
+    @staticmethod
+    def _is_cancel_call(node):
+        if not isinstance(node, ast.Call):
+            return False
+        if any(keyword.arg == "action" and isinstance(keyword.value, ast.Constant) and keyword.value.value == "cancel"
+               for keyword in node.keywords):
+            return True
+        return any(isinstance(arg, ast.JoinedStr) and isinstance(arg.values[-1], ast.Constant)
+            and str(arg.values[-1].value).endswith("/cancel") for arg in node.args)
+
+    def test_every_content_factory_cancel_request_sends_a_reason(self):
+        """Every function that POSTs a cancel to Content Factory sends the IF-20 pair."""
+        root = Path(__file__).resolve().parent.parent
+        seen = set()
+        for path in sorted(root.glob("*/**/*.py")):
+            parts = path.relative_to(root).parts
+            if parts[0].startswith(".") or parts[0] in {"tests", "docs", "scripts"} or "migrations" in parts \
+                    or path.name.startswith(("test_", "tests_")):
+                continue
+            source = path.read_text(encoding="utf-8")
+            if "cancel" not in source:
+                continue
+            relative = path.relative_to(root).as_posix()
+            for function in ast.walk(ast.parse(source)):
+                if not isinstance(function, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                    continue
+                if not any(self._is_cancel_call(node) for node in ast.walk(function)):
+                    continue
+                site = (relative, function.name)
+                seen.add(site)
+                if site in self.NON_ARTICLE_CANCEL_SITES:
+                    continue
+                with self.subTest(site=f"{relative}:{function.name}"):
+                    self.assertIn("cancellation_request_fields", ast.get_source_segment(source, function))
+        self.assertTrue({("content_factory/website_first_article_settlement.py", "stop_children"),
+            ("content_factory/reconciliation.py", "_stop_stalled_article")} <= seen)
+        # A stale allowlist entry would hide a new cancel under an old name.
+        self.assertLessEqual(self.NON_ARTICLE_CANCEL_SITES, seen)
 
 
 @override_settings(**FREE)
@@ -195,6 +261,80 @@ class OwnerCancelReasonTests(EntitlementFixture, TestCase):
         delivered.refresh_from_db()
         self.assertNotIn(DRAFT_DELETED_AT_KEY, delivered.result)
 
+    def close_pull_requests(self, *, ok=True, reason=""):
+        closed = []
+        def close(config, pr_url):
+            closed.append(pr_url)
+            return {"prUrl": pr_url, "ok": ok, "action": "closed" if ok else "", "reason": "" if ok else reason}
+        self.enterContext(patch("content_factory.draft_pull_request_cleanup.close_draft_pull_request",
+            side_effect=close))
+        return closed
+
+    def test_a_kept_sibling_has_its_own_draft_pr_closed_before_it_is_hidden(self):
+        pr_url = "https://github.com/acme/site/pull/9"
+        delivered = self.article(status="completed", step="finalize", draft_pr_url=pr_url)
+        pressed = self.article(status="awaiting_approval", step="await_review")
+        closed = self.close_pull_requests()
+        response = self.control(pressed, {"cancel_group": True})
+        self.assertEqual((response.data["cancelledRunIds"], response.data["protectedRunIds"]), ([pressed.run_id], []))
+        self.assertEqual(closed, [pr_url])
+        delivered.refresh_from_db()
+        self.assertEqual(delivered.status, "completed")
+        self.assertTrue(delivered.result[DRAFT_DELETED_AT_KEY])
+        self.assertNotIn(delivered.run_id, self.bodies)
+
+    def test_a_kept_sibling_whose_pr_cannot_be_closed_stays_visible(self):
+        pr_url = "https://github.com/acme/site/pull/9"
+        delivered = self.article(status="completed", step="finalize", draft_pr_url=pr_url)
+        pressed = self.article(status="awaiting_approval", step="await_review")
+        self.close_pull_requests(ok=False, reason="team_changes")
+        response = self.control(pressed, {"cancel_group": True})
+        self.assertEqual(response.status_code, 202)
+        self.assertEqual((response.data["cancelledRunIds"], response.data["protectedRunIds"]),
+            ([pressed.run_id], [delivered.run_id]))
+        delivered.refresh_from_db()
+        self.assertNotIn(DRAFT_DELETED_AT_KEY, delivered.result)
+        self.assertIn(delivered.run_id, [draft["runId"] for draft in views._recent_article_drafts(self.org)])
+
+    def test_kept_siblings_are_gone_from_latest_runs_and_publish_evidence(self):
+        delivered = self.article(status="completed", step="finalize")
+        pressed = self.article(status="failed", step="plan_article", error_code="CORPUS_INCOMPLETE")
+        before = [run.run_id for run in views._latest_runs_for_org(self.org)]
+        self.assertIn(delivered.run_id, before)
+        self.control(pressed, {"cancel_group": True})
+        latest = views._latest_runs_for_org(self.org)
+        self.assertNotIn(delivered.run_id, [run.run_id for run in latest])
+        # The same pick bootstrap uses for latestRuns' article and publishEvidence.
+        self.assertIsNone(views._latest_run_matching(latest, views.ARTICLE_WORKFLOWS))
+
+    def test_a_kept_sibling_the_worker_revives_shows_again(self):
+        failed = self.article(status="failed", step="plan_article")
+        pressed = self.article(status="awaiting_approval", step="await_review")
+        self.control(pressed, {"cancel_group": True})
+        failed.refresh_from_db()
+        self.assertTrue(failed.result[DRAFT_DELETED_AT_KEY])
+        ContentFactoryRun.objects.filter(pk=failed.pk).update(status="running")
+        self.assertIn(failed.run_id, [run.run_id for run in views._latest_runs_for_org(self.org)])
+        self.assertIn(failed.run_id, [draft["runId"] for draft in views._recent_article_drafts(self.org)])
+        # A delete that raced the revival does not hide the live run.
+        other = self.article(status="running", step="research_topic", keyword="raced topic")
+        self.assertFalse(views._hide_kept_draft_sibling(other, now=timezone.now()))
+        other.refresh_from_db()
+        self.assertNotIn(DRAFT_DELETED_AT_KEY, other.result)
+
+    def test_a_later_owner_action_never_relabels_a_system_stop(self):
+        for data in ({"cancel_group": True}, {}):
+            with self.subTest(data=data):
+                run = self.article(keyword=f"stopped {bool(data)}")
+                views._cancel_local_article_run(run=run, organization=self.org, remote_data={},
+                    cancellation_reason="worker_heartbeat_lost", cancelled_by="system")
+                run.refresh_from_db()
+                self.control(run, data)
+                run.refresh_from_db()
+                self.assertEqual((run.result["cancellation_reason"], run.result["cancelled_by"]),
+                    ("worker_heartbeat_lost", "system"))
+                self.assertEqual(run.steps.get().message, "Stopped.")
+
     def test_a_cancel_with_no_reason_records_unspecified_with_system_wording(self):
         run = self.article()
         cancelled = views._cancel_local_article_run(run=run, organization=self.org, remote_data={})
@@ -288,6 +428,15 @@ class SystemStopReasonTests(EntitlementFixture, TestCase):
         run.refresh_from_db()
         self.assertEqual((run.status, run.result["cancellation_reason"], run.result["cancelled_by"]),
             ("cancelled", "system_stop", "system"))
+
+    def test_a_website_connection_change_records_superseded(self):
+        from . import website_cancellation_retirement as cancel_work
+        run = self.running()
+        op = SimpleNamespace(receipt={})
+        self.assertTrue(cancel_work.acknowledge(op, run, run.run_id, 200, self.worker_reply(run)))
+        run.refresh_from_db()
+        self.assertEqual((run.status, run.result["cancellation_reason"], run.result["cancelled_by"]),
+            ("cancelled", "superseded", "system"))
 
     def test_a_receipt_for_a_run_with_no_saved_reason_takes_the_workers(self):
         run = self.running()
@@ -415,4 +564,14 @@ class EditorialRunConflictLogTests(TestCase):
             response = service_views._apply_run_snapshot("run-conflict", {"workflow": "article_generation",
                 "status": "running", "domain": "conflict.example.test"})
         self.assertEqual((response.status_code, response.data["code"]), (409, "editorial_run_conflict"))
-        self.assertIn(f"run_id=run-conflict workflow=article_generation guard={guard}", "\n".join(logs.output))
+        self.assertIn(f"run_id=run-conflict workflow=article_generation guard={guard} field=-", "\n".join(logs.output))
+
+    def test_the_identity_guard_names_the_field_it_refused(self):
+        from .editorial_run_state import EditorialRunConflict
+        from .service_views import _merge_django_owned_run_request
+        with self.assertRaises(EditorialRunConflict) as refused:
+            _merge_django_owned_run_request({"client_request_id": "key", "delivery_mode": "content_only"},
+                {"client_request_id": "key", "delivery_mode": "review_draft"})
+        self.assertEqual(refused.exception.guard_field, "delivery_mode")
+        # The content-only "" vs null repository is not a conflict (be#1232).
+        _merge_django_owned_run_request({"github_repo": ""}, {"github_repo": None})

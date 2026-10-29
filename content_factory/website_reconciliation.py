@@ -934,7 +934,10 @@ def process_website_connection_operations(*, limit=20, now=None, connection_id=N
                         response = http_client.post(f"{remote['base_url']}/api/connections/{op.connection_id}/cancel-operation",
                             headers=_content_factory_headers(), json=cancel_work.scoped_nonarticle_request(run), timeout=(3, 15))
                     else:
-                        payload = {"reason": "website_connection_changed"}
+                        from .run_cancellation import cancellation_request_fields
+                        # A website connection change supersedes the run (IF-20).
+                        payload = {"reason": "website_connection_changed",
+                            **cancellation_request_fields("superseded", "system")}
                         if bounded_cancel:
                             payload["expected_cancellation_v1"] = cancel_work.expected_article_cancellation(run)
                         response = http_client.post(f"{remote['base_url']}/api/runs/{run_id}/cancel",

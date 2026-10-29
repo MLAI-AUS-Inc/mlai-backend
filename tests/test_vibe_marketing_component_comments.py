@@ -2196,6 +2196,11 @@ class VibeMarketingComponentCommentTests(_PublishRetryApprovalFixture, TestCase)
         self.assertIn(source_run_id, draft_source_run_ids)
         self.assertNotIn(cancellable_one.run_id, draft_run_ids)
         self.assertNotIn(cancellable_two.run_id, draft_run_ids)
+        # The kept failure is hidden wherever a cancelled run is, not only from drafts.
+        full = self.client.get("/api/v1/vibe-marketing/bootstrap/")
+        latest_run_ids = {item["runId"] for item in full.data["latestRuns"]}
+        self.assertIn(protected.run_id, latest_run_ids)
+        self.assertNotIn(cancellable_two.run_id, latest_run_ids)
 
     def _setup_blocked_draft_with_copied_setup_pr(self, run_id):
         """TalaThrive (18 Oct): drafts blocked on setup carried the merged setup PR #42."""

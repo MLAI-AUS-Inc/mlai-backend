@@ -34,6 +34,16 @@ DRAFT_DELETE_KEEPS_STATUSES = frozenset({"completed", "failed", "denied", "cance
 DRAFT_DELETED_AT_KEY = "draft_deleted_at"
 
 
+def hidden_by_draft_delete(status, result) -> bool:
+    """True for a finished attempt kept when the owner deleted its draft card.
+
+    Such a run is hidden everywhere a cancelled run is. Only while it stays
+    finished: a run the worker revives is live work again and shows.
+    """
+    result = result if isinstance(result, dict) else {}
+    return bool(result.get(DRAFT_DELETED_AT_KEY)) and str(status or "") in DRAFT_DELETE_KEEPS_STATUSES
+
+
 def _text(value) -> str:
     return value.strip().casefold() if isinstance(value, str) else ""
 

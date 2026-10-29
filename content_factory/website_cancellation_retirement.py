@@ -111,7 +111,11 @@ def acknowledge(op, run, run_id, status, body):
         if status not in {200, 202} or proof is None:
             return False
         from .service_views import _apply_cancellation_receipt
-        incoming = {**goals.mapping(body.get("result")), **{key: body[key]
+        from .run_cancellation import cancellation_request_fields
+        # Only website connection changes retire cancellations here: an older
+        # worker that echoes no reason still records the stop as superseded.
+        incoming = {**cancellation_request_fields("superseded", "system"),
+            **goals.mapping(body.get("result")), **{key: body[key]
             for key in ("article_cancellation_v1", "publication_evidence_v1") if key in body}}
         response = _apply_cancellation_receipt(run_id, {"domain": run.domain, "status": "cancelled", "result": incoming})
         if response.status_code != 200:

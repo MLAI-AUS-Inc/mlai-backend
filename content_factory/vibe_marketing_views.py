@@ -37,6 +37,7 @@ from .run_cancellation import (
     DRAFT_DELETED_AT_KEY,
     cancellation_payload,
     cancellation_request_fields,
+    hidden_by_draft_delete,
     normalize_cancellation,
     step_message,
 )
@@ -1799,7 +1800,9 @@ def _latest_runs_for_org(organization, limit=24, *, config=None, prefetch_feedba
         if selected is not None:
             retained.append(selected)
     retained_ids = {run.run_id for run in retained}
-    ordinary = [run for run in candidates if run.run_id not in retained_ids and not article_setup_reset_ignores_run(config, run)]
+    # A finished attempt kept by a draft delete is hidden like a cancelled run.
+    ordinary = [run for run in candidates if run.run_id not in retained_ids and not article_setup_reset_ignores_run(config, run)
+        and not hidden_by_draft_delete(getattr(run, "status", ""), getattr(run, "result", None))]
     selected_runs = sorted(retained + ordinary[:max(limit - len(retained), 0)], key=lambda run: run.updated_at, reverse=True)
     # Prefetch only the final display window. Discarded candidates must not
     # acquire reverse-relation cycles that retain their large result JSON.
@@ -3398,7 +3401,7 @@ def _article_restart_available(run):
 def _serialize_article_draft(run, *, written_keys):
     if run.workflow not in ARTICLE_WORKFLOWS or run.status == ContentFactoryRunStatus.CANCELLED:
         return None
-    if _run_mapping(run.result).get(DRAFT_DELETED_AT_KEY):
+    if hidden_by_draft_delete(run.status, run.result):
         # A finished attempt kept when the owner deleted its draft card.
         return None
     # Once a topic has a WrittenArticle it has graduated into the publish
@@ -7527,6 +7530,12 @@ def _cancel_local_article_run(*, run, organization, remote_data=None, cancellati
 
     with transaction.atomic():
         locked_run = ContentFactoryRun.objects.select_for_update().get(pk=run.pk)
+        saved = _run_mapping(locked_run.result)
+        if locked_run.status == ContentFactoryRunStatus.CANCELLED and saved.get("cancellation_reason"):
+            # Already stopped with a recorded reason (say a lost worker): a later
+            # owner delete or cancel of the same run never relabels that stop.
+            cancellation_reason, cancelled_by = normalize_cancellation(
+                saved.get("cancellation_reason"), saved.get("cancelled_by"))
         # Every caller is an owner action (cancel, delete-draft cascade, discard).
         # Settle a free first article from the pre-cancel state: consumed once
         # writing started on a live run, released by the bound no-effect stop
@@ -8394,7 +8403,9 @@ DJANGO_OWNED_ARTICLE_RESULT_KEYS = (
     "ops_alerts",
     "cancellation_reason",
     "cancelled_by",
-    DRAFT_DELETED_AT_KEY,
+    # run_cancellation.DRAFT_DELETED_AT_KEY. A literal, as in service_views, so
+    # the AST-extracted merge tests can exec this tuple on its own.
+    "draft_deleted_at",
 )
 # Written by the backend itself (ops alert receipts, owner cancellation reason).
 # A saved non-empty value always wins over a worker snapshot or status poll.
@@ -8577,25 +8588,24 @@ def _article_draft_group_members(run, organization):
     return group
 
 
-def _hide_kept_draft_siblings(siblings):
-    """Hide the finished siblings a draft delete kept, without changing their outcome.
+def _hide_kept_draft_sibling(sibling, *, now):
+    """Hide a finished sibling a draft delete kept, without changing its outcome.
 
-    Their status, error and billing state stay as they are. Only the drafts
-    list stops showing them, so the deleted card does not come back as an
-    older attempt. ``updated_at`` is left alone so refund and alert sweeps
-    keyed on it see the run exactly as before.
+    Its status, error and billing state stay as they are. It is hidden wherever
+    a cancelled run is (the drafts list, latest runs, publish evidence), so the
+    deleted card does not come back as an older attempt. ``updated_at`` is left
+    alone so refund and alert sweeps keyed on it see the run exactly as before.
+    Returns False when the run is no longer finished (the worker revived it).
     """
-    now = timezone.now().isoformat()
-    for sibling in siblings:
-        with transaction.atomic():
-            locked = ContentFactoryRun.objects.select_for_update().filter(pk=sibling.pk).first()
-            if locked is None:
-                continue
-            result = dict(_run_mapping(locked.result))
-            if result.get(DRAFT_DELETED_AT_KEY):
-                continue
-            result[DRAFT_DELETED_AT_KEY] = now
+    with transaction.atomic():
+        locked = ContentFactoryRun.objects.select_for_update().filter(pk=sibling.pk).first()
+        if locked is None or locked.status not in DRAFT_DELETE_KEEPS_STATUSES:
+            return False
+        result = dict(_run_mapping(locked.result))
+        if not result.get(DRAFT_DELETED_AT_KEY):
+            result[DRAFT_DELETED_AT_KEY] = now.isoformat()
             ContentFactoryRun.objects.filter(pk=locked.pk).update(result=sanitize_json_for_postgres(result))
+        return True
 
 
 def _run_delivery_mode(run):
@@ -19194,7 +19204,19 @@ def control_article_run(*, user, context, run, action, data, run_id=None, goal_o
                     continue
                 cancelled_ids.append(member.run_id)
             if run.run_id in cancelled_ids:
-                _hide_kept_draft_siblings(kept_siblings)
+                hidden_at = timezone.now()
+                for sibling in kept_siblings:
+                    if _run_has_external_publish_evidence(sibling):
+                        # A kept attempt's own draft PR is closed (or confirmed
+                        # closed) before it is hidden, exactly as a cancelled
+                        # member's is; one that cannot be closed stays visible.
+                        kept = [item for item in (close_draft_pull_request(config, url)
+                            for url in _draft_pull_request_urls(sibling)) if not item["ok"]]
+                        if kept:
+                            protected_ids.append(sibling.run_id)
+                            blocked_reasons.update(item["reason"] for item in kept)
+                            continue
+                    _hide_kept_draft_sibling(sibling, now=hidden_at)
 
             if not cancelled_ids and protected_ids:
                 detail = (

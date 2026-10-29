@@ -8844,7 +8844,10 @@ def _merge_django_owned_run_request(existing_request, incoming_request):
     for key, value in existing.items():
         if key in immutable:
             if key in incoming and canonical_bytes(unset_as_none(incoming[key])) != canonical_bytes(unset_as_none(value)):
-                raise EditorialRunConflict("Worker snapshots cannot change original article identity or delivery consent")
+                conflict = EditorialRunConflict("Worker snapshots cannot change original article identity or delivery consent")
+                # The field's name (never its value) for the refused-snapshot log.
+                conflict.guard_field = key
+                raise conflict
             merged[key] = deepcopy(value)
             continue
         if key in {"setup_delivery_v1","article_delivery_v1","workflow_order_v1"}:
@@ -9033,6 +9036,10 @@ def _sync_content_factory_run_snapshot(*, run_id: str, data: dict, step_states: 
                 active_status=data["status"],
                 current_step=data.get("current_step") or "",
             )
+            if isinstance(data["result"], dict):
+                # A deleted draft's kept attempt that the worker revives is live
+                # work again, so it shows (run_cancellation.DRAFT_DELETED_AT_KEY).
+                data["result"].pop("draft_deleted_at", None)
         data["result"] = merge_reliability_fields(data.get("result"), data)
         if not created and _content_factory_run_snapshot_unchanged(existing_run, data=data, step_states=step_states):
             existing_run._content_factory_sync_unchanged = True
@@ -9242,8 +9249,9 @@ def _apply_run_snapshot(run_id, payload, *, ack=False):
         except EditorialRunConflict as exc:
             # Content Factory keeps only the code when it fails the run, so name
             # the guard here (a fixed message, never article or founder text).
-            logger.warning("content_factory_editorial_run_conflict run_id=%s workflow=%s guard=%s",
-                run_id, str(data.get("workflow") or "")[:80], str(exc)[:200])
+            logger.warning("content_factory_editorial_run_conflict run_id=%s workflow=%s guard=%s field=%s",
+                run_id, str(data.get("workflow") or "")[:80], str(exc)[:200],
+                str(getattr(exc, "guard_field", "") or "-")[:80])
             return Response(
                 {"error": "editorial_run_conflict", "code": "editorial_run_conflict", "detail": str(exc), "run_id": run_id},
                 status=status.HTTP_409_CONFLICT,
