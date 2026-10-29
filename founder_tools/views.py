@@ -26,6 +26,7 @@ from .services import (
     ensure_company_organization,
     get_or_create_founder_profile,
     offboard_company,
+    seed_new_company_founder_and_author,
     set_active_company,
 )
 from vibe_raising.registration import (
@@ -121,6 +122,8 @@ class FounderToolsCompanyView(APIView):
             if key in data
         }
 
+        # A new company, or the first save of an unsaved research workspace.
+        first_save = False
         try:
             if company_id:
                 company = get_object_or_404(VibeRaisingCompany, pk=company_id, profile=profile)
@@ -128,12 +131,13 @@ class FounderToolsCompanyView(APIView):
                 from .profile_fields import is_research_workspace
                 from .services import find_company_with_domain
                 provisional = find_company_with_domain(profile, plain_fields.get("domain"))
-                company = (provisional if provisional and is_research_workspace(provisional)
-                           else VibeRaisingCompany(profile=profile))
+                reuse = bool(provisional and is_research_workspace(provisional))
+                company = provisional if reuse else VibeRaisingCompany(profile=profile)
+                first_save = True
             else:
-                company = profile.companies.filter(name__iexact=data["name"]).first() or VibeRaisingCompany(
-                    profile=profile
-                )
+                company = profile.companies.filter(name__iexact=data["name"]).first()
+                first_save = company is None
+                company = company or VibeRaisingCompany(profile=profile)
 
             if "domain" in plain_fields:
                 assert_company_domain_available(
@@ -200,6 +204,8 @@ class FounderToolsCompanyView(APIView):
 
         ensure_company_organization(company)
         apply_shared_startup_details(user=request.user, company=company, data=data)
+        if first_save:
+            seed_new_company_founder_and_author(user=request.user, company=company)
         if profile.active_company_id is None:
             set_active_company(profile, company)
         company.refresh_from_db()

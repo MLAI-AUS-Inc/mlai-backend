@@ -668,6 +668,44 @@ def apply_shared_startup_details(*, user, company: VibeRaisingCompany, data: dic
     return organization
 
 
+def _member_display_name(user) -> str:
+    """The member's own account name; never derived from the email address."""
+    name = str(getattr(user, "full_name", "") or "").strip() or str(getattr(user, "first_name", "") or "").strip()
+    return " ".join(name.split())[:255]
+
+
+def seed_new_company_founder_and_author(*, user, company: VibeRaisingCompany) -> None:
+    """Record the signed-in member as founder 1 and default article author.
+
+    Called only when a startup is first saved. Existing founders (profile rows
+    or legacy founder names) and existing authors are never overwritten, and a
+    member without a name seeds nothing, so the Founders step stays optional.
+    """
+    from content_factory.authors import normalize_author
+    from content_factory.models import OrganizationContentConfig
+    from founder_tools.profile_fields import profile_details, save_profile_details, validate_profile_fields
+    from startup_updates.services import resolve_or_create_profile
+
+    organization = company.organization if company.organization_id else None
+    name = _member_display_name(user)
+    if organization is None or not name:
+        return
+    with transaction.atomic():
+        Organization.objects.select_for_update().get(pk=organization.pk)
+        _, startup_profile = resolve_or_create_profile(domain=organization.domain)
+        if not profile_details(organization).get("founderProfiles") and not startup_profile.founder_names:
+            data = validate_profile_fields({"founderProfiles": [{"name": name}]})
+            save_profile_details(organization, data)
+            startup_profile.founder_names = data["founderNames"]
+            startup_profile.save(update_fields=["founder_names", "updated_at"])
+        config, _ = OrganizationContentConfig.objects.select_for_update().get_or_create(organization=organization)
+        if not config.authors:
+            author = normalize_author({"id": f"member-{user.id}", "name": name, "role": "Founder"})
+            config.authors = [author]
+            config.default_author_id = author["id"]
+            config.save(update_fields=["authors", "default_author_id", "updated_at"])
+
+
 def get_or_create_founder_profile(user) -> VibeRaisingProfile:
     reconcile_user_slack_id_from_email(user)
     profile, _created = VibeRaisingProfile.objects.get_or_create(
