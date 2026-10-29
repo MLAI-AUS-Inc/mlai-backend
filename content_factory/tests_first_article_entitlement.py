@@ -203,6 +203,31 @@ class FirstArticleStartTests(EntitlementFixture, TestCase):
         self.assertEqual(error.data["costPoints"], 12)
         self.assertFalse(free_rows().exists())
 
+    @override_settings(ARTICLES_FREE_FIRST_ARTICLE_ENABLED=False)
+    def test_flag_off_still_tells_established_startups_from_new_ones(self):
+        # IF-21: the client offers the paid copy-ready primary for 'disabled' and
+        # keeps the review path for 'established', so the flag must not blur them.
+        from .activation import article_capabilities
+
+        def summary(state):
+            return state["status"], state["free"], state["topic_batch_free"], state["limit"]
+
+        self.assertEqual(summary(self.state()), ("unavailable", False, False, "disabled"))
+        ContentFactoryRun.objects.create(run_id="paid-run", workflow="article_generation", domain=self.org.domain,
+            organization=self.org, status="completed", run_request={"roo_points_billing_status": "charged"})
+        self.assertEqual(summary(self.state()), ("unavailable", False, False, "established"))
+        connected = self.make_org("connected.example.test")
+        with patch("content_factory.portable_drafts.has_connected_website", return_value=True):
+            self.assertEqual(self.state(connected)["limit"], "established")
+        newcomer = self.make_org("newcomer.example.test")
+        self.assertEqual(self.state(newcomer)["limit"], "disabled")
+        with override_settings(ARTICLES_FREE_FIRST_ARTICLE_ENABLED=True, ARTICLES_FIRST_ARTICLE_GOAL_ENABLED=True):
+            self.assertEqual((self.state()["limit"], self.state(newcomer)["limit"]), ("established", "disabled"))
+        config = OrganizationContentConfig.objects.get(organization=self.org)
+        capabilities = article_capabilities(config, domain=self.org.domain, user=self.user, first_article=self.state())
+        self.assertEqual((capabilities["prices"]["article"], capabilities["firstArticle"]["limit"]), (12, "established"))
+        self.assertFalse(free_rows().exists())
+
     def test_goal_flag_turns_the_free_article_off_and_warns(self):
         from .checks import free_first_article_goal_check
         with override_settings(ARTICLES_FIRST_ARTICLE_GOAL_ENABLED=True):

@@ -60,13 +60,21 @@ def _accepted(run_id="island-refresh-run-1"):
 
 
 class IslandRefreshSchedulerTestCase(TestCase):
-    def make_org(self, domain, *, timezone_name="Australia/Melbourne", islands=0, strategy=None, clusters=0):
+    def make_org(self, domain, *, timezone_name="Australia/Melbourne", islands=0, strategy=None, clusters=0, keywords=None):
         organization = Organization.objects.create(name=domain, domain=domain)
         OrganizationContentConfig.objects.create(
             organization=organization,
             default_timezone=timezone_name,
             pillar_strategy=strategy or {},
         )
+        # An org with islands has usually been researched; clusters add their own keywords.
+        for index in range(1 if keywords is None and islands else keywords or 0):
+            ResearchedKeyword.objects.create(
+                organization=organization,
+                keyword=f"{domain} researched {index}",
+                keyword_normalized=f"{domain} researched {index}",
+                volume=300,
+            )
         for index in range(islands):
             ContentIsland.objects.create(
                 organization=organization,
@@ -272,22 +280,49 @@ class IslandRefreshEligibilityTests(IslandRefreshSchedulerTestCase):
             ContentIslandRefreshDispatch.objects.values_list("organization__domain", flat=True)
         )
 
-    def test_a_cold_start_org_with_only_a_pillar_strategy_is_eligible(self):
-        self.make_org(
+    def test_a_cold_start_org_with_only_a_pillar_strategy_is_seeded_without_a_run(self):
+        # 29 Oct 2026 audit: content-factory fails every refresh with NO_KEYWORDS
+        # until research runs, so the scheduler seeds the islands itself.
+        organization = self.make_org(
             "cold-start.com",
             strategy={"pillars": [{"name": "AI Startup Fundraising", "keyword": "ai startup fundraising"}]},
         )
+        with patch(
+            "content_factory.content_islands.seed_islands_from_bootstrap_pillars", return_value=["seeded"]
+        ) as seed, patch(POST_HELPER, return_value=_accepted()) as post:
+            result = run_island_refresh_scheduler(now=DUE_NOW)
 
-        self.assertEqual(self._dispatched_domains(), ["cold-start.com"])
+        seed.assert_called_once_with(organization)
+        post.assert_not_called()
+        self.assertEqual((result["skipped_no_keywords"], result["seeded"], result["dispatched"]), (1, 1, 0))
+        self.assertFalse(ContentIslandRefreshDispatch.objects.exists())
+
+    def test_an_islanded_org_without_keywords_is_not_dispatched_or_reseeded(self):
+        self.make_org("islanded.com", islands=1, keywords=0)
+        with patch("content_factory.content_islands.seed_islands_from_bootstrap_pillars") as seed:
+            self.assertEqual(self._dispatched_domains(), [])
+        seed.assert_not_called()
+
+    def test_an_org_is_dispatched_once_research_has_produced_keywords(self):
+        self.make_org(
+            "researched.com",
+            strategy={"pillars": [{"name": "AI Startup Fundraising", "keyword": "ai startup fundraising"}]},
+            keywords=2,
+        )
+
+        self.assertEqual(self._dispatched_domains(), ["researched.com"])
 
     def test_profile_details_and_bookkeeping_alone_are_not_a_strategy(self):
+        # Every org has researched keywords, so only the private-key rule decides:
+        # without it, all five would be dispatched.
         self.make_org("new-startup.com", strategy={
-            "startup_profile_details": {"founderProfiles": [{"name": "Ann A", "linkedinUrl": ""}]}})
-        self.make_org("researching.com", strategy={"startup_profile_details": {"researchDraft": True}})
-        self.make_org("offboarded.com", strategy={"previous_owner": {"user_id": 1, "reason": "company_deleted"}})
-        self.make_org("alerted.com", strategy={"ops_alerts": {"alert-1": {"state": "pending"}}})
+            "startup_profile_details": {"founderProfiles": [{"name": "Ann A", "linkedinUrl": ""}]}}, keywords=1)
+        self.make_org("researching.com", strategy={"startup_profile_details": {"researchDraft": True}}, keywords=1)
+        self.make_org("offboarded.com", strategy={
+            "previous_owner": {"user_id": 1, "reason": "company_deleted"}}, keywords=1)
+        self.make_org("alerted.com", strategy={"ops_alerts": {"alert-1": {"state": "pending"}}}, keywords=1)
         self.make_org("voiced.com", strategy={
-            "startup_profile_details": {"founderProfiles": []}, "article_voice": {"tone": "plain"}})
+            "startup_profile_details": {"founderProfiles": []}, "article_voice": {"tone": "plain"}}, keywords=1)
 
         self.assertEqual(self._dispatched_domains(), ["voiced.com"])
 
