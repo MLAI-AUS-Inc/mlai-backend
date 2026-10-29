@@ -1200,9 +1200,10 @@ def refund_content_factory_topic_generation_for_user(
     from roo.services import PointsService
 
     client_request_id = _get_client_request_id(article_request)
-    from content_factory.first_article_entitlement import release_topic_batch
-    if release_topic_batch(client_request_id=client_request_id):
-        # The free first topic batch never started: allow its one free re-run.
+    from content_factory.first_article_entitlement import entitled_request, release_topic_batch
+    if entitled_request(article_request):
+        # The free first topic batch never started: no credit, one free re-run.
+        release_topic_batch(client_request_id=client_request_id)
         return None
     cost_points = _original_content_charge_points(
         user, f"content_factory:topic_generation:charge:{client_request_id}")

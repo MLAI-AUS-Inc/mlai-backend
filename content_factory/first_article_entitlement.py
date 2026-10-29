@@ -503,6 +503,19 @@ def topic_batch_free(organization, user) -> bool:
     return entitlement_state(organization, user)["topic_batch_free"]
 
 
+def topic_batch_quote_free(organization, user, client_request_id) -> bool:
+    """Whether a research start is quoted at 0: a replay of its live grant, or the free first batch."""
+    if not free_first_article_enabled() or organization is None or not getattr(organization, "pk", None):
+        return False
+    rows = _rows(organization.pk)
+    reference = _reference(client_request_id)
+    if rows.topics is not None and rows.topics.reference_id == reference:
+        return not rows.topics_released
+    if rows.topics_retry is not None and rows.topics_retry.reference_id == reference:
+        return True
+    return entitlement_state(organization, user)["topic_batch_free"]
+
+
 def grant_topic_batch(*, organization, user, client_request_id, requested_topic_count):
     """Grant the free first topic batch (up to four topics, once, plus one free re-run).
 
@@ -519,9 +532,11 @@ def grant_topic_batch(*, organization, user, client_request_id, requested_topic_
     with transaction.atomic():
         _lock(organization.pk, user)
         rows = _rows(organization.pk)
-        for row in (rows.topics, rows.topics_retry):
-            if row is not None and row.reference_id == reference:
-                return row
+        if rows.topics is not None and rows.topics.reference_id == reference:
+            # A replay keeps its grant; a released batch is re-run under a new request.
+            return None if rows.topics_released else rows.topics
+        if rows.topics_retry is not None and rows.topics_retry.reference_id == reference:
+            return rows.topics_retry
         if not entitlement_state(organization, user)["topic_batch_free"]:
             return None
         suffix = "topics" if rows.topics is None else "topics:retry"
@@ -596,14 +611,34 @@ def note_attempts_exhausted(organization) -> None:
     _queue_alert(organization=organization, alert_reason="first_article_attempts_exhausted")
 
 
+def _recent_child_runs(since) -> int:
+    from workflow_runs.models import ContentFactoryRun
+    return ContentFactoryRun.objects.filter(created_at__gte=since, run_request__roo_points_entitlement=ENTITLEMENT,
+        run_request__original_billing_source_run_id__isnull=False).count()
+
+
 def _check_spike(organization) -> None:
+    """Tell ops once an hour when free reservations and their child runs pass the threshold."""
     threshold = int(getattr(settings, "ARTICLES_FREE_FIRST_ARTICLE_SPIKE_THRESHOLD", 0) or 0)
     if threshold <= 0:
         return
-    count = _recent_reservations(timezone.now() - timedelta(hours=1))
-    if count and count % threshold == 0:
-        logger.warning("first_article_entitlement_spike reservations_last_hour=%s threshold=%s", count, threshold)
-        _queue_alert(organization=organization, alert_reason="free_cap_spike")
+    now = timezone.now()
+    since = now - timedelta(hours=1)
+    count = _recent_reservations(since) + _recent_child_runs(since)
+    if count < threshold:
+        return
+    from django.core.cache import cache
+    if not cache.add(f"first_article_entitlement_spike:{now:%Y%m%d%H}", 1, timeout=3600):
+        return
+    logger.warning("first_article_entitlement_spike work_last_hour=%s threshold=%s", count, threshold)
+    _queue_alert(organization=organization, alert_reason="free_cap_spike")
+
+
+def note_entitled_child_run(run) -> None:
+    """Count a revision, restart or comment run of the free article toward the spike alert."""
+    organization = getattr(run, "organization", None)
+    if organization is not None:
+        transaction.on_commit(lambda: _check_spike(organization), robust=True)
 
 
 def request_namespace(request, *, organization_id=None, run_id=""):

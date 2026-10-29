@@ -1010,12 +1010,17 @@ def _charge_roo_points_for_article(request, *, context, payload: dict, goal_oper
     return charged_user, charge_ledger, article_request, None
 
 
-def _charge_roo_points_for_content_island_topic_generation(request, *, context, payload: dict, scope_request_id=True):
+def _charge_roo_points_for_content_island_topic_generation(request, *, context, payload: dict, scope_request_id=True,
+        first_topic_batch=False):
+    """Charge (or grant) a topic research batch and stamp its billing authorization.
+
+    ``first_topic_batch`` marks the article research start, whose first batch
+    of up to four topics is free for a startup that still has its free first
+    article. Island research always keeps its price.
+    """
+    from . import first_article_entitlement as first_article
     domain = context.organization.domain
     cost_points = get_content_factory_research_cost_points(domain, payload.get("requested_topic_count", 4))
-    quote_error = _quoted_price_response(request, cost_points=cost_points)
-    if quote_error is not None:
-        return None, None, quote_error
     content_island_slug = str(payload.get("content_island_slug") or "").strip()
     # Bound the slug embedded in the generated id: it lands in Ledger.reference_id AND
     # ContentFactoryJob.client_request_id, both CharField(max_length=100). A long island
@@ -1033,6 +1038,16 @@ def _charge_roo_points_for_content_island_topic_generation(request, *, context, 
     if scope_request_id:
         client_request_id = "vibe-research:" + hashlib.sha256(
             f"{request.user.pk}:{context.company.pk}:{client_request_id}".encode()).hexdigest()
+    try:
+        within_free_batch = int(payload.get("requested_topic_count", 4)) <= first_article.FREE_TOPIC_BATCH_MAX
+    except (TypeError, ValueError):
+        within_free_batch = False
+    # A replay of the granted batch keeps its 0 quote.
+    free_batch = (bool(first_topic_batch) and within_free_batch
+        and first_article.topic_batch_quote_free(context.organization, request.user, client_request_id))
+    quote_error = _quoted_price_response(request, cost_points=0 if free_batch else cost_points)
+    if quote_error is not None:
+        return None, None, quote_error
     payload["client_request_id"] = client_request_id
     actor_id = founder_actor_id_for_user(request.user)
     article_request = {
@@ -1046,14 +1061,25 @@ def _charge_roo_points_for_content_island_topic_generation(request, *, context, 
     # Existing HTTP clients retain their contract; only explicitly marked MCP
     # requests enlist the existing outbox in the same Roo spend transaction.
     durable = bool(payload.get("mcp_request_hash"))
-    with transaction.atomic() if durable else nullcontext():
+    # The free grant rolls back with its outbox row, like a spend.
+    with transaction.atomic() if durable or free_batch else nullcontext():
+        grant = None
+        if free_batch:
+            grant = first_article.grant_topic_batch(organization=context.organization, user=request.user,
+                client_request_id=client_request_id, requested_topic_count=payload.get("requested_topic_count", 4))
+            if grant is None:
+                # The free batch went elsewhere between quote and lock: quote the price.
+                return None, None, _quoted_price_response(request, cost_points=cost_points, require_quote=True)
         try:
-            charged_user, charge_ledger, charge_amount = charge_content_factory_topic_generation_for_user(
-                user=request.user,
-                actor_id=actor_id,
-                article_request=article_request,
-                resolved_domain=domain,
-            )
+            if grant is not None:
+                charged_user, charge_ledger, charge_amount = request.user, None, 0
+            else:
+                charged_user, charge_ledger, charge_amount = charge_content_factory_topic_generation_for_user(
+                    user=request.user,
+                    actor_id=actor_id,
+                    article_request=article_request,
+                    resolved_domain=domain,
+                )
         except InsufficientRooPointsError as exc:
             return None, None, Response(
                 getattr(exc, "payload", None) or build_roo_points_payload(
@@ -1071,17 +1097,24 @@ def _charge_roo_points_for_content_island_topic_generation(request, *, context, 
                 status=status.HTTP_409_CONFLICT,
             )
 
-        payload.update(
-            build_roo_points_authorization_payload(
-                domain=domain,
-                action=CONTENT_FACTORY_ACTION_CONTENT_ISLAND_TOPIC_GENERATION,
-                cost_points=charge_amount,
-                required_points=cost_points,
-                current_balance=_roo_points_balance_for_user(request.user),
-                billing_status="charged" if charge_amount > 0 else "free",
-                ledger_id=getattr(charge_ledger, "id", None),
+        if grant is not None:
+            stamp = first_article.entitled_authorization(domain=domain, ledger=grant,
+                action=CONTENT_FACTORY_ACTION_CONTENT_ISLAND_TOPIC_GENERATION if content_island_slug else "topic_discovery")
+            payload.update(stamp)
+            # A start-failure refund reads this request: the stamp releases the grant.
+            article_request.update(stamp)
+        else:
+            payload.update(
+                build_roo_points_authorization_payload(
+                    domain=domain,
+                    action=CONTENT_FACTORY_ACTION_CONTENT_ISLAND_TOPIC_GENERATION,
+                    cost_points=charge_amount,
+                    required_points=cost_points,
+                    current_balance=_roo_points_balance_for_user(request.user),
+                    billing_status="charged" if charge_amount > 0 else "free",
+                    ledger_id=getattr(charge_ledger, "id", None),
+                )
             )
-        )
         if durable:
             from .dispatch_outbox import reserve_dispatch
             payload.update(dispatch_outbox_reserved=True,
@@ -1196,6 +1229,20 @@ def _reusable_content_factory_charge_for_run(run) -> Optional[int]:
 
 def _reuse_roo_points_authorization_for_article_job(*, run, payload: dict, domain: str, failure_detail: str) -> Response | None:
     run_request = run.run_request if isinstance(run.run_request, dict) else {}
+    from . import first_article_entitlement as first_article
+    if first_article.entitled_request(run_request):
+        # A free first article's restarts, re-pins, resumes and comments run on
+        # its grant while that attempt is live (reserved or consumed). They never
+        # settle it. A released attempt covers nothing: start a new article.
+        grant = first_article.lineage_entitlement(run)
+        if grant is None:
+            return Response({"detail": failure_detail, "code": "roo_points_billing_required"},
+                status=status.HTTP_409_CONFLICT)
+        payload.update(first_article.entitled_authorization(domain=domain,
+            action=CONTENT_FACTORY_ACTION_ARTICLE_GENERATION, ledger=grant))
+        payload["original_billing_source_run_id"] = run.run_id
+        first_article.note_entitled_child_run(run)
+        return None
     try:
         authorized = bool(run_request.get("roo_points_authorized"))
         action = str(run_request.get("roo_points_action") or "").strip()
@@ -17001,6 +17048,7 @@ def start_article_research(*, user, context, data, request_hash=None):
         command,
         context=context,
         payload=payload,
+        first_topic_batch=True,
     )
     if billing_error is not None:
         return billing_error
@@ -19215,7 +19263,16 @@ def control_article_run(*, user, context, run, action, data, run_id=None, goal_o
                 _annotate_publish_handoff_staleness(candidate)
             return Response(_serialize_run(run, context=context), status=status.HTTP_202_ACCEPTED)
         _mark_publish_handoff_pending(run=run, remote_run=remote_run, action=action, auto_merge=auto_merge_requested)
-    if action == "revise":
+    from . import first_article_entitlement as first_article
+    revision_grant = first_article.lineage_entitlement(run) if action == "revise" else None
+    if revision_grant is not None:
+        # Revising the free first article runs on its live grant: no balance
+        # floor, and the revision never consumes or releases the attempt.
+        payload.update(first_article.entitled_authorization(domain=context.organization.domain,
+            action=CONTENT_FACTORY_ACTION_ARTICLE_GENERATION, ledger=revision_grant))
+        payload["original_billing_source_run_id"] = run.run_id
+        first_article.note_entitled_child_run(run)
+    elif action == "revise":
         gate_response, gate_balance = _require_roo_points_for_ai_agent(
             command.user,
             domain=context.organization.domain,

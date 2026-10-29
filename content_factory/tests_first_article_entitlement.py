@@ -218,10 +218,19 @@ class FirstArticleStartTests(EntitlementFixture, TestCase):
         self.assertEqual(self.state(other, neighbour)["limit"], "daily_cap")
 
     @override_settings(ARTICLES_FREE_FIRST_ARTICLE_SPIKE_THRESHOLD=1)
-    def test_reservation_spike_alerts_ops_after_commit(self):
+    def test_reservation_spike_alerts_ops_once_an_hour_after_commit(self):
+        from django.core.cache import cache
+        cache.clear()
         with self.captureOnCommitCallbacks(execute=True):
             self.started()
         self.alerts.assert_any_call(organization=self.org, alert_reason="free_cap_spike")
+        self.alerts.reset_mock()
+        # Child runs of the free article count too, but ops hear once an hour.
+        run = self.make_run({**self.charged[2], "original_billing_source_run_id": "parent"})
+        with self.captureOnCommitCallbacks(execute=True):
+            first_article.note_entitled_child_run(run)
+        self.alerts.assert_not_called()
+        self.assertEqual(first_article._recent_child_runs(run.created_at.replace(year=2000)), 1)
 
     def test_capabilities_quote_zero_while_free(self):
         from .activation import article_capabilities
@@ -362,3 +371,126 @@ class FirstArticleSettlementTests(EntitlementFixture, TestCase):
         merged = views._merge_django_owned_article_result(local, {"status": "cancelled",
             "cancellation_reason": "worker_reason", "cancelled_by": "worker", "ops_alerts": []})
         self.assertEqual({key: merged[key] for key in local}, local)
+
+
+@override_settings(**FREE)
+class EntitledChildRunTests(EntitlementFixture, TestCase):
+    """Revisions, restarts and comments of the free article run on its grant."""
+
+    def reuse(self, run):
+        payload = {}
+        error = views._reuse_roo_points_authorization_for_article_job(run=run, payload=payload, domain=self.org.domain,
+            failure_detail="Start a new article.")
+        return error, payload
+
+    def test_restart_of_a_live_attempt_runs_on_its_grant_and_settles_nothing(self):
+        original = self.started()
+        run = self.make_run(original, status="failed")
+        error, payload = self.reuse(run)
+        self.assertIsNone(error)
+        self.assertEqual((payload["roo_points_billing_status"], payload["roo_points_entitlement"],
+            payload["roo_points_cost"], payload["roo_points_ledger_id"], payload["original_billing_source_run_id"]),
+            ("entitled", "first_article", 0, original["roo_points_ledger_id"], run.run_id))
+        child = self.make_run({**original, **payload}, status="completed")
+        first_article.settle_entitlement_for_run(child)
+        self.assertEqual(keys(self.org), ["attempt:1"])
+        # A consumed attempt still covers comment revisions of the delivered article.
+        first_article.settle_entitlement_for_run(self.make_run(original, status="completed"))
+        self.assertIsNone(self.reuse(child)[0])
+
+    def test_restart_of_a_released_attempt_is_refused(self):
+        run = self.make_run(self.started(), status="cancelled")
+        first_article.release_entitlement(organization=None, run=run, reason="owner_cancelled")
+        error, payload = self.reuse(run)
+        self.assertEqual((error.status_code, error.data["code"]), (409, "roo_points_billing_required"))
+        self.assertEqual(payload, {})
+
+    def test_revising_the_free_article_skips_the_balance_floor(self):
+        original = self.started()
+        run = self.make_run(original, status="awaiting_review", step="await_review")
+        sent = {}
+
+        def remote(**kwargs):
+            sent.update(kwargs["payload"])
+            return {"content_factory_status_code": 409, "error": "Synthetic stop after dispatch."}
+
+        context = SimpleNamespace(organization=self.org, company=None, profile=None)
+        with patch.object(views, "_setup_blocked_response_for_generation", return_value=None), \
+                patch.object(views, "_call_content_factory_run_action", side_effect=remote), \
+                patch.object(views, "_require_roo_points_for_ai_agent") as gate:
+            response = views.control_article_run(user=self.user, context=context, run=run, action="revise",
+                data={"feedback": "Make the intro shorter."})
+        gate.assert_not_called()
+        self.assertEqual(response.status_code, 409)
+        self.assertEqual((sent["roo_points_billing_status"], sent["roo_points_ledger_id"],
+            sent["original_billing_source_run_id"]), ("entitled", original["roo_points_ledger_id"], run.run_id))
+        self.assertEqual(keys(self.org), ["attempt:1"])
+
+
+@override_settings(**FREE)
+class FreeFirstTopicBatchTests(EntitlementFixture, TestCase):
+    def setUp(self):
+        super().setUp()
+        self.enterContext(patch.object(views, "get_content_factory_research_cost_points", return_value=4))
+        self.topic_debits = []
+        self.enterContext(patch.object(views, "charge_content_factory_topic_generation_for_user",
+            side_effect=self.topic_debit))
+
+    def topic_debit(self, **kwargs):
+        self.topic_debits.append(kwargs)
+        raise InsufficientRooPointsError({"code": "roo_points_required", "requiredPoints": 4, "currentBalance": 0})
+
+    def research(self, *, key, org=None, island="", first=True, expected=0, count=4):
+        org = org or self.org
+        payload = {"requested_topic_count": count, "client_request_id": key}
+        if island:
+            payload["content_island_slug"] = island
+        user, request, error = views._charge_roo_points_for_content_island_topic_generation(
+            SimpleNamespace(user=self.user, data={"expectedCostPoints": expected}),
+            context=SimpleNamespace(organization=org, company=SimpleNamespace(pk=org.pk)), payload=payload,
+            first_topic_batch=first)
+        return payload, request, error
+
+    def test_first_topic_batch_is_free_once_and_replays_keep_it(self):
+        payload, _request, error = self.research(key="topics-1")
+        self.assertIsNone(error)
+        grant = free_rows(self.org).get()
+        self.assertEqual(keys(self.org), ["topics"])
+        self.assertEqual((payload["roo_points_billing_status"], payload["roo_points_action"], payload["roo_points_cost"],
+            payload["roo_points_ledger_id"]), ("entitled", "topic_discovery", 0, str(grant.pk)))
+        self.assertEqual(self.topic_debits, [])
+        self.assertIsNone(self.research(key="topics-1")[2])
+        self.assertEqual(keys(self.org), ["topics"])
+        error = self.research(key="topics-2")[2]
+        self.assertEqual((error.status_code, error.data["costPoints"]), (409, 4))
+
+    def test_island_batch_stamps_the_island_action(self):
+        payload, _request, error = self.research(key="island-1", island="pet-insurance")
+        self.assertIsNone(error)
+        self.assertEqual(payload["roo_points_action"], "content_island_topic_generation")
+
+    def test_island_research_and_large_batches_keep_the_price(self):
+        for label, kwargs in (("island_research", {"first": False}), ("eight_topics", {"count": 8})):
+            with self.subTest(label):
+                error = self.research(key=f"priced-{label}", **kwargs)[2]
+                self.assertEqual((error.status_code, error.data["costPoints"]), (409, 4))
+        self.assertFalse(free_rows().exists())
+
+    def test_a_second_startup_on_the_same_account_pays_for_topics(self):
+        self.research(key="topics-1")
+        other = self.make_org("second-topics.example.test")
+        self.assertFalse(first_article.topic_batch_free(other, self.user))
+        error = self.research(key="topics-other", org=other)[2]
+        self.assertEqual(error.data["costPoints"], 4)
+
+    def test_a_batch_that_never_started_gets_one_free_rerun(self):
+        from integrations.services.article_generation import refund_content_factory_topic_generation_for_user
+        _payload, request, _error = self.research(key="topics-1")
+        with patch("roo.services.PointsService.refund") as credit:
+            self.assertIsNone(refund_content_factory_topic_generation_for_user(user=self.user, actor_id="",
+                article_request=request, resolved_domain=self.org.domain, reason="queue_failed"))
+        credit.assert_not_called()
+        self.assertEqual(keys(self.org), ["topics", "topics:released"])
+        self.assertIsNone(self.research(key="topics-rerun")[2])
+        self.assertEqual(keys(self.org), ["topics", "topics:released", "topics:retry"])
+        self.assertEqual(self.research(key="topics-third")[2].data["costPoints"], 4)
