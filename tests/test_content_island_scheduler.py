@@ -280,6 +280,17 @@ class IslandRefreshEligibilityTests(IslandRefreshSchedulerTestCase):
 
         self.assertEqual(self._dispatched_domains(), ["cold-start.com"])
 
+    def test_profile_details_and_bookkeeping_alone_are_not_a_strategy(self):
+        self.make_org("new-startup.com", strategy={
+            "startup_profile_details": {"founderProfiles": [{"name": "Ann A", "linkedinUrl": ""}]}})
+        self.make_org("researching.com", strategy={"startup_profile_details": {"researchDraft": True}})
+        self.make_org("offboarded.com", strategy={"previous_owner": {"user_id": 1, "reason": "company_deleted"}})
+        self.make_org("alerted.com", strategy={"ops_alerts": {"alert-1": {"state": "pending"}}})
+        self.make_org("voiced.com", strategy={
+            "startup_profile_details": {"founderProfiles": []}, "article_voice": {"tone": "plain"}})
+
+        self.assertEqual(self._dispatched_domains(), ["voiced.com"])
+
     def test_a_cluster_backed_org_with_no_islands_is_eligible(self):
         self.make_org("clustered.com", clusters=1)
 

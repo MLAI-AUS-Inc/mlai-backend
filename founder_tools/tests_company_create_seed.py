@@ -30,7 +30,12 @@ class CompanyCreateSeedTests(TestCase):
         return response, VibeRaisingCompany.objects.select_related("organization").get(pk=response.data["id"])
 
     def test_create_seeds_founder_one_and_default_author(self):
+        from content_factory.services.island_refresh_scheduler import _eligible_configs
+
         response, company = self.create(domain="engines.test")
+
+        # The seeded founder is profile detail, not a strategy to cluster.
+        self.assertNotIn(company.organization_id, [row.organization_id for row in _eligible_configs()])
 
         self.assertEqual(response.data["founderProfiles"], [{"name": "Ada Lovelace", "linkedinUrl": ""}])
         self.assertEqual(response.data["founderNames"], ["Ada Lovelace"])

@@ -115,6 +115,9 @@ class CompanyOffboardingTests(TestCase):
         config = OrganizationContentConfig.objects.get(organization=organization)
         self.assertEqual(set(config.pillar_strategy), {"previous_owner"})
         self.assertEqual(config.pillar_strategy["previous_owner"]["user_id"], self.user.id)
+        # That record is bookkeeping: the deleted startup gets no nightly island refresh.
+        from content_factory.services.island_refresh_scheduler import _eligible_configs
+        self.assertNotIn(organization.pk, [row.organization_id for row in _eligible_configs()])
         # Organisation and its domain remain reserved until ownership review.
         self.assertTrue(Organization.objects.filter(pk=organization.pk).exists())
 
