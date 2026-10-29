@@ -5,12 +5,32 @@ the draft into it on MLAI's public preview host. It asks here first, so only a
 site the run's own organisation can show it controls is copied; any other domain
 gets the plain brand-template preview. Nothing is stored.
 
+The bases, strongest first:
+
+- ``hosted_site``: an active or draft MLAI-hosted article site of the
+  organisation (operators create these).
+- ``website_connection``: a connected or paused website connection of the
+  organisation holds a passed live-deployment receipt for the domain. Only
+  ``verify_live_deployment`` writes one, after fetching the domain's public
+  pages over pinned HTTPS and finding the repository CI's sealed artifact
+  digest there, so it proves the connection deploys that domain. A connection's
+  typed ``site_url`` proves nothing and is not read.
+- ``email_domain``: the run's requester proved, by a consumed email code, that
+  they hold their current address, the address is on the domain, the domain is
+  not a mail provider, and no other organisation has verified members on it.
+  Proof does not expire: someone who leaves a company keeps it until their
+  address changes. That is accepted because the claim is only ever asked for the
+  run's own organisation's domain, and another tenant's domain is refused.
+- ``org_website``: the organisation's saved website. It is typed and
+  first-claim-wins, so it proves nothing; Content Factory excludes it by default.
+
 There is no public suffix list in this repository, so domain matching is
-deliberately narrow. A record covers a domain only when it is that domain or a
-parent of it (``pawshare.com.au`` covers ``blog.pawshare.com.au``; siblings and
-children never cover their parent), and never when the record is itself a public
-suffix, a shared hosting root or a government or education namespace. A missed
-match costs only preview fidelity; a false match would copy someone else's site.
+deliberately narrow (see ``preview_domain_lists``). A record covers a domain
+only when it is that domain or a parent of it (``pawshare.com.au`` covers
+``blog.pawshare.com.au``; siblings and children never cover their parent), and
+never when the record is itself a public suffix, a shared hosting root or a
+government or education namespace. A missed match costs only preview fidelity;
+a false match would copy someone else's site.
 """
 
 import ipaddress
@@ -23,6 +43,8 @@ from django.contrib.auth import get_user_model
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
+from community_chat.email_codes import email_digest
+from community_chat.models import CommunityChatEmailCodeChallenge
 from core.permissions import HasRooApiKey
 from founder_tools.models import VibeRaisingCompany
 from integrations.utils import normalize_domain
@@ -30,7 +52,10 @@ from organizations.models import Organization
 from workflow_runs.models import ContentFactoryRun
 
 from .hosted_article_models import HostedArticleSite
-from .website_models import WebsiteConnection
+from .preview_domain_lists import (CC_SECOND_LEVEL, FREE_MAIL_BRANDS, FREE_MAIL_DOMAINS, REGIONAL_SECOND_LEVEL,
+                                   RESERVED_TLDS, SHARED_HOST_BRANDS, SHARED_HOST_SUFFIXES,
+                                   UNCLAIMABLE_ROOTS, UNCLAIMABLE_SECOND_LEVEL, UNCLAIMABLE_TLDS)
+from .website_models import WebsiteConnection, WebsiteConnectionOperation
 
 logger = logging.getLogger(__name__)
 
@@ -40,34 +65,11 @@ RUN_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.:-]{0,99}")
 USER_ID = re.compile(r"[1-9][0-9]{0,17}")
 LABEL = re.compile(r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?")
 TLD = re.compile(r"[a-z]{2,63}|xn--[a-z0-9-]{1,59}")
-# Names that never resolve to a public website.
-RESERVED_TLDS = frozenset({"arpa", "internal", "invalid", "local", "localhost", "onion"})
-# Second-level labels ccTLD registries keep for public registration (com.au,
-# co.uk, co.nz, com.sg, ...). Listing too many only narrows a claim.
-CC_SECOND_LEVEL = frozenset({
-    "ac", "act", "asn", "co", "com", "conf", "csiro", "edu", "go", "gob", "gouv", "gov", "govt", "gv", "id", "info", "ltd",
-    "me", "mil", "ne", "net", "nom", "nsw", "nt", "or", "org", "plc", "qld", "sa", "sch", "tas", "vic", "wa"})
-# Government and education namespaces have deeper public suffixes (nsw.gov.au,
-# k12.ca.us) that cannot be told apart without the full list, so they are never claimed.
-UNCLAIMABLE_SECOND_LEVEL = frozenset({"ac", "edu", "go", "gob", "gouv", "gov", "govt", "gv", "mil", "sch"})
-UNCLAIMABLE_TLDS = frozenset({"edu", "gov", "int", "mil"})
-# Hosts where unrelated customers each get a subdomain.
-SHARED_HOST_SUFFIXES = frozenset({
-    "amazonaws.com", "appspot.com", "azurestaticapps.net", "azurewebsites.net", "blogspot.com", "bubbleapps.io",
-    "carrd.co", "cloudfront.net", "firebaseapp.com", "fly.dev", "framer.app", "framer.website", "ghost.io",
-    "github.io", "gitlab.io", "glitch.me", "herokuapp.com", "hs-sites.com", "lovable.app", "myshopify.com",
-    "netlify.app", "notion.site", "onrender.com", "pages.dev", "railway.app", "replit.app", "square.site",
-    "squarespace.com", "substack.com", "surge.sh", "vercel.app", "web.app", "webflow.io", "weebly.com",
-    "wixsite.com", "wordpress.com", "workers.dev"})
-# Mailboxes anyone can open prove nothing about the domain.
-FREE_MAIL_DOMAINS = frozenset({
-    "126.com", "163.com", "aol.com", "bigpond.com", "bigpond.net.au", "dodo.com.au", "fastmail.com", "fastmail.fm",
-    "gmail.com", "gmx.com", "gmx.net", "googlemail.com", "hey.com", "hotmail.co.uk", "hotmail.com", "hotmail.com.au",
-    "icloud.com", "iinet.net.au", "internode.on.net", "live.com", "live.com.au", "mac.com", "mail.com", "mail.ru",
-    "me.com", "msn.com", "optusnet.com.au", "outlook.com", "outlook.com.au", "ozemail.com.au", "pm.me",
-    "proton.me", "protonmail.com", "qq.com", "rocketmail.com", "telstra.com", "tpg.com.au", "tuta.io",
-    "tutanota.com", "westnet.com.au", "y7mail.com", "yahoo.co.uk", "yahoo.com", "yahoo.com.au", "yandex.com",
-    "ymail.com", "zoho.com", "zohomail.com"})
+# The host part of a stored domain that a strict parse refuses (a stray port word, user info, ...).
+STORED_HOST = re.compile(r"(?:[a-z][a-z0-9+.-]*://)?(?:[^@/?#]*@)?([^/:?#\s]+)")
+# The newest live-deployment receipts read per claim; every one comes from verify_live_deployment.
+RECEIPTS_READ = 100
+USABLE_CONNECTION_STATES = (WebsiteConnection.State.CONNECTED, WebsiteConnection.State.PAUSED)
 
 
 def public_host(value) -> str:
@@ -106,23 +108,47 @@ def public_host(value) -> str:
     return ".".join(labels)
 
 
+def _under(host: str, roots) -> bool:
+    labels = host.split(".")
+    return any(".".join(labels[index:]) in roots for index in range(len(labels)))
+
+
+def _public_suffix_depth(labels) -> int:
+    """How many trailing labels form the public suffix the registrant's name sits under, or 0 for none."""
+    tld = labels[-1]
+    if len(tld) != 2 or len(labels) < 2:
+        return 1
+    if labels[-2] in CC_SECOND_LEVEL or labels[-2] in REGIONAL_SECOND_LEVEL.get(tld, ()):
+        return 0 if labels[-2] in UNCLAIMABLE_SECOND_LEVEL else 2
+    # Geographic .us names (ca.us, k12.ca.us) belong to governments and schools.
+    if tld == "us" and len(labels[-2]) == 2:
+        return 0
+    return 1
+
+
 def registrable_domain(host: str) -> str:
     """The name a registrant holds for ``host`` (``blog.pawshare.com.au`` -> ``pawshare.com.au``), or "" for none.
 
     ``host`` must come from :func:`public_host`. Public suffixes, shared hosting
     roots and government or education namespaces have no registrable domain.
     """
+    if _under(host, UNCLAIMABLE_ROOTS):
+        return ""
     labels = host.split(".")
     for index in range(len(labels)):
         if ".".join(labels[index:]) in SHARED_HOST_SUFFIXES:
             return ".".join(labels[index - 1:]) if index else ""
     if labels[-1] in UNCLAIMABLE_TLDS:
         return ""
-    if len(labels[-1]) == 2 and labels[-2] in CC_SECOND_LEVEL:
-        if labels[-2] in UNCLAIMABLE_SECOND_LEVEL or len(labels) < 3:
+    depth = _public_suffix_depth(labels)
+    if not depth or len(labels) <= depth:
+        return ""
+    # A platform brand on a country domain (blogspot.com.au) is itself a shared root.
+    if labels[-depth - 1] in SHARED_HOST_BRANDS:
+        depth += 1
+        if len(labels) <= depth:
             return ""
-        return ".".join(labels[-3:])
-    return ".".join(labels[-2:])
+    return ".".join(labels[-depth - 1:])
 
 
 def covers(evidence, host: str) -> bool:
@@ -132,7 +158,11 @@ def covers(evidence, host: str) -> bool:
 
 
 def free_mail(domain: str) -> bool:
-    return any(domain == item or domain.endswith("." + item) for item in FREE_MAIL_DOMAINS)
+    """True when ``domain`` (from :func:`public_host`) belongs to a mail provider anyone can open a box at."""
+    if _under(domain, FREE_MAIL_DOMAINS):
+        return True
+    registrable = registrable_domain(domain)
+    return bool(registrable) and registrable.split(".", 1)[0] in FREE_MAIL_BRANDS
 
 
 def _run_organization(run):
@@ -154,17 +184,40 @@ def _spellings(names):
     return sorted(result)
 
 
+def _stored_host(value) -> str:
+    """The public host of a stored domain, also when it kept a port, a trailing dot or other debris."""
+    host = public_host(value)
+    if host:
+        return host
+    match = STORED_HOST.match(str(value or "").strip().lower())
+    return public_host(match.group(1)) if match else ""
+
+
 def _claimed_by_another_organization(host: str, organization) -> bool:
-    """Another MLAI organisation has this site, or a parent of it up to its registrable domain, as its own."""
-    registrable, names, name = registrable_domain(host), [], host
+    """Another MLAI organisation holds this site, a parent of it up to its registrable domain, or a child of it.
+
+    Every stored spelling counts (ports, trailing dots, schemes, Unicode), so
+    the candidates are read by the registrable name and compared once normalized.
+    """
+    registrable, names, name = registrable_domain(host), set(), host
     while True:
-        names.append(name)
+        names.add(name)
         if name == registrable or "." not in name:
             break
         name = name.split(".", 1)[1]
-    names = _spellings(names)
-    return (Organization.objects.filter(domain__in=names).exclude(pk=organization.pk).exists()
-            or HostedArticleSite.objects.filter(domain__in=names).exclude(organization=organization).exists())
+
+    def held(stored) -> bool:
+        stored = _stored_host(stored)
+        return bool(stored) and (stored in names or stored.endswith("." + host))
+
+    for spelling in _spellings([registrable]):
+        rivals = Organization.objects.filter(domain__icontains=spelling).exclude(pk=organization.pk)
+        if any(held(domain) for domain in rivals.values_list("domain", flat=True)):
+            return True
+        sites = HostedArticleSite.objects.filter(domain__icontains=spelling).exclude(organization=organization)
+        if any(held(domain) for domain in sites.values_list("domain", flat=True)):
+            return True
+    return False
 
 
 def _run_owner(run, organization):
@@ -176,6 +229,39 @@ def _run_owner(run, organization):
     if user is None or not VibeRaisingCompany.objects.filter(organization=organization, profile__user=user).exists():
         return None
     return user
+
+
+def _deployment_proven(organization, host: str) -> bool:
+    """A usable connection of the organisation passed a live-deployment check on ``host`` or a parent, at any age."""
+    receipts = WebsiteConnectionOperation.objects.filter(
+        connection__organization=organization, connection__state__in=USABLE_CONNECTION_STATES,
+        action="deployment-verify", state="completed", receipt__status="passed",
+    ).order_by("-created_at").values_list("receipt", flat=True)[:RECEIPTS_READ]
+    return any(isinstance(receipt, dict) and receipt.get("status") == "passed" and receipt.get("provider_verified") is True
+               and covers(receipt.get("public_url"), host) for receipt in receipts)
+
+
+def _mailbox_proven(owner, organization, host: str) -> bool:
+    """The owner holds their current address, on ``host`` or a parent, at a domain one organisation uses."""
+    email = str(owner.email or "")
+    if owner.email_verified_at is None or email.count("@") != 1:
+        return False
+    stored_domain = email.rsplit("@", 1)[1]
+    domain = public_host(stored_domain)
+    if not domain or free_mail(domain) or not covers(domain, host):
+        return False
+    # email_verified_at is stamped once and survives an address change, so only a
+    # consumed code sent to this exact address proves the mailbox.
+    if not CommunityChatEmailCodeChallenge.objects.filter(
+            user=owner, email_digest=email_digest(email), consumed_at__isnull=False).exists():
+        return False
+    # Verified members of other organisations on the same domain mark a mail provider, not one company.
+    for spelling in sorted({stored_domain, domain}):
+        if VibeRaisingCompany.objects.filter(
+                profile__user__email__iendswith="@" + spelling, profile__user__email_verified_at__isnull=False,
+                organization__isnull=False).exclude(organization=organization).exclude(profile__user=owner).exists():
+            return False
+    return True
 
 
 def claim_basis(run_id: str, host: str) -> str:
@@ -194,15 +280,11 @@ def claim_basis(run_id: str, host: str) -> str:
         organization=organization, state__in=[HostedArticleSite.State.ACTIVE, HostedArticleSite.State.DRAFT])
     if any(covers(domain, host) for domain in sites.values_list("domain", flat=True)):
         return "hosted_site"
-    connections = WebsiteConnection.objects.filter(
-        organization=organization, state__in=[WebsiteConnection.State.CONNECTED, WebsiteConnection.State.PAUSED])
-    if any(covers(site_url, host) for site_url in connections.values_list("site_url", flat=True)):
+    if _deployment_proven(organization, host):
         return "website_connection"
     owner = _run_owner(run, organization)
-    if owner is not None and owner.email_verified_at is not None and "@" in owner.email:
-        email_domain = public_host(owner.email.rsplit("@", 1)[1])
-        if email_domain and not free_mail(email_domain) and covers(email_domain, host):
-            return "email_domain"
+    if owner is not None and _mailbox_proven(owner, organization, host):
+        return "email_domain"
     websites = [organization.domain, *VibeRaisingCompany.objects.filter(organization=organization).values_list("domain", flat=True)]
     if any(covers(website, host) for website in websites):
         return "org_website"

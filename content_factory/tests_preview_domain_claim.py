@@ -1,69 +1,28 @@
-"""A run's preview copies a live site's design only for a domain its own organisation controls."""
+"""A run's preview copies a live site's design only for a domain its own organisation controls.
+
+Database-backed, so these run in CI only; tests_preview_domain_claim_unit covers
+the same rules without a database.
+"""
+import uuid
+from datetime import timedelta
+
 from django.contrib.auth import get_user_model
-from django.test import SimpleTestCase, TestCase, override_settings
+from django.test import TestCase, override_settings
 from django.urls import resolve
 from django.utils import timezone
 from rest_framework.test import APIRequestFactory
 
+from community_chat.email_codes import email_digest
+from community_chat.models import CommunityChatEmailCodeChallenge
 from founder_tools.models import VibeRaisingCompany, VibeRaisingProfile
 from organizations.models import Organization
 from workflow_runs.models import ContentFactoryRun
 
 from .hosted_article_models import HostedArticleSite
-from .preview_domain_claim import PreviewDomainClaimServiceView, covers, free_mail, public_host, registrable_domain
-from .website_models import WebsiteConnection
+from .preview_domain_claim import PreviewDomainClaimServiceView
+from .website_models import WebsiteConnection, WebsiteConnectionOperation
 
 KEY = "synthetic-test-key"
-
-
-class DomainMatchingTests(SimpleTestCase):
-    def test_every_spelling_of_one_site_normalizes_to_the_same_host(self):
-        for value in ("pawshare.com.au", "PawShare.com.au.", "www.pawshare.com.au", "https://WWW.PawShare.com.au:443/blog/?x=1",
-                      "http://pawshare.com.au:8080", "//pawshare.com.au/"):
-            self.assertEqual(public_host(value), "pawshare.com.au", value)
-        self.assertEqual(public_host("bücher.de"), "xn--bcher-kva.de")
-        self.assertEqual(public_host("XN--BCHER-KVA.DE"), "xn--bcher-kva.de")
-        self.assertEqual(public_host("ＥＸＡＭＰＬＥ．ｃｏｍ"), "example.com")
-        self.assertEqual(public_host("www.co.uk"), "co.uk")
-
-    def test_anything_that_is_not_a_public_dns_name_is_refused(self):
-        for value in (None, "", " ", "localhost", "intranet", "a.localhost", "startup-1.invalid", "127.0.0.1", "[::1]", "::1",
-                      "10.0.0.1:80", "1.2.3.4.5", "owner@pawshare.com.au", "https://a:b@pawshare.com.au", "ftp://pawshare.com.au",
-                      "javascript:alert(1)", "pawshare.com.au:99999", "pawshare.com.au:port", "a_b.com", "-a.com", "a..com",
-                      ".a.com", "pawshare com.au", "pawshare\\.com.au", "a%2e.com", "😀.com", "x" * 64 + ".com",
-                      ".".join(["a"] * 128) + ".com"):
-            self.assertEqual(public_host(value), "", value)
-
-    def test_the_registrable_domain_stops_at_public_suffixes_and_shared_hosts(self):
-        self.assertEqual(registrable_domain("blog.pawshare.com.au"), "pawshare.com.au")
-        self.assertEqual(registrable_domain("pawshare.com.au"), "pawshare.com.au")
-        self.assertEqual(registrable_domain("shop.acme.co.uk"), "acme.co.uk")
-        self.assertEqual(registrable_domain("acme.au"), "acme.au")
-        self.assertEqual(registrable_domain("docs.example.com"), "example.com")
-        self.assertEqual(registrable_domain("x.alice.github.io"), "alice.github.io")
-        for host in ("com.au", "co.uk", "nsw.au", "github.io", "pages.dev", "health.nsw.gov.au", "unimelb.edu.au", "mit.edu",
-                     "ox.ac.uk"):
-            self.assertEqual(registrable_domain(host), "", host)
-
-    def test_a_record_covers_its_own_domain_and_subdomains_only(self):
-        self.assertTrue(covers("pawshare.com.au", "pawshare.com.au"))
-        self.assertTrue(covers("https://www.pawshare.com.au/", "blog.pawshare.com.au"))
-        self.assertTrue(covers("bücher.de", "xn--bcher-kva.de"))
-        self.assertTrue(covers("alice.github.io", "alice.github.io"))
-        self.assertFalse(covers("blog.pawshare.com.au", "pawshare.com.au"))
-        self.assertFalse(covers("shop.pawshare.com.au", "blog.pawshare.com.au"))
-        self.assertFalse(covers("notpawshare.com.au", "pawshare.com.au"))
-        self.assertFalse(covers("com.au", "pawshare.com.au"))
-        self.assertFalse(covers("github.io", "alice.github.io"))
-        self.assertFalse(covers("alice.github.io", "bob.github.io"))
-        self.assertFalse(covers("", "pawshare.com.au"))
-        self.assertFalse(covers(None, "pawshare.com.au"))
-
-    def test_free_mail_providers_are_recognised(self):
-        for domain in ("gmail.com", "outlook.com.au", "bigpond.net.au", "mail.yahoo.com"):
-            self.assertTrue(free_mail(domain), domain)
-        for domain in ("pawshare.com.au", "notgmail.com"):
-            self.assertFalse(free_mail(domain), domain)
 
 
 @override_settings(ROO_API_KEY=KEY, INTERNAL_API_KEY=KEY)
@@ -83,6 +42,21 @@ class PreviewDomainClaimTests(TestCase):
                                                run_request={"delivery_mode": "content_only", "delivery_mode_confirmed": True,
                                                             "roo_points_requested_by_user_id": user.pk})
         return org, user, run
+
+    def deployed(self, connection, domain, **receipt):
+        # The receipt verify_live_deployment writes after finding the CI artifact marker on the live site.
+        return WebsiteConnectionOperation.objects.create(
+            connection=connection, generation=connection.generation, action="deployment-verify", state="completed",
+            idempotency_key=f"{connection.pk}:deployment:{uuid.uuid4()}",
+            receipt={"status": "passed", "provider_verified": True, "public_url": f"https://{domain}/articles", **receipt})
+
+    def prove_mailbox(self, user, email, *, consumed=True):
+        user.email = email
+        user.save(update_fields=["email"])
+        CommunityChatEmailCodeChallenge.objects.create(
+            user=user, email_digest=email_digest(email), code_digest="b" * 64, client_id="mlai-chat-web",
+            installation_id=uuid.uuid4(), origin="https://chat.example.test", platform="web", public_key="c" * 64,
+            expires_at=timezone.now() + timedelta(minutes=10), consumed_at=timezone.now() if consumed else None)
 
     def claim(self, domain, run_id="claim-run", **headers):
         headers = headers or {"HTTP_X_API_KEY": KEY}
@@ -121,9 +95,17 @@ class PreviewDomainClaimTests(TestCase):
         self.assertEqual(self.basis("xn--bcher-kva.example.test"), "hosted_site")
         self.assertEqual(self.basis("BÜCHER.example.test."), "hosted_site")
 
-    def test_a_connected_or_paused_website_connection_is_a_basis(self):
+    def test_a_connection_needs_a_passed_live_deployment_receipt_for_the_domain(self):
         connection = WebsiteConnection.objects.create(organization=self.org, github_repo="example/brand",
                                                       site_url="https://www.brand.example.test:443/")
+        # A typed site_url and a bound repository prove nothing about the live site.
+        self.assertEqual(self.basis("brand.example.test"), "none")
+        self.deployed(connection, "another-brand.example.test")
+        self.deployed(connection, "brand.example.test", status="failed")
+        self.deployed(connection, "brand.example.test", provider_verified=False)
+        self.assertEqual(self.basis("brand.example.test"), "none")
+        self.assertEqual(self.basis("another-brand.example.test"), "website_connection")
+        self.deployed(connection, "brand.example.test", checked_at="2024-01-01T00:00:00+00:00")
         self.assertEqual(self.basis("brand.example.test"), "website_connection")
         connection.state = "paused"
         connection.save(update_fields=["state"])
@@ -133,18 +115,24 @@ class PreviewDomainClaimTests(TestCase):
             connection.save(update_fields=["state"])
             self.assertEqual(self.basis("brand.example.test"), "none", state)
 
-    def test_the_run_owners_verified_work_email_is_a_basis(self):
-        self.owner.email = "founder@brand.example.test"
-        self.owner.save(update_fields=["email"])
+    def test_the_run_owners_proven_work_email_is_a_basis(self):
+        self.prove_mailbox(self.owner, "founder@brand.example.test", consumed=False)
+        self.assertEqual(self.basis("brand.example.test"), "none")
+        self.prove_mailbox(self.owner, "founder@brand.example.test")
         self.assertEqual(self.basis("brand.example.test"), "email_domain")
         self.assertEqual(self.basis("www.brand.example.test"), "email_domain")
         self.owner.email_verified_at = None
         self.owner.save(update_fields=["email_verified_at"])
         self.assertEqual(self.basis("brand.example.test"), "none")
 
-    def test_an_email_only_counts_for_the_runs_requester_while_they_belong_to_its_organisation(self):
-        self.owner.email = "founder@brand.example.test"
+    def test_a_verified_stamp_does_not_follow_an_email_change(self):
+        self.prove_mailbox(self.owner, self.owner.email)
+        self.owner.email = "ceo@brand.example.test"
         self.owner.save(update_fields=["email"])
+        self.assertEqual(self.basis("brand.example.test"), "none")
+
+    def test_an_email_only_counts_for_the_runs_requester_while_they_belong_to_its_organisation(self):
+        self.prove_mailbox(self.owner, "founder@brand.example.test")
         for requester in (None, "", "not-a-user", True, 10 ** 30, self.owner.pk + 1000):
             self.run.run_request = {**self.run.run_request, "roo_points_requested_by_user_id": requester}
             self.run.save(update_fields=["run_request"])
@@ -156,8 +144,7 @@ class PreviewDomainClaimTests(TestCase):
         self.assertEqual(self.basis("brand.example.test"), "none")
 
     def test_a_free_mail_address_proves_nothing(self):
-        self.owner.email = "founder@gmail.com"
-        self.owner.save(update_fields=["email"])
+        self.prove_mailbox(self.owner, "founder@gmail.com")
         self.assertEqual(self.basis("gmail.com"), "none")
         self.assertEqual(self.basis("mail.gmail.com"), "none")
         # Nor does a mail provider typed as the startup's website.
@@ -175,10 +162,10 @@ class PreviewDomainClaimTests(TestCase):
         self.assertEqual(self.basis("second-brand.example.test"), "org_website")
 
     def test_bases_are_reported_strongest_first(self):
-        self.owner.email = f"founder@{self.org.domain}"
-        self.owner.save(update_fields=["email"])
+        self.prove_mailbox(self.owner, f"founder@{self.org.domain}")
         site = HostedArticleSite.objects.create(organization=self.org, domain=self.org.domain, state="active")
         connection = WebsiteConnection.objects.create(organization=self.org, github_repo="example/site", site_url=self.org.domain)
+        self.deployed(connection, self.org.domain)
         self.assertEqual(self.basis(self.org.domain), "hosted_site")
         site.delete()
         self.assertEqual(self.basis(self.org.domain), "website_connection")
@@ -195,10 +182,10 @@ class PreviewDomainClaimTests(TestCase):
         for domain in ("rival.example.test", "blog.rival.example.test", "rival-blog.example.test"):
             self.assertEqual(self.basis(domain), "none", domain)
         # Nor do the claim run's own records reach a site another organisation holds.
-        WebsiteConnection.objects.create(organization=self.org, github_repo="example/copy", site_url="rival.example.test")
-        WebsiteConnection.objects.create(organization=self.org, github_repo="example/copy", site_url="rival-blog.example.test")
-        self.owner.email = "founder@rival.example.test"
-        self.owner.save(update_fields=["email"])
+        copy = WebsiteConnection.objects.create(organization=self.org, github_repo="example/copy", site_url="rival.example.test")
+        self.deployed(copy, "rival.example.test")
+        self.deployed(copy, "rival-blog.example.test")
+        self.prove_mailbox(self.owner, "founder@rival.example.test")
         VibeRaisingCompany.objects.create(profile=self.owner.vibe_raising_profile, organization=self.org,
                                           domain="rival-blog.example.test", name="Copied brand")
         for domain in ("rival.example.test", "blog.rival.example.test", "rival-blog.example.test"):
