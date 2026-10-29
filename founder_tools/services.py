@@ -104,9 +104,10 @@ class CompanyDomainClaimedError(DomainOwnershipError):
     guards keep the base ``DomainOwnershipError`` body. The founder can carry on
     without the website, so the body says so and never names the owner. Callers
     catch it outside any transaction that rolls back, queue the
-    ``domain_claim_disputed`` alert, and return :meth:`response`, which keeps
-    ``canContinueWithoutDomain`` a real JSON boolean (DRF's exception handler
-    would render ``exc.detail`` values as strings).
+    ``domain_claim_disputed`` alert, and return :meth:`response`. Left
+    uncaught, DRF's exception handler renders the same body (``detail`` is kept
+    a plain dict, so ``canContinueWithoutDomain`` stays a JSON boolean) but no
+    alert is queued.
     """
 
     default_detail = COMPANY_DOMAIN_CLAIMED_DETAIL
@@ -115,7 +116,15 @@ class CompanyDomainClaimedError(DomainOwnershipError):
     def __init__(self, organization=None):
         #: The organisation whose existing claim refused this save, if known.
         self.organization = organization
-        super().__init__(detail=self.body())
+        super().__init__()
+        # APIException would turn every value into a string (True to "True").
+        self.detail = self.body()
+
+    def get_codes(self):
+        return COMPANY_DOMAIN_CLAIMED_CODE
+
+    def get_full_details(self):
+        return self.body()
 
     @staticmethod
     def body() -> dict:
@@ -137,13 +146,16 @@ def claimed_organization(domain) -> Organization | None:
     return Organization.objects.filter(domain=normalized).first() if normalized else None
 
 
+_ALERT_HELPER_MODULE = "content_factory.founder_journey_alerts"
+
+
 def queue_domain_claim_alert(*, organization, claimant_user_id) -> str | None:
     """Tell ops that a founder was refused a domain another startup holds.
 
     Calls the founder-journey alert helper (IF-15, reason domain_claim_disputed)
     and must run outside the transaction that rolled the refused save back.
-    Until that helper is deployed with this code, a structured warning is the
-    alert. Returns the alert id, or None when nothing could be queued. Alert
+    Until that module is deployed with this code, a structured warning is the
+    alert; a module that exists but fails to import is logged as an error. Returns the alert id, or None when nothing could be queued. Alert
     storage problems are logged and never change the founder's response.
     """
     if organization is None:
@@ -152,7 +164,13 @@ def queue_domain_claim_alert(*, organization, claimant_user_id) -> str | None:
         return None
     try:
         from content_factory.founder_journey_alerts import queue_founder_journey_alert
-    except ImportError:
+    except ImportError as exc:
+        if not (isinstance(exc, ModuleNotFoundError) and exc.name == _ALERT_HELPER_MODULE):
+            # The helper is deployed but cannot load: that is a fault, not a
+            # missing feature, so it is logged as an error with no receipt.
+            logger.exception("founder_journey_alert_helper_broken alert_reason=domain_claim_disputed org_id=%s",
+                             organization.pk)
+            return None
         alert_id = str(uuid.uuid5(
             uuid.NAMESPACE_URL,
             f"mlai:founder-journey:{organization.pk}:claimant-user-{claimant_user_id}:domain_claim_disputed",
@@ -188,7 +206,12 @@ def _organization_claims(organization):
 
     A research workspace is the hidden company "Research my startup" creates
     before anything is saved. Older than the hold, it no longer claims the
-    domain. The researchDraft marker is per organisation.
+    domain. The researchDraft marker is per organisation, so it cannot tell a
+    saved startup from a workspace on its own (an administrator's research sets
+    it on an org that already holds a real startup). A workspace is therefore
+    stale only when it is the org's one and only company and nobody has made it
+    their active startup; any other org keeps first-claim-wins and releases
+    nothing.
     """
     from .profile_fields import is_research_workspace
 
@@ -198,13 +221,17 @@ def _organization_claims(organization):
         .select_related("profile")
         .order_by("created_at", "id")
     )
-    cutoff = timezone.now() - research_workspace_claim_hold()
-    # Only an org whose oldest company has outlived the hold can hold a stale
-    # workspace, so most tenancy reads skip the config lookup.
-    if not companies or companies[0].created_at > cutoff or not is_research_workspace(companies[0]):
+    if len(companies) != 1:
         return companies, []
-    stale = [company for company in companies if company.created_at <= cutoff]
-    return [company for company in companies if company.created_at > cutoff], stale
+    [workspace] = companies
+    cutoff = timezone.now() - research_workspace_claim_hold()
+    if (
+        workspace.created_at > cutoff
+        or not is_research_workspace(workspace)
+        or VibeRaisingProfile.objects.filter(active_company=workspace).exists()
+    ):
+        return companies, []
+    return [], companies
 
 
 def organization_owner_user_id(organization) -> int | None:
@@ -278,8 +305,11 @@ def _settle_organization_claim(user, company, organization) -> None:
     released = [workspace for workspace in stale
                 if workspace.pk != company.pk and workspace.profile.user_id != user.id]
     if released and not live:
-        # The hidden workspace would otherwise become this founder's owner (and
-        # a visible company for the researcher) once the marker is cleared.
+        # Nothing the other account researched passes to this founder: its
+        # runs, approved catalogue and config go with the workspace. The hidden
+        # workspace would otherwise become this founder's owner (and a visible
+        # company for the researcher) once the marker is cleared.
+        _purge_org_marketing_data(organization)
         VibeRaisingCompany.objects.filter(pk__in=[workspace.pk for workspace in released]).delete()
         clear_research_draft(organization)
         logger.info(

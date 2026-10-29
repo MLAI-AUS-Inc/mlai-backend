@@ -7,6 +7,8 @@ research workspace stops holding its domain after the claim hold.
 """
 import importlib.util
 import json
+import sys
+import types
 from datetime import timedelta
 from unittest import skipIf, skipUnless
 from unittest.mock import patch
@@ -15,6 +17,7 @@ from django.contrib.auth import get_user_model
 from django.test import TestCase, override_settings
 from django.utils import timezone
 from rest_framework.test import APIClient
+from rest_framework.views import exception_handler
 
 from content_factory.models import OrganizationContentConfig
 from founder_tools.models import VibeRaisingCompany, VibeRaisingProfile
@@ -28,6 +31,7 @@ from founder_tools.services import (
     queue_domain_claim_alert,
 )
 from organizations.models import Organization
+from workflow_runs.models import ContentFactoryRun
 
 User = get_user_model()
 COMPANIES_URL = "/api/v1/founder-tools/companies/"
@@ -210,6 +214,60 @@ class DomainClaimTests(TestCase):
         self._create(self.claimant_client, name="Acme Cofounder")
         self.assertFalse(VibeRaisingCompany.objects.filter(pk=workspace.pk).exists())
 
+    def test_research_marker_on_a_saved_startup_never_moves_or_releases_it(self):
+        # A saved startup, then an administrator's "Research my startup" on the
+        # same domain: staff skip the claim check and the per-org marker lands
+        # on the real startup's organisation.
+        owned = VibeRaisingCompany.objects.get(pk=self._create(self.owner_client).data["id"])
+        organization = owned.organization
+        VibeRaisingCompany.objects.filter(pk=owned.pk).update(created_at=timezone.now() - timedelta(days=30))
+        admin = User.objects.create_user(email="claim-admin@example.test", role="participant", is_staff=True)
+        self._research_workspace(admin, age=timedelta(hours=2))
+        self.assertEqual(organization_owner_user_id(organization), self.owner.id)
+
+        # Days later the marker still does not make the real startup stale.
+        VibeRaisingCompany.objects.filter(organization=organization).update(
+            created_at=timezone.now() - timedelta(days=2))
+        VibeRaisingCompany.objects.filter(pk=owned.pk).update(created_at=timezone.now() - timedelta(days=30))
+        self.assertEqual(organization_owner_user_id(organization), self.owner.id)
+        with patch(ALERT) as alert:
+            self.assert_claimed_body(self._create(self.claimant_client, name="Acme Cofounder", expected=409))
+        alert.assert_called_once_with(organization=organization, claimant_user_id=self.claimant.id)
+        self.assertTrue(VibeRaisingCompany.objects.filter(pk=owned.pk).exists())
+        self.assertEqual(organization_owner_user_id(organization), self.owner.id)
+
+    def test_a_saved_startup_carrying_the_marker_alone_is_not_released(self):
+        # The marker can outlive a save that set the startup active elsewhere;
+        # an active startup is never treated as an abandoned workspace.
+        workspace = self._research_workspace(self.owner, age=timedelta(hours=48))
+        VibeRaisingProfile.objects.filter(user=self.owner).update(active_company=workspace)
+
+        with patch(ALERT):
+            self.assert_claimed_body(self._create(self.claimant_client, name="Acme Cofounder", expected=409))
+        self.assertTrue(VibeRaisingCompany.objects.filter(pk=workspace.pk).exists())
+        self.assertEqual(organization_owner_user_id(workspace.organization), self.owner.id)
+
+    def test_releasing_a_stale_workspace_purges_what_the_other_account_researched(self):
+        workspace = self._research_workspace(self.owner, age=timedelta(hours=25))
+        organization = workspace.organization
+        config = OrganizationContentConfig.objects.get(organization=organization)
+        config.pillar_strategy = {**config.pillar_strategy, "editorial_catalog": {
+            "audience_options": [{"id": "olive-audience", "status": "approved", "approved_by": f"user:{self.owner.id}"}]}}
+        config.save()
+        ContentFactoryRun.objects.create(
+            run_id="researcher-run", organization=organization, domain="acme.test",
+            workflow="startup_autofill", status="completed", run_request={})
+
+        response = self._create(self.claimant_client, name="Acme Cofounder")
+
+        self.assertEqual(organization_owner_user_id(organization), self.claimant.id)
+        self.assertFalse(ContentFactoryRun.objects.filter(organization=organization).exists())
+        strategy = OrganizationContentConfig.objects.get(organization=organization).pillar_strategy
+        self.assertNotIn("editorial_catalog", strategy)
+        self.assertNotIn("researchDraft", strategy.get(PROFILE_KEY, {}))
+        # The claimant's own first save still seeded their founder byline.
+        self.assertEqual(response.data["founderNames"], ["Cory Claimant"])
+
     def test_the_researcher_keeps_their_own_stale_workspace(self):
         workspace = self._research_workspace(self.owner, age=timedelta(hours=48))
         self.assertEqual(organization_owner_user_id(workspace.organization), self.owner.id)
@@ -247,6 +305,33 @@ class DomainClaimTests(TestCase):
         self.assertIn("founder_journey_alert", line)
         self.assertIn("alert_reason=domain_claim_disputed", line)
         self.assertNotIn("claim-cofounder", line)
+
+    def test_a_broken_alert_helper_is_an_error_not_a_quiet_warning(self):
+        organization = Organization.objects.create(name="Acme", domain="acme.test")
+        broken = types.ModuleType("content_factory.founder_journey_alerts")  # no queue function
+        with patch.dict(sys.modules, {"content_factory.founder_journey_alerts": broken}), \
+                self.assertLogs("founder_tools.services", level="ERROR") as logs:
+            alert_id = queue_domain_claim_alert(organization=organization, claimant_user_id=self.claimant.id)
+        self.assertIsNone(alert_id)
+        self.assertIn("founder_journey_alert_helper_broken", logs.output[0])
+
+    def test_an_uncaught_claim_still_renders_a_json_boolean(self):
+        response = exception_handler(CompanyDomainClaimedError(), {})
+        self.assertEqual(response.status_code, 409)
+        self.assertIs(response.data["canContinueWithoutDomain"], True)
+        self.assertEqual(response.data, CLAIMED_BODY)
+
+    def test_the_vibe_raising_company_form_queues_the_alert_for_a_raced_claim(self):
+        self._create(self.owner_client)
+        organization = Organization.objects.get(domain="acme.test")
+        VibeRaisingProfile.objects.create(user=self.claimant, role=VibeRaisingProfile.ROLE_FOUNDER)
+        with patch("vibe_raising.views.domain_is_available_to", return_value=True), \
+                patch("vibe_raising.views.queue_domain_claim_alert") as alert:
+            response = self.claimant_client.post(
+                "/api/v1/vibe-raising/companies/", {"name": "Acme Cofounder", "domain": "acme.test"}, format="json")
+        self.assert_claimed_body(response)
+        alert.assert_called_once_with(organization=organization, claimant_user_id=self.claimant.id)
+        self.assertFalse(VibeRaisingCompany.objects.filter(profile__user=self.claimant).exists())
 
     @skipUnless(HAS_ALERT_HELPER, "needs the founder-journey alert helper (IF-15)")
     def test_exactly_one_alert_receipt_survives_the_rollback(self):
