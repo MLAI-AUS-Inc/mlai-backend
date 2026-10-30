@@ -197,6 +197,10 @@ def start_prepare(config, *, expected=None, company_id=None, user=None, retry=Fa
     connection = config.website_connection
     if connection is None:
         raise WebsiteAuthorityError("website_connection_required", "Select and authorize your website repository first.")
+    # A new-journey setup never merges without the owner's click, and that
+    # stays true even if V2 is later switched off (G10).
+    from .website_setup_owner_approval import require_owner_click
+    require_owner_click(getattr(connection, "organization", None))
     binding = {**(contract_for(connection) if expected is None else expected)}
     if getattr(connection, "organization", None):
         binding.update(domain=connection.organization.domain, github_repo=connection.github_repo)
@@ -1287,6 +1291,15 @@ def maybe_merge_prepared_setup(run, context, config, *, user, goal=None):
         "user_action": {"id": "review_setup", "label": "Review and publish", "run_id": run.run_id, "pr_number": number, "url": url}}
     if config.requires_review:
         return publish
+    from .website_setup_owner_approval import may_merge_setup, approved_run_choice
+    organization = getattr(context, "organization", None) or getattr(config, "organization", None)
+    if may_merge_setup(organization=organization, run=run) is False:
+        # The owner's click decides (decision 12). "Let me review it on GitHub"
+        # leaves the pull request for them; without a click nothing merges.
+        if approved_run_choice(organization=organization, run=run) == "manual":
+            return {"status": "needs_user", "message": f"Your articles setup pull request #{number} is waiting for you on GitHub.",
+                "user_action": action}
+        return publish
     outcome = _attempt_setup_publish_merge(run=run, context=context, automatic=True)
     kind = outcome.get("outcome")
     if kind in {"merged", "waiting", "auto_merge_pending"}:
@@ -1343,6 +1356,13 @@ def approve_prepared_setup(run, context, config, *, user, goal=None):
         "url": preview.get("url") or (run.result or {}).get("preview_url"), "run_id": run.run_id}}
     if config.requires_review:
         return review
+    from .website_setup_owner_approval import requires_owner_click, approved_run_choice
+    organization = getattr(context, "organization", None) or getattr(config, "organization", None)
+    owner_click = requires_owner_click(organization)
+    if owner_click and approved_run_choice(organization=organization, run=run) is not None:
+        # The owner already pressed "Add to my website"; their approval is opening
+        # the setup pull request.
+        return {"status": "pending"}
     from .website_hosted_build import enabled as hosted_enabled, current_scan_source
     from .website_setup_consent import valid as valid_consent
     from .website_goal import scope_matches, scope_for, mapping
@@ -1366,6 +1386,10 @@ def approve_prepared_setup(run, context, config, *, user, goal=None):
         if _setup_preview_proven_for_review(run, head) and not (hosted and goal is not None):
             return review
         raise WebsiteAuthorityError("setup_preview_verification_required", "Waiting for exact setup preview proof.", retryable=True)
+    if owner_click:
+        # The preview is proven. Only the owner's "Add to my website" approves
+        # it; preparation never posts that approval itself.
+        return review
     verify_repository_head(website, base)
     data = {**scoped_run_contract(run), "company_id": str(context.company.pk), "configuration_revision": website.configuration_version}
     request = SimpleNamespace(method="POST", user=user, data=data, query_params={}, headers={})
