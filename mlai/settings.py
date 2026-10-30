@@ -346,8 +346,11 @@ CORS_ALLOW_HEADERS = (
     "x-request-id",
     "idempotency-key",
     "x-mlai-slack-catalog-kinds",
+    # P1 founder journey poll (GET /api/v1/my-startup/journey/) revalidates
+    # with If-None-Match and reads the ETag cross-origin.
+    "if-none-match",
 )
-CORS_EXPOSE_HEADERS = ["X-Request-ID", "Retry-After"]
+CORS_EXPOSE_HEADERS = ["X-Request-ID", "Retry-After", "ETag"]
 
 # Bound request buffering before application-specific parsers run. Larger
 # uploads use the dedicated streaming/media paths rather than unbounded Django
@@ -2532,3 +2535,35 @@ ARTICLES_EXISTING_INVENTORY_DISPLAY_ENABLED = _env_is_true("ARTICLES_EXISTING_IN
 ARTICLES_GOAL_NOTIFICATIONS_ENABLED = _env_is_true("ARTICLES_GOAL_NOTIFICATIONS_ENABLED", False)
 # Registered first-party notifier identity; never a customer or Slack bridge key.
 ARTICLES_GOAL_NOTIFIER_PRIVATE_KEY = os.getenv("ARTICLES_GOAL_NOTIFIER_PRIVATE_KEY", "")
+
+# P1 founder journey ("one simple path"). Every switch defaults off, so a
+# deploy alone changes nothing. New behaviour applies only to the new-journey
+# cohort (content_factory.founder_journey_cohort.is_new_journey); the legacy
+# cohort keeps today's path even with every switch on. Turn-on order is in
+# the P1 contract section 6: report, join, cohort-gated features, then launch.
+MY_STARTUP_FOUNDER_JOURNEY_V2_ENABLED = _env_is_true("MY_STARTUP_FOUNDER_JOURNEY_V2_ENABLED", False)
+# ISO 8601 with an offset; startups created at or after it join the new journey.
+MY_STARTUP_FOUNDER_JOURNEY_V2_LAUNCHED_AT = os.getenv("MY_STARTUP_FOUNDER_JOURNEY_V2_LAUNCHED_AT", "").strip()
+# Per-organisation kill switch: comma-separated organisation ids or domains.
+MY_STARTUP_FOUNDER_JOURNEY_V2_DISABLED_ORGANIZATIONS = os.getenv("MY_STARTUP_FOUNDER_JOURNEY_V2_DISABLED_ORGANIZATIONS", "").strip()
+MY_STARTUP_FOUNDER_JOURNEY_API_ENABLED = _env_is_true("MY_STARTUP_FOUNDER_JOURNEY_API_ENABLED", False)
+MY_STARTUP_FOUNDER_JOURNEY_OPT_IN_ENABLED = _env_is_true("MY_STARTUP_FOUNDER_JOURNEY_OPT_IN_ENABLED", False)
+COMMUNITY_CHAT_ONE_STEP_JOIN_ENABLED = _env_is_true("COMMUNITY_CHAT_ONE_STEP_JOIN_ENABLED", False)
+COMMUNITY_CHAT_INVITE_TOKENS_ENABLED = _env_is_true("COMMUNITY_CHAT_INVITE_TOKENS_ENABLED", False)
+MY_STARTUP_PENDING_MEMBER_ACCESS_ENABLED = _env_is_true("MY_STARTUP_PENDING_MEMBER_ACCESS_ENABLED", False)
+COMMUNITY_CHAT_REVIEW_CLEARED_EMAIL_ENABLED = _env_is_true("COMMUNITY_CHAT_REVIEW_CLEARED_EMAIL_ENABLED", False)
+COMMUNITY_CHAT_DEVICE_AUTH_V2_ENABLED = _env_is_true("COMMUNITY_CHAT_DEVICE_AUTH_V2_ENABLED", False)
+MY_STARTUP_ONE_FIELD_START_ENABLED = _env_is_true("MY_STARTUP_ONE_FIELD_START_ENABLED", False)
+MY_STARTUP_NO_WEBSITE_ARTICLES_ENABLED = _env_is_true("MY_STARTUP_NO_WEBSITE_ARTICLES_ENABLED", False)
+ARTICLES_FIRST_ARTICLE_CARD_ENABLED = _env_is_true("ARTICLES_FIRST_ARTICLE_CARD_ENABLED", False)
+ARTICLES_COPY_READY_BEFORE_VERIFICATION_ENABLED = _env_is_true("ARTICLES_COPY_READY_BEFORE_VERIFICATION_ENABLED", False)
+ARTICLES_DRAFT_READY_NOTIFICATIONS_ENABLED = _env_is_true("ARTICLES_DRAFT_READY_NOTIFICATIONS_ENABLED", False)
+ARTICLES_COPY_WITHOUT_PREVIEW_ENABLED = _env_is_true("ARTICLES_COPY_WITHOUT_PREVIEW_ENABLED", False)
+ARTICLES_DRAFT_TOOLS_ENABLED = _env_is_true("ARTICLES_DRAFT_TOOLS_ENABLED", False)
+ARTICLES_LIVE_URL_VERIFICATION_ENABLED = _env_is_true("ARTICLES_LIVE_URL_VERIFICATION_ENABLED", False)
+MY_STARTUP_GITHUB_CALLBACK_REDIRECTS_ENABLED = _env_is_true("MY_STARTUP_GITHUB_CALLBACK_REDIRECTS_ENABLED", False)
+COMMUNITY_CHAT_INVITE_TOKEN_DEFAULT_TTL_HOURS = int(os.getenv("COMMUNITY_CHAT_INVITE_TOKEN_DEFAULT_TTL_HOURS", "72"))
+COMMUNITY_CHAT_INVITE_TOKEN_MAX_TTL_HOURS = int(os.getenv("COMMUNITY_CHAT_INVITE_TOKEN_MAX_TTL_HOURS", "336"))
+COMMUNITY_CHAT_INVITE_RESOLVE_RATE = os.getenv("COMMUNITY_CHAT_INVITE_RESOLVE_RATE", "30/minute")
+COMMUNITY_CHAT_DEVICE_AUTH_MAX_LIFETIME_SECONDS = int(os.getenv("COMMUNITY_CHAT_DEVICE_AUTH_MAX_LIFETIME_SECONDS", "3600"))
+REST_FRAMEWORK["DEFAULT_THROTTLE_RATES"]["community_chat_invite_resolve"] = COMMUNITY_CHAT_INVITE_RESOLVE_RATE
