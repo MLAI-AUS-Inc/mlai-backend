@@ -14,6 +14,8 @@ NO_DELIVERY_REFUND_CODES = frozenset({
     "EDITORIAL_REJECTED", "EXPORT_EDITORIAL_REJECTED", "DELIVERY_REVIEW_DRIFT", "SOURCE_CHANGED",
     # Authority refusal codes arrive lowercase and are matched upper-cased.
     "WEBSITE_SOURCE_CHANGED", "ARTICLE_DIRECTORY_AGENT_PROVIDER_ERROR",
+    # Content Factory's own code when this backend refuses without naming one.
+    "CONNECTION_AUTHORIZATION_FAILED",
 })
 
 

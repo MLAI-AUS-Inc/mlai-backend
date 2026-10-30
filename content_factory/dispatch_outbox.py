@@ -109,6 +109,13 @@ def refund_dispatch(row, *, reason):
     from integrations.services.article_generation import (
         refund_content_factory_request_for_user, refund_content_factory_topic_generation_for_user,
     )
+    from .first_article_entitlement import entitled_request, release_entitlement_for_request, release_topic_batch
+    # A free first article or topic batch has cost 0 and no payer to credit.
+    # A proven no-work dispatch gives the free attempt back instead.
+    if entitled_request(request) and _research_dispatch(row):
+        release_topic_batch(client_request_id=row.client_request_id, organization=row.organization_id)
+    elif entitled_request(request):
+        release_entitlement_for_request(organization=row.organization_id, request=request, reason=reason)
     payer_id = row.payload.get("billing_user_id")
     if not payer_id or not row.payload.get("request", {}).get("roo_points_cost"):
         return
@@ -176,8 +183,9 @@ def _deliver(row):
                 _validate_article_start_reservation(SimpleNamespace(organization=row.organization),
                     request, require_website=True)
     require_unlocked_remote_call()
+    from .run_queue_position import with_interactive_queue_class
     response = http_client.post(f"{remote['base_url']}/api/runs/{row.payload['endpoint']}",
-        headers=_content_factory_headers(), json=request, timeout=(3, 30))
+        headers=_content_factory_headers(), json=with_interactive_queue_class(request), timeout=(3, 30))
     try:
         body = response.json()
     except (ValueError, AttributeError):

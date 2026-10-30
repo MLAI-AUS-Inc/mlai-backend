@@ -155,12 +155,13 @@ from founder_tools.profile_fields import company_avatar_url
 from founder_tools.models import VibeRaisingCompany
 from founder_tools.services import (
     CompanyDomainChangeBlocked,
-    DomainOwnershipError,
+    CompanyDomainClaimedError,
     DuplicateCompanyDomainError,
     apply_company_domain_change,
     apply_shared_startup_details,
     actor_ids_for_user,
     assert_company_domain_available,
+    claimed_organization,
     domain_is_available_to,
     ensure_company_organization,
     founder_actor_id_for_user,
@@ -168,6 +169,7 @@ from founder_tools.services import (
     get_or_create_founder_profile,
     normalize_company_domain,
     normalize_company_linkedin_url,
+    queue_domain_claim_alert,
     resolve_active_company,
     string_list_from_value,
 )
@@ -727,13 +729,21 @@ def _roo_points_response(*, domain: str, action: str, current_balance: int, cost
 
 
 def _require_roo_points_for_ai_agent(user, *, domain: str, action: str):
-    from content_factory.billing import FREE_SETUP_ACTIONS
-    if action in FREE_SETUP_ACTIONS:
+    from content_factory.billing import FREE_SETUP_RESEARCH_ACTIONS, check_free_setup_daily_cap, free_setup_actions
+    free_research = action in FREE_SETUP_RESEARCH_ACTIONS and action in free_setup_actions()
+    if action in free_setup_actions() and not free_research:
         return None, None
+    # Only the named free actions skip the floor. Every other AI action
+    # still needs 6 points even though its quoted cost is 0.
     required_points = get_content_factory_ai_agent_required_points(domain)
     if required_points <= 0:
         return None, None
     current_balance = _roo_points_balance_for_user(user)
+    if free_research and current_balance < required_points:
+        # The free waiver for founders below the floor, capped per account.
+        # A founder with points keeps today's uncapped path.
+        check_free_setup_daily_cap(user, action)
+        return None, None
     if current_balance < required_points:
         return _roo_points_response(
             domain=domain,
@@ -744,9 +754,22 @@ def _require_roo_points_for_ai_agent(user, *, domain: str, action: str):
     return None, current_balance
 
 
+def _record_free_setup_research(user, *, action: str, gate_balance, run) -> None:
+    """Count a started free setup research run against the account's daily cap.
+
+    The gate returns no balance only when the free waiver let the request
+    through; a run that failed to queue costs the founder no use.
+    """
+    from content_factory.billing import FREE_SETUP_RESEARCH_ACTIONS, free_setup_actions, record_free_setup_use
+    if (gate_balance is not None or action not in FREE_SETUP_RESEARCH_ACTIONS or action not in free_setup_actions()
+            or run is None or getattr(run, "status", None) in FAILED_RUN_STATUSES):
+        return
+    record_free_setup_use(user, action)
+
+
 def _mark_roo_points_gate_authorized(payload: dict, *, domain: str, action: str, current_balance: int | None) -> None:
-    from content_factory.billing import FREE_SETUP_ACTIONS
-    free = action in FREE_SETUP_ACTIONS or is_free_content_factory_domain(domain)
+    from content_factory.billing import free_setup_actions
+    free = action in free_setup_actions() or is_free_content_factory_domain(domain)
     payload.update(
         build_roo_points_authorization_payload(
             domain=domain,
@@ -845,6 +868,10 @@ def _validate_article_start_reservation(context, payload, *, require_website=Fal
             "Verify the current articles integration before starting this article.")
 
 
+class _FreeArticleUnavailable(Exception):
+    """Roll back an article start whose free attempt could not be reserved."""
+
+
 def _charge_roo_points_for_article(request, *, context, payload: dict, goal_operation_id=None):
     # Only the internal goal dispatcher can supply this argument. HTTP/MCP body
     # fields cannot bypass the normal current-price and wallet checks.
@@ -855,8 +882,26 @@ def _charge_roo_points_for_article(request, *, context, payload: dict, goal_oper
             payload.update(first_article_goal_operation_id=str(goal_operation_id),first_article_goal_id=str(goal_operation_id))
         except WebsiteAuthorityError as exc:
             return None, None, None, Response(exc.as_dict(), status=exc.status)
-    quote_error = (_quoted_price_response(request, cost_points=get_content_factory_article_cost_points(context.organization.domain, user=request.user), require_quote=True)
+    from . import first_article_entitlement as first_article
+    # The goal path settles through its own allocation and never reads a price here.
+    article_price = (get_content_factory_article_cost_points(context.organization.domain, user=request.user)
         if goal_operation_id is None else None)
+    free_quote = False
+    if goal_operation_id is None and first_article.free_first_article_enabled():
+        # One free first article per startup. A replay of a live attempt keeps
+        # its 0 quote; an old client asking for review_draft keeps the price.
+        free_config = _get_config(context.organization)
+        free_quote = first_article.quote_is_free(organization=context.organization, user=request.user,
+            client_request_id=str(payload.get("client_request_id")
+                or _request_value(request.data, "client_request_id", "clientRequestId", default="") or "").strip(),
+            data=payload, config=free_config)
+        if not free_quote and first_article.entitlement_state(context.organization, request.user,
+                config=free_config)["limit"] == "attempts":
+            first_article.note_attempts_exhausted(context.organization)
+    quote_error = (_quoted_price_response(request, cost_points=0 if free_quote else article_price, require_quote=True)
+        if goal_operation_id is None else None)
+    if quote_error is not None and free_quote:
+        return None, None, None, quote_error
     if quote_error is not None:
         # A retry keeps the recorded debit even after a benefit expires. This
         # read only selects the quote; consent, payload and ledger ownership
@@ -917,7 +962,16 @@ def _charge_roo_points_for_article(request, *, context, payload: dict, goal_oper
                 return None, None, None, connection_error
             article_request.update(payload)
             _validate_article_start_reservation(context, payload)
-            if goal_operation_id is not None:
+            entitlement = None
+            if free_quote:
+                # Same organisation lock and transaction as the dispatch row.
+                entitlement = first_article.reserve_entitlement(organization=context.organization, user=request.user,
+                    client_request_id=client_request_id, data=article_request, config=_get_config(context.organization))
+                if entitlement is None:
+                    raise _FreeArticleUnavailable()
+            if entitlement is not None:
+                charged_user, charge_ledger, charge_amount = request.user, None, 0
+            elif goal_operation_id is not None:
                 from .website_first_article_billing import consume
                 charged_user, charge_ledger, charge_amount = consume(goal_operation_id,
                     context=context, user=request.user, payload=article_request)
@@ -931,6 +985,9 @@ def _charge_roo_points_for_article(request, *, context, payload: dict, goal_oper
                     prevalidated_admission=True,
                 )
             payload.update(
+                first_article.entitled_authorization(domain=domain, action=CONTENT_FACTORY_ACTION_ARTICLE_GENERATION,
+                    ledger=entitlement)
+                if entitlement is not None else
                 build_roo_points_authorization_payload(
                     domain=domain,
                     action=CONTENT_FACTORY_ACTION_ARTICLE_GENERATION,
@@ -942,10 +999,18 @@ def _charge_roo_points_for_article(request, *, context, payload: dict, goal_oper
                 )
             )
             payload.update(roo_points_requested_by_user_id=request.user.pk, roo_points_billing_user_id=charged_user.pk)
+            if entitlement is not None:
+                # A start-failure refund reads this request: the stamp routes it
+                # to the attempt release instead of a points credit.
+                article_request.update({key: value for key, value in payload.items() if key.startswith("roo_points_")})
             from content_factory.dispatch_outbox import reserve_dispatch
             payload["dispatch_outbox_reserved"] = True
             reserve_dispatch(organization=context.organization, payload=payload,
                 billing_user_id=charged_user.pk, actor_id=actor_id)
+    except _FreeArticleUnavailable:
+        # The free attempt went elsewhere between quote and lock (a cap, a
+        # second press or a verified site). Nothing was written: quote the price.
+        return None, None, None, _quoted_price_response(request, cost_points=article_price, require_quote=True)
     except InsufficientRooPointsError as exc:
         return None, None, None, Response(
             getattr(exc, "payload", None) or build_roo_points_payload(
@@ -964,12 +1029,17 @@ def _charge_roo_points_for_article(request, *, context, payload: dict, goal_oper
     return charged_user, charge_ledger, article_request, None
 
 
-def _charge_roo_points_for_content_island_topic_generation(request, *, context, payload: dict, scope_request_id=True):
+def _charge_roo_points_for_content_island_topic_generation(request, *, context, payload: dict, scope_request_id=True,
+        first_topic_batch=False):
+    """Charge (or grant) a topic research batch and stamp its billing authorization.
+
+    ``first_topic_batch`` marks the article research start, whose first batch
+    of up to four topics is free for a startup that still has its free first
+    article. Island research always keeps its price.
+    """
+    from . import first_article_entitlement as first_article
     domain = context.organization.domain
     cost_points = get_content_factory_research_cost_points(domain, payload.get("requested_topic_count", 4))
-    quote_error = _quoted_price_response(request, cost_points=cost_points)
-    if quote_error is not None:
-        return None, None, quote_error
     content_island_slug = str(payload.get("content_island_slug") or "").strip()
     # Bound the slug embedded in the generated id: it lands in Ledger.reference_id AND
     # ContentFactoryJob.client_request_id, both CharField(max_length=100). A long island
@@ -987,6 +1057,16 @@ def _charge_roo_points_for_content_island_topic_generation(request, *, context, 
     if scope_request_id:
         client_request_id = "vibe-research:" + hashlib.sha256(
             f"{request.user.pk}:{context.company.pk}:{client_request_id}".encode()).hexdigest()
+    try:
+        within_free_batch = int(payload.get("requested_topic_count", 4)) <= first_article.FREE_TOPIC_BATCH_MAX
+    except (TypeError, ValueError):
+        within_free_batch = False
+    # A replay of the granted batch keeps its 0 quote.
+    free_batch = (bool(first_topic_batch) and within_free_batch
+        and first_article.topic_batch_quote_free(context.organization, request.user, client_request_id))
+    quote_error = _quoted_price_response(request, cost_points=0 if free_batch else cost_points)
+    if quote_error is not None:
+        return None, None, quote_error
     payload["client_request_id"] = client_request_id
     actor_id = founder_actor_id_for_user(request.user)
     article_request = {
@@ -1000,14 +1080,25 @@ def _charge_roo_points_for_content_island_topic_generation(request, *, context, 
     # Existing HTTP clients retain their contract; only explicitly marked MCP
     # requests enlist the existing outbox in the same Roo spend transaction.
     durable = bool(payload.get("mcp_request_hash"))
-    with transaction.atomic() if durable else nullcontext():
+    # The free grant rolls back with its outbox row, like a spend.
+    with transaction.atomic() if durable or free_batch else nullcontext():
+        grant = None
+        if free_batch:
+            grant = first_article.grant_topic_batch(organization=context.organization, user=request.user,
+                client_request_id=client_request_id, requested_topic_count=payload.get("requested_topic_count", 4))
+            if grant is None:
+                # The free batch went elsewhere between quote and lock: quote the price.
+                return None, None, _quoted_price_response(request, cost_points=cost_points, require_quote=True)
         try:
-            charged_user, charge_ledger, charge_amount = charge_content_factory_topic_generation_for_user(
-                user=request.user,
-                actor_id=actor_id,
-                article_request=article_request,
-                resolved_domain=domain,
-            )
+            if grant is not None:
+                charged_user, charge_ledger, charge_amount = request.user, None, 0
+            else:
+                charged_user, charge_ledger, charge_amount = charge_content_factory_topic_generation_for_user(
+                    user=request.user,
+                    actor_id=actor_id,
+                    article_request=article_request,
+                    resolved_domain=domain,
+                )
         except InsufficientRooPointsError as exc:
             return None, None, Response(
                 getattr(exc, "payload", None) or build_roo_points_payload(
@@ -1025,17 +1116,24 @@ def _charge_roo_points_for_content_island_topic_generation(request, *, context, 
                 status=status.HTTP_409_CONFLICT,
             )
 
-        payload.update(
-            build_roo_points_authorization_payload(
-                domain=domain,
-                action=CONTENT_FACTORY_ACTION_CONTENT_ISLAND_TOPIC_GENERATION,
-                cost_points=charge_amount,
-                required_points=cost_points,
-                current_balance=_roo_points_balance_for_user(request.user),
-                billing_status="charged" if charge_amount > 0 else "free",
-                ledger_id=getattr(charge_ledger, "id", None),
+        if grant is not None:
+            stamp = first_article.entitled_authorization(domain=domain, ledger=grant,
+                action=CONTENT_FACTORY_ACTION_CONTENT_ISLAND_TOPIC_GENERATION if content_island_slug else "topic_discovery")
+            payload.update(stamp)
+            # A start-failure refund reads this request: the stamp releases the grant.
+            article_request.update(stamp)
+        else:
+            payload.update(
+                build_roo_points_authorization_payload(
+                    domain=domain,
+                    action=CONTENT_FACTORY_ACTION_CONTENT_ISLAND_TOPIC_GENERATION,
+                    cost_points=charge_amount,
+                    required_points=cost_points,
+                    current_balance=_roo_points_balance_for_user(request.user),
+                    billing_status="charged" if charge_amount > 0 else "free",
+                    ledger_id=getattr(charge_ledger, "id", None),
+                )
             )
-        )
         if durable:
             from .dispatch_outbox import reserve_dispatch
             payload.update(dispatch_outbox_reserved=True,
@@ -1150,6 +1248,22 @@ def _reusable_content_factory_charge_for_run(run) -> Optional[int]:
 
 def _reuse_roo_points_authorization_for_article_job(*, run, payload: dict, domain: str, failure_detail: str) -> Response | None:
     run_request = run.run_request if isinstance(run.run_request, dict) else {}
+    from . import first_article_entitlement as first_article
+    if first_article.entitled_request(run_request):
+        # A free first article's restarts, re-pins, resumes and comments run on
+        # its grant while that attempt is live (reserved or consumed). A delivery
+        # by one of them consumes it; a stop releases it only as the lineage's
+        # last run. A released attempt covers nothing: start a new article,
+        # which is free again while a second attempt remains.
+        grant = first_article.lineage_entitlement(run)
+        if grant is None:
+            return Response({"detail": "This free draft was stopped. Start a new article instead.",
+                "code": "roo_points_billing_required"}, status=status.HTTP_409_CONFLICT)
+        payload.update(first_article.entitled_authorization(domain=domain,
+            action=CONTENT_FACTORY_ACTION_ARTICLE_GENERATION, ledger=grant))
+        payload["original_billing_source_run_id"] = run.run_id
+        first_article.note_entitled_child_run(run)
+        return None
     try:
         authorized = bool(run_request.get("roo_points_authorized"))
         action = str(run_request.get("roo_points_action") or "").strip()
@@ -7395,8 +7509,18 @@ def _cancel_local_article_run(*, run, organization, remote_data=None):
 
     with transaction.atomic():
         locked_run = ContentFactoryRun.objects.select_for_update().get(pk=run.pk)
+        # Every caller is an owner action (cancel, delete-draft cascade, discard).
+        # Settle a free first article from the pre-cancel state: consumed once
+        # writing started on a live run, released by the bound no-effect stop
+        # below otherwise, and held for the stop sweep when no stop came back.
+        from .first_article_entitlement import settle_owner_cancel
+        entitlement_hold = settle_owner_cancel(locked_run, remote_data)
         from .article_publication_evidence import cancellation_result
         preserved = cancellation_result(locked_run, remote_data)
+        if entitlement_hold == "stop_required" and "article_terminal_refund" not in preserved:
+            # The exhausted-run sweep asks the worker for its stop, then releases.
+            preserved = {**preserved, "reconciliation_refund_pending": True, "article_terminal_refund": {
+                "status": "stop_required", "job_id": locked_run.run_id, "settlement_reason": "cancelled_without_stop"}}
         _release_cancelled_article_keyword(organization, locked_run)
         locked_run.steps.exclude(status=ContentFactoryStepStatus.COMPLETED).update(
             status=ContentFactoryStepStatus.CANCELLED,
@@ -8247,7 +8371,13 @@ DJANGO_OWNED_ARTICLE_RESULT_KEYS = (
     "article_system_review_comments",
     "daily_automation_channel_warning",
     "latest_article_system_revision_response",
+    "ops_alerts",
+    "cancellation_reason",
+    "cancelled_by",
 )
+# Written by the backend itself (ops alert receipts, owner cancellation reason).
+# A saved non-empty value always wins over a worker snapshot or status poll.
+DJANGO_AUTHORITATIVE_ARTICLE_RESULT_KEYS = frozenset({"ops_alerts", "cancellation_reason", "cancelled_by"})
 DJANGO_OWNED_ARTICLE_RESULT_PREFIXES = (
     "component_feedback_",
     "publish_auto_merge",
@@ -8283,6 +8413,8 @@ def _merge_django_owned_article_result(local_result, remote_result):
         if not django_owned:
             continue
         if key in backend_merge_keys or (merged.get(key) in (None, "", {}, []) and value not in (None, "", {}, [])):
+            merged[key] = value
+        elif key in DJANGO_AUTHORITATIVE_ARTICLE_RESULT_KEYS and value not in (None, "", {}, []):
             merged[key] = value
     return merged
 
@@ -11301,6 +11433,7 @@ def _serialize_run(
         original_request.get("delivery_mode_explicit", original_request.get("deliveryModeExplicit"))))
     step_states = _serialize_run_steps(run, compact=compact)
     from content_factory.run_state import reliability_presentation
+    from content_factory.run_queue_position import queue_position_payload
     result = _run_mapping(run.result)
     section_issues = public_section_issues(_nested_run_result_value(result, "section_issues", "sectionIssues"))
     raw_quality = _nested_run_result_value(result, "article_preview_quality", "articlePreviewQuality")
@@ -11351,6 +11484,8 @@ def _serialize_run(
     content_island = _run_content_island_payload(run)
     saved_request = _run_mapping(getattr(run, "run_request", {}))
     from content_factory.billing import public_run_billing_receipt
+    from .first_article_entitlement import entitlement_payload
+    from .run_cancellation import cancellation_payload
     billing_receipt = public_run_billing_receipt(saved_request, result)
     saved_brief = saved_request.get("editorial_brief") or saved_request.get("editorialBrief")
     editorial_snapshot = ({"schema_version": 1, "writing_run_id": run.run_id,
@@ -11402,6 +11537,7 @@ def _serialize_run(
             "failureStep": result.get("failure_step"),
             "queueName": result.get("queue_name"),
             "queuedAt": result.get("queued_at"),
+            **queue_position_payload(run),
             "setupQueue": result.get("setup_queue"),
             "livePreview": live_preview,
             "articleSetupState": article_setup_state,
@@ -11416,6 +11552,8 @@ def _serialize_run(
             **reliability_presentation(result, status=run.status, workflow=run.workflow,
                                        current_step=run.current_step, resume_available=run.resume_available,
                                        approval_state=run.approval_state),
+            **entitlement_payload(run),
+            **cancellation_payload(run.result),
         }
     content_package = _content_package_from_run(run)
     artifacts = _nested_run_result_value(result, "artifacts") or []
@@ -11478,6 +11616,7 @@ def _serialize_run(
             "failureStep": result.get("failure_step"),
             "queueName": result.get("queue_name"),
         "queuedAt": result.get("queued_at"),
+        **queue_position_payload(run),
         "setupQueue": result.get("setup_queue"),
         "contentPackage": content_package,
         "componentManifest": component_manifest,
@@ -11495,6 +11634,8 @@ def _serialize_run(
         **reliability_presentation(result, status=run.status, workflow=run.workflow,
                                    current_step=run.current_step, resume_available=run.resume_available,
                                    approval_state=run.approval_state),
+        **entitlement_payload(run),
+        **cancellation_payload(run.result),
     }
 
 
@@ -12455,8 +12596,11 @@ def _article_capabilities_for_context(context, config, *, latest_runs=None, forc
     access = _verify_github_repository_access(context, config, force=force, allow_probe=allow_probe) if account.get("saved") and getattr(config, "github_repo", "") else {}
     if evidence.get("verified") and access.get("verified") and (access.get("branch") != evidence.get("branch") or access.get("sha") != evidence.get("sha")):
         evidence = {**evidence, "verified": False, "reasonCode": "verification_stale"}
-    return article_capabilities(config, domain=context.organization.domain, user=getattr(getattr(context, "profile", None), "user", None), account=account,
-                                evidence=evidence, repository_access=access)
+    user = getattr(getattr(context, "profile", None), "user", None)
+    from .first_article_entitlement import entitlement_state
+    return article_capabilities(config, domain=context.organization.domain, user=user, account=account,
+                                evidence=evidence, repository_access=access,
+                                first_article=entitlement_state(context.organization, user, config=config))
 
 
 def _setup_blocked_response_for_generation(context, config, *, run=None, publishing=False, request_data=None):
@@ -13614,10 +13758,14 @@ def _sync_local_run_from_remote(run, remote_data):
             run.refresh_from_db()
             if stale_execution_event(run.result, remote_data, saved_status=run.status):
                 return run
-            return _sync_local_run_from_remote_locked(run, remote_data)
+            run = _sync_local_run_from_remote_locked(run, remote_data)
     except WebsiteAuthorityError:
         run.refresh_from_db()
         return run
+    # After the run lock is released: a mirrored delivery consumes the free first article.
+    from .first_article_entitlement import settle_entitlement_for_run
+    settle_entitlement_for_run(run)
+    return run
 
 
 def _sync_local_run_from_remote_locked(run, remote_data):
@@ -14157,7 +14305,8 @@ def _queue_content_factory_run_authorized(*, endpoint, workflow, context, config
                         organization=context.organization, workflow=workflow, actor_id=actor_id, payload=payload)
             try:
                 post_attempted = True
-                response = http_client.post(url, json=payload, headers=_content_factory_headers(), timeout=(3, 10))
+                from content_factory.run_queue_position import with_interactive_queue_class
+                response = http_client.post(url, json=with_interactive_queue_class(payload), headers=_content_factory_headers(), timeout=(3, 10))
                 request_exception = None
             except http_client.RequestException as exc:
                 request_exception = exc
@@ -15660,7 +15809,11 @@ class VibeMarketingSettingsView(APIView):
             if isinstance(prepared, Response):
                 return prepared
             self.prepared_authors = prepared
-        saved = self._save_settings(request)
+        try:
+            saved = self._save_settings(request)
+        except CompanyDomainClaimedError as exc:
+            # The settings transaction has rolled back, so the alert is kept (IF-09).
+            return _domain_claimed_response(request, exc)
         if isinstance(saved, Response):
             return saved
         # Full bootstrap may reconcile a setup PR through the worker. Commit
@@ -15855,6 +16008,16 @@ class VibeMarketingSettingsView(APIView):
         return refreshed_context
 
 
+def _domain_claimed_response(request, exc):
+    """Refuse a startup save or autofill whose domain another founder's startup holds (IF-09).
+
+    Called outside any transaction that rolled back, so the queued
+    domain_claim_disputed alert is kept. The body never names the owner.
+    """
+    queue_domain_claim_alert(organization=exc.organization, claimant_user_id=request.user.id)
+    return exc.response()
+
+
 class VibeMarketingAutofillView(APIView):
     def post(self, request):
         profile = get_or_create_founder_profile(request.user)
@@ -15881,8 +16044,10 @@ class VibeMarketingAutofillView(APIView):
             getattr(request.user, "is_staff", False) or getattr(request.user, "is_superuser", False)
         ) and not domain_is_available_to(request.user, domain):
             # First-claim-wins tenancy: never bind a founder's autofill to a
-            # domain another founder already owns.
-            raise DomainOwnershipError()
+            # domain another founder already owns. The founder can carry on
+            # without the website, and ops hear about the dispute (IF-09).
+            return _domain_claimed_response(
+                request, CompanyDomainClaimedError(claimed_organization(domain)))
         gate_response, gate_balance = _require_roo_points_for_ai_agent(
             request.user,
             domain=domain,
@@ -15891,124 +16056,130 @@ class VibeMarketingAutofillView(APIView):
         if gate_response is not None:
             return gate_response
 
-        with transaction.atomic():
-            if draft_only:
-                from founder_tools.profile_fields import lock_research_profile
-                profile = lock_research_profile(profile)
-            company_id = _company_id_from_request(request)
-            create_new = _request_flag(request, "create_new", "createNew")
-            confirm_domain_change = _request_flag(request, "confirm_domain_change", "confirmDomainChange")
-            if company_id:
+        # Binding the company can still meet a claim that raced the check above
+        # (a confirmed domain change, or an existing organisation's history).
+        # The writes roll back first; only then is the dispute queued.
+        try:
+            with transaction.atomic():
+                if draft_only:
+                    from founder_tools.profile_fields import lock_research_profile
+                    profile = lock_research_profile(profile)
+                company_id = _company_id_from_request(request)
+                create_new = _request_flag(request, "create_new", "createNew")
+                confirm_domain_change = _request_flag(request, "confirm_domain_change", "confirmDomainChange")
+                if company_id:
+                    try:
+                        company = profile.companies.get(pk=company_id)
+                    except VibeRaisingCompany.DoesNotExist:
+                        return Response({"detail": "Company not found."}, status=status.HTTP_404_NOT_FOUND)
+                elif create_new:
+                    company = None
+                else:
+                    company = resolve_active_company(profile)
+
+                # Autofill used to adopt whatever company was active and rewrite its
+                # name/domain in place — so "researching" a second startup destroyed
+                # the first one. Changing an existing company's domain now requires
+                # an explicit confirmation (or create_new to register a sibling).
+                if company is not None:
+                    existing_domain = normalize_company_domain(company.domain)
+                    if draft_only and existing_domain != domain:
+                        return Response({"detail": "Save the changed website before researching this startup.",
+                                         "code": "startup_research_domain_unsaved", "field": "domain"},
+                                        status=status.HTTP_409_CONFLICT)
+                    if existing_domain and existing_domain != domain and not confirm_domain_change:
+                        return Response(
+                            {
+                                "detail": (
+                                    f"{company.name or 'Your current company'} is registered on "
+                                    f"'{existing_domain}'. Confirm the domain change, or register "
+                                    "this as a new company instead."
+                                ),
+                                "code": "company_domain_change_requires_confirmation",
+                                "field": "domain",
+                                "companyId": str(company.id),
+                                "companyName": company.name,
+                                "existingDomain": existing_domain,
+                                "submittedDomain": domain,
+                            },
+                            status=status.HTTP_409_CONFLICT,
+                        )
+
                 try:
-                    company = profile.companies.get(pk=company_id)
-                except VibeRaisingCompany.DoesNotExist:
-                    return Response({"detail": "Company not found."}, status=status.HTTP_404_NOT_FOUND)
-            elif create_new:
-                company = None
-            else:
-                company = resolve_active_company(profile)
+                    assert_company_domain_available(
+                        profile, domain, exclude_company_id=company.id if company else None
+                    )
+                except DuplicateCompanyDomainError as exc:
+                    from founder_tools.profile_fields import is_research_workspace
+                    if draft_only and create_new and is_research_workspace(exc.existing_company):
+                        # Recover the same owned hidden workspace if a start response
+                        # was lost. Never adopt a saved startup via createNew.
+                        company = exc.existing_company
+                    else:
+                        return Response(
+                            {"detail": str(exc), "code": "duplicate_company_domain", "field": "domain",
+                             "companyId": str(exc.existing_company.id)}, status=status.HTTP_409_CONFLICT,
+                        )
 
-            # Autofill used to adopt whatever company was active and rewrite its
-            # name/domain in place — so "researching" a second startup destroyed
-            # the first one. Changing an existing company's domain now requires
-            # an explicit confirmation (or create_new to register a sibling).
-            if company is not None:
-                existing_domain = normalize_company_domain(company.domain)
-                if draft_only and existing_domain != domain:
-                    return Response({"detail": "Save the changed website before researching this startup.",
-                                     "code": "startup_research_domain_unsaved", "field": "domain"},
-                                    status=status.HTTP_409_CONFLICT)
-                if existing_domain and existing_domain != domain and not confirm_domain_change:
-                    return Response(
-                        {
-                            "detail": (
-                                f"{company.name or 'Your current company'} is registered on "
-                                f"'{existing_domain}'. Confirm the domain change, or register "
-                                "this as a new company instead."
-                            ),
-                            "code": "company_domain_change_requires_confirmation",
-                            "field": "domain",
-                            "companyId": str(company.id),
-                            "companyName": company.name,
-                            "existingDomain": existing_domain,
-                            "submittedDomain": domain,
-                        },
-                        status=status.HTTP_409_CONFLICT,
+                if company is None:
+                    company = VibeRaisingCompany.objects.create(
+                        profile=profile,
+                        name=company_name,
+                        domain=domain,
+                        location=str(request.data.get("location") or "").strip(),
+                        abn=None if draft_mode else str(request.data.get("abn") or "").strip() or None,
+                    )
+                    if not draft_only:
+                        profile.active_company = company
+                        profile.save(update_fields=["active_company", "updated_at"])
+                    else:
+                        # Research needs an owned workspace for run scoping. It is
+                        # not a saved startup until the profile is explicitly saved.
+                        organization = ensure_company_organization(company)
+                        config = _get_config(organization)
+                        from founder_tools.profile_fields import PROFILE_KEY
+                        strategy = dict(config.pillar_strategy or {})
+                        strategy[PROFILE_KEY] = {**(strategy.get(PROFILE_KEY) or {}), "researchDraft": True}
+                        config.pillar_strategy = strategy
+                        config.save(update_fields=["pillar_strategy", "updated_at"])
+                elif not draft_only:
+                    # The founder confirmed this domain change (or it is unchanged):
+                    # rename the org in place when safe so connections/runs/updates
+                    # follow; a confirmed re-point is logged as stranding.
+                    apply_company_domain_change(company, domain, confirmed=True)
+                    company.name = company_name
+                    company.domain = domain
+                    if "location" in request.data:
+                        company.location = str(request.data.get("location") or "").strip()
+                    if not draft_mode and "abn" in request.data:
+                        set_unverified_company_abn(company, request.data.get("abn"))
+                    company.save(
+                        update_fields=[
+                            "name",
+                            "domain",
+                            "location",
+                            "abn",
+                            "registered",
+                            "acn",
+                            "entity_type_code",
+                            "abr_verified_at",
+                            "updated_at",
+                        ]
                     )
 
-            try:
-                assert_company_domain_available(
-                    profile, domain, exclude_company_id=company.id if company else None
-                )
-            except DuplicateCompanyDomainError as exc:
-                from founder_tools.profile_fields import is_research_workspace
-                if draft_only and create_new and is_research_workspace(exc.existing_company):
-                    # Recover the same owned hidden workspace if a start response
-                    # was lost. Never adopt a saved startup via createNew.
-                    company = exc.existing_company
-                else:
-                    return Response(
-                        {"detail": str(exc), "code": "duplicate_company_domain", "field": "domain",
-                         "companyId": str(exc.existing_company.id)}, status=status.HTTP_409_CONFLICT,
-                    )
+                organization = ensure_company_organization(company)
+                if organization is None:
+                    transaction.set_rollback(True)
+                    return Response({"detail": "Website domain is required for autofill."}, status=status.HTTP_400_BAD_REQUEST)
 
-            if company is None:
-                company = VibeRaisingCompany.objects.create(
-                    profile=profile,
-                    name=company_name,
-                    domain=domain,
-                    location=str(request.data.get("location") or "").strip(),
-                    abn=None if draft_mode else str(request.data.get("abn") or "").strip() or None,
-                )
-                if not draft_only:
-                    profile.active_company = company
-                    profile.save(update_fields=["active_company", "updated_at"])
-                else:
-                    # Research needs an owned workspace for run scoping. It is
-                    # not a saved startup until the profile is explicitly saved.
-                    organization = ensure_company_organization(company)
-                    config = _get_config(organization)
-                    from founder_tools.profile_fields import PROFILE_KEY
-                    strategy = dict(config.pillar_strategy or {})
-                    strategy[PROFILE_KEY] = {**(strategy.get(PROFILE_KEY) or {}), "researchDraft": True}
-                    config.pillar_strategy = strategy
-                    config.save(update_fields=["pillar_strategy", "updated_at"])
-            elif not draft_only:
-                # The founder confirmed this domain change (or it is unchanged):
-                # rename the org in place when safe so connections/runs/updates
-                # follow; a confirmed re-point is logged as stranding.
-                apply_company_domain_change(company, domain, confirmed=True)
-                company.name = company_name
-                company.domain = domain
-                if "location" in request.data:
-                    company.location = str(request.data.get("location") or "").strip()
-                if not draft_mode and "abn" in request.data:
-                    set_unverified_company_abn(company, request.data.get("abn"))
-                company.save(
-                    update_fields=[
-                        "name",
-                        "domain",
-                        "location",
-                        "abn",
-                        "registered",
-                        "acn",
-                        "entity_type_code",
-                        "abr_verified_at",
-                        "updated_at",
-                    ]
-                )
-
-            organization = ensure_company_organization(company)
-            if organization is None:
-                transaction.set_rollback(True)
-                return Response({"detail": "Website domain is required for autofill."}, status=status.HTTP_400_BAD_REQUEST)
-
-            try:
-                if not draft_only and not draft_mode:
-                    apply_shared_startup_details(user=request.user, company=company, data=request.data)
-            except ValueError as exc:
-                transaction.set_rollback(True)
-                return Response({"detail": str(exc), "field": "companyLinkedInUrl"}, status=status.HTTP_400_BAD_REQUEST)
+                try:
+                    if not draft_only and not draft_mode:
+                        apply_shared_startup_details(user=request.user, company=company, data=request.data)
+                except ValueError as exc:
+                    transaction.set_rollback(True)
+                    return Response({"detail": str(exc), "field": "companyLinkedInUrl"}, status=status.HTTP_400_BAD_REQUEST)
+        except CompanyDomainClaimedError as exc:
+            return _domain_claimed_response(request, exc)
 
         context = get_founder_company_context(
             request.user, company_id=company.id, persist_active=not draft_only
@@ -16094,6 +16265,7 @@ class VibeMarketingAutofillView(APIView):
             config=config,
             payload=payload,
         )
+        _record_free_setup_research(request.user, action="startup_autofill", gate_balance=gate_balance, run=run)
         return _autofill_start_response(
             run, reused_active_run=False, research_company_id=company.id
         )
@@ -16171,6 +16343,7 @@ class VibeMarketingBaselineView(APIView):
             config=config,
             payload=payload,
         )
+        _record_free_setup_research(request.user, action="website_baseline", gate_balance=gate_balance, run=run)
         if run.status == ContentFactoryRunStatus.COMPLETED:
             _persist_baseline_snapshot_from_payload(organization=context.organization, run=run)
         return Response({"run_id": run.run_id, "runId": run.run_id, "status": run.status}, status=status.HTTP_202_ACCEPTED)
@@ -16929,6 +17102,7 @@ def start_article_research(*, user, context, data, request_hash=None):
         command,
         context=context,
         payload=payload,
+        first_topic_batch=True,
     )
     if billing_error is not None:
         return billing_error
@@ -19143,7 +19317,16 @@ def control_article_run(*, user, context, run, action, data, run_id=None, goal_o
                 _annotate_publish_handoff_staleness(candidate)
             return Response(_serialize_run(run, context=context), status=status.HTTP_202_ACCEPTED)
         _mark_publish_handoff_pending(run=run, remote_run=remote_run, action=action, auto_merge=auto_merge_requested)
-    if action == "revise":
+    from . import first_article_entitlement as first_article
+    revision_grant = first_article.lineage_entitlement(run) if action == "revise" else None
+    if revision_grant is not None:
+        # Revising the free first article runs on its live grant: no balance
+        # floor. The delivered article already consumed the attempt.
+        payload.update(first_article.entitled_authorization(domain=context.organization.domain,
+            action=CONTENT_FACTORY_ACTION_ARTICLE_GENERATION, ledger=revision_grant))
+        payload["original_billing_source_run_id"] = run.run_id
+        first_article.note_entitled_child_run(run)
+    elif action == "revise":
         gate_response, gate_balance = _require_roo_points_for_ai_agent(
             command.user,
             domain=context.organization.domain,

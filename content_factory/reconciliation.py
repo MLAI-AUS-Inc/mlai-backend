@@ -671,6 +671,16 @@ def _refund_failed_run(run, *, reason):
             current.save(update_fields=["result"])
             return
         request = current.run_request or {}
+        from .first_article_entitlement import entitled_request, release_entitlement
+        if entitled_request(request):
+            # A free first article has no spend to credit. Its stop releases the
+            # attempt once, unless another run of its lineage delivered or is going.
+            released = release_entitlement(organization=current.organization_id, run=current, reason=reason)
+            current.result = {**result, "reconciliation_refund_pending": False, "article_terminal_refund": {
+                **receipt, "status": "not_required",
+                "entitlement_released": released or receipt.get("entitlement_released") is True}}
+            current.save(update_fields=["result"])
+            return None
         paid_obligation = receipt.get("paid_obligation") is True or receipt.get("billing_resolution_required") is True
         ledger = original_article_spend_for_run(current)
         refund = None
@@ -699,6 +709,7 @@ def _queue_denied_article_refunds(*, limit, now):
     obtains the worker's bound stop receipt before ``_refund_failed_run`` credits.
     """
     from .article_publication_evidence import denied_refund_code
+    from .first_article_entitlement import entitled_request
     from .run_state import ARTICLE_WORKFLOWS
     from organizations.models import Organization
     count = 0
@@ -718,8 +729,8 @@ def _queue_denied_article_refunds(*, limit, now):
             if run is None or "article_terminal_refund" in (run.result or {}) or denied_refund_code(run) != code:
                 continue
             run.result = {**(run.result or {}), "reconciliation_refund_pending": True,
-                "article_terminal_refund": {"status": "pending", "paid_obligation": True, "job_id": run.run_id,
-                    "error_code": code[:100], "settlement_reason": "denied_without_delivery"}}
+                "article_terminal_refund": {"status": "pending", "paid_obligation": not entitled_request(run.run_request),
+                    "job_id": run.run_id, "error_code": code[:100], "settlement_reason": "denied_without_delivery"}}
             run.save(update_fields=["result"])
         try:
             _refund_failed_run(run, reason=f"Article run was refused before delivery ({code}).")
@@ -737,6 +748,7 @@ def _queue_unrecoverable_article_refunds(*, limit, now):
     bound stop receipt before ``_refund_failed_run`` credits.
     """
     from .article_publication_evidence import unrecoverable_refund_code
+    from .first_article_entitlement import entitled_request
     from .run_state import ARTICLE_WORKFLOWS
     from organizations.models import Organization
     count = 0
@@ -758,8 +770,8 @@ def _queue_unrecoverable_article_refunds(*, limit, now):
                         | Q(run_request__billing_source_run_id=run.run_id)).exists()):
                 continue
             run.result = {**(run.result or {}), "reconciliation_refund_pending": True,
-                "article_terminal_refund": {"status": "pending", "paid_obligation": True, "job_id": run.run_id,
-                    "error_code": code[:100], "settlement_reason": "failed_without_recovery"}}
+                "article_terminal_refund": {"status": "pending", "paid_obligation": not entitled_request(run.run_request),
+                    "job_id": run.run_id, "error_code": code[:100], "settlement_reason": "failed_without_recovery"}}
             run.save(update_fields=["result"])
         try:
             _refund_failed_run(run, reason=f"Article run failed with no way to continue ({code}).")
@@ -778,6 +790,7 @@ def _queue_dispatch_rejected_article_refunds(*, limit, now):
     no-work proof. Any other answer keeps the charge for reconciliation.
     """
     from .article_publication_evidence import DISPATCH_REJECTED, dispatch_rejected_refund_candidate
+    from .first_article_entitlement import entitled_request
     from .run_state import ARTICLE_WORKFLOWS
     from .vibe_marketing_views import _content_factory_remote_config, _lookup_content_factory_dispatch_by_key
     from organizations.models import Organization
@@ -814,7 +827,7 @@ def _queue_dispatch_rejected_article_refunds(*, limit, now):
                 continue
             result = {**(run.result or {}), "reconciliation_refund_pending": True,
                 "article_terminal_refund": {"status": "pending" if proved else "needs_reconciliation",
-                    "paid_obligation": True, "job_id": run.run_id,
+                    "paid_obligation": not entitled_request(run.run_request), "job_id": run.run_id,
                     "settlement_reason": "dispatch_rejected_without_delivery" if proved else "dispatch_rejection_unconfirmed"}}
             if proved:
                 result["dispatch_rejection_v1"] = {"version": 1, "run_id": run.run_id, "client_request_id": key,

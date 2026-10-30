@@ -10,6 +10,7 @@ from core.slack_founder_link_retention import (
     run_scheduled_slack_founder_link_request_cleanup,
 )
 from content_analytics.services.report_scheduler import run_daily_article_report_scheduler
+from content_factory.founder_journey_alerts import run_founder_journey_alert_sweep
 from content_factory.reconciliation import run_content_factory_reconciliation_sweep
 from content_factory.website_reconciliation import process_website_connection_operations
 from content_factory.dispatch_outbox import process_dispatch_outbox
@@ -99,6 +100,11 @@ class Command(BaseCommand):
             # lost (outbox retries exhaust after ~2h) and dispatch ghosts.
             # Self-throttling per run, so it is safe to tick every loop.
             ("content_factory_reconciliation", run_content_factory_reconciliation_sweep),
+            # Tells ops once per stuck founder (run stopped or blocked, no
+            # draft 24 h after a startup is created, Your turn for 72 h), for
+            # every org. Gated by ARTICLES_FOUNDER_JOURNEY_ALERTS_ENABLED and
+            # bounded by ARTICLES_FOUNDER_JOURNEY_ALERTS_MAX_PER_TICK.
+            ("founder_journey_alerts", run_founder_journey_alert_sweep),
             # Prunes stale GitHub App installations (founder uninstalled the
             # App) from the founder registry so dead rows stop poisoning the
             # "registry exists" guards. Self-throttling (min-age + probe

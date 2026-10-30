@@ -831,6 +831,18 @@ class ArticleCancellationSettlementTests(SimpleTestCase):
         self.assertEqual(self.queue_denied(), 0)
         self.run.save.assert_not_called()
 
+    def test_denied_refusal_with_content_factorys_default_code_owes_its_charge_back(self):
+        # Content Factory names a refusal CONNECTION_AUTHORIZATION_FAILED when this
+        # backend refused without a code; such runs kept their charge (29 Oct 2026 audit).
+        from .article_publication_evidence import denied_refund_code
+        self.deny_before_delivery()
+        self.run.result.update(error_code="CONNECTION_AUTHORIZATION_FAILED",
+            authority_refusals=[{"at": "2026-10-20T03:20:33+00:00", "code": "CONNECTION_AUTHORIZATION_FAILED"}])
+        self.assertEqual(denied_refund_code(self.run), "CONNECTION_AUTHORIZATION_FAILED")
+        self.assertEqual(self.queue_denied(), 1)
+        receipt = self.run.result["article_terminal_refund"]
+        self.assertEqual((receipt["status"], receipt["error_code"]), ("stop_required", "CONNECTION_AUTHORIZATION_FAILED"))
+
     def test_denied_refusal_with_effect_delivery_other_code_or_no_charge_keeps_charge(self):
         from .article_publication_evidence import denied_refund_code
         self.deny_before_delivery()

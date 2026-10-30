@@ -214,7 +214,10 @@ class WebsiteConnectionActionView(APIView):
                     branch=current.branch, site_url=current.site_url, reconnect=True, expected=request.data)
                 from .website_prepare import start_prepare, advance_prepare
                 config.refresh_from_db()
-                operation = start_prepare(config, company_id=context.company.pk, user=request.user)
+                # A connected website keeps its generation and saved preparation,
+                # so retry that preparation as "prepare" does instead of returning
+                # one that stalled waiting for this reconnect.
+                operation = start_prepare(config, company_id=context.company.pk, user=request.user, retry=True)
                 advance_prepare(operation.pk)
                 operation.refresh_from_db()
             else:

@@ -423,6 +423,9 @@ jobs:
           founder_tools.tests \
           founder_tools.tests_domain_change \
           founder_tools.tests_offboarding \
+          founder_tools.tests_company_create_seed \
+          founder_tools.tests_domain_claims \
+          content_factory.tests_editorial_first_audience \
           startup_updates.tests_covers \
           startup_updates.tests_founder_metrics \
           startup_updates.tests_update_identity \
@@ -430,6 +433,8 @@ jobs:
           content_factory.tests_github_credential_migrations \
           tests.test_jobs_scheduler \
           tests.test_content_island_scheduler \
+          content_factory.tests_island_refresh_eligibility \
+          content_factory.tests_run_queue_position \
           tests.test_content_analytics \
           roo.tests_coding \
           core.test_slack_user_creation \
@@ -454,6 +459,8 @@ jobs:
           integrations.tests_github_workflow_permissions \
           integrations.tests_github_ci_evidence \
           content_factory.tests_activation_connections \
+          content_factory.tests_founder_journey_alerts \
+          content_factory.tests_founder_funnel_report \
           content_factory.tests_hosted_articles \
           content_factory.tests_preview_domain_claim \
           content_factory.tests_website_portable \
@@ -487,6 +494,8 @@ jobs:
           community_chat.tests.test_api \
           community_chat.tests.test_device_auth \
           community_chat.tests.test_throttles \
+          community_chat.tests_client_events \
+          core.tests_auth_throttles_rolling \
           community_chat.tests.test_link_previews \
           community_chat.tests.test_message_references \
           community_chat.tests.test_preview_image_negotiation \
@@ -816,6 +825,8 @@ jobs:
           integrations.tests_startup_updates.StartupUpdateSlackLineagePostgresTests \
           content_factory.tests_website_connections.WebsiteConcurrentDisconnectTests \
           content_factory.tests_one_click_database \
+          content_factory.tests_first_article_entitlement \
+          content_factory.tests_free_setup_research \
           content_factory.tests_website_goal_audit_database \
           content_factory.tests_website_reentry \
           --verbosity 2

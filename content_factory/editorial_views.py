@@ -173,6 +173,27 @@ class EditorialCatalogApprovalView(EditorialCatalogView):
         return self._mutate(request, approving=True)
 
 
+class EditorialFirstAudienceView(EditorialCatalogView):
+    """Save the founder's one-sentence customer profile as an approved audience.
+
+    Called only from the "Write my first article" press, which is the owner's
+    approval (see editorial_first_audience). Served to Chat through the
+    My startup alias, which applies the my_startup_write account budget.
+    """
+
+    http_method_names = ["post", "options"]
+
+    def post(self, request):
+        from .editorial_first_audience import first_audience_response
+        if not isinstance(request.data, dict):
+            return Response({"error": "Expected a JSON object"}, status=400)
+        context, error = self._context(request)
+        if error is not None:
+            return error
+        payload = {key: value for key, value in request.data.items() if key != "company_id"}
+        return first_audience_response(context, request.user.pk, payload)
+
+
 from rest_framework.throttling import UserRateThrottle
 
 class EditorialSuggestionThrottle(UserRateThrottle):
