@@ -152,6 +152,41 @@ class CardTests(CardFixture, TestCase):
         self.assertEqual(len(set(ids)), 3)
         self.assertIn("booking software for physiotherapy clinics", first["topic"]["title"])
 
+    def test_description_titles_read_well_for_every_one_liner_shape(self):
+        cases = {
+            "Helps tradies get paid faster": "How to help tradies get paid faster",
+            "Helping tradies get paid faster": "How to help tradies get paid faster",
+            "We help clinics fill empty slots": "How to help clinics fill empty slots",
+            "The easiest way to book a physio": "How to book a physio",
+            "Acme helps tradies get paid": "How to help tradies get paid",
+            "Simplifies invoicing for tradies": "How to simplify invoicing for tradies",
+            "Booking software for physiotherapy clinics":
+                "A beginner's guide to booking software for physiotherapy clinics",
+            "Acme is a booking platform for physios": "A beginner's guide to a booking platform for physios",
+            "AI rostering for aged care": "A beginner's guide to AI rostering for aged care",
+        }
+        for one_liner, title in cases.items():
+            with self.subTest(one_liner=one_liner):
+                facts = {"name": "Acme", "oneLiner": one_liner}
+                topics = cards.description_topics(facts, {"description": cards.infer_audience(one_liner)})
+                self.assertEqual(topics[0]["title"], title)
+                for topic in topics:
+                    self.assertNotIn("People who need", topic["title"])
+                    self.assertNotIn("guide to helps", topic["title"])
+                    self.assertNotIn("choosing the easiest", topic["title"])
+
+    def test_a_first_person_one_liner_falls_back_to_the_audience_or_the_name(self):
+        facts = {"name": "Acme", "oneLiner": "Our platform for physios"}
+        self.assertEqual([item["title"] for item in cards.description_topics(
+            facts, {"description": cards.infer_audience(facts["oneLiner"])})],
+            ["A practical guide for physios", "Common questions from physios, answered",
+             "What physios should know about Acme"])
+        facts = {"name": "Acme", "oneLiner": "We're building the future of care"}
+        inferred = {"description": cards.infer_audience(facts["oneLiner"])}
+        self.assertTrue(inferred["description"].startswith("People who need"))
+        self.assertEqual([item["title"] for item in cards.description_topics(facts, inferred)],
+                         ["Acme: a beginner's guide", "Common questions about Acme, answered", "How Acme works"])
+
     def test_researched_candidates_come_first(self):
         self.pool.return_value = [
             {"id": "cand-low", "title": "Clinic waitlists explained", "keyword": "clinic waitlist", "volume": 10,
@@ -318,6 +353,73 @@ class StartTests(CardFixture, TestCase):
         self.assertEqual(catalog["cta_options"], [])
         self.assertEqual(catalog["audience_options"][0]["status"], "approved")
 
+    def test_a_description_topic_still_starts_after_research_lands(self):
+        card = self.card()
+        self.assertEqual(card["topic"]["source"], "description")
+        self.pool.return_value = [
+            {"id": f"cand-{index}", "title": f"Researched topic {index}", "volume": 100 - index,
+             "opportunityScore": 5} for index in range(3)]
+        self.assertEqual(self.card()["topic"]["source"], "research")
+        response = self.call(journey_views.FirstArticleStartView, method="post",
+                             data={"topicId": card["topic"]["id"], "expectedCostPoints": 0})
+        run = self.assertStarted(response)
+        self.assertEqual(run.run_request["custom_title"], card["topic"]["title"])
+
+    def approve_first(self, description="Physiotherapy clinic owners in Australia"):
+        from founder_tools.services import FounderCompanyContext
+        from .editorial_first_audience import first_audience_response
+        context = FounderCompanyContext(profile=self.company.profile, company=self.company, organization=self.org)
+        current = review_payload(self.strategy())
+        response = first_audience_response(context, self.owner.pk, {
+            "description": description, "expected_editorial_catalog_version": current["editorial_catalog_version"]})
+        self.assertEqual(response.status_code, 201, response.data)
+        return response.data["audience_id"]
+
+    def test_an_edited_audience_after_one_was_approved_is_the_one_written_for(self):
+        old = self.approve_first()
+        run = self.assertStarted(self.press({"audience": {"id": None,
+                                                          "description": "Dentists running small practices"}}))
+        catalog = review_payload(self.strategy())
+        brief = run.run_request["editorial_brief"]
+        chosen = next(item for item in catalog["audience_options"] if item["id"] == brief["audience_id"])
+        self.assertNotEqual(chosen["id"], old)
+        self.assertEqual((chosen["description"], chosen["status"]), ("Dentists running small practices", "approved"))
+        self.assertIn(chosen["id"], self.strategy()["editorial_catalog"]["approval_receipts"]["audience"])
+
+    def test_an_unchanged_audience_description_reuses_the_approved_audience(self):
+        old = self.approve_first()
+        run = self.assertStarted(self.press({"audience": {"id": None,
+                                                          "description": "physiotherapy clinic owners in australia"}}))
+        self.assertEqual(run.run_request["editorial_brief"]["audience_id"], old)
+        self.assertEqual(len(review_payload(self.strategy())["audience_options"]), 1)
+
+    def test_paid_presses_share_a_server_side_id_until_one_reaches_the_outbox(self):
+        seen = []
+
+        def spy(**kwargs):
+            seen.append(kwargs["data"]["client_request_id"])
+            return Response({"runId": "run-x", "status": "queued"}, status=202)
+
+        with override_settings(ARTICLES_FREE_FIRST_ARTICLE_ENABLED=False), \
+                patch.object(views, "start_article_generation", side_effect=spy):
+            self.press({"expectedCostPoints": 12})
+            # A second press racing the first (nothing committed yet) gets the same id,
+            # so it collides on the charge idempotency key and the dispatch row.
+            self.press({"expectedCostPoints": 12})
+            ContentFactoryDispatchOutbox.objects.create(client_request_id=seen[0], organization=self.org, payload={})
+            self.press({"expectedCostPoints": 12})
+        prefix = f"first-article:{self.company.pk}:paid:"
+        self.assertEqual(seen, [f"{prefix}1", f"{prefix}1", f"{prefix}2"])
+
+    def test_a_second_press_while_one_is_in_flight_is_refused_and_starts_nothing(self):
+        with cards.press_lock(self.org), patch.object(views, "start_article_generation") as start:
+            response = self.press()
+        self.assertEqual((response.status_code, response.data["reason"]), (409, "in_progress"))
+        start.assert_not_called()
+        self.assertFalse(self.runs().exists())
+        # The lock is released after a press, so the next one starts.
+        self.assertStarted(self.press())
+
     def test_existing_posts_are_named_in_the_brief(self):
         self.site_profile(existingPosts=[{"url": f"https://{self.org.domain}/blog/a", "title": "Physio pricing"}])
         run = self.assertStarted(self.press())
@@ -396,6 +498,24 @@ class EmailNormalisationTests(CardFixture, TestCase):
         self.assertEqual(first_article.normalised_email("j.o+x@example.com"), "j.o@example.com")
         self.assertEqual(first_article.normalised_email("+x@example.com"), "")
         self.assertEqual(first_article.normalised_email("not-an-email"), "")
+
+    def test_accounts_sharing_a_normalised_email_queue_behind_one_lock(self):
+        from unittest.mock import MagicMock
+        domain = f"{uuid4().hex[:6]}.example"
+        built = self.make_org(email=f"jo+a@{domain}")
+        fake = MagicMock(vendor="postgresql")
+        cursor = fake.cursor.return_value.__enter__.return_value
+        with patch.object(first_article, "connection", fake):
+            first_article._lock_normalised_email(built.organization.pk, built.owner)
+        cursor.execute.assert_called_once_with("SELECT pg_advisory_xact_lock(%s)",
+                                               [first_article._email_lock_key(f"jo@{domain}")])
+        legacy = make_named_legacy_org("mlai", domain=f"{uuid4().hex[:6]}-mlai.au", owner_email=f"jo+b@{domain}")
+        cursor.execute.reset_mock()
+        with patch.object(first_article, "connection", fake):
+            first_article._lock_normalised_email(legacy.organization.pk, legacy.owner)
+            with override_settings(MY_STARTUP_NO_WEBSITE_ARTICLES_ENABLED=False):
+                first_article._lock_normalised_email(built.organization.pk, built.owner)
+        cursor.execute.assert_not_called()
 
     def test_with_the_flag_off_todays_exact_match_applies(self):
         domain = f"{uuid4().hex[:6]}.example"
@@ -478,6 +598,58 @@ class SwitchTopicTests(CardFixture, TestCase):
         # The journey skips the superseded run and follows attempt 2.
         journey = journeys.project_founder_journey(self.org, user=self.owner, company=self.company)
         self.assertEqual(journey["runId"], second.run_id)
+
+    def assertUntouched(self, run):
+        run.refresh_from_db()
+        self.assertEqual(run.status, "running")
+        self.assertNotIn("cancellation_reason", run.result or {})
+        self.assertEqual(self.stops, [])
+        self.assertEqual(first_article.entitlement_state(self.org, self.owner)["status"], "in_progress")
+        self.assertEqual(self.runs().count(), 1)
+
+    def test_under_the_daily_cap_the_switch_is_refused_before_anything_stops(self):
+        run = self.slow_free_run()
+        with override_settings(ARTICLES_FREE_FIRST_ARTICLE_DAILY_CAP=1):
+            journey = journeys.project_founder_journey(self.org, user=self.owner, company=self.company)
+            self.assertFalse(journey["switchTopicAvailable"])
+            response = self.switch(run)
+        self.assertEqual((response.status_code, response.data["reason"]), (409, "not_available"))
+        self.assertUntouched(run)
+
+    def test_a_refused_topic_leaves_the_running_article_alone(self):
+        run = self.slow_free_run()
+        response = self.switch(run, {"customTopic": None, "topicId": "missing"})
+        self.assertEqual((response.status_code, response.data["reason"]), (400, "invalid_topic"))
+        self.assertUntouched(run)
+
+    def test_a_refused_audience_leaves_the_running_article_alone(self):
+        run = self.slow_free_run()
+        with patch.object(cards, "_approve", side_effect=cards.FirstArticleRefusal(
+                400, cards.DETAIL_INVALID_AUDIENCE, "invalid_audience")):
+            response = self.switch(run)
+        self.assertEqual((response.status_code, response.data["reason"]), (400, "invalid_audience"))
+        self.assertUntouched(run)
+
+    def test_a_draft_delivered_as_the_switch_lands_is_never_hidden(self):
+        run = self.slow_free_run()
+        real = self.remote_stop
+
+        def delivered(run_id, action, payload, workflow):
+            body = real(run_id, action, payload, workflow)
+            from .website_failure_contract import canonical_bytes
+            receipt = {key: value for key, value in body["article_cancellation_v1"].items() if key != "receipt_id"}
+            receipt.update(delivered_value=True)
+            receipt["receipt_id"] = sha256(canonical_bytes(receipt)).hexdigest()
+            return {**body, "article_cancellation_v1": receipt}
+
+        with patch.object(views, "_call_content_factory_run_action", side_effect=delivered):
+            response = self.switch(run)
+        self.assertEqual((response.status_code, response.data["reason"]), (409, "not_available"))
+        run.refresh_from_db()
+        self.assertNotEqual(run.result.get("cancellation_reason"), "superseded")
+        self.assertFalse(journeys.is_hidden_run(run))
+        self.assertFalse(free_rows(self.org).filter(idempotency_key__endswith=":released").exists())
+        self.assertEqual(self.runs().count(), 1)
 
     def test_a_third_attempt_is_refused(self):
         run = self.slow_free_run()

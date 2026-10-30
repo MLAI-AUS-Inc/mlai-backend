@@ -18,10 +18,12 @@ from __future__ import annotations
 import hashlib
 import logging
 import re
-import uuid
+import secrets
+from contextlib import contextmanager
 from urllib.parse import urlsplit
 
 from django.conf import settings
+from django.core.cache import cache
 from django.db import transaction
 
 from . import founder_journey_cohort as cohorts
@@ -40,8 +42,25 @@ FREE_LABEL = "Write my first article · free"
 PAID_LABEL = "Write an article · {price} points"
 DEFAULT_COUNTRY = "AU"
 REQUEST_ID_PREFIX = "first-article:"
+PRESS_LOCK_PREFIX = "first-article-press:"
+PRESS_LOCK_SECONDS = 120
 SKIPPED_TOPIC_STATUSES = frozenset({"written", "in_progress", "skipped", "declined"})
-_FIRST_PERSON = re.compile(r"^(we|i|our|my)\b", re.IGNORECASE)
+INFERRED_NEED_PREFIX = "People who need "
+# Third-person verbs a one-line description commonly starts with ("Helps
+# tradies get paid faster"). Words that are also common plural nouns
+# ("books", "plans", "tools") are left out, so those read as noun phrases.
+_LEAD_VERBS = frozenset({
+    "automates", "boosts", "brings", "builds", "captures", "cleans", "collects", "combines", "compares", "connects",
+    "converts", "creates", "delivers", "detects", "digitises", "digitizes", "empowers", "enables", "equips", "finds",
+    "fixes", "generates", "gets", "gives", "grows", "handles", "helps", "hires", "improves", "increases", "keeps",
+    "lets", "makes", "manages", "monitors", "offers", "organises", "organizes", "predicts", "prevents", "protects",
+    "provides", "puts", "recommends", "recruits", "reduces", "removes", "replaces", "saves", "sells", "sends",
+    "shares", "simplifies", "solves", "streamlines", "summarises", "summarizes", "supports", "takes", "teaches",
+    "transforms", "translates", "turns", "unlocks", "verifies", "writes"})
+_FIRST_PERSON_LEAD = re.compile(r"^(?:we|i)\s+(?P<rest>.+)$", re.IGNORECASE)
+_POSSESSIVE_LEAD = re.compile(r"^(?:our|my|we're|we are|i'm|i am)\b", re.IGNORECASE)
+_WAY_TO = re.compile(r"^(?:the|a|an)\s+(?:[\w#'-]+\s+){0,2}way\s+to\s+(?P<rest>.+)$", re.IGNORECASE)
+_IS_LEAD = re.compile(r"^(?:is|are)\s+(?P<rest>.+)$", re.IGNORECASE)
 
 DETAIL_IN_PROGRESS = "Your article is already being written."
 DETAIL_DAILY_CAP = "Free first articles are busy today. Please try again tomorrow."
@@ -246,6 +265,7 @@ def normalise_title(value) -> str:
 
 
 def slugify(value) -> str:
+    """Lowercase words joined by hyphens (the existing-post slug match and offer ids)."""
     return re.sub(r"[^a-z0-9]+", "-", str(value or "").lower()).strip("-")
 
 
@@ -276,13 +296,100 @@ def repeats_existing_post(title, config) -> bool:
     return normalise_title(title) in titles or slugify(title) in slugs
 
 
-def _subject(facts, audience) -> str:
-    one_liner = _clean(facts.get("oneLiner"), ONE_LINER_MAX).rstrip(" .!?")
-    if one_liner and not _FIRST_PERSON.match(one_liner):
-        return one_liner[:1].lower() + one_liner[1:] if one_liner[:1].isupper() and one_liner[1:2].islower() else one_liner
-    if audience and audience.get("description"):
-        return f"{_clean(facts.get('name'), 80) or 'your startup'} for {_cut_at_word(audience['description'], 80).rstrip(' .')}"
-    return _clean(facts.get("name"), 80) or "getting started"
+def _base_verb(word) -> str:
+    """'helps' -> 'help', 'simplifies' -> 'simplify', 'fixes' -> 'fix'."""
+    lowered = word.lower()
+    if lowered.endswith("ies"):
+        return lowered[:-3] + "y"
+    if lowered.endswith(("sses", "shes", "ches", "xes", "zzes", "oes")):
+        return lowered[:-2]
+    return lowered[:-1]
+
+
+_BASE_VERBS = frozenset(_base_verb(word) for word in _LEAD_VERBS)
+
+
+def _gerunds(base) -> set[str]:
+    forms = {base + "ing"}
+    if base.endswith("e") and not base.endswith("ee"):
+        forms.add(base[:-1] + "ing")
+    if len(base) >= 3 and base[-1] in "tpgnm" and base[-2] in "aeiou" and base[-3] not in "aeiou":
+        forms.add(base + base[-1] + "ing")
+    return forms
+
+
+# "Helping" -> "help". Only gerunds of the verbs above, so "Booking software"
+# and "Accounting for cafes" stay noun phrases.
+_GERUND_BASES = {form: base for base in _BASE_VERBS for form in _gerunds(base)}
+
+
+def _lower_lead(text) -> str:
+    """Lowercase the first letter of an ordinary word (never an acronym such as 'AI')."""
+    return text[:1].lower() + text[1:] if text[:1].isupper() and text[1:2].islower() else text
+
+
+def _phrase(facts):
+    """Classify the one-liner as ``("action", base-verb phrase)``, ``("noun", phrase)`` or None.
+
+    "Helps tradies get paid faster", "Helping tradies get paid faster", "We
+    help clinics fill empty slots" and "The easiest way to book a physio" are
+    actions ("help tradies get paid faster", "book a physio"); "Booking
+    software for physio clinics" is a noun phrase. A first-person or
+    possessive one-liner that is none of these gives None.
+    """
+    text = _clean(facts.get("oneLiner"), ONE_LINER_MAX).rstrip(" .!?")
+    name = _clean(facts.get("name"), 80)
+    if name and text.lower().startswith(name.lower() + " "):
+        text = text[len(name) + 1:].strip()
+        text = (_IS_LEAD.match(text) or re.match(r"(?P<rest>.*)", text)).group("rest")
+    if not text:
+        return None
+    way = _WAY_TO.match(text)
+    if way:
+        return "action", way.group("rest")
+    first_person = _FIRST_PERSON_LEAD.match(text)
+    if first_person:
+        rest = first_person.group("rest")
+        lead, _space, tail = rest.partition(" ")
+        if lead.lower() in _BASE_VERBS and tail:
+            return "action", f"{lead.lower()} {tail}"
+        return None
+    if _POSSESSIVE_LEAD.match(text):
+        return None
+    lead, _space, tail = text.partition(" ")
+    if lead.lower() in _LEAD_VERBS and tail:
+        return "action", f"{_base_verb(lead)} {tail}"
+    if lead.lower() in _GERUND_BASES and tail:
+        return "action", f"{_GERUND_BASES[lead.lower()]} {tail}"
+    return "noun", _lower_lead(text)
+
+
+def _usable_audience(audience) -> str:
+    """The audience as a noun phrase for a title: never the "People who need …" inference."""
+    description = _clean((audience or {}).get("description"), AUDIENCE_MAX).rstrip(" .")
+    if not description or description.startswith(INFERRED_NEED_PREFIX):
+        return ""
+    return _lower_lead(_cut_at_word(description, 80))
+
+
+def description_titles(facts, audience) -> list[str]:
+    """Three grammatical titles from the one-liner, else from the audience, else from the name."""
+    facts = facts or {}
+    phrase = _phrase(facts)
+    if phrase is not None:
+        kind, text = phrase
+        templates = {
+            "action": ("How to {text}", "Common mistakes to avoid when you {text}", "What it takes to {text}"),
+            "noun": ("A beginner's guide to {text}", "Common mistakes to avoid with {text}",
+                     "Questions to ask before choosing {text}"),
+        }[kind]
+        return [template.format(text=text) for template in templates]
+    name = _clean(facts.get("name"), 80) or "your startup"
+    audience_text = _usable_audience(audience)
+    if audience_text:
+        return [f"A practical guide for {audience_text}", f"Common questions from {audience_text}, answered",
+                f"What {audience_text} should know about {name}"]
+    return [f"{name}: a beginner's guide", f"Common questions about {name}, answered", f"How {name} works"]
 
 
 def description_topics(facts, audience) -> list[dict]:
@@ -291,12 +398,9 @@ def description_topics(facts, audience) -> list[dict]:
     Used when no researched topic exists, also when discovery is off. Ids are
     stable for the same inputs.
     """
-    subject = _subject(facts or {}, audience)
-    templates = ("A beginner's guide to {subject}", "Common mistakes to avoid with {subject}",
-                 "Questions to ask before choosing {subject}")
     topics = []
-    for index, template in enumerate(templates):
-        title = _cut_at_word(template.format(subject=subject), CUSTOM_TOPIC_MAX)
+    for index, raw in enumerate(description_titles(facts, audience)):
+        title = _cut_at_word(raw[:1].upper() + raw[1:], CUSTOM_TOPIC_MAX)
         digest = hashlib.sha256(f"{index}|{title}".encode()).hexdigest()[:16]
         topics.append({"id": f"description:{digest}", "title": title, "source": "description"})
     return topics
@@ -334,8 +438,13 @@ def research_topics(organization, config) -> list[dict]:
     return [item for item, _candidate in eligible]
 
 
-def topics_for(*, organization, config, facts, audience=None) -> list[dict]:
-    """Up to 3 topics (the first is the card's topic), never repeating an existing post."""
+def all_topics(*, organization, config, facts, audience=None) -> list[dict]:
+    """Every eligible topic, best first: researched candidates, then the description titles.
+
+    Never repeats an existing post. A press resolves its ``topicId`` against
+    this whole list, so a description topic the card showed still resolves
+    after the free topic batch lands.
+    """
     seen, chosen = set(), []
     for topic in [*research_topics(organization, config), *description_topics(facts, audience)]:
         key = normalise_title(topic["title"])
@@ -343,9 +452,12 @@ def topics_for(*, organization, config, facts, audience=None) -> list[dict]:
             continue
         seen.add(key)
         chosen.append(topic)
-        if len(chosen) >= TOPIC_COUNT:
-            break
     return chosen
+
+
+def topics_for(*, organization, config, facts, audience=None) -> list[dict]:
+    """Up to 3 topics (the first is the card's topic), never repeating an existing post."""
+    return all_topics(organization=organization, config=config, facts=facts, audience=audience)[:TOPIC_COUNT]
 
 
 def first_topic(*, organization, company, config, facts=None) -> dict | None:
@@ -473,6 +585,14 @@ def _resolve_topic(press, topics) -> dict:
     return topic
 
 
+def _catalog_audience_with_description(config, description):
+    """An approved (else draft) catalogue audience whose description matches, so an unchanged edit reuses it."""
+    key = normalise_title(description)
+    options = [entry for entry in ((_catalog(config) or {}).get("audience_options") or [])
+               if entry.get("status") in {"approved", "draft"} and normalise_title(entry.get("description")) == key]
+    return next((entry for entry in options if entry["status"] == "approved"), options[0] if options else None)
+
+
 def _resolve_audience(press, card_audience, config) -> dict:
     """The audience to approve: a catalogue entry by id, a new description, or the card's audience."""
     if press["audienceId"]:
@@ -484,6 +604,9 @@ def _resolve_audience(press, card_audience, config) -> dict:
         return {**_audience_payload(item, item["status"]), "version": item.get("version")}
     if press["audienceDescription"]:
         from .editorial_first_audience import _default_name
+        same = _catalog_audience_with_description(config, press["audienceDescription"])
+        if same is not None:
+            return {**_audience_payload(same, same["status"]), "version": same.get("version")}
         return {"id": None, "name": _default_name(press["audienceDescription"]),
                 "description": press["audienceDescription"], "status": "inferred"}
     if card_audience is None or len(card_audience.get("description") or "") < AUDIENCE_MIN:
@@ -591,36 +714,62 @@ def _approve_with_offer(context, user, config, audience, cta, *, country, topic_
     return brief
 
 
-def _approve_without_offer(context, user, config, audience):
-    """P0 IF-08: approve the audience at press time and return its brief, or raise."""
-    from .editorial_first_audience import first_audience_response
+def _approve_without_offer(context, user, config, audience, *, country):
+    """P0 IF-08: approve the audience at press time and return its brief, or raise.
+
+    With no approved audience yet this is P0's ``first_audience_response``,
+    unchanged. A catalogue audience is activated when it is a draft. A new
+    description while another audience is already approved is added and
+    approved in one catalogue mutation, so the founder's edit is what the
+    article is written for. The brief always names the pressed audience.
+    """
+    from .editorial_first_audience import _brief as audience_brief, _startup_name, first_audience_response
     from .editorial_views import mutate_catalog_response
     current = _catalog(config)
     if current is None:
         raise FirstArticleRefusal(409, DETAIL_NOT_AVAILABLE, "not_available")
-    if audience.get("id"):
-        item = next((entry for entry in current["audience_options"] if entry["id"] == audience["id"]), None)
-        if item is not None and item["status"] == "draft":
-            response = mutate_catalog_response(
-                {"pk": context.organization.pk},
-                {"audience_options": current["audience_options"],
-                 "expected_editorial_catalog_version": current["editorial_catalog_version"],
-                 "activate_entries": [{"kind": "audience", "id": item["id"], "version": item["version"]}]},
-                owner_context=context, owner_user_id=user.pk)
-            if response.status_code != 200:
-                raise FirstArticleRefusal(400, DETAIL_INVALID_AUDIENCE, "invalid_audience")
-            config.refresh_from_db()
-            current = _catalog(config) or current
-    response = first_audience_response(context, user.pk, {
-        "description": _clean(audience["description"], AUDIENCE_MAX),
-        "name": _clean(audience.get("name"), 80) or None,
-        "expected_editorial_catalog_version": current["editorial_catalog_version"]})
-    if response.status_code not in (200, 201):
+    options = current["audience_options"]
+    target_id = audience.get("id")
+    if target_id:
+        item = next((entry for entry in options if entry["id"] == target_id), None)
+        if item is None:
+            raise FirstArticleRefusal(400, DETAIL_INVALID_AUDIENCE, "invalid_audience")
+        activate = [{"kind": "audience", "id": item["id"], "version": item["version"]}] \
+            if item["status"] == "draft" else []
+        mutation = {"audience_options": options}
+    elif not any(entry["status"] == "approved" for entry in options):
+        response = first_audience_response(context, user.pk, {
+            "description": _clean(audience["description"], AUDIENCE_MAX),
+            "name": _clean(audience.get("name"), 80) or None,
+            "expected_editorial_catalog_version": current["editorial_catalog_version"]})
+        if response.status_code not in (200, 201):
+            raise FirstArticleRefusal(400, DETAIL_INVALID_AUDIENCE, "invalid_audience")
+        brief = _mapping(response.data).get("editorial_brief")
+        if not brief:
+            raise FirstArticleRefusal(400, DETAIL_INVALID_AUDIENCE, "invalid_audience")
+        config.refresh_from_db()
+        return brief
+    else:
+        option = _new_audience_option(audience, {entry["id"] for entry in options})
+        target_id = option["id"]
+        activate = [{"kind": "audience", "id": target_id, "version": 1}]
+        mutation = {"audience_options": [*options, option]}
+    if activate:
+        response = mutate_catalog_response(
+            {"pk": context.organization.pk},
+            {**mutation, "expected_editorial_catalog_version": current["editorial_catalog_version"],
+             "activate_entries": activate},
+            owner_context=context, owner_user_id=user.pk)
+        if response.status_code != 200:
+            raise FirstArticleRefusal(400, DETAIL_INVALID_AUDIENCE, "invalid_audience")
+        config.refresh_from_db()
+        current = _catalog(config) or current
+    item = next((entry for entry in current["audience_options"] if entry["id"] == target_id), None)
+    if item is None or item["status"] != "approved":
         raise FirstArticleRefusal(400, DETAIL_INVALID_AUDIENCE, "invalid_audience")
-    brief = _mapping(response.data).get("editorial_brief")
+    brief = audience_brief(_strategy(config), item, country=country, startup_name=_startup_name(context))
     if not brief:
         raise FirstArticleRefusal(400, DETAIL_INVALID_AUDIENCE, "invalid_audience")
-    config.refresh_from_db()
     return brief
 
 
@@ -644,7 +793,23 @@ def request_id(company, attempt) -> str:
     return f"{REQUEST_ID_PREFIX}{company.pk}:{attempt}"
 
 
-def _is_first_article_request(run, company) -> bool:
+def paid_request_id(company, organization) -> str:
+    """``first-article:{company_id}:paid:{n}`` for a paid press, derived server-side.
+
+    ``n`` is one more than this startup's paid card presses that reached the
+    dispatch outbox, so two presses racing before either commits share one
+    id, one charge idempotency key and one dispatch row, while a press after
+    a finished (or refunded) article gets a fresh one.
+    """
+    from .dispatch_models import ContentFactoryDispatchOutbox
+    prefix = f"{REQUEST_ID_PREFIX}{company.pk}:paid:"
+    used = ContentFactoryDispatchOutbox.objects.filter(organization_id=organization.pk,
+                                                       client_request_id__startswith=prefix).count()
+    return f"{prefix}{used + 1}"
+
+
+def is_first_article_request(run, company) -> bool:
+    """True for a run the card started (its server-side ``first-article:{company}:`` request id)."""
     key = str(_mapping(getattr(run, "run_request", None)).get("client_request_id") or "")
     return key.startswith(f"{REQUEST_ID_PREFIX}{company.pk}:")
 
@@ -655,6 +820,35 @@ def started_body(run_id, status, company) -> dict:
             "redirect": f"/my-startup/runs/{run_id}/writing?company_id={company.pk}"}
 
 
+@contextmanager
+def press_lock(organization):
+    """Serialise one startup's presses (start and switch-topic) across workers.
+
+    A second press while one is still between its replay check and its
+    dispatch is refused as ``in_progress`` instead of starting (and, for a
+    paid article, charging) a second run. A cache outage does not block the
+    press: the server-side request ids still collide on the charge key.
+    """
+    name = f"{PRESS_LOCK_PREFIX}{organization.pk}"
+    token = secrets.token_urlsafe(16)
+    try:
+        acquired = cache.add(name, token, timeout=PRESS_LOCK_SECONDS)
+    except Exception:
+        logger.warning("first_article_press_lock_unavailable org=%s", organization.pk, exc_info=True)
+        acquired = None
+    if acquired is False:
+        raise FirstArticleRefusal(409, DETAIL_IN_PROGRESS, "in_progress")
+    try:
+        yield
+    finally:
+        if acquired:
+            try:
+                if cache.get(name) == token:
+                    cache.delete(name)
+            except Exception:
+                logger.warning("first_article_press_lock_release_failed org=%s", organization.pk, exc_info=True)
+
+
 def _replay_or_refuse(context, entitlement):
     """A press while an article is in flight: replay our attempt (200), else 409 in_progress."""
     from workflow_runs.models import ContentFactoryRun
@@ -662,7 +856,8 @@ def _replay_or_refuse(context, entitlement):
     if run is None and entitlement.get("status") == "in_progress" and entitlement.get("run_id"):
         run = ContentFactoryRun.objects.filter(organization_id=context.organization.pk,
                                                run_id=entitlement["run_id"]).first()
-    if run is not None and _is_first_article_request(run, context.company) and run.status not in {"failed", "cancelled", "denied"}:
+    if run is not None and is_first_article_request(run, context.company) \
+            and run.status not in {"failed", "cancelled", "denied"}:
         return started_body(run.run_id, run.status, context.company)
     if run is not None or entitlement.get("status") == "in_progress":
         raise FirstArticleRefusal(409, DETAIL_IN_PROGRESS, "in_progress")
@@ -690,52 +885,45 @@ def _passthrough(response) -> bool:
                                                        "INSUFFICIENT_ROO_POINTS"}
 
 
-def start_first_article(context, user, data, *, attempt_source="start"):
-    """Run the one-press start (IF-P1-09). Returns ``(status, body)``; refusals raise FirstArticleRefusal.
-
-    Order: save profile edits, approve the audience (and the call to action's
-    offer, falling back to IF-08), build the brief, derive the request id
-    server-side, then start a ``content_only`` run, where the free first
-    article is reserved in the same transaction as the dispatch.
-    """
-    from .first_article_entitlement import entitlement_state
-    from . import vibe_marketing_views as views
+def _prepare(context, press, config, *, audience_override=None) -> dict:
+    """Resolve the press's topic and audience without side effects (refusals raise)."""
     organization, company = context.organization, context.company
-    require_owner(user, organization)
-    press = parse_press(data)
-    config = _config(organization)
-    entitlement = entitlement_state(organization, user, config=config)
-    replay = _replay_or_refuse(context, entitlement)
-    if replay is not None:
-        return 200, replay
-    if entitlement.get("limit") == "daily_cap":
-        raise FirstArticleRefusal(409, DETAIL_DAILY_CAP, "daily_cap")
     facts = profile_facts(company, organization, config)
     card_audience = audience_for(organization, config, facts)
-    topic = _resolve_topic(press, topics_for(organization=organization, config=config, facts=facts,
+    topic = _resolve_topic(press, all_topics(organization=organization, config=config, facts=facts,
                                              audience=card_audience))
-    audience = _resolve_audience(press, card_audience, config)
-    expected = press["expectedCostPoints"]
+    audience = _resolve_audience(audience_override or press, card_audience, config)
+    expected = press.get("expectedCostPoints")
     if isinstance(expected, bool) or not isinstance(expected, int):
         expected = None
-
-    save_profile_edits(company, organization, press)
     from .editorial_first_audience import country_from_location
     country = country_from_location(getattr(company, "location", "")) or DEFAULT_COUNTRY
+    return {"topic": topic, "audience": audience, "expected": expected, "country": country}
+
+
+def _approve(context, user, config, prepared) -> dict:
+    """Approve the audience (and the call to action's offer, falling back to IF-08) and return the brief."""
+    organization = context.organization
     brief = None
     cta = call_to_action(organization, config)
     if cta is not None:
-        brief = _approve_with_offer(context, user, config, audience, cta, country=country, topic_title=topic["title"])
+        brief = _approve_with_offer(context, user, config, prepared["audience"], cta, country=prepared["country"],
+                                    topic_title=prepared["topic"]["title"])
         config.refresh_from_db()
     if brief is None:
-        brief = _approve_without_offer(context, user, config, audience)
-    brief = _with_existing_posts(brief, config)
+        brief = _approve_without_offer(context, user, config, prepared["audience"], country=prepared["country"])
+    return _with_existing_posts(brief, config)
 
+
+def _dispatch(context, user, prepared, brief, entitlement, *, attempt_source):
+    """Start the ``content_only`` run on the real charge path. Returns ``(status, body)`` or raises."""
+    from . import vibe_marketing_views as views
+    organization, company = context.organization, context.company
     free = bool(entitlement.get("free"))
     attempt = int(entitlement.get("attempts_used") or 0) + 1
-    client_request_id = request_id(company, attempt) if free else f"{REQUEST_ID_PREFIX}{company.pk}:paid:{uuid.uuid4().hex[:12]}"
+    client_request_id = request_id(company, attempt) if free else paid_request_id(company, organization)
     response = views.start_article_generation(user=user, context=context, data=_start_data(
-        topic, brief, client_request_id=client_request_id, expected=expected))
+        prepared["topic"], brief, client_request_id=client_request_id, expected=prepared["expected"]))
     if response.status_code == 202:
         body = _mapping(response.data)
         run_id = str(body.get("runId") or body.get("run_id") or "")
@@ -746,20 +934,52 @@ def start_first_article(context, user, data, *, attempt_source="start"):
         return response.status_code, response.data
     if response.status_code == 400:
         raise FirstArticleRefusal(400, DETAIL_INVALID_TOPIC, "invalid_topic")
-    logger.info("first_article_start_refused org=%s status=%s", organization.pk, response.status_code)
+    logger.info("first_article_start_refused org=%s status=%s source=%s", organization.pk, response.status_code,
+                attempt_source)
     raise FirstArticleRefusal(409, DETAIL_NOT_AVAILABLE, "not_available")
+
+
+def start_first_article(context, user, data, *, attempt_source="start"):
+    """Run the one-press start (IF-P1-09). Returns ``(status, body)``; refusals raise FirstArticleRefusal.
+
+    Order: save profile edits, approve the audience (and the call to action's
+    offer, falling back to IF-08), build the brief, derive the request id
+    server-side, then start a ``content_only`` run, where the free first
+    article is reserved in the same transaction as the dispatch. One press
+    per startup at a time (:func:`press_lock`).
+    """
+    from .first_article_entitlement import entitlement_state
+    organization, company = context.organization, context.company
+    require_owner(user, organization)
+    press = parse_press(data)
+    with press_lock(organization):
+        config = _config(organization)
+        entitlement = entitlement_state(organization, user, config=config)
+        replay = _replay_or_refuse(context, entitlement)
+        if replay is not None:
+            return 200, replay
+        if entitlement.get("limit") == "daily_cap":
+            raise FirstArticleRefusal(409, DETAIL_DAILY_CAP, "daily_cap")
+        prepared = _prepare(context, press, config)
+        save_profile_edits(company, organization, press)
+        brief = _approve(context, user, config, prepared)
+        return _dispatch(context, user, prepared, brief, entitlement, attempt_source=attempt_source)
 
 
 def switch_topic(context, user, data):
     """Cancel a slow free first-article run as ``superseded`` and start attempt 2. Returns ``(status, body)``.
 
     Allowed only while the journey says ``switchTopicAvailable`` for that run.
-    The entitlement of the cancelled attempt is released, not consumed, so the
-    new attempt is free; a third attempt is never offered.
+    Everything that can refuse runs before the cancel: the journey's check
+    (which includes the attempts, account and daily caps for attempt 2), the
+    topic and the audience, and the brief. Only then is the run stopped at
+    Content Factory, its attempt released (not consumed) and attempt 2
+    started, so a refused switch leaves the running article untouched. A third
+    attempt is never offered.
     """
     from workflow_runs.models import ContentFactoryRun
     from .article_publication_evidence import cancellation_receipt
-    from .first_article_entitlement import release_entitlement
+    from .first_article_entitlement import entitlement_state, release_entitlement
     from .founder_journey import project_founder_journey
     from .run_cancellation import cancellation_request_fields
     from . import vibe_marketing_views as views
@@ -769,44 +989,50 @@ def switch_topic(context, user, data):
     run_id = data.get("runId")
     if not isinstance(run_id, str) or not run_id.strip():
         raise FirstArticleRefusal(409, DETAIL_SWITCH_UNAVAILABLE, "not_available")
-    press = parse_press({key: data.get(key) for key in ("topicId", "customTopic") if key in data})
-    journey = project_founder_journey(organization, user=user, company=company)
-    if not journey.get("switchTopicAvailable") or journey.get("runId") != run_id:
-        raise FirstArticleRefusal(409, DETAIL_SWITCH_UNAVAILABLE, "not_available")
-    run = ContentFactoryRun.objects.filter(organization_id=organization.pk, run_id=run_id).first()
-    if run is None:
-        raise FirstArticleRefusal(409, DETAIL_SWITCH_UNAVAILABLE, "not_available")
-    config = _config(organization)
-    facts = profile_facts(company, organization, config)
-    card_audience = audience_for(organization, config, facts)
-    topic = _resolve_topic(press, topics_for(organization=organization, config=config, facts=facts,
-                                             audience=card_audience))
-    remote = views._call_content_factory_run_action(run_id=run.run_id, action="cancel",
-                                                    payload=cancellation_request_fields("superseded", "system"),
-                                                    workflow=run.workflow)
-    remote = remote if isinstance(remote, dict) else {}
-    # Without a clean stop the worker may still be writing: never start a
-    # second free article on top of it.
-    if (remote.get("error") or int(remote.get("content_factory_status_code") or 0) == 409
-            or views._article_cancel_receipt_conflict(run, remote)):
-        raise FirstArticleRefusal(409, DETAIL_SWITCH_UNAVAILABLE, "not_available")
-    try:
-        receipt = cancellation_receipt(run, remote)
-    except (ValueError, TypeError):
-        receipt = None
-    delivered = bool(receipt and receipt.get("delivered_value") is True)
-    with transaction.atomic():
-        if not delivered:
-            release_entitlement(organization=organization, run=run, reason="superseded")
-        try:
-            views._cancel_local_article_run(run=run, organization=organization, remote_data=remote,
-                                            cancellation_reason="superseded", cancelled_by="system")
-        except (ValueError, TypeError):
+    press = parse_press({**{key: data.get(key) for key in ("topicId", "customTopic") if key in data},
+                         "expectedCostPoints": 0})
+    with press_lock(organization):
+        journey = project_founder_journey(organization, user=user, company=company)
+        if not journey.get("switchTopicAvailable") or journey.get("runId") != run_id:
             raise FirstArticleRefusal(409, DETAIL_SWITCH_UNAVAILABLE, "not_available")
-    if delivered:
-        raise FirstArticleRefusal(409, DETAIL_SWITCH_UNAVAILABLE, "not_available")
-    start_body = {"topicId": topic["id"]} if topic["id"] else {"customTopic": topic["title"]}
-    start_body["expectedCostPoints"] = 0
-    if card_audience and card_audience.get("id"):
-        start_body["audience"] = {"id": card_audience["id"]}
-    return start_first_article(context, user, start_body, attempt_source="switch_topic")
+        run = ContentFactoryRun.objects.filter(organization_id=organization.pk, run_id=run_id).first()
+        if run is None or not is_first_article_request(run, company):
+            raise FirstArticleRefusal(409, DETAIL_SWITCH_UNAVAILABLE, "not_available")
+        config = _config(organization)
+        prepared = _prepare(context, press, config, audience_override={**press, "audienceId": None,
+                                                                         "audienceDescription": None})
+        brief = _approve(context, user, config, prepared)
+
+        remote = views._call_content_factory_run_action(run_id=run.run_id, action="cancel",
+                                                        payload=cancellation_request_fields("superseded", "system"),
+                                                        workflow=run.workflow)
+        remote = remote if isinstance(remote, dict) else {}
+        # Without a clean stop the worker may still be writing: never start a
+        # second free article on top of it.
+        if (remote.get("error") or int(remote.get("content_factory_status_code") or 0) == 409
+                or views._article_cancel_receipt_conflict(run, remote)):
+            raise FirstArticleRefusal(409, DETAIL_SWITCH_UNAVAILABLE, "not_available")
+        try:
+            receipt = cancellation_receipt(run, remote)
+        except (ValueError, TypeError):
+            receipt = None
+        if receipt and receipt.get("delivered_value") is True:
+            # The draft arrived as the founder pressed: the delivery settles the
+            # run and the journey shows it. Never record it as superseded.
+            logger.info("first_article_switch_after_delivery org=%s run=%s", organization.pk, run.run_id)
+            raise FirstArticleRefusal(409, DETAIL_SWITCH_UNAVAILABLE, "not_available")
+        with transaction.atomic():
+            release_entitlement(organization=organization, run=run, reason="superseded")
+            try:
+                views._cancel_local_article_run(run=run, organization=organization, remote_data=remote,
+                                                cancellation_reason="superseded", cancelled_by="system")
+            except (ValueError, TypeError):
+                raise FirstArticleRefusal(409, DETAIL_SWITCH_UNAVAILABLE, "not_available")
+        entitlement = entitlement_state(organization, user, config=config)
+        if not entitlement.get("free"):
+            # Admitted a moment ago; another startup took the last daily slot in
+            # between. The released attempt is offered again from the card.
+            logger.warning("first_article_switch_lost_slot org=%s run=%s limit=%s", organization.pk, run.run_id,
+                           entitlement.get("limit"))
+            raise FirstArticleRefusal(409, DETAIL_SWITCH_UNAVAILABLE, "not_available")
+        return _dispatch(context, user, prepared, brief, entitlement, attempt_source="switch_topic")
