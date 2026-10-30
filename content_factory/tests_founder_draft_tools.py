@@ -312,7 +312,8 @@ class DraftToolTests(TestCase):
         self.assertIn("1.png: Image 0", readme)
         self.assertNotIn("https://cdn.example.com/photo.png", fetched)
         self.assertEqual(len(fetched), 11)
-        self.assertNotIn("—", readme)
+        self.assertNotIn("\u2014", readme)
+        self.assertNotIn("\u2013", readme)
 
     @override_settings(**FLAGS)
     def test_zip_is_refused_until_the_export_is_ready(self, _latest):
