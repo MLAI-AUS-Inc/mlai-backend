@@ -87,6 +87,13 @@ class NotionAgendaClientTests(SimpleTestCase):
         self.assertEqual(raised.exception.code, "notion_invalid_response")
         self.assertTrue(raised.exception.uncertain)
 
+    def test_insert_response_with_more_blocks_than_sent_is_returned(self):
+        # Seen live with after_block: the new block comes back with the blocks after it.
+        returned = [{"id": "inserted"}, {"id": "next-paragraph"}, {"id": "next-heading"}]
+        with patch(REQUEST, return_value=FakeNotionResponse({"results": returned})):
+            results = NotionAgendaClient().insert_after("page-1", "last-bullet", [{}])
+        self.assertEqual(results, returned)
+
     def test_list_children_follows_pagination(self):
         with patch(REQUEST, side_effect=[
             FakeNotionResponse({"results": [{"id": "a"}], "has_more": True, "next_cursor": "c1"}),

@@ -40,6 +40,10 @@ class _FakeClient:
         self.blank_reads_after_create = 0
         self.insert_error = None
         self.drop_inserted_on_read = False
+        # What the insert response holds: "following" (new block, then the
+        # blocks after it, as seen live), "only_new", "all" or "new_not_first".
+        self.response_shape = "following"
+        self.hand_typed_copy = False
         self._inserted = 0
 
     def find_pages_by_title(self, title):
@@ -69,13 +73,23 @@ class _FakeClient:
     def insert_after(self, page_id, after_block_id, children):
         self.calls.append(("insert", page_id, after_block_id))
         self._inserted += 1
-        new = _block(f"inserted-{self._inserted}", "bulleted_list_item", children[0]["bulleted_list_item"]["rich_text"][0]["text"]["content"])
+        text = children[0]["bulleted_list_item"]["rich_text"][0]["text"]["content"]
+        new = _block(f"inserted-{self._inserted}", "bulleted_list_item", text)
         blocks = self.pages[page_id]
         position = next(index for index, block in enumerate(blocks) if block["id"] == after_block_id)
         blocks.insert(position + 1, new)
+        if self.hand_typed_copy:
+            # Someone typed the same line between Roo's read and its write.
+            blocks.insert(position + 2, _block("typed-by-hand", "bulleted_list_item", text))
         if self.insert_error:
             raise self.insert_error
-        return [{"id": new["id"]}]
+        index = blocks.index(new)
+        return {
+            "following": blocks[index:],
+            "only_new": [new],
+            "all": list(blocks),
+            "new_not_first": blocks[index - 1:],
+        }[self.response_shape]
 
     def writes(self):
         return [call for call in self.calls if call[0] in {"create", "insert"}]
@@ -192,6 +206,38 @@ class AddAgendaItemTests(SimpleTestCase):
 
         self.assertEqual(raised.exception.code, "agenda_verify_failed")
         self.assertTrue(raised.exception.uncertain)
+
+    def test_own_block_is_found_whatever_else_the_insert_response_holds(self):
+        # Scenarios 1-4: Notion's response isn't just the new block (seen live: it isn't).
+        for shape in ("following", "only_new", "all", "new_not_first"):
+            with self.subTest(shape=shape):
+                client = _FakeClient({"page-1": _template()})
+                client.response_shape = shape
+
+                result, _ = _add(client)
+
+                self.assertEqual((result.status, result.block_id), ("added", "inserted-1"))
+
+    def test_same_line_typed_by_hand_during_the_write_is_uncertain_not_guessed(self):
+        # Scenario 5: two new blocks with our text; picking one would be a guess.
+        client = _FakeClient({"page-1": _template()})
+        client.hand_typed_copy = True
+
+        with self.assertRaises(NotionAgendaError) as raised:
+            _add(client)
+
+        self.assertEqual(raised.exception.code, "agenda_verify_failed")
+        self.assertTrue(raised.exception.uncertain)
+
+    def test_response_without_our_text_is_uncertain(self):
+        # A returned block that is new but doesn't carry our line isn't ours.
+        client = _FakeClient({"page-1": _template()})
+        client.insert_after = lambda page_id, after_block_id, children: [_block("other-new", "bulleted_list_item", "Something else")]
+
+        with self.assertRaises(NotionAgendaError) as raised:
+            _add(client)
+
+        self.assertEqual(raised.exception.code, "agenda_verify_failed")
 
     def test_retry_after_uncertain_write_finds_the_earlier_bullet(self):
         # The bank-transfer case: Notion applied the insert, but the response never arrived.

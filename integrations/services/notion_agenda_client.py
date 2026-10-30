@@ -142,8 +142,10 @@ class NotionAgendaClient:
         }
         payload = self.request("PATCH", f"/blocks/{parent_id}/children", body=body)
         results = payload.get("results")
-        if not isinstance(results, list) or len(results) != len(children):
+        # The response can hold more blocks than were sent (seen live with
+        # after_block), so the caller picks out its own block.
+        if not isinstance(results, list) or not results:
             raise NotionAgendaError(
                 "notion_invalid_response", "Notion did not confirm the inserted blocks.", uncertain=True
             )
-        return results
+        return [block for block in results if isinstance(block, dict)]

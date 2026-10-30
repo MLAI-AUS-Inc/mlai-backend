@@ -35,6 +35,7 @@ from integrations.services.notion_agenda_page import (
     AgendaPageError,
     agenda_bullet,
     agenda_line,
+    block_text,
     find_agenda_section,
     find_duplicate,
     verify_inserted,
@@ -129,8 +130,9 @@ def add_agenda_item(
         result.duplicate_location = location
         return result
 
+    existing_ids = {block.get("id") for block in blocks}
     inserted = client.insert_after(result.page_id, section.insert_after_id, [agenda_bullet(line)])
-    result.block_id = str(inserted[0].get("id") or "")
+    result.block_id = _new_block_id(inserted, existing_ids, line)
     if not result.block_id or not verify_inserted(client.list_children(result.page_id), result.block_id, line):
         raise NotionAgendaError(
             "agenda_verify_failed",
@@ -138,6 +140,20 @@ def add_agenda_item(
             uncertain=True,
         )
     return result
+
+
+def _new_block_id(returned: list[dict[str, Any]], existing_ids: set[Any], line: str) -> str:
+    """Our bullet among the insert response, which can include other blocks.
+
+    Exactly one returned block must be new to the page and carry our text.
+    Otherwise (none, or a same-text block typed by hand meanwhile) return no ID,
+    so the caller reports the write as uncertain instead of guessing.
+    """
+    candidates = [
+        block for block in returned
+        if block.get("id") not in existing_ids and block_text(block).strip() == line
+    ]
+    return str(candidates[0].get("id") or "") if len(candidates) == 1 else ""
 
 
 def _wait_for_template(client: NotionAgendaClient, page_id: str, sleep: Callable[[float], None]) -> list[dict[str, Any]] | None:
