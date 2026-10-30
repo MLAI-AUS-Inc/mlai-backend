@@ -52,6 +52,15 @@ def merge_by_meaning_enabled():
     return getattr(settings, "ARTICLES_SNAPSHOT_MERGE_BY_MEANING_ENABLED", False) is True
 
 
+def final_refusal():
+    """``retryable: False`` for a coded 409, only behind the flag.
+
+    The worker blocks a run on a non-retryable refusal that carries a code, so
+    the hint ships with the merge that makes such a refusal a real rail change.
+    """
+    return {"retryable": False} if merge_by_meaning_enabled() else {}
+
+
 def is_rail(field):
     return field in RAIL_FIELDS or str(field).startswith(RAIL_PREFIXES)
 

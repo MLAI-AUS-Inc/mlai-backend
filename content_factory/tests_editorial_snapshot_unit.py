@@ -451,8 +451,9 @@ class EditorialSnapshotPersistenceSeamTests(unittest.TestCase):
         before = deepcopy(self.existing.run_request)
         incoming = {"workflow": "article_generation", "status": "running",
                     "run_request": {"roo_points_ledger_id": 123, "roo_points_cost": "6"}}
-        refused = self.put(incoming)  # Flag off: the exact comparison still refuses.
-        self.assertEqual((refused.status_code, refused.data["retryable"]), (409, False))
+        refused = self.put(incoming)  # Flag off: the exact comparison still refuses,
+        # and not as final, or the worker would block the run over a spelling.
+        self.assertEqual((refused.status_code, refused.data.get("retryable")), (409, None))
         self.assertEqual(self.existing.run_request, before)
         with self.by_meaning():
             response = self.put(incoming)

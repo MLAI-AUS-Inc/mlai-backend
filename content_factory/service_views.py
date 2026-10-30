@@ -9156,6 +9156,7 @@ def _apply_cancellation_receipt(run_id, payload):
     tokens, targets, proof and run-request identity remain discarded.
     """
     from .run_observations import _observations
+    from .snapshot_meaning import final_refusal
     from .website_operations import observe_workflow_status
     with transaction.atomic():
         run = ContentFactoryRun.objects.select_for_update().filter(run_id=run_id).first()
@@ -9167,7 +9168,7 @@ def _apply_cancellation_receipt(run_id, payload):
         if (not domain or domain != expected or (request.get("domain") and str(request["domain"]).strip().casefold() != expected)
                 or (payload.get("run_id") and payload["run_id"] != run_id)
                 or (request.get("run_id") and request["run_id"] != run_id)):
-            return Response({"code": "website_scope_mismatch", "detail": "Cancellation receipt does not match the saved run domain.", "run_id": run_id, "retryable": False}, status=409)
+            return Response({"code": "website_scope_mismatch", "detail": "Cancellation receipt does not match the saved run domain.", "run_id": run_id, **final_refusal()}, status=409)
         incoming = payload.get("result") if isinstance(payload.get("result"), dict) else {}
         metadata = _observations({key: incoming[key] for key in (
             "cancelled_at", "cancellation", "cleanup", "cleanup_pending", "remote_cleanup_pending", "mirror_rejection",
@@ -9176,7 +9177,7 @@ def _apply_cancellation_receipt(run_id, payload):
         try:
             preserved = cancellation_result(run, incoming)
         except (ValueError, TypeError):
-            return Response({"code": "cancellation_scope_mismatch", "run_id": run_id, "retryable": False}, status=409)
+            return Response({"code": "cancellation_scope_mismatch", "run_id": run_id, **final_refusal()}, status=409)
         # Why it stopped and who asked (IF-20): the backend's own saved value wins
         # over the worker's; a receipt carrying neither records unspecified/system.
         from .run_cancellation import receipt_cancellation_fields
@@ -9198,6 +9199,7 @@ def _apply_cancellation_receipt(run_id, payload):
 
 
 def _apply_run_snapshot(run_id, payload, *, ack=False):
+    from .snapshot_meaning import final_refusal
     existing_run = ContentFactoryRun.objects.filter(run_id=run_id).first()
     payload = sanitize_json_for_postgres(dict(payload))
     payload["run_id"] = run_id
@@ -9277,7 +9279,7 @@ def _apply_run_snapshot(run_id, payload, *, ack=False):
                 str(getattr(exc, "guard_field", "") or "-")[:80])
             return Response(
                 {"error": "editorial_run_conflict", "code": "editorial_run_conflict", "detail": str(exc), "run_id": run_id,
-                 "retryable": False},
+                 **final_refusal()},
                 status=status.HTTP_409_CONFLICT,
             )
         except OperationalError as exc:

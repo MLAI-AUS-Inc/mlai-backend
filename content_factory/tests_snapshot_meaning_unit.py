@@ -65,6 +65,14 @@ class MeaningTests(SimpleTestCase):
         many = record_drift({}, [f"field_{index}" for index in range(80)])
         self.assertEqual(len(many[DRIFT_RESULT_KEY]["fields"]), 50)
 
+    def test_coded_refusals_are_final_only_behind_the_flag(self):
+        # A worker blocks the run on a coded non-retryable 409, so flag off keeps
+        # today's retried refusal.
+        from .snapshot_meaning import final_refusal
+        self.assertEqual(final_refusal(), {})
+        with override_settings(ARTICLES_SNAPSHOT_MERGE_BY_MEANING_ENABLED=True):
+            self.assertEqual(final_refusal(), {"retryable": False})
+
     def test_flag_defaults_off(self):
         from .snapshot_meaning import merge_by_meaning_enabled
         self.assertFalse(merge_by_meaning_enabled())
