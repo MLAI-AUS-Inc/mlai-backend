@@ -204,20 +204,68 @@ def _lock_attempt(organization_id, request):
     return rows, number, attempt
 
 
-def _account_rows(user, *, now):
-    """Entitlement rows of every account sharing this account's email in the window."""
+GMAIL_DOMAINS = ("gmail.com", "googlemail.com")
+
+
+def normalised_email(email) -> str:
+    """The account email the P1 free-article cap keys on.
+
+    Lowercased; any ``+tag`` is dropped from the local part on every domain;
+    for gmail.com and googlemail.com the local part's dots are removed and
+    googlemail.com becomes gmail.com. Empty for an empty or malformed email.
+    """
+    text = str(email or "").strip().lower()
+    local, at, domain = text.rpartition("@")
+    if not at or not local or not domain:
+        return ""
+    local = local.split("+", 1)[0]
+    if domain in GMAIL_DOMAINS:
+        local, domain = local.replace(".", ""), "gmail.com"
+    return f"{local}@{domain}" if local else ""
+
+
+def _normalises_email(organization) -> bool:
+    """P1.9: only a new-journey startup with ``MY_STARTUP_NO_WEBSITE_ARTICLES_ENABLED`` normalises."""
+    from django.conf import settings
+    if organization is None or not getattr(organization, "pk", None):
+        return False
+    if not getattr(settings, "MY_STARTUP_NO_WEBSITE_ARTICLES_ENABLED", False):
+        return False
+    from .founder_journey_cohort import is_new_journey
+    return is_new_journey(organization)
+
+
+def _account_rows(user, *, now, organization=None):
+    """Entitlement rows of every account sharing this account's email in the window.
+
+    Legacy startups (and every startup while the P1 flag is off) match the
+    email case-insensitively, as before. A new-journey startup matches the
+    normalised email, so ``jo+1@gmail.com`` and ``j.o@googlemail.com`` share
+    one cap.
+    """
     from django.db.models import Q
     from roo.models import Ledger
     email = str(getattr(user, "email", "") or "").strip()
+    normalised = normalised_email(email) if email and _normalises_email(organization) else ""
+    if normalised:
+        domain = normalised.rpartition("@")[2]
+        domains = GMAIL_DOMAINS if domain == "gmail.com" else (domain,)
+        owner = Q(user_id=getattr(user, "pk", None))
+        for item in domains:
+            owner |= Q(user__email__iendswith=f"@{item}")
+        rows = Ledger.objects.filter(owner, reference_type=REFERENCE_TYPE,
+                                     created_at__gte=now - ACCOUNT_WINDOW).select_related("user")
+        return [row for row in rows if row.user_id == getattr(user, "pk", None)
+                or normalised_email(getattr(row.user, "email", "")) == normalised]
     owner = Q(user__email__iexact=email) if email else Q(user_id=getattr(user, "pk", None))
     return list(Ledger.objects.filter(owner, reference_type=REFERENCE_TYPE, created_at__gte=now - ACCOUNT_WINDOW))
 
 
-def _account_limited(user, *, topics: bool, now) -> bool:
+def _account_limited(user, *, topics: bool, now, organization=None) -> bool:
     """Apply the email-keyed cap: one live grant and three grants in any outcome."""
     if user is None:
         return True
-    rows = _account_rows(user, now=now)
+    rows = _account_rows(user, now=now, organization=organization)
     keys = {row.idempotency_key for row in rows}
     if topics:
         grants = [row for row in rows if (row.idempotency_key or "").endswith((":topics", ":topics:retry"))]
@@ -348,7 +396,7 @@ def is_established_publisher(organization, config=None) -> bool:
 def _topic_batch_free(organization, user, rows: _Rows, *, now, established: bool) -> bool:
     if established or (rows.topics is not None and (not rows.topics_released or rows.topics_retry is not None)):
         return False
-    return not _account_limited(user, topics=True, now=now)
+    return not _account_limited(user, topics=True, now=now, organization=organization)
 
 
 def entitlement_state(organization, user, *, config=None, now=None) -> dict:
@@ -392,7 +440,7 @@ def entitlement_state(organization, user, *, config=None, now=None) -> dict:
         return {**state, "limit": "established"}
     if len(rows.attempts) >= ATTEMPTS_ALLOWED:
         return {**state, "limit": "attempts"}
-    if _account_limited(user, topics=False, now=now):
+    if _account_limited(user, topics=False, now=now, organization=organization):
         return {**state, "limit": "account"}
     if _daily_cap_reached(now):
         return {**state, "limit": "daily_cap"}
