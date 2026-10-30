@@ -727,6 +727,18 @@
     {
       "adapter": "validated_v1_projection",
       "allowed_codes_ref": "contracts/failure-codes.json#/codes",
+      "expression": "failure['code']",
+      "field": "code",
+      "function": "legacy_view",
+      "owner": "backend.website_failure_contract",
+      "path": "content_factory/website_failure_contract.py",
+      "site_sha256": "6d8af6b5a241c6f4d7480960ce7561415bb13e05e8aea3d72b4e6f9627ae3086",
+      "source": "website_failure_contract.validate_failure membership fallback: an envelope code this registry lacks keeps its own validated code, class and retryable",
+      "test": "content_factory.tests_failure_contract_unit.MembershipTests.test_membership_accepts_unknown_codes_and_registry_drift"
+    },
+    {
+      "adapter": "validated_v1_projection",
+      "allowed_codes_ref": "contracts/failure-codes.json#/codes",
       "expression": "code",
       "field": "code",
       "function": "resolve_failure",

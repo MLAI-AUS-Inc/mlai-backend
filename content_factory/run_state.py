@@ -9,6 +9,8 @@ from __future__ import annotations
 
 from typing import Any, Mapping
 
+from .run_status_contract import ACTIVE, EXTERNAL_LABELS
+
 
 RELIABILITY_FIELDS = ("generation", "state_version", "failure", "recovery", "recovery_intents", "budget")
 
@@ -84,9 +86,16 @@ def reliability_presentation(result, *, status="", workflow="", current_step="",
     return fields
 
 
-ACTIVE_RUN_STATUSES = frozenset(
-    {"queued", "running", "processing", "pending", "starting", "in_progress"}
-)
+# Spellings older workers sent for a run that was still working.
+LEGACY_ACTIVE_SPELLINGS = frozenset({"pending", "starting", "in_progress"})
+# Raw snapshot statuses that mean the worker still owns the run. Snapshot
+# merges compare the incoming string, so besides the contract's active
+# statuses this accepts the label GET /api/runs reports for them
+# ("processing") and the legacy spellings above. It is not the contract's
+# ACTIVE: use that for stored ContentFactoryRun.status values.
+ACTIVE_SNAPSHOT_STATUSES = ACTIVE | frozenset(EXTERNAL_LABELS[status] for status in ACTIVE) | LEGACY_ACTIVE_SPELLINGS
+# service_views imports this name as DURABLE_ACTIVE_RUN_STATUSES.
+ACTIVE_RUN_STATUSES = ACTIVE_SNAPSHOT_STATUSES
 ARTICLE_WORKFLOWS = frozenset(
     {
         "article_generation",
