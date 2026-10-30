@@ -521,7 +521,16 @@ def _stored_article_delivery_mode(config) -> str:
 
 
 def _reported_article_delivery_mode(config) -> str:
-    """Saved mode for settings payloads; never content_only for a connected website."""
+    """Saved mode for settings payloads; never content_only for a connected website.
+
+    P1.8 (IF-P1-10): a new-journey organisation reports content_only until its
+    website verifies and the owner chose "Publish automatically". Stored
+    values are never rewritten.
+    """
+    from .portable_drafts import copy_ready_reported_mode
+    copy_ready = copy_ready_reported_mode(config)
+    if copy_ready:
+        return copy_ready
     return _stored_article_delivery_mode(config) or ("review_draft" if has_connected_website(config) else "content_only")
 
 
@@ -17917,10 +17926,17 @@ def start_article_generation(*, user, context, data, request_hash=None, website_
     """Execute the canonical owned operation for HTTP and MCP transports."""
     command = ContentCommand(user=user, data=data)
     config = _get_config(context.organization)
-    from .portable_drafts import has_connected_website, requests_content_only
+    from .portable_drafts import has_connected_website, keeps_copy_ready_start, requests_content_only
     if requests_content_only(command.data) and has_connected_website(config):
-        return _start_website_preview_article(user=user, context=context, config=config, data=command.data,
-            request_hash=request_hash, website_contract=website_contract, goal_operation_id=goal_operation_id)
+        # P1.8 (IF-P1-10): a new-journey article started before the website
+        # verifies (or before the owner chose "Publish automatically") stays
+        # copy-ready and continues below as a portable run.
+        if keeps_copy_ready_start(context.organization, config, command.data, can_generate_article=lambda: (
+                _article_capabilities_for_context(context, config, force=True)["canGenerateArticle"])):
+            logger.info("vibe_marketing_article_copy_ready_before_verification org_id=%s", context.organization.pk)
+        else:
+            return _start_website_preview_article(user=user, context=context, config=config, data=command.data,
+                request_hash=request_hash, website_contract=website_contract, goal_operation_id=goal_operation_id)
     blocked_response = _setup_blocked_response_for_generation(context, config, request_data=command.data)
     if blocked_response is not None:
         return blocked_response
