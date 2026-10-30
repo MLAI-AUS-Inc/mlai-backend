@@ -469,7 +469,7 @@ def _website_journey_facts(*, organization, company, config, user, connection, l
         cached = None
     if isinstance(cached, dict):
         return cached
-    facts = {"operation": None, "setupPullRequest": None, "canGenerateArticle": False}
+    facts = {"operation": None, "setupPullRequest": None, "sourceSha": None, "canGenerateArticle": False}
     try:
         from founder_tools.services import FounderCompanyContext
         from .vibe_marketing_views import _article_capabilities_for_context
@@ -487,6 +487,7 @@ def _website_journey_facts(*, organization, company, config, user, connection, l
             if operation else None,
             "setupPullRequest": {"runId": pull_request.get("runId"), "prUrl": _https_or_none(pull_request.get("prUrl"))}
             if pull_request else None,
+            "sourceSha": str(_mapping(journey.get("repository")).get("observedSourceSha") or "") or None,
             "canGenerateArticle": bool(_mapping(journey.get("capabilities")).get("canGenerateArticle")),
         }
     except Exception:
@@ -769,14 +770,7 @@ def _setup_decision(*, organization, company, config, user, marker, connection, 
             and approval.get("runId") != setup_run.run_id):
         return _decide("setup", "your_turn", "approve_setup", action="approve_setup", run_id=setup_run.run_id)
     if approval.get("merge") == "manual":
-        pull_request = _mapping(facts.get("setupPullRequest"))
-        approved_run = _setup_run(organization, approval.get("runId")) if approval.get("runId") else None
-        url = pull_request.get("prUrl") if pull_request.get("runId") == approval.get("runId") else None
-        # An approved setup run completes once its pull request is open; it
-        # still waits on GitHub until that pull request merges.
-        url = url or (_pull_request_url(approved_run) if approved_run is not None
-                      and approved_run.status not in SETUP_STOPPED_STATUSES and not _setup_merged(approved_run)
-                      else None)
+        url = _manual_setup_pull_request_url(organization, approval.get("runId"), facts)
         if url:
             return _decide("setup", "your_turn", "approve_on_github", action="approve_on_github",
                            run_id=approval.get("runId"), url=url)
@@ -798,12 +792,41 @@ def _setup_decision(*, organization, company, config, user, marker, connection, 
     return None
 
 
-def _setup_merged(run) -> bool:
-    """True when a setup run's change has merged (its pull request no longer waits on GitHub)."""
-    result = _result(run)
-    setup = _mapping(result.get("article_system_setup"))
-    return "merged" in {result.get("merge_status"), result.get("mergeStatus"), setup.get("merge_status"),
-                        setup.get("mergeStatus")}
+def _manual_setup_pull_request_url(organization, run_id, facts):
+    """The setup pull request the owner chose to review on GitHub, while it still waits there (rule 7).
+
+    An approved setup run completes as soon as its pull request opens, so the
+    run's status alone never says the ask is over. It is over, and this
+    returns None, when any of these holds:
+
+    - the website's articles target is verified (whatever merged the setup);
+    - the website journey reports its open setup pull request, and it is
+      another run's;
+    - the run no longer records an open pull request (merged, or closed as
+      ``pr_closed`` by the merge status check);
+    - the repository has moved on from the source the setup was built on: a
+      stale pull request, or one the owner merged together with other changes,
+      which the website journey scans as an external change.
+
+    A pull request closed on GitHub and not yet recorded, on an unchanged
+    branch, still counts as open here, as it does on the website journey.
+    """
+    from .website_connections import setup_pr_open
+    if not run_id or cohorts.has_connected_website(organization):
+        return None
+    pull_request = _mapping(facts.get("setupPullRequest"))
+    if pull_request:
+        if pull_request.get("runId") != run_id:
+            return None
+        if _https_or_none(pull_request.get("prUrl")):
+            return pull_request.get("prUrl")
+    approved_run = _setup_run(organization, run_id)
+    if approved_run is None or not setup_pr_open(approved_run):
+        return None
+    observed = str(facts.get("sourceSha") or "")
+    if observed and observed != str(_request(approved_run).get("expected_source_sha") or ""):
+        return None
+    return _pull_request_url(approved_run)
 
 
 def _latest_run_updated_at(organization):

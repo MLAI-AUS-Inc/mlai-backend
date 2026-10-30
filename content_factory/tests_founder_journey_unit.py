@@ -314,17 +314,56 @@ class ExtraCaseTests(JourneyFixture, TestCase):
         self.assertEqual((body["action"]["url"], body["action"]["label"], body["body"]),
                          (url, "Open on GitHub", "Approve it on GitHub when you're ready."))
 
-    def test_manual_setup_approval_shows_the_open_pull_request(self):
+    def manual_setup(self, *, merge_status="not_merged", status="pr_created"):
+        """An owner-approved setup run ("Let me review it on GitHub") whose pull request opened on SHA a."""
         url = "https://github.com/example/site/pull/9"
-        run = self.setup_run("awaiting_approval", result={"pr_html_url": url})
+        run = make_run(self.org, workflow="article_system_setup", status="completed", step="create_pull_request",
+                       approval_state="approved", request={"github_repo": "example/site", "expected_source_sha": "a" * 40},
+                       result={"status": status, "merge_status": merge_status, "pr_url": url, "pr_number": 9,
+                               "article_system_setup": {"status": status, "merge_status": merge_status,
+                                                        "pr_url": url, "pr_number": 9}})
         strategy = dict(self.built.config.pillar_strategy)
         strategy["founder_journey"] = {**strategy["founder_journey"],
                                        "setupApproval": {"runId": run.run_id, "merge": "manual"}}
         self.built.config.pillar_strategy = strategy
         self.built.config.save(update_fields=["pillar_strategy", "updated_at"])
+        return run, url
+
+    def test_manual_setup_approval_shows_the_open_pull_request(self):
+        _run, url = self.manual_setup()
         body = self.journey()
         self.assertStep(body, "setup", "your_turn", ask="approve_on_github")
         self.assertEqual(body["action"]["url"], url)
+
+    def test_manual_setup_ask_ends_once_the_pull_request_is_no_longer_open(self):
+        """Merged, recorded closed, or still open but every other stop: no stale approve_on_github."""
+        for merge_status, status in (("merged", "pr_created"), ("pr_closed", "pr_closed")):
+            with self.subTest(merge_status=merge_status):
+                self.manual_setup(merge_status=merge_status, status=status)
+                self.assertNotEqual((self.journey()["action"] or {}).get("id"), "approve_on_github")
+
+    def test_manual_setup_ask_ends_when_the_branch_moved_on(self):
+        """A moved base (a stale PR, or the owner merged it with other changes) is the website journey's to scan."""
+        _run, url = self.manual_setup()
+        self.connection(verified=False)
+        self.website_facts = {**NO_WEBSITE_FACTS, "sourceSha": "a" * 40}
+        self.assertEqual(self.journey()["action"]["url"], url)
+        self.website_facts = {**NO_WEBSITE_FACTS, "sourceSha": "c" * 40}
+        self.assertNotEqual((self.journey()["action"] or {}).get("id"), "approve_on_github")
+
+    def test_manual_setup_follows_the_website_journeys_open_pull_request(self):
+        run, _url = self.manual_setup()
+        self.connection(verified=False)
+        other = "https://github.com/example/site/pull/10"
+        self.website_facts = {**NO_WEBSITE_FACTS, "setupPullRequest": {"runId": run.run_id, "prUrl": other}}
+        self.assertEqual(self.journey()["action"]["url"], other)
+        self.website_facts = {**NO_WEBSITE_FACTS, "setupPullRequest": {"runId": "another-setup", "prUrl": other}}
+        self.assertNotEqual((self.journey()["action"] or {}).get("id"), "approve_on_github")
+
+    def test_manual_setup_ask_ends_once_the_website_is_verified(self):
+        self.manual_setup()
+        self.connection()
+        self.assertNotEqual((self.journey()["action"] or {}).get("id"), "approve_on_github")
 
     def test_daily_cap_is_busy_today(self):
         with override_settings(ARTICLES_FREE_FIRST_ARTICLE_DAILY_CAP=1):

@@ -6,9 +6,12 @@ cases drive those producers through their own entry points, not stubs:
 - be-start's owner approve of a setup run through ``VibeMarketingRunControlView``
   records ``setupApproval`` (be-github-b's ``website_setup_owner_approval``);
   the journey then moves from ``approve_setup`` to ``publishing`` ("auto") or
-  to ``approve_on_github`` with the pull request URL ("manual");
-- with V2 switched off afterwards, ``_maybe_auto_publish_setup`` and
-  ``maybe_merge_prepared_setup`` still never merge an unapproved setup (G10);
+  to ``approve_on_github`` with the pull request URL ("manual"), an ask that
+  ends once the pull request is recorded merged or closed, or the branch moved
+  on, and a copied draft is then done;
+- with V2 switched off afterwards, ``_maybe_auto_publish_setup`` (reaching its
+  owner-click guard) and ``maybe_merge_prepared_setup`` still never merge an
+  unapproved setup (G10);
 - be-draft's copy receipt or posted link makes a content_only draft done with
   ``next: view_draft``, and a draft with neither stays in review;
 - a GitHub return reason that be-github-a's callback stores shows in
@@ -168,16 +171,82 @@ class OwnerSetupApproveTests(TestCase):
         ContentFactoryRun.objects.filter(pk=self.run.pk).update(result=result)
         self.assertNotEqual((_project(self.built)["action"] or {}).get("id"), "approve_on_github")
 
+    def manual_with_open_pull_request(self):
+        """Approve with "Let me review it on GitHub": the journey asks approve_on_github."""
+        response, _remote, _merge = self.approve(self.run, {"merge": "manual"})
+        self.assertEqual(response.status_code, 200, getattr(response, "data", response.content))
+        self.assertEqual((_project(self.built)["action"] or {}).get("id"), "approve_on_github")
+        self.run.refresh_from_db()
+        return self.run
+
+    def test_manual_ask_ends_when_the_pull_request_is_recorded_closed(self):
+        run = self.manual_with_open_pull_request()
+        # The merge status check's own record of a pull request closed on GitHub.
+        views._mark_setup_merge_blocked(run=run, config=self.built.config, reason="closed", status_value="pr_closed")
+        after = _project(self.built)
+        self.assertNotEqual((after["action"] or {}).get("id"), "approve_on_github", after)
+
+    def test_manual_ask_ends_when_the_owner_merged_onto_a_moved_branch(self):
+        """Merged with other changes: reconciliation records no merge, the repository moved on, then verifies."""
+        self.manual_with_open_pull_request()
+        capabilities = views._article_capabilities_for_context
+        moved = "c" * 40
+
+        def observed(*args, **kwargs):
+            return {**capabilities(*args, **kwargs), "repositorySourceSha": moved}
+        with mock.patch.object(views, "_article_capabilities_for_context", side_effect=observed):
+            journeys.cache.clear()
+            after = _project(self.built)
+        self.assertNotEqual((after["action"] or {}).get("id"), "approve_on_github", after)
+        # Once the moved source is verified the website is connected, with or without a sha read.
+        WebsiteConnectionTarget.objects.filter(connection=self.built.connection).update(verified_at=timezone.now())
+        journeys.cache.clear()
+        after = _project(self.built)
+        self.assertNotEqual((after["action"] or {}).get("id"), "approve_on_github", after)
+
+    def test_a_copied_draft_after_a_manual_setup_that_ended_is_done(self):
+        run = self.manual_with_open_pull_request()
+        views._mark_setup_merge_blocked(run=run, config=self.built.config, reason="closed", status_value="pr_closed")
+        draft = ContentFactoryRun.objects.create(
+            run_id=f"run-{uuid4().hex[:12]}", workflow="article_generation", domain=self.built.organization.domain,
+            organization=self.built.organization, status="completed", current_step="deliver",
+            run_request={"delivery_mode": "content_only", "delivery_mode_confirmed": True},
+            result={"delivery_mode": "content_only"})
+        client = APIClient()
+        client.force_authenticate(self.built.owner)
+        url = f"/api/v1/vibe-marketing/runs/{draft.run_id}/copied/?company_id={self.built.company.pk}"
+        with mock.patch("content_factory.article_review_views.remote_review",
+                        return_value=deepcopy(snapshot(draft.run_id))), \
+                mock.patch("content_factory.founder_draft_views.views._latest_review_ready_component_revision",
+                           return_value=None):
+            response = client.post(url, {"revision": "rev-1"}, format="json")
+        self.assertEqual(response.status_code, 200, response.content)
+        after = _project(self.built)
+        self.assertEqual((after["stage"], after["state"], after["action"]), ("done", "done", None), after)
+        self.assertEqual((after["next"]["kind"], after["next"]["runId"]), ("view_draft", draft.run_id))
+
     def test_g10_with_v2_off_an_unapproved_setup_never_merges(self):
         response, _remote, _merge = self.approve(self.run, {"merge": "auto"})
         self.assertEqual(response.status_code, 200, getattr(response, "data", response.content))
         unapproved = _setup_run(self.built)
+        # The shape the auto-publish hook acts on: a completed setup with its pull request open and not merged.
+        result = deepcopy(unapproved.result)
+        result["status"] = "pr_created"
+        result["article_system_setup"].update(status="pr_created", merge_status="not_merged")
+        ContentFactoryRun.objects.filter(pk=unapproved.pk).update(
+            status="completed", approval_state="approved", current_step="create_pull_request", result=result)
+        unapproved.refresh_from_db()
+        self.assertTrue(views._setup_pending_status_allows_auto_publish(unapproved))
+        self.assertFalse(self.built.config.requires_review)
         context = SimpleNamespace(organization=self.built.organization, company=self.built.company)
         with override_settings(**V2_OFF):
             self.assertFalse(cohort.is_new_journey(self.built.organization))
             with mock.patch.object(views, "_org_config_enables_auto_publish", return_value=True), \
                     mock.patch.object(views, "_attempt_setup_publish_merge", return_value={"outcome": "merged"}) as merge:
-                views._maybe_auto_publish_setup(run=unapproved, context=context)
+                with self.assertLogs("content_factory.vibe_marketing_views", "INFO") as logs:
+                    views._maybe_auto_publish_setup(run=unapproved, context=context)
+                self.assertTrue(any("vibe_marketing_setup_auto_publish_waits_for_owner" in line
+                                    and unapproved.run_id in line for line in logs.output), logs.output)
                 outcome = website_prepare.maybe_merge_prepared_setup(unapproved, context, self.built.config,
                                                                      user=self.built.owner)
             merge.assert_not_called()
