@@ -333,6 +333,36 @@ def setup_owner_approval_hooks():
         return None
 
 
+def setup_owner_approval_snapshot(organization):
+    """The marker's ``setupApproval`` and ``publishAutomatically`` before an owner click.
+
+    :func:`restore_setup_owner_approval` puts them back when Content Factory
+    then rejects the approve, so a failed approve never leaves "Publish
+    automatically" on or an ``auto`` receipt for a run that was not approved.
+    """
+    from .founder_journey_cohort import read_marker
+    marker = read_marker(organization) or {}
+    return {"setup_approval": marker.get("setupApproval"), "publish_automatically": marker.get("publishAutomatically")}
+
+
+def setup_approve_rejected(remote_data) -> bool:
+    """True when ``control_article_run`` answers this setup approve with an error.
+
+    Mirrors its three approve refusals: a setup pull request that could not be
+    created, a 400/404/409/422 from Content Factory, and any other error.
+    """
+    remote_status_code = int(remote_data.get("content_factory_status_code") or 0)
+    return (remote_data.get("status") == "setup_pr_create_failed" or remote_status_code in {400, 404, 409, 422}
+            or bool(remote_data.get("error")))
+
+
+def restore_setup_owner_approval(organization, snapshot):
+    """Put back the owner-click keys :func:`setup_owner_approval_snapshot` saw (no other key changes)."""
+    from .founder_journey_cohort import update_marker
+    update_marker(organization, setup_approval=snapshot.get("setup_approval"),
+                  publish_automatically=snapshot.get("publish_automatically"))
+
+
 class WebsiteConnectionAuthorizeView(APIView):
     """Check a worker's exact consent tuple; a denial never supplies credentials."""
 

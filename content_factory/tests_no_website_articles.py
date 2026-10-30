@@ -26,8 +26,8 @@ from founder_tools.models import VibeRaisingCompany
 from . import first_article_entitlement as first_article
 from . import vibe_marketing_views as views
 from .founder_journey_testing import ALL_P1_FLAGS_ON
-from .no_website_capabilities import (NO_WEBSITE_GITHUB_REFUSAL, NO_WEBSITE_TOPICS_REFUSAL, applies,
-                                      apply_no_website_capabilities)
+from .no_website_capabilities import (NO_WEBSITE_CAPABILITY_REASON, NO_WEBSITE_GITHUB_REFUSAL, NO_WEBSITE_TOPICS_REFUSAL,
+                                      applies, apply_no_website_capabilities)
 from .service_views import ContentFactoryCallbackView, ContentFactoryRunView
 
 COMPANIES_URL = "/api/v1/founder-tools/companies/"
@@ -101,6 +101,7 @@ class NoWebsiteBootstrapTests(_NoWebsiteBase, TestCase):
                     self.assertTrue(capabilities["canResearch"])
                     self.assertFalse(capabilities["canGenerateArticle"])
                     self.assertNotEqual(capabilities["nextStep"], "repository")
+                    self.assert_no_github_step(capabilities)
                     self.assertEqual(capabilities["firstArticle"]["status"], "available")
                     self.assertEqual(capabilities["prices"]["article"], 0)
         self.assert_nothing_left_the_backend()
@@ -114,13 +115,27 @@ class NoWebsiteBootstrapTests(_NoWebsiteBase, TestCase):
         self.assertFalse(capabilities["canGeneratePortableDraft"])
         self.assertFalse(capabilities["canResearch"])
         self.assertNotEqual(capabilities["nextStep"], "repository")
+        self.assert_no_github_step(capabilities)
+
+    def assert_no_github_step(self, capabilities):
+        """No stage, code or sentence sends this founder to GitHub."""
+        self.assertNotIn(capabilities["stage"], {"github", "repository"})
+        self.assertEqual((capabilities["reasonCode"], capabilities["publishingReasonCode"]), ("", ""))
+        for key in ("reason", "publishingReason"):
+            self.assertEqual(capabilities[key], NO_WEBSITE_CAPABILITY_REASON)
+            self.assertNotIn("GitHub", capabilities[key])
+            self.assertFalse({"\u2013", "\u2014"} & set(capabilities[key]))
 
     def test_capability_overrides_apply_only_to_new_journey_startups_without_a_website(self):
         company = self.create_no_website_startup()
         today = {"canResearch": True, "canGeneratePortableDraft": True, "canGenerateArticle": True,
-                 "nextStep": "repository", "stage": "github"}
+                 "canPublishArticle": False, "nextStep": "repository", "stage": "github",
+                 "reasonCode": "github_required", "reason": "Connect GitHub to get started.",
+                 "publishingReasonCode": "github_required", "publishingReason": "Connect GitHub to get started."}
         changed = apply_no_website_capabilities(today, organization=company.organization)
-        self.assertEqual(changed, {**today, "canGenerateArticle": False, "nextStep": "articles"})
+        self.assertEqual(changed, {**today, "canGenerateArticle": False, "nextStep": "articles", "stage": "integration",
+                                   "reasonCode": "", "reason": NO_WEBSITE_CAPABILITY_REASON,
+                                   "publishingReasonCode": "", "publishingReason": NO_WEBSITE_CAPABILITY_REASON})
         self.assertEqual(today["nextStep"], "repository")  # never mutated in place
         with override_settings(MY_STARTUP_NO_WEBSITE_ARTICLES_ENABLED=False):
             self.assertIs(apply_no_website_capabilities(today, organization=company.organization), today)

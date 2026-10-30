@@ -24,6 +24,9 @@ FLAG = "MY_STARTUP_NO_WEBSITE_ARTICLES_ENABLED"
 # closed ``reason`` enum, never a failure code.
 NO_WEBSITE_GITHUB_REFUSAL = {"detail": "Add your website before connecting GitHub.", "reason": "no_website"}
 NO_WEBSITE_TOPICS_REFUSAL = {"detail": "Add your website first.", "reason": "no_website"}
+# What the capabilities say instead of today's GitHub step ("Connect GitHub to
+# get started."): there is no GitHub step for a startup with no website.
+NO_WEBSITE_CAPABILITY_REASON = "Your articles are ready to copy. Add your website any time to publish them there."
 
 
 def no_website_articles_enabled() -> bool:
@@ -57,14 +60,18 @@ def apply_no_website_capabilities(capabilities, *, organization, config=None):
 
     For an organisation where :func:`applies` is false the input is returned
     unchanged (the same object). Otherwise a copy where research and portable
-    drafts depend on the one-line description, repository articles are off and
-    the next step is never ``"repository"``.
+    drafts depend on the one-line description, repository articles are off,
+    the next step is never ``"repository"`` and nothing points at GitHub: the
+    stage is ``"integration"`` (never ``"github"`` or ``"repository"``), the
+    GitHub reason codes are cleared and the reasons are founder copy.
     """
     if not isinstance(capabilities, dict) or not applies(organization, config):
         return capabilities
     described = bool(one_line_description(organization))
     updated = {**capabilities, "canResearch": described, "canGeneratePortableDraft": described,
-               "canGenerateArticle": False}
+               "canGenerateArticle": False, "canPublishArticle": False, "stage": "integration",
+               "reasonCode": "", "reason": NO_WEBSITE_CAPABILITY_REASON,
+               "publishingReasonCode": "", "publishingReason": NO_WEBSITE_CAPABILITY_REASON}
     if updated.get("nextStep") == "repository":
         updated["nextStep"] = "articles"
     return updated

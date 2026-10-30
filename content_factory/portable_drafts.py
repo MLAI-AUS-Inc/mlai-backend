@@ -248,12 +248,31 @@ def keeps_copy_ready_start(organization, config, payload, *, can_generate_articl
     article to a review draft. False (today's preview rule) for every
     organisation outside the gate and for any request that is not an explicit,
     confirmed portable choice.
+
+    When this is True the caller must continue with :func:`copy_ready_request`,
+    so the start leaves as a portable run however the client spelled its
+    confirmation. A start that names no delivery mode is outside this gate and
+    keeps today's repository path: enforcing "Publish automatically" beyond the
+    content_only upgrade is P2.13.
     """
     if not copy_ready_before_verification(organization, config) or not explicit_portable_request(payload):
         return False
     if not publishes_automatically(organization, config):
         return True
     return not can_generate_article()
+
+
+def copy_ready_request(data):
+    """A copy of a start request that every later read sees as an explicit content_only choice.
+
+    :func:`explicit_portable_request` accepts ``deliveryModeConfirmed`` alone,
+    while the rest of the article start reads only the explicit marker. The
+    snake_case keys are read first by every alias lookup, so this copy makes
+    the start a portable run with no repository or connection ids.
+    """
+    items = data.items() if hasattr(data, "items") else ()
+    return {**dict(items), "delivery_mode": "content_only", "delivery_mode_explicit": True,
+            "delivery_mode_confirmed": True}
 
 
 def copy_ready_reported_mode(config):

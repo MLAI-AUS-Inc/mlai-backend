@@ -65,6 +65,13 @@ def portable_request(built, topic="Copy-ready article"):
     return data
 
 
+def confirmed_only_request(built, topic="Confirmed-only article"):
+    """The same choice with only ``deliveryModeConfirmed``, as some MCP callers send it."""
+    data = portable_request(built, topic)
+    data.pop("deliveryModeExplicit")
+    return data
+
+
 class _StartHarness:
     """Runs today's start with billing and Content Factory replaced by recorders."""
 
@@ -119,6 +126,36 @@ class NewJourneyCopyReadyTests(_StartHarness, TestCase):
                                               unready("verification_required")), ("started", "content_only"))
 
     def test_the_content_factory_request_carries_no_repository_or_connection(self):
+        for shape, build in (("explicit", portable_request), ("confirmed only", confirmed_only_request)):
+            for operable in (False, True):
+                with self.subTest(shape=shape, github_operable=operable):
+                    request = self.content_factory_request(build(self.built), github_operable=operable)
+                    self.assertEqual((request["delivery_mode"], request["github_repo"]), ("content_only", ""))
+                    self.assertIs(request["delivery_mode_explicit"], True)
+                    for field in (*CONNECTION_FIELDS, "branch", "app_root"):
+                        self.assertNotIn(field, request)
+
+    def test_a_confirmed_only_request_starts_copy_ready_even_with_github_operable(self):
+        for operable in (False, True):
+            with self.subTest(github_operable=operable), \
+                 patch.object(views, "_github_repo_operable", return_value=operable):
+                self.assertEqual(self.outcome(self.built, confirmed_only_request(self.built),
+                                              unready("verification_required")), ("started", "content_only"))
+                self.assertIs(self.queued_payload["delivery_mode_explicit"], True)
+                self.assertIs(self.queued_payload["delivery_mode_confirmed"], True)
+                # Without "Publish automatically" a verified website stays copy-ready too.
+                self.assertEqual(self.outcome(self.built, confirmed_only_request(self.built), READY),
+                                 ("started", "content_only"))
+
+    def test_a_start_that_names_no_delivery_mode_keeps_todays_repository_path(self):
+        # The IF-P1-10 gate covers the content_only upgrade only; a start that
+        # names no mode is today's repository start (P2.13 enforces the opt-in further).
+        with patch.object(views, "_github_repo_operable", return_value=True):
+            self.assertEqual(self.outcome(self.built, {"topic": "No mode"}, READY), ("started", None))
+        self.assertEqual(self.queued_payload["github_repo"], "example-new/website")
+        self.assertIs(self.queued_payload["delivery_mode_explicit"], False)
+
+    def content_factory_request(self, data, *, github_operable=False):
         sent = []
         from requests import RequestException
 
@@ -135,15 +172,13 @@ class NewJourneyCopyReadyTests(_StartHarness, TestCase):
                  "enabled": True, "base_url": "https://worker.invalid", "api_key_configured": True, "is_local_env": True}), \
              patch.object(views, "_content_factory_headers", return_value={}), \
              patch.object(views, "_lookup_content_factory_dispatch_by_key", return_value=("pending", {})), \
+             patch.object(views, "_github_repo_operable", return_value=github_operable), \
              patch.object(views, "http_client") as http:
             http.RequestException = RequestException
             http.post.side_effect = accept
-            response = START(user=self.built.owner, context=context_for(self.built), data=portable_request(self.built))
+            response = START(user=self.built.owner, context=context_for(self.built), data=data)
         self.assertEqual(response.status_code, 202, response.data)
-        request = sent[-1]
-        self.assertEqual((request["delivery_mode"], request["github_repo"]), ("content_only", ""))
-        for field in (*CONNECTION_FIELDS, "branch", "app_root"):
-            self.assertNotIn(field, request)
+        return sent[-1]
 
     def test_a_verified_website_stays_copy_ready_without_publish_automatically(self):
         result = self.outcome(self.built, portable_request(self.built), READY)
@@ -228,6 +263,18 @@ class LegacyDeliveryModeTests(_StartHarness, TestCase):
                 for label, flags in FLAG_SETS:
                     with self.subTest(name=name, marker=marker, flags=label), override_settings(**flags):
                         self.assertEqual(self.results(built), today)
+
+    def test_a_confirmed_only_request_keeps_todays_preview_rule(self):
+        for name in NAMED_LEGACY_ORGS:
+            if name == "pawshare":
+                continue
+            built = make_named_legacy_org(name, domain=f"{name.replace('_', '-')}-confirmed.example.test")
+            for label, flags in FLAG_SETS:
+                with self.subTest(name=name, flags=label), override_settings(**flags):
+                    self.assertEqual(self.outcome(built, confirmed_only_request(built), unready("verification_required")),
+                                     ("refused", "website_preview_required"))
+                    self.assertEqual(self.outcome(built, confirmed_only_request(built), READY),
+                                     ("review_draft", "review_draft"))
 
     @override_settings(**ALL_P1_FLAGS_ON)
     def test_talathrive_after_opt_in_still_gets_review_drafts(self):

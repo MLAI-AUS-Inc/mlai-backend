@@ -17936,14 +17936,16 @@ def start_article_generation(*, user, context, data, request_hash=None, website_
     """Execute the canonical owned operation for HTTP and MCP transports."""
     command = ContentCommand(user=user, data=data)
     config = _get_config(context.organization)
-    from .portable_drafts import has_connected_website, keeps_copy_ready_start, requests_content_only
+    from .portable_drafts import copy_ready_request, has_connected_website, keeps_copy_ready_start, requests_content_only
     if requests_content_only(command.data) and has_connected_website(config):
         # P1.8 (IF-P1-10): a new-journey article started before the website
         # verifies (or before the owner chose "Publish automatically") stays
-        # copy-ready and continues below as a portable run.
+        # copy-ready and continues below as a portable run, made explicit so a
+        # confirmed-only request never leaves as a repository run.
         if keeps_copy_ready_start(context.organization, config, command.data, can_generate_article=lambda: (
                 _article_capabilities_for_context(context, config, force=True)["canGenerateArticle"])):
             logger.info("vibe_marketing_article_copy_ready_before_verification org_id=%s", context.organization.pk)
+            command = ContentCommand(user=command.user, data=copy_ready_request(command.data))
         else:
             return _start_website_preview_article(user=user, context=context, config=config, data=command.data,
                 request_hash=request_hash, website_contract=website_contract, goal_operation_id=goal_operation_id)
@@ -19943,7 +19945,7 @@ def control_article_run(*, user, context, run, action, data, run_id=None, goal_o
             {"detail": "The article preview changed before approval. Refresh and review the current preview."},
             status=status.HTTP_409_CONFLICT,
         )
-    setup_owner_approval = None
+    setup_owner_approval = owner_approval_snapshot = None
     if action == "approve" and run.workflow == "article_system_setup":
         # P1.14 (IF-P1-17): the owner's approve of a setup run is the owner
         # click. Its receipt is recorded before anything can merge; "manual"
@@ -19956,6 +19958,8 @@ def control_article_run(*, user, context, run, action, data, run_id=None, goal_o
             if not user_may_use_organization(command.user, context.organization):
                 return Response({"detail": "Only your startup's owner can add this to your website.",
                                  "reason": "owner_required"}, status=status.HTTP_403_FORBIDDEN)
+            from .website_views import setup_owner_approval_snapshot
+            owner_approval_snapshot = setup_owner_approval_snapshot(context.organization)
             setup_owner_approval = owner_approval.on_owner_setup_approve(
                 organization=context.organization, user=command.user, run=run, data=command.data)
             if setup_owner_approval is not None:
@@ -19973,6 +19977,12 @@ def control_article_run(*, user, context, run, action, data, run_id=None, goal_o
         ),
         transport_errors_are_pending=action in {"promote-bundle", "publish-pr"},
     )
+    if setup_owner_approval is not None:
+        # The owner click counts only for an approve Content Factory accepted.
+        from .website_views import restore_setup_owner_approval, setup_approve_rejected
+        if setup_approve_rejected(remote_data):
+            restore_setup_owner_approval(context.organization, owner_approval_snapshot)
+            logger.info("founder_setup_owner_click_reverted org=%s run=%s", context.organization.pk, run.run_id)
 
     with _remote_response_write_guard(remote_data, workflow="article_generation"):
         run.refresh_from_db()

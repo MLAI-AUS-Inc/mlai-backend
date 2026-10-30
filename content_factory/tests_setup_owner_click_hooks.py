@@ -58,6 +58,20 @@ class OwnerApprovalStub(types.ModuleType):
         return self.may_merge
 
 
+class MarkerWritingStub(OwnerApprovalStub):
+    """Records the owner click in the marker the way be-github-b's module does."""
+
+    def on_owner_setup_approve(self, *, organization, user, run, data):
+        decision = super().on_owner_setup_approve(organization=organization, user=user, run=run, data=data)
+        if decision is not None:
+            from .founder_journey_cohort import update_marker
+            update_marker(organization, owner_click_required=True,
+                          setup_approval={"runId": run.run_id, "merge": decision["merge"], "at": "now", "by": user.pk},
+                          publish_automatically={"enabledAt": "now", "enabledBy": user.pk,
+                                                 "origin": "owner_setup_approval"})
+        return decision
+
+
 def deterministic_run(run, context=None, **kwargs):
     return {"runId": run.run_id, "status": run.status, "approvalState": run.approval_state,
             "currentStep": run.current_step}
@@ -73,13 +87,15 @@ class _SetupRunHarness:
             result={"article_system_setup": {"status": "pr_created", "pr_number": 7,
                                              "pr_url": f"https://github.com/{repo}{PR_URL_SUFFIX}"}})
 
-    def approve(self, built, run, *, data=None, user=None, stub=None, absent=False):
+    def approve(self, built, run, *, data=None, user=None, stub=None, absent=False, remote_reply=None):
         """Approve the setup run; returns (response, CF payload or None, merge mock, events)."""
         events = stub.events if stub is not None else []
         repo = built.connection.github_repo
 
         def content_factory(**kwargs):
             events.append("content_factory")
+            if remote_reply is not None:
+                return dict(remote_reply)
             return {"status": "setup_pr_created", "pr_url": f"https://github.com/{repo}{PR_URL_SUFFIX}",
                     "pr_number": 7, "current_step": "create_pull_request"}
 
@@ -145,6 +161,39 @@ class NewJourneyOwnerClickTests(_SetupRunHarness, TestCase):
         self.assertEqual(response.data["merge"], "manual")
         self.assertEqual(response.data["setupPullRequestUrl"], f"https://github.com/example-new/website{PR_URL_SUFFIX}")
         merge.assert_not_called()
+
+    def test_a_rejected_approve_takes_back_the_owner_click(self):
+        from .founder_journey_cohort import update_marker
+        earlier = {"enabledAt": "earlier", "enabledBy": 1, "origin": "opt_in_existing_publisher"}
+        rejections = {
+            "conflict": {"content_factory_status_code": 409, "error": "Preview changed."},
+            "setup pull request failed": {"status": "setup_pr_create_failed", "error": "No branch."},
+            "worker error": {"error": "Worker unavailable."},
+        }
+        for label, reply in rejections.items():
+            for before in (None, earlier):
+                with self.subTest(label, publish_automatically_before=before):
+                    update_marker(self.built.organization, setup_approval=None, publish_automatically=before)
+                    stub = MarkerWritingStub()
+                    response, _payload, merge, events = self.approve(
+                        self.built, self.make_setup_run(self.built), data={"merge": "auto"}, stub=stub,
+                        remote_reply=reply)
+                    self.assertGreaterEqual(response.status_code, 400, response.data)
+                    self.assertEqual(events, ["owner_click", "content_factory"])
+                    marker = read_marker(self.built.organization)
+                    self.assertIsNone(marker["setupApproval"])
+                    self.assertEqual(marker["publishAutomatically"], before)
+                    # The sticky owner-click requirement stays (G10).
+                    self.assertIs(marker["ownerClickRequired"], True)
+                    merge.assert_not_called()
+
+    def test_an_accepted_approve_keeps_the_owner_click(self):
+        stub = MarkerWritingStub()
+        response, _payload, _merge, _events = self.approve(self.built, self.run, data={"merge": "manual"}, stub=stub)
+        self.assertEqual(response.status_code, 200, response.data)
+        marker = read_marker(self.built.organization)
+        self.assertEqual(marker["setupApproval"]["runId"], self.run.run_id)
+        self.assertEqual(marker["publishAutomatically"]["origin"], "owner_setup_approval")
 
     def test_only_the_owner_can_make_the_owner_click(self):
         stub = OwnerApprovalStub()
