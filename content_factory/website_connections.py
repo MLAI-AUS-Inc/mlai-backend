@@ -29,6 +29,9 @@ from .portable_drafts import REPOSITORY_CONFIG_FIELDS, portable_run_update_allow
 logger = logging.getLogger(__name__)
 
 
+# Folder spellings that mean "the whole repository" (finding D-09).
+ROOT_FOLDER_SPELLINGS = frozenset({".", "./", "/"})
+
 REPOSITORY_WORKFLOWS = frozenset({
     "repo_scan", "content_factory_scan", "article_system_setup", "direct_generate",
     "confirmed_topic", "article_revision", "publish_article", "article_publish",
@@ -750,6 +753,12 @@ def bind_website(config, *, user, repo, app_root="", branch="", site_url="", rec
     repo = str(repo or "").strip()
     if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9-]*/[A-Za-z0-9_.-]+", repo) or repo.split("/")[-1] in {".", ".."}:
         raise WebsiteAuthorityError("invalid_github_repository", "Choose a GitHub owner/repository.", status=400)
+    from .founder_journey_cohort import is_new_journey
+    new_journey = is_new_journey(config.organization)
+    if new_journey and str(app_root or "").strip() in ROOT_FOLDER_SPELLINGS:
+        # D-09: "the whole repository" spelled as a folder never blocks a
+        # new-journey founder's publishing.
+        app_root = ""
     app_root = safe_repository_path(app_root, allow_empty=True)
     if len(app_root) > 500:
         raise WebsiteAuthorityError("invalid_repository_path", "Application root is too long.", status=400)
@@ -759,6 +768,9 @@ def bind_website(config, *, user, repo, app_root="", branch="", site_url="", rec
     from .website_failure_scope import failure_scope
     with failure_scope(config.organization_id):
         metadata = verify_repository_access(user=user, repo=repo)
+    if new_journey and branch and branch.removeprefix("refs/heads/") == metadata["branch"]:
+        # D-09: naming the repository's default branch is the same as leaving it empty.
+        branch = ""
     with transaction.atomic():
         Organization.objects.select_for_update().get(pk=config.organization_id)
         config.refresh_from_db()
