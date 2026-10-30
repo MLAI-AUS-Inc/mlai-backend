@@ -8695,12 +8695,14 @@ def _autofill_profile_fields_payload(startup_profile):
     }
 
 
-def _autofill_draft_existing_fields(saved_fields, data):
+def _autofill_draft_existing_fields(saved_fields, data, *, drop_invalid=False):
     """Forward whitelisted local form values without writing saved profiles.
 
     Explicit empty strings/lists describe the local draft, not a request to
     clear saved data. Top-level answers take precedence over nested context.
     Author and audience fields remain the saved values managed elsewhere.
+    With ``drop_invalid`` (the P1.5 one-field start) a LinkedIn URL that
+    cannot be normalised keeps the saved value instead of raising.
     """
     containers = [
         value for key in ("existing_fields", "existingFields")
@@ -8745,7 +8747,14 @@ def _autofill_draft_existing_fields(saved_fields, data):
             context_sources, aliases, is_list=key in {"competitors", "seedKeywords"}
         )
         if provided:
-            draft[key] = normalize_company_linkedin_url(value) if key == "companyLinkedInUrl" else value
+            if key == "companyLinkedInUrl":
+                try:
+                    value = normalize_company_linkedin_url(value)
+                except ValueError:
+                    if not drop_invalid:
+                        raise
+                    continue
+            draft[key] = value
 
     profile_fields = dict(saved_fields.get("profileFields") or {})
     for key, aliases in {
@@ -16497,11 +16506,25 @@ class VibeMarketingAutofillView(APIView):
         if draft_only:
             from content_factory.startup_research_draft import research_draft_values
             research_draft_values(request.data)
+        # P1.5 (IF-P1-07): researchDepth "first_profile" is honoured only for a
+        # new-journey company with MY_STARTUP_ONE_FIELD_START_ENABLED; a legacy
+        # request gets (None, False) and runs exactly as before.
+        from .startup_first_profile import derive_company_name, first_profile_gate
+        first_profile_company, refuse_no_website = first_profile_gate(
+            profile, request.data, _company_id_from_request(request))
+        if refuse_no_website:
+            return Response({"detail": "Add your website first.", "reason": "no_website"},
+                            status=status.HTTP_409_CONFLICT)
+        if first_profile_company is not None:
+            # The company already exists: its name and website are the defaults.
+            domain = domain or normalize_company_domain(first_profile_company.domain)
+            company_name = company_name or str(first_profile_company.name or "").strip() or derive_company_name(domain)
         if not company_name:
             return Response({"detail": "Company name is required for autofill."}, status=status.HTTP_400_BAD_REQUEST)
         if not domain:
             return Response({"detail": "Website domain is required for autofill."}, status=status.HTTP_400_BAD_REQUEST)
-        if draft_mode and not draft_only and not str(request.data.get("location") or "").strip():
+        if (draft_mode and not draft_only and first_profile_company is None
+                and not str(request.data.get("location") or "").strip()):
             return Response(
                 {"detail": "Startup location is required to draft your profile.", "field": "location"},
                 status=status.HTTP_400_BAD_REQUEST,
@@ -16673,8 +16696,11 @@ class VibeMarketingAutofillView(APIView):
             "profileFields": profile_fields,
         }
         if draft_mode:
+            # P1.5: a new-journey founder's LinkedIn is normalised or dropped, never rejected.
+            from .startup_first_profile import first_profile_applies
             try:
-                existing_fields = _autofill_draft_existing_fields(existing_fields, request.data)
+                existing_fields = _autofill_draft_existing_fields(
+                    existing_fields, request.data, drop_invalid=first_profile_applies(organization, config))
             except ValueError as exc:
                 transaction.set_rollback(True)
                 return Response({"detail": str(exc), "field": "companyLinkedInUrl"}, status=status.HTTP_400_BAD_REQUEST)
@@ -16718,6 +16744,15 @@ class VibeMarketingAutofillView(APIView):
             # Profile drafts use the worker's faster evidence-grounded pass.
             # Generated answers remain reviewable client drafts until Save.
             payload["draft_mode"] = True
+        first_profile_meta = None
+        if first_profile_company is not None and first_profile_company.pk == company.pk:
+            # IF-P1-07: a 90 s draft-mode pass with a fresh request id per
+            # attempt; the homepage is read first so the profile is never empty.
+            from .startup_first_profile import dispatch_homepage_meta, first_profile_payload
+            payload = first_profile_payload(payload, company=company)
+            first_profile_meta = dispatch_homepage_meta(organization)
+        else:
+            first_profile_company = None
         _mark_roo_points_gate_authorized(
             payload,
             domain=organization.domain,
@@ -16732,6 +16767,9 @@ class VibeMarketingAutofillView(APIView):
             payload=payload,
         )
         _record_free_setup_research(request.user, action="startup_autofill", gate_balance=gate_balance, run=run)
+        if first_profile_company is not None:
+            from .startup_first_profile import record_dispatch
+            record_dispatch(organization, run, meta=first_profile_meta)
         return _autofill_start_response(
             run, reused_active_run=False, research_company_id=company.id
         )
@@ -18414,6 +18452,11 @@ class VibeMarketingRunView(APIView):
         from .island_research import refund_empty_or_failed_research
         refund_empty_or_failed_research(run)
         _release_failed_article_keyword(context.organization, run)
+        if run.workflow == "startup_autofill":
+            # P1.5 (IF-P1-07): a terminal first-profile run fills the profile
+            # once. No-op unless the flag is on and the org is new-journey.
+            from .startup_first_profile import apply_on_poll
+            apply_on_poll(run)
         payload = _serialize_run(run, context=context, mode=view)
         if (run.run_request or {}).get("island_research_brief") and _run_pending_remote_dispatch(run):
             payload["status"] = "queued"
