@@ -106,8 +106,11 @@ def build_island_refresh_idempotency_key(domain, local_date) -> str:
 # startup's own profile details (founders, research marker) are not strategy: a
 # config holding only these keys has nothing to cluster. A new startup records
 # its founder in startup_profile_details, and an offboarded org keeps only
-# previous_owner, so neither becomes refresh-eligible on that alone.
-_PRIVATE_STRATEGY_KEYS = frozenset({"ops_alerts", "previous_owner", "startup_profile_details"})
+# previous_owner, so neither becomes refresh-eligible on that alone. The P1
+# founder-journey keys (cohort marker, first profile, posted links) are
+# bookkeeping too.
+_PRIVATE_STRATEGY_KEYS = frozenset({"ops_alerts", "previous_owner", "startup_profile_details",
+                                    "founder_journey", "founder_first_profile", "founder_posted_articles"})
 
 
 def _has_pillar_strategy(config) -> bool:
