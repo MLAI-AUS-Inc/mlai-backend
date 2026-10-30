@@ -273,6 +273,9 @@ def validate_failure(failure: Any) -> dict:
             default = True
     elif not _same_action(_action(entry, failure["action"]), failure["action"]):
         raise FailureContractError("invalid_failure_action")
+    elif failure["user_message"] != entry["user_message"]:
+        # Founder copy for a registered code is this registry's, whatever the emitter's copy says.
+        logger.warning("failure_registry_drift code=%s user_message", failure["code"])
     if not isinstance(failure["evidence_refs"], list) or len(failure["evidence_refs"]) > MAX_FINDINGS:
         raise FailureContractError("invalid_evidence_references")
     for reference in failure["evidence_refs"]:
@@ -282,6 +285,8 @@ def validate_failure(failure: Any) -> dict:
     result = deepcopy(failure)
     if default:
         result.update(failure_class=entry["failure_class"], retryable=False, action=None, user_message=entry["user_message"])
+    elif _registered(failure) is entry:
+        result["user_message"] = entry["user_message"]
     return result
 
 

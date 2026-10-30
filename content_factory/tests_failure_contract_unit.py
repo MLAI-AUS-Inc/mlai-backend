@@ -171,8 +171,12 @@ class MembershipTests(SimpleTestCase):
         from .website_failure_contract import classify_failure, legacy_view, load_registry, validate_failure
         drifted = {**classify_failure("DIRECTORY_STYLE_REVIEW_FAILED", "style"), "registry_sha256": "0" * 64,
                    "user_message": "An older copy of the same failure message."}
-        self.assertEqual(validate_failure(drifted), drifted)
-        self.assertEqual(legacy_view(drifted), load_registry()["by_code"]["DIRECTORY_STYLE_REVIEW_FAILED"]["legacy"])
+        # Founder copy for a registered code stays this registry's, whatever the emitter sent.
+        registered = load_registry()["by_code"]["DIRECTORY_STYLE_REVIEW_FAILED"]
+        with self.assertLogs("content_factory.website_failure_contract", "WARNING") as logs:
+            self.assertEqual(validate_failure(drifted), {**drifted, "user_message": registered["user_message"]})
+        self.assertIn("failure_registry_drift code=DIRECTORY_STYLE_REVIEW_FAILED user_message", "".join(logs.output))
+        self.assertEqual(legacy_view(drifted), registered["legacy"])
         owner = classify_failure("GITHUB_ACCESS_REQUIRED", "access")
         owner["action"] = {**owner["action"], "label": "An older label for the same step"}
         self.assertEqual(validate_failure(owner), owner)
