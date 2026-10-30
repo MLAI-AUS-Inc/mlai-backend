@@ -9258,6 +9258,8 @@ def _apply_run_snapshot(run_id, payload, *, ack=False):
         if created
         else "updated"
     )
+    from .first_article_entitlement import settle_entitlement_for_run
+    settle_entitlement_for_run(run)
     if run.status == ContentFactoryRunStatus.COMPLETED:
         from content_factory.vibe_marketing_views import _persist_completed_article_memory_if_possible
         from startup_updates.completion import record_completion

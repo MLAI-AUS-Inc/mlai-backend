@@ -1121,6 +1121,14 @@ def _refund_content_factory_request(
         return None
 
     client_request_id = _get_client_request_id(article_request)
+    from content_factory.first_article_entitlement import entitled_request, release_entitlement_for_request
+    if entitled_request(article_request):
+        # A free first article that never started owes no credit: its original
+        # attempt is released instead (a child run's request releases nothing).
+        organization = Organization.objects.filter(domain=normalize_domain(resolved_domain)).only("pk").first()
+        if organization is not None:
+            release_entitlement_for_request(organization=organization.pk, request=article_request, reason=reason)
+        return None
     original = Ledger.objects.filter(user=user, kind="SPEND", source=CONTENT_FACTORY_LEDGER_SOURCE,
         idempotency_key=f"content_factory:charge:{client_request_id}").first()
     amount = -int(getattr(original, "delta_microroo", 0) or 0) if original else 0
@@ -1192,6 +1200,11 @@ def refund_content_factory_topic_generation_for_user(
     from roo.services import PointsService
 
     client_request_id = _get_client_request_id(article_request)
+    from content_factory.first_article_entitlement import entitled_request, release_topic_batch
+    if entitled_request(article_request):
+        # The free first topic batch never started: no credit, one free re-run.
+        release_topic_batch(client_request_id=client_request_id)
+        return None
     cost_points = _original_content_charge_points(
         user, f"content_factory:topic_generation:charge:{client_request_id}")
     if cost_points == 0:
@@ -1449,8 +1462,12 @@ def _serialize_existing_confirm_child_job(job, *, source_run_id: Optional[str]) 
     return payload
 
 
-def _record_terminal_article_refund(job, *, status, error_code, ledger=None):
-    """Keep article credits retryable without replacing a newer run receipt."""
+def _record_terminal_article_refund(job, *, status, error_code, ledger=None, paid_obligation=True):
+    """Keep article credits retryable without replacing a newer run receipt.
+
+    A free first article passes ``paid_obligation=False``: its settlement is
+    a release of the attempt, never a credit.
+    """
     from django.db import transaction
     from workflow_runs.models import ContentFactoryRun
     job_id = str(getattr(job, 'job_id', '') or '')
@@ -1468,7 +1485,7 @@ def _record_terminal_article_refund(job, *, status, error_code, ledger=None):
             return
         if status == 'pending' and receipt.get('status') in {'stop_required', 'needs_reconciliation', 'deferred_to_goal'}:
             status = receipt['status']
-        receipt.update(status=status, paid_obligation=True, job_id=job_id, error_code=str(error_code or '')[:100])
+        receipt.update(status=status, paid_obligation=paid_obligation, job_id=job_id, error_code=str(error_code or '')[:100])
         if ledger is not None:
             receipt['refund_ledger_id'] = str(ledger.pk)
         current.result = {**result, 'article_terminal_refund': receipt,
@@ -1491,6 +1508,22 @@ def maybe_auto_refund_terminal_failure(
         resolved_domain=getattr(job, "domain", "")):
         return False, 0
 
+    from content_factory.first_article_entitlement import TOPIC_ACTIONS, entitled_request, release_topic_batch
+    from content_factory.run_state import ARTICLE_WORKFLOWS
+    from workflow_runs.models import ContentFactoryRun
+    topic_request = dict(getattr(job, "request_meta", {}) or {})
+    if not topic_request.get("roo_points_billing_status") and getattr(job, "job_id", None):
+        # The research run keeps the billing stamp even when the job's copy lacks it.
+        research_run = ContentFactoryRun.objects.filter(run_id=job.job_id).exclude(
+            workflow__in=ARTICLE_WORKFLOWS).only("run_request").first()
+        topic_request = dict(getattr(research_run, "run_request", None) or {})
+    if entitled_request(topic_request) and topic_request.get("roo_points_action") in TOPIC_ACTIONS:
+        # The free first topic batch has no spend to credit (billing_amount 0).
+        # A failed batch gives its one free re-run back instead.
+        release_topic_batch(client_request_id=str(getattr(job, "client_request_id", "") or "").strip()
+            or topic_request.get("client_request_id"))
+        return False, 0
+
     # A terminal failure signal queues settlement, but never proves an absence
     # of side effects. Article credit also needs the bound worker stop below.
     resolved_error_code = str(error_code or "").strip().upper()
@@ -1510,6 +1543,19 @@ def maybe_auto_refund_terminal_failure(
             return False, 0
     no_value_failure = resolved_error_code in NO_DELIVERY_REFUND_CODES and run is not None
     if not research_paid and not bool(refundable) and not no_value_failure and resolved_error_code not in AUTO_REFUND_ERROR_CODES:
+        return False, 0
+    if run is not None and run.workflow in ARTICLE_WORKFLOWS and entitled_request(run.run_request):
+        # A free first article has no spend (cost 0), so the paid checks below
+        # would return early. Its settlement still waits for the bound worker
+        # stop; _refund_failed_run then releases the attempt once, when no
+        # other run of its lineage delivered or is still going.
+        _record_terminal_article_refund(job, status='pending', error_code=resolved_error_code, paid_obligation=False)
+        from content_factory.reconciliation import _refund_failed_run
+        try:
+            _refund_failed_run(run, reason=str(error_message or resolved_error_code or "Article could not complete."))
+        except Exception:
+            # The pending receipt keeps the release queued for the reconciliation sweep.
+            logger.warning('content_factory_terminal_release_pending job_id=%s', getattr(job, 'job_id', ''), exc_info=True)
         return False, 0
 
     # The status handler records the terminal job before attempting its credit.

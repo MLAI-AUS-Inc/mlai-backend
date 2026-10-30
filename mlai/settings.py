@@ -2457,6 +2457,18 @@ ARTICLES_SETUP_CONSENT_ENABLED = _env_is_true("ARTICLES_SETUP_CONSENT_ENABLED", 
 ARTICLES_AUTO_PAGE_ENABLED = _env_is_true("ARTICLES_AUTO_PAGE_ENABLED", False)
 ARTICLES_PAGE_CONFIDENCE_MARGIN = float(os.getenv("ARTICLES_PAGE_CONFIDENCE_MARGIN", "0.15"))
 ARTICLES_FIRST_ARTICLE_GOAL_ENABLED = _env_is_true("ARTICLES_FIRST_ARTICLE_GOAL_ENABLED", False)
+# P0.2: free setup research and one free first article per startup (default
+# off). Content Factory must accept 'free' setup and 'entitled' authorizations
+# before either flag is turned on, or it refuses the work with 402.
+ARTICLES_FREE_SETUP_RESEARCH_ENABLED = _env_is_true("ARTICLES_FREE_SETUP_RESEARCH_ENABLED", False)
+# Free autofill and baseline uses per account email in a rolling 24 hours (0 = no cap).
+ARTICLES_FREE_SETUP_AUTOFILL_DAILY_CAP = int(os.getenv("ARTICLES_FREE_SETUP_AUTOFILL_DAILY_CAP", "5"))
+ARTICLES_FREE_SETUP_BASELINE_DAILY_CAP = int(os.getenv("ARTICLES_FREE_SETUP_BASELINE_DAILY_CAP", "2"))
+ARTICLES_FREE_FIRST_ARTICLE_ENABLED = _env_is_true("ARTICLES_FREE_FIRST_ARTICLE_ENABLED", False)
+# Global safety cap on free first-article reservations per rolling 24 hours (0 = off).
+ARTICLES_FREE_FIRST_ARTICLE_DAILY_CAP = int(os.getenv("ARTICLES_FREE_FIRST_ARTICLE_DAILY_CAP", "0"))
+# Reservations in one hour that raise a free_cap_spike ops alert (0 = off).
+ARTICLES_FREE_FIRST_ARTICLE_SPIKE_THRESHOLD = int(os.getenv("ARTICLES_FREE_FIRST_ARTICLE_SPIKE_THRESHOLD", "25"))
 ARTICLES_ARTICLE_RECOVERY_ENABLED = _env_is_true("ARTICLES_ARTICLE_RECOVERY_ENABLED", False)
 CONTENT_FACTORY_ARTICLE_DELIVERY_V1_APPLY_ENABLED = _env_is_true("CONTENT_FACTORY_ARTICLE_DELIVERY_V1_APPLY_ENABLED", False)
 

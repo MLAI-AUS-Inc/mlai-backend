@@ -239,7 +239,17 @@ def cancellation_result(run, payload):
         return result
     if no_value and previous.get("status") not in {"refunded", "not_required"}:
         from .billing_lineage import paid_article_request
+        from .first_article_entitlement import entitled_request, release_entitlement
         request = mapping(run.run_request)
+        if entitled_request(request):
+            # A free first article owes no credit: the stop releases its
+            # attempt, unless another run of its lineage delivered or is going.
+            released = release_entitlement(organization=None, run=run, reason="cancelled_without_delivery")
+            result["article_terminal_refund"] = {**previous, "status": "not_required", "job_id": run.run_id,
+                "entitlement_released": released or previous.get("entitlement_released") is True,
+                "settlement_reason": "cancelled_without_delivery", "cancellation_receipt_id": receipt["receipt_id"]}
+            result["reconciliation_refund_pending"] = False
+            return result
         result["article_terminal_refund"] = {**previous, "status": "pending", "job_id": run.run_id,
             "paid_obligation": paid_article_request(mapping(run.run_request)) or previous.get("paid_obligation") is True,
             "billing_resolution_required": bool(request.get("client_request_id"))
@@ -276,10 +286,10 @@ def denied_refund_code(run):
     callback is superseded, so no failure callback reserves the credit. Recorded
     effects or delivery keep the charge; the credit itself still needs a stop.
     """
-    from .billing_lineage import paid_article_request
+    from .billing_lineage import settlement_owed_request
     from .incident_guards import NO_DELIVERY_REFUND_CODES, delivered_content
     request = mapping(run.run_request)
-    if (run.workflow not in ARTICLE_WORKFLOWS or run.status != "denied" or not paid_article_request(request)
+    if (run.workflow not in ARTICLE_WORKFLOWS or run.status != "denied" or not settlement_owed_request(request)
             or request.get("first_article_goal_operation_id")):
         return None
     result = mapping(run.result)
@@ -299,13 +309,13 @@ def dispatch_rejected_refund_candidate(run):
     A restart that reused the charge, a goal-owned spend, or any recorded
     effect or delivery keeps the charge.
     """
-    from .billing_lineage import paid_article_request
+    from .billing_lineage import settlement_owed_request
     from .incident_guards import delivered_content
     request, result = mapping(run.run_request), mapping(run.result)
     code = str(mapping(result.get("failure")).get("code") or result.get("error_code") or "").strip().lower()
     restart = mapping(result.get("restart_receipt"))
     if (run.workflow not in ARTICLE_WORKFLOWS or run.status != "failed" or code != DISPATCH_REJECTED
-            or not paid_article_request(request) or not str(request.get("client_request_id") or "").strip()
+            or not settlement_owed_request(request) or not str(request.get("client_request_id") or "").strip()
             or str(request.get("client_request_id")).strip() == str(run.run_id or "").strip()
             or request.get("first_article_goal_operation_id") or request.get("pending_billing_refund")
             or result.get("dispatch_refund_processed") or request.get("roo_points_billing_status") == "refunded"
@@ -349,13 +359,13 @@ def unrecoverable_refund_code(run):
     No callback reserves that credit. Recorded effects, delivery or a restart
     that reused the charge keep it; the credit itself still needs a stop.
     """
-    from .billing_lineage import paid_article_request
+    from .billing_lineage import settlement_owed_request
     from .incident_guards import delivered_content
     from .website_failure_contract import load_registry
     request, result = mapping(run.run_request), mapping(run.result)
     failure = mapping(result.get("failure"))
     if (run.workflow not in ARTICLE_WORKFLOWS or run.status != "failed" or run.resume_available
-            or not paid_article_request(request) or request.get("first_article_goal_operation_id")
+            or not settlement_owed_request(request) or request.get("first_article_goal_operation_id")
             or request.get("pending_billing_refund") or request.get("roo_points_billing_status") == "refunded"
             or restart_reused_charge(run)):
         return None
