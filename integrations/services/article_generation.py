@@ -1332,6 +1332,7 @@ def _post_content_factory_queue_request(
     domain: Optional[str],
     source_run_id: Optional[str] = None,
 ) -> object:
+    from content_factory.run_queue_position import with_interactive_queue_class
     from content_factory.website_connections import require_unlocked_remote_call
     require_unlocked_remote_call()
     if payload.get("delivery_mode") == "content_only":
@@ -1352,7 +1353,7 @@ def _post_content_factory_queue_request(
         try:
             response = http_requests.post(
                 endpoint,
-                json=payload,
+                json=with_interactive_queue_class(payload),
                 headers=headers,
                 timeout=timeout,
             )

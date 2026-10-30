@@ -11433,6 +11433,7 @@ def _serialize_run(
         original_request.get("delivery_mode_explicit", original_request.get("deliveryModeExplicit"))))
     step_states = _serialize_run_steps(run, compact=compact)
     from content_factory.run_state import reliability_presentation
+    from content_factory.run_queue_position import queue_position_payload
     result = _run_mapping(run.result)
     section_issues = public_section_issues(_nested_run_result_value(result, "section_issues", "sectionIssues"))
     raw_quality = _nested_run_result_value(result, "article_preview_quality", "articlePreviewQuality")
@@ -11536,6 +11537,7 @@ def _serialize_run(
             "failureStep": result.get("failure_step"),
             "queueName": result.get("queue_name"),
             "queuedAt": result.get("queued_at"),
+            **queue_position_payload(run),
             "setupQueue": result.get("setup_queue"),
             "livePreview": live_preview,
             "articleSetupState": article_setup_state,
@@ -11614,6 +11616,7 @@ def _serialize_run(
             "failureStep": result.get("failure_step"),
             "queueName": result.get("queue_name"),
         "queuedAt": result.get("queued_at"),
+        **queue_position_payload(run),
         "setupQueue": result.get("setup_queue"),
         "contentPackage": content_package,
         "componentManifest": component_manifest,
@@ -14302,7 +14305,8 @@ def _queue_content_factory_run_authorized(*, endpoint, workflow, context, config
                         organization=context.organization, workflow=workflow, actor_id=actor_id, payload=payload)
             try:
                 post_attempted = True
-                response = http_client.post(url, json=payload, headers=_content_factory_headers(), timeout=(3, 10))
+                from content_factory.run_queue_position import with_interactive_queue_class
+                response = http_client.post(url, json=with_interactive_queue_class(payload), headers=_content_factory_headers(), timeout=(3, 10))
                 request_exception = None
             except http_client.RequestException as exc:
                 request_exception = exc

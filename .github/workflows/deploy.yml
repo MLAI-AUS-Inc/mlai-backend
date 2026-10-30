@@ -430,6 +430,8 @@ jobs:
           content_factory.tests_github_credential_migrations \
           tests.test_jobs_scheduler \
           tests.test_content_island_scheduler \
+          content_factory.tests_island_refresh_eligibility \
+          content_factory.tests_run_queue_position \
           tests.test_content_analytics \
           roo.tests_coding \
           core.test_slack_user_creation \

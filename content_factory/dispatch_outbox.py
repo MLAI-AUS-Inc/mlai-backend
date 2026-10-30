@@ -183,8 +183,9 @@ def _deliver(row):
                 _validate_article_start_reservation(SimpleNamespace(organization=row.organization),
                     request, require_website=True)
     require_unlocked_remote_call()
+    from .run_queue_position import with_interactive_queue_class
     response = http_client.post(f"{remote['base_url']}/api/runs/{row.payload['endpoint']}",
-        headers=_content_factory_headers(), json=request, timeout=(3, 30))
+        headers=_content_factory_headers(), json=with_interactive_queue_class(request), timeout=(3, 30))
     try:
         body = response.json()
     except (ValueError, AttributeError):
