@@ -6,6 +6,7 @@ from django.conf import settings
 from django.contrib.auth import get_user_model
 from django.core import signing
 from django.core.cache import cache
+from django.core.exceptions import ValidationError as DjangoValidationError
 from django.http import HttpResponseBadRequest, QueryDict
 from django.shortcuts import redirect
 from django.urls import reverse
@@ -107,6 +108,26 @@ def _peek_github_ticket(ticket):
     return payload, company
 
 
+def _bad_ticket_is_new_journey(ticket):
+    """Whether a bad GitHub ticket goes to the fixed route rather than today's 400.
+
+    Only a ticket whose signature still checks out (expired, replayed, or for
+    a revoked Chat session) and whose company's organisation is new-journey.
+    Its age is deliberately not checked: it is read only to find the cohort,
+    and the fixed route carries nothing from it. A tampered or unsigned
+    ticket, and every legacy one, keeps today's 400.
+    """
+    try:
+        payload = signing.loads(ticket, salt=SALT)
+        if not isinstance(payload, dict) or payload.get("provider") != "github":
+            return False
+        company = VibeRaisingCompany.objects.select_related("organization").filter(
+            pk=payload["company"], profile__user_id=payload["uid"]).first()
+    except (signing.BadSignature, KeyError, ValueError, TypeError, DjangoValidationError):
+        return False
+    return company is not None and _new_journey_organization(company) is not None
+
+
 def _new_journey_return(payload, company):
     """The new-journey return: the website page on the web, today's native link on the desktop."""
     from integrations.services.github_callback_reasons import chat_return_url
@@ -189,7 +210,9 @@ def connect_browser(request):
         if provider not in PROVIDERS:
             raise ValueError("Unknown provider")
     except (signing.BadSignature, KeyError, ValueError, get_user_model().DoesNotExist, VibeRaisingCompany.DoesNotExist):
-        if reasons.redirects_enabled() and reasons.is_github_chat_ticket(request.GET.get("ticket", "")):
+        bad_ticket = request.GET.get("ticket", "")
+        if (reasons.redirects_enabled() and reasons.is_github_chat_ticket(bad_ticket)
+                and _bad_ticket_is_new_journey(bad_ticket)):
             # Nothing in a bad ticket is used: the fixed route only.
             fixed = reasons.state_expired_redirect()
             if fixed is not None:

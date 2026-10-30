@@ -296,7 +296,41 @@ def _used(raw_state) -> bool:
     return bool(cache.get("github-oauth-used:" + hashlib.sha256(raw_state.encode()).hexdigest()))
 
 
-def _bad_state():
+def bad_state_redirect_applies(raw_state) -> bool:
+    """Whether a bad Chat-shaped state goes to the fixed route rather than today's 400.
+
+    Never while V2 is off (the kill switch and the time before launch keep
+    today's 400 for everyone). A state whose signature still checks out
+    (expired, replayed, or for a revoked Chat session) names its organisation,
+    which is read only to keep today's 400 for a legacy organisation; nothing
+    else in it is used, and the fixed route carries nothing from it. An
+    unsigned or tampered state names no organisation it can be trusted for,
+    so it takes the fixed route (contract IF-P1-17).
+    """
+    from content_factory.founder_journey_cohort import v2_enabled
+    if not v2_enabled():
+        return False
+    from integrations.services.github_connections import GITHUB_OAUTH_STATE_SALT
+    try:
+        # Signature only: the age is deliberately not checked here.
+        payload = signing.loads(raw_state, salt=GITHUB_OAUTH_STATE_SALT)
+    except (signing.BadSignature, ValueError, TypeError):
+        return True
+    context = payload.get("chat_context") if isinstance(payload, dict) else None
+    organization_id = context.get("organization_id") if isinstance(context, dict) else None
+    if organization_id is None:
+        return True
+    from organizations.models import Organization
+    try:
+        organization = Organization.objects.filter(pk=organization_id).first()
+    except (ValueError, TypeError):
+        return True
+    return organization is None or is_new_journey_organization(organization)
+
+
+def _bad_state(raw_state):
+    if not bad_state_redirect_applies(raw_state):
+        return None
     response = state_expired_redirect()
     return ChatCallback(response=response) if response is not None else None
 
@@ -312,7 +346,9 @@ def begin_callback(request) -> Optional[ChatCallback]:
     cancelled or failed authorization).
 
     The legacy decision is a pure read: the state is only consumed once the
-    organisation is known to be new-journey.
+    organisation is known to be new-journey. A bad Chat state takes the fixed
+    route only as :func:`bad_state_redirect_applies` decides; otherwise it
+    also returns None, and today's code answers its 400.
     """
     if not redirects_enabled():
         return None
@@ -325,13 +361,13 @@ def begin_callback(request) -> Optional[ChatCallback]:
     try:
         payload = signing.loads(raw_state, salt=GITHUB_OAUTH_STATE_SALT, max_age=GITHUB_OAUTH_STATE_TIMEOUT_SECONDS)
     except (signing.BadSignature, ValueError, TypeError):
-        return _bad_state()
+        return _bad_state(raw_state)
     context = payload.get("chat_context") if isinstance(payload, dict) else None
     if not isinstance(context, dict) or payload.get("type") != "org" or _used(raw_state):
-        return _bad_state()
+        return _bad_state(raw_state)
     from community_chat.startups.oauth_context import valid_chat_oauth_context
     if not valid_chat_oauth_context(context, context.get("user_id")):
-        return _bad_state()
+        return _bad_state(raw_state)
     from organizations.models import Organization
     try:
         organization = Organization.objects.filter(pk=context.get("organization_id")).first() \
@@ -343,7 +379,7 @@ def begin_callback(request) -> Optional[ChatCallback]:
     try:
         oauth_state = validate_github_oauth_state(raw_state, request=request)
     except ValueError:
-        return _bad_state()
+        return _bad_state(raw_state)
     from founder_tools.models import VibeRaisingCompany
     company = VibeRaisingCompany.objects.select_related("organization").filter(
         pk=context["chat_company_id"], profile__user_id=context["user_id"],
@@ -490,9 +526,24 @@ def _repository_owned_elsewhere(organization, repo) -> bool:
             .exclude(organization=organization).exists())
 
 
+def bind_installation_id(user, repo, fallback) -> str:
+    """The installation the bind mints its token for: the founder registry's, as
+    ``verify_repository_access`` resolves it, else the callback's ``fallback``."""
+    from integrations.services.github_installations import installation_for_repo
+    try:
+        installation = installation_for_repo(user, repo)
+    except Exception:
+        logger.warning("founder_github_installation_resolve_failed")
+        installation = None
+    resolved = getattr(installation, "installation_id", None) if installation is not None else None
+    return str(resolved or fallback or "")
+
+
 def remint_installation_token(installation_id, repo) -> bool:
     """Drop the cached read token for ``repo`` and mint a fresh one, once. True when it minted."""
     from integrations.services import github_app
+    if not installation_id:
+        return False
     try:
         cache.delete(github_app._cache_key(installation_id=str(installation_id), repository=str(repo), permission_mode="read"))
         github_app.create_installation_access_token(installation_id=str(installation_id), repository=str(repo),
@@ -547,9 +598,10 @@ def bind_new_journey_repository(*, config, user, company, repositories, installa
             website_connections.bind_website(config, user=user, repo=full_name, app_root="", branch="")
             break
         except WebsiteAuthorityError as exc:
-            if not reminted and getattr(exc, "code", "") in _REMINT_FAILURES and installation_id:
+            if not reminted and getattr(exc, "code", "") in _REMINT_FAILURES:
                 reminted = True
-                if remint_installation_token(installation_id, full_name):
+                # Re-mint the token the retry reads: the installation the bind resolves.
+                if remint_installation_token(bind_installation_id(user, full_name, installation_id), full_name):
                     continue
             logger.warning("founder_github_bind_refused org=%s", organization.pk)
             return _failure_reason(exc)

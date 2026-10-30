@@ -153,6 +153,9 @@ class CallbackBindingTests(TestCase):
         self.verify.assert_not_called()
         self.assertFalse(WebsiteConnection.objects.filter(organization=built.organization).exists())
         self.assertIsNone((read_marker(built.organization) or {}).get("ownerClickRequired"))
+        # The single granted, read-only repository is not saved as the chosen one either.
+        built.config.refresh_from_db()
+        self.assertIsNone(built.config.github_repo)
 
     def test_several_candidates_none_and_the_only_candidate(self):
         several = make_new_journey_org(domain="banksia.studio")
@@ -193,6 +196,23 @@ class CallbackBindingTests(TestCase):
         self.mint.assert_called_once()
         self.assertIsNone((read_marker(again.organization) or {}).get("ownerClickRequired"))
 
+    def test_remint_uses_the_installation_the_bind_resolves(self):
+        built = make_new_journey_org(domain="banksia.studio")
+        calls = []
+
+        def flaky(*, user, repo):
+            calls.append(repo)
+            if len(calls) == 1:
+                raise WebsiteAuthorityError("github_repository_unavailable", "GitHub could not verify access.")
+            return _metadata(repo)
+
+        with patch("integrations.services.github_installations.installation_for_repo",
+                   return_value=Obj(installation_id="11")) as resolve:
+            response = self.callback(built, [_repo("founder/banksia-studio")], verify=flaky)
+        self.assertEqual(self.reason(response), reasons.CONNECTED)
+        self.assertEqual(resolve.call_args.args[1], "founder/banksia-studio")
+        self.mint.assert_called_once_with(installation_id="11", repository="founder/banksia-studio", permission_mode="read")
+
     def test_repository_already_connected_elsewhere(self):
         other = make_new_journey_org(domain="other-startup.example")
         other.config.github_repo = "founder/banksia-studio"
@@ -200,6 +220,10 @@ class CallbackBindingTests(TestCase):
         built = make_new_journey_org(domain="banksia.studio")
         self.assertEqual(self.reason(self.callback(built, [_repo("founder/banksia-studio")])), reasons.OWNED_ELSEWHERE)
         self.verify.assert_not_called()
+        # This org never claims the other startup's repository.
+        built.config.refresh_from_db()
+        self.assertIsNone(built.config.github_repo)
+        self.assertIsNone(built.config.website_connection)
 
     def test_successful_bind_writes_owner_click_and_keeps_other_marker_keys(self):
         built = make_new_journey_org(domain="banksia.studio")

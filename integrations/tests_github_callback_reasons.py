@@ -33,6 +33,9 @@ from integrations.services.github_connections import build_github_oauth_state
 FRONTEND = "https://chat.example"
 FIXED_ROUTE = FRONTEND + "/my-startup/website?github=state_expired"
 FLAG_OFF = {**ALL_P1_FLAGS_ON, "MY_STARTUP_GITHUB_CALLBACK_REDIRECTS_ENABLED": False}
+# The V2 kill switch (and production between turn-on steps 5 and 6): every P1 flag on but V2.
+V2_OFF = {**ALL_P1_FLAGS_ON, "MY_STARTUP_FOUNDER_JOURNEY_V2_ENABLED": False}
+TODAY_BAD_STATE = (400, b"Invalid or expired state", None)
 COMMON = {
     "CACHES": {"default": {"BACKEND": "django.core.cache.backends.locmem.LocMemCache"}},
     "COMMUNITY_CHAT_FRONTEND_URL": FRONTEND,
@@ -260,6 +263,53 @@ class BadChatStateTests(CallbackReasonTestBase):
             response = self.client.get(reverse("github_callback"), self.params(state))
         self.assertEqual(response["Location"], FIXED_ROUTE)
 
+    def _bad_states(self, built):
+        """Expired, replayed and tampered Chat states of ``built``, plus a valid one for a revoked session."""
+        replayed = self.chat_state(built)
+        with override_settings(**FLAG_OFF):
+            self.callback(self.params(replayed))
+        with patch("time.time", return_value=time.time() - 3600):
+            expired = self.chat_state(built).raw
+        tampered = self.chat_state(built).raw
+        return {"expired": expired, "replayed": replayed.raw,
+                "tampered": tampered[:-2] + ("aa" if not tampered.endswith("aa") else "bb")}
+
+    def _revoked(self, built, values):
+        state = self.chat_state(built)
+        with override_settings(**values), self.github(post=_json(TOKEN), get=[_json(USER), _json(_repos("founder/x"))]), \
+                patch("community_chat.startups.oauth_context.valid_chat_oauth_context", return_value=False):
+            return _snapshot(self.client.get(reverse("github_callback"), self.params(state)))
+
+    def test_v2_kill_switch_keeps_todays_400_for_every_bad_state(self):
+        """G3: with every P1 flag on but V2, no bad state is redirected, for any cohort."""
+        legacy = make_named_legacy_org("talathrive", domain=f"talathrive-{uuid.uuid4().hex[:6]}.example")
+        for name, built in (("new journey", self.new), ("legacy", legacy)):
+            states = {**self._bad_states(built), "unsigned": self._unsigned()}
+            for label, raw in states.items():
+                with self.subTest(f"{name} {label}"), override_settings(**V2_OFF):
+                    response = self.callback({"code": "c", "installation_id": "77", "state": raw})
+                    self.assertEqual(_snapshot(response), TODAY_BAD_STATE)
+            with self.subTest(f"{name} revoked session"):
+                self.assertEqual(self._revoked(built, V2_OFF), self._revoked(built, FLAG_OFF))
+        self.assertIsNone((read_marker(self.new.organization) or {}).get("githubReturn"))
+
+    def test_legacy_expired_replayed_and_revoked_states_keep_todays_400_with_every_flag_on(self):
+        """G1: a legacy org's validly signed bad state is not redirected; only its org is read."""
+        legacy = make_named_legacy_org("vyavos", domain=f"vyavos-{uuid.uuid4().hex[:6]}.example")
+        states = self._bad_states(legacy)
+        for label in ("expired", "replayed"):
+            with self.subTest(label):
+                today = _snapshot(self.callback({"code": "c", "installation_id": "77", "state": states[label]}))
+                with override_settings(**FLAG_OFF):
+                    flag_off = _snapshot(self.callback({"code": "c", "installation_id": "77", "state": states[label]}))
+                self.assertEqual(today, TODAY_BAD_STATE)
+                self.assertEqual(today, flag_off)
+        with self.subTest("revoked session"):
+            self.assertEqual(self._revoked(legacy, ALL_P1_FLAGS_ON), self._revoked(legacy, FLAG_OFF))
+        with self.subTest("tampered (names no trusted org: the contract's fixed route)"):
+            response = self.callback({"code": "c", "installation_id": "77", "state": states["tampered"]})
+            self.assertEqual(response["Location"], FIXED_ROUTE)
+
     def test_missing_and_non_chat_states_keep_todays_400_with_the_flag_on(self):
         missing = self.callback({"code": "c", "installation_id": "77"})
         self.assertEqual(_snapshot(missing)[:2], (400, b"Missing state"))
@@ -345,6 +395,9 @@ class G7UnchangedTests(CallbackReasonTestBase):
                 self.assertEqual(now, today)
 
 
+TODAY_BAD_TICKET = b"This connection link expired or was already used. Start again in MLAI Chat."
+
+
 class ConnectBrowserTests(CallbackReasonTestBase):
     """connect_browser's text 400s become typed 302s for new-journey GitHub handoffs."""
 
@@ -355,11 +408,12 @@ class ConnectBrowserTests(CallbackReasonTestBase):
             platform="web", access_token_hash=uuid.uuid4().hex, refresh_token_hash=uuid.uuid4().hex,
             auth_version=user.auth_version, access_expires_at=now + timedelta(hours=1), expires_at=now + timedelta(days=1))
 
-    def ticket(self, built, *, provider="github", return_to=None, editor=None):
+    def ticket(self, built, *, provider="github", return_to=None, editor=None, age=0):
         session = self.session_for(built.owner)
-        return signing.dumps({"uid": built.owner.pk, "company": str(built.company.pk), "session": str(session.pk),
-                              "provider": provider, "return_to": return_to, "github_settings_return": editor,
-                              "nonce": uuid.uuid4().hex}, salt=connections.SALT)
+        with patch("time.time", return_value=time.time() - age):
+            return signing.dumps({"uid": built.owner.pk, "company": str(built.company.pk), "session": str(session.pk),
+                                  "provider": provider, "return_to": return_to, "github_settings_return": editor,
+                                  "nonce": uuid.uuid4().hex}, salt=connections.SALT)
 
     def browse(self, ticket):
         return connections.connect_browser(RequestFactory().get("/connect/browser/", {"ticket": ticket}))
@@ -382,11 +436,28 @@ class ConnectBrowserTests(CallbackReasonTestBase):
     def test_bad_ticket_uses_only_the_fixed_route(self):
         used = self.ticket(self.new)
         self.browse(used)
-        for label, raw in {"replayed": used, "tampered": used[:-2] + "zz"}.items():
+        revoked = self.ticket(self.new)
+        CommunityChatAccountSession.objects.filter(pk=signing.loads(revoked, salt=connections.SALT)["session"]).delete()
+        for label, raw in {"replayed": used, "expired": self.ticket(self.new, age=3600), "revoked session": revoked}.items():
             with self.subTest(label):
                 response = self.browse(raw)
                 self.assertEqual(response.status_code, 302)
                 self.assertEqual(response["Location"], FIXED_ROUTE)
+        with self.subTest("tampered names no trusted company: today's 400"):
+            response = self.browse(used[:-2] + "zz")
+            self.assertEqual(_snapshot(response)[:2], (400, TODAY_BAD_TICKET))
+
+    def test_bad_tickets_of_legacy_orgs_and_with_v2_off_keep_todays_400(self):
+        """G1 and G3: only a new-journey org's ticket is redirected, and never with V2 off."""
+        legacy = make_named_legacy_org("vyavos", domain=f"vyavos-{uuid.uuid4().hex[:6]}.example")
+        for label, built, values in (("legacy, every flag on", legacy, ALL_P1_FLAGS_ON),
+                                     ("new journey, V2 off", self.new, V2_OFF)):
+            with self.subTest(label), override_settings(**values):
+                used = self.ticket(built)
+                self.browse(used)
+                for kind, raw in {"replayed": used, "expired": self.ticket(built, age=3600)}.items():
+                    response = self.browse(raw)
+                    self.assertEqual(_snapshot(response), (400, TODAY_BAD_TICKET, None), kind)
 
     def test_no_website_mints_no_state(self):
         placeholder = make_new_journey_org(domain=f"startup-{uuid.uuid4().hex[:8]}.invalid")
