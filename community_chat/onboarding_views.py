@@ -123,6 +123,10 @@ class InviteResolveView(APIView):
     throttle_classes = (InviteResolveThrottle,)
     community_chat_throttle_scope = "community_chat_invite_resolve"
 
+    def get_throttles(self):
+        # While the feature is off every caller gets the 404, never a 429.
+        return super().get_throttles() if invite_tokens_enabled() else []
+
     def post(self, request):
         if not invite_tokens_enabled():
             return self._no_store(Response({"error": "invite_tokens_disabled"}, status=status.HTTP_404_NOT_FOUND))

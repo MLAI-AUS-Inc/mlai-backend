@@ -117,6 +117,12 @@ class InviteResolveTests(TestCase):
         self.assertEqual(statuses, [200, 200, 429])
         self.assertEqual(other_ip, 200)
 
+    def test_flag_off_always_answers_404_and_never_429(self):
+        token = mint_invite_token(cohort="melb")
+        with patch.object(InviteResolveThrottle, "THROTTLE_RATES", {"community_chat_invite_resolve": "2/minute"}):
+            statuses = {self.resolve(token, REMOTE_ADDR="203.0.113.9").status_code for _ in range(5)}
+        self.assertEqual(statuses, {404})
+
 
 @override_settings(
     COMMUNITY_CHAT_SIGNUP_ENABLED=True,
@@ -148,6 +154,15 @@ class InviteJoinTests(TestCase):
         self.assertIn("cohort=melb", line)
         self.assertNotIn("invitee@example.com", line)
         self.assertNotIn("Priya", line)
+        self.assertNotIn("intent=", line)
+
+    def test_a_repeated_join_logs_the_cohort_once(self):
+        token = mint_invite_token(intent="startup", cohort="melb")
+        with self.assertLogs("community_chat.onboarding", level="INFO") as logs:
+            self.assertEqual(self.join(token).status_code, 200)
+            self.assertEqual(self.join(token).status_code, 200)
+        joined = [line for line in logs.output if "community_chat_invite_joined" in line]
+        self.assertEqual(len(joined), 1)
 
     def test_invalid_invite_never_blocks_joining(self):
         with self.assertLogs("community_chat.onboarding", level="INFO") as logs:

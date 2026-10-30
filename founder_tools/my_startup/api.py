@@ -19,12 +19,33 @@ def pending_member_access_enabled():
     return bool(getattr(settings, "MY_STARTUP_PENDING_MEMBER_ACCESS_ENABLED", False))
 
 
+def _pending_member_is_new_journey(user):
+    """Whether a member awaiting review belongs only to the new-journey cohort.
+
+    Every startup the member owns must be ``is_new_journey``. A member with no
+    startup yet is judged by the cohort a startup added now would join, so a
+    founder still on the legacy path (V2 off, or before LAUNCHED_AT) is
+    refused exactly as today.
+    """
+    from content_factory.founder_journey_cohort import NEW_JOURNEY, is_new_journey, new_startup_cohort
+    from founder_tools.models import VibeRaisingCompany
+
+    companies = list(
+        VibeRaisingCompany.objects.filter(profile__user_id=user.pk, organization__isnull=False)
+        .select_related("organization")
+    )
+    if not companies:
+        return new_startup_cohort() == NEW_JOURNEY
+    return all(is_new_journey(company.organization) for company in companies)
+
+
 def require_my_startup_access(user):
-    """Admit approved members and, with the switch on, members awaiting review.
+    """Admit approved members and, with the switch on, new-journey members awaiting review.
 
     Decision 9: a name flagged for committee review holds only public posting,
-    so a ``pending_review`` member keeps My startup. Incomplete, rejected and
-    suspended members are refused exactly as ``require_community_access`` does.
+    so a ``pending_review`` member of the new-journey cohort keeps My startup.
+    A pending member who owns a legacy startup, and incomplete, rejected and
+    suspended members, are refused exactly as ``require_community_access`` does.
     """
     from community_chat.models import CommunityMemberProfile
     from community_chat.onboarding import has_community_access, require_community_access
@@ -32,9 +53,11 @@ def require_my_startup_access(user):
     if not pending_member_access_enabled():
         require_community_access(user)
         return
-    if has_community_access(user) or CommunityMemberProfile.objects.filter(
+    if has_community_access(user):
+        return
+    if CommunityMemberProfile.objects.filter(
         user=user, status=CommunityMemberProfile.Status.PENDING,
-    ).exists():
+    ).exists() and _pending_member_is_new_journey(user):
         return
     require_community_access(user)
 

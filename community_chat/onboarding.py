@@ -202,6 +202,10 @@ def _join(user, session, profile, values, *, existing_access, version, now):
         _submit_for_admission(user, profile, now)
 
 
+INVITE_JOINED_CACHE_PREFIX = "community-chat:invite-joined:"
+INVITE_JOINED_CACHE_SECONDS = 365 * 24 * 60 * 60
+
+
 def _after_join(user, values):
     """Effects outside the admission transaction: founder role and invite cohort."""
     if values.get("intent") == "startup":
@@ -219,10 +223,12 @@ def _after_join(user, values):
         # An invalid or expired invite never blocks joining.
         logger.info("community_chat_invite_ignored user=%s", user.pk)
         return
-    logger.info(
-        "community_chat_invite_joined user=%s cohort=%s intent=%s",
-        user.pk, claims.cohort or "", claims.intent or "",
-    )
+    # Once per member, ids and the label only, so cohort counts are not
+    # inflated by a retried or re-submitted join.
+    from django.core.cache import cache
+    if not cache.add(f"{INVITE_JOINED_CACHE_PREFIX}{user.pk}", True, INVITE_JOINED_CACHE_SECONDS):
+        return
+    logger.info("community_chat_invite_joined user=%s cohort=%s", user.pk, claims.cohort or "")
 
 
 def save_onboarding(*, authenticated_session, values):

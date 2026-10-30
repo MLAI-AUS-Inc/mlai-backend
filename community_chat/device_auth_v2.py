@@ -188,18 +188,22 @@ def renew_proof_matches(auth_request, state: str) -> bool:
 
 
 class RenewExpired(Exception):
-    """The request is consumed, or past its hard lifetime cap."""
+    """The request is consumed, already expired, or past its hard lifetime cap."""
 
 
 def renewed_expiry(auth_request, *, now=None):
-    """Extend a locked, unauthorized request by one TTL, within the lifetime cap.
+    """Extend a locked, live, unauthorized request by one TTL, within the lifetime cap.
 
     An authorized request keeps its expiry (the desktop should exchange it now).
-    Raises ``RenewExpired`` when the request is consumed or past the cap.
+    Raises ``RenewExpired`` when the request is consumed, past the cap, or
+    already expired. An expired request is never revived: device revocation
+    fences in-flight handoffs by setting ``expires_at`` to now, and reviving
+    one would undo that fence. The desktop renews before expiry, and a 410
+    makes it start a new request.
     """
     now = now or timezone.now()
     cap = auth_request.created_at + timedelta(seconds=max_lifetime_seconds())
-    if auth_request.consumed_at is not None or now >= cap:
+    if auth_request.consumed_at is not None or now >= cap or auth_request.expires_at <= now:
         raise RenewExpired()
     if auth_request.authorized_at is not None:
         return auth_request.expires_at

@@ -14,7 +14,9 @@ from rest_framework.test import APIClient
 from community_chat.models import CommunityChatDevice, CommunityMemberProfile
 from community_chat.tests.test_account_profiles import credentials_for
 from content_factory.company_billing import CompanyBillingView
-from content_factory.founder_journey_testing import ALL_P1_FLAGS_ON, make_named_legacy_org
+from content_factory.founder_journey_testing import (
+    ALL_P1_FLAGS_ON, NAMED_LEGACY_ORGS, make_named_legacy_org, make_new_journey_org,
+)
 from founder_tools.my_startup.api import MyStartupViewMixin
 from founder_tools.my_startup.purchases import (
     StartupPurchaseCheckoutView, StartupPurchaseCreateView, StartupPurchaseView,
@@ -23,7 +25,9 @@ from roo.views import CurrentUserPurchaseView
 
 PREFIX = "/api/v1/my-startup/"
 ORIGIN = "https://chat.mlai.au"
-ON = dict(MY_STARTUP_PENDING_MEMBER_ACCESS_ENABLED=True)
+# Pending access follows the new-journey cohort, so it needs V2 and a past LAUNCHED_AT too.
+ON = dict(MY_STARTUP_PENDING_MEMBER_ACCESS_ENABLED=True, MY_STARTUP_FOUNDER_JOURNEY_V2_ENABLED=True,
+          MY_STARTUP_FOUNDER_JOURNEY_V2_LAUNCHED_AT=ALL_P1_FLAGS_ON["MY_STARTUP_FOUNDER_JOURNEY_V2_LAUNCHED_AT"])
 REFUSAL = {"error": "onboarding_required", "detail": "Complete your community application before joining MLAI Chat."}
 GUARDED = (CompanyBillingView, CurrentUserPurchaseView, StartupPurchaseCreateView, StartupPurchaseView,
            StartupPurchaseCheckoutView)
@@ -73,11 +77,12 @@ class PendingMemberAccessTests(TestCase):
             mock.start()
             self.addCleanup(mock.stop)
 
-    def member(self, status, email=None):
-        user = get_user_model().objects.create_user(email=email or f"{status}-{uuid.uuid4().hex[:6]}@example.com",
-                                                    email_verified_at=timezone.now())
-        CommunityMemberProfile.objects.create(user=user, status=status, first_name="Priya", last_name="",
-                                              adult_confirmed_at=timezone.now(), policy_version="v")
+    def member(self, status, email=None, user=None):
+        if user is None:
+            user = get_user_model().objects.create_user(
+                email=email or f"{status}-{uuid.uuid4().hex[:6]}@example.com", email_verified_at=timezone.now())
+        CommunityMemberProfile.objects.update_or_create(user=user, defaults=dict(
+            status=status, first_name="Priya", last_name="", adult_confirmed_at=timezone.now(), policy_version="v"))
         client = APIClient()
         client.credentials(HTTP_AUTHORIZATION=f"Bearer {credentials_for(user).access_token}")
         return user, client
@@ -157,3 +162,45 @@ class PendingMemberAccessTests(TestCase):
         self.assertEqual(responses[False], responses[True])
         self.assertEqual(responses[True][0], 200)
         self.assertNotEqual(responses[True][2], 403)
+
+    def test_pending_owner_of_a_new_journey_startup_reads_my_startup(self):
+        startup = make_new_journey_org()
+        _, client = self.member(CommunityMemberProfile.Status.PENDING, user=startup.owner)
+        with override_settings(**ALL_P1_FLAGS_ON):
+            self.assertEqual(self.read(client).status_code, 200)
+            billing = client.get(PREFIX + "vibe-marketing/company-billing/", {"company_id": str(startup.company.pk)})
+            self.assertEqual(billing.status_code, 403)
+            self.assertEqual(billing.data, REFUSAL)
+
+    def test_pending_owner_of_a_legacy_startup_is_refused_with_every_flag_on(self):
+        for name in NAMED_LEGACY_ORGS:
+            with self.subTest(org=name):
+                legacy = make_named_legacy_org(name)
+                _, client = self.member(CommunityMemberProfile.Status.PENDING, user=legacy.owner)
+                responses = {}
+                for flags in ({}, ALL_P1_FLAGS_ON):
+                    with override_settings(**flags):
+                        response = self.read(client)
+                        responses[bool(flags)] = (response.status_code, response.data)
+                self.assertEqual(responses[True], responses[False])
+                self.assertEqual(responses[True], (403, REFUSAL))
+
+    def test_pending_owner_of_a_legacy_and_a_new_startup_is_refused(self):
+        startup = make_new_journey_org()
+        legacy = make_named_legacy_org("talathrive")
+        legacy.company.profile = startup.owner.vibe_raising_profile
+        legacy.company.save(update_fields=["profile"])
+        _, client = self.member(CommunityMemberProfile.Status.PENDING, user=startup.owner)
+        with override_settings(**ALL_P1_FLAGS_ON):
+            self.assertEqual(self.read(client).status_code, 403)
+
+    def test_pending_member_without_a_startup_follows_the_new_startup_cohort(self):
+        _, client = self.member(CommunityMemberProfile.Status.PENDING)
+        for flags, expected in (
+            ({"MY_STARTUP_PENDING_MEMBER_ACCESS_ENABLED": True}, 403),
+            ({**ALL_P1_FLAGS_ON, "MY_STARTUP_FOUNDER_JOURNEY_V2_ENABLED": False}, 403),
+            ({**ALL_P1_FLAGS_ON, "MY_STARTUP_FOUNDER_JOURNEY_V2_LAUNCHED_AT": ""}, 403),
+            (ALL_P1_FLAGS_ON, 200),
+        ):
+            with self.subTest(flags=sorted(flags.items())), override_settings(**flags):
+                self.assertEqual(self.read(client).status_code, expected)

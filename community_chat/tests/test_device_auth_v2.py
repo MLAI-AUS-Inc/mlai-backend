@@ -8,6 +8,7 @@ from datetime import timedelta
 from coincurve import PrivateKey
 from django.contrib.auth import get_user_model
 from django.core.cache import cache
+from django.db import transaction
 from django.test import override_settings
 from django.urls import reverse
 from django.utils import timezone
@@ -16,6 +17,7 @@ from rest_framework.test import APIClient, APITestCase
 
 from community_chat import device_auth_v2
 from community_chat.account_sessions import issue_account_session
+from community_chat.device_revocation import revoke_device_credentials_locked
 from community_chat.email_codes import code_digest
 from community_chat.models import (
     CommunityChatBootstrapToken, CommunityChatDeviceAuthRequest, CommunityChatEmailCodeChallenge,
@@ -317,17 +319,46 @@ class DeviceAuthV2Tests(APITestCase):
     # -- renew --------------------------------------------------------------
 
     @override_settings(**V2)
-    def test_renew_extends_within_the_cap_even_after_expiry(self):
+    def test_renew_extends_a_live_request_within_the_cap(self):
         request_id = self.started_id()
         auth_request = CommunityChatDeviceAuthRequest.objects.get(id=request_id)
         CommunityChatDeviceAuthRequest.objects.filter(id=request_id).update(
-            created_at=timezone.now() - timedelta(minutes=20), expires_at=timezone.now() - timedelta(seconds=5))
+            created_at=timezone.now() - timedelta(minutes=20), expires_at=timezone.now() + timedelta(seconds=30))
         renewed = self.renew(request_id)
         self.assertEqual(renewed.status_code, 200, renewed.data)
         auth_request.refresh_from_db()
         self.assertEqual(renewed.data, {"expiresAt": auth_request.expires_at})
         self.assertGreater(auth_request.expires_at, timezone.now() + timedelta(minutes=14))
         self.assertEqual(self.probe(request_id).data["requestedAt"], auth_request.created_at)
+
+    @override_settings(**V2)
+    def test_renew_never_revives_an_expired_request(self):
+        request_id = self.started_id()
+        expired_at = timezone.now() - timedelta(seconds=5)
+        CommunityChatDeviceAuthRequest.objects.filter(id=request_id).update(
+            created_at=timezone.now() - timedelta(minutes=20), expires_at=expired_at)
+        response = self.renew(request_id)
+        self.assertEqual(response.status_code, 410)
+        self.assertEqual(response.data, {"detail": "This sign-in link expired. Start again.",
+                                         "code": "device_request_expired"})
+        self.assertEqual(CommunityChatDeviceAuthRequest.objects.get(id=request_id).expires_at, expired_at)
+
+    @override_settings(**V2)
+    def test_renew_cannot_undo_device_revocation(self):
+        """Deleting the device fences the handoff; renew must not bring it back."""
+        request_id = self.started_id()
+        with transaction.atomic():
+            get_user_model().objects.select_for_update().get(pk=self.user.pk)
+            revoke_device_credentials_locked(
+                self.user, public_key=self.device["public_key"], installation_id=self.installation_id)
+        fenced = CommunityChatDeviceAuthRequest.objects.get(id=request_id)
+        self.assertLessEqual(fenced.expires_at, timezone.now())
+        self.assertEqual(self.renew(request_id).status_code, 410)
+        fenced.refresh_from_db()
+        self.assertLessEqual(fenced.expires_at, timezone.now())
+        browser, _ = self.browser_session()
+        self.assertEqual(self.authorize(browser, request_id).status_code, 410)
+        self.assertIsNone(CommunityChatDeviceAuthRequest.objects.get(id=request_id).authorized_at)
 
     @override_settings(**V2)
     def test_renew_is_capped_at_the_max_lifetime(self):
