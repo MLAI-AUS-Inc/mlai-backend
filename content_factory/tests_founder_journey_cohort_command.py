@@ -23,7 +23,12 @@ from .founder_journey_testing import (
     ALL_P1_FLAGS_ON, LAUNCHED_AT, NAMED_LEGACY_ORGS, make_history_free_org, make_named_legacy_org,
     make_new_journey_org,
 )
-from .models import NotificationChannel, OrganizationContentConfig, WrittenArticle
+from .management.commands.founder_journey_cohort import apply_markers
+from .models import (
+    ContentIsland, ContentIslandStatus, NotificationChannel, OrganizationContentConfig, ResearchedKeyword,
+    WrittenArticle,
+)
+from .services import island_refresh_scheduler
 
 PRE_LAUNCH = LAUNCHED_AT - timedelta(days=30)
 
@@ -81,7 +86,7 @@ class ReportTests(TestCase):
         self.assertEqual(set(report), {"organizations", "legacy_orgs_losing_an_action"})
         self.assertEqual(set(report["organizations"][0]), {
             "id", "domain", "markerCohort", "assignedBy", "effectiveCohort", "proposedCohort", "reasons",
-            "inventory", "entitlement", "inFlightRuns", "losingAnAction"})
+            "inventory", "priorState", "entitlement", "inFlightRuns", "losingAnAction"})
         self.assertEqual(len(report["organizations"]), Organization.objects.count())
 
     def test_in_flight_runs_are_listed(self):
@@ -183,7 +188,7 @@ class ApplyTests(TestCase):
         call_command("founder_journey_cohort", "--apply", "--json", stdout=out)
         counts = json.loads(out.getvalue())
         self.assertEqual(counts, {"new_journey": 3, "legacy": 6, "skipped_existing_marker": 1,
-                                  "skipped_launch_window": 1})
+                                  "skipped_launch_window": 1, "legacy_no_config": 0})
 
         for name, built in named.items():
             with self.subTest(name=name):
@@ -212,7 +217,7 @@ class ApplyTests(TestCase):
         out = StringIO()
         call_command("founder_journey_cohort", "--apply", "--json", stdout=out)
         self.assertEqual(json.loads(out.getvalue()), {"new_journey": 0, "legacy": 0, "skipped_existing_marker": 10,
-                                                      "skipped_launch_window": 1})
+                                                      "skipped_launch_window": 1, "legacy_no_config": 0})
         self.assertEqual({config.organization_id: json.dumps(config.pillar_strategy, sort_keys=True)
                           for config in OrganizationContentConfig.objects.all()}, snapshot)
 
@@ -238,3 +243,132 @@ class ApplyTests(TestCase):
         self.assertEqual(json.loads(out.getvalue())["new_journey"], 1)
         self.assertEqual(cohorts.read_marker(org)["cohort"], "new_journey")
         self.assertGreater(timezone.now(), LAUNCHED_AT)
+
+
+def written_article(org, *, created_at=None):
+    article = WrittenArticle.objects.create(organization=org, title="T", slug=f"t-{uuid4().hex[:6]}", category="c",
+                                            primary_keyword="t")
+    if created_at is not None:
+        WrittenArticle.objects.filter(pk=article.pk).update(created_at=created_at)
+    return article
+
+
+def row_for(org):
+    out, code = run_command("--json")
+    report = json.loads(out)
+    return next(row for row in report["organizations"] if row["id"] == org.pk), report, code
+
+
+@override_settings(**ALL_P1_FLAGS_ON)
+class LaunchWindowHistoryTests(TestCase):
+    """An org created after LAUNCHED_AT that has history from before it is flagged, then frozen as legacy."""
+
+    @override_settings(MY_STARTUP_FOUNDER_JOURNEY_V2_LAUNCHED_AT="2026-01-01T00:00:00+00:00")
+    def test_a_named_org_created_after_a_mis_set_launch_time_is_flagged_and_frozen(self):
+        pawshare = make_named_legacy_org("pawshare", marker=False)
+        self.assertTrue(cohorts.is_new_journey(pawshare.organization))  # what --apply must fix
+        row, _, code = row_for(pawshare.organization)
+        self.assertEqual(code, 1)
+        self.assertTrue(row["losingAnAction"])
+        self.assertIn("named_org", row["priorState"])
+
+        counts = apply_markers()
+        self.assertEqual((counts["legacy"], counts["skipped_launch_window"]), (1, 0))
+        marker = cohorts.read_marker(pawshare.organization)
+        self.assertEqual((marker["cohort"], marker["assignedBy"]), ("legacy", "report_apply"))
+        self.assertIn("before_launch:named_org", marker["reasons"])
+        self.assertIn("hosted_site", marker["reasons"])
+        self.assertFalse(cohorts.is_new_journey(pawshare.organization))
+        _, report, code = row_for(pawshare.organization)
+        self.assertEqual((code, report["legacy_orgs_losing_an_action"]), (0, 0))
+
+    def test_an_org_created_after_launch_with_earlier_state_is_frozen(self):
+        late = make_new_journey_org(marker=False)
+        written_article(late.organization, created_at=LAUNCHED_AT - timedelta(days=5))
+        row, _, code = row_for(late.organization)
+        self.assertEqual((code, row["priorState"]), (1, ["written_article"]))
+
+        counts = apply_markers()
+        self.assertEqual(counts["legacy"], 1)
+        marker = cohorts.read_marker(late.organization)
+        self.assertEqual(marker["cohort"], "legacy")
+        self.assertIn("before_launch:written_article", marker["reasons"])
+        _, _, code = row_for(late.organization)
+        self.assertEqual(code, 0)
+
+    def test_state_added_after_launch_leaves_the_launch_window_alone(self):
+        late = make_new_journey_org(marker=False)
+        written_article(late.organization)
+        created = make_new_journey_org()
+        written_article(created.organization, created_at=LAUNCHED_AT - timedelta(days=5))
+        _, report, code = row_for(late.organization)
+        self.assertEqual((code, report["legacy_orgs_losing_an_action"]), (0, 0))  # create markers never count
+        counts = apply_markers()
+        self.assertEqual((counts["skipped_launch_window"], counts["skipped_existing_marker"]), (1, 1))
+        self.assertIsNone(cohorts.read_marker(late.organization))
+        self.assertTrue(cohorts.is_new_journey(late.organization))
+
+
+@override_settings(**ALL_P1_FLAGS_ON)
+class AfterApplyTests(TestCase):
+    def test_new_journey_state_added_after_apply_never_counts(self):
+        fresh = make_history_free_org()
+        self.assertEqual(apply_markers()["new_journey"], 1)
+        assigned = parse_assigned_at(fresh.organization)
+        later = assigned + timedelta(minutes=1)
+        written_article(fresh.organization, created_at=later)
+        run = ContentFactoryRun.objects.create(run_id=f"run-{uuid4().hex[:10]}", workflow="article_generation",
+                                               domain=fresh.organization.domain, organization=fresh.organization,
+                                               status="awaiting_approval")
+        ContentFactoryRun.objects.filter(pk=run.pk).update(created_at=later)
+        channel = NotificationChannel.objects.create(organization=fresh.organization, channel_type="email",
+                                                     route_id="a@synthetic.example.test")
+        NotificationChannel.objects.filter(pk=channel.pk).update(created_at=later)
+        row, report, code = row_for(fresh.organization)
+        self.assertEqual((row["effectiveCohort"], row["priorState"], row["losingAnAction"]), ("new_journey", [], False))
+        self.assertEqual((code, report["legacy_orgs_losing_an_action"]), (0, 0))
+        out, code = run_command()
+        self.assertEqual((code, out.strip().splitlines()[-1]), (0, "legacy_orgs_losing_an_action: 0"))
+
+
+def parse_assigned_at(org):
+    from django.utils.dateparse import parse_datetime
+    return parse_datetime(cohorts.read_marker(org)["assignedAt"])
+
+
+@override_settings(**ALL_P1_FLAGS_ON)
+class IslandRefreshEnrolmentTests(TestCase):
+    """--apply never creates a config row that would enrol an org in the island refresh."""
+
+    def _research(self, org):
+        ResearchedKeyword.objects.create(organization=org, keyword="kw", keyword_normalized="kw", volume=100)
+        ContentIsland.objects.create(organization=org, slug="island", name="Island", pillar_keyword="island",
+                                     status=ContentIslandStatus.VISIBLE, centroid_embedding=[1.0, 0.0])
+
+    def _no_config_org(self, domain):
+        org = Organization.objects.create(domain=domain, name="No config")
+        Organization.objects.filter(pk=org.pk).update(created_at=PRE_LAUNCH)
+        org.refresh_from_db()
+        return org
+
+    def test_apply_leaves_eligibility_unchanged(self):
+        legacy = self._no_config_org("legacy-research.example.test")
+        written_article(legacy)
+        self._research(legacy)
+        quiet = self._no_config_org("quiet-research.example.test")
+        self._research(quiet)
+        eligible_before = [config.organization_id for config in island_refresh_scheduler._eligible_configs()]
+
+        counts = apply_markers()
+
+        self.assertEqual(counts["legacy_no_config"], 2)
+        self.assertFalse(OrganizationContentConfig.objects.filter(organization__in=[legacy, quiet]).exists())
+        self.assertEqual([config.organization_id for config in island_refresh_scheduler._eligible_configs()],
+                         eligible_before)
+        for org in (legacy, quiet):
+            with self.subTest(domain=org.domain):
+                self.assertEqual(cohorts.cohort(org), "legacy")
+                self.assertFalse(cohorts.is_new_journey(org))
+        _, report, code = row_for(legacy)
+        self.assertEqual((code, report["legacy_orgs_losing_an_action"]), (0, 0))
+        self.assertEqual(apply_markers()["legacy_no_config"], 2)  # still idempotent
