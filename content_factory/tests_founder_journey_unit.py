@@ -20,6 +20,8 @@ from workflow_runs.models import ContentFactoryRun
 
 from . import first_article_entitlement as first_article
 from . import founder_journey as journeys
+from . import founder_notification_outbox as outbox
+from . import website_setup_owner_approval as owner_approval
 from . import vibe_marketing_views as views
 from .founder_journey_testing import ALL_P1_FLAGS_ON, make_named_legacy_org, make_new_journey_org
 from .models import ArticlePublishStatus, WrittenArticle
@@ -149,9 +151,9 @@ class ContractFixtureTests(JourneyFixture, TestCase):
 
     def test_05_setup_needing_the_owner_click(self):
         run = self.setup_run("awaiting_approval")
-        stub = SimpleNamespace(requires_owner_click=lambda org: True)
-        with patch.object(journeys, "_owner_click_module", return_value=stub):
-            body = self.journey()
+        # The real be-github-b module: every new-journey startup needs the owner click.
+        self.assertTrue(owner_approval.requires_owner_click(self.org))
+        body = self.journey()
         self.assertStep(body, "setup", "your_turn", ask="approve_setup")
         self.assertEqual((body["headline"], body["body"], body["action"]["label"], body["runId"]),
                          ("Your blog page is ready", "Take a look, then add it to your website.", "Take a look",
@@ -554,18 +556,60 @@ class EmailClauseTests(JourneyFixture, TestCase):
             body = self.journey()
         self.assertNotIn(journeys.EMAIL_CLAUSE, body["body"])
 
-    def test_a_missing_outbox_module_means_no_email(self):
-        with patch.object(journeys.importlib, "import_module", side_effect=ImportError):
-            self.assertFalse(journeys.draft_ready_notifications(self.org, self.owner))
+    def test_the_real_outbox_says_no_without_a_sender_or_with_its_flag_off(self):
+        """be-draft's ``can_notify``: no Resend key, or the outbox flag off, means no email clause."""
+        make_run(self.org, status="running", step="write_article")
+        for label, flags in (("no sender", {"RESEND_API_KEY": ""}),
+                             ("flag off", {"RESEND_API_KEY": "re_test", "ARTICLES_DRAFT_READY_NOTIFICATIONS_ENABLED": False}),
+                             ("v2 off", {"RESEND_API_KEY": "re_test", "MY_STARTUP_FOUNDER_JOURNEY_V2_ENABLED": False})):
+            with self.subTest(label), override_settings(**flags):
+                self.assertFalse(outbox.can_notify(self.org, self.owner))
+                self.assertFalse(journeys.draft_ready_notifications(self.org, self.owner))
+                if label != "v2 off":
+                    body = self.journey()
+                    self.assertFalse(body["draftReadyNotifications"])
+                    self.assertEqual(body["body"], "Writing your article.")
 
-    def test_a_present_outbox_module_is_asked(self):
-        module = SimpleNamespace(can_notify=lambda org, user: True)
-        with patch.object(journeys.importlib, "import_module", return_value=module):
-            self.assertTrue(journeys.draft_ready_notifications(self.org, self.owner))
+    @override_settings(RESEND_API_KEY="re_test")
+    def test_the_real_outbox_says_yes_and_the_clause_appears(self):
+        """be-draft's ``can_notify`` with the flag, V2, a sender and an owner email: the clause appears."""
+        make_run(self.org, status="running", step="write_article")
+        self.assertTrue(outbox.can_notify(self.org, self.owner))
+        body = self.journey()
+        self.assertTrue(body["draftReadyNotifications"])
+        self.assertEqual(body["body"], f"Writing your article. {journeys.EMAIL_CLAUSE}")
 
-    def test_a_missing_owner_click_module_means_only_the_registry_mapping(self):
+    @override_settings(RESEND_API_KEY="re_test")
+    def test_the_real_outbox_never_puts_the_clause_on_a_failure_or_retry(self):
+        self.assertTrue(outbox.can_notify(self.org, self.owner))
+        make_run(self.org, status="failed", result={"failure_class": "permanent"})
+        failed = self.journey()
+        self.assertTrue(failed["draftReadyNotifications"])
+        self.assertNotIn(journeys.EMAIL_CLAUSE, failed["body"] or "")
+        make_run(self.org, status="failed", result={"failure_class": "transient", "recovery": {"state": "pending"}})
+        retrying = self.journey()
+        self.assertEqual(retrying["stage"], "writing")
+        self.assertNotIn(journeys.EMAIL_CLAUSE, retrying["body"] or "")
+
+    def test_the_real_owner_approval_moves_the_setup_past_the_owner_click(self):
+        """be-github-b's receipt for this exact run ends the approve_setup ask."""
+        self.connection(verified=False)
+        run = self.setup_run("awaiting_approval")
+        self.assertStep(self.journey(), "setup", "your_turn", ask="approve_setup")
+        # A receipt for another run still asks.
+        owner_approval.on_owner_setup_approve(organization=self.org, user=self.owner,
+                                              run=SimpleNamespace(run_id="another-run"), data={})
+        self.assertStep(self.journey(), "setup", "your_turn", ask="approve_setup")
+        self.assertEqual(owner_approval.on_owner_setup_approve(organization=self.org, user=self.owner, run=run, data={}),
+                         {"merge": "auto"})
+        body = self.journey()
+        self.assertStep(body, "publishing", "working")
+        self.assertEqual((body["holdingReason"], body["website"]["publishAutomatically"]),
+                         ("website_update", "in_progress"))
+
+    def test_the_real_owner_approval_check_failing_keeps_the_registry_mapping(self):
         self.setup_run("awaiting_approval")
-        with patch.object(journeys.importlib, "import_module", side_effect=ImportError):
+        with patch.object(owner_approval, "requires_owner_click", side_effect=RuntimeError("boom")):
             body = self.journey()
         self.assertStep(body, "first_article", None, next_kind="write_first_article")
 

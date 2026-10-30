@@ -772,8 +772,11 @@ def _setup_decision(*, organization, company, config, user, marker, connection, 
         pull_request = _mapping(facts.get("setupPullRequest"))
         approved_run = _setup_run(organization, approval.get("runId")) if approval.get("runId") else None
         url = pull_request.get("prUrl") if pull_request.get("runId") == approval.get("runId") else None
+        # An approved setup run completes once its pull request is open; it
+        # still waits on GitHub until that pull request merges.
         url = url or (_pull_request_url(approved_run) if approved_run is not None
-                      and approved_run.status not in {"completed"} | SETUP_STOPPED_STATUSES else None)
+                      and approved_run.status not in SETUP_STOPPED_STATUSES and not _setup_merged(approved_run)
+                      else None)
         if url:
             return _decide("setup", "your_turn", "approve_on_github", action="approve_on_github",
                            run_id=approval.get("runId"), url=url)
@@ -793,6 +796,14 @@ def _setup_decision(*, organization, company, config, user, marker, connection, 
         elif operation.get("actionId") in RETIRED_ACTIONS:
             logger.info("founder_journey_retired_action org=%s action=%s", organization.pk, operation.get("actionId"))
     return None
+
+
+def _setup_merged(run) -> bool:
+    """True when a setup run's change has merged (its pull request no longer waits on GitHub)."""
+    result = _result(run)
+    setup = _mapping(result.get("article_system_setup"))
+    return "merged" in {result.get("merge_status"), result.get("mergeStatus"), setup.get("merge_status"),
+                        setup.get("mergeStatus")}
 
 
 def _latest_run_updated_at(organization):
