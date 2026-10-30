@@ -2,6 +2,7 @@
 
 import base64
 import json
+import logging
 import re
 from datetime import timedelta
 from urllib.parse import quote
@@ -16,6 +17,8 @@ from .website_connections import authority_guard, contract_for, require_unlocked
 from .website_contract import WebsiteAuthorityError, evidence_digest
 from .website_models import WebsiteConnectionOperation
 from .website_publishing_inputs import has_candidate
+
+logger = logging.getLogger(__name__)
 
 
 IDENTITY_FIELDS = ("website_connection_id", "connection_generation", "repository_id", "operation_id", "operation_attempt", "deletion_epoch",
@@ -414,6 +417,148 @@ def verify_live_deployment(config, *, data):
         from .website_prepare import wake_prepare_after_commit
         wake_prepare_after_commit(website.pk)
         return op
+
+
+def _require_live_url_lineage(website, source_sha, setup_run_id):
+    """A changed source must be a reviewed setup's own merge, or contain a reviewed head.
+
+    The same lineage rule CI attestation applies: a live page never certifies
+    source MLAI did not review.
+    """
+    from workflow_runs.models import ContentFactoryRun
+    rows = ContentFactoryRun.objects.filter(organization_id=website.organization_id, workflow="article_system_setup",
+        run_request__website_connection_id=str(website.pk), run_request__connection_generation=website.generation)
+    run_ids = [setup_run_id] if setup_run_id else []
+    run_ids += [run_id for run_id in rows.order_by("-updated_at").values_list("run_id", flat=True)[:5] if run_id not in run_ids]
+    if any(_setup_merged_at(website, run_id, source_sha) for run_id in run_ids):
+        return
+    heads = list(website.repository_mutations.filter(generation=website.generation, status="applied",
+        run_id__in=run_ids).exclude(head_sha="").values_list("head_sha", flat=True))
+    if not heads:
+        raise WebsiteAuthorityError("website_source_review_required", "Review the changed source before activating articles.")
+    verify_reviewed_source_lineage(website, heads, source_sha)
+
+
+def _live_url_detail(organization, domain):
+    """Compare one live article with its saved body; the observation, or None when none matches.
+
+    The newest live articles are tried in turn, so an article revised, edited,
+    moved or taken down after publishing never blocks the website's proof:
+    the listing marker already proves the reviewed setup is deployed. An
+    unreachable host is still a transient failure.
+    """
+    from urllib.parse import urlsplit
+    from .article_live_evidence import compare_live_body
+    from .website_live_fetch import fetch_live_route
+    from .website_live_verification import detail_candidates
+    for article, expected_html in detail_candidates(organization):
+        try:
+            page, _ = fetch_live_route(article.live_url, domain, expected_status=200)
+        except WebsiteAuthorityError as exc:
+            if exc.code == "deployment_route_transient":
+                raise
+            continue
+        try:
+            observed = compare_live_body(expected_html, page, canonical_url=article.live_url)
+        except ValueError:
+            continue
+        if observed.get("state") == "verified":
+            return {"kind": "detail", "path": urlsplit(article.live_url).path, "status": 200,
+                "body_sha256": observed.get("observed_body_sha256")}
+    return None
+
+
+def verify_live_url_deployment(config, target, *, setup_run_id=""):
+    """Record a new-journey website's live-URL proof (``website_live_verification.verify_live_url``).
+
+    Requires the target's own build proof first, so a page that shows the
+    kit's marker never certifies a build MLAI did not verify, then the
+    reviewed marker on the live listing. The build proof is kept and the live
+    proof is written beside it.
+    """
+    from . import website_live_verification as live
+    from .website_live_fetch import fetch_live_route
+    from .website_connections import verify_repository_head
+    from .website_contract import SHA_PATTERN
+    website = config.website_connection
+    if website is None:
+        raise WebsiteAuthorityError("website_connection_required", "Select and authorize your website repository first.")
+    if target is None or not live.applicable(target) or not live.build_proof(target):
+        raise WebsiteAuthorityError("verified_target_required", "Waiting for articles build and render proof.", retryable=True)
+    source_sha = str(target.source_sha or "")
+    contract = dict(target.contract or {})
+    route = str(contract.get("route_path") or contract.get("public_path") or "")
+    digest = live.artifact_digest(contract)
+    if not SHA_PATTERN.fullmatch(source_sha):
+        raise WebsiteAuthorityError("verified_target_required", "Waiting for articles build and render proof.", retryable=True)
+    if not route.startswith("/"):
+        raise WebsiteAuthorityError("public_route_required", "The target needs an explicit public route.")
+    if not digest or not contract.get("contract_digest"):
+        raise WebsiteAuthorityError("deployment_marker_required", "Prepare a certified route with a reviewed artifact digest marker.")
+    binding = {**contract_for(website), "source_sha": source_sha, "target_id": target.target_key,
+        "contract_digest": contract["contract_digest"], "method": live.METHOD}
+    with authority_guard(binding, action="read") as current:
+        current_target = current.targets.filter(generation=current.generation, target_key=target.target_key).first()
+        if current_target is None or current_target.contract != target.contract or current_target.source_sha != source_sha:
+            raise WebsiteAuthorityError("website_configuration_changed", "The verified target changed during the live check.")
+        changed_source = current.verified_sha != source_sha
+        domain = current.organization.domain
+        organization = current.organization
+    require_unlocked_remote_call()
+    verify_repository_head(website, source_sha)
+    if changed_source:
+        _require_live_url_lineage(website, source_sha, setup_run_id)
+    url = f"https://{domain}{route}"
+    body, headers = fetch_live_route(url, domain, expected_status=200)
+    if not live.marker_present(digest, body, headers):
+        raise WebsiteAuthorityError("live_route_unavailable", "The public blog page has not deployed this reviewed articles setup yet.")
+    observations = [{"kind": "listing", "path": route, "status": 200}]
+    detail = _live_url_detail(organization, domain)
+    if detail is not None:
+        observations.append(detail)
+    now = timezone.now()
+    receipt = {"status": "passed", "method": live.METHOD, "attestation_origin": live.ORIGIN, "provider_verified": False,
+        "source_sha": source_sha, "connection_generation": website.generation, "target_id": target.target_key,
+        "public_url": url, "checked_at": now.isoformat(), "artifact_digest": digest,
+        "contract_digest": contract["contract_digest"], "verified_routes": observations}
+    with authority_guard(binding, action="read") as current:
+        target = current.targets.filter(generation=current.generation, target_key=binding["target_id"]).first()
+        if (target is None or target.contract != current_target.contract or target.source_sha != source_sha
+                or not live.build_proof(target) or not live.applicable(target)):
+            raise WebsiteAuthorityError("website_configuration_changed", "The verified target changed during the live check.")
+        target.verified_at = now
+        target.contract = {**target.contract, live.PROOF_KEY: {"status": "verified", "attestation_origin": live.ORIGIN,
+            "observed_at": now.isoformat(), "source_sha": source_sha, "target_id": target.target_key,
+            "contract_digest": contract["contract_digest"], "artifact_digest": digest, "public_url": url,
+            "detail_compared": detail is not None}}
+        target.capabilities = {**(target.capabilities or {}), "publishingReady": True, "previewSupported": True}
+        target.save(update_fields=["verified_at", "contract", "capabilities", "updated_at"])
+        from .models import OrganizationContentConfig
+        saved = OrganizationContentConfig.objects.get(website_connection=current)
+        if not saved.default_publish_target_id:
+            saved.default_publish_target_id = target.target_key
+        saved.publish_targets = [row for row in (saved.publish_targets or []) if row.get("target_id") != target.target_key] + [target.contract]
+        saved.save(update_fields=["default_publish_target_id", "publish_targets", "updated_at"])
+        if current.verified_sha != source_sha:
+            previous_revision = current.configuration_version
+            current.configuration_version += 1
+            from .website_goal_scope import record_source_transition
+            record_source_transition(current, previous_revision=previous_revision, source_sha=source_sha)
+        current.verified_sha, current.last_verified_at = source_sha, now
+        current.blockers = [row for row in current.blockers if row.get("code") != "repository_source_changed"]
+        connected = current.state == "connected"
+        current.capabilities = {**(current.capabilities or {}), "publishingReady": connected,
+            "generationReady": connected, "previewSupported": True}
+        current.save(update_fields=["verified_sha", "last_verified_at", "configuration_version", "blockers", "capabilities", "updated_at"])
+        operation, _ = WebsiteConnectionOperation.objects.update_or_create(
+            idempotency_key=f"{current.pk}:live-url:{evidence_digest(binding)}", defaults={
+                "connection": current, "generation": current.generation, "action": "deployment-verify",
+                "state": "completed", "payload": binding, "receipt": receipt})
+        from .website_prepare import wake_prepare_after_commit
+        wake_prepare_after_commit(current.pk)
+    logger.info("website_live_url_verified org=%s connection=%s target=%s detail=%s", current.organization_id, current.pk,
+        target.target_key, "compared" if detail is not None else "none")
+    return {**receipt, "operation_id": str(operation.pk)}
 
 
 class WebsiteCiAttestationView(APIView):

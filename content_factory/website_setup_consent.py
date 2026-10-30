@@ -79,6 +79,11 @@ def setup_plan(context, config, journey):
     selection=choose_page(goals.mapping(journey).get("discovery"))
     grants=goals.mapping(goals.mapping(journey).get("githubPermissions"))
     ci_mode="hosted" if getattr(settings,"ARTICLES_HOSTED_ATTESTATION_ENABLED",False) and getattr(settings,"ARTICLES_HOSTED_VERIFICATION_ENABLED",False) else "repository"
+    from .website_live_verification import selected as live_url_selected
+    if live_url_selected(context.organization):
+        # New-journey sites are verified by MLAI's build and their live pages,
+        # so GitHub is never asked for Workflows, Checks or Statuses (IF-P1-16).
+        ci_mode="hosted"
     required=required_grants(ci_mode=ci_mode)
     url=grants.get("settingsUrl")
     from urllib.parse import urlsplit

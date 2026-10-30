@@ -153,8 +153,10 @@ def live_deployment_verified(connection, target, *, now=None):
     now = now or timezone.now()
     contract = mapping(target.contract)
     from .website_sealed_workflow import required
+    from .website_live_verification import accepted as live_url_accepted
     execution_proof = None
-    if required(connection, target):
+    # A new-journey site's live-URL receipt stands in for CI execution proof.
+    if required(connection, target) and not live_url_accepted(connection, target):
         from .website_verification import current_ci_attestation
         execution_proof = current_ci_attestation(connection, target)
         if execution_proof is None:
@@ -209,7 +211,8 @@ def durable_integration_evidence(config, connection, *, now=None):
             or target.verified_at > now + timedelta(minutes=5) or now - target.verified_at > VERIFICATION_MAX_AGE):
         return {**base, "reasonCode": "verification_stale"}
     from .website_sealed_workflow import required
-    if required(connection, target):
+    from .website_live_verification import accepted as live_url_accepted
+    if required(connection, target) and not live_url_accepted(connection, target):
         from .website_verification import current_ci_attestation
         if current_ci_attestation(connection, target) is None:
             return {**base, "reasonCode": "verification_required"}

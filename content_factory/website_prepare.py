@@ -197,6 +197,10 @@ def start_prepare(config, *, expected=None, company_id=None, user=None, retry=Fa
     connection = config.website_connection
     if connection is None:
         raise WebsiteAuthorityError("website_connection_required", "Select and authorize your website repository first.")
+    # A new-journey setup never merges without the owner's click, and that
+    # stays true even if V2 is later switched off (G10).
+    from .website_setup_owner_approval import require_owner_click
+    require_owner_click(getattr(connection, "organization", None))
     binding = {**(contract_for(connection) if expected is None else expected)}
     if getattr(connection, "organization", None):
         binding.update(domain=connection.organization.domain, github_repo=connection.github_repo)
@@ -652,6 +656,12 @@ def _owner_request(op, context, config, step, *, user, journey=None):
         from .website_hosted_build import enabled as hosted_enabled
         if valid_consent(op.receipt["goal"]) and hosted_enabled(connection):
             data["verification_mode"] = op.receipt["goal"]["consent"]["answers"]["ci_mode"]
+    elif step == "setup":
+        from .website_live_verification import selected as live_url_selected
+        if live_url_selected(getattr(context, "organization", None)):
+            # MLAI builds the exact merged source and checks the live site; the
+            # setup writes no workflow file into the founder's repository.
+            data["verification_mode"] = "hosted"
     if step == "setup":
         mode, surface = _merged_setup_surface(op, config) or _superseded_setup_surface(op, config) or _setup_surface(
             config, journey or journey_for_context(context, config), goal=op.receipt.get("goal"))
@@ -732,6 +742,12 @@ def attach_selected_setup_run(config, run, *, company_id):
 
 def _dispatch_prepare_step(op, context, config, step, *, user, journey=None):
     from .vibe_marketing_views import VibeMarketingScanView, VibeMarketingArticleSystemSetupView, _article_capabilities_for_context
+    from .website_live_verification import selected as live_url_selected
+    live_url = live_url_selected(getattr(context, "organization", None)) and "goal" not in op.receipt
+    if step == "permissions" and live_url:
+        # Live-URL verification needs no workflow or CI grant, so a new-journey
+        # founder is never sent back to GitHub for one.
+        return {"status": "completed"}
     if step == "permissions":
         grants = (journey or {}).get("githubPermissions") or {}
         prerequisite = (journey or {}).get("prerequisites", {}).get("permissions") or {}
@@ -764,6 +780,15 @@ def _dispatch_prepare_step(op, context, config, step, *, user, journey=None):
     repository = (journey or {}).get("repository") or {}
     receipt = current_ci_attestation(website, target, capabilities={"repositorySourceSha": repository.get("observedSourceSha"),
         "repositoryBranch": repository.get("branch")}) if step == "verify" else None
+    from .website_live_verification import applicable as live_url_applicable
+    if live_url and receipt is None and live_url_applicable(target):
+        # New-journey sites are verified by their live blog page on top of the
+        # scan's build proof. A current hosted proof, when one exists, and a
+        # target that needs sealed execution proof still take the CI path below.
+        from .website_live_verification import verify_live_url
+        verified = verify_live_url(config, target,
+            setup_run_id=op.receipt.get("merged_setup_run_id") or op.receipt.get("setup_run_id") or "")
+        return {"status": "completed", "operation_id": verified["operation_id"]}
     if receipt is None:
         from .website_connections import observed_source_sha
         source_sha = observed_source_sha(website) or repository.get("observedSourceSha") or website.verified_sha
@@ -1268,6 +1293,15 @@ def maybe_merge_prepared_setup(run, context, config, *, user, goal=None):
         "user_action": {"id": "review_setup", "label": "Review and publish", "run_id": run.run_id, "pr_number": number, "url": url}}
     if config.requires_review:
         return publish
+    from .website_setup_owner_approval import may_merge_setup, approved_run_choice
+    organization = getattr(context, "organization", None) or getattr(config, "organization", None)
+    if may_merge_setup(organization=organization, run=run) is False:
+        # The owner's click decides (decision 12). "Let me review it on GitHub"
+        # leaves the pull request for them; without a click nothing merges.
+        if approved_run_choice(organization=organization, run=run) == "manual":
+            return {"status": "needs_user", "message": "Your change is waiting on GitHub. Approve it on GitHub when you're ready.",
+                "user_action": action}
+        return publish
     outcome = _attempt_setup_publish_merge(run=run, context=context, automatic=True)
     kind = outcome.get("outcome")
     if kind in {"merged", "waiting", "auto_merge_pending"}:
@@ -1314,6 +1348,29 @@ def _setup_preview_proven_for_review(run, head_sha):
     )
 
 
+# How long a recorded owner approval may wait for its run to leave approval
+# before preparation offers the review again (the approve may have failed).
+OWNER_APPROVAL_SETTLE = timedelta(minutes=5)
+
+
+def _setup_left_approval(run):
+    """Whether a setup run is past its approval (its approve reached Content Factory)."""
+    return not (run.status in {"awaiting_approval", "approval_required"} or run.approval_state == "approval_required")
+
+
+def _owner_approval_recent(organization, *, now=None):
+    """Whether the owner's recorded setup approval is younger than ``OWNER_APPROVAL_SETTLE``."""
+    from django.utils.dateparse import parse_datetime
+    from . import founder_journey_cohort as cohort
+    marker = cohort.read_marker(organization)
+    approval = marker.get("setupApproval") if isinstance(marker, dict) else None
+    stamp = parse_datetime(str(approval.get("at") or "")) if isinstance(approval, dict) else None
+    if stamp is None or timezone.is_naive(stamp):
+        return False
+    now = now or timezone.now()
+    return now - OWNER_APPROVAL_SETTLE <= stamp <= now + timedelta(minutes=1)
+
+
 def approve_prepared_setup(run, context, config, *, user, goal=None):
     """Use the existing setup control only after exact automatic preview proof."""
     from .website_connections import _verified_setup_run_base, scoped_run_contract, verify_repository_head
@@ -1324,6 +1381,15 @@ def approve_prepared_setup(run, context, config, *, user, goal=None):
         "url": preview.get("url") or (run.result or {}).get("preview_url"), "run_id": run.run_id}}
     if config.requires_review:
         return review
+    from .website_setup_owner_approval import requires_owner_click, approved_run_choice
+    organization = getattr(context, "organization", None) or getattr(config, "organization", None)
+    owner_click = requires_owner_click(organization)
+    if owner_click and approved_run_choice(organization=organization, run=run) is not None and (
+            _setup_left_approval(run) or _owner_approval_recent(organization)):
+        # The owner already pressed "Add to my website" and their approval is
+        # opening the setup pull request. When that approve never reached the
+        # run (it is still awaiting approval), the review is offered again.
+        return {"status": "pending"}
     from .website_hosted_build import enabled as hosted_enabled, current_scan_source
     from .website_setup_consent import valid as valid_consent
     from .website_goal import scope_matches, scope_for, mapping
@@ -1347,6 +1413,10 @@ def approve_prepared_setup(run, context, config, *, user, goal=None):
         if _setup_preview_proven_for_review(run, head) and not (hosted and goal is not None):
             return review
         raise WebsiteAuthorityError("setup_preview_verification_required", "Waiting for exact setup preview proof.", retryable=True)
+    if owner_click:
+        # The preview is proven. Only the owner's "Add to my website" approves
+        # it; preparation never posts that approval itself.
+        return review
     verify_repository_head(website, base)
     data = {**scoped_run_contract(run), "company_id": str(context.company.pk), "configuration_revision": website.configuration_version}
     request = SimpleNamespace(method="POST", user=user, data=data, query_params={}, headers={})
