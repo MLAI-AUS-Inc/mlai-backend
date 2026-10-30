@@ -111,6 +111,9 @@ class FounderToolsCompanyView(APIView):
         return Response(FounderCompanySerializer(companies, many=True).data, status=status.HTTP_200_OK)
 
     def post(self, request):
+        from .one_field_start import one_field_create_requested
+        if one_field_create_requested(request.data):
+            return self._one_field_create(request)
         # The claim check can fail after company rows were written (binding to
         # an existing organisation), so the save runs in its own transaction and
         # the ops alert is queued only once that transaction has rolled back.
@@ -121,7 +124,60 @@ class FounderToolsCompanyView(APIView):
             queue_domain_claim_alert(organization=exc.organization, claimant_user_id=request.user.id)
             return exc.response()
 
-    def _save_company(self, request):
+    def _one_field_create(self, request):
+        """P1.5 (IF-P1-06): create a new-journey startup from one field, once per Idempotency-Key."""
+        from content_factory.founder_journey_cohort import NEW_JOURNEY, assign_on_create, find_company_for_create_key
+        from content_factory.startup_first_profile import record_create
+        from . import one_field_start
+
+        body, error, derived_name = one_field_start.prepare_body(request.data)
+        if error is not None:
+            return Response(error, status=status.HTTP_400_BAD_REQUEST)
+        key_sha = one_field_start.create_key_sha256(request)
+        locked = False
+        if key_sha:
+            locked = one_field_start.acquire_create_lock(request.user.pk, key_sha)
+            if not locked:
+                outcome, company = one_field_start.wait_for_replay(
+                    get_or_create_founder_profile(request.user), request.user.pk, key_sha)
+                if outcome == "replay":
+                    return self._one_field_response(company, status_code=status.HTTP_200_OK)
+                if outcome == "busy":
+                    return Response(one_field_start.CREATE_IN_PROGRESS, status=status.HTTP_409_CONFLICT)
+                locked = True
+        try:
+            with transaction.atomic():
+                profile = get_or_create_founder_profile(request.user)
+                profile = VibeRaisingProfile.objects.select_for_update().get(pk=profile.pk)
+                if key_sha:
+                    existing = find_company_for_create_key(profile, key_sha)
+                    if existing is not None:
+                        return self._one_field_response(existing, status_code=status.HTTP_200_OK)
+                response = self._save_company(request, data=body)
+                if response.status_code != status.HTTP_200_OK:
+                    return response
+                company = VibeRaisingCompany.objects.select_related("organization").get(pk=response.data["id"])
+                cohort = assign_on_create(company.organization, company_id=company.pk, create_key_sha256=key_sha)
+                if cohort == NEW_JOURNEY:
+                    record_create(company.organization, derived_name=derived_name)
+                return self._one_field_response(company, status_code=status.HTTP_201_CREATED, cohort=cohort)
+        except CompanyDomainClaimedError as exc:
+            queue_domain_claim_alert(organization=exc.organization, claimant_user_id=request.user.id)
+            return exc.response()
+        finally:
+            if locked:
+                one_field_start.release_create_lock(request.user.pk, key_sha)
+
+    @staticmethod
+    def _one_field_response(company, *, status_code, cohort=None):
+        from content_factory.founder_journey_cohort import cohort as raw_cohort
+
+        company.refresh_from_db()
+        payload = dict(FounderCompanySerializer(company).data)
+        payload["founderJourney"] = {"version": 1, "cohort": cohort or raw_cohort(company.organization)}
+        return Response(payload, status=status_code)
+
+    def _save_company(self, request, data=None):
         profile = get_or_create_founder_profile(request.user)
         profile = VibeRaisingProfile.objects.select_for_update().get(pk=profile.pk)
         if profile.role != VibeRaisingProfile.ROLE_FOUNDER:
@@ -129,7 +185,7 @@ class FounderToolsCompanyView(APIView):
             profile.organization_name = None
             profile.save(update_fields=["role", "organization_name", "updated_at"])
 
-        serializer = FounderCompanyUpsertSerializer(data=request.data)
+        serializer = FounderCompanyUpsertSerializer(data=request.data if data is None else data)
         serializer.is_valid(raise_exception=True)
         data = serializer.validated_data
         company_id = data.pop("companyId", None)
