@@ -154,14 +154,45 @@ class FirstProfileAutofillRequestTests(_Base, TestCase):
         self.assertIsNone(self.state().get("homepageMeta"))
         self.assertEqual(len(self.dispatched), 1)
 
-    def test_a_no_website_org_is_refused_before_dispatch(self):
+    def make_no_website(self):
         self.org.domain = f"startup-{self.company.pk}.invalid"
         self.org.save()
         VibeRaisingCompany.objects.filter(pk=self.company.pk).update(domain="")
         self.company.refresh_from_db()
-        response, fetcher = self.autofill({"domain": "banksia.studio"})
-        self.assertEqual(response.status_code, 409)
-        self.assertEqual(response.data, {"detail": "Add your website first.", "reason": "no_website"})
+
+    def test_a_no_website_org_is_refused_before_dispatch(self):
+        self.make_no_website()
+        for domain in ("", f"startup-{self.company.pk}.invalid"):
+            with self.subTest(domain=domain):
+                response, fetcher = self.autofill({"domain": domain})
+                self.assertEqual(response.status_code, 409)
+                self.assertEqual(response.data, {"detail": "Add your website first.", "reason": "no_website"})
+                self.assertEqual(self.dispatched, [])
+                fetcher.assert_not_called()
+
+    def test_a_no_website_org_that_brings_its_website_attaches_and_researches_it(self):
+        # The legacy company-setup page posts the typed website for the active
+        # company: that request runs today's attach-and-research path.
+        self.make_no_website()
+        body = {"companyId": str(self.company.pk), "companyName": "Banksia Studio",
+                "domain": "https://banksia.studio/", "location": "Melbourne"}
+        with patch(f"{VIEWS}._require_roo_points_for_ai_agent", return_value=(None, 100)), \
+                patch(f"{VIEWS}._queue_content_factory_run", side_effect=self.fake_queue), \
+                patch(FETCH, return_value=(HOMEPAGE, {})):
+            response = self.client.post(AUTOFILL_URL, body, format="json")
+        self.assertEqual(response.status_code, 202, response.data)
+        self.assertEqual(len(self.dispatched), 1)
+        self.assertNotEqual(self.dispatched[0].get("research_depth"), "first_profile")
+        self.company.refresh_from_db()
+        self.assertEqual(self.company.domain, "banksia.studio")
+
+    def test_the_no_website_refusal_needs_its_own_flag(self):
+        self.make_no_website()
+        with override_settings(MY_STARTUP_NO_WEBSITE_ARTICLES_ENABLED=False):
+            response, fetcher = self.autofill({"domain": ""})
+        # Today's 400 for a request with no website, not the new refusal.
+        self.assertEqual(response.status_code, 400)
+        self.assertNotIn("reason", response.data)
         self.assertEqual(self.dispatched, [])
         fetcher.assert_not_called()
 
@@ -416,6 +447,24 @@ class PollAndSweepTests(_Base, TestCase):
             summary = first_profile.sweep()
         self.assertEqual(summary["applied"], 1, summary)
         self.assertEqual(StartupProfile.objects.get(organization=self.org).short_description, "Native gardens.")
+
+    def test_the_sweep_never_reads_configs_outside_its_window(self):
+        run = self.make_run(status="completed")
+        self.set_state(runId=run.run_id, startedAt=timezone.now().isoformat())
+        OrganizationContentConfig.objects.filter(organization=self.org).update(
+            updated_at=timezone.now() - timedelta(hours=25))
+        with patch.object(first_profile, "read_state", wraps=first_profile.read_state) as read:
+            summary = first_profile.sweep()
+        self.assertEqual(summary["checked"], 0, summary)
+        read.assert_not_called()
+        self.assertIsNone(self.state().get("appliedRunId"))
+
+    def test_the_sweep_scan_is_bounded(self):
+        self.set_state(appliedRunId="done", runId="done")
+        with patch.object(first_profile, "SWEEP_SCAN_LIMIT", 0), \
+                patch.object(first_profile, "read_state", wraps=first_profile.read_state) as read:
+            first_profile.sweep()
+        read.assert_not_called()
 
     def test_the_founder_journey_runner_finds_the_sweep(self):
         from content_factory.founder_journey_sweeps import run_founder_journey_sweeps

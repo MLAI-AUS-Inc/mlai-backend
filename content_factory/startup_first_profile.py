@@ -57,6 +57,8 @@ HOMEPAGE_FETCH_SECONDS = 6
 STALE_RUN_AFTER = timedelta(minutes=15)
 SWEEP_WINDOW = timedelta(hours=24)
 SWEEP_LIMIT = 50
+# Configs read per tick, whatever their state, so the scan never grows with the cohort.
+SWEEP_SCAN_LIMIT = 500
 STATE_VERSION = 1
 MAX_EXISTING_POSTS = 50
 SITE_PLATFORMS = frozenset({"wix", "squarespace", "webflow", "wordpress", "ghost", "framer", "shopify", "nextjs", "unknown"})
@@ -77,6 +79,11 @@ we with you your who what which while will can all any more most new best get ma
 def one_field_start_enabled() -> bool:
     """True when ``MY_STARTUP_ONE_FIELD_START_ENABLED`` is on (code default off)."""
     return bool(getattr(settings, "MY_STARTUP_ONE_FIELD_START_ENABLED", False))
+
+
+def no_website_articles_enabled() -> bool:
+    """True when ``MY_STARTUP_NO_WEBSITE_ARTICLES_ENABLED`` is on (code default off, IF-P1-08)."""
+    return bool(getattr(settings, "MY_STARTUP_NO_WEBSITE_ARTICLES_ENABLED", False))
 
 
 def first_profile_applies(organization, config=None) -> bool:
@@ -310,9 +317,12 @@ def first_profile_gate(profile, data, company_id):
     Returns ``(company, refuse_no_website)``. ``company`` is the founder's own
     new-journey company when ``researchDepth: "first_profile"`` is honoured
     (flag on, new-journey org), else None. ``refuse_no_website`` is True for a
-    new-journey company without a website: no autofill is ever dispatched for
-    it. A legacy company always gets ``(None, False)``, so its request runs
-    exactly as today.
+    new-journey company without a website whose request brings no usable
+    website of its own, while ``MY_STARTUP_NO_WEBSITE_ARTICLES_ENABLED`` is
+    also on (IF-P1-08): nothing is dispatched for it. A request that brings a
+    real domain for such a company runs today's attach-and-research path. A
+    legacy company always gets ``(None, False)``, so its request runs exactly
+    as today.
     """
     if not one_field_start_enabled() or not company_id or profile is None:
         return None, False
@@ -324,9 +334,16 @@ def first_profile_gate(profile, data, company_id):
     if organization is None or not is_new_journey(organization):
         return None, False
     if not organization_has_website(organization):
-        return None, True
+        return None, no_website_articles_enabled() and not _request_has_website(data)
     depth = str(data.get("researchDepth") or data.get("research_depth") or "").strip()
     return (company if depth == FIRST_PROFILE_DEPTH else None), False
+
+
+def _request_has_website(data) -> bool:
+    """True when the autofill body carries a real website (not empty, not a ``.invalid`` placeholder)."""
+    from founder_tools.services import normalize_company_domain
+    domain = normalize_company_domain(data.get("domain"))
+    return bool(domain) and not str(domain).lower().rstrip(".").endswith(".invalid")
 
 
 def _normalised_linkedin(value) -> str:
@@ -552,6 +569,18 @@ def _ensure_seed_keywords(organization, autofill, candidates) -> bool:
         startup_profile.positive_keywords = seeds
         startup_profile.save(update_fields=["positive_keywords", "updated_at"])
     return True
+
+
+def seed_no_website_keywords(organization, *, name="", description="") -> bool:
+    """Seed keywords for a new no-website startup, which never gets an autofill run.
+
+    The one-field create calls this for a ``.invalid`` org so island refresh
+    still has keywords (P1.5). Fills empty keywords only; True when it wrote.
+    """
+    if organization is None or organization_has_website(organization):
+        return False
+    return _ensure_seed_keywords(organization, {}, {
+        "name": _clean(name, 255), "shortDescription": _clean(description, 500), "targetAudience": ""})
 
 
 def _apply_logo(company, site_profile, state) -> bool:
@@ -822,8 +851,11 @@ def sweep(now=None) -> dict:
     if not one_field_start_enabled():
         return {"status": "disabled"}
     applied = retried = checked = 0
-    configs = (OrganizationContentConfig.objects.filter(pillar_strategy__has_key=FIRST_PROFILE_KEY)
-               .select_related("organization").order_by("-updated_at"))
+    # A run started inside the window wrote its state (and bumped updated_at)
+    # inside it too, so older configs are never read.
+    configs = (OrganizationContentConfig.objects
+               .filter(pillar_strategy__has_key=FIRST_PROFILE_KEY, updated_at__gte=now - SWEEP_WINDOW)
+               .select_related("organization").order_by("-updated_at")[:SWEEP_SCAN_LIMIT])
     for config in configs.iterator():
         if checked >= SWEEP_LIMIT:
             break

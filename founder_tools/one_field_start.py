@@ -11,7 +11,8 @@ On this path:
 - ``Idempotency-Key`` makes a double press create one company: a replay within
   24 h returns 200 with the same company, a first create returns 201;
 - the name may be omitted (derived from the website) and the website may be
-  omitted (no website: ``shortDescription`` is then required);
+  omitted (no website: ``shortDescription`` is then required while
+  ``MY_STARTUP_NO_WEBSITE_ARTICLES_ENABLED`` is on);
 - ``timezone`` is stored when it is a valid IANA zone and ignored otherwise;
 - website and LinkedIn input is normalised, never rejected.
 """
@@ -85,7 +86,8 @@ def prepare_body(data):
     """The serializer body for a one-field create.
 
     Returns ``(body, error, derived_name)``: ``error`` is a 400 body when no
-    website and no one-sentence description were given; ``derived_name`` is
+    website and no one-sentence description were given while
+    ``MY_STARTUP_NO_WEBSITE_ARTICLES_ENABLED`` is on; ``derived_name`` is
     the name made from the website when the founder gave none.
     """
     from .services import normalize_company_linkedin_url
@@ -99,7 +101,10 @@ def prepare_body(data):
     alias = body.pop("short_description", None)
     description = body.get("shortDescription") if body.get("shortDescription") is not None else alias
     description = " ".join(str(description or "").split())
-    if not domain and not DESCRIPTION_MIN <= len(description) <= DESCRIPTION_MAX:
+    if (not domain and getattr(settings, "MY_STARTUP_NO_WEBSITE_ARTICLES_ENABLED", False)
+            and not DESCRIPTION_MIN <= len(description) <= DESCRIPTION_MAX):
+        # IF-P1-08: a no-website startup needs its one sentence. With that
+        # flag off this is today's name-only create.
         return None, DESCRIPTION_REQUIRED, None
     if description:
         body["shortDescription"] = description
@@ -159,6 +164,43 @@ def release_create_lock(user_id, key_sha) -> None:
         logger.warning("founder_company_create_unlock_failed", exc_info=True)
 
 
+def _done_key(user_id, key_sha) -> str:
+    return f"founder-company-created:{user_id}:{key_sha}"
+
+
+def remember_create(user_id, key_sha, company_id) -> None:
+    """Remember which company this key created, for 24 h.
+
+    The org marker holds the key only for a new-journey org; a create that
+    binds to an organisation made before launch stays legacy and has no
+    marker, so this cache entry is what lets its retry replay. The view
+    writes it only when no marker carries the key.
+    """
+    from content_factory.founder_journey_cohort import CREATE_KEY_WINDOW_HOURS
+    try:
+        cache.set(_done_key(user_id, key_sha), str(company_id), CREATE_KEY_WINDOW_HOURS * 3600)
+    except Exception:  # noqa: BLE001 - the marker still replays new-journey creates
+        logger.warning("founder_company_create_remember_failed", exc_info=True)
+
+
+def find_created_company(profile, user_id, key_sha):
+    """The company this key already created for this profile within 24 h, or None."""
+    from content_factory.founder_journey_cohort import find_company_for_create_key
+    from .models import VibeRaisingCompany
+
+    company = find_company_for_create_key(profile, key_sha)
+    if company is not None:
+        return company
+    try:
+        company_id = cache.get(_done_key(user_id, key_sha))
+    except Exception:  # noqa: BLE001
+        logger.warning("founder_company_create_recall_failed", exc_info=True)
+        return None
+    if not company_id:
+        return None
+    return VibeRaisingCompany.objects.filter(pk=company_id, profile=profile).select_related("organization").first()
+
+
 def wait_for_replay(profile, user_id, key_sha):
     """Wait for the in-flight create with this key.
 
@@ -166,12 +208,10 @@ def wait_for_replay(profile, user_id, key_sha):
     when the other request finished without one (the caller now holds the
     lock and creates), or ``("busy", None)`` after the wait.
     """
-    from content_factory.founder_journey_cohort import find_company_for_create_key
-
     deadline = time.monotonic() + REPLAY_WAIT_SECONDS
     while time.monotonic() < deadline:
         try:
-            company = find_company_for_create_key(profile, key_sha)
+            company = find_created_company(profile, user_id, key_sha)
         except OperationalError:
             company = None
         if company is not None:

@@ -115,6 +115,24 @@ class FounderJourneyBootstrapTests(_Client, TestCase):
         self.assertNotIn("founderJourney", off)
         self.assertEqual({key: value for key, value in on.items() if key != "founderJourney"}, off)
 
+    def test_the_no_domain_bootstrap_reads_no_viewer_with_v2_off_and_the_request_viewer_with_it_on(self):
+        from content_factory import vibe_marketing_views as views
+        user = get_user_model().objects.create_user(email="viewer@example.test", first_name="Ada")
+        client = self.client_for(user)
+        with override_settings(**ALL_P1_FLAGS_ON):
+            created = client.post("/api/v1/founder-tools/companies/", {"name": "Ledger Mates", "createNew": True},
+                                  format="json")
+        company = VibeRaisingCompany.objects.select_related("organization").get(pk=created.data["id"])
+        staff = get_user_model().objects.create_user(email="staff@example.test", is_staff=True)
+        with override_settings(**WITHOUT_V2), patch("content_factory.founder_journey_cohort.public_payload") as payload:
+            views._serialize_bootstrap_without_domain(company)
+        payload.assert_not_called()
+        with override_settings(**ALL_P1_FLAGS_ON):
+            as_staff = views._serialize_bootstrap_without_domain(company, user=staff)
+            as_owner = views._serialize_bootstrap_without_domain(company)
+        self.assertIs(as_staff["founderJourney"]["staffView"], True)
+        self.assertIs(as_owner["founderJourney"]["staffView"], False)
+
     def assert_named_org_unchanged(self, name, marker):
         built = make_named_legacy_org(name, marker=marker)
         for view in ("summary", "full"):

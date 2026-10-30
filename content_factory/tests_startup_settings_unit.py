@@ -203,7 +203,7 @@ class LogoAndBootstrapTests(SimpleTestCase):
             result = views.VibeMarketingBootstrapView().get(Obj(query_params={"companyId": "selected"}))
         self.assertTrue(result["selected"])
         resolve.assert_called_once()
-        serialize.assert_called_once_with(selected)
+        serialize.assert_called_once_with(selected, user=None)
 
     def test_invalid_timezone_fails_before_company_or_settings_mutation(self):
         with patch.object(views, "_resolve_profile_company_or_response") as resolve, self.assertRaises(ValidationError):

@@ -146,6 +146,36 @@ class OneFieldCreateTests(_Base, TestCase):
         self.assertEqual(StartupProfile.objects.get(organization=company.organization).short_description,
                          "Bookkeeping for tradies")
         self.assertEqual(response.data["founderJourney"]["cohort"], "new_journey")
+        # It never gets an autofill run, so its keywords are seeded at create.
+        self.assertTrue(company.organization.seed_keywords)
+        self.assertIn("ledger mates", company.organization.seed_keywords)
+
+    def test_without_the_no_website_flag_a_name_only_create_is_todays(self):
+        with override_settings(MY_STARTUP_NO_WEBSITE_ARTICLES_ENABLED=False):
+            response = self.post({"createNew": True, "firstProfile": True, "name": "Ledger Mates"}, key="k")
+        self.assertEqual(response.status_code, 201, response.data)
+        company = VibeRaisingCompany.objects.select_related("organization").get()
+        self.assertEqual(company.organization.domain, f"startup-{company.pk}.invalid")
+
+    def test_a_create_bound_to_an_older_organisation_still_replays(self):
+        # The org predates launch, so it stays legacy and carries no create
+        # marker: the key is remembered for the replay instead.
+        from founder_tools.services import PREVIOUS_OWNER_KEY
+        from organizations.models import Organization
+        older = Organization.objects.create(name="Older", domain="older.test")
+        Organization.objects.filter(pk=older.pk).update(created_at=timezone.now() - timedelta(days=30))
+        # The founder deleted their startup here before launch and takes it back.
+        OrganizationContentConfig.objects.create(
+            organization=older, pillar_strategy={PREVIOUS_OWNER_KEY: {"user_id": self.user.pk}})
+        body = {"createNew": True, "firstProfile": True, "domain": "older.test"}
+        first = self.post(body, key="press-1")
+        self.assertEqual(first.status_code, 201, first.data)
+        self.assertEqual(first.data["founderJourney"]["cohort"], "legacy")
+        self.assertEqual(VibeRaisingCompany.objects.get().organization_id, older.pk)
+        replay = self.post(body, key="press-1")
+        self.assertEqual(replay.status_code, 200, replay.data)
+        self.assertEqual(replay.data, first.data)
+        self.assertEqual(VibeRaisingCompany.objects.count(), 1)
 
     def test_founder_role_and_founder_one_are_seeded(self):
         VibeRaisingProfile.objects.create(user=self.user, role=VibeRaisingProfile.ROLE_INVESTOR)

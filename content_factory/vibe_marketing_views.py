@@ -12469,11 +12469,12 @@ def _overlay_live_bootstrap_fields(payload, *, context, request, config=None, la
             serialized["workflowProgress"] = progress["runs"][serialized["runId"]]
     # P1 (IF-P1-02): per-viewer and never cached, so the V2 kill switch acts
     # on the next read. Absent while V2 is off; "legacy" for the legacy cohort.
-    from .founder_journey_cohort import public_payload
-    founder_journey = public_payload(context.organization, config=website_config,
-                                     user=getattr(request, "user", None) or context.profile.user)
-    if founder_journey is not None:
-        payload["founderJourney"] = founder_journey
+    from content_factory.founder_journey_cohort import public_payload, v2_enabled
+    if v2_enabled():
+        viewer = getattr(request, "user", None) or getattr(getattr(context, "profile", None), "user", None)
+        founder_journey = public_payload(context.organization, config=website_config, user=viewer)
+        if founder_journey is not None:
+            payload["founderJourney"] = founder_journey
     return payload
 
 
@@ -12813,12 +12814,14 @@ def _serialize_bootstrap_without_domain(company, *, user=None):
         "hasCompletedArticleFlow": False,
         "startPageMode": "first_article_setup",
     }
-    # P1 (IF-P1-02): additive and present only while V2 is on.
-    from .founder_journey_cohort import public_payload
-    founder_journey = public_payload(company.organization if company.organization_id else None,
-                                     user=user if user is not None else company.profile.user)
-    if founder_journey is not None:
-        payload["founderJourney"] = founder_journey
+    # P1 (IF-P1-02): additive and present only while V2 is on. The viewer is
+    # resolved only then, so the flags-off path reads nothing extra.
+    from content_factory.founder_journey_cohort import public_payload, v2_enabled
+    if v2_enabled():
+        viewer = user if user is not None else getattr(getattr(company, "profile", None), "user", None)
+        founder_journey = public_payload(company.organization if company.organization_id else None, user=viewer)
+        if founder_journey is not None:
+            payload["founderJourney"] = founder_journey
 
     # Name-only startups retain profile/context under their synthetic organization.
     # The website-dependent capability gates above remain closed.
@@ -15813,7 +15816,7 @@ class VibeMarketingBootstrapView(APIView):
             return error_response
         if not normalize_company_domain(company.domain):
             return _timed_vibe_response(
-                _serialize_bootstrap_without_domain(company),
+                _serialize_bootstrap_without_domain(company, user=getattr(request, "user", None)),
                 started_at=started_at,
                 metric_name="vibe_bootstrap",
                 view=view,
@@ -16509,7 +16512,7 @@ class VibeMarketingAutofillView(APIView):
         # P1.5 (IF-P1-07): researchDepth "first_profile" is honoured only for a
         # new-journey company with MY_STARTUP_ONE_FIELD_START_ENABLED; a legacy
         # request gets (None, False) and runs exactly as before.
-        from .startup_first_profile import derive_company_name, first_profile_gate
+        from content_factory.startup_first_profile import derive_company_name, first_profile_gate
         first_profile_company, refuse_no_website = first_profile_gate(
             profile, request.data, _company_id_from_request(request))
         if refuse_no_website:
@@ -16697,7 +16700,7 @@ class VibeMarketingAutofillView(APIView):
         }
         if draft_mode:
             # P1.5: a new-journey founder's LinkedIn is normalised or dropped, never rejected.
-            from .startup_first_profile import first_profile_applies
+            from content_factory.startup_first_profile import first_profile_applies
             try:
                 existing_fields = _autofill_draft_existing_fields(
                     existing_fields, request.data, drop_invalid=first_profile_applies(organization, config))
@@ -16748,7 +16751,7 @@ class VibeMarketingAutofillView(APIView):
         if first_profile_company is not None and first_profile_company.pk == company.pk:
             # IF-P1-07: a 90 s draft-mode pass with a fresh request id per
             # attempt; the homepage is read first so the profile is never empty.
-            from .startup_first_profile import dispatch_homepage_meta, first_profile_payload
+            from content_factory.startup_first_profile import dispatch_homepage_meta, first_profile_payload
             payload = first_profile_payload(payload, company=company)
             first_profile_meta = dispatch_homepage_meta(organization)
         else:
@@ -16768,7 +16771,7 @@ class VibeMarketingAutofillView(APIView):
         )
         _record_free_setup_research(request.user, action="startup_autofill", gate_balance=gate_balance, run=run)
         if first_profile_company is not None:
-            from .startup_first_profile import record_dispatch
+            from content_factory.startup_first_profile import record_dispatch
             record_dispatch(organization, run, meta=first_profile_meta)
         return _autofill_start_response(
             run, reused_active_run=False, research_company_id=company.id
@@ -18455,7 +18458,7 @@ class VibeMarketingRunView(APIView):
         if run.workflow == "startup_autofill":
             # P1.5 (IF-P1-07): a terminal first-profile run fills the profile
             # once. No-op unless the flag is on and the org is new-journey.
-            from .startup_first_profile import apply_on_poll
+            from content_factory.startup_first_profile import apply_on_poll
             apply_on_poll(run)
         payload = _serialize_run(run, context=context, mode=view)
         if (run.run_request or {}).get("island_research_brief") and _run_pending_remote_dispatch(run):

@@ -126,8 +126,8 @@ class FounderToolsCompanyView(APIView):
 
     def _one_field_create(self, request):
         """P1.5 (IF-P1-06): create a new-journey startup from one field, once per Idempotency-Key."""
-        from content_factory.founder_journey_cohort import NEW_JOURNEY, assign_on_create, find_company_for_create_key
-        from content_factory.startup_first_profile import record_create
+        from content_factory.founder_journey_cohort import NEW_JOURNEY, assign_on_create, read_marker
+        from content_factory.startup_first_profile import record_create, seed_no_website_keywords
         from . import one_field_start
 
         body, error, derived_name = one_field_start.prepare_body(request.data)
@@ -150,7 +150,7 @@ class FounderToolsCompanyView(APIView):
                 profile = get_or_create_founder_profile(request.user)
                 profile = VibeRaisingProfile.objects.select_for_update().get(pk=profile.pk)
                 if key_sha:
-                    existing = find_company_for_create_key(profile, key_sha)
+                    existing = one_field_start.find_created_company(profile, request.user.pk, key_sha)
                     if existing is not None:
                         return self._one_field_response(existing, status_code=status.HTTP_200_OK)
                 response = self._save_company(request, data=body)
@@ -160,6 +160,13 @@ class FounderToolsCompanyView(APIView):
                 cohort = assign_on_create(company.organization, company_id=company.pk, create_key_sha256=key_sha)
                 if cohort == NEW_JOURNEY:
                     record_create(company.organization, derived_name=derived_name)
+                    seed_no_website_keywords(company.organization, name=company.name,
+                                             description=body.get("shortDescription"))
+                if key_sha and (read_marker(company.organization) or {}).get("createKeySha256") != key_sha:
+                    # No marker holds this key (the create bound to an older,
+                    # legacy organisation), so remember it for the replay. A
+                    # rolled-back create leaves an id no lookup finds.
+                    one_field_start.remember_create(request.user.pk, key_sha, company.pk)
                 return self._one_field_response(company, status_code=status.HTTP_201_CREATED, cohort=cohort)
         except CompanyDomainClaimedError as exc:
             queue_domain_claim_alert(organization=exc.organization, claimant_user_id=request.user.id)
