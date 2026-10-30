@@ -12458,6 +12458,13 @@ def _overlay_live_bootstrap_fields(payload, *, context, request, config=None, la
     for serialized in payload.get("latestRuns") or []:
         if serialized.get("runId") in progress["runs"]:
             serialized["workflowProgress"] = progress["runs"][serialized["runId"]]
+    # P1 (IF-P1-02): per-viewer and never cached, so the V2 kill switch acts
+    # on the next read. Absent while V2 is off; "legacy" for the legacy cohort.
+    from .founder_journey_cohort import public_payload
+    founder_journey = public_payload(context.organization, config=website_config,
+                                     user=getattr(request, "user", None) or context.profile.user)
+    if founder_journey is not None:
+        payload["founderJourney"] = founder_journey
     return payload
 
 
@@ -12676,7 +12683,7 @@ def _compute_bootstrap_payload(context, request=None, *, view="summary", config=
     }
 
 
-def _serialize_bootstrap_without_domain(company):
+def _serialize_bootstrap_without_domain(company, *, user=None):
     checks = {
         "account": {"passed": True},
         "websiteProfile": {
@@ -12797,6 +12804,12 @@ def _serialize_bootstrap_without_domain(company):
         "hasCompletedArticleFlow": False,
         "startPageMode": "first_article_setup",
     }
+    # P1 (IF-P1-02): additive and present only while V2 is on.
+    from .founder_journey_cohort import public_payload
+    founder_journey = public_payload(company.organization if company.organization_id else None,
+                                     user=user if user is not None else company.profile.user)
+    if founder_journey is not None:
+        payload["founderJourney"] = founder_journey
 
     # Name-only startups retain profile/context under their synthetic organization.
     # The website-dependent capability gates above remain closed.

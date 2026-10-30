@@ -77,8 +77,15 @@ class FounderToolsBootstrapView(APIView):
 
 class FounderToolsProfileView(APIView):
     def get(self, request):
+        from content_factory.founder_journey_cohort import account_payload
+
         profile = get_or_create_founder_profile(request.user)
-        return Response(FounderProfileSerializer(profile).data, status=status.HTTP_200_OK)
+        payload = FounderProfileSerializer(profile).data
+        # P1 (IF-P1-02): additive, present only while V2 is on.
+        founder_journey = account_payload(request.user)
+        if founder_journey is not None:
+            payload = {**payload, "founderJourney": founder_journey}
+        return Response(payload, status=status.HTTP_200_OK)
 
     def put(self, request):
         return self._upsert(request)
