@@ -10,6 +10,7 @@ from content_factory.article_system import (
     resolve_article_system_with_source,
 )
 from content_factory.models import ContentFactoryJob, OrganizationContentConfig
+from content_factory.article_voice import article_voice_for_dispatch
 from content_factory.authors import (
     author_profile_for_renderer,
     normalize_authors,
@@ -2703,8 +2704,15 @@ def trigger_article_generation(
         payload["author"] = effective_author
         payload["default_author_name"] = effective_author.get("name", "")
         payload["default_author_profile"] = author_profile_for_renderer(effective_author)
+    # Voice: the founder's saved article voice, so Slack and daily discovery write the same way.
+    article_voice = article_voice_for_dispatch(getattr(config, "pillar_strategy", None) if config else None)
+    if article_voice:
+        payload["article_voice"] = article_voice
 
     masked_payload = payload.copy()
+    if article_voice:
+        # Founder free text stays out of logs; the digest identifies the voice.
+        masked_payload["article_voice"] = {"sha256": article_voice["sha256"]}
     logger.info(f"Triggering article generation at {generate_endpoint} with payload: {masked_payload}")
     charged_user, charge_ledger, charge_amount = _charge_content_factory_request(
         slack_user_id,

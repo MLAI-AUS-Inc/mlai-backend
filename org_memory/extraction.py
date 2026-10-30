@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from .slack_privacy import source_is_members
+
 import hashlib
 import json
 import re
@@ -762,7 +764,8 @@ def extract_source_version(*, source_version, provider: Optional[ExtractionProvi
             "created": False,
         }
     if (
-        not source_version.is_current
+        source_is_members(source_version.source)
+        or not source_version.is_current
         or source_version.tombstoned_at is not None
         or source_version.source.lifecycle_state != MemorySourceLifecycle.ACTIVE
         or source_version.classification == MemoryClassification.NO_AGENT
@@ -1097,7 +1100,8 @@ def extract_source_version(*, source_version, provider: Optional[ExtractionProvi
 def schedule_source_extraction(*, source_version, target=None) -> dict:
     target = target or configured_extraction_target()
     if (
-        not source_version.is_current
+        source_is_members(source_version.source)
+        or not source_version.is_current
         or source_version.classification == MemoryClassification.NO_AGENT
         or source_version.source.lifecycle_state != MemorySourceLifecycle.ACTIVE
         or not source_version.chunks.filter(active_for_retrieval=True).exists()

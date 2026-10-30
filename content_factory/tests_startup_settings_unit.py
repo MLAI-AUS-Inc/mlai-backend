@@ -50,12 +50,12 @@ class RepositorySelectionTests(SimpleTestCase):
         return repositories.VibeMarketingGitHubRepositoryView.put.__wrapped__(
             repositories.VibeMarketingGitHubRepositoryView(), request)
 
-    def test_selection_verifies_prospective_repo_before_persist_and_invalidates_readiness(self):
+    def test_new_selection_binds_through_founder_installations_and_invalidates_readiness(self):
         response = self.call("new/site")
         self.assertEqual(response.status_code, 200)
-        candidate = self._verify_github_repository_access.call_args.args[1]
-        self.assertEqual(candidate.github_repo, "new/site")
-        self.assertIsNot(candidate, self.config)
+        # The connection-scoped probe cannot mint before a connection exists, so
+        # bind_website's installation check is the only access proof.
+        self._verify_github_repository_access.assert_not_called()
         self.assertEqual(self.config.github_repo, "new/site")
         self.assertNotIn("scan", self.config.article_system)
         self.assertFalse(self.config.daily_discovery_enabled)
@@ -64,14 +64,44 @@ class RepositorySelectionTests(SimpleTestCase):
         self.assertTrue(response.data["requiresVerification"])
         self.automation.return_value.update.assert_called_once_with(status=repositories.ResearchAutomationStatus.PAUSED)
 
+    def test_changed_repo_on_connected_website_binds_without_old_connection_probe(self):
+        self.config.website_connection_id = 42
+        self.assertEqual(self.call("new/site").status_code, 200)
+        self._verify_github_repository_access.assert_not_called()
+        self.bind_website.assert_called_once()
+
     def test_inaccessible_or_malformed_repo_never_changes_selection(self):
-        self._verify_github_repository_access.return_value = {"verified": False, "reasonCode": "github_access_required"}
-        self.assertEqual(self.call("new/site").status_code, 409)
+        self.bind_website.side_effect = repositories.WebsiteAuthorityError(
+            "github_authorization_required", "Authorize the GitHub App for this repository first.")
+        with patch.object(repositories.transaction, "set_rollback") as rollback, \
+                self.assertLogs(repositories.logger, level="WARNING") as logs:
+            response = self.call("new/site")
+        self.assertEqual(response.status_code, 409)
+        self.assertEqual(response.data["code"], "github_authorization_required")
+        self.assertEqual(response.data["detail"], "Authorize the GitHub App for this repository first.")
+        rollback.assert_called_once_with(True)
+        self.assertIn("repo=new/site stage=bind code=github_authorization_required", logs.output[0])
         self.assertEqual(self.call("https://github.com/new/site").status_code, 400)
         self.assertEqual(self.call("new/site", company=False).status_code, 400)
         self.assertEqual(self.config.github_repo, "old/site")
         self.config.save.assert_not_called()
         self.reset.assert_not_called()
+
+    def test_bound_repo_that_lost_access_names_the_reason(self):
+        self.config.website_connection_id = 42
+        self._verify_github_repository_access.return_value = {"verified": False, "reasonCode": "github_access_required"}
+        with self.assertLogs(repositories.logger, level="WARNING") as logs:
+            response = self.call("old/site")
+        self.assertEqual(response.status_code, 409)
+        self.assertEqual(response.data["code"], "github_access_required")
+        self.assertIn("can no longer read old/site", response.data["detail"])
+        self.assertIn("stage=reverify code=github_access_required", logs.output[0])
+        self._verify_github_repository_access.return_value = {"verified": False, "reasonCode": "github_new_reason"}
+        with self.assertLogs(repositories.logger, level="WARNING"):
+            response = self.call("old/site")
+        self.assertEqual(response.data["detail"], "GitHub access to old/site could not be verified. Check the connection and try again.")
+        self.bind_website.assert_not_called()
+        self.config.save.assert_not_called()
 
     def test_unlink_does_not_require_oauth_and_invalidates_old_ready_state(self):
         response = self.call("")
@@ -88,7 +118,9 @@ class RepositorySelectionTests(SimpleTestCase):
         self.config.save.assert_not_called()
 
     def test_legacy_repository_without_connection_binds_before_reverification(self):
+        # A GitHub callback can save the repo without a connection; saving it again must bind.
         response = self.call("old/site")
+        self._verify_github_repository_access.assert_not_called()
         self.bind_website.assert_called_once()
         self.organization_lock.return_value.get.assert_called_once_with(pk=2)
         self.assertTrue(response.data["requiresVerification"])

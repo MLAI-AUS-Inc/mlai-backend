@@ -1854,3 +1854,4 @@ from .website_models import (  # noqa: E402,F401
     WebsiteTemplateRevision,
 )
 from .dispatch_models import ContentFactoryDispatchOutbox  # noqa: E402,F401
+from .hosted_article_models import HostedArticlePublication, HostedArticleSite  # noqa: E402,F401

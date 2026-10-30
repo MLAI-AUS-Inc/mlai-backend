@@ -26,6 +26,8 @@ def _content(payload):
 
 def repair_observed_message(channel, message, *, read_started_at):
     """Queue idempotent corrections, avoiding callbacks newer than this read."""
+    from .member_history import guard_page
+    guard_page(channel)
     ts = str(message["ts"])
     base = {"team_id": channel.slack_workspace_id, "event": {
         **message, "type": "message", "channel": channel.slack_channel_id, "channel_type": "channel",

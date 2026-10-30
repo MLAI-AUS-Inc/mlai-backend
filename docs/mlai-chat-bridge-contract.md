@@ -58,27 +58,83 @@ MLAI Chat is another client surface, not a one-time data migration.
 
 ## Public Roo mentions from Chat
 
-Slack attributes a mirrored Chat post to the bridge bot. The visible author
-header is presentation and must never be used to grant that bot the human's
-permissions. Public Roo resolves bot-origin `app_mention` events through
+Slack can attribute a mirrored Chat post to its verified member poster or to
+the bridge bot fallback. The visible author header is presentation and must
+never grant a transport identity the human's permissions. Public Roo resolves
+API-posted `app_mention` events through
 `GET /api/v1/integrations/bridge/roo/actor`, authenticated exclusively with
 `ROO_API_KEY` (not the general internal key).
 
 Query parameters are `workspace_id`, `channel_id`, `message_id`, `thread_ts`,
-and `bridge_user_id`, taken from the verified Slack event. The sender must
-match `SLACK_BRIDGE_BOT_USER_ID`. The backend finds the exact completed
+and `bridge_user_id`, taken from the verified Slack event. The backend finds the exact completed
 Chat-to-Slack message link in that workspace and enabled public channel,
 checks the reply thread and deletion state, and resolves the original signing
-device through the current account identity link. Legacy key-only links,
+device through the current account identity link. For member posts, the sender
+must match the server-recorded poster of that exact acknowledged create
+delivery, including its canonical owner, grant, connection and consent epoch.
+The command hash, verified provider receipt, destination timestamp, channel and
+thread must agree. Current account device, Slack attribution link, grant consent,
+posting scope and joined channel membership are revalidated without token
+refresh or provider calls. For bot fallback the sender must match
+`SLACK_BRIDGE_BOT_USER_ID`; modern account-bound bot records also require their
+exact delivery acknowledgement. Legacy configured-bot links remain supported.
+Legacy key-only identities,
 revoked devices/accounts, missing AI-sharing consent, and messages without an
 explicit signed Roo mention cannot delegate an actor. Private mirrors are
 outside this endpoint's scope.
 
-The response echoes that scope and returns `user_id`, `source_event_id`, and
-the stored source `text` with signed mention IDs rendered for Slack. Roo uses
+The version 2 response echoes that scope and returns `version: 2`,
+`posting_mode` (`member` or `bot`), canonical `actor_profile_id`, legacy human
+Slack `user_id`, `source_event_id`, `recipient_targets`, and the stored source
+`text` with signed Slack mention IDs rendered for Slack. A resolved human
+`user_id` may equal the observed transport sender only for verified member
+posting. The actor currently requires a linked Slack identity; recipients do
+not. Roo uses
 that human actor in its existing permission checks; this does not grant points
 administration or change role policy. Caller-supplied names, text and actor IDs
 are ignored. Successful responses are `Cache-Control: no-store`.
+
+Explicit native recipient selections use signed tags
+`["mlai-mention", "<64 lowercase hex device key>", "<display label>"]`.
+The authenticated callback replaces any normalized recipient hints with these
+raw source tags. At most 20 are accepted; labels contain 1–80 characters and
+exclude controls, backticks, angle brackets and `@`. A corresponding `@label`
+must occur in source prose outside Markdown code. Generic `p` tags, broadcasts,
+reply participants, routing tags and plain names never select award recipients.
+Ambiguous identical labels for different accounts are omitted. At actor resolution,
+each key must still belong to an active, verified, non-revoked community device;
+multiple keys for one account collapse to one target:
+
+```json
+{"kind":"mlai_profile","profile_id":"<public profile UUID>","display_name":"<current account name>","source_labels":["<signed label>"]}
+```
+
+`source_labels` preserves the matched signed selection labels, even if the
+account was renamed later. Roo excludes these exact mention spans from amount
+parsing; a name containing `4 points` cannot supply the award amount.
+Labels confer no identity or authority. Roo must escape display names in
+provider replies and restrict a native award to this verified target set. An
+empty target set requires an explicit selection, never fuzzy name resolution.
+Existing messages without these tags cannot retroactively authorize a target.
+
+At authenticated ingress the server replaces any supplied
+`mlai_mention_bindings` metadata with bounded key/profile bindings from the
+device enrollment valid at signed `raw_payload.created_at`. Enrollment and
+source timestamps may fall within the same second; conflicting canonical owners
+within that second are omitted. Historical revoked enrollments identify the
+original owner only and never grant current access. Resolution requires the
+current verified device owner to match that original profile. A revoked key
+later enrolled by another account cannot redirect a pending or retried award.
+Missing source timestamps or bindings confer no native recipient authority.
+The native introduction receipt path applies the same source-second ownership
+check locally before persisting its canonical author, and rechecks it under that
+account's lock. Delayed introductions cannot reward a later owner of a reused
+key. Unknown or ambiguous original authors are ignored as unavailable members.
+The actor response's top-level `source_labels` retains every validated signed
+prose label, including ambiguous or currently ineligible recipients, solely to
+exclude those label spans from amount parsing. A target may include its valid
+canonical `slack_user_id` so Roo can recognize the same person when both native
+and Slack mention tags were selected.
 
 An absent delivery link returns `409 bridge_delivery_pending`: Slack can send
 its callback before the posting worker commits the link. Roo briefly retries
@@ -278,43 +334,74 @@ grant only `channels:history`, `channels:read`, `chat:write`, `files:read`,
 `SLACK_BRIDGE_BOT_USER_ID` so its messages and reactions are discarded for loop
 prevention.
 
-### Public channel lifecycle (`COMMUNITY_BRIDGE_CHANNEL_LIFECYCLE_ENABLED`)
+### Permanent member source
 
-Live mirroring of public channel lifecycle needs these additions to the same
-bot app, which a workspace admin must approve and reinstall:
+Community and Members content history and intake require a current authorized
+member reader. There is no bot/both source selector. A complete zero-reader
+assessment records `sync_paused_reason=no_reader`, preserves durable checkpoints
+and retries after 60 seconds. Unknown membership also holds work. Bot callbacks
+receive a separate retired-source receipt and cannot reserve the member content
+key. Pending member callbacks keep their encrypted payload until authority
+recovers. Scrolling reports retryable `slack_history_unavailable` while no reader
+is available; it cannot create bot authority. Reconnecting or joining resumes the
+normal worker, with a fresh cursor when the reader's authority changes.
 
-- Bot events: `channel_created`, `channel_rename`, `channel_archive`,
-  `channel_unarchive`, `channel_deleted` and `channel_id_changed`. All are
-  covered by the existing `channels:read` scope.
-- Bot scope `channels:join`, so the bot can join a newly mirrored channel.
-  Slack only sends a channel's messages and history to the bot once it is a
-  member. Without this scope the room is not created until someone invites the
-  bot; the ten-minute reconciliation then picks it up.
+Member posting, member-channel discovery and private event routing are permanent
+paths. The four former rollout settings are removed from settings and deployment:
+`SLACK_MEMBER_CHANNELS_ENABLED`, `SLACK_COMMUNITY_SEND_AS_MEMBER`,
+`SLACK_COMMUNITY_SOURCE` and `MESSAGE_SYNC_EVENT_ROUTING`. A stale value cannot
+select the former implementation. The shared `MESSAGE_SYNC_ENABLED` processing
+pause, owner-inventory prerequisite and optional channel restriction remain.
+Reductions and revocations continue while expansion is paused.
 
-No user-app change is needed: private conversations are outside this path.
+The bot may still post for an approved unlinked account. Mutations retain the
+original posting actor; deleting a reader strategy never relabels an existing
+command or receipt. Historical comparison markers remain decodable for retained
+queues and privacy erasure, but there is no live comparison writer or finalizer.
+Status reports current reader availability, without inventing an elapsed window.
 
-Each lifecycle event only queues a refresh (`community_bridge_channel_refresh`).
-The bridge worker re-reads the channel with `conversations.info` and applies
-that state, and every ten minutes a `conversations.list` pass catches missed
-events. `CommunityBridgeChannel.mirror_decision` is authoritative:
+The owner requested expedited cleanup on 23 October 2026, superseding the former
+seven-day comparison and fourteen-day observation rollout gates. Those windows
+and the waived iOS/human checks are not recorded as passed. See
+[permanent operations](slack-member-permanent-operations.md) for release and
+recovery behavior. Dated phase documents describe the retired rollout.
 
-- `mirror`: the bot joins and the adapter's `POST /v1/public-channels` creates
-  or updates the room (kind 9007 with a room ID derived from the Slack IDs, then
-  kind 9002 for name, purpose, topic and archive state). The row is then
-  enabled, and the existing history seeder imports the last 30 days.
-- `hold`: a human decides in Django admin ("Mirror selected public channels").
-  Public channels that already existed when the flag was first switched on
-  (`community_bridge_lifecycle_state.auto_mirror_since`), Slack Connect
-  channels, name collisions with a native MLAI Chat room, and channels
-  converted to private all land here.
-- `exclude`: never mirrored. Migration `integrations.0049` seeds the reviewed
-  hold/no rows from MLAI Chat's `deploy/mlai/bridge-channels.conf`.
+### Member-managed rooms
 
-Renames, topic and purpose changes, archiving and unarchiving follow Slack. A
-deleted channel, or one that becomes private or invisible to the bot, has its
-room archived and its mapping disabled; content is never deleted. Operator
-rooms keep their MLAI Chat description and topic until Slack's purpose or topic
-next changes.
+The former bot lifecycle and fixed deployment mapping lanes are retired. Current
+member grants, verified public membership, Mirror/Hold/Exclude decisions and
+managed relay audiences control discovery and delivery. Metadata by itself never
+grants membership or a synchronized audience.
+
+Every adapter room request explicitly states `audience: community|members`.
+Community rooms retain their existing identities and access policy; Members
+rooms require the Phase 2 private-stream and bridge-managed membership contract.
+A registered room's audience, bridge ownership, Slack identity and room UUID
+are immutable. Adapter synchronization cannot widen an existing Members room
+into a Community room. Slack archive/deletion, private conversion and Slack
+Connect observations stop the delivery gate. Slack Connect channels remain
+unsupported.
+
+The refresh queue coalesces events by channel. Claims lease due rows without
+reading Slack. Completion, retry and exhausted-attempt cleanup compare the
+claimed row version, preserving a newer event queued during processing.
+Adapter failures also compare the captured policy and metadata, so an older
+name conflict cannot replace a newer administrator exclusion or rename.
+Operator room descriptions/topics remain unmanaged until Slack changes the
+adopted baseline; bridge-discovered rooms follow Slack metadata.
+
+A Slack channel ID change can rekey an **unmapped** row and its history source.
+For a mapped row, the helper preserves the original source ID, destination UUID
+and adapter identity, records `rekey_requires_room_migration`, and queues that
+original identity for review. It does not retarget the registered room or
+fabricate an older Slack identity. The ID-change router must not be enabled
+until an explicit room migration/archive-and-recreate contract is implemented.
+
+Migration 0050 adds audience and member-authority state, removes the obsolete
+workspace lifecycle cursor and bot-membership flag, and removes only the exact
+unmapped private manifest rows seeded by 0049. Its rollout still requires the
+owner's exact production migration-plan approval; source/test approval does
+not authorize applying it in production.
 
 The public-channel normalizer continues to ignore direct messages, private
 channels, and payloads marked as shared/external. A separate consent-gated DM
@@ -603,18 +690,32 @@ UUID `client_msg_id`. Discovery and history maintenance run independently from
 the delivery retry loop. Adapter provisioning occurs for discovery, explicit
 start, or participant changes rather than as a fleet-wide periodic refresh.
 
-Create each public-channel mapping with:
+Public MLAI Chat mappings are created and maintained by authorized member
+inventory, channel lifecycle events and the member-sync refresh queue. The
+fifteen existing Community rooms retain their registered IDs and audience;
+new eligible channels become Members rooms. Use the channel admin's **Mirror**,
+**Hold** and **Exclude** actions for an operator decision. These actions queue
+revalidation and never authorize access without current grant and membership
+evidence. Production deployment no longer upserts a fixed mapping, and the
+one-off tech-volunteers provisioning workflow is retired.
 
-```sh
-python manage.py upsert_community_bridge_channel \
-  --slack-workspace-id T0123456789 \
-  --slack-channel-id C0123456789 \
-  --slack-channel-name community \
-  --destination-platform buzz \
-  --destination-workspace-id chat.mlai.au \
-  --destination-channel-id 922c3b22-8002-4c3c-a37b-ce406a5e606e \
-  --destination-channel-name community
-```
+The separate Discord integration retains `upsert_discord_bridge_channel` with
+the existing Discord URL/ID arguments. It cannot create a MLAI Chat mapping or
+replace an existing Chat room with a Discord destination.
+
+The durable `bridge-worker` maintains history discovery and recovery itself.
+Its bounded history lane seeds at startup and every five seconds; a failed
+seeding turn is retried independently of history page progress. Deployment
+verifies the new container's durable lanes with
+`message_sync_status --check --local-worker`. The duplicate `bridge-reconciler`
+service and old polling command are removed. Deployment of this removal requires
+recorded confirmation that the prior container has been retired; do not leave an
+orphan process when withdrawing its Compose definition. The normal worker also
+owns bounded repair jobs; see [member-authorized repair](slack-member-repair.md).
+
+A failed code-only release restores the previous runtime's owner-inventory
+setting along with its image. An incomplete schema transition still keeps all
+writers stopped; this cleanup changes no schema.
 
 After investigating an exhausted delivery, replay it without changing its
 idempotency identity:
@@ -680,42 +781,16 @@ history has finished. Slack plan retention, missing scopes and API rate limits
 still apply. Archived and external Slack Connect conversations, bot messages,
 and unsupported Slack system events retain their existing exclusions.
 
-## Slack thread reconciliation
+## Slack thread recovery
 
-Slack is authoritative for thread membership. Audit a controlled batch before
-applying any mutation:
-
-```sh
-python manage.py reconcile_community_bridge_slack_threads \
-  --slack-channel-id C0123456789 \
-  --max-roots 25
-```
-
-The JSON report identifies missing events, orphaned or incorrectly parented
-replies, incorrect broadcast state, duplicate bridge events, stale links, and
-links that can be restored without republishing. A multi-channel dry-run returns
-one cursor per channel in `resume.by_channel`; apply mode deliberately requires
-exactly one channel, whose cursor is also exposed as `resume.latest`. Continue
-older batches only with that channel's cursor. Apply after reviewing the
-mismatch rate and worker health:
-
-```sh
-python manage.py reconcile_community_bridge_slack_threads \
-  --slack-channel-id C0123456789 \
-  --latest <resume.latest> \
-  --max-roots 25 \
-  --apply \
-  --confirm-historical-repair \
-  --wait-seconds 120
-```
-
-Apply mode restores trustworthy database links, tombstones malformed or
-duplicate bridge events, recreates each source message once with its exact
-Slack parent and broadcast state, and waits for the durable worker after every
-step. Receipt keys include the reconciliation version, source ID, and target
-event ID, so repeating a completed batch is idempotent. The GitHub Actions
-workflow `Reconcile production Slack threads` exposes the same bounded,
-dry-run-first operation for production.
+Use `message_sync_repair --workspace-id T… --channel-id C…` for a database-only
+preview. Up to twenty explicit `--thread-ts` values select bounded thread jobs;
+`--apply` queues the same durable member-authorized worker after operator review.
+It does not fetch Slack during planning, replay messages directly, reset cursors,
+rewrite historical avatars/mentions or recreate orphaned events. Current reader,
+consent, membership, source, audience and provider-budget fences apply when the
+worker executes. See [member repair](slack-member-repair.md) for limits and the
+supported recovery procedure. The old thread replay workflows are removed.
 
 Run the live staging matrix and capture durable, content-free evidence with
 [`mlai-chat-bridge-staging.md`](mlai-chat-bridge-staging.md). The final database
@@ -1198,14 +1273,10 @@ require the requesting account's live/paused mirror and non-revoked grant.
 Unknown, disabled, or deleted mappings return 422 without public URL scraping.
 Thread mapping responses use `Cache-Control: private, no-store`.
 
-To repair older public posts whose reference attachments were dropped, run
-`python manage.py backfill_community_bridge_thread_references --slack-channel-id C…`
-as an authorized operator. It is a bounded dry run (500 posts by default,
-maximum 5000); `--oldest`/`--latest` bound the Slack history interval. Explicit
-`--apply --confirm-historical-edits` queues existing-post edits through the
-normal bridge outbox. It never creates replacement posts. Deleted posts,
-concurrent/pending updates, and already-restored references are skipped. The
-report contains counts and a pagination timestamp, never message bodies.
+Older dropped references can be revisited only through the bounded member worker
+when their source message remains inside its permitted history window. The
+standalone thread-reference backfill is removed. Cleanup does not promise a
+historical rewrite and does not alter already queued immutable edits.
 
 ## Durable synchronization rollout (14 September 2026)
 

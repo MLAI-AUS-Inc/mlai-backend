@@ -23,7 +23,7 @@ COMMUNITY_CHAT_MEMBER_ACCOUNTS_ENABLED="${COMMUNITY_CHAT_MEMBER_ACCOUNTS_ENABLED
 COMMUNITY_CHAT_INBOX_ERASURE_ENABLED="${COMMUNITY_CHAT_INBOX_ERASURE_ENABLED:-false}"
 MESSAGE_SYNC_TARGETED_READ_POLLING="${MESSAGE_SYNC_TARGETED_READ_POLLING:-false}"
 MESSAGE_SYNC_RECENT_HISTORY_ENABLED="${MESSAGE_SYNC_RECENT_HISTORY_ENABLED:-false}"
-COMMUNITY_BRIDGE_CHANNEL_LIFECYCLE_ENABLED="${COMMUNITY_BRIDGE_CHANNEL_LIFECYCLE_ENABLED:-false}"
+SLACK_MEMBER_CHANNEL_ALLOWED_IDS="${SLACK_MEMBER_CHANNEL_ALLOWED_IDS:-}"
 MESSAGE_SYNC_OPEN_PRIORITY_ENABLED="${MESSAGE_SYNC_OPEN_PRIORITY_ENABLED:-true}"
 MESSAGE_SYNC_UNREAD_PREFETCH_ENABLED="${MESSAGE_SYNC_UNREAD_PREFETCH_ENABLED:-false}"
 MESSAGE_SYNC_TARGETED_STAGED_ROUTING="${MESSAGE_SYNC_TARGETED_STAGED_ROUTING:-false}"
@@ -61,6 +61,15 @@ VALLEY_MCP_DOMAIN_VERIFICATION_TOKEN="${VALLEY_MCP_DOMAIN_VERIFICATION_TOKEN:-}"
 export VALLEY_MCP_ENABLED VALLEY_MCP_PUBLIC_BASE_URL
 export COMMUNITY_CHAT_STARTUP_UPDATES_ENABLED VALLEY_MCP_DOMAIN_VERIFICATION_TOKEN
 python3 scripts/validate_valley_mcp_deploy_config.py
+# CRM switches and delivery settings. Empty values keep the host's own, so a
+# release never switches the CRM off by omission.
+CRM_DEPLOY_SETTINGS="COMMUNITY_CHAT_CRM_ENABLED CRM_LUMA_SYNC_ENABLED CRM_SENDING_ENABLED CRM_SMS_ENABLED CRM_WHATSAPP_ENABLED LISTMONK_BASE_URL LISTMONK_API_USER TWILIO_MESSAGING_SERVICE_SID"
+for crm_setting in $CRM_DEPLOY_SETTINGS; do
+    printf -v "$crm_setting" '%s' "${!crm_setting:-}"
+    export "$crm_setting"
+done
+LISTMONK_API_TOKEN="${LISTMONK_API_TOKEN:-}"
+python3 scripts/validate_crm_deploy_config.py
 MLAI_MCP_NATIVE_AGENTS_ENABLED="${MLAI_MCP_NATIVE_AGENTS_ENABLED:-false}"
 AGENT_RUNTIME_ENABLED="${AGENT_RUNTIME_ENABLED:-false}"
 AGENT_RUNTIME_NATIVE_ENABLED="${AGENT_RUNTIME_NATIVE_ENABLED:-false}"
@@ -129,7 +138,7 @@ case "$MESSAGE_SYNC_QUIET_HEAD_BACKOFF_ENABLED" in
     *) echo "MESSAGE_SYNC_QUIET_HEAD_BACKOFF_ENABLED must be true or false." >&2; exit 1 ;;
 esac
 export MESSAGE_SYNC_QUIET_HEAD_BACKOFF_ENABLED
-for responsiveness_flag in MESSAGE_SYNC_OPEN_PRIORITY_ENABLED MESSAGE_SYNC_UNREAD_PREFETCH_ENABLED MESSAGE_SYNC_RECENT_HISTORY_ENABLED MESSAGE_SYNC_TARGETED_STAGED_ROUTING COMMUNITY_BRIDGE_CHANNEL_LIFECYCLE_ENABLED; do
+for responsiveness_flag in MESSAGE_SYNC_OPEN_PRIORITY_ENABLED MESSAGE_SYNC_UNREAD_PREFETCH_ENABLED MESSAGE_SYNC_RECENT_HISTORY_ENABLED MESSAGE_SYNC_TARGETED_STAGED_ROUTING; do
     case "${!responsiveness_flag}" in
         true|TRUE|True) printf -v "$responsiveness_flag" '%s' true ;;
         false|FALSE|False) printf -v "$responsiveness_flag" '%s' false ;;
@@ -137,6 +146,7 @@ for responsiveness_flag in MESSAGE_SYNC_OPEN_PRIORITY_ENABLED MESSAGE_SYNC_UNREA
     esac
     export "$responsiveness_flag"
 done
+export SLACK_MEMBER_CHANNEL_ALLOWED_IDS
 if ! [[ "$MESSAGE_SYNC_UNREAD_PREFETCH_PER_HOUR" =~ ^[1-9][0-9]{0,2}$ ]] || [ "$MESSAGE_SYNC_UNREAD_PREFETCH_PER_HOUR" -gt 256 ]; then
     echo "MESSAGE_SYNC_UNREAD_PREFETCH_PER_HOUR must be an integer from 1 to 256." >&2
     exit 1
@@ -255,14 +265,9 @@ if [ "$COMMUNITY_BRIDGE_PRODUCTION_ENABLED" = "true" ]; then
         "${SLACK_BRIDGE_SIGNING_SECRET:-}"
         "${SLACK_BRIDGE_BOT_USER_ID:-}"
         "${SLACK_BRIDGE_WORKSPACE_ID:-}"
-        "${SLACK_BRIDGE_CHANNEL_ID:-}"
-        "${SLACK_BRIDGE_CHANNEL_NAME:-}"
         "${BUZZ_BRIDGE_ADAPTER_URL:-}"
         "${BUZZ_BRIDGE_ADAPTER_TOKEN:-}"
         "${BUZZ_BRIDGE_CALLBACK_SECRET:-}"
-        "${BUZZ_BRIDGE_DESTINATION_WORKSPACE_ID:-}"
-        "${BUZZ_BRIDGE_DESTINATION_CHANNEL_ID:-}"
-        "${BUZZ_BRIDGE_DESTINATION_CHANNEL_NAME:-}"
     )
     for bridge_value in "${bridge_values[@]}"; do
         [ -n "$bridge_value" ] && bridge_present=$((bridge_present + 1))
@@ -284,19 +289,7 @@ import re
 
 if not re.fullmatch(r"T[A-Z0-9]+", os.environ["SLACK_BRIDGE_WORKSPACE_ID"]):
     raise SystemExit("SLACK_BRIDGE_WORKSPACE_ID must be a Slack workspace ID")
-if not re.fullmatch(r"C[A-Z0-9]+", os.environ["SLACK_BRIDGE_CHANNEL_ID"]):
-    raise SystemExit("SLACK_BRIDGE_CHANNEL_ID must be a public Slack channel ID")
-if not re.fullmatch(r"[a-z0-9_-]{1,80}", os.environ["SLACK_BRIDGE_CHANNEL_NAME"]):
-    raise SystemExit("SLACK_BRIDGE_CHANNEL_NAME must be a valid public channel name")
-if os.environ["BUZZ_BRIDGE_DESTINATION_WORKSPACE_ID"] != "chat.mlai.au":
-    raise SystemExit("BUZZ_BRIDGE_DESTINATION_WORKSPACE_ID must be chat.mlai.au")
-if not re.fullmatch(
-    r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}",
-    os.environ["BUZZ_BRIDGE_DESTINATION_CHANNEL_ID"],
-):
-    raise SystemExit("BUZZ_BRIDGE_DESTINATION_CHANNEL_ID must be a lowercase UUID")
-if not re.fullmatch(r"[a-z0-9_-]{1,80}", os.environ["BUZZ_BRIDGE_DESTINATION_CHANNEL_NAME"]):
-    raise SystemExit("BUZZ_BRIDGE_DESTINATION_CHANNEL_NAME must be a valid channel name")
+
 PY
 else
     echo "ℹ️ Community bridge production activation is disabled; staged bridge settings will not be installed."
@@ -419,6 +412,9 @@ if [ -n "${MLAI_CHAT_ACCOUNT_KEY_SECRET:-}" ]; then
 fi
 echo "🔐 Updating Linear channel issue credential (value redacted)..."
 install_remote_env_secret LINEAR_API_KEY "$LINEAR_API_KEY"
+if [ -n "$LISTMONK_API_TOKEN" ]; then
+    install_remote_env_secret LISTMONK_API_TOKEN "$LISTMONK_API_TOKEN"
+fi
 echo "🔐 Updating distinct Roo and internal service credentials (values redacted)..."
 install_remote_env_secret ROO_API_KEY "$ROO_API_KEY"
 install_remote_env_secret INTERNAL_API_KEY "$INTERNAL_API_KEY"
@@ -465,6 +461,11 @@ install_remote_env_value VALLEY_MCP_PUBLIC_BASE_URL "$VALLEY_MCP_PUBLIC_BASE_URL
 if [ -n "$COMMUNITY_CHAT_STARTUP_UPDATES_ENABLED" ]; then
     install_remote_env_value COMMUNITY_CHAT_STARTUP_UPDATES_ENABLED "$COMMUNITY_CHAT_STARTUP_UPDATES_ENABLED"
 fi
+for crm_setting in $CRM_DEPLOY_SETTINGS; do
+    if [ -n "${!crm_setting}" ]; then
+        install_remote_env_value "$crm_setting" "${!crm_setting}"
+    fi
+done
 if [ -n "$VALLEY_MCP_DOMAIN_VERIFICATION_TOKEN" ]; then
     install_remote_env_value VALLEY_MCP_DOMAIN_VERIFICATION_TOKEN "$VALLEY_MCP_DOMAIN_VERIFICATION_TOKEN"
 fi
@@ -502,7 +503,7 @@ fi
 # bot/user token: recipient expansion is a separate Slack authorization surface.
 install_remote_env_value MESSAGE_SYNC_ENABLED "$MESSAGE_SYNC_ENABLED"
 install_remote_env_value MESSAGE_SYNC_RECENT_HISTORY_ENABLED "$MESSAGE_SYNC_RECENT_HISTORY_ENABLED"
-install_remote_env_value COMMUNITY_BRIDGE_CHANNEL_LIFECYCLE_ENABLED "$COMMUNITY_BRIDGE_CHANNEL_LIFECYCLE_ENABLED"
+install_remote_env_value SLACK_MEMBER_CHANNEL_ALLOWED_IDS "$SLACK_MEMBER_CHANNEL_ALLOWED_IDS"
 install_remote_env_value COMMUNITY_BRIDGE_DEPENDENCY_VERDICTS_ENABLED "$COMMUNITY_BRIDGE_DEPENDENCY_VERDICTS_ENABLED"
 install_remote_env_value MESSAGE_SYNC_QUIET_HEAD_BACKOFF_ENABLED "$MESSAGE_SYNC_QUIET_HEAD_BACKOFF_ENABLED"
 install_remote_env_value MESSAGE_SYNC_OPEN_PRIORITY_ENABLED "$MESSAGE_SYNC_OPEN_PRIORITY_ENABLED"
@@ -729,7 +730,18 @@ fi
 
 # 2. Run setup commands on the server
 echo "🔧 Configuring server..."
-ssh "$DEPLOY_SSH_TARGET" <<EOF
+# SSH hands this script to the remote shell on stdin, and bash reads stdin one
+# command at a time. A host command that reads stdin (Compose exec attaches it
+# even with -T) would swallow the rest of the script, and the shell would then
+# exit 0 having skipped every later step. On 25 Oct 2026 that skipped the
+# release tail and left the migration writer pause marker behind. Bash parses
+# the whole group below before running any of it, and the group's stdin is
+# /dev/null, so no command can reach the script text.
+remote_deploy_log=$(mktemp)
+trap 'rm -f "$remote_deploy_log"' EXIT
+remote_deploy_completed="Remote deployment script completed for $APP_RELEASE."
+ssh "$DEPLOY_SSH_TARGET" <<EOF | tee "$remote_deploy_log"
+{
     set -euo pipefail
 
     verify_current_main_release_on_host() {
@@ -877,6 +889,10 @@ ssh "$DEPLOY_SSH_TARGET" <<EOF
     # .env may retain a failed release's marker even when the old container
     # never changed. Use the serving container as rollback truth.
     previous_app_release=\$(docker compose exec -T web sh -lc 'printf "%s" "\$APP_RELEASE"' </dev/null 2>/dev/null || read_env_value APP_RELEASE)
+    # The staging .env may already be false; capture the running contract so a
+    # code-only rollback does not silently disable established member discovery.
+    previous_owner_inventory_enabled=\$(docker compose exec -T web sh -lc 'printf "%s" "\$SLACK_OWNER_INVENTORY_ENABLED"' </dev/null 2>/dev/null || printf false)
+    case "\$previous_owner_inventory_enabled" in true|false) ;; *) echo "Invalid previous owner inventory state" >&2; exit 1 ;; esac
     upsert_env_value APP_RELEASE "$APP_RELEASE"
     upsert_env_value HEALTH_HACK_AI_BUDGET_MODE "enforce"
     # Keep the atomic worst-case reservation aligned with Roo's enforced model
@@ -1214,6 +1230,12 @@ ssh "$DEPLOY_SSH_TARGET" <<EOF
     schema_transition_started=0
     schema_transition_completed=0
     writer_pause_sentinel=/run/mlai-backend-writers-paused
+    describe_writer_pause_sentinel() {
+        local paused_release paused_at
+        paused_release=\$(head -n 1 "\$writer_pause_sentinel" 2>/dev/null || true)
+        paused_at=\$(date -u -r "\$writer_pause_sentinel" '+%Y-%m-%d %H:%M:%S UTC' 2>/dev/null || true)
+        printf '%s (release %s, written %s)' "\$writer_pause_sentinel" "\${paused_release:-unknown}" "\${paused_at:-at an unknown time}"
+    }
     writer_watchdog_units_to_restore=()
     pause_host_writer_watchdogs() {
         local units unit exec_start active_state watchdog_processes watchdog_status
@@ -1279,6 +1301,7 @@ ssh "$DEPLOY_SSH_TARGET" <<EOF
         local service container_ids container_id running
         if [ -e "\$writer_pause_sentinel" ]; then
             echo "❌ A prior migration writer pause is still active; operator review is required." >&2
+            echo "   \$(describe_writer_pause_sentinel)" >&2
             return 1
         fi
         # The host watchdog must see the pause before any Compose service is
@@ -1405,8 +1428,14 @@ ssh "$DEPLOY_SSH_TARGET" <<EOF
             fi
         fi
 
-        echo "⚠️ Deployment failed after runtime services were paused; disabling Slack owner inventory for recovery."
-        upsert_env_value SLACK_OWNER_INVENTORY_ENABLED "false" || true
+        # Incomplete schema transitions returned above with all writers stopped.
+        # A compatible old-image rollback restores its actual enabled state;
+        # completed schema transitions use the reviewed new runtime setting.
+        recovery_inventory_enabled="\${slack_owner_inventory_enabled:-false}"
+        if [ "\$migration_started" != "1" ]; then
+            recovery_inventory_enabled="\${previous_owner_inventory_enabled:-false}"
+        fi
+        upsert_env_value SLACK_OWNER_INVENTORY_ENABLED "\$recovery_inventory_enabled" || return
         if [ "\$migration_started" != "1" ]; then
             # No schema changed, so the previous image is the last known-good
             # release even if a replacement container has already started.
@@ -1550,6 +1579,12 @@ ssh "$DEPLOY_SSH_TARGET" <<EOF
         compose_run_web python manage.py migrate --check --noinput
         schema_transition_completed=1
     else
+        # A code-only release never pauses writers, so a marker here was left
+        # by an earlier migration deploy. Surface it now instead of when the
+        # next migration deploy refuses to start.
+        if [ -e "\$writer_pause_sentinel" ]; then
+            echo "::warning title=Stale migration writer pause::\$(describe_writer_pause_sentinel) is still present. Host watchdogs stay stood down, and the next migration deploy will stop until an operator reviews and removes it."
+        fi
         # Confirm the migration graph still has no pending work before the new
         # binary replaces live services. This cannot apply a migration.
         compose_run_web python manage.py migrate --check --noinput
@@ -1561,17 +1596,6 @@ ssh "$DEPLOY_SSH_TARGET" <<EOF
     echo "✅ Running post-migration deployment checks..."
     compose_run_web python manage.py deploy_postmigrate
 
-    if [ "$bridge_present" -gt 0 ]; then
-        echo "🌉 Upserting the reviewed Slack to MLAI Chat channel mapping..."
-        compose_run_web python manage.py upsert_community_bridge_channel \
-            --slack-workspace-id "$SLACK_BRIDGE_WORKSPACE_ID" \
-            --slack-channel-id "$SLACK_BRIDGE_CHANNEL_ID" \
-            --slack-channel-name "$SLACK_BRIDGE_CHANNEL_NAME" \
-            --destination-platform buzz \
-            --destination-workspace-id "$BUZZ_BRIDGE_DESTINATION_WORKSPACE_ID" \
-            --destination-channel-id "$BUZZ_BRIDGE_DESTINATION_CHANNEL_ID" \
-            --destination-channel-name "$BUZZ_BRIDGE_DESTINATION_CHANNEL_NAME"
-    fi
 
     if [ "\$org_memory_production_deploy_enabled" = "true" ]; then
         approval_manifest="/root/mlai-backend-operations/pilot-approval.json"
@@ -1797,8 +1821,8 @@ PY
 
     if [ "\$bridge_worker_enabled" != "1" ]; then
         echo "🧹 Stopping disabled community bridge services..."
-        docker compose stop bridge-worker bridge-reconciler bridge-retention || true
-        docker compose rm -f bridge-worker bridge-reconciler bridge-retention || true
+        docker compose stop bridge-worker bridge-retention || true
+        docker compose rm -f bridge-worker bridge-retention || true
     fi
 
     if [ "\$analytics_sync_enabled" != "1" ]; then
@@ -1915,6 +1939,12 @@ if slugs != expected:
         unset meeting_room_api_key meeting_rooms_body
     fi
 
+    if [ "\$bridge_worker_enabled" = "1" ]; then
+        echo "🌉 Verifying the current member sync worker..."
+        # Compose exec still attaches stdin with -T; preserve the SSH script.
+        docker compose exec -T bridge-worker python manage.py message_sync_status --check --local-worker </dev/null
+    fi
+
     echo "🛠️ Verifying external Django admin assets..."
     admin_login_ok=0
     for attempt in \$(seq 1 12); do
@@ -1993,7 +2023,17 @@ if slugs != expected:
     for rollback_tag in "\${rollback_tags[@]}"; do
         docker image rm "\$rollback_tag" >/dev/null 2>&1 || true
     done
+    echo "$remote_deploy_completed"
+} </dev/null
 EOF
+
+# A remote shell that stops early still exits 0, and the release check below
+# passes as soon as the new web slot serves. Neither proves the release checks,
+# candidate cleanup or writer pause cleanup ran, so require the final line too.
+if ! grep -qxF "$remote_deploy_completed" "$remote_deploy_log"; then
+    echo "❌ The remote deployment script ended before its final step; later release checks and cleanup did not run." >&2
+    exit 1
+fi
 
 # Independently verify the release outside SSH so an early remote exit can
 # never turn a skipped migration/restart into a successful deployment.

@@ -209,7 +209,16 @@ class OneClickPersistenceTests(OneClickBillingFixture, TestCase):
         self.assertEqual(self.balance(self.payer), 20_000_000)
         self.assertFalse(Ledger.objects.filter(kind='SPEND').exists())
         self.assertFalse(ContentFactoryDispatchOutbox.objects.exists())
-        # Admission reservation persists safely before the charge transaction.
+        # The provisional operation shares the debit/outbox rollback boundary.
+        self.assertFalse(WebsiteConnectionOperation.objects.filter(action='workflow').exists())
+        for _ in range(2):
+            payer, ledger, _, error = self.charge(self.payload())
+            self.assertIsNone(error)
+            self.assertEqual((payer.pk, ledger.user_id), (self.payer.pk, self.payer.pk))
+        self.assertEqual(self.balance(self.payer), 8_000_000)
+        self.assertEqual(Ledger.objects.filter(kind='SPEND').count(), 1)
+        self.assertFalse(Ledger.objects.filter(user=self.requester, kind='SPEND').exists())
+        self.assertEqual(ContentFactoryDispatchOutbox.objects.count(), 1)
         self.assertEqual(WebsiteConnectionOperation.objects.filter(action='workflow').count(), 1)
 
     def test_repeated_start_after_company_payer_change_returns_typed_conflict(self):
@@ -247,7 +256,18 @@ class OneClickPersistenceTests(OneClickBillingFixture, TestCase):
         self.assertFalse(Ledger.objects.filter(kind='SPEND').exists())
         self.assertFalse(ContentFactoryDispatchOutbox.objects.exists())
         self.assertEqual(self.balance(self.payer), 20_000_000)
-        self.assertEqual(WebsiteConnectionOperation.objects.get(action='workflow').state, 'cancelled')
+        self.assertFalse(WebsiteConnectionOperation.objects.filter(action='workflow').exists())
+        self.website.refresh_from_db()
+        self.assertEqual(self.website.state, 'disconnected')
+        self.assertEqual(self.website.generation, self.binding['connection_generation'] + 1)
+        self.assertIsNotNone(self.website.disconnected_at)
+        # The original binding cannot reserve or spend after the durable fence.
+        _, _, _, error = self.charge(self.payload())
+        self.assertEqual((error.status_code, error.data['code']), (409, 'website_connection_changed'))
+        self.assertFalse(WebsiteConnectionOperation.objects.filter(action='workflow').exists())
+        self.assertFalse(Ledger.objects.filter(kind='SPEND').exists())
+        self.assertFalse(ContentFactoryDispatchOutbox.objects.exists())
+        self.assertEqual(self.balance(self.payer), 20_000_000)
 
     def test_disconnect_refunds_cancelled_original_payer_once_and_keeps_pages(self):
         payload = self.payload()

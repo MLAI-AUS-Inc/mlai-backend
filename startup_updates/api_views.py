@@ -1,3 +1,5 @@
+
+from integrations.services.slack_source_privacy import slack_source_queryset
 import time
 from datetime import date, datetime, timedelta, timezone as dt_timezone
 from functools import wraps
@@ -731,6 +733,8 @@ def _serialize_draft_for_editor(draft) -> dict:
         "metricEvidence": {item.get("metric_key"): {key: item.get(key) for key in ("quality", "source_provider", "basis", "limitations")} for item in structured_memo.get("kpi_snapshot", []) if isinstance(item, dict)},
         "month": month_value.strftime("%B"),
         "year": month_value.year,
+        **({"startupOverview": str(structured_memo.get("startupOverview") or "")}
+           if "startupOverview" in structured_memo else {}),
         "highlights": _join_named_sections(structured_memo, _HIGHLIGHT_SECTIONS),
         "challenges": _join_text_items_with_newlines(structured_memo.get("lowlights")),
         "asks": _join_named_sections(structured_memo, [
@@ -765,6 +769,8 @@ def _serialize_email_draft_month(draft) -> dict:
         "presentationMode": str(
             structured_memo.get("presentation_mode") or structured_memo.get("presentationMode") or ""
         ),
+        **({"startupOverview": str(structured_memo.get("startupOverview") or "")}
+           if "startupOverview" in structured_memo else {}),
         "highlights": _join_named_sections(structured_memo, _HIGHLIGHT_SECTIONS),
         "challenges": _join_text_items_with_newlines(structured_memo.get("lowlights")),
         "asks": _join_named_sections(structured_memo, [
@@ -788,6 +794,7 @@ def _serialize_draft_results_bundle(drafts) -> Optional[dict]:
         editor_past_months.append(
             {
                 "month": f"{payload['month']} {payload['year']}",
+                **({"startupOverview": payload["startupOverview"]} if "startupOverview" in payload else {}),
                 "highlights": payload["highlights"],
                 "challenges": payload["challenges"],
                 "asks": payload["asks"],
@@ -2009,7 +2016,7 @@ def _locked_slack_run_context(
         # them while the exact connection is locked so another Slack identity's
         # channel ids can never be carried into this run.
         run.run_request["slack_channel_ids"] = list(
-            SlackChannelSelection.objects.filter(
+            slack_source_queryset(SlackChannelSelection).filter(
                 connection=locked_connection,
                 selected=True,
             ).values_list("channel_id", flat=True)
@@ -2082,7 +2089,7 @@ class StartupUpdateSlackBackfillView(APIView):
                 channel_ids = _run_slack_channel_ids(run)
                 if not channel_ids and "automatic_source_scope" not in (run.run_request or {}):
                     channel_ids = list(
-                        SlackChannelSelection.objects.filter(
+                        slack_source_queryset(SlackChannelSelection).filter(
                             connection=connection,
                             selected=True,
                         ).values_list("channel_id", flat=True)
@@ -2147,7 +2154,7 @@ class StartupUpdateSlackBackfillView(APIView):
                 run_request["slack_channel_ids"] = channel_ids
                 if run_request.get("narrative_period") and not sync_result.get("has_more"):
                     from startup_updates.activity_scope import prepare_activity_classification
-                    artifacts = SlackThreadArtifact.objects.filter(connection=locked_connection, channel_id__in=channel_ids)
+                    artifacts = slack_source_queryset(SlackThreadArtifact).filter(connection=locked_connection, channel_id__in=channel_ids)
                     artifacts = _slack_threads_in_run_window(artifacts, run, locked_connection)
                     run_request = prepare_activity_classification(run_request, "slack", artifacts)
                 external_context = dict(run_request.get("external_context") or {})
@@ -2175,7 +2182,7 @@ def _slack_threads_in_run_window(queryset, run, connection):
     """Historical membership comes from in-range messages, not the latest reply."""
     if not run_activity_period(run.run_request or {}):
         return _apply_run_window(queryset, run, "latest_message_at")
-    messages = SlackMessageArtifact.objects.filter(
+    messages = slack_source_queryset(SlackMessageArtifact).filter(
         connection=connection, channel_id=OuterRef("channel_id"),
     ).filter(Q(thread_ts=OuterRef("thread_ts")) | Q(slack_message_ts=OuterRef("thread_ts")))
     messages = _apply_run_window(messages, run, "posted_at")
@@ -2190,7 +2197,7 @@ def _update_slack_filtering_summary(
     channel_ids: list[str],
     batch_context: Optional[dict] = None,
 ) -> None:
-    queryset = SlackThreadArtifact.objects.filter(
+    queryset = slack_source_queryset(SlackThreadArtifact).filter(
         organization=organization,
         connection=connection,
     )
@@ -2246,7 +2253,7 @@ class StartupUpdateSlackClassificationBatchView(APIView):
         _update_run_step(run, step_key="slack_relevance_classification")
 
         channel_ids = _run_slack_channel_ids(run)
-        queryset = SlackThreadArtifact.objects.filter(
+        queryset = slack_source_queryset(SlackThreadArtifact).filter(
             organization=organization,
             connection=connection,
             extraction_status__in=[ArtifactProcessingStatus.PENDING, ArtifactProcessingStatus.HYDRATED],
@@ -2343,7 +2350,7 @@ class StartupUpdateSlackClassificationResultsView(APIView):
                 )
             channel_id, thread_ts = parsed
             thread = get_object_or_404(
-                SlackThreadArtifact.objects.select_for_update(),
+                slack_source_queryset(SlackThreadArtifact).select_for_update(),
                 organization=organization,
                 connection=connection,
                 channel_id=channel_id,
@@ -2427,7 +2434,7 @@ class StartupUpdateSlackExtractionBatchView(APIView):
         _update_run_step(run, step_key="slack_event_extraction")
 
         channel_ids = _run_slack_channel_ids(run)
-        queryset = SlackThreadArtifact.objects.filter(
+        queryset = slack_source_queryset(SlackThreadArtifact).filter(
             organization=organization,
             connection=connection,
             extraction_status__in=[ArtifactProcessingStatus.PENDING, ArtifactProcessingStatus.HYDRATED],
@@ -2514,7 +2521,7 @@ class StartupUpdateSlackExtractionResultsView(APIView):
                 )
             channel_id, thread_ts = parsed
             thread_artifact = get_object_or_404(
-                SlackThreadArtifact.objects.select_for_update(),
+                slack_source_queryset(SlackThreadArtifact).select_for_update(),
                 organization=organization,
                 connection=connection,
                 channel_id=channel_id,
@@ -4298,6 +4305,8 @@ class StartupUpdateDraftResultsView(APIView):
                         raise RevisionConflict("Generation base revision does not match this run.")
                     from startup_updates.cover_images import generated_cover_image
                     memo = generated_cover_image(item["structured_memo"], run.run_request)
+                    from startup_updates.financial_history import generated_history_selection
+                    memo = generated_history_selection(memo, run.run_request)
                     from startup_updates.evidence_contract import content_hash, validate_generated_metric_claims
                     try:
                         validate_generated_metric_claims(memo, snapshot.payload.get("metrics"))

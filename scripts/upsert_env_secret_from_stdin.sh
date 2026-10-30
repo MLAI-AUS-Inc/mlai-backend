@@ -19,7 +19,8 @@ case "$key" in
   BUZZ_BRIDGE_CALLBACK_SECRET|\
   ROO_API_KEY|\
   INTERNAL_API_KEY|\
-  LINEAR_API_KEY) ;;
+  LINEAR_API_KEY|\
+  LISTMONK_API_TOKEN) ;;
   *)
     echo "Unsupported production secret key" >&2
     exit 64

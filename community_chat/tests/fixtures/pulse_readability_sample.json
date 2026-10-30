@@ -1,0 +1,25 @@
+{
+  "synthetic": true,
+  "authorship": "Deterministic own-AI API contract fixture; not claimed to be a model generation.",
+  "startup": {
+    "id": 900001,
+    "name": "RouteNest",
+    "stage": "pre-seed",
+    "description": "We build route-planning software for independent shops that deliver orders locally. It helps shop owners organise stops and delivery times without planning every route by hand.",
+    "short_description": "Software for route optimisation for independent retailers coordinating last-mile deliveries.",
+    "problem_solved": "Shop owners currently organise delivery stops and promised delivery times by hand.",
+    "target_audience": "Independent shop owners who deliver local orders.",
+    "startup_overview": "Software for route optimisation for independent retailers coordinating last-mile deliveries."
+  },
+  "month": "2026-10",
+  "founder_notes": "Fictional test company; all names and events in this fixture are invented.\nOctober 2026 founder notes:\n- We added CSV ingestion for customer orders. Shop owners can now upload their order spreadsheet instead of copying delivery addresses into RouteNest one by one. This works in our internal test environment; it is not available to customers yet.\n- We tested the route solver's time-window constraints using made-up delivery orders. It now keeps a stop inside its promised delivery time in those tests. We have not tested this on real delivery rounds, so we cannot claim it saves drivers time yet.\n- During conversations this month, shop owners said a clear list of delivery stops mattered more to them than a dashboard of route statistics. We decided to focus the next customer trial on the stop list.\n- We still have a blocker in address validation: an incomplete address can put a delivery stop in the wrong place. We need to fix this before a live customer trial.\n- Next month we plan to test the stop list with shop owners and check the suggested routes against their existing delivery plans. The trial has not started and we have not set a launch date.\n- Our current request: please introduce us to independent shop owners who plan local delivery routes by hand and would be willing to show us how they do it. Reply to this update if you can make an introduction.\n",
+  "narrative": {
+    "startupOverview": "RouteNest helps independent shops plan local deliveries. Its software organises delivery stops and promised arrival times so owners do not have to plan every route by hand.",
+    "summary": "We tested two ways to make delivery planning easier: uploading an order spreadsheet and keeping stops within their promised delivery times. These features have only been tested internally.",
+    "highlights": "Shop owners can upload an order spreadsheet in our test environment instead of copying addresses one by one. This is not available to customers yet.\nRoutes kept stops within promised delivery times in tests with made-up orders. We still need to test real delivery rounds before claiming this saves drivers time.",
+    "challenges": "Incomplete addresses can put stops in the wrong place. We need to fix this before a live customer trial.",
+    "learnings": "Shop owners told us a clear list of delivery stops matters more than a dashboard of route statistics. We will focus the next trial on the stop list.",
+    "next30Days": "We plan to test the stop list with shop owners and compare suggested routes with their existing plans. The trial has not started and there is no launch date yet.",
+    "asks": "Please introduce us to independent shop owners who plan local delivery routes by hand and would show us how they do it. Reply to this update if you can make an introduction."
+  }
+}

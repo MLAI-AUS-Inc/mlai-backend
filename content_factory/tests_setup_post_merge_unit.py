@@ -178,6 +178,118 @@ class PostMergePrepareTests(SimpleTestCase):
         self.assertNotIn("repair_setup", self.op.payload)
 
 
+class PostMergeSetupSurfaceTests(SimpleTestCase):
+    """PawShare (23 Oct): setup ccd3ea22 merged without its kit. The follow-up setup asked
+    the owner to choose the articles page again from /dist/blog, /articles/detail and tag pages."""
+
+    def setUp(self):
+        self.replay = replay.PrepareJourneyReplayTests()
+        self.replay.setUp()
+        self.replay.facts["resolution"] = {"existence_state": "ambiguous", "ranked_candidates": {"listing_surface_candidates": [
+            {"route": "/dist/blog"}, {"route": "/articles/detail"}, {"route": "/dist/blog/tag/Melbourne"}]}}
+        self.op = self.replay.op
+        self.op.payload.update(attempt=15, retry_epoch="post-merge", source_reverify=True)
+        self.op.receipt = {"merged_setup_run_id": "setup-3", "scan_run_id": "scan-9"}
+
+    def merged(self, *, mode="existing", hint="/dist/blog", built="/blog", merged=True):
+        run = setup_run(merged=merged)
+        run.run_request.update(article_surface_mode=mode,
+            article_surface_hint={"source": "user_input", "route_path": hint, "listing_url": hint} if hint else None)
+        run.result["route_path"] = built
+        return run
+
+    def request(self, run):
+        with patch("workflow_runs.models.ContentFactoryRun.objects.filter", return_value=newest_first(run)) as rows:
+            data = prepare._owner_request(self.op, self.replay.context, self.replay.config, "setup",
+                user=self.replay.user, journey=self.replay.journey()).data
+        return data, rows
+
+    def test_the_kit_follow_up_keeps_the_merged_setups_page(self):
+        data, rows = self.request(self.merged())
+        self.assertEqual((data["article_surface_mode"], data["article_surface_url"]), ("existing", "/dist/blog"))
+        self.assertEqual(data["source_scan_run_id"], "scan-9")
+        self.assertEqual(rows.call_args.kwargs, {"run_id": "setup-3", "organization_id": 7, "workflow": "article_system_setup",
+            "run_request__website_connection_id": "website", "run_request__connection_generation": 3})
+
+    def test_a_page_the_merged_setup_created_is_now_existing(self):
+        data, _ = self.request(self.merged(mode="none", hint="", built="/articles/"))
+        self.assertEqual((data["article_surface_mode"], data["article_surface_url"]), ("existing", "/articles"))
+
+    def test_an_unmerged_or_foreign_setup_leaves_the_choice_to_the_owner(self):
+        for run in (self.merged(merged=False), None):
+            with self.subTest(run=run), self.assertRaises(WebsiteAuthorityError) as raised:
+                self.request(run)
+            self.assertEqual(raised.exception.code, "articles_page_choice_required")
+
+    def test_without_its_own_merge_the_rescan_still_decides(self):
+        self.op.receipt.pop("merged_setup_run_id")
+        with patch("workflow_runs.models.ContentFactoryRun.objects.filter") as rows, \
+                self.assertRaises(WebsiteAuthorityError) as raised:
+            prepare._owner_request(self.op, self.replay.context, self.replay.config, "setup",
+                user=self.replay.user, journey=self.replay.journey())
+        self.assertEqual(raised.exception.code, "articles_page_choice_required")
+        rows.assert_not_called()
+
+
+class ClosedSetupReplacementTests(SimpleTestCase):
+    """La Vie (23 Oct): its setup PR #30 was closed so a fresh setup could replace it. Try
+    again on the waiting review kept attempt 30 and its retry epoch, so the replacement
+    reused setup c12e1329's request key. Content Factory replayed c12e1329, which the
+    backend then marked queued, and Prepare waited on it indefinitely."""
+
+    def setUp(self):
+        self.replay = replay.PrepareJourneyReplayTests()
+        self.replay.setUp()
+        self.op = self.replay.op
+        self.op.payload.update(attempt=30, retry_epoch="review-wait")
+        self.closed = setup_run("setup-30", merged=False, kit=False, status="queued")
+        self.closed.result.update(merge_status="pr_closed", status="pr_closed")
+        self.closed.result["article_system_setup"].update(merge_status="pr_closed")
+        self.closed.run_request.update(article_surface_mode="existing",
+            article_surface_hint={"source": "user_input", "route_path": "/articles", "listing_url": "/articles"})
+        self.op.receipt = {"child_run_id": "setup-30", "setup_run_id": "setup-30", "current_step": "setup"}
+        self.setup = Mock(return_value={"run_id": "setup-31"})
+
+    def journey(self, *args, **kwargs):
+        return project_journey(company_id=9, domain="fixture.test", website={"status": "connected", "repositoryId": 123,
+            "connectionGeneration": 3, "writePolicy": {"allowed": True}, "verifiedSha": ""},
+            capabilities={"repositoryAccessVerified": True, "repositorySourceSha": HEAD},
+            discovery={"complete": True, "sourceSha": HEAD, "resolution": self.replay.facts["resolution"]})
+
+    def advance(self):
+        with patch.object(prepare, "_claim_prepare", return_value=self.op), \
+                patch.object(prepare, "_prepare_context", return_value=(self.replay.context, self.replay.config, self.replay.user)), \
+                patch.object(prepare, "journey_for_context", side_effect=self.journey), \
+                patch.object(prepare, "_cleanup_retry_journey", side_effect=lambda op, context, config, journey: journey), \
+                patch.object(prepare, "_persist_prepare", side_effect=lambda op, **kw: op), \
+                patch.object(prepare, "_setup_owner_action", return_value=None), \
+                patch("workflow_runs.models.ContentFactoryRun.objects.filter", return_value=newest_first(self.closed)):
+            prepare.advance_prepare(self.op.pk, handlers={"setup": self.setup})
+
+    def test_a_closed_setup_is_replaced_under_a_new_request_identity(self):
+        self.advance()
+        self.setup.assert_called_once()
+        self.assertEqual(self.op.payload["attempt"], 31)
+        self.assertNotEqual(self.op.payload["retry_epoch"], "review-wait")
+        self.assertEqual(self.op.receipt["superseded_setup_run_id"], "setup-30")
+        self.assertEqual(self.op.receipt["child_run_id"], "setup-31")
+        self.assertEqual(self.op.state, "pending")
+
+    def test_the_identity_rotates_once_per_closed_setup(self):
+        self.op.receipt["superseded_setup_run_id"] = "setup-30"
+        self.advance()
+        self.assertEqual((self.op.payload["attempt"], self.op.payload["retry_epoch"]), (30, "review-wait"))
+
+    def test_the_replacement_keeps_the_owners_existing_page(self):
+        self.replay.facts["resolution"] = {"existence_state": "ambiguous", "ranked_candidates": {"listing_surface_candidates": [
+            {"route": "/articles"}, {"route": "/journal"}]}}
+        self.op.receipt = {"superseded_setup_run_id": "setup-30"}
+        with patch("workflow_runs.models.ContentFactoryRun.objects.filter", return_value=newest_first(self.closed)):
+            data = prepare._owner_request(self.op, self.replay.context, self.replay.config, "setup",
+                user=self.replay.user, journey=self.journey()).data
+        self.assertEqual((data["article_surface_mode"], data["article_surface_url"]), ("existing", "/articles"))
+
+
 class OwnedSquashMergeAttestationTests(SimpleTestCase):
     """A squash merge never contains the reviewed head; the platform's own merge record is the lineage."""
 

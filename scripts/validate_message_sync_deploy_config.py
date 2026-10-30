@@ -17,7 +17,14 @@ def validate(env):
         raise ValueError("SLACK_OWNER_INVENTORY_ENABLED must be true or false")
     if inventory_enabled == "true" and enabled != "true":
         raise ValueError("SLACK_OWNER_INVENTORY_ENABLED requires MESSAGE_SYNC_ENABLED=true")
-    for key, default in (("MESSAGE_SYNC_OPEN_PRIORITY_ENABLED", "true"), ("MESSAGE_SYNC_UNREAD_PREFETCH_ENABLED", "false"), ("MESSAGE_SYNC_RECENT_HISTORY_ENABLED", "false"), ("MESSAGE_SYNC_TARGETED_STAGED_ROUTING", "false"), ("COMMUNITY_BRIDGE_CHANNEL_LIFECYCLE_ENABLED", "false")):
+    member_ids = env.get("SLACK_MEMBER_CHANNEL_ALLOWED_IDS", "")
+    if (not isinstance(member_ids, str) or len(member_ids) > 25000
+            or re.fullmatch(r"[A-Z0-9, \t]*", member_ids) is None
+            or member_ids and (len(member_ids.split(",")) > 1000 or not all(
+                re.fullmatch(r"C[A-Z0-9]{2,23}", value.strip()) for value in member_ids.split(",")
+            ))):
+        raise ValueError("SLACK_MEMBER_CHANNEL_ALLOWED_IDS must be empty or a bounded comma-separated channel list")
+    for key, default in (("MESSAGE_SYNC_OPEN_PRIORITY_ENABLED", "true"), ("MESSAGE_SYNC_UNREAD_PREFETCH_ENABLED", "false"), ("MESSAGE_SYNC_RECENT_HISTORY_ENABLED", "false"), ("MESSAGE_SYNC_TARGETED_STAGED_ROUTING", "false")):
         if env.get(key, default).lower() not in {"true", "false"}:
             raise ValueError(f"{key} must be true or false")
     cap = env.get("MESSAGE_SYNC_UNREAD_PREFETCH_PER_HOUR", "6")
@@ -25,8 +32,6 @@ def validate(env):
         raise ValueError("MESSAGE_SYNC_UNREAD_PREFETCH_PER_HOUR must be an integer from 1 to 256")
     if env.get("MESSAGE_SYNC_RECENT_HISTORY_ENABLED", "false").lower() == "true" and enabled != "true":
         raise ValueError("MESSAGE_SYNC_RECENT_HISTORY_ENABLED requires MESSAGE_SYNC_ENABLED=true")
-    if env.get("COMMUNITY_BRIDGE_CHANNEL_LIFECYCLE_ENABLED", "false").lower() == "true" and enabled != "true":
-        raise ValueError("COMMUNITY_BRIDGE_CHANNEL_LIFECYCLE_ENABLED requires MESSAGE_SYNC_ENABLED=true")
     if env.get("MESSAGE_SYNC_TARGETED_STAGED_ROUTING", "false").lower() == "true" and enabled != "true":
         raise ValueError("MESSAGE_SYNC_TARGETED_STAGED_ROUTING requires MESSAGE_SYNC_ENABLED=true")
     if env.get("MESSAGE_SYNC_UNREAD_PREFETCH_ENABLED", "false").lower() == "true" and (enabled != "true" or inventory_enabled != "true"):

@@ -5,6 +5,7 @@ import time
 import logging
 import uuid
 from typing import Optional
+from threading import Lock
 from urllib.parse import quote, urlencode
 
 import discord
@@ -15,6 +16,7 @@ from slack_sdk.errors import SlackApiError
 from integrations.models import CommunityBridgeDeliveryType, CommunityBridgePlatform
 from integrations.services.community_bridge.buzz import BuzzBridgeClient
 from integrations.services.community_bridge.ai_consent import send_with_ai_consent
+from integrations.services.community_bridge.member_delivery import legacy_send
 from integrations.services.community_bridge.coworking import is_coworking_request, deliver_coworking_request
 from integrations.services.community_bridge.formatting import (
     build_mirrored_text,
@@ -56,16 +58,18 @@ from integrations.services.message_sync.runner import process_history_once
 from integrations.services.message_sync.history import seed_states
 from integrations.services.message_sync.discovery import discovery_poll_seconds
 from integrations.services.message_sync.read_state import refresh_read_state_once
-from integrations.services.message_sync.execution import run_lane
+from integrations.services.message_sync.execution import run_lane, run_slots
 from integrations.services.slack_workspace_users import warm_workspace_directory_once
-from integrations.services.community_bridge import channel_lifecycle
 
 logger = logging.getLogger(__name__)
 WORKER_ID = f"{socket.gethostname()}:{os.getpid()}"[:100]
+# Host/PID can repeat after a container process restart. Coverage cannot.
 _discovery_heartbeat_at = 0.0
 _discovery_completed = 0
 _discovery_failed = 0
 _discovery_error = ""
+_discovery_heartbeat_lock = Lock()
+_discovery_heartbeat_inflight = False
 
 
 class ParentMappingPending(Exception):
@@ -100,9 +104,13 @@ class CommunityBridgeDiscordClient(discord.Client):
         self._delivery_loop_started = False
         self._slack_dm_maintenance_started = False
         self._slack_user_directory_started = False
+        self._member_channel_maintenance_started = False
 
     async def setup_hook(self) -> None:
         await asyncio.to_thread(reset_stale_processing_deliveries)
+        if not self._member_channel_maintenance_started:
+            self.member_channel_maintenance_loop.start()
+            self._member_channel_maintenance_started = True
         if not self._delivery_loop_started:
             self.delivery_loop.start()
             self._delivery_loop_started = True
@@ -129,6 +137,7 @@ class CommunityBridgeDiscordClient(discord.Client):
                      self.slack_dm_discovery_loop, self.slack_dm_history_loop, self.sync_inbox_loop, self.slack_read_state_loop,
                      self.slack_user_directory_loop):
             loop.cancel()
+        self.member_channel_maintenance_loop.cancel()
         await super().close()
 
     async def on_message(self, message: discord.Message) -> None:
@@ -223,12 +232,19 @@ class CommunityBridgeDiscordClient(discord.Client):
 
     @tasks.loop(seconds=5.0)
     async def slack_dm_discovery_loop(self) -> None:
+        from integrations.services.message_sync.event_routing import enabled as event_routing_enabled
+        if event_routing_enabled():
+            await _run_discovery_loop()
+            return
         await asyncio.to_thread(_maintain_chat_accounts)
+
+    @tasks.loop(seconds=5.0)
+    async def member_channel_maintenance_loop(self) -> None:
+        await _member_channel_maintenance_turn()
 
     @tasks.loop(seconds=3.0)
     async def slack_user_directory_loop(self) -> None:
         await _warm_workspace_directory_turn()
-        await _channel_lifecycle_turn()
 
     @tasks.loop(seconds=HISTORY_REQUEST_INTERVAL_SECONDS)
     async def slack_dm_history_loop(self) -> None:
@@ -371,6 +387,11 @@ class CommunityBridgeDiscordClient(discord.Client):
                     parent_message_id=exc.parent_message_id,
                 )
             except Exception as exc:
+                from .public_echo import PublicReactionSuperseded
+
+                if isinstance(exc, PublicReactionSuperseded):
+                    await asyncio.to_thread(complete_delivery, delivery_id=delivery["id"])
+                    return
                 logger.exception(
                     "community_bridge_delivery_failed delivery_id=%s target_platform=%s adapter_error=%s",
                     delivery["id"],
@@ -385,6 +406,16 @@ class CommunityBridgeDiscordClient(discord.Client):
                 )
 
     async def _process_delivery(self, delivery: dict) -> None:
+        from .member_delivery import required, execute
+        if delivery.get("target_platform") in {CommunityBridgePlatform.SLACK, CommunityBridgePlatform.BUZZ} and await asyncio.to_thread(required, delivery):
+            await asyncio.to_thread(execute, delivery)
+            return
+        if delivery.get("target_platform") == CommunityBridgePlatform.SLACK:
+            from .community_delivery import required as community_required, execute as community_execute
+
+            if await asyncio.to_thread(community_required, delivery):
+                await asyncio.to_thread(community_execute, delivery)
+                return
         if delivery["target_platform"] == CommunityBridgePlatform.DISCORD:
             await self._deliver_to_discord(delivery)
             return
@@ -404,12 +435,12 @@ class CommunityBridgeDiscordClient(discord.Client):
         payload = dict(delivery["payload"] or {})
         author_display_name = await self._resolve_author_display_name(
             payload,
-            source_platform=delivery["source_platform"],
+            source_platform=delivery["source_platform"], delivery=delivery,
             channel=delivery.get("channel"),
         )
         body = await self._resolve_message_body(
             payload,
-            source_platform=delivery["source_platform"],
+            source_platform=delivery["source_platform"], delivery=delivery,
         )
         content = build_mirrored_text(
             destination_platform=CommunityBridgePlatform.DISCORD,
@@ -489,19 +520,15 @@ class CommunityBridgeDiscordClient(discord.Client):
             return
         author_display_name = await self._resolve_author_display_name(
             payload,
-            source_platform=delivery["source_platform"],
+            source_platform=delivery["source_platform"], delivery=delivery,
             channel=delivery.get("channel"),
         )
         from integrations.services.slack_channel_mentions import render_slack_mentions
-        from integrations.services.slack_mentions import validate_mention_users
+        from .member_metadata import prepare_legacy_text
         body, mention_ids = render_slack_mentions(
             str(payload.get("text") or ""), (payload.get("metadata") or {}).get("slack_mention_tags") or [],
         )
-        if mention_ids:
-            await asyncio.to_thread(validate_mention_users, SlackBridgeClient.get_client(), mention_ids,
-                                    (delivery.get("channel") or {}).get("slack_workspace_id", ""), scope="public-bot")
-        from integrations.services.community_bridge.broadcast_mentions import prepare_slack_broadcasts
-        body = await asyncio.to_thread(prepare_slack_broadcasts, delivery, body)
+        body = await asyncio.to_thread(prepare_legacy_text, delivery, body, mention_ids)
         text = build_mirrored_text(
             destination_platform=CommunityBridgePlatform.SLACK,
             source_platform=delivery["source_platform"],
@@ -523,9 +550,10 @@ class CommunityBridgeDiscordClient(discord.Client):
                 await deliver_coworking_request(delivery, text, thread_ts)
                 return
             response = await asyncio.to_thread(
-                send_with_ai_consent,
+                legacy_send,
                 delivery,
                 SlackBridgeClient.post_message,
+                require_ai=True,
                 channel_id=delivery["target_channel_id"],
                 text=text,
                 thread_ts=thread_ts,
@@ -560,9 +588,10 @@ class CommunityBridgeDiscordClient(discord.Client):
         if delivery["delivery_type"] == CommunityBridgeDeliveryType.EDIT:
             try:
                 await asyncio.to_thread(
-                    send_with_ai_consent,
+                    legacy_send,
                     delivery,
                     SlackBridgeClient.update_message,
+                    require_ai=True,
                     channel_id=link["destination_channel_id"],
                     message_id=link["destination_message_id"],
                     text=text,
@@ -578,7 +607,7 @@ class CommunityBridgeDiscordClient(discord.Client):
         if delivery["delivery_type"] == CommunityBridgeDeliveryType.DELETE:
             try:
                 await asyncio.to_thread(
-                    SlackBridgeClient.delete_message,
+                    legacy_send, delivery, SlackBridgeClient.delete_message,
                     channel_id=link["destination_channel_id"],
                     message_id=link["destination_message_id"],
                 )
@@ -608,9 +637,10 @@ class CommunityBridgeDiscordClient(discord.Client):
                 return
             try:
                 await asyncio.to_thread(
-                    send_with_ai_consent,
+                    legacy_send,
                     delivery,
                     SlackBridgeClient.add_reaction,
+                    require_ai=True,
                     channel_id=delivery["target_channel_id"],
                     message_id=target_message_id,
                     reaction=reaction,
@@ -650,7 +680,7 @@ class CommunityBridgeDiscordClient(discord.Client):
         destination = dict(link.get("destination_payload") or {})
         try:
             await asyncio.to_thread(
-                SlackBridgeClient.remove_reaction,
+                legacy_send, delivery, SlackBridgeClient.remove_reaction,
                 channel_id=str(destination.get("channel_id") or link["destination_channel_id"]),
                 message_id=str(destination.get("message_id") or ""),
                 reaction=str(destination.get("reaction") or reaction),
@@ -702,8 +732,7 @@ class CommunityBridgeDiscordClient(discord.Client):
             and (not author_display_name or not author_avatar_url)
         ):
             slack_profile = await asyncio.to_thread(
-                SlackBridgeClient.get_user_profile,
-                source_author_id,
+                SlackBridgeClient.get_user_profile, source_author_id, workspace_id=slack_workspace_id,
             )
             author_display_name = author_display_name or str(
                 slack_profile.get("display_name") or ""
@@ -739,12 +768,12 @@ class CommunityBridgeDiscordClient(discord.Client):
             if not author_display_name:
                 author_display_name = await self._resolve_author_display_name(
                     payload,
-                    source_platform=delivery["source_platform"],
+                    source_platform=delivery["source_platform"], delivery=delivery,
                     channel=channel,
                 )
             body = await self._resolve_message_body(
                 payload,
-                source_platform=delivery["source_platform"],
+                source_platform=delivery["source_platform"], delivery=delivery,
             )
             text = build_mirrored_text(
                 destination_platform=CommunityBridgePlatform.BUZZ,
@@ -831,13 +860,19 @@ class CommunityBridgeDiscordClient(discord.Client):
         )
 
     async def _freeze_and_send_buzz_delivery(self, delivery: dict, **envelope) -> None:
+        from integrations.services.slack_custom_emoji import load_catalog, catalog_names, needs_catalog, present
+        if delivery.get("source_platform") == "slack" and not delivery.get("canonical_envelope"):
+            catalog = await asyncio.to_thread(load_catalog, envelope.get("source_workspace_id", ""), requested_names=catalog_names(envelope.get("text"))) if needs_catalog(envelope.get("text")) else {}
+            envelope["text"], emojis = present(envelope.get("text", ""), catalog)
+            if emojis:
+                envelope["emojis"] = emojis
         frozen = await asyncio.to_thread(
             freeze_buzz_delivery, delivery_id=delivery["id"], envelope=envelope,
         )
         await self._send_frozen_buzz_delivery(delivery, frozen)
 
     async def _send_frozen_buzz_delivery(self, delivery: dict, envelope: dict) -> None:
-        response = await asyncio.to_thread(BuzzBridgeClient.deliver, **envelope)
+        response = await asyncio.to_thread(legacy_send, delivery, BuzzBridgeClient.deliver, **envelope)
         operation = delivery["delivery_type"]
         if operation in {
             CommunityBridgeDeliveryType.CREATE,
@@ -902,6 +937,7 @@ class CommunityBridgeDiscordClient(discord.Client):
         *,
         source_platform: str,
         channel: Optional[dict] = None,
+        delivery: Optional[dict] = None,
     ) -> str:
         display_name = str(payload.get("source_author_display_name") or "").strip()
         if display_name:
@@ -917,12 +953,12 @@ class CommunityBridgeDiscordClient(discord.Client):
                 return str(identity.get("display_name") or user_id)
         if source_platform == CommunityBridgePlatform.SLACK and user_id:
             return await asyncio.to_thread(
-                SlackBridgeClient.get_user_display_name,
-                user_id,
+                SlackBridgeClient.get_user_display_name, user_id,
+                workspace_id=str((channel or {}).get("slack_workspace_id") or ""),
             )
         return user_id or "Unknown user"
 
-    async def _resolve_message_body(self, payload: dict, *, source_platform: str) -> str:
+    async def _resolve_message_body(self, payload: dict, *, source_platform: str, delivery: Optional[dict] = None) -> str:
         body = str(payload.get("text") or "")
         if source_platform != CommunityBridgePlatform.SLACK:
             return body
@@ -930,12 +966,14 @@ class CommunityBridgeDiscordClient(discord.Client):
         display_markdown = metadata.get("slack_display_markdown")
         if isinstance(display_markdown, str):
             return await asyncio.to_thread(
-                SlackBridgeClient.resolve_markdown_entities, display_markdown
+                SlackBridgeClient.resolve_markdown_entities, display_markdown,
+                workspace_id=str(((delivery or {}).get("channel") or {}).get("slack_workspace_id") or ""),
             )
         raw_text = str(metadata.get("slack_raw_text") or "")
         if not raw_text:
             return body
-        return await asyncio.to_thread(SlackBridgeClient.resolve_message_text, raw_text)
+        return await asyncio.to_thread(SlackBridgeClient.resolve_message_text, raw_text,
+            workspace_id=str(((delivery or {}).get("channel") or {}).get("slack_workspace_id") or ""))
 
     def _should_process_message(self, message: discord.Message) -> bool:
         if message.guild is None:
@@ -1014,8 +1052,12 @@ async def _run_headless_delivery_worker(client: CommunityBridgeDiscordClient) ->
     async def user_directory_loop():
         while True:
             await _warm_workspace_directory_turn()
-            await _channel_lifecycle_turn()
             await asyncio.sleep(3.0)
+
+    async def member_channel_loop():
+        while True:
+            await _member_channel_maintenance_turn()
+            await asyncio.sleep(5.0)
 
     async with asyncio.TaskGroup() as group:
         group.create_task(inbox_loop())
@@ -1025,6 +1067,7 @@ async def _run_headless_delivery_worker(client: CommunityBridgeDiscordClient) ->
         group.create_task(delivery_loop())
         group.create_task(private_delivery_loop())
         group.create_task(user_directory_loop())
+        group.create_task(member_channel_loop())
 
 
 async def _run_history_workers():
@@ -1042,6 +1085,13 @@ async def _run_read_state_workers():
 
 async def _run_discovery_loop() -> None:
     """Poll once per configured turn even with no work; never spin on deferral."""
+    from integrations.services.message_sync.event_routing import enabled as event_routing_enabled
+    if event_routing_enabled():
+        # One slow owner's directory/provider work cannot occupy every event
+        # slot. Both slots still acquire the same durable owner lease, respect
+        # the global poll cap and run authority reduction before each claim.
+        await run_slots(lambda _: _maintain_chat_accounts(), slots=2, idle_seconds=1.0)
+        return
     while True:
         await asyncio.to_thread(_maintain_chat_accounts)
         await asyncio.sleep(discovery_poll_seconds())
@@ -1054,15 +1104,16 @@ async def _warm_workspace_directory_turn() -> None:
         logger.warning("slack_user_directory_warm_failed error_code=%s", type(exc).__name__)
 
 
-async def _channel_lifecycle_turn() -> None:
-    """Apply queued Slack channel changes, then advance reconciliation."""
-    if not channel_lifecycle.enabled():
-        return
+async def _member_channel_maintenance_turn() -> None:
+    """Keep existing-room reductions alive before gated source expansion."""
+    from .member_channels import process_refreshes_once, process_room_reductions_once, sync_audiences_once
+
     try:
-        await asyncio.to_thread(channel_lifecycle.process_refreshes_once)
-        await asyncio.to_thread(channel_lifecycle.reconcile_once)
+        await asyncio.to_thread(sync_audiences_once, 5)
+        await asyncio.to_thread(process_room_reductions_once, 5)
+        await asyncio.to_thread(process_refreshes_once, 5)
     except Exception as exc:
-        logger.warning("community_bridge_channel_lifecycle_failed error_code=%s", type(exc).__name__)
+        logger.warning("member_channel_maintenance_failed error_code=%s", type(exc).__name__)
 
 
 def _maintain_chat_accounts():
@@ -1076,16 +1127,32 @@ def _maintain_chat_accounts():
 def _record_discovery_heartbeat(outcome):
     """Aggregate turns from either entrypoint and write no more than every 5 s."""
     global _discovery_heartbeat_at, _discovery_completed, _discovery_failed, _discovery_error
+    global _discovery_heartbeat_inflight
     if not message_sync_enabled():
         return
-    if outcome is not None:
-        _discovery_completed += outcome.completed
-        _discovery_failed += outcome.failed
-        _discovery_error = outcome.error_code
-    now = time.monotonic()
-    if now - _discovery_heartbeat_at >= 5:
-        heartbeat(WORKER_ID, "discovery", completed=_discovery_completed,
-                  failed=_discovery_failed, error_code=_discovery_error)
+    with _discovery_heartbeat_lock:
+        if outcome is not None:
+            _discovery_completed += outcome.completed
+            _discovery_failed += outcome.failed
+            _discovery_error = outcome.error_code
+        now = time.monotonic()
+        if _discovery_heartbeat_inflight or now - _discovery_heartbeat_at < 5:
+            return
+        snapshot = (_discovery_completed, _discovery_failed, _discovery_error)
+        _discovery_heartbeat_inflight = True
         _discovery_heartbeat_at = now
         _discovery_completed = _discovery_failed = 0
         _discovery_error = ""
+    try:
+        heartbeat(WORKER_ID, "discovery", completed=snapshot[0],
+                  failed=snapshot[1], error_code=snapshot[2])
+    except Exception:
+        with _discovery_heartbeat_lock:
+            _discovery_completed += snapshot[0]
+            _discovery_failed += snapshot[1]
+            _discovery_error = _discovery_error or snapshot[2]
+            _discovery_heartbeat_at = 0.0
+        raise
+    finally:
+        with _discovery_heartbeat_lock:
+            _discovery_heartbeat_inflight = False

@@ -1,9 +1,11 @@
+from .slack_emoji_views import SlackEmojiDirectoryView
 from django.urls import include, path
 from .apple_iap_views import AppleIapView, AppleIapTransactionView, AppleIapNotificationView
 from .privacy_views import AccountDeletionView, AiConsentView
 from .device_management_views import AccountDevicesView, AccountDeviceView
 from .onboarding_views import MemberOnboardingView
 from .account_ban_views import AccountBanView
+from .admin_views import AdminAccessView
 from .permission_views import ChatPermissionsView, RelayChatRoleView, ChatModeratorView, ChatMemberRolesView, ChatAdminView
 
 from .views import (
@@ -74,6 +76,9 @@ urlpatterns = [
     path("moderators/<str:public_key>/", ChatModeratorView.as_view(), name="community_chat_moderator"),
     path("relay-roles/<str:public_key>/", RelayChatRoleView.as_view(), name="community_chat_relay_role"),
     path("volunteer/", include("community_chat.volunteer.urls")),
+    path("crm/", include("community_chat.crm.urls")),
+    # MLAI Chat's Admin area; not Django's /admin/ site or the relay's /api/admin/v1.
+    path("admin/access/", AdminAccessView.as_view(), name="community_chat_admin_access"),
     path("home/", CommunityHomeView.as_view(), name="community_chat_home"),
     path("coworking/today/", CoworkingTodayView.as_view(), name="community_chat_coworking_today"),
     path("meeting-rooms/rooms/", MeetingRoomListView.as_view(), name="community_chat_meeting_room_list"),
@@ -81,6 +86,7 @@ urlpatterns = [
     path("meeting-rooms/book/", MeetingRoomBookView.as_view(), name="community_chat_meeting_room_book"),
     path("meeting-rooms/my-bookings/", MyMeetingRoomBookingsView.as_view(), name="community_chat_meeting_room_my_bookings"),
     path("meeting-rooms/cancel/", MeetingRoomCancelView.as_view(), name="community_chat_meeting_room_cancel"),
+    path("slack/emoji/", SlackEmojiDirectoryView.as_view(), name="community_chat_slack_emoji"),
     path("slack/message/", SlackMessageActionView.as_view(), name="community_chat_slack_message"),
     path("slack/", SlackDmMirrorView.as_view(), name="community_chat_slack"),
     path("slack/conversations/", SlackOwnerConversationView.as_view(), name="community_chat_slack_conversations"),

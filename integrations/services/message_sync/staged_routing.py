@@ -211,7 +211,7 @@ def _bounded_details(details):
     return safe
 
 
-def _route_channel(grant, authority, channel_id, parked, *, reset_history, profiles):
+def _route_channel(grant, authority, channel_id, parked, *, reset_history, profiles, path="targeted"):
     """Revalidate one parked channel and route it only through the full check."""
     from integrations.models import SlackDmMirrorConversationStatus
     from integrations.services import slack_dm_mirror as dm
@@ -283,7 +283,7 @@ def _route_channel(grant, authority, channel_id, parked, *, reset_history, profi
         # Provisioning or the device audience is not ready; keep events parked.
         _settle(authority, channel_id, delay="backoff")
         return "fenced"
-    dm._drain_staged_events_for_conversation(authority, conversation.pk, path="targeted")
+    dm._drain_staged_events_for_conversation(authority, conversation.pk, path=path)
     return "routed"
 
 

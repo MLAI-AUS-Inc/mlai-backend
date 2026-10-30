@@ -118,7 +118,7 @@ def private_page_limit(conversation, provider_limit):
     return page_limit(marker.metadata or {}, provider_limit)
 
 
-def imported_floor(state, consent_floor):
+def imported_floor(state, consent_floor, *, scope=None):
     """Repair only already imported history plus new arrivals, not old archives."""
     from .history import timestamp
     if not enabled():
@@ -132,7 +132,7 @@ def imported_floor(state, consent_floor):
         from .head_repair import head_scope
         job = state.jobs.filter(kind="archive", source_object_key="").first()
         progress = job.checkpoint or {} if job else {}
-        if progress.get("authority_generation") != head_scope(state):
+        if progress.get("authority_generation") != (scope or head_scope(state)):
             return None
         frontier = progress.get("frontier") or (progress.get("upper_bound") if progress.get("timeline_complete") else None)
     if not frontier:

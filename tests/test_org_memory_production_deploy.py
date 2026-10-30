@@ -209,7 +209,7 @@ class OrgMemoryProductionDeployTests(SimpleTestCase):
 
     def test_remote_deployment_script_is_valid_bash(self):
         deploy = (ROOT / "deploy.sh").read_text()
-        remote = deploy.split('ssh "$DEPLOY_SSH_TARGET" <<EOF\n', 1)[1]
+        remote = deploy.split('ssh "$DEPLOY_SSH_TARGET" <<EOF', 1)[1].split("\n", 1)[1]
         remote = remote.rsplit("\nEOF", 1)[0].replace("\\$", "$")
 
         result = subprocess.run(

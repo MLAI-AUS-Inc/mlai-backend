@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from .slack_privacy import identity_is_members
+
 import hashlib
 import json
 import re
@@ -319,6 +321,11 @@ def capture_source_version(
     if len(bounded_excerpt) > 4096:
         raise EvidenceKernelError("bounded_excerpt exceeds 4096 characters.")
     source_metadata = _safe_metadata(metadata or {}, path="source.metadata")
+    if provider == "slack" and identity_is_members(
+        external_account_id=external_account_id, external_id=external_id,
+        metadata=source_metadata, source_scope=source_scope,
+    ):
+        raise EvidenceKernelError("Members Slack sources are excluded from memory.")
     acl_payload = _normalized_acl(acl)
     _validate_source_links(
         organization=organization,

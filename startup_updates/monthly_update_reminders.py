@@ -21,7 +21,7 @@ from integrations.services.notification_adapters import _customerio_client
 from roo.services import CoworkingService
 from vibe_raising.registration import company_is_verified
 
-from .benefits import approved_update_at
+from .benefits import discount_approved_update_at
 from .models import (
     MonthlyUpdateDraft,
     MonthlyUpdateReminderDelivery,
@@ -131,7 +131,7 @@ def collect_monthly_update_reminder_targets(reminder_date: date) -> list[Monthly
         first_approved_at=Min("revisions__approval__approved_at"),
     ).order_by("organization_id", "-id")
     for update in ready_updates:
-        anchor = approved_update_at(update)
+        anchor = discount_approved_update_at(update)
         previous = latest_ready_by_org.get(update.organization_id)
         if anchor is not None and (previous is None or anchor > previous[0]):
             # Generated READY stamps and recreated drafts must not determine

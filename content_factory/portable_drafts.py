@@ -168,8 +168,15 @@ _REQUEST_TRUE_VALUES = frozenset({"1", "true", "yes", "on"})
 
 
 def has_connected_website(config):
-    """True when the company's selected website can host an article preview."""
+    """True when the company's selected website can host an article preview.
+
+    A company whose articles MLAI hosts publishes repo-free drafts instead, even
+    while its repository connection stays in place.
+    """
     if config is None or not getattr(config, "website_connection_id", None):
+        return False
+    from .hosted_articles import hosted_site_active
+    if hosted_site_active(config):
         return False
     connection = getattr(config, "website_connection", None)
     return getattr(connection, "state", None) in WEBSITE_PREVIEW_CONNECTION_STATES

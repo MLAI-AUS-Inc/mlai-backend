@@ -248,6 +248,16 @@ def start_prepare(config, *, expected=None, company_id=None, user=None, retry=Fa
                 for key in ("scan_run_id", "setup_run_id", "completed_steps"):
                     op.receipt.pop(key, None)
             op.save(update_fields=["state", "next_attempt_at", "receipt", "payload", "updated_at"])
+        elif not created and retry and op.state == "completed" and _readiness_lapsed(config, current):
+            # "Check website again" on a finished preparation whose proof has
+            # lapsed: re-verify on the server, as a source change would, rather
+            # than replaying a completion the website no longer satisfies.
+            for field, value in _source_recheck_values(op, message="Checking your website again.").items():
+                setattr(op, field, value)
+            op.payload["user_clicks"] = op.payload.get("user_clicks", 1) + 1
+            op.receipt["dispatch_outcome"] = "new_attempt"
+            op.save(update_fields=["state", "next_attempt_at", "receipt", "payload", "updated_at"])
+            _adopt_source_checks(current, op)
         elif not created:
             op.receipt = {**op.receipt, "dispatch_outcome": "replayed"}
             # A response replay must not invalidate a worker's updated_at lease.
@@ -568,6 +578,56 @@ def _setup_surface(config, journey, *, goal=None):
     raise WebsiteAuthorityError("article_surface_unresolved", "Scan the repository to identify an articles page before setup.", retryable=False)
 
 
+def _merged_setup_surface(op, config):
+    """The page this preparation's own merged setup used, for the setup that follows it.
+
+    A setup merged without its verification kit is set up once more to install
+    the kit (TalaThrive PR #40). That follow-up adopts the page the merged setup
+    built, so it keeps the owner's original choice. A rescan of the merged source
+    can rank build output and tag pages as candidates and would ask the owner to
+    choose again (PawShare setup ccd3ea22, 23 Oct 2026).
+    """
+    run = _connection_setup_run(op.receipt.get("merged_setup_run_id"), config.website_connection)
+    result = run.result if run is not None and isinstance(run.result, dict) else {}
+    setup = result.get("article_system_setup") if isinstance(result.get("article_system_setup"), dict) else {}
+    if "merged" not in {result.get("merge_status"), setup.get("merge_status")}:
+        return None
+    chosen = _chosen_existing_page(run)
+    if chosen:
+        return chosen
+    # A page the merged setup created now exists at the route it built.
+    built = result.get("route_path") or setup.get("route_path") or ""
+    return ("existing", _canonical_article_route(built)) if isinstance(built, str) and built else None
+
+
+def _superseded_setup_surface(op, config):
+    """The existing page a closed setup pull request was built on, for the setup replacing it.
+
+    Closing the pull request replaces the build, not the owner's choice of page.
+    """
+    return _chosen_existing_page(_connection_setup_run(op.receipt.get("superseded_setup_run_id"), config.website_connection))
+
+
+def _connection_setup_run(run_id, connection):
+    """A setup run of this connection's current generation, or None."""
+    if not run_id or connection is None:
+        return None
+    from workflow_runs.models import ContentFactoryRun
+    return ContentFactoryRun.objects.filter(run_id=run_id, organization_id=connection.organization_id,
+        workflow="article_system_setup", run_request__website_connection_id=str(connection.pk),
+        run_request__connection_generation=connection.generation).first()
+
+
+def _chosen_existing_page(run):
+    """The existing articles page the owner chose for a setup run, if any."""
+    request = run.run_request if run is not None and isinstance(run.run_request, dict) else {}
+    hint = request.get("article_surface_hint") if isinstance(request.get("article_surface_hint"), dict) else {}
+    chosen = hint.get("route_path") or hint.get("listing_url") or ""
+    if request.get("article_surface_mode") == "existing" and isinstance(chosen, str) and chosen:
+        return "existing", _canonical_article_route(chosen)
+    return None
+
+
 def _owner_request(op, context, config, step, *, user, journey=None):
     """Call existing guarded owner handlers with a complete POST request shape."""
     connection = config.website_connection
@@ -593,7 +653,8 @@ def _owner_request(op, context, config, step, *, user, journey=None):
         if valid_consent(op.receipt["goal"]) and hosted_enabled(connection):
             data["verification_mode"] = op.receipt["goal"]["consent"]["answers"]["ci_mode"]
     if step == "setup":
-        mode, surface = _setup_surface(config, journey or journey_for_context(context, config), goal=op.receipt.get("goal"))
+        mode, surface = _merged_setup_surface(op, config) or _superseded_setup_surface(op, config) or _setup_surface(
+            config, journey or journey_for_context(context, config), goal=op.receipt.get("goal"))
         pending = (config.article_system or {}).get("pending_article_system_setup") or {}
         if op.payload.get("manual_setup_example_cleanup_retry") or op.payload.get("source_reverify"):
             pending = {**pending, "source_scan_run_id": op.receipt.get("scan_run_id") or ""}
@@ -838,6 +899,10 @@ def _advance_claimed_prepare(op, *, now, handlers):
             from workflow_runs.models import ContentFactoryRun
             child = child or ContentFactoryRun.objects.filter(run_id=child_id, organization_id=op.connection.organization_id).first()
             setup = ((child.result or {}).get("article_system_setup") or {}) if child else {}
+            if child and child.workflow == "article_system_setup" and "pr_closed" in {(child.result or {}).get("merge_status"), setup.get("merge_status")}:
+                # The owner closed this setup's pull request on GitHub; a new setup replaces it below.
+                _begin_replacement_setup_attempt(op, child)
+                child = None
             owner_action = _setup_owner_action(child, setup, op.connection) if child and child.workflow == "article_system_setup" else None
             if owner_action:
                 if owns_goal(op) and not any(item["name"] == "previewed" and item["state"] == "passed"
@@ -899,13 +964,19 @@ def _advance_claimed_prepare(op, *, now, handlers):
                     _begin_post_merge_attempt(op, child)
                     op.state, op.next_attempt_at = "pending", now
                     return _finish_prepare(op, now=now)
-                # "superseded": the pull request was closed on GitHub, so a new setup replaces it below.
+                if merge.get("status") == "superseded":
+                    # The pull request was closed on GitHub, so a new setup replaces it below.
+                    _begin_replacement_setup_attempt(op, child)
             op.receipt.pop("child_run_id", None)
         # Access probes may change the next requirement immediately; bound the
         # same-pass continuation to one probe plus one actual work dispatch.
         for _ in range(2):
             next_action = journey.get("nextAction") or {}
             step = next_action.get("id")
+            if step == "prepare":
+                # The owner's "Check website again" names this preparation; for
+                # it, that requirement is re-attesting the current source.
+                step = "ci-attestation"
             blocked = next((item for item in journey.get("steps", []) if item.get("status") != "complete"), {})
             if not step:
                 step = blocked.get("id") or op.receipt.get("current_step") or "prepare"
@@ -1027,25 +1098,62 @@ def wake_prepare_for_source(connection_id, *, organization_id, owned_merge_run_i
         run_request__connection_generation=connection.generation).exists()
     if owned_setup:
         reopenable.append("cancelled")
-    # Cancellation bookkeeping stays with the cancel follow-up that owns the cleanup.
-    receipt = {key: value for key, value in op.receipt.items()
-        if key not in {"scan_run_id", "setup_run_id", "completed_steps", "deployment_wait_started_at", "transient_started_at", "child_resume_pending",
-            "remote_effects", "remote_outcome_unknown", "remote_cleanup_pending", "cancellation_undoes_remote_writes"}}
-    if owned_setup:
-        receipt["merged_setup_run_id"] = owned_merge_run_id
+    values = _source_recheck_values(op, message="Rechecking the changed website source.",
+        merged_setup_run_id=owned_merge_run_id if owned_setup else "")
     reopened = WebsiteConnectionOperation.objects.filter(pk=op.pk, generation=connection.generation,
-        state__in=reopenable).update(state="pending", next_attempt_at=timezone.now(),
-            receipt={**receipt, "status": "working", "current_step": "scan", "deployment_attempts": 0,
-                "step_failures": {}, "user_action": None, "last_completed": None, "child_run_id": None,
-                "message": "Rechecking the changed website source."},
-            payload={**{key: value for key, value in op.payload.items() if key not in {"run_id", "repair_setup"}},
-                "source_reverify": True, "attempt": op.payload.get("attempt", 1) + 1, "retry_epoch": uuid4().hex}, updated_at=timezone.now())
+        state__in=reopenable).update(**values, updated_at=timezone.now())
     if not reopened:
         return None
+    _adopt_source_checks(connection, op)
+    return op
+
+
+# Cancellation bookkeeping stays with the cancel follow-up that owns the cleanup.
+SOURCE_RECHECK_DROPPED_RECEIPT_KEYS = frozenset({"scan_run_id", "setup_run_id", "completed_steps", "deployment_wait_started_at",
+    "transient_started_at", "child_resume_pending", "remote_effects", "remote_outcome_unknown", "remote_cleanup_pending",
+    "cancellation_undoes_remote_writes"})
+
+
+def _source_recheck_values(op, *, message, merged_setup_run_id=""):
+    """Fields that restart preparation at a fresh check of the selected source.
+
+    A new attempt and dispatch epoch mean no earlier child or request key is
+    replayed. Consent, the saved company and the requesting owner are kept.
+    """
+    receipt = {key: value for key, value in op.receipt.items() if key not in SOURCE_RECHECK_DROPPED_RECEIPT_KEYS}
+    if merged_setup_run_id:
+        receipt["merged_setup_run_id"] = merged_setup_run_id
+    return {"state": "pending", "next_attempt_at": timezone.now(),
+        "receipt": {**receipt, "status": "working", "current_step": "scan", "deployment_attempts": 0,
+            "step_failures": {}, "user_action": None, "last_completed": None, "child_run_id": None, "message": message},
+        "payload": {**{key: value for key, value in op.payload.items() if key not in {"run_id", "repair_setup"}},
+            "source_reverify": True, "attempt": op.payload.get("attempt", 1) + 1, "retry_epoch": uuid4().hex}}
+
+
+def _adopt_source_checks(connection, op):
+    """The reopened preparation now owns any queued source check of this generation."""
     connection.operations.filter(generation=connection.generation, action="source-reverify", state="pending").update(
         state="completed", receipt={"status": "managed_by_prepare", "prepare_operation_id": str(op.pk),
             "repository_modified": False}, updated_at=timezone.now())
-    return op
+
+
+# A lapse that re-verification cannot repair. Retrying such a completed
+# preparation stays a harmless replay; its own action is shown instead.
+READINESS_LAPSES_WITHOUT_RECHECK = frozenset({"website_disconnected", "website_publishing_paused", "website_writes_paused",
+    "repository_changed", "publishing_adapter_required"})
+
+
+def _readiness_lapsed(config, connection):
+    """Whether a completed preparation's website has lost current publication proof.
+
+    Accepted CI and live receipts expire after VERIFICATION_MAX_AGE, and a push
+    revokes readiness until its source is verified. Reads saved state only.
+    """
+    from .activation import durable_integration_evidence
+    evidence = durable_integration_evidence(config, connection)
+    if evidence.get("reasonCode") in READINESS_LAPSES_WITHOUT_RECHECK:
+        return False
+    return not (evidence.get("verified") is True and evidence.get("publishingVerified") is True)
 
 
 def _begin_post_merge_attempt(op, child):
@@ -1063,6 +1171,25 @@ def _begin_post_merge_attempt(op, child):
     for key in ("scan_run_id", "setup_run_id", "completed_steps", "last_completed"):
         op.receipt.pop(key, None)
     op.receipt["merged_setup_run_id"] = child.run_id
+
+
+def _begin_replacement_setup_attempt(op, child):
+    """Give the setup that replaces a closed setup pull request its own request identity.
+
+    Try again on a setup waiting for review is a recheck: it keeps the attempt and
+    retry epoch. The setup replacing a pull request the owner then closed reused
+    the closed setup's request key, so Content Factory replayed that run instead
+    of starting a new one (La Vie, la-vie#30 / c12e1329, 23 Oct 2026).
+    """
+    if op.receipt.get("superseded_setup_run_id") == child.run_id:
+        return  # A replay after the local transition cannot rotate its identity again.
+    from .website_hosted_setup_lineage import discard_for_new_setup
+    discard_for_new_setup(op)
+    op.payload = {**{key: value for key, value in op.payload.items() if key != "run_id"},
+        "attempt": op.payload.get("attempt", 1) + 1, "retry_epoch": uuid4().hex}
+    for key in ("setup_run_id", "completed_steps", "last_completed"):
+        op.receipt.pop(key, None)
+    op.receipt["superseded_setup_run_id"] = child.run_id
 
 
 def _return_to_open_setup_pr(op, config, journey):

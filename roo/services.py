@@ -1488,7 +1488,9 @@ class CoworkingService:
         Return whether a bound founder has an approved update's 30-day benefit.
 
         Require authoritative ABR verification, including eligible nonprofits
-        without an ACN. The benefit survives edits to the working draft and
+        without an ACN, and an approved community/public revision for new
+        benefits. Pre-policy approvals retain their earned windows. The benefit
+        survives edits to the working draft and
         expires exactly 30 days after first approval. Advance bookings must also
         fall inside the benefit window, using Melbourne booking dates.
         """
@@ -1503,7 +1505,7 @@ class CoworkingService:
             UserStartupBinding,
         )
         from vibe_raising.registration import company_is_verified
-        from startup_updates.benefits import approved_update_at
+        from startup_updates.benefits import discount_approved_update_at
 
         eligibility_user_ids = coworking_eligibility_user_ids(user)
         org_ids = list(
@@ -1552,7 +1554,7 @@ class CoworkingService:
         )
         return any(
             anchor is not None and window_start < anchor <= now
-            for anchor in (approved_update_at(draft) for draft in candidates)
+            for anchor in (discount_approved_update_at(draft) for draft in candidates)
         )
 
     @staticmethod
@@ -1565,7 +1567,7 @@ class CoworkingService:
 
         Defaults to the standard cost (from catalog/settings). When both
         ``user`` and ``booking_date`` are supplied and the user's ABR-verified
-        startup has a monthly update first approved within the last 30
+        startup has a shared monthly update first approved within the last 30
         days, the discounted cost applies instead — rewarding founders who keep
         their monthly update current.
         """

@@ -1,5 +1,6 @@
 import hashlib
 import inspect
+import re
 from datetime import timedelta
 from decimal import Decimal
 
@@ -498,6 +499,30 @@ class PublicKnowledgePublicationTests(TestCase):
         self.assertNotIn("internal draft", str(response.data))
         self.assertNotIn("Other organisation", str(response.data))
 
+    def test_retained_members_lineage_filters_current_public_reads_without_unpublishing(self):
+        from integrations.models import CommunityBridgeChannel
+        from integrations.tests_members_source_privacy_phase4c import add_retained_member_evidence
+        from org_memory.public_knowledge import active_public_knowledge
+        from org_memory.slack_privacy import exclude_members_publications
+        claim, _ = self._claim(external_id="members-public-copy", statement="Reviewed synthetic community fact.")
+        add_retained_member_evidence(claim)
+        publication, item = self._create_and_publish(
+            claim=claim, public_key="members-public-copy", public_body="Reviewed synthetic community fact.",
+        )
+        self.assertTrue(active_public_knowledge(organization_id=self.organization.pk).filter(pk=item.pk).exists())
+        self.assertTrue(exclude_members_publications(MemoryPublication.objects.filter(pk=publication.pk)).exists())
+        CommunityBridgeChannel.objects.create(
+            slack_workspace_id="TPRIMARY", slack_channel_id="CEXCLUDED", audience="members", enabled=False,
+        )
+        self.assertFalse(active_public_knowledge(organization_id=self.organization.pk).filter(pk=item.pk).exists())
+        detail = self.client.get(
+            f"/api/v1/org-memory/publications/{publication.pk}", **self._admin_headers(),
+        )
+        self.assertEqual(detail.status_code, 404, detail.data)
+        item.refresh_from_db()
+        self.assertEqual(item.status, PublicKnowledgeStatus.ACTIVE)
+        self.assertTrue(MemoryPublication.objects.filter(pk=publication.pk).exists())
+
     def test_source_revocation_automatically_retires_public_item(self):
         claim, source = self._claim(
             external_id="public-event",
@@ -748,14 +773,24 @@ class PublicKnowledgePublicationTests(TestCase):
             response = self._public_answer("isolated query boundary")
 
         self.assertEqual(response.status_code, 200, response.data)
-        sql = "\n".join(query["sql"].casefold() for query in captured.captured_queries)
-        for private_table in (
-            "org_memory_memoryclaim",
-            "org_memory_memoryevidence",
-            "org_memory_memorysource",
-            "org_memory_memorychunk",
-            "org_memory_memorysummary",
-            "org_memory_memorypublication",
-        ):
-            self.assertNotIn(private_table, sql)
-        self.assertIn("org_memory_publicknowledgeitem", sql)
+        private_tables = (
+            "org_memory_memoryclaim", "org_memory_memoryevidence",
+            "org_memory_memorysource", "org_memory_memorychunk",
+            "org_memory_memorysummary", "org_memory_memorypublication",
+        )
+        public_content_queries = []
+        for query in captured.captured_queries:
+            sql = query["sql"].casefold()
+            if not any(table in sql for table in private_tables):
+                continue
+            # Only a negative identity/lineage subquery may consult private
+            # tables. The outer retrieval remains the separate public corpus.
+            outer_table = re.search(r'\bfrom\s+"([^"]+)"', sql)
+            self.assertIsNotNone(outer_table, sql)
+            self.assertEqual(outer_table.group(1), "org_memory_publicknowledgeitem")
+            self.assertIn('not ("org_memory_publicknowledgeitem"."id" in (select', sql)
+            self.assertNotRegex(sql, r'\."(?:statement|quote|text|excerpt|object_value|proposed_body)"')
+            for body_table in re.findall(r'"([^"]+)"\."body"', sql):
+                self.assertEqual(body_table, "org_memory_publicknowledgeitem")
+            public_content_queries.append(sql)
+        self.assertTrue(public_content_queries)

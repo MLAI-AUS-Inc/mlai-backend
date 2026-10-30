@@ -1,5 +1,6 @@
 """Pure guards for immutable certified website and backend-owned run evidence."""
 from datetime import timedelta
+import re
 
 from django.db.models import Q
 from django.utils import timezone
@@ -26,6 +27,16 @@ def proof_stamp(proof, *, now=None):
     return stamp
 
 
+DIGEST = re.compile(r"[a-f0-9]{64}")
+
+
+def sealed_contract(contract):
+    """A target whose contract digest and live marker a setup sealed into its verification kit."""
+    contract = contract if isinstance(contract, dict) else {}
+    marker = contract.get("live_marker") if isinstance(contract.get("live_marker"), dict) else {}
+    return bool(DIGEST.fullmatch(str(contract.get("contract_digest") or "")) and DIGEST.fullmatch(str(marker.get("value") or "")))
+
+
 def target_update_allowed(previous, incoming, *, generation, sha):
     """Scans cannot rewrite an accepted certificate at its exact source."""
     if previous is None:
@@ -41,6 +52,13 @@ def target_update_allowed(previous, incoming, *, generation, sha):
     if has_candidate(previous.contract) and not has_candidate(incoming):
         # An unverified proposal still requires its stronger protocol. Dropping
         # the candidate must not let a scan restore a legacy ready flag.
+        return False
+    if sealed_contract(previous.contract) and not DIGEST.fullmatch(str((incoming or {}).get("contract_digest") or "")):
+        # Setup sealed this target's identity into the repository's own
+        # verification kit, whose CI proof names that digest. A rescan's
+        # re-detection of the same key, carrying no digest, cannot erase it:
+        # La Vie's post-merge rescan (25 Oct 2026) dropped digest f737dcf3, so
+        # the kit's proof at the merged commit matched nothing.
         return False
     if not previous.verified_at or previous.source_sha != sha:
         return True

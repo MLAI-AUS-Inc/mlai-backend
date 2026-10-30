@@ -174,8 +174,9 @@ def hourly_snapshot(scopes, *, hours=24, now=None):
 
 
 # staged_routed: a parked group-DM/private-channel event reached the delivery queue.
-LATENCY_KINDS = ("open_provisioned", "open_presented", "open_ready", "staged_routed")
-LATENCY_COUNTERS = ("count", "sum_ms", "over_30s", "over_120s")
+LATENCY_KINDS = ("open_provisioned", "open_presented", "open_ready", "staged_routed", "staged_delivered",
+                 "staged_delivered_event", "staged_delivered_targeted", "staged_delivered_discovery")
+LATENCY_COUNTERS = ("count", "sum_ms", "at_least_15s", "over_30s", "over_120s")
 
 
 def record_latency(kind, ms):
@@ -186,6 +187,7 @@ def record_latency(kind, ms):
         ms = max(0, int(ms))
         now = time()
         for counter, amount in (("count", 1), ("sum_ms", ms),
+                                ("at_least_15s", int(ms >= 15000)),
                                 ("over_30s", int(ms > 30000)), ("over_120s", int(ms > 120000))):
             _enqueue((f"latency:{kind}", counter, amount, int(now // 60), int(now // 3600)))
     except Exception:

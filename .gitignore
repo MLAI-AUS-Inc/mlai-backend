@@ -77,6 +77,8 @@ cookies.txt
 /*.md
 /docs/*.md
 /docs/**/*.md
+!/docs/studio-report-source.md
+!/docs/crm.md
 !/docs/roo-event-discounts.md
 !/docs/roo-event-discount-migration-proposal.md
 /output/event-discount-verification/
@@ -103,6 +105,8 @@ cookies.txt
 !/docs/org-memory-review-summaries-digests.md
 !/docs/mlai-chat-bridge-contract.md
 !/docs/slack-unfinished-conversation-recovery.md
+!/docs/slack-event-routing-phase8.md
+!/docs/slack-community-phase6-operations.md
 !/docs/message-sync-schema-proposal.md
 !/docs/community-chat-home.md
 !/docs/community-chat-dependency-signals.md
@@ -274,3 +278,4 @@ medhack_backend/hospital/Eval_Labels.csv
 
 # Maintained Roo purchase tax contract.
 !/docs/roo-points-gst.md
+!/docs/shared-update-benefits.md

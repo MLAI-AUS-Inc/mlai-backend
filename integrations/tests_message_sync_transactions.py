@@ -14,6 +14,7 @@ from integrations.services.community_bridge.store import (
 class MessageSyncTransactionTests(TransactionTestCase):
     def setUp(self):
         self.channel = CommunityBridgeChannel.objects.create(
+            audience="community",
             slack_workspace_id="T123", slack_channel_id="C123",
             destination_platform="buzz", destination_workspace_id="test.invalid",
             destination_channel_id="11111111-1111-4111-8111-111111111111",
@@ -182,7 +183,7 @@ class UndeliverableAndDependencyReportTests(TestCase):
                 operation='create', status='completed', available_at=now, metadata={'undeliverable': True, 'undeliverable_reason': reason})
             if reason == 'expired':
                 SlackDmMirrorDelivery.objects.filter(pk=row.pk).update(updated_at=now - timedelta(days=8))
-        channel = CommunityBridgeChannel.objects.create(slack_workspace_id='TREPORT', slack_channel_id='CREPORT', destination_platform='buzz', destination_channel_id='room')
+        channel = CommunityBridgeChannel.objects.create(audience="community", slack_workspace_id='TREPORT', slack_channel_id='CREPORT', destination_platform='buzz', destination_channel_id='room')
         for platform, status, error in [('buzz', 'waiting_parent', 'parent_mapping_parked:dependency_dead:123.4'),
                 ('buzz', 'dead', 'parent_unresolvable:dependency_dead:123.4'), ('buzz', 'completed', 'dependency_noop:dependency_dead:123.4'),
                 ('slack', 'waiting_parent', 'parent_mapping_pending:123.4')]:

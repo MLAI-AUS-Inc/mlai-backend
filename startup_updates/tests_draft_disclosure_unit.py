@@ -123,6 +123,21 @@ class DraftDisclosureContractTests(SimpleTestCase):
         self.assertFalse(serializer.is_valid())
         self.assertIn("audience", serializer.errors["drafts"][0])
 
+    def test_generated_financial_sharing_uses_only_the_pinned_founder_choice(self):
+        self.run.run_request["financial_history_selection"] = {"enabled": True, "shareAmounts": False}
+        item = self.item(structured_memo={**self.memo,
+            "_financial_history_selection": {"enabled": True, "shareAmounts": True},
+            "financial_history": {"snapshot": {"revenue": 99999}},
+        })
+        with ExitStack() as stack:
+            self.seams(stack)
+            save = stack.enter_context(patch("startup_updates.revisions.save_revision", side_effect=self.save_revision))
+            generated = self.submit(item)
+        self.assertEqual(generated.status_code, 200)
+        memo = save.call_args.args[1]
+        self.assertEqual(memo["_financial_history_selection"], {"enabled": True, "shareAmounts": False, "refresh": False})
+        self.assertNotIn("financial_history", memo)
+
 
 class LegacyDraftAudienceSelectionTests(SimpleTestCase):
     """New legacy drafts inherit saved owner choices; existing drafts keep theirs."""

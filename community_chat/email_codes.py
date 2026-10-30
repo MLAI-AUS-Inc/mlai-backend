@@ -73,7 +73,7 @@ def issue_email_code_challenge(
 
     canonical_email = normalize_email(email)
     digest = email_digest(canonical_email)
-    user = User.objects.filter(email__iexact=canonical_email).first()
+    user = User.objects.resolve_email(canonical_email)
     eligible_user = user if is_email_code_eligible(user) else None
     signup = bool(
         user is None and settings.COMMUNITY_CHAT_SIGNUP_ENABLED and onboarding_version == 1
@@ -213,7 +213,7 @@ def consume_email_code(*, challenge_id, code, client_id, installation_id):
             if signup:
                 # Case-insensitive uniqueness in core.User resolves concurrent
                 # verifications and a concurrent signup in another MLAI product.
-                user, created = User.objects.get_or_create(email__iexact=signup_email, defaults={
+                user, created = User.objects.get_or_create_for_email(signup_email, defaults={
                     "email": signup_email, "password": make_password(None), "email_verified_at": now,
                 })
                 locked_user = User.objects.select_for_update().get(pk=user.pk)

@@ -1298,6 +1298,25 @@ class SlackDmMirrorOwnerTests(APITestCase):
             ).exists()
         )
 
+    def test_private_single_and_batch_preserve_custom_emoji_images(self):
+        from integrations.services.slack_custom_emoji import resolve_catalog
+        catalog=resolve_catalog({"party_parrot":"https://emoji.slack-edge.com/TTEST/parrot/id.gif"})
+        _, conversation=self._live_conversation()
+        for batch_size, count in [(1,1),(20,2)]:
+            for offset in range(count):
+                conversation.deliveries.create(source_platform=CommunityBridgePlatform.SLACK,
+                    source_message_id=recent_slack_ts(f"17879000{batch_size:02d}.{offset:06d}"),
+                    source_author_id="UTWO", operation=CommunityBridgeDeliveryType.CREATE,
+                    encrypted_text=":party_parrot: :thumbsup::skin-tone-4:",
+                    metadata={"backfill":True,"participant_hash":conversation.participant_hash},
+                    available_at=timezone.now())
+            with patch("integrations.services.slack_custom_emoji.load_catalog",return_value=catalog), patch("integrations.services.slack_dm_mirror.BuzzBridgeClient.deliver_private",return_value={"message_id":"a"*64}) as single, patch("integrations.services.slack_dm_mirror.BuzzBridgeClient.deliver_private_batch",return_value=[{"message_id":c*64} for c in ("b","c")]) as batch:
+                self.assertEqual(process_ready_deliveries(limit=count,batch_size=batch_size),count)
+            payloads=[single.call_args.kwargs] if count==1 else batch.call_args.args[0]
+            for payload in payloads:
+                self.assertEqual(payload["text"],":party_parrot: 👍🏽")
+                self.assertEqual(payload["emojis"],[{"shortcode":"party_parrot","url":catalog["party_parrot"]["url"]}])
+
     @patch(
         "integrations.services.slack_dm_mirror.BuzzBridgeClient.deliver_private_batch"
     )

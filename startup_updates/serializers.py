@@ -339,6 +339,13 @@ class DraftResultSerializer(serializers.Serializer):
     audience_visibility = AudienceVisibilityField(required=False)
     audienceVisibility = AudienceVisibilityField(required=False)
 
+    def validate_structured_memo(self, value):
+        if "startupOverview" in value:
+            overview = value["startupOverview"]
+            if not isinstance(overview, str) or len(overview) > 2000:
+                raise serializers.ValidationError({"startupOverview": "Use a short text overview of at most 2000 characters."})
+        return value
+
     def validate(self, attrs):
         snake_case_visibility = attrs.get("audience_visibility")
         camel_case_visibility = attrs.pop("audienceVisibility", None)

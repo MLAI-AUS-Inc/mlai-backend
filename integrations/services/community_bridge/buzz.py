@@ -47,6 +47,46 @@ class BuzzBridgePermanentError(BuzzBridgeError):
     permanent = True
 
 
+class BuzzAudienceConflict(BuzzBridgeError):
+    """Only an exact Members audience update rejected by the relay CAS."""
+
+
+def _audience_uuid(value, *, optional=False):
+    if optional and value is None:
+        return None
+    try:
+        parsed = uuid.UUID(str(value))
+    except (ValueError, TypeError, AttributeError) as exc:
+        raise BuzzBridgeError("Invalid Members audience identifier") from exc
+    if parsed.int == 0 or str(parsed) != str(value):
+        raise BuzzBridgeError("Invalid Members audience identifier")
+    return str(parsed)
+
+
+def _audience_keys(values):
+    if (not isinstance(values, (list, tuple)) or len(values) > 1000
+            or any(not isinstance(key, str) or not EVENT_ID_RE.fullmatch(key) for key in values)
+            or len(set(values)) != len(values)):
+        raise BuzzBridgeError("Invalid Members audience keys")
+    return sorted(values)
+
+
+def validate_member_scope(value):
+    """Closed scope schema; this is server authority, never provider metadata."""
+    fields={'channel_id','slack_workspace_id','slack_channel_id','audience',
+            'expected_generation','expected_audience_hash'}
+    if not isinstance(value,dict) or set(value)!=fields or value.get('audience')!='members':
+        raise BuzzBridgeError('Invalid Members delivery scope')
+    result=dict(value)
+    for name in ('channel_id','expected_generation'):
+        result[name]=_audience_uuid(value[name])
+    if (not isinstance(value['slack_workspace_id'],str) or not re.fullmatch(r'T[A-Z0-9]{1,99}',value['slack_workspace_id'])
+            or not isinstance(value['slack_channel_id'],str) or not re.fullmatch(r'C[A-Z0-9]{1,99}',value['slack_channel_id'])
+            or not isinstance(value['expected_audience_hash'],str) or not EVENT_ID_RE.fullmatch(value['expected_audience_hash'])):
+        raise BuzzBridgeError('Invalid Members delivery scope')
+    return result
+
+
 class BuzzBridgeClient:
     _private_batch_disabled_until = 0.0
     _private_batch_fallback_seconds = 300
@@ -97,6 +137,8 @@ class BuzzBridgeClient:
         source_created_at: int = 0,
         broadcast: bool = False,
         mention_pubkeys: list[str] | None = None,
+        member_scope: dict | None = None,
+        emojis: list[dict] | None = None,
     ) -> dict:
         adapter_url = cls._validated_adapter_url()
         api_token = cls._api_token()
@@ -121,6 +163,14 @@ class BuzzBridgeClient:
             "source_created_at": int(source_created_at or 0) or None,
             "broadcast": bool(broadcast),
         }
+        if member_scope is not None:
+            payload['member_scope'] = validate_member_scope(member_scope)
+            if (payload['member_scope']['channel_id'] != payload['channel_id']
+                    or payload['member_scope']['slack_workspace_id'] != payload['source_workspace_id']
+                    or payload['member_scope']['slack_channel_id'] != payload['source_channel_id']):
+                raise BuzzBridgeError('Members delivery scope does not match source')
+        if emojis:
+            payload['emojis'] = emojis
         if mention_pubkeys:
             payload['mention_pubkeys'] = cls._mention_keys(mention_pubkeys)
         timeout = max(1, min(int(getattr(settings, "BUZZ_BRIDGE_ADAPTER_TIMEOUT_SECONDS", 15)), 60))
@@ -271,23 +321,28 @@ class BuzzBridgeClient:
         *,
         slack_workspace_id: str,
         slack_channel_id: str,
+        audience: str,
         name: str,
         archived: bool,
         about: str | None = None,
         topic: str | None = None,
         channel_id: str = "",
     ) -> dict:
-        """Create or update the public room mirroring one public Slack channel.
+        """Create or update a room mirroring one public Slack channel.
 
-        The adapter derives the room from the Slack IDs unless ``channel_id``
-        names an existing operator-provisioned or re-keyed room. ``about`` and
+        Audience and registered Slack identity are immutable. The adapter
+        derives the room from the Slack IDs unless ``channel_id`` names an
+        explicitly adopted Community room. ``about`` and
         ``topic`` of ``None`` leave those room fields unmanaged. A name already
         used by another room raises a permanent error with code
         ``name_conflict``.
         """
+        if audience not in {"community", "members"}:
+            raise BuzzBridgePermanentError("Public channel room requires an explicit valid audience")
         payload = {
             "slack_workspace_id": str(slack_workspace_id or "").strip(),
             "slack_channel_id": str(slack_channel_id or "").strip(),
+            "audience": audience,
             "name": str(name or "").strip(),
             "archived": bool(archived),
         }
@@ -322,6 +377,44 @@ class BuzzBridgeClient:
         })
         if result.get("accepted") is not True:
             raise BuzzBridgeError("MLAI Chat adapter did not accept the read notification")
+
+    @classmethod
+    def inspect_member_audience(cls, channel_id, *, generation):
+        """Inspect exact registered Members authority; no implicit update/rebase."""
+        channel = _audience_uuid(channel_id)
+        result = cls._post_adapter(f"v1/public-channels/{channel}/audience", {
+            "action": "inspect", "channel_id": channel, "previous_pubkeys": [],
+            "participant_pubkeys": [], "expected_generation": None,
+            "generation": _audience_uuid(generation),
+        })
+        if not isinstance(result, dict) or set(result) != {"channel_id", "generation", "participant_pubkeys"}:
+            raise BuzzBridgeError("Invalid Members audience inspection")
+        if _audience_uuid(result["channel_id"]) != channel:
+            raise BuzzBridgeError("Members audience channel mismatch")
+        current = _audience_uuid(result["generation"], optional=True)
+        keys = _audience_keys(result["participant_pubkeys"])
+        if current is None and keys:
+            raise BuzzBridgeError("Unfenced Members audience inspection")
+        return {"channel_id": channel, "generation": current, "participant_pubkeys": keys}
+
+    @classmethod
+    def update_member_audience(cls, channel_id, *, previous_pubkeys, participant_pubkeys,
+                               expected_generation, generation):
+        """Send one fixed CAS command; caller durably prepares its UUID first."""
+        channel = _audience_uuid(channel_id)
+        command = _audience_uuid(generation)
+        result = cls._post_adapter(f"v1/public-channels/{channel}/audience", {
+            "action": "update", "channel_id": channel,
+            "previous_pubkeys": _audience_keys(previous_pubkeys),
+            "participant_pubkeys": _audience_keys(participant_pubkeys),
+            "expected_generation": _audience_uuid(expected_generation, optional=True),
+            "generation": command,
+        })
+        if (not isinstance(result, dict) or set(result) != {"channel_id", "generation"}
+                or _audience_uuid(result["channel_id"]) != channel
+                or _audience_uuid(result["generation"]) != command):
+            raise BuzzBridgeError("Members audience acknowledgement mismatch")
+        return {"channel_id": channel, "generation": command}
 
     @classmethod
     def inbox_export_frontier(cls, *, community_id, account_key, channel_id, consented_at):
@@ -393,6 +486,7 @@ class BuzzBridgeClient:
         parent_message_id: str = "",
         mention_pubkeys: list[str] | None = None,
         broadcast: bool = False,
+        emojis: list[dict] | None = None,
     ) -> dict:
         result = cls._post_adapter(
             "v1/private-deliveries",
@@ -414,6 +508,7 @@ class BuzzBridgeClient:
                 "parent_message_id": str(parent_message_id or "") or None,
                 **({'mention_pubkeys': cls._mention_keys(mention_pubkeys)} if mention_pubkeys else {}),
                 **({'broadcast': True} if broadcast else {}),
+                **({'emojis': emojis} if emojis else {}),
             },
         )
         return cls._validated_private_delivery_result(
@@ -552,6 +647,10 @@ class BuzzBridgeClient:
             raise BuzzBridgeError(f"MLAI Chat adapter request failed: {exc.__class__.__name__}") from exc
         if 400 <= response.status_code < 500 and response.status_code not in {408, 429}:
             detail = _adapter_error_detail(response)
+            if (response.status_code == 409 and detail == "audience_conflict"
+                    and re.fullmatch(r"v1/public-channels/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/audience", path)
+                    and payload.get("action") == "update"):
+                raise BuzzAudienceConflict("Members audience changed", adapter_error="audience_conflict")
             raise BuzzBridgePermanentError(
                 _with_detail(f"MLAI Chat adapter rejected request with HTTP {response.status_code}", detail),
                 adapter_error=detail,

@@ -49,6 +49,60 @@ class SetupMergeVerificationUnitTests(SimpleTestCase):
         self.assertEqual(self.website.verified_sha, "")
         self.website.targets.update_or_create.assert_not_called()
 
+    def test_first_setup_without_a_pinned_source_uses_its_current_scan(self):
+        # PawShare setup ccd3ea22 (23 Oct 2026): Prepare cannot pin a source for a
+        # site with no verified SHA, so every Publish answered 409.
+        self.run.run_request.pop("expected_source_sha")
+        with patch("content_factory.website_hosted_build.current_scan_source", return_value=self.base):
+            self.validate()
+        for scan in ("c" * 40, None):
+            with self.subTest(scan=scan), \
+                    patch("content_factory.website_hosted_build.current_scan_source", return_value=scan), \
+                    self.assertRaises(WebsiteAuthorityError):
+                self.validate()
+
+    def code_review(self):
+        # La Vie setup c12e1329 (23 Oct 2026): the preview worker could not run the
+        # app, so the founder approved the branch diff instead of a hosted preview.
+        self.run.result.update(preview_runtime_unsupported=True,
+            live_preview={"status": "unavailable", "exactRender": False, "commitSha": "", "platformStatus": "unsupported_runtime"},
+            directory_quality_verification={"status": "code_review_ready", "task_id": "verification-1",
+                "completed_at": "2026-10-23T03:41:45+00:00", "commit_sha": ""})
+        self.run.result["directory_quality_gates"].update(status="failed", failed_gate="browser", browser=False, visual_style=False)
+        self.run.result["article_system_setup"]["preview_runtime_unsupported"] = True
+
+    def test_an_approved_code_review_setup_merges_its_exact_head(self):
+        self.code_review()
+        self.validate()
+
+    def test_code_review_still_requires_approval_build_quality_and_the_exact_head(self):
+        self.code_review()
+        valid = deepcopy(self.run.result)
+        for label, change in (
+            ("not code review", lambda r: r.pop("preview_runtime_unsupported")),
+            ("no code review proof", lambda r: r["directory_quality_verification"].update(status="failed")),
+            ("local build failed", lambda r: r["directory_quality_gates"].update(local_build=False)),
+            ("local build skipped", lambda r: r["directory_quality_gates"].update(local_build_skipped=True)),
+            ("source quality failed", lambda r: r["directory_quality_gates"].update(dom_slot_compliance=False)),
+            ("different head", lambda r: r.update(branch_commit_sha="c" * 40)),
+        ):
+            with self.subTest(label):
+                self.run.result = deepcopy(valid)
+                change(self.run.result)
+                with self.assertRaises(WebsiteAuthorityError):
+                    self.validate()
+        self.run.result = deepcopy(valid)
+        self.run.approval_state = "approval_required"
+        with self.assertRaises(WebsiteAuthorityError):
+            self.validate()
+
+    def test_a_verified_site_never_falls_back_to_the_recorded_source(self):
+        self.run.run_request.pop("expected_source_sha")
+        self.website.verified_sha = self.base
+        with patch("content_factory.website_hosted_build.current_scan_source", return_value=self.base), \
+                self.assertRaises(WebsiteAuthorityError):
+            self.validate()
+
     def test_adopted_kit_requires_its_actual_preview_head_and_full_proof(self):
         self.run.approval_state = "not_required"
         self.run.result.update(status="adopted", adopted=True, adoption_kit_preview_verified=True,

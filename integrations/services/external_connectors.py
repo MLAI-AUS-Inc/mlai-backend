@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from integrations.services.slack_source_privacy import is_members_source, slack_source_queryset
+
 import logging
 import hashlib
 import re
@@ -431,6 +433,7 @@ def _slack_oauth_user_scope_list() -> list[str]:
             "users:read",
             "reactions:read",
             "reactions:write",
+            "emoji:read",
             "files:read",
         ]
     )
@@ -2528,6 +2531,28 @@ def _xero_required_token(connection: ExternalServiceConnection) -> str:
 
 
 def _refresh_xero_connection(connection: ExternalServiceConnection) -> str:
+    # Refresh tokens rotate. All backend readers share this row lock, including
+    # the private Studio collector, so concurrent jobs cannot reuse an old one.
+    error = None
+    with transaction.atomic():
+        locked = ExternalServiceConnection.objects.select_for_update().get(pk=connection.pk)
+        try:
+            if (locked.access_token and (locked.token_expires_at is None
+                    or locked.token_expires_at > timezone.now() + timedelta(minutes=2))):
+                token = locked.access_token
+            else:
+                token = _refresh_xero_connection_unlocked(locked)
+        except ConnectorOAuthError as exc:
+            # Keep the durable reauthorisation status written by the owner;
+            # raising inside this atomic block would roll that update back.
+            error = exc
+        connection.refresh_from_db()
+    if error is not None:
+        raise error
+    return token
+
+
+def _refresh_xero_connection_unlocked(connection: ExternalServiceConnection) -> str:
     if not connection.refresh_token:
         connection.status = ExternalServiceConnectionStatus.ERROR
         connection.last_error = "Xero connection needs to be reauthorised."
@@ -4875,7 +4900,7 @@ def _upsert_slack_message(
     channel_name: str,
     message: dict[str, Any],
 ) -> Optional[SlackMessageArtifact]:
-    if not connection.organization:
+    if not connection.organization or is_members_source(connection.external_account_id, channel_id):
         return None
     message_ts = str(message.get("ts") or "").strip()
     if not message_ts:
@@ -4923,7 +4948,7 @@ def _slack_api_request_and_persist_messages(
     with transaction.atomic():
         connection = _lock_slack_connection_authority(authority)
         selection = (
-            SlackChannelSelection.objects.select_for_update()
+            slack_source_queryset(SlackChannelSelection).select_for_update()
             .filter(
                 pk=selection_id,
                 connection=connection,
@@ -4968,10 +4993,11 @@ def _upsert_slack_thread_artifact(
     channel_name: str,
     thread_ts: str,
 ) -> Optional[SlackThreadArtifact]:
-    if not connection.organization or not thread_ts:
+    if (not connection.organization or not thread_ts
+            or is_members_source(connection.external_account_id, channel_id)):
         return None
     messages = list(
-        SlackMessageArtifact.objects.filter(
+        slack_source_queryset(SlackMessageArtifact).filter(
             organization=connection.organization,
             connection=connection,
             channel_id=channel_id,
@@ -4992,7 +5018,7 @@ def _upsert_slack_thread_artifact(
 
     source_message_ids = [_slack_source_id(message.channel_id, message.slack_message_ts) for message in messages]
     cleaned_text = "\n".join(lines)
-    existing = SlackThreadArtifact.objects.filter(
+    existing = slack_source_queryset(SlackThreadArtifact).filter(
         organization=connection.organization,
         connection=connection,
         channel_id=channel_id,
@@ -5047,7 +5073,7 @@ def _upsert_slack_thread_artifact(
 
 
 def _selected_slack_channels(connection: ExternalServiceConnection):
-    return SlackChannelSelection.objects.filter(
+    return slack_source_queryset(SlackChannelSelection).filter(
         connection=connection,
         selected=True,
     ).order_by("channel_name", "channel_id")
@@ -5150,6 +5176,8 @@ def update_slack_channel_selections(user, channel_ids: Iterable[str], *, organiz
     }
     with transaction.atomic():
         connection = _lock_slack_connection_authority(authority)
+        if any(is_members_source(connection.external_account_id, channel_id) for channel_id in selected_ids):
+            raise ConnectorConfigurationError("Members Slack sources cannot be selected for analytics.")
         SlackChannelSelection.objects.filter(connection=connection).update(selected=False)
         for channel_id in sorted(selected_ids):
             selection, created = SlackChannelSelection.objects.get_or_create(
@@ -5168,7 +5196,7 @@ def update_slack_channel_selections(user, channel_ids: Iterable[str], *, organiz
                 selection.organization = connection.organization
                 selection.save(update_fields=["selected", "user", "organization", "updated_at"])
         if selected_ids:
-            SlackChannelSelection.objects.filter(
+            slack_source_queryset(SlackChannelSelection).filter(
                 connection=connection,
                 channel_id__in=selected_ids,
             ).update(selected=True)
@@ -5259,7 +5287,7 @@ def sync_slack_connection_page(
         else None
     )
     def scoped_channels():
-        rows = SlackChannelSelection.objects.filter(connection=connection)
+        rows = slack_source_queryset(SlackChannelSelection).filter(connection=connection)
         if not include_unselected:
             rows = rows.filter(selected=True)
         # An explicit empty run scope must never fall back to every channel.
@@ -5722,7 +5750,7 @@ def sync_slack_connection(
             connection = _lock_slack_connection_authority(authority)
             locked_selections = {
                 item.pk: item
-                for item in SlackChannelSelection.objects.select_for_update().filter(
+                for item in slack_source_queryset(SlackChannelSelection).select_for_update().filter(
                     connection=connection,
                     selected=True,
                     pk__in=[item["selection_id"] for item in pending_channel_results],
@@ -5835,7 +5863,7 @@ def serialize_slack_preview(user, *, limit: int = 5, organization=_ACTIVE_ORG) -
     if connection.status == ExternalServiceConnectionStatus.ERROR and connection.last_error:
         warnings.append(connection.last_error)
 
-    queryset = SlackMessageArtifact.objects.filter(
+    queryset = slack_source_queryset(SlackMessageArtifact).filter(
         connection=connection,
         organization=connection.organization,
     )
@@ -6260,7 +6288,7 @@ def _serialize_external_source(user, provider: str, organization=_ACTIVE_ORG) ->
         warning = configuration_error
     selected_channel_count = 0
     if provider == ExternalServiceProvider.SLACK and connection:
-        selected_channel_count = SlackChannelSelection.objects.filter(
+        selected_channel_count = slack_source_queryset(SlackChannelSelection).filter(
             connection=connection,
             selected=True,
         ).count()

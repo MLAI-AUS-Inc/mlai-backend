@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from integrations.services.slack_source_privacy import is_members_source
+
 import base64
 import hashlib
 import hmac
@@ -210,7 +212,9 @@ def schedule_artifact_wake(
     external_account_id: str,
     external_scope_id: str = "",
 ) -> int:
-    if provider == MemoryProvider.SLACK and is_slack_dm_scope(external_scope_id):
+    if provider == MemoryProvider.SLACK and (
+            is_slack_dm_scope(external_scope_id)
+            or is_members_source(external_account_id, external_scope_id)):
         return 0
     if provider == MemoryProvider.SLACK:
         setting_name, default = "ORG_MEMORY_SLACK_THREAD_QUIET_SECONDS", 900
@@ -381,7 +385,8 @@ def receive_slack_event(headers: Mapping, raw_body: bytes) -> ProviderEventResul
     if not created:
         return ProviderEventResult(status="duplicate")
     scheduled = 0
-    if channel_id and not is_slack_dm_scope(channel_id):
+    if (channel_id and not is_slack_dm_scope(channel_id)
+            and not is_members_source(team_id, channel_id)):
         scheduled = _schedule_configurations(
             provider=MemoryProvider.SLACK,
             external_account_id=team_id,

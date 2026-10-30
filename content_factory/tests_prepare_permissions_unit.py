@@ -166,6 +166,19 @@ class PrepareVerificationRuntimeTests(SimpleTestCase):
         self.fetch = stack.enter_context(patch("content_factory.website_live_fetch.fetch_live_route", side_effect=fetch))
         return stack
 
+    def test_only_the_owner_view_reports_a_source_check_as_running(self):
+        from .website_journey import journey_for_context
+        check = {"operationId": "check-1", "reason": "Checking your latest website changes."}
+        with self.boundaries(), patch("content_factory.website_journey.source_check_in_flight", return_value=check) as found:
+            runner = journey_for_context(self.context, self.config)
+            owner = journey_for_context(self.context, self.config, owner_view=True)
+        # Preparation keeps choosing its step from the unmasked facts.
+        found.assert_called_once()
+        self.assertEqual(runner["nextAction"]["id"], "verify")
+        self.assertIsNone(owner["nextAction"])
+        self.assertEqual((owner["prerequisites"]["deployment"]["status"], owner["prerequisites"]["deployment"]["operationId"]),
+            ("running", "check-1"))
+
     def test_fresh_saved_proof_verifies_live_without_optional_ci_grants(self):
         from . import website_prepare as prepare
         from .website_journey import journey_for_context
@@ -418,8 +431,9 @@ class PreparePermissionsTests(SimpleTestCase):
                 ci_missing = build != "fresh" and not (checks and statuses)
                 permissions_complete = not (workflow_missing or ci_missing)
                 publish_ready = integration and build == "fresh" and deployed
+                # Writable, connected sites renew expired proof through preparation.
                 next_id = "permissions" if not permissions_complete else "setup" if not integration else (
-                    "ci-attestation" if build == "stale" else "verify" if build != "fresh" or not deployed else None)
+                    "prepare" if build == "stale" else "verify" if build != "fresh" or not deployed else None)
                 self.assertEqual(journey["capabilities"]["canPublishArticle"], publish_ready)
                 self.assertEqual(journey["capabilities"]["canGenerateArticle"], integration and build == "fresh")
                 self.assertEqual((journey["nextAction"] or {}).get("id"), next_id)

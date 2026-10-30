@@ -2,8 +2,8 @@ name: Deploy to Digital Ocean
 
 on:
   pull_request:
-    # Stacked Articles implementation PRs need the same validation lanes.
-    branches: [ main, "codex/articles-*", "fix/admin-brain-deploy-decoupling", "feat/goal-wakeups", "feat/deploy-detection", "feat/first-article-goal" ]
+    # Stacked implementation PRs need the same validation lanes.
+    branches: [ main, "codex/articles-*", "codex/slack-*", "fix/admin-brain-deploy-decoupling", "feat/goal-wakeups", "feat/deploy-detection", "feat/first-article-goal" ]
   push:
     branches: [ main ]
   workflow_dispatch:
@@ -73,7 +73,7 @@ jobs:
         python -m pip install --only-binary=:all: --require-hashes -r .github/requirements-ci.lock
 
     - name: Test deployment failure handling and live contract
-      run: python -m unittest tests.test_deploy_runtime_checks tests.test_message_sync_deploy_config tests.test_community_bridge_dependency_review_workflow tests.test_valley_mcp_deploy_config tests.test_native_agent_deploy_config tests.test_slack_owner_inventory_deploy_config tests.test_tech_volunteers_bridge_workflow -v
+      run: python -m unittest tests.test_deploy_runtime_checks tests.test_message_sync_deploy_config tests.test_community_bridge_dependency_review_workflow tests.test_valley_mcp_deploy_config tests.test_crm_deploy_config tests.test_native_agent_deploy_config tests.test_slack_owner_inventory_deploy_config tests.test_member_room_provisioning_contract -v
 
     - name: Check jobs delivery contracts without database access
       run: python -m unittest tests.test_jobs_delivery_unit -v
@@ -100,6 +100,9 @@ jobs:
     - name: Check test-module assignment
       run: python scripts/check_test_assignment.py
 
+    - name: Test private Studio source preparation without database access
+      run: python scripts/test_without_database.py integrations.tests_studio_report_source
+
     - name: Run isolated refactor checks without database access
       run: python scripts/test_without_database.py content_factory.tests_run_sync_authority_unit content_factory.tests_pulse_sync_unit startup_updates.tests_source_throughput_unit content_factory.tests_current_connection_unit tests.test_refactor_unit tests.test_refactor_django_unit tests.test_refactor_migration_inventory roo.test_event_ticket_price
 
@@ -108,6 +111,18 @@ jobs:
 
     - name: Check event discount provider and worker boundaries without database access
       run: python scripts/test_without_database.py tests.test_luma_event_discounts_unit tests.test_event_discount_worker
+
+    - name: Check CRM messaging rules without database access
+      run: python scripts/test_without_database.py crm.tests.test_messaging_unit
+
+    - name: Check CRM Luma guest parsing, the Luma sync pass budget and CSV import rules without database access
+      run: python scripts/test_without_database.py crm.tests.test_luma_guests_unit crm.tests.test_luma_sync_unit crm.tests.test_contact_import_unit crm.tests.test_phones_unit
+
+    - name: Check CRM API, segment and admin gate rules without database access
+      run: python scripts/test_without_database.py crm.tests.test_api_unit crm.tests.test_segments_unit crm.tests.test_admin_gate_unit
+
+    - name: Check CRM blasts, sending domains and the listmonk client without database access
+      run: python scripts/test_without_database.py crm.tests.test_blasts_unit crm.tests.test_sending_domains_unit crm.tests.test_listmonk_unit
 
     - name: Verify event discounts against disposable migration state
       run: python scripts/test_event_discounts.py roo.tests_event_discounts roo.tests_event_discount_api roo.tests_event_discount_concurrency
@@ -126,10 +141,13 @@ jobs:
       run: python scripts/test_without_database.py community_chat.tests.test_unified_dm_directory_unit
 
     - name: Check Chat Roo identity and broadcast permissions without database access
-      run: python scripts/test_without_database.py integrations.tests_bridge_roo_actor integrations.test_broadcast_mentions_unit
+      run: python scripts/test_without_database.py integrations.tests_bridge_roo_actor integrations.tests_bridge_native_mentions integrations.test_broadcast_mentions_unit
 
     - name: Check Slack conversation opening without database access
-      run: python scripts/test_without_database.py community_chat.tests.test_slack_inventory_openable community_chat.tests.test_slack_open_requests community_chat.tests.test_slack_open_recovery integrations.tests_slack_progressive_presentation integrations.tests_slack_unread_prefetch
+      run: python scripts/test_without_database.py tests.test_slack_catalog_cors community_chat.tests.test_slack_inventory_openable community_chat.tests.test_slack_open_requests community_chat.tests.test_slack_open_recovery integrations.tests_slack_progressive_presentation integrations.tests_slack_unread_prefetch
+
+    - name: Check member Slack routing and catalog without database access
+      run: python scripts/test_without_database.py integrations.tests_member_channel_events_phase4a integrations.tests_member_public_receipts_phase4a integrations.tests_member_channel_catalog_phase4a integrations.tests_member_channel_inventory_api_phase4a integrations.tests_member_callback_authority_phase4a
 
     - name: Check unread and capacity scheduling without database access
       run: |
@@ -141,7 +159,9 @@ jobs:
           integrations.tests_slack_recent_history \
           integrations.tests_message_sync_telemetry \
           integrations.tests_message_sync_capacity \
-          integrations.tests_message_sync_staged_routing
+          integrations.tests_slack_member_coverage_unit \
+          integrations.tests_message_sync_staged_routing \
+          integrations.tests_message_sync_event_routing.EventRoutingDiagnosticsTests
 
     - name: Check startup facade, profile drafts and sparse settings without database access
       run: |
@@ -151,6 +171,7 @@ jobs:
           content_factory.tests_baseline_ai_evidence_unit \
           content_factory.tests_startup_profile_draft_unit \
           content_factory.tests_startup_settings_unit \
+          content_factory.tests_article_voice_unit \
           content_factory.tests_author_photos_unit \
           content_factory.tests_copy_author_photos_unit \
           content_factory.tests_article_website_preview_unit \
@@ -161,12 +182,14 @@ jobs:
         python scripts/test_without_database.py \
           community_chat.tests.test_startup_connections_unit \
           content_factory.tests_activation_unit \
-          content_factory.tests_article_pricing_unit \
+          content_factory.tests_article_pricing_unit content_factory.tests_article_request_identity_unit \
           content_factory.tests_research_automation_billing_unit \
           community_chat.tests.test_startup_activity_defaults \
           startup_updates.tests_linear_reconnect_unit \
           community_chat.tests.test_startup_lifecycle \
           community_chat.tests.test_startup_mcp \
+          community_chat.tests.test_startup_mcp_readability \
+          community_chat.tests.test_startup_readability \
           community_chat.tests.test_mlai_mcp \
           community_chat.tests.test_mlai_mcp_native_agents \
           community_chat.tests.test_relay_role_service_unit \
@@ -181,6 +204,7 @@ jobs:
           startup_updates.tests_curation_context_unit \
           startup_updates.tests_curation_context_api_unit \
           startup_updates.tests_draft_disclosure_unit \
+          startup_updates.tests_financial_history_unit \
           startup_updates.tests_dispatch_timing_unit \
           startup_updates.tests_update_identity.GenerationDateCompatibilityTests
 
@@ -210,7 +234,7 @@ jobs:
       run: python scripts/test_without_database.py content_factory.tests_article_publication_policy_unit
 
     - name: Check website journey and lifecycle contracts without database access
-      run: python scripts/test_without_database.py content_factory.tests_website_goal_unit content_factory.tests_website_goal_chain_unit content_factory.tests_website_status_unit content_factory.tests_one_click_operations_unit content_factory.tests_articles_phase_a_unit content_factory.tests_dispatch_outcomes_unit content_factory.tests_prepare_observability_unit content_factory.tests_prepare_journey_unit content_factory.tests_prepare_permissions_unit content_factory.tests_cancel_receipts_unit content_factory.tests_article_publication_evidence_unit content_factory.tests_article_publication_observation_unit content_factory.tests_setup_revision_status_unit content_factory.tests_reconciliation_unit content_factory.tests_website_articles_reliability_unit content_factory.tests_portable_run_controls_unit content_factory.tests_portable_workflow_progress_unit content_factory.tests_incident_guards_unit content_factory.tests_publish_child_review_identity_unit content_factory.tests_website_operation_recovery_unit content_factory.tests_setup_pr_failure_unit content_factory.tests_setup_merge_verification_unit content_factory.tests_source_reverify_target_unit content_factory.tests_live_marker_routes_unit content_factory.tests_setup_pr_changes_unit content_factory.tests_setup_merge_policy_unit content_factory.tests_setup_pr_return_unit content_factory.tests_stopped_prepare_source_unit content_factory.tests_superseded_setup_cleanup_unit content_factory.tests_owner_setup_merge_unit content_factory.tests_setup_post_merge_unit content_factory.tests_setup_delivery_unit content_factory.test_reliability_contract content_factory.tests_private_preview_document_unit content_factory.tests_editorial_dispatch_unit content_factory.tests_cancel_preview_stop_unit content_factory.tests_website_cancel_retirement_unit content_factory.tests_prepare_transient_authorization_unit content_factory.tests_site_fingerprint_unit content_factory.tests_website_first_article_unit content_factory.tests_website_first_article_topics_unit content_factory.tests_website_first_article_billing_unit content_factory.tests_website_first_article_settlement_unit content_factory.tests_website_notification_delivery_unit content_factory.tests_website_goal_notifications_unit content_factory.tests_website_deployment_unit content_factory.tests_website_hosted_verification_unit content_factory.tests_website_hosted_build_unit content_factory.tests_website_environment_recovery_unit content_factory.tests_website_setup_consent_unit content_factory.tests_website_doctor_unit content_factory.tests_website_wakeups_unit content_factory.tests_website_strategy_budget_unit content_factory.tests_website_usage_settlement_unit content_factory.tests_website_cost_usage_unit content_factory.tests_website_cost_ledger_unit content_factory.tests_website_cost_recovery_unit content_factory.tests_website_operational_alerts_unit content_factory.tests_website_repair_alerts_unit content_factory.tests_website_stage_stalls_unit content_factory.tests_website_preview_cleanup_budget_unit content_factory.tests_publishing_inputs_unit content_factory.tests_sealed_verification_unit content_factory.tests_sealed_candidate_unit content_factory.tests_sealed_workflow_unit content_factory.tests_sealed_settlement_integration_unit content_factory.tests_sealed_provenance_unit content_factory.tests_draft_pull_request_cleanup_unit content_factory.tests_website_goal_audit_unit content_factory.tests_website_review_action_audit_unit content_factory.tests_website_comment_action_audit_unit content_factory.tests_website_zoo_scope_unit content_factory.tests_website_rollout_inspection_unit content_factory.tests_website_runtime_observation_unit content_factory.tests_native_inventory_summary_unit content_factory.tests_hosted_postmerge_lineage_unit
+      run: python scripts/test_without_database.py content_factory.tests_website_goal_unit content_factory.tests_website_goal_chain_unit content_factory.tests_website_status_unit content_factory.tests_one_click_operations_unit content_factory.tests_articles_phase_a_unit content_factory.tests_dispatch_outcomes_unit content_factory.tests_prepare_observability_unit content_factory.tests_prepare_journey_unit content_factory.tests_prepare_permissions_unit content_factory.tests_cancel_receipts_unit content_factory.tests_article_publication_evidence_unit content_factory.tests_article_publication_observation_unit content_factory.tests_setup_revision_status_unit content_factory.tests_reconciliation_unit content_factory.tests_website_articles_reliability_unit content_factory.tests_portable_run_controls_unit content_factory.tests_portable_workflow_progress_unit content_factory.tests_incident_guards_unit content_factory.tests_publish_child_review_identity_unit content_factory.tests_website_operation_recovery_unit content_factory.tests_setup_pr_failure_unit content_factory.tests_setup_merge_verification_unit content_factory.tests_source_reverify_target_unit content_factory.tests_verification_refresh_unit content_factory.tests_live_marker_routes_unit content_factory.tests_setup_pr_changes_unit content_factory.tests_setup_merge_policy_unit content_factory.tests_setup_pr_return_unit content_factory.tests_stopped_prepare_source_unit content_factory.tests_superseded_setup_cleanup_unit content_factory.tests_owner_setup_merge_unit content_factory.tests_setup_post_merge_unit content_factory.tests_setup_delivery_unit content_factory.test_reliability_contract content_factory.tests_private_preview_document_unit content_factory.tests_editorial_dispatch_unit content_factory.tests_cancel_preview_stop_unit content_factory.tests_website_cancel_retirement_unit content_factory.tests_prepare_transient_authorization_unit content_factory.tests_site_fingerprint_unit content_factory.tests_website_first_article_unit content_factory.tests_website_first_article_topics_unit content_factory.tests_website_first_article_billing_unit content_factory.tests_website_first_article_settlement_unit content_factory.tests_website_notification_delivery_unit content_factory.tests_website_goal_notifications_unit content_factory.tests_website_deployment_unit content_factory.tests_website_hosted_verification_unit content_factory.tests_website_hosted_build_unit content_factory.tests_website_environment_recovery_unit content_factory.tests_website_setup_consent_unit content_factory.tests_website_doctor_unit content_factory.tests_website_wakeups_unit content_factory.tests_website_strategy_budget_unit content_factory.tests_website_usage_settlement_unit content_factory.tests_website_cost_usage_unit content_factory.tests_website_cost_ledger_unit content_factory.tests_website_cost_recovery_unit content_factory.tests_website_operational_alerts_unit content_factory.tests_website_repair_alerts_unit content_factory.tests_website_stage_stalls_unit content_factory.tests_website_preview_cleanup_budget_unit content_factory.tests_publishing_inputs_unit content_factory.tests_sealed_verification_unit content_factory.tests_sealed_candidate_unit content_factory.tests_sealed_workflow_unit content_factory.tests_sealed_settlement_integration_unit content_factory.tests_sealed_provenance_unit content_factory.tests_draft_pull_request_cleanup_unit content_factory.tests_website_goal_audit_unit content_factory.tests_website_review_action_audit_unit content_factory.tests_website_comment_action_audit_unit content_factory.tests_website_zoo_scope_unit content_factory.tests_website_rollout_inspection_unit content_factory.tests_website_runtime_observation_unit content_factory.tests_native_inventory_summary_unit content_factory.tests_hosted_postmerge_lineage_unit content_factory.tests_source_recheck_journey_unit
 
     - name: Check migrations are committed
       run: python manage.py makemigrations --check --dry-run
@@ -222,7 +246,7 @@ jobs:
       run: python scripts/test_without_database.py content_factory.tests_island_refresh_domain_unit content_factory.tests_island_research_unit content_factory.tests_island_research_cancel_unit content_factory.tests_island_removal_unit content_factory.tests_custom_islands_unit content_factory.tests_editorial_catalog_unit
 
     - name: Run formerly unassigned database-free suites
-      run: python scripts/test_without_database.py content_factory.tests_preserve_publish_targets content_factory.tests_scaffold_accept core.tests.test_observability generic_hackathons.tests_smart_home integrations.tests_valley_harness tests.test_article_system_registry tests.test_customerio_template_docs tests.test_github_app_credentials_command tests.test_jobs_public_pages tests.test_jobs_sources tests.test_jobs_startup_boards tests.test_scan_force_refresh vibe_raising.tests_acn_validators
+      run: python scripts/test_without_database.py content_factory.tests_preserve_publish_targets content_factory.tests_scaffold_accept core.tests.test_observability core.tests.test_email_aliases_unit generic_hackathons.tests_smart_home integrations.tests_valley_harness tests.test_article_system_registry tests.test_customerio_template_docs tests.test_github_app_credentials_command tests.test_jobs_public_pages tests.test_jobs_sources tests.test_jobs_startup_boards tests.test_scan_force_refresh vibe_raising.tests_acn_validators
 
     - name: Scan tracked source for credentials
       run: python scripts/check_secrets.py
@@ -391,6 +415,8 @@ jobs:
           core.tests.test_auth_contract \
           core.tests.test_auth_session \
           core.tests.test_password_api \
+          core.tests.test_email_aliases_database \
+          content_factory.tests_article_retry_transaction_database \
           founder_tools.tests \
           founder_tools.tests_domain_change \
           founder_tools.tests_offboarding \
@@ -425,6 +451,7 @@ jobs:
           integrations.tests_github_workflow_permissions \
           integrations.tests_github_ci_evidence \
           content_factory.tests_activation_connections \
+          content_factory.tests_hosted_articles \
           content_factory.tests_website_portable \
           content_factory.tests_website_portable_wire \
           integrations.tests_content_factory_website_reads \
@@ -461,6 +488,7 @@ jobs:
           community_chat.tests.test_preview_image_negotiation \
           community_chat.tests.test_slack_read_state \
           community_chat.tests.test_slack_owner_inventory \
+          integrations.tests_slack_member_coverage \
           community_chat.tests.test_slack_open_requests \
           community_chat.tests.test_slack_channel_refresh \
           community_chat.tests.test_token_usage \
@@ -492,15 +520,39 @@ jobs:
           community_chat.tests.test_volunteer_backfill \
           community_chat.tests.test_volunteer_presentation \
           community_chat.tests.test_volunteer_events \
+          community_chat.tests.test_intro_award_handoff \
+          integrations.tests_bridge_roo_actor_database \
           roo.tests.StartupUpdateRewardServiceTests \
           roo.tests_api.FirstChannelPostAwardViewTests \
           integrations.tests_slack_emoji \
           integrations.tests_community_bridge \
-          integrations.tests_community_bridge_channel_lifecycle \
+          integrations.tests_community_bridge_member_channels_unit \
+          integrations.tests_community_bridge_member_channels \
+          integrations.tests_slack_member_channels_migration \
+          integrations.tests_slack_member_access_unit \
+          integrations.tests_slack_member_access \
+          integrations.tests_slack_member_access_departures_phase4a \
+          integrations.tests_community_bridge_member_audiences_phase4a \
+          integrations.tests_slack_channel_membership_phase4a \
+          integrations.tests_slack_member_membership_epoch_phase4a \
+          integrations.tests_slack_owner_inventory_phase4a \
+          integrations.tests_member_channel_maintenance_phase4a \
+          integrations.tests_member_public_receipts_database_phase4a \
+          integrations.tests_member_pending_intake_phase4a \
+          integrations.tests_message_sync_member_history_phase4b \
+          integrations.tests_member_delivery_phase4c \
+          integrations.tests_community_member_send_phase5 integrations.tests_slack_member_directory integrations.tests_slack_custom_emoji integrations.tests_slack_member_files integrations.tests_message_sync_repair \
+          integrations.tests_community_source_phase6 \
+          integrations.tests_community_source_codec_phase6 \
+          integrations.tests_community_reader_phase6 \
+          integrations.tests_slack_member_all_devices \
+          integrations.tests_members_source_privacy_phase4c \
+          integrations.tests_member_callback_authority_phase4a \
+          integrations.tests_member_callback_authority_concurrency_phase4a \
+          integrations.tests_message_sync_member_budgets \
+          integrations.tests_message_sync_event_routing \
           integrations.tests_coworking_handoff \
           integrations.tests_public_bridge_consent \
-          integrations.tests_community_bridge_avatar_backfill \
-          integrations.tests_community_bridge_mention_backfill \
           integrations.tests_community_bridge_contracts \
           core.tests.test_auth_contract \
           core.tests.test_account_ban_guards \
@@ -542,10 +594,13 @@ jobs:
           vibe_raising.tests_transaction_retry \
           community_chat.tests.test_startup_updates \
           community_chat.tests.test_startup_updates_database \
+          community_chat.tests.test_startup_readability_database \
           startup_updates.tests_evidence_contract \
+          startup_updates.tests_dashboard_financial_refresh \
           startup_updates.tests_source_evidence \
           startup_updates.tests_reporting_canaries \
           startup_updates.tests_revisions \
+          startup_updates.tests_financial_history_database \
           startup_updates.tests_update_identity \
           hospital.test_sim_contest \
           hospital.test_sim_guess_proxy \
@@ -629,6 +684,18 @@ jobs:
     - name: Run Pulse source cache and Linear cursor PostgreSQL tests
       run: python manage.py test startup_updates.tests_source_cache_database --verbosity 2
 
+    - name: Verify CRM messaging on PostgreSQL
+      run: python manage.py test crm.tests.test_messaging_database --verbosity 2
+
+    - name: Verify CRM Luma guest sync and contact import on PostgreSQL
+      run: python manage.py test crm.tests.test_contact_store_database --verbosity 2
+
+    - name: Verify CRM API, segments and the admin gate on PostgreSQL
+      run: python manage.py test crm.tests.test_api_database crm.tests.test_segments_database crm.tests.test_admin_gate_database --verbosity 2
+
+    - name: Verify CRM blasts, senders and listmonk feedback on PostgreSQL
+      run: python manage.py test crm.tests.test_blasts_database crm.tests.test_sending_database --verbosity 2
+
     - name: Verify PostgreSQL search infrastructure
       run: |
         python manage.py check_org_memory_search --require-vector
@@ -676,12 +743,17 @@ jobs:
           integrations.tests_message_sync_unit \
           integrations.tests_message_sync_throughput \
           integrations.tests_message_sync_capacity \
+          integrations.tests_slack_member_coverage \
           integrations.tests_message_sync_configuration \
           integrations.tests_message_sync_transactions \
           integrations.tests_community_bridge_dependency_cleanup \
           integrations.tests_message_sync_scheduler \
           integrations.tests_message_sync_discovery \
           integrations.tests_message_sync_discovery_worker \
+          integrations.tests_message_sync_staged_routing \
+          integrations.tests_message_sync_event_routing \
+          integrations.tests_slack_dm_payload_contract \
+          community_chat.tests.test_slack_private_mentions \
           integrations.tests_message_sync_read_state \
           integrations.tests_message_sync_read_priority \
           integrations.tests_slack_discovery_progress \
@@ -693,7 +765,33 @@ jobs:
           integrations.tests_slack_private_target_boundaries \
           integrations.tests_slack_import_readiness \
           integrations.tests_message_sync_public_repair \
-          integrations.tests_community_bridge_channel_lifecycle \
+          integrations.tests_community_bridge_member_channels_unit \
+          integrations.tests_community_bridge_member_channels \
+          integrations.tests_slack_member_channels_migration \
+          integrations.tests_slack_member_access_unit \
+          integrations.tests_slack_member_access \
+          integrations.tests_slack_member_access_departures_phase4a \
+          integrations.tests_community_bridge_member_audiences_phase4a \
+          integrations.tests_slack_channel_membership_phase4a \
+          integrations.tests_slack_member_membership_epoch_phase4a \
+          integrations.tests_slack_owner_inventory_phase4a \
+          integrations.tests_member_channel_maintenance_phase4a \
+          integrations.tests_member_public_receipts_database_phase4a \
+          integrations.tests_member_pending_intake_phase4a \
+          integrations.tests_message_sync_member_history_phase4b \
+          integrations.tests_member_delivery_phase4c \
+          integrations.tests_community_member_send_phase5 integrations.tests_slack_member_directory integrations.tests_slack_custom_emoji integrations.tests_slack_member_files integrations.tests_message_sync_repair \
+          integrations.tests_community_source_phase6 \
+          integrations.tests_community_source_codec_phase6 \
+          integrations.tests_community_reader_phase6 \
+          integrations.tests_slack_member_all_devices \
+          integrations.tests_members_source_privacy_phase4c \
+          org_memory.tests.test_retrieval_answers.MemoryQueryApiTests.test_retained_mixed_members_answer_cannot_be_recovered_from_trace \
+          org_memory.tests.test_review_summaries.ReviewSummaryDigestTests.test_retained_mixed_members_summary_and_digest_reads_are_denied \
+          org_memory.tests.test_publication.PublicKnowledgePublicationTests.test_retained_members_lineage_filters_current_public_reads_without_unpublishing \
+          integrations.tests_member_callback_authority_phase4a \
+          integrations.tests_member_callback_authority_concurrency_phase4a \
+          integrations.tests_message_sync_member_budgets \
           --verbosity 2
 
     - name: Run meeting-room PostgreSQL tests
@@ -817,8 +915,6 @@ jobs:
           integrations.test_luma_cover \
           integrations.tests \
           integrations.tests_article \
-          integrations.tests_community_bridge_thread_reconciliation \
-          integrations.tests_community_bridge_thread_repair \
           integrations.tests_connection_org_scoping \
           integrations.tests_connector_company_scoping \
           integrations.tests_github_callback \
@@ -841,6 +937,7 @@ jobs:
           roo.tests \
           roo.tests_admin \
           roo.tests_api \
+          roo.tests_manual_awards \
           roo.tests_boost_post_admission \
           roo.tests_coding_migration \
           roo.tests_committee_candidates \
@@ -953,6 +1050,15 @@ jobs:
         COMMUNITY_CHAT_ADAPTER_URL: ${{ vars.COMMUNITY_CHAT_ADAPTER_URL }}
         COMMUNITY_CHAT_PASSWORD_AUTH_ENABLED: ${{ vars.COMMUNITY_CHAT_PASSWORD_AUTH_ENABLED || 'false' }}
         COMMUNITY_CHAT_STARTUP_UPDATES_ENABLED: ${{ vars.COMMUNITY_CHAT_STARTUP_UPDATES_ENABLED || '' }}
+        COMMUNITY_CHAT_CRM_ENABLED: ${{ vars.COMMUNITY_CHAT_CRM_ENABLED || '' }}
+        CRM_LUMA_SYNC_ENABLED: ${{ vars.CRM_LUMA_SYNC_ENABLED || '' }}
+        CRM_SENDING_ENABLED: ${{ vars.CRM_SENDING_ENABLED || '' }}
+        CRM_SMS_ENABLED: ${{ vars.CRM_SMS_ENABLED || '' }}
+        CRM_WHATSAPP_ENABLED: ${{ vars.CRM_WHATSAPP_ENABLED || '' }}
+        LISTMONK_BASE_URL: ${{ vars.LISTMONK_BASE_URL || '' }}
+        LISTMONK_API_USER: ${{ vars.LISTMONK_API_USER || '' }}
+        LISTMONK_API_TOKEN: ${{ secrets.LISTMONK_API_TOKEN || '' }}
+        TWILIO_MESSAGING_SERVICE_SID: ${{ vars.TWILIO_MESSAGING_SERVICE_SID || '' }}
         MLAI_MCP_ENABLED: ${{ vars.MLAI_MCP_ENABLED || 'false' }}
         VALLEY_MCP_UNIFIED_ALIAS_ENABLED: ${{ vars.VALLEY_MCP_UNIFIED_ALIAS_ENABLED || 'false' }}
         MLAI_MCP_COMMUNITY_ENABLED: ${{ vars.MLAI_MCP_COMMUNITY_ENABLED || 'false' }}
@@ -989,7 +1095,7 @@ jobs:
         COMMUNITY_BRIDGE_DEPENDENCY_VERDICTS_ENABLED: ${{ vars.COMMUNITY_BRIDGE_DEPENDENCY_VERDICTS_ENABLED || 'false' }}
         MESSAGE_SYNC_ENABLED: ${{ vars.MESSAGE_SYNC_ENABLED || 'false' }}
         MESSAGE_SYNC_RECENT_HISTORY_ENABLED: ${{ vars.MESSAGE_SYNC_RECENT_HISTORY_ENABLED || 'false' }}
-        COMMUNITY_BRIDGE_CHANNEL_LIFECYCLE_ENABLED: ${{ vars.COMMUNITY_BRIDGE_CHANNEL_LIFECYCLE_ENABLED || 'false' }}
+        SLACK_MEMBER_CHANNEL_ALLOWED_IDS: ${{ vars.SLACK_MEMBER_CHANNEL_ALLOWED_IDS || '' }}
         MESSAGE_SYNC_QUIET_HEAD_BACKOFF_ENABLED: ${{ vars.MESSAGE_SYNC_QUIET_HEAD_BACKOFF_ENABLED || 'false' }}
         COMMUNITY_CHAT_MEMBER_ACCOUNTS_ENABLED: ${{ vars.COMMUNITY_CHAT_MEMBER_ACCOUNTS_ENABLED || 'false' }}
         COMMUNITY_CHAT_INBOX_ERASURE_ENABLED: ${{ vars.COMMUNITY_CHAT_INBOX_ERASURE_ENABLED || 'false' }}
@@ -1016,14 +1122,9 @@ jobs:
         SLACK_BRIDGE_SIGNING_SECRET: ${{ secrets.SLACK_BRIDGE_SIGNING_SECRET }}
         SLACK_BRIDGE_BOT_USER_ID: ${{ vars.SLACK_BRIDGE_BOT_USER_ID }}
         SLACK_BRIDGE_WORKSPACE_ID: ${{ vars.SLACK_BRIDGE_WORKSPACE_ID }}
-        SLACK_BRIDGE_CHANNEL_ID: ${{ vars.SLACK_BRIDGE_CHANNEL_ID }}
-        SLACK_BRIDGE_CHANNEL_NAME: ${{ vars.SLACK_BRIDGE_CHANNEL_NAME }}
         BUZZ_BRIDGE_ADAPTER_URL: ${{ vars.BUZZ_BRIDGE_ADAPTER_URL }}
         BUZZ_BRIDGE_ADAPTER_TOKEN: ${{ secrets.BUZZ_BRIDGE_ADAPTER_TOKEN }}
         BUZZ_BRIDGE_CALLBACK_SECRET: ${{ secrets.BUZZ_BRIDGE_CALLBACK_SECRET }}
-        BUZZ_BRIDGE_DESTINATION_WORKSPACE_ID: ${{ vars.BUZZ_BRIDGE_DESTINATION_WORKSPACE_ID }}
-        BUZZ_BRIDGE_DESTINATION_CHANNEL_ID: ${{ vars.BUZZ_BRIDGE_DESTINATION_CHANNEL_ID }}
-        BUZZ_BRIDGE_DESTINATION_CHANNEL_NAME: ${{ vars.BUZZ_BRIDGE_DESTINATION_CHANNEL_NAME }}
         MEETING_ROOM_BOOKING_ENABLED: ${{ vars.MEETING_ROOM_BOOKING_ENABLED || 'false' }}
         COMMUNITY_BRIDGE_PRODUCTION_ENABLED: ${{ vars.COMMUNITY_BRIDGE_PRODUCTION_ENABLED || 'false' }}
         ORG_MEMORY_PRODUCTION_DEPLOY_ENABLED: ${{ vars.ORG_MEMORY_PRODUCTION_DEPLOY_ENABLED || 'false' }}
@@ -1112,14 +1213,9 @@ jobs:
             "$SLACK_BRIDGE_SIGNING_SECRET"
             "$SLACK_BRIDGE_BOT_USER_ID"
             "$SLACK_BRIDGE_WORKSPACE_ID"
-            "$SLACK_BRIDGE_CHANNEL_ID"
-            "$SLACK_BRIDGE_CHANNEL_NAME"
             "$BUZZ_BRIDGE_ADAPTER_URL"
             "$BUZZ_BRIDGE_ADAPTER_TOKEN"
             "$BUZZ_BRIDGE_CALLBACK_SECRET"
-            "$BUZZ_BRIDGE_DESTINATION_WORKSPACE_ID"
-            "$BUZZ_BRIDGE_DESTINATION_CHANNEL_ID"
-            "$BUZZ_BRIDGE_DESTINATION_CHANNEL_NAME"
           )
           for value in "${bridge_values[@]}"; do
             [ -n "$value" ] && bridge_present=$((bridge_present + 1))

@@ -41,6 +41,7 @@ urlpatterns = [
     path('api/v1/points/', include('roo.urls')),
     path('api/v1/org-memory/', include('org_memory.urls')),
     path('api/v1/community-chat/', include('community_chat.urls')),
+    path('api/v1/crm/webhooks/', include('crm.urls_webhooks')),
     path('api/v1/public-brain/', include('org_memory.public_urls')),
     path('api/v1/jobs/', include('jobs.urls')),
     path('api/v1/medhack/', include('hospital.medhack_urls')),

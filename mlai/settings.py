@@ -269,6 +269,7 @@ INSTALLED_APPS = [
     "roo",
 
     "integrations",
+    "crm",
 ]
 
 MIDDLEWARE = [
@@ -340,7 +341,12 @@ for _operations_origin in ('https://ops.mlai.au',):
     if _operations_origin not in CSRF_TRUSTED_ORIGINS:
         CSRF_TRUSTED_ORIGINS.append(_operations_origin)
 CORS_ALLOW_CREDENTIALS = True
-CORS_ALLOW_HEADERS = (*default_headers, "x-request-id", "idempotency-key")
+CORS_ALLOW_HEADERS = (
+    *default_headers,
+    "x-request-id",
+    "idempotency-key",
+    "x-mlai-slack-catalog-kinds",
+)
 CORS_EXPOSE_HEADERS = ["X-Request-ID", "Retry-After"]
 
 # Bound request buffering before application-specific parsers run. Larger
@@ -514,6 +520,8 @@ REST_FRAMEWORK = {
         'community_chat_slack_read_receipt': os.getenv('COMMUNITY_CHAT_SLACK_READ_RECEIPT_RATE', '60/minute'),
         'community_chat_slack_directory': os.getenv('COMMUNITY_CHAT_SLACK_DIRECTORY_RATE', '120/minute'),
         'community_chat_home': os.getenv('COMMUNITY_CHAT_HOME_RATE', '60/minute'),
+        'community_chat_crm': os.getenv('COMMUNITY_CHAT_CRM_RATE', '240/minute'),
+        'community_chat_admin': os.getenv('COMMUNITY_CHAT_ADMIN_RATE', '120/minute'),
         'my_startup_bootstrap': os.getenv('MY_STARTUP_BOOTSTRAP_RATE', '120/minute'),
         'my_startup_read': os.getenv('MY_STARTUP_READ_RATE', '120/minute'),
         'my_startup_poll': os.getenv('MY_STARTUP_POLL_RATE', '120/minute'),
@@ -529,6 +537,8 @@ REST_FRAMEWORK = {
         'token_usage_leaderboard': os.getenv('TOKEN_USAGE_LEADERBOARD_RATE', '60/minute'),
         'token_usage_insights': os.getenv('TOKEN_USAGE_INSIGHTS_RATE', '120/minute'),
         'community_chat_home': os.getenv('COMMUNITY_CHAT_HOME_RATE', '60/minute'),
+        'community_chat_crm': os.getenv('COMMUNITY_CHAT_CRM_RATE', '240/minute'),
+        'community_chat_admin': os.getenv('COMMUNITY_CHAT_ADMIN_RATE', '120/minute'),
         'community_chat_slack_delete': os.getenv(
             'COMMUNITY_CHAT_SLACK_DELETE_RATE', '20/minute'
         ),
@@ -544,6 +554,8 @@ COMMUNITY_CHAT_VOLUNTEER_ENABLED = _env_is_true('COMMUNITY_CHAT_VOLUNTEER_ENABLE
 COMMUNITY_CHAT_VOLUNTEER_RECOGNITION_ENABLED = _env_is_true('COMMUNITY_CHAT_VOLUNTEER_RECOGNITION_ENABLED', False)
 COMMUNITY_CHAT_VOLUNTEER_AWARDS_ENABLED = _env_is_true('COMMUNITY_CHAT_VOLUNTEER_AWARDS_ENABLED', False)
 COMMUNITY_CHAT_VOLUNTEER_ADVICE_REWARDS_ENABLED = _env_is_true('COMMUNITY_CHAT_VOLUNTEER_ADVICE_REWARDS_ENABLED', False)
+COMMUNITY_CHAT_VOLUNTEER_INTRO_REWARDS_ENABLED = _env_is_true('COMMUNITY_CHAT_VOLUNTEER_INTRO_REWARDS_ENABLED', False)
+COMMUNITY_CHAT_VOLUNTEER_INTRO_ACTIVE_FROM = os.getenv('COMMUNITY_CHAT_VOLUNTEER_INTRO_ACTIVE_FROM', '')
 COMMUNITY_CHAT_VOLUNTEER_BONUSES_ENABLED = _env_is_true('COMMUNITY_CHAT_VOLUNTEER_BONUSES_ENABLED', False)
 COMMUNITY_CHAT_VOLUNTEER_ATTENDANCE_ENABLED = _env_is_true('COMMUNITY_CHAT_VOLUNTEER_ATTENDANCE_ENABLED', False)
 COMMUNITY_CHAT_VOLUNTEER_COMMUNITY = os.getenv('COMMUNITY_CHAT_VOLUNTEER_COMMUNITY', '')
@@ -1021,6 +1033,9 @@ ROO_INTERNAL_MENTION_API_KEY = os.getenv('ROO_INTERNAL_MENTION_API_KEY', '').str
 ROO_SIM_PATIENT_KEY = os.getenv('ROO_SIM_PATIENT_KEY', '').strip()
 HEALTH_HACK_API_KEY = os.getenv('HEALTH_HACK_API_KEY', '').strip()
 ROO_API_KEY = os.getenv('ROO_API_KEY', '').strip()
+STUDIO_REPORT_SOURCE_ENABLED = os.getenv('STUDIO_REPORT_SOURCE_ENABLED', 'false').lower() == 'true'
+STUDIO_REPORT_SOURCE_KEY = os.getenv('STUDIO_REPORT_SOURCE_KEY', '').strip()
+STUDIO_REPORT_SOURCE_CONFIG = os.getenv('STUDIO_REPORT_SOURCE_CONFIG', '')
 ROO_EVENT_DISCOUNTS_ENABLED = _env_is_true('ROO_EVENT_DISCOUNTS_ENABLED', False)
 ROO_EVENT_DISCOUNTS_SLACK_TEAM_ID = os.getenv('ROO_EVENT_DISCOUNTS_SLACK_TEAM_ID', '').strip()
 # Additional report-only access for verified Roo requests in one shared chat.
@@ -1104,6 +1119,8 @@ ARTICLES_WEBSITE_GOAL_ENROLLED_ORGANIZATIONS = tuple(
     identifier.strip() for identifier in os.getenv('ARTICLES_WEBSITE_GOAL_ENROLLED_ORGANIZATIONS', '').split(',')
     if identifier.strip()
 )
+# MLAI-hosted article sites: owners publish repo-free drafts that MLAI serves on their own domain.
+ARTICLES_HOSTED_SITES_ENABLED = os.getenv('ARTICLES_HOSTED_SITES_ENABLED', 'false').lower() == 'true'
 CONTENT_FACTORY_DEFAULT_ARTICLE_DELIVERY_MODE = os.getenv(
     'CONTENT_FACTORY_DEFAULT_ARTICLE_DELIVERY_MODE',
     'review_draft',
@@ -1175,6 +1192,30 @@ TWILIO_WHATSAPP_TOPIC_ANALYTICS_CONTENT_SID = os.getenv('TWILIO_WHATSAPP_TOPIC_A
 # {{1}} title, {{2}} domain, {{3}} expanded founder-tools review URL). The fixed
 # template copy must include "Reply STOP to opt out.".
 TWILIO_WHATSAPP_REVIEW_CONTENT_SID = os.getenv('TWILIO_WHATSAPP_REVIEW_CONTENT_SID', '')
+# Contacts blasts by SMS and WhatsApp (crm app); both channels stay off until
+# enabled. SMS goes through a Messaging Service (MG..., Advanced Opt-Out on)
+# that holds MLAI's Twilio number. WhatsApp reuses TWILIO_WHATSAPP_FROM and
+# sends approved Content templates only.
+TWILIO_MESSAGING_SERVICE_SID = os.getenv('TWILIO_MESSAGING_SERVICE_SID', '').strip()
+CRM_SMS_ENABLED = _env_is_true('CRM_SMS_ENABLED', False)
+CRM_WHATSAPP_ENABLED = _env_is_true('CRM_WHATSAPP_ENABLED', False)
+# Comma-separated E.164 prefixes SMS may go to; +614 is Australian mobiles.
+CRM_SMS_ALLOWED_PREFIXES = [
+    prefix.strip()
+    for prefix in os.getenv('CRM_SMS_ALLOWED_PREFIXES', '+614').split(',')
+    if prefix.strip()
+]
+# Composer cost estimates in AUD, as decimal strings. Check current Twilio
+# and Meta pricing; it changes.
+CRM_SMS_COST_PER_SEGMENT_AUD = os.getenv('CRM_SMS_COST_PER_SEGMENT_AUD', '0').strip() or '0'
+CRM_WHATSAPP_COST_PER_MESSAGE_AUD = (
+    os.getenv('CRM_WHATSAPP_COST_PER_MESSAGE_AUD', '0').strip() or '0'
+)
+# Safety caps per channel over a rolling 24 hours, and Twilio sends per
+# blast dispatch tick.
+CRM_SMS_DAILY_LIMIT = max(0, int(os.getenv('CRM_SMS_DAILY_LIMIT', '500')))
+CRM_WHATSAPP_DAILY_LIMIT = max(0, int(os.getenv('CRM_WHATSAPP_DAILY_LIMIT', '500')))
+CRM_TWILIO_SENDS_PER_TICK = max(1, int(os.getenv('CRM_TWILIO_SENDS_PER_TICK', '200')))
 NOTIFICATION_CHANNEL_VERIFY_MAX_AGE_SECONDS = int(
     os.getenv('NOTIFICATION_CHANNEL_VERIFY_MAX_AGE_SECONDS', str(3 * 24 * 60 * 60))
 )
@@ -1282,10 +1323,11 @@ COMMUNITY_BRIDGE_WORKER_POLL_SECONDS = float(
     os.getenv('COMMUNITY_BRIDGE_WORKER_POLL_SECONDS', '1')
 )
 COMMUNITY_BRIDGE_DEPENDENCY_VERDICTS_ENABLED = _env_is_true('COMMUNITY_BRIDGE_DEPENDENCY_VERDICTS_ENABLED', False)
-# Mirror public Slack channel lifecycle (create, rename, archive, delete) into
-# MLAI Chat. Enable only after integrations.0049, the MLAI Chat adapter's
-# /v1/public-channels route and the Slack bot channel_* event subscriptions.
-COMMUNITY_BRIDGE_CHANNEL_LIFECYCLE_ENABLED = _env_is_true('COMMUNITY_BRIDGE_CHANNEL_LIFECYCLE_ENABLED', False)
+# Inactive foundations: enable only after the member-channel implementation,
+# compatible clients and exact approved schema are deployed and canary checked.
+# Optional channel cohort for the first Members canary; empty permits the
+# normal rollout only when the separate member-channel switch is enabled.
+SLACK_MEMBER_CHANNEL_ALLOWED_IDS = os.getenv('SLACK_MEMBER_CHANNEL_ALLOWED_IDS', '')
 COMMUNITY_BRIDGE_DEPENDENCY_VERDICT_MIN_AGE_SECONDS = int(os.getenv('COMMUNITY_BRIDGE_DEPENDENCY_VERDICT_MIN_AGE_SECONDS', '3600'))
 COMMUNITY_BRIDGE_PARENT_DEPENDENCY_MAX_AGE_SECONDS = int(
     os.getenv('COMMUNITY_BRIDGE_PARENT_DEPENDENCY_MAX_AGE_SECONDS', '3600')
@@ -1643,6 +1685,7 @@ SLACK_OAUTH_SCOPES = _env_list(
         "users:read",
         "reactions:read",
         "reactions:write",
+        "emoji:read",
         "files:read",
     ],
 )
@@ -2189,6 +2232,72 @@ LUMA_UPCOMING_EVENTS_CACHE_SECONDS = max(
     0,
     int(os.environ.get('LUMA_UPCOMING_EVENTS_CACHE_SECONDS', '300')),
 )
+
+# Contacts store (crm app). The scheduled Luma guest sync stays off until an
+# operator enables it; the backfill and import commands work regardless.
+CRM_LUMA_SYNC_ENABLED = _env_is_true('CRM_LUMA_SYNC_ENABLED', False)
+CRM_LUMA_SYNC_INTERVAL_SECONDS = max(
+    300,
+    int(os.environ.get('CRM_LUMA_SYNC_INTERVAL_SECONDS', '1800')),
+)
+CRM_LUMA_SYNC_RECENT_DAYS = max(0, int(os.environ.get('CRM_LUMA_SYNC_RECENT_DAYS', '14')))
+CRM_LUMA_SYNC_MAX_EVENTS_PER_RUN = max(
+    1,
+    int(os.environ.get('CRM_LUMA_SYNC_MAX_EVENTS_PER_RUN', '25')),
+)
+# Chat Home, Volunteer and Roo share the calendar key's 200/minute budget.
+CRM_LUMA_REQUESTS_PER_MINUTE = max(
+    1,
+    min(200, int(os.environ.get('CRM_LUMA_REQUESTS_PER_MINUTE', '100'))),
+)
+# Pipe-separated Luma registration question labels whose "yes" grants
+# marketing consent, e.g. "Keep me updated about MLAI events".
+CRM_LUMA_CONSENT_QUESTION_LABELS = [
+    label.strip()
+    for label in os.environ.get('CRM_LUMA_CONSENT_QUESTION_LABELS', '').split('|')
+    if label.strip()
+]
+# Same format: labels whose "yes" answer is WhatsApp opt-in. A phone number
+# on its own never is.
+CRM_LUMA_WHATSAPP_QUESTION_LABELS = [
+    label.strip()
+    for label in os.environ.get('CRM_LUMA_WHATSAPP_QUESTION_LABELS', '').split('|')
+    if label.strip()
+]
+# Contacts API for Chat owners and admins (/api/v1/community-chat/crm/).
+# Off by default; the API answers 404 crm_disabled until an operator enables it.
+COMMUNITY_CHAT_CRM_ENABLED = _env_is_true('COMMUNITY_CHAT_CRM_ENABLED', False)
+# Email blasts go through a self-hosted listmonk (v6.2) reached on the
+# mlai-shared network, e.g. LISTMONK_BASE_URL=http://listmonk:9000, as a
+# listmonk API user. CRM_SENDING_ENABLED is the email kill switch; SMTP
+# credentials live only in listmonk. See docs/crm.md.
+CRM_SENDING_ENABLED = _env_is_true('CRM_SENDING_ENABLED', False)
+LISTMONK_BASE_URL = os.environ.get('LISTMONK_BASE_URL', '').strip().rstrip('/')
+LISTMONK_API_USER = os.environ.get('LISTMONK_API_USER', '').strip()
+LISTMONK_API_TOKEN = os.environ.get('LISTMONK_API_TOKEN', '').strip()
+# The MLAI campaign template's numeric id in listmonk; blank uses listmonk's default.
+_LISTMONK_TEMPLATE_ID = os.environ.get('LISTMONK_TEMPLATE_ID', '').strip()
+LISTMONK_TEMPLATE_ID = int(_LISTMONK_TEMPLATE_ID) if _LISTMONK_TEMPLATE_ID.isdigit() else None
+# Comma-separated domain:route pairs CRM email may be sent from (route is
+# resend or google_relay). Admins add sender addresses on these domains in
+# Admin → Sending; a sender can only be enabled while the domain's DNS checks pass.
+CRM_SENDING_DOMAINS = [
+    entry.strip()
+    for entry in os.environ.get(
+        'CRM_SENDING_DOMAINS', 'mlai.au:resend,mlai-aus.com:resend,mlai.org.au:resend'
+    ).split(',')
+    if entry.strip()
+]
+# The blast dispatcher and the listmonk feedback sync are scheduler runners,
+# each cache-throttled to one pass per interval.
+CRM_BLAST_DISPATCH_INTERVAL_SECONDS = max(
+    10,
+    int(os.environ.get('CRM_BLAST_DISPATCH_INTERVAL_SECONDS', '60')),
+)
+CRM_LISTMONK_SYNC_INTERVAL_SECONDS = max(
+    60,
+    int(os.environ.get('CRM_LISTMONK_SYNC_INTERVAL_SECONDS', '300')),
+)
 HUMANITIX_API_BASE_URL = os.environ.get(
     'HUMANITIX_API_BASE_URL',
     'https://api.humanitix.com/v1',
@@ -2323,6 +2432,9 @@ ARTICLES_GOAL_REPAIRABLE_ATTEMPTS = int(os.getenv("ARTICLES_GOAL_REPAIRABLE_ATTE
 ARTICLES_WEBSITE_EVENT_WAKES_ENABLED = os.getenv("ARTICLES_WEBSITE_EVENT_WAKES_ENABLED", "false").lower() == "true"
 
 ARTICLES_WEBSITE_DOCTOR_ENABLED = os.getenv("ARTICLES_WEBSITE_DOCTOR_ENABLED", "false").lower() == "true"
+
+# Opening Articles runs a website's due same-source verification refresh first.
+WEBSITE_VERIFICATION_PAGE_REFRESH_ENABLED = _env_is_true("WEBSITE_VERIFICATION_PAGE_REFRESH_ENABLED", True)
 
 # C1/C2: owner consent and automatic route choice (default off).
 ARTICLES_SETUP_CONSENT_ENABLED = _env_is_true("ARTICLES_SETUP_CONSENT_ENABLED", False)

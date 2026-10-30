@@ -69,6 +69,11 @@ def remove_manifest_decisions(apps, schema_editor):
         enabled=False,
         destination_channel_id="",
     ).delete()
+    # The reversed schema operations ALTER this table next. PostgreSQL queues
+    # deferred FK checks for deleted rows and refuses that ALTER until they run.
+    if schema_editor.connection.vendor == "postgresql":
+        with schema_editor.connection.cursor() as cursor:
+            cursor.execute("SET CONSTRAINTS ALL IMMEDIATE")
 
 
 class Migration(migrations.Migration):

@@ -4,6 +4,9 @@ Start with the repository [`README`](../README.md) and
 [`ARCHITECTURE`](../ARCHITECTURE.md). Use this index to find current
 subsystem-specific contracts and runbooks.
 
+- [Private Studio report source](studio-report-source.md) — scoped hours/invoice/payment refresh and missing-data barriers
+- [Contacts store](crm.md) — MLAI Luma guest sync, CSV opt-in import, consent rules and the `crm` migration
+
 ## Backend maintenance
 
 - [26 September release integration](backend-refactor-release-2026-09-26.md) — current-main fixes, validation and pending migration approval
@@ -17,6 +20,8 @@ subsystem-specific contracts and runbooks.
 - [Credential migration and disposable-test scope](backend-refactor-migration-proposal-2026-09-14.md) — local validation complete; production application of credential migrations 0039/0040 approved, rollout pending
 
 ## Production API
+
+- [Alternate sign-in emails and account repairs](email-aliases.md) — identity resolution, delivery policy, and reviewed merges
 
 - [Backend API web handoff](backend-api-web-handoff.md) — verified ingress,
   first adoption, code-only route flips, rollback, and migration limits
@@ -96,6 +101,18 @@ release evidence may describe earlier deployment stages; verify current runtime
 state when using those operational documents.
 
 - [`mlai-chat-bridge-contract.md`](mlai-chat-bridge-contract.md)
+- [Permanent Slack member operations](slack-member-permanent-operations.md) — member-only strategy, processing pause, reader holds and recovery
+- [Member read ownership](slack-member-read-cleanup-inventory.md) — current token boundaries and retained bot writes
+- [Member-authorized repair](slack-member-repair.md) — durable, bounded recovery without a legacy replay path
+- [Slack member migration: Phase 0 operations](slack-member-phase0-operations.md) — read-only coverage command and owner baseline checks
+- [Slack member migration: Phase 3 foundations](slack-member-phase3-operations.md) — disabled configuration, exact migration proposal and rollout gates
+- [Slack member migration: Phase 4a operations](slack-member-phase4a-operations.md) — feature-off release, scoped public intake, membership epochs and audience reduction gates
+- [Phase 4b member-token history](slack-member-phase4b-operations.md) — current reader/source/audience fences, pagination scope and feature-off rollout holds.
+- [Phase 4c Members delivery](slack-member-phase4c-operations.md) — immutable Slack actors/requests, current audience fences and combined Chat release gates.
+- [Phase 5 Community posting](slack-community-phase5-operations.md) — scoped member selection, verified-account bot fallback and immutable original-poster retries.
+- [Historical Phase 6 source comparison](slack-community-phase6-operations.md) — superseded rollout modes and observation gates; use permanent operations for current behavior.
+- [Private Slack first-event routing: Phase 8](slack-event-routing-phase8.md) — owner leases, disabled rollout and confirmed-delivery latency evidence
+- [Slack member-sync evidence](slack-member-sync-facts.md) — owner decisions, documented contracts and outstanding live observations
 - [`slack-unfinished-conversation-recovery.md`](slack-unfinished-conversation-recovery.md) — reviewed recovery of existing unfinished private mirrors
 - [`mlai-chat-bridge-staging.md`](mlai-chat-bridge-staging.md)
 - [`mlai-chat-membership-bootstrap.md`](mlai-chat-membership-bootstrap.md)
@@ -127,6 +144,8 @@ rollout sequence.
   private scoring-data boundary and runtime provisioning contract.
 
 ## Roo
+
+- [Roo awards to members without Slack](roo-chat-only-points.md)
 
 - [Roo event discounts](roo-event-discounts.md) — private quotes, general-point holds, one-use Luma coupons and supervised reconciliation.
 
@@ -164,5 +183,6 @@ identified as current by a maintained architecture document.
 - [Startup Progress dashboard and chart disclosure](startup-progress.md)
 
 - [Chat startup updates](community-chat-startup-updates.md): founder setup, draft, review, approval and community API.
+- [Shared update benefits](shared-update-benefits.md): sharing requirements, grandfathered discounts, points and rollout dependencies.
 
 - [Website connection lifecycle and repository consent](website-connections.md) — schema, API, revocation, reviewed cleanup, and local verification.
