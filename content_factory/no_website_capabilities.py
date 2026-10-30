@@ -93,22 +93,37 @@ def _portable_run_of(organization, run_id) -> bool:
     return bool(run is not None and run.organization_id == organization.pk and original_portable_run(run))
 
 
+def portable_no_website_context(request, *, run_id=None):
+    """The founder context when the domain requirement is waived for this request, else None.
+
+    It is waived only for a new-journey startup with no website
+    (:func:`applies`), and only for an explicit, confirmed portable request
+    or for an operation on one of its original portable runs. With the switch
+    off this returns None before any read, so the caller's own resolution runs
+    exactly as today.
+    """
+    if not no_website_articles_enabled():
+        return None
+    from .portable_drafts import explicit_portable_request
+    data = getattr(request, "data", None)
+    portable = explicit_portable_request(data) if hasattr(data, "get") else False
+    if not (portable or run_id):
+        return None
+    context = resolve_no_website_context(request)
+    if context is not None and (portable or _portable_run_of(context.organization, run_id)):
+        return context
+    return None
+
+
 def resolve_portable_context_or_response(request, *, run_id=None):
     """``(context, error)`` for an owner operation that may run without a website.
 
-    The domain requirement is waived only for a new-journey startup with no
-    website (:func:`applies`) and only for an explicit, confirmed portable
-    request, or for an operation on one of its original portable runs.
-    Everything else resolves exactly as ``_resolve_context_or_response`` does
-    today, with the same error responses.
+    :func:`portable_no_website_context` decides the waiver. Everything else
+    resolves exactly as ``_resolve_context_or_response`` does today, with the
+    same error responses.
     """
+    context = portable_no_website_context(request, run_id=run_id)
+    if context is not None:
+        return context, None
     from .vibe_marketing_views import _resolve_context_or_response
-    if no_website_articles_enabled():
-        from .portable_drafts import explicit_portable_request
-        data = getattr(request, "data", None)
-        portable = explicit_portable_request(data) if hasattr(data, "get") else False
-        if portable or run_id:
-            context = resolve_no_website_context(request)
-            if context is not None and (portable or _portable_run_of(context.organization, run_id)):
-                return context, None
     return _resolve_context_or_response(request)

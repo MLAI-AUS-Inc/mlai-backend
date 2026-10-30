@@ -18242,10 +18242,12 @@ class VibeMarketingArticleView(APIView):
     def post(self, request):
         # P1.6 (IF-P1-08): an explicit portable start from a new-journey
         # startup with no website resolves without a domain.
-        from .no_website_capabilities import resolve_portable_context_or_response
-        context, error_response = resolve_portable_context_or_response(request)
-        if error_response:
-            return error_response
+        from .no_website_capabilities import portable_no_website_context
+        context = portable_no_website_context(request)
+        if context is None:
+            context, error_response = _resolve_context_or_response(request)
+            if error_response:
+                return error_response
         return start_article_generation(user=request.user, context=context, data=request.data)
 
 
