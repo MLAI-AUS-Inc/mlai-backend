@@ -99,12 +99,14 @@ from startup_updates.services import (
 from founder_tools.models import VibeRaisingCompany, VibeRaisingProfile
 from founder_tools.services import (
     CompanyDomainChangeBlocked,
+    CompanyDomainClaimedError,
     DomainOwnershipError,
     DuplicateCompanyDomainError,
     apply_company_domain_change,
     assert_company_domain_available,
     domain_is_available_to,
     ensure_company_organization,
+    queue_domain_claim_alert,
     set_active_company,
     user_may_use_organization,
 )
@@ -2254,6 +2256,11 @@ class VibeRaisingCompanyView(APIView):
                 ensure_company_organization(company)
                 if profile.active_company_id is None:
                     set_active_company(profile, company)
+        except CompanyDomainClaimedError as exc:
+            # A claim that raced the check above: the company writes have
+            # rolled back, so ops hears about it once and the founder can carry on.
+            queue_domain_claim_alert(organization=exc.organization, claimant_user_id=request.user.id)
+            return exc.response()
         except DuplicateCompanyDomainError as exc:
             return Response(
                 {

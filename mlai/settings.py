@@ -976,6 +976,18 @@ ESAFETY_URL = os.getenv('ESAFETY_URL') or DEFAULT_FRONTEND_URL
 WATT_THE_HACK_URL = os.getenv('WATT_THE_HACK_URL') or DEFAULT_FRONTEND_URL
 VIBE_RAISING_URL = os.getenv('VIBE_RAISING_URL') or DEFAULT_FRONTEND_URL
 FOUNDER_TOOLS_URL = os.getenv('FOUNDER_TOOLS_URL') or VIBE_RAISING_URL
+# A hidden research workspace holds its domain only this long; after that a real
+# startup save on the same domain releases it (founder_tools.services).
+try:
+    FOUNDER_RESEARCH_WORKSPACE_CLAIM_HOLD_HOURS = int(
+        os.getenv('FOUNDER_RESEARCH_WORKSPACE_CLAIM_HOLD_HOURS', '24') or 24
+    )
+except ValueError as exc:
+    raise ImproperlyConfigured(
+        'FOUNDER_RESEARCH_WORKSPACE_CLAIM_HOLD_HOURS must be a whole number of hours'
+    ) from exc
+if FOUNDER_RESEARCH_WORKSPACE_CLAIM_HOLD_HOURS < 1:
+    raise ImproperlyConfigured('FOUNDER_RESEARCH_WORKSPACE_CLAIM_HOLD_HOURS must be at least 1')
 CORE_ACTOR_MIGRATION_HISTORY_ATTESTATION = os.getenv(
     'CORE_ACTOR_MIGRATION_HISTORY_ATTESTATION',
     '',

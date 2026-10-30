@@ -312,6 +312,20 @@ class IslandRefreshEligibilityTests(IslandRefreshSchedulerTestCase):
 
         self.assertEqual(self._dispatched_domains(), ["researched.com"])
 
+    def test_profile_details_and_bookkeeping_alone_are_not_a_strategy(self):
+        # Every org has researched keywords, so only the private-key rule decides:
+        # without it, all five would be dispatched.
+        self.make_org("new-startup.com", strategy={
+            "startup_profile_details": {"founderProfiles": [{"name": "Ann A", "linkedinUrl": ""}]}}, keywords=1)
+        self.make_org("researching.com", strategy={"startup_profile_details": {"researchDraft": True}}, keywords=1)
+        self.make_org("offboarded.com", strategy={
+            "previous_owner": {"user_id": 1, "reason": "company_deleted"}}, keywords=1)
+        self.make_org("alerted.com", strategy={"ops_alerts": {"alert-1": {"state": "pending"}}}, keywords=1)
+        self.make_org("voiced.com", strategy={
+            "startup_profile_details": {"founderProfiles": []}, "article_voice": {"tone": "plain"}}, keywords=1)
+
+        self.assertEqual(self._dispatched_domains(), ["voiced.com"])
+
     def test_a_cluster_backed_org_with_no_islands_is_eligible(self):
         self.make_org("clustered.com", clusters=1)
 
