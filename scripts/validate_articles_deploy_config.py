@@ -21,6 +21,9 @@ FLAG_KEYS = (
     "ARTICLES_FREE_FIRST_ARTICLE_ENABLED",
     "ARTICLES_FIRST_ARTICLE_GOAL_ENABLED",
     "ARTICLES_FOUNDER_JOURNEY_ALERTS_ENABLED",
+    # Article preview switches: restart portable previews, and publish only a rendered one.
+    "CONTENT_FACTORY_PORTABLE_PREVIEW_REARM",
+    "HOSTED_PUBLISH_REQUIRES_RENDERED_PREVIEW",
 )
 # 0 means "no cap", "off" or, for the queue slots, "no ETA".
 COUNT_KEYS = (
