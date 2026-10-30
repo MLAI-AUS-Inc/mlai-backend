@@ -29,13 +29,20 @@ def _article_html(text=ARTICLE_TEXT, canonical="https://{domain}/blog/first-post
             f"<p>{text}</p></article></body></html>")
 
 
-def _next_js_target(connection, *, source_sha=MERGED, verified_at=None):
+SCAN_PROOF = {"status": "passed", "source_sha": MERGED, "preview_capable": True}
+
+
+def _next_js_target(connection, *, source_sha=MERGED, verified_at=None, build_proof=True):
+    """The default target as the scan of the merged source records it (with MLAI's build proof by default)."""
+    contract = {"target_id": "articles", "delivery_adapter": "next_app_router", "route_path": "/blog",
+        "route_template": "/blog/{slug}", "contract_digest": CONTRACT_DIGEST,
+        "live_marker": {"kind": "artifact_digest", "value": DIGEST}}
+    if build_proof:
+        contract["verification"] = {**SCAN_PROOF, "source_sha": source_sha}
     return WebsiteConnectionTarget.objects.create(
         connection=connection, target_key="articles", generation=connection.generation, adapter="next_app_router",
-        source_sha=source_sha, verified_at=verified_at, capabilities={"publishingReady": False},
-        contract={"target_id": "articles", "delivery_adapter": "next_app_router", "route_path": "/blog",
-            "route_template": "/blog/{slug}", "contract_digest": CONTRACT_DIGEST,
-            "live_marker": {"kind": "artifact_digest", "value": DIGEST}})
+        source_sha=source_sha, verified_at=verified_at or (timezone.now() - timedelta(minutes=5) if build_proof else None),
+        capabilities={"publishingReady": build_proof}, contract=contract)
 
 
 def _connect(built, *, verified_sha=BASE):
@@ -61,10 +68,10 @@ class LiveUrlFixture:
         self.lineage = lineage.start()
         self.addCleanup(lineage.stop)
 
-    def new_journey_site(self, domain="banksia.studio"):
+    def new_journey_site(self, domain="banksia.studio", **target_options):
         built = make_new_journey_org(domain=domain)
         connection = _connect(built)
-        target = _next_js_target(connection)
+        target = _next_js_target(connection, **target_options)
         built.config.refresh_from_db()
         return built, connection, target
 
@@ -86,9 +93,11 @@ class LiveUrlVerificationTests(LiveUrlFixture, TestCase):
         fetch.assert_called_once_with("https://banksia.studio/blog", "banksia.studio", expected_status=200)
         target.refresh_from_db()
         connection.refresh_from_db()
-        verification = target.contract["verification"]
-        self.assertEqual((verification["status"], verification["attestation_origin"]), ("verified", "live_url"))
-        self.assertTrue(verification["observed_at"])
+        # The scan's build proof is kept; the live proof is written beside it.
+        self.assertEqual(target.contract["verification"], SCAN_PROOF)
+        live = target.contract["live_verification"]
+        self.assertEqual((live["status"], live["attestation_origin"], live["source_sha"]), ("verified", "live_url", MERGED))
+        self.assertTrue(live["observed_at"])
         self.assertIsNotNone(target.verified_at)
         self.assertTrue(target.capabilities["publishingReady"])
         self.assertEqual(connection.verified_sha, MERGED)
@@ -122,13 +131,92 @@ class LiveUrlVerificationTests(LiveUrlFixture, TestCase):
         with self.fetch({"https://banksia.studio/blog": LISTING, url: _article_html(canonical=url).encode()}):
             receipt = verify_live_url(built.config, target, setup_run_id="setup-1")
         self.assertEqual([row["kind"] for row in receipt["verified_routes"]], ["listing", "detail"])
-        changed = _article_html(text=ARTICLE_TEXT.replace("word3", "other"), canonical=url).encode()
-        target.contract = {key: value for key, value in target.contract.items() if key != "verification"}
-        target.save(update_fields=["contract"])
-        with self.fetch({"https://banksia.studio/blog": LISTING, url: changed}), \
+        self.assertTrue(receipt["verified_routes"][1]["body_sha256"])
+        self.assertIs(WebsiteConnectionTarget.objects.get(pk=target.pk).contract["live_verification"]["detail_compared"], True)
+
+    def test_a_revised_or_removed_article_never_blocks_the_live_proof(self):
+        built, connection, target = self.new_journey_site()
+        older, newer = "https://banksia.studio/blog/older-post", "https://banksia.studio/blog/first-post"
+        for run_id, url, days in (("article-old", older, 3), ("article-new", newer, 1)):
+            run = ContentFactoryRun.objects.create(run_id=run_id, workflow="article_generation", domain="banksia.studio",
+                organization=built.organization, status="completed",
+                result={"content_package": {"article_html": _article_html(canonical=url)}})
+            WrittenArticle.objects.create(organization=built.organization, title=run_id, slug=run_id, category="guides",
+                primary_keyword=run_id, live_url=url, published_at=timezone.now() - timedelta(days=days), source_run_id=run.run_id)
+        edited = _article_html(text=ARTICLE_TEXT.replace("word3", "other"), canonical=newer).encode()
+        # The newest article was edited on the site: the next one is compared instead.
+        with self.fetch({"https://banksia.studio/blog": LISTING, newer: edited, older: _article_html(canonical=older).encode()}):
+            receipt = verify_live_url(built.config, target, setup_run_id="setup-1")
+        self.assertEqual(receipt["verified_routes"][1]["path"], "/blog/older-post")
+        target.refresh_from_db()
+        # Every article edited or taken down: the listing marker alone proves the deployed setup.
+        def fetch_live_route(url, domain, *, expected_status=200):
+            if url == "https://banksia.studio/blog":
+                return LISTING, {}
+            if url == newer:
+                return edited, {}
+            raise WebsiteAuthorityError("live_route_unavailable", "The exact public articles route has not deployed successfully.")
+        with patch("content_factory.website_live_fetch.fetch_live_route", side_effect=fetch_live_route):
+            receipt = verify_live_url(built.config, target, setup_run_id="setup-1")
+        self.assertEqual([row["kind"] for row in receipt["verified_routes"]], ["listing"])
+        target.refresh_from_db()
+        connection.refresh_from_db()
+        self.assertTrue(accepted(connection, target))
+        self.assertIs(target.contract["live_verification"]["detail_compared"], False)
+        # An unreachable host is still transient, so nothing is recorded for it.
+        def unreachable_detail(url, domain, *, expected_status=200):
+            if url == "https://banksia.studio/blog":
+                return LISTING, {}
+            raise WebsiteAuthorityError("deployment_route_transient", "The public articles route could not be reached.", retryable=True)
+        with patch("content_factory.website_live_fetch.fetch_live_route", side_effect=unreachable_detail), \
                 self.assertRaises(WebsiteAuthorityError) as raised:
-            verify_live_url(built.config, target)
-        self.assertEqual(raised.exception.code, "live_route_unavailable")
+            verify_live_url(built.config, target, setup_run_id="setup-1")
+        self.assertEqual(raised.exception.code, "deployment_route_transient")
+
+    def test_a_target_without_mlai_build_proof_is_never_certified_by_its_live_page(self):
+        """A page carrying the kit's marker never stands in for a failed or uncertified build."""
+        from .website_sealed_workflow import REQUIRED_VERSION
+        failed = {"status": "failed", "source_sha": MERGED}
+        cases = {
+            "failed build": dict(verification=failed, verified_at=None, capabilities={"publishingReady": False}),
+            "no proof yet": dict(verification=None, verified_at=None, capabilities={"publishingReady": False}),
+            "proof of another source": dict(verification={**SCAN_PROOF, "source_sha": BASE}),
+            "uncertified candidate": dict(contract_extra={"contract": {"publishing_inputs_v1": {"schema_version": 1}}},
+                verified_at=None, capabilities={"publishingReady": False}),
+            "certified candidate": dict(contract_extra={"contract": {"publishing_inputs_v1": {"schema_version": 1}}}),
+            "sealed v3 target": dict(capabilities={"publishingReady": True, REQUIRED_VERSION: 3}),
+        }
+        for label, case in cases.items():
+            with self.subTest(label):
+                built, connection, target = self.new_journey_site(domain=f"{label.replace(' ', '-')}.banksia.studio")
+                contract = {**target.contract, **case.get("contract_extra", {})}
+                if "verification" in case:
+                    contract.pop("verification", None)
+                    if case["verification"] is not None:
+                        contract["verification"] = case["verification"]
+                target.contract = contract
+                if "verified_at" in case:
+                    target.verified_at = case["verified_at"]
+                target.capabilities = case.get("capabilities", target.capabilities)
+                target.save(update_fields=["contract", "verified_at", "capabilities"])
+                before = (target.verified_at, dict(target.contract), dict(target.capabilities))
+                with self.fetch({f"https://{built.organization.domain}/blog": LISTING}) as fetch, \
+                        self.assertRaises(WebsiteAuthorityError) as raised:
+                    verify_live_url(built.config, target, setup_run_id="setup-1")
+                self.assertEqual(raised.exception.code, "verified_target_required")
+                fetch.assert_not_called()
+                target.refresh_from_db()
+                connection.refresh_from_db()
+                self.assertEqual((target.verified_at, target.contract, target.capabilities), before)
+                self.assertEqual(connection.verified_sha, BASE)
+                self.assertFalse(connection.operations.filter(action="deployment-verify").exists())
+                # A stored live proof never makes such a target acceptable either.
+                target.contract = {**target.contract, "live_verification": {"status": "verified", "attestation_origin": "live_url",
+                    "source_sha": MERGED, "contract_digest": CONTRACT_DIGEST, "artifact_digest": DIGEST}}
+                target.save(update_fields=["contract"])
+                connection.verified_sha = MERGED
+                connection.save(update_fields=["verified_sha"])
+                self.assertFalse(accepted(connection, target))
 
     def test_a_missing_marker_or_a_transient_fetch_leaves_the_site_unverified(self):
         built, connection, target = self.new_journey_site()
@@ -139,8 +227,9 @@ class LiveUrlVerificationTests(LiveUrlFixture, TestCase):
             self.assertEqual(raised.exception.code, code)
             target.refresh_from_db()
             connection.refresh_from_db()
-            self.assertIsNone(target.verified_at)
-            self.assertNotIn("verification", target.contract)
+            self.assertEqual(target.contract["verification"], SCAN_PROOF)
+            self.assertNotIn("live_verification", target.contract)
+            self.assertFalse(accepted(connection, target))
             self.assertEqual(connection.verified_sha, BASE)
             self.assertFalse(WebsiteConnectionOperation.objects.filter(connection=connection, action="deployment-verify").exists())
         from .website_failure_contract import load_registry
@@ -211,6 +300,108 @@ class LiveUrlVerificationTests(LiveUrlFixture, TestCase):
         self.assertNotIn("workflows_permission", journey["proofContract"]["requirements"])
         self.assertNotIn("ci_artifact_digest", journey["proofContract"]["requirements"])
         self.assertNotEqual((journey["nextAction"] or {}).get("id"), "permissions")
+
+
+@override_settings(**ALL_P1_FLAGS_ON)
+class LiveUrlRenewalTests(LiveUrlFixture, TestCase):
+    """A live-URL proof is renewed automatically before it ages out, like CI proof is."""
+
+    def verified_site(self, *, age=timedelta(days=6)):
+        built, connection, target = self.new_journey_site()
+        with self.fetch({"https://banksia.studio/blog": LISTING}):
+            verify_live_url(built.config, target, setup_run_id="setup-1")
+        aged = timezone.now() - age
+        WebsiteConnectionTarget.objects.filter(pk=target.pk).update(verified_at=aged)
+        WebsiteConnection.objects.filter(pk=connection.pk).update(last_verified_at=aged)
+        WebsiteConnectionOperation.objects.filter(connection=connection).update(created_at=aged, updated_at=aged)
+        connection.refresh_from_db()
+        target.refresh_from_db()
+        return built, connection, target
+
+    def test_the_verification_refresh_renews_a_live_url_proof_before_day_seven(self):
+        from . import website_reconciliation as recon
+        built, connection, target = self.verified_site()
+        self.assertEqual(recon._refresh_target(connection, built.config), target)
+        queued = recon.queue_verification_refreshes(now=timezone.now())
+        self.assertEqual(len(queued), 1)
+        with self.fetch({"https://banksia.studio/blog": LISTING}), \
+                patch("content_factory.website_verification.discover_source_attestation") as discover, \
+                patch("content_factory.website_verification.verify_live_deployment") as deployment:
+            state = recon._process_source_reverification(queued[0], timezone.now())
+        self.assertEqual(state, "completed")
+        discover.assert_not_called()
+        deployment.assert_not_called()
+        operation = WebsiteConnectionOperation.objects.get(pk=queued[0])
+        self.assertEqual((operation.receipt["status"], operation.receipt["method"]), ("verified", "live_url"))
+        connection.refresh_from_db()
+        target.refresh_from_db()
+        self.assertGreater(target.verified_at, timezone.now() - timedelta(minutes=1))
+        later = timezone.now() + timedelta(days=3)
+        evidence = durable_integration_evidence(built.config, connection, now=later)
+        self.assertTrue(evidence["verified"], evidence)
+        self.assertTrue(evidence["publishingVerified"])
+
+    def test_a_pushed_source_waits_for_its_build_proof_and_never_takes_the_ci_path(self):
+        from . import website_reconciliation as recon
+        built, connection, target = self.verified_site(age=timedelta(days=1))
+        operation = WebsiteConnectionOperation.objects.create(connection=connection, generation=connection.generation,
+            action="source-reverify", payload={"source_sha": "e" * 40, "target_id": "articles", "scan_required": False},
+            receipt={"status": "verification_queued"}, idempotency_key="push-check")
+        with self.fetch({"https://banksia.studio/blog": LISTING}) as fetch, \
+                patch("content_factory.website_verification.discover_source_attestation") as discover:
+            state = recon._process_source_reverification(operation.pk, timezone.now())
+        self.assertEqual(state, "pending")
+        operation.refresh_from_db()
+        self.assertEqual(operation.receipt["code"], "verified_target_required")
+        fetch.assert_not_called()
+        discover.assert_not_called()
+
+
+@override_settings(**ALL_P1_FLAGS_ON)
+class SealedTargetTests(LiveUrlFixture, TestCase):
+    """A target that needs sealed execution proof keeps its CI requirements, even for a new-journey site."""
+
+    def sealed_site(self):
+        from .website_sealed_workflow import REQUIRED_VERSION
+        built, connection, target = self.new_journey_site()
+        target.capabilities = {**target.capabilities, REQUIRED_VERSION: 3}
+        target.save(update_fields=["capabilities"])
+        connection.verified_sha = MERGED
+        connection.last_verified_at = timezone.now()
+        connection.save(update_fields=["verified_sha", "last_verified_at"])
+        return built, connection, target
+
+    def test_prepare_takes_the_ci_path_for_a_sealed_target(self):
+        from . import website_prepare
+        built, connection, target = self.sealed_site()
+        op = SimpleNamespace(receipt={"setup_run_id": "setup-1"})
+        context = SimpleNamespace(organization=built.organization, company=built.company)
+        ci = SimpleNamespace(pk="ci-op", receipt={"evidence_digest": "e"})
+        with patch("content_factory.website_live_verification.verify_live_url") as live, \
+                patch("content_factory.website_verification.discover_source_attestation", return_value={}) as discover, \
+                patch("content_factory.website_verification.record_ci_attestation", return_value=ci):
+            outcome = website_prepare._dispatch_prepare_step(op, context, built.config, "ci-attestation", user=built.owner, journey={})
+        self.assertEqual(outcome, {"status": "completed", "operation_id": "ci-op"})
+        discover.assert_called_once()
+        live.assert_not_called()
+
+    def test_the_journey_keeps_asking_for_ci_proof_a_sealed_target_needs(self):
+        from .website_journey import journey_for_context
+        built, connection, target = self.sealed_site()
+        context = SimpleNamespace(organization=built.organization, company=built.company, profile=None)
+        with patch("content_factory.website_verification.current_ci_attestation", return_value=None):
+            journey = journey_for_context(context, built.config, capabilities={})
+        self.assertIn("ci_artifact_digest", journey["proofContract"]["requirements"])
+        self.assertEqual(journey["prerequisites"]["verification"]["reasonCode"], "ci_attestation_required")
+        plain_built, plain_connection, plain_target = self.new_journey_site(domain="plain.banksia.studio")
+        plain_connection.verified_sha = MERGED
+        plain_connection.last_verified_at = timezone.now()
+        plain_connection.save(update_fields=["verified_sha", "last_verified_at"])
+        context = SimpleNamespace(organization=plain_built.organization, company=plain_built.company, profile=None)
+        with patch("content_factory.website_verification.current_ci_attestation", return_value=None):
+            journey = journey_for_context(context, plain_built.config, capabilities={})
+        self.assertNotIn("ci_artifact_digest", journey["proofContract"]["requirements"])
+        self.assertEqual(journey["prerequisites"]["verification"]["status"], "complete")
 
 
 class LegacyCiProofTests(LiveUrlFixture, TestCase):

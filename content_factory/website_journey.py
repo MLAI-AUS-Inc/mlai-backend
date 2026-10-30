@@ -363,8 +363,11 @@ def journey_for_context(context, config, *, capabilities=None, owner_view=False)
         prepared = bool(preview_target and preview_target.source_sha == connection.verified_sha and preview_proof.get("status") in {"passed", "verified", "preview_verified"})
         fresh = prepared and build_proof_fresh(connection, preview_target, capabilities)
         from .website_verification import current_ci_attestation
-        from .website_live_verification import selected as live_url_selected
-        live_selected = live_url_selected(getattr(context, "organization", None))
+        from .website_live_verification import applicable as live_url_applicable, selected as live_url_selected
+        # Live-URL proof stands in for CI only where activation accepts it: a
+        # target that needs sealed execution proof keeps the CI requirements.
+        live_selected = live_url_selected(getattr(context, "organization", None)) and (
+            selected is None or live_url_applicable(selected))
         proof = {"integrationVerified": prepared, "buildVerified": fresh, "verificationStale": prepared and not fresh,
             "verifiedAdapter": preview_target.adapter if fresh else None,
             "ciAttestationRequired": bool(not live_selected and fresh

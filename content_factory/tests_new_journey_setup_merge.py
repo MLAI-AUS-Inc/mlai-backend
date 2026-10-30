@@ -1,8 +1,10 @@
 """P1.14: a new-journey setup merges only after the owner's click; legacy merge policy is unchanged."""
+from datetime import timedelta
 from types import SimpleNamespace
 from unittest.mock import patch
 
 from django.test import TestCase, override_settings
+from django.utils import timezone
 
 from workflow_runs.models import ContentFactoryRun
 from . import founder_journey_cohort as cohort
@@ -133,6 +135,37 @@ class PrepareOwnerClickTests(TestCase):
         outcome, post = self.approve(built, run)
         self.assertEqual(outcome, {"status": "pending"})
         post.assert_not_called()
+
+    @override_settings(**ALL_P1_FLAGS_ON)
+    def test_an_approval_that_never_reached_the_run_offers_the_review_again(self):
+        """The owner's receipt was recorded but the run-control approve failed (for example a 409)."""
+        built = make_new_journey_org()
+        _connect(built)
+        run = _setup_run(built, pr=False)
+        on_owner_setup_approve(organization=built.organization, user=built.owner, run=run, data={})
+        marker = cohort.read_marker(built.organization)
+        stale = (timezone.now() - website_prepare.OWNER_APPROVAL_SETTLE - timedelta(minutes=1)).isoformat()
+        cohort.update_marker(built.organization, setup_approval={**marker["setupApproval"], "at": stale})
+        outcome, post = self.approve(built, run)
+        self.assertEqual((outcome["status"], outcome["user_action"]["id"]), ("needs_user", "review_setup"))
+        post.assert_not_called()
+        # Once the approve reached the run, preparation waits for its pull request.
+        run.status, run.approval_state = "running", "approved"
+        run.save(update_fields=["status", "approval_state"])
+        outcome, post = self.approve(built, run)
+        self.assertEqual(outcome, {"status": "pending"})
+        post.assert_not_called()
+
+    @override_settings(**ALL_P1_FLAGS_ON)
+    def test_the_manual_choice_uses_the_plain_github_copy(self):
+        built = make_new_journey_org()
+        _connect(built)
+        run = _setup_run(built)
+        on_owner_setup_approve(organization=built.organization, user=built.owner, run=run, data={"merge": "manual"})
+        outcome, merge = self.merge(built, run)
+        self.assertEqual(outcome["message"], "Your change is waiting on GitHub. Approve it on GitHub when you're ready.")
+        self.assertNotIn("pull request", outcome["message"])
+        merge.assert_not_called()
 
     @override_settings(**ALL_P1_FLAGS_ON)
     def test_a_new_journey_setup_merges_only_with_an_auto_receipt_for_that_run(self):

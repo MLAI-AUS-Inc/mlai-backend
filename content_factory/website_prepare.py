@@ -780,9 +780,11 @@ def _dispatch_prepare_step(op, context, config, step, *, user, journey=None):
     repository = (journey or {}).get("repository") or {}
     receipt = current_ci_attestation(website, target, capabilities={"repositorySourceSha": repository.get("observedSourceSha"),
         "repositoryBranch": repository.get("branch")}) if step == "verify" else None
-    if live_url and receipt is None:
-        # New-journey sites are verified by their live blog page. A current
-        # hosted proof, when one exists, still goes through the CI path below.
+    from .website_live_verification import applicable as live_url_applicable
+    if live_url and receipt is None and live_url_applicable(target):
+        # New-journey sites are verified by their live blog page on top of the
+        # scan's build proof. A current hosted proof, when one exists, and a
+        # target that needs sealed execution proof still take the CI path below.
         from .website_live_verification import verify_live_url
         verified = verify_live_url(config, target,
             setup_run_id=op.receipt.get("merged_setup_run_id") or op.receipt.get("setup_run_id") or "")
@@ -1297,7 +1299,7 @@ def maybe_merge_prepared_setup(run, context, config, *, user, goal=None):
         # The owner's click decides (decision 12). "Let me review it on GitHub"
         # leaves the pull request for them; without a click nothing merges.
         if approved_run_choice(organization=organization, run=run) == "manual":
-            return {"status": "needs_user", "message": f"Your articles setup pull request #{number} is waiting for you on GitHub.",
+            return {"status": "needs_user", "message": "Your change is waiting on GitHub. Approve it on GitHub when you're ready.",
                 "user_action": action}
         return publish
     outcome = _attempt_setup_publish_merge(run=run, context=context, automatic=True)
@@ -1346,6 +1348,29 @@ def _setup_preview_proven_for_review(run, head_sha):
     )
 
 
+# How long a recorded owner approval may wait for its run to leave approval
+# before preparation offers the review again (the approve may have failed).
+OWNER_APPROVAL_SETTLE = timedelta(minutes=5)
+
+
+def _setup_left_approval(run):
+    """Whether a setup run is past its approval (its approve reached Content Factory)."""
+    return not (run.status in {"awaiting_approval", "approval_required"} or run.approval_state == "approval_required")
+
+
+def _owner_approval_recent(organization, *, now=None):
+    """Whether the owner's recorded setup approval is younger than ``OWNER_APPROVAL_SETTLE``."""
+    from django.utils.dateparse import parse_datetime
+    from . import founder_journey_cohort as cohort
+    marker = cohort.read_marker(organization)
+    approval = marker.get("setupApproval") if isinstance(marker, dict) else None
+    stamp = parse_datetime(str(approval.get("at") or "")) if isinstance(approval, dict) else None
+    if stamp is None or timezone.is_naive(stamp):
+        return False
+    now = now or timezone.now()
+    return now - OWNER_APPROVAL_SETTLE <= stamp <= now + timedelta(minutes=1)
+
+
 def approve_prepared_setup(run, context, config, *, user, goal=None):
     """Use the existing setup control only after exact automatic preview proof."""
     from .website_connections import _verified_setup_run_base, scoped_run_contract, verify_repository_head
@@ -1359,9 +1384,11 @@ def approve_prepared_setup(run, context, config, *, user, goal=None):
     from .website_setup_owner_approval import requires_owner_click, approved_run_choice
     organization = getattr(context, "organization", None) or getattr(config, "organization", None)
     owner_click = requires_owner_click(organization)
-    if owner_click and approved_run_choice(organization=organization, run=run) is not None:
-        # The owner already pressed "Add to my website"; their approval is opening
-        # the setup pull request.
+    if owner_click and approved_run_choice(organization=organization, run=run) is not None and (
+            _setup_left_approval(run) or _owner_approval_recent(organization)):
+        # The owner already pressed "Add to my website" and their approval is
+        # opening the setup pull request. When that approve never reached the
+        # run (it is still awaiting approval), the review is offered again.
         return {"status": "pending"}
     from .website_hosted_build import enabled as hosted_enabled, current_scan_source
     from .website_setup_consent import valid as valid_consent
