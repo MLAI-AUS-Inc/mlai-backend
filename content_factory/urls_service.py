@@ -7,6 +7,7 @@ from .website_verification import WebsiteCiAttestationView
 from .website_runtime_observation import WebsiteRuntimeObservationView
 from .hosted_article_views import (HostedArticlePublicationServiceView, HostedArticleSiteServiceView,
                                    HostedArticleSiteSourceServiceView)
+from .preview_domain_claim import PreviewDomainClaimServiceView
 
 urlpatterns = [
     path('articles/runtime-observation/', WebsiteRuntimeObservationView.as_view(), name='articles_runtime_observation'),
@@ -16,6 +17,8 @@ urlpatterns = [
     path('hosted-sites/source', HostedArticleSiteSourceServiceView.as_view()),
     path('hosted-sites/publications/<str:run_id>', HostedArticlePublicationServiceView.as_view(), name='hosted_article_publication'),
     path('hosted-sites/publications/<str:run_id>/', HostedArticlePublicationServiceView.as_view()),
+    path('preview-domain-claim/', PreviewDomainClaimServiceView.as_view(), name='content_factory_preview_domain_claim'),
+    path('preview-domain-claim', PreviewDomainClaimServiceView.as_view()),
     path('connections/current', WebsiteCurrentConnectionView.as_view()),
     path('connections/current/', WebsiteCurrentConnectionView.as_view()),
     path('connections/ci-attestation', WebsiteCiAttestationView.as_view()),
