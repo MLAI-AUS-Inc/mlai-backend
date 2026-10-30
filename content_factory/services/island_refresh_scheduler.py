@@ -7,18 +7,35 @@ unique constraint is the idempotency record, so once today's row exists a tick i
 a cheap existence check per org.
 
 The refresh is free (no Roo charge) and sends no notification, so unlike the
-discovery loops it can serve cold-start web orgs that have no Slack owner and no
-automations - they are exactly the orgs whose graph would otherwise never grow.
+discovery loops it serves web orgs that have no Slack owner and no automations.
+
+A refresh reclusters the org's researched keywords, and content-factory fails it
+with "No researched keywords" when its load step finds none. So only seedable
+orgs (islands, clusters or a pillar strategy) with at least one researched
+keyword are dispatched; seedable orgs without keywords are counted as
+``skipped_no_keywords`` and never dispatched, failed or denied. A cold-start org
+(a pillar strategy, no islands yet) still gets its first islands: the
+scheduler seeds them from its pillars itself, which was the refresh's one useful
+effect for such an org, and counts them as ``seeded``. It gets its first
+keywords from topic discovery (its first topic batch) and is refreshed from the
+next due tick after that. Orgs with keywords but nothing seedable stay
+ineligible, as before. The dispatch is organization scoped (no website
+connection), so an org with keywords and no connection still refreshes. During
+scheduled founder workshops (``ARTICLES_WORKSHOP_WINDOWS``) nothing is
+dispatched.
 """
 from __future__ import annotations
 
+import json
 import logging
-from datetime import timedelta
+from datetime import timedelta, timezone as datetime_timezone
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from django.conf import settings
+from django.core.cache import cache
 from django.db import transaction
 from django.utils import timezone
+from django.utils.dateparse import parse_datetime
 
 from content_factory.models import (
     ContentIsland,
@@ -55,6 +72,11 @@ STUCK_DISPATCH_AGE = timedelta(hours=3)
 # Bound the per-tick detail list so the scheduler's stdout stays readable even
 # with many orgs; counters remain exact.
 MAX_RESULT_ROWS = 20
+
+# A seedable org without keywords is logged once per org-local day, not on
+# every 60-second tick.
+NO_KEYWORDS_LOG_KEY_PREFIX = "island-refresh:skipped-no-keywords:"
+NO_KEYWORDS_LOG_TTL_SECONDS = 26 * 60 * 60
 
 
 def island_refresh_scheduler_enabled() -> bool:
@@ -98,8 +120,37 @@ def _has_pillar_strategy(config) -> bool:
     return bool(strategy)
 
 
-def _eligible_configs() -> list:
-    """Every org that has something to cluster: islands, a pillar strategy, or clusters."""
+def _seedable(config, *, island_org_ids, cluster_org_ids) -> bool:
+    """The pre-keyword rule: islands, clusters or a pillar strategy to cluster around."""
+    return bool(
+        config.organization_id in island_org_ids
+        or config.organization_id in cluster_org_ids
+        or _has_pillar_strategy(config)
+    )
+
+
+def has_researched_keywords(config) -> bool:
+    """True when content-factory's refresh would load at least one keyword row.
+
+    content-factory's ``_island_refresh_load_context`` reads the org's keyword
+    rows from ``GET /api/seo/keywords/`` (``SEOKeywordListView``): every
+    ``ResearchedKeyword`` of the organization, unfiltered by status. Islands,
+    clusters and pillar strategy are not read as keywords, so they do not count.
+    """
+    organization_id = getattr(config, "organization_id", None)
+    if not organization_id:
+        return False
+    return ResearchedKeyword.objects.filter(organization_id=organization_id).exists()
+
+
+def _partition_configs() -> tuple[list, list]:
+    """Split seedable orgs into (eligible, skipped_no_keywords).
+
+    Eligible orgs have at least one researched keyword (see
+    ``has_researched_keywords``). Seedable orgs without one are skipped: their
+    refresh could only complete if DataForSEO expansion happened to write the
+    first keywords, and otherwise fails with "No researched keywords".
+    """
     configs = list(
         OrganizationContentConfig.objects.select_related("organization").order_by("organization_id")
     )
@@ -109,16 +160,27 @@ def _eligible_configs() -> list:
     cluster_org_ids = set(
         SemanticCluster.objects.values_list("organization_id", flat=True).distinct()
     )
-    return [
+    seedable = [
         config
         for config in configs
         if config.organization_id
-        and (
-            config.organization_id in island_org_ids
-            or config.organization_id in cluster_org_ids
-            or _has_pillar_strategy(config)
-        )
+        and _seedable(config, island_org_ids=island_org_ids, cluster_org_ids=cluster_org_ids)
     ]
+    keyword_org_ids = set(
+        ResearchedKeyword.objects.filter(
+            organization_id__in=[config.organization_id for config in seedable]
+        )
+        .values_list("organization_id", flat=True)
+        .distinct()
+    )
+    eligible = [config for config in seedable if config.organization_id in keyword_org_ids]
+    skipped = [config for config in seedable if config.organization_id not in keyword_org_ids]
+    return eligible, skipped
+
+
+def _eligible_configs() -> list:
+    """Every seedable org with researched keywords to recluster."""
+    return _partition_configs()[0]
 
 
 def _seed_cold_start_islands(organization) -> int:
@@ -132,6 +194,67 @@ def _seed_cold_start_islands(organization) -> int:
     except Exception:
         logger.exception("Island seeding failed for %s.", organization.domain)
         return 0
+
+
+def _log_skipped_no_keywords(config, *, now) -> None:
+    organization = config.organization
+    local_date = now.astimezone(_zone(config.default_timezone)).date()
+    key = f"{NO_KEYWORDS_LOG_KEY_PREFIX}{config.organization_id}:{local_date.isoformat()}"
+    try:
+        first_today = cache.add(key, 1, NO_KEYWORDS_LOG_TTL_SECONDS)
+    except Exception:
+        logger.warning("Island refresh skip log dedupe is unavailable.", exc_info=True)
+        first_today = True
+    if first_today:
+        logger.info(
+            "island_refresh_skipped reason=no_researched_keywords organization_id=%s domain=%s local_date=%s",
+            config.organization_id,
+            getattr(organization, "domain", ""),
+            local_date.isoformat(),
+        )
+
+
+def _workshop_windows() -> list:
+    """Parse ``ARTICLES_WORKSHOP_WINDOWS`` into aware (start, end) pairs, dropping bad entries."""
+    raw = getattr(settings, "ARTICLES_WORKSHOP_WINDOWS", None) or []
+    if isinstance(raw, str):
+        try:
+            raw = json.loads(raw or "[]")
+        except ValueError:
+            logger.warning("ARTICLES_WORKSHOP_WINDOWS is not valid JSON; no workshop windows apply.")
+            return []
+    if not isinstance(raw, list):
+        logger.warning("ARTICLES_WORKSHOP_WINDOWS must be a JSON list; no workshop windows apply.")
+        return []
+    windows = []
+    for entry in raw:
+        start = end = None
+        if isinstance(entry, dict):
+            try:
+                start = parse_datetime(str(entry.get("start") or ""))
+                end = parse_datetime(str(entry.get("end") or ""))
+            except ValueError:
+                start = end = None
+        if start is None or end is None:
+            logger.warning("Ignoring malformed ARTICLES_WORKSHOP_WINDOWS entry %r.", entry)
+            continue
+        if timezone.is_naive(start):
+            start = start.replace(tzinfo=datetime_timezone.utc)
+        if timezone.is_naive(end):
+            end = end.replace(tzinfo=datetime_timezone.utc)
+        if end <= start:
+            logger.warning("Ignoring ARTICLES_WORKSHOP_WINDOWS entry that ends before it starts: %r.", entry)
+            continue
+        windows.append((start, end))
+    return windows
+
+
+def active_workshop_window(now):
+    """The (start, end) workshop window containing ``now``, or None."""
+    for start, end in _workshop_windows():
+        if start <= now < end:
+            return start, end
+    return None
 
 
 def _fail_stuck_dispatches(now) -> int:
@@ -221,19 +344,32 @@ def _mark_dispatch_failed(dispatch, error) -> dict:
 
 
 def run_island_refresh_scheduler(*, now=None) -> dict:
-    """Dispatch due island refreshes. Safe to tick every loop; never raises per-org."""
+    """Dispatch due island refreshes. Safe to tick every loop; never raises per-org.
+
+    Returns ``{"status": "workshop_window", "dispatched": 0, ...}`` and does
+    nothing else while a configured workshop window is open.
+    """
     if not island_refresh_scheduler_enabled():
         return {"status": "disabled", "dispatched": 0}
 
     now = now or timezone.now()
+    window = active_workshop_window(now)
+    if window is not None:
+        return {
+            "status": "workshop_window",
+            "dispatched": 0,
+            "window_start": window[0].isoformat(),
+            "window_end": window[1].isoformat(),
+        }
     stuck_failed = _fail_stuck_dispatches(now)
     local_hour = int(getattr(settings, "CONTENT_ISLANDS_REFRESH_LOCAL_HOUR", 6) or 0)
     max_per_tick = int(getattr(settings, "CONTENT_ISLANDS_REFRESH_MAX_PER_TICK", 3) or 0)
 
     dispatched = existing = not_due = failed = deferred = skipped_no_keywords = seeded = 0
     results: list = []
-    keyword_org_ids = set(ResearchedKeyword.objects.values_list("organization_id", flat=True).distinct())
-    for config in _eligible_configs():
+    eligible, skipped = _partition_configs()
+    keyword_org_ids = {config.organization_id for config in eligible}
+    for config in sorted([*eligible, *skipped], key=lambda item: item.organization_id):
         organization = config.organization
         from integrations.services.daily_research_policy import pause_if_unanswered
         if pause_if_unanswered(organization, now=now):
@@ -254,6 +390,7 @@ def run_island_refresh_scheduler(*, now=None) -> dict:
             # audit). The run's one useful effect for a cold-start org was
             # seeding its first islands from the pillars; do that here and
             # dispatch once research has produced keywords to cluster.
+            _log_skipped_no_keywords(config, now=now)
             seeded += _seed_cold_start_islands(organization)
             skipped_no_keywords += 1
             continue

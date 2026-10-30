@@ -297,6 +297,15 @@ class IslandRefreshEligibilityTests(IslandRefreshSchedulerTestCase):
         self.assertEqual((result["skipped_no_keywords"], result["seeded"], result["dispatched"]), (1, 1, 0))
         self.assertFalse(ContentIslandRefreshDispatch.objects.exists())
 
+    def test_a_pillar_strategy_without_researched_keywords_is_skipped(self):
+        self.make_org(
+            "no-keywords.com",
+            strategy={"pillars": [{"name": "AI Startup Fundraising", "keyword": "ai startup fundraising"}]},
+            keywords=0,
+        )
+
+        self.assertEqual(self._dispatched_domains(), [])
+
     def test_an_islanded_org_without_keywords_is_not_dispatched_or_reseeded(self):
         self.make_org("islanded.com", islands=1, keywords=0)
         with patch("content_factory.content_islands.seed_islands_from_bootstrap_pillars") as seed:
@@ -327,7 +336,7 @@ class IslandRefreshEligibilityTests(IslandRefreshSchedulerTestCase):
         self.assertEqual(self._dispatched_domains(), ["voiced.com"])
 
     def test_a_cluster_backed_org_with_no_islands_is_eligible(self):
-        self.make_org("clustered.com", clusters=1)
+        self.make_org("clustered.com", clusters=1, keywords=0)
 
         self.assertEqual(self._dispatched_domains(), ["clustered.com"])
 
