@@ -1,6 +1,7 @@
 """Owner-scoped website management and internal worker authorization APIs."""
 
 from functools import wraps
+import re
 import uuid
 
 from rest_framework.response import Response
@@ -265,7 +266,7 @@ class WebsiteCostUsageView(APIView):
     """Read recorded accounting for an explicitly selected authorized company."""
 
     def get(self, request):
-        context, _, error = _context(request)
+        context, config, error = _context(request)
         if error:
             return error
         from . import website_cost_ledger as ledger
@@ -279,8 +280,39 @@ class WebsiteCostUsageView(APIView):
                     raise ValueError("Noncanonical goal ID")
             except (ValueError, AttributeError, TypeError):
                 return Response({"detail": "Invalid goal ID."}, status=400)
-        return Response({"usage": ledger.read(company_id=context.company.pk, organization_id=context.organization.pk, goal_id=goal_id)},
-            headers={"Cache-Control": "private, no-store"})
+        usage = ledger.read(company_id=context.company.pk, organization_id=context.organization.pk, goal_id=goal_id)
+        from .founder_journey_cohort import is_new_journey
+        if not getattr(getattr(request, "user", None), "is_staff", False) and is_new_journey(context.organization, config):
+            # P1.11 (IF-P1-18): founders on the new journey see counts and
+            # points only; USD, SHAs and operation ids are staff details.
+            usage = founder_cost_usage(usage)
+        return Response({"usage": usage}, headers={"Cache-Control": "private, no-store"})
+
+
+_SHA_VALUE = re.compile(r"[0-9a-fA-F]{40}(?:[0-9a-fA-F]{24})?")
+_OPERATION_ID_KEYS = frozenset({"goalid", "goal_id", "operationid", "operation_id", "goaloperationid", "goal_operation_id"})
+
+
+def founder_cost_usage(value):
+    """A copy of a cost-usage payload without USD amounts, SHAs or operation UUIDs.
+
+    Keys naming a USD amount (``model_usd``), a SHA (``*sha``) or an operation
+    id (``goalId``, ``operationId``) are dropped, as is any string value that is
+    a 40- or 64-character hex digest. Counts, coverage and points are kept.
+    """
+    if isinstance(value, dict):
+        kept = {}
+        for key, item in value.items():
+            name = str(key).lower()
+            if name.startswith("usd") or name.endswith("usd") or "_usd" in name or name.endswith("sha") or name in _OPERATION_ID_KEYS:
+                continue
+            if isinstance(item, str) and _SHA_VALUE.fullmatch(item):
+                continue
+            kept[key] = founder_cost_usage(item)
+        return kept
+    if isinstance(value, list):
+        return [founder_cost_usage(item) for item in value if not (isinstance(item, str) and _SHA_VALUE.fullmatch(item))]
+    return value
 
 
 class WebsiteConnectionAuthorizeView(APIView):
