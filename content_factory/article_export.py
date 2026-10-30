@@ -1,10 +1,10 @@
 """Allowlisted export of an exact current Content Factory article snapshot."""
 
+from urllib.parse import urlsplit
+
 # Bounds for the copy formats a new-journey founder pastes (IF-P1-12).
 MAX_EXPORT_HTML_BYTES = 4_000_000
 MAX_META_TITLE_CHARS = 10_000
-
-from urllib.parse import urlsplit
 
 
 def public_export_url(value):

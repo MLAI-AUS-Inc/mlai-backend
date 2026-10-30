@@ -21,6 +21,7 @@ from .models import OrganizationContentConfig
 FLAGS = ALL_P1_FLAGS_ON
 V2_OFF = {**ALL_P1_FLAGS_ON, "MY_STARTUP_FOUNDER_JOURNEY_V2_ENABLED": False}
 COPY_OFF = {**ALL_P1_FLAGS_ON, "ARTICLES_COPY_WITHOUT_PREVIEW_ENABLED": False}
+P110_OFF = {**COPY_OFF, "ARTICLES_DRAFT_TOOLS_ENABLED": False}
 
 
 def snapshot(run_id, *, pending=True, revision="rev-1", saved_revision=None, saved_status="ready", html=True):
@@ -157,6 +158,29 @@ class ReviewViewFounderDraftTests(TestCase):
         self.assertIs(data["founderDraft"]["copyWhilePreviewPending"], False)
         ready = self._get(built, run, snapshot(run.run_id, pending=False)).json()["articleExport"]
         self.assertNotIn("html", ready)
+
+    @override_settings(**P110_OFF)
+    def test_both_draft_flags_off_give_todays_review_for_new_journey(self, *_mocks):
+        """The P1.10 kill switch: V2 on, copy and tools flags off, no founderDraft at all."""
+        built = make_new_journey_org()
+        self._set_profile(built, {"platform": "wix", "blogUrl": "https://example.test/blog"})
+        run = _content_only_run(built.organization)
+        data = self._get(built, run, snapshot(run.run_id)).json()
+        self.assertEqual(data["articleExport"]["reasonCode"], "preview_pending")
+        self.assertNotIn("founderDraft", data)
+        ready = self._get(built, run, snapshot(run.run_id, pending=False)).json()
+        self.assertEqual(ready["articleExport"]["status"], "ready")
+        self.assertNotIn("html", ready["articleExport"])
+        self.assertNotIn("metaTitle", ready["articleExport"])
+        self.assertNotIn("founderDraft", ready)
+
+    @override_settings(**COPY_OFF)
+    def test_tools_flag_alone_still_reports_founder_draft(self, *_mocks):
+        built = make_new_journey_org()
+        run = _content_only_run(built.organization)
+        draft = self._get(built, run, snapshot(run.run_id)).json()["founderDraft"]
+        self.assertIs(draft["tools"], True)
+        self.assertIs(draft["copyWhilePreviewPending"], False)
 
     def test_legacy_orgs_fail_closed_without_founder_draft_with_every_flag_on(self, *_mocks):
         for name in NAMED_LEGACY_ORGS:

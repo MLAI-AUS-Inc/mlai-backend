@@ -16,8 +16,12 @@ The three endpoints sit behind ``ARTICLES_DRAFT_TOOLS_ENABLED`` and
 ``founder_journey_cohort.is_new_journey`` (404 otherwise), are scoped to the
 selected company's runs, and are for the startup owner only. Receipts and
 links live in ``pillar_strategy["founder_posted_articles"]`` (no migration):
-``{run_id: {"url", "check", "checkedAt", "postedAt", "copiedAt", "copiedRevision"}}``,
-newest first, at most 50 runs.
+``{run_id: {"url", "check", "checkedAt", "postedAt", "copiedAt", "copiedRevision", "updatedAt"}}``,
+at most 50 runs. The key order means nothing (PostgreSQL ``jsonb`` does not
+keep it): when the cap is reached, the record with the oldest ``updatedAt``
+(else ``postedAt`` or ``copiedAt``) is dropped.
+
+A ``pending`` link check is final in P1: nothing re-checks it later.
 
 Error bodies are ``{"detail": <founder sentence>, "reason": <closed enum>}``
 with ``reason`` in ``not_ready``, ``revision_changed``, ``invalid_url`` and
@@ -67,6 +71,8 @@ IMAGE_TYPES = {"image/jpeg": "jpg", "image/png": "png", "image/webp": "webp", "i
 # Hostnames that are never a public place to post an article.
 _PRIVATE_SUFFIXES = (".localhost", ".local", ".internal", ".invalid", ".test", ".example", ".lan", ".home.arpa", ".corp")
 # Live-route outcomes that mean the page answered and is not this article.
+# ``live_route_unavailable`` joins them only while the failure taxonomy is
+# active, where it means a 404 (5xx and 429 are ``deployment_route_transient``).
 _NOT_MATCHED_FETCH = frozenset({"deployment_origin_invalid", "deployment_body_oversized", "deployment_route_contract_invalid",
                                 "deployment_route_unverified", "deployment_tls_invalid"})
 MATCH_SHARE = 0.6
@@ -98,6 +104,25 @@ def _mapping(value):
 def is_content_only(run) -> bool:
     """True when the run delivers a portable (copy-ready) draft."""
     return views._run_delivery_mode(run) == "content_only"
+
+
+def is_delivered_article(run) -> bool:
+    """An article run with a delivered draft that was not discarded, in either delivery mode.
+
+    A content_only run must pass :func:`is_delivered_content_only`; a
+    review_draft run must be completed or waiting for approval (or carry a
+    verified preview).
+    """
+    from .article_publication_evidence import useful_delivery
+    from .run_cancellation import DRAFT_DELETED_AT_KEY
+    from .run_state import ARTICLE_WORKFLOWS
+    if is_content_only(run):
+        return is_delivered_content_only(run)
+    if run.workflow not in ARTICLE_WORKFLOWS or run.status in {"cancelled", "denied"}:
+        return False
+    if _mapping(run.result).get(DRAFT_DELETED_AT_KEY):
+        return False
+    return run.status in {"completed", "awaiting_approval", "approval_required"} or useful_delivery(run)
 
 
 def is_delivered_content_only(run) -> bool:
@@ -160,8 +185,10 @@ def _is_owner(user, organization) -> bool:
 def founder_draft_review(*, context, run, user):
     """``(article_export keyword arguments, founderDraft or None)`` for the article review view.
 
-    For a legacy organisation it returns ``({}, None)``, so the review stays
-    exactly as it is today. For a new-journey organisation:
+    For a legacy organisation, or while both ``ARTICLES_COPY_WITHOUT_PREVIEW_ENABLED``
+    and ``ARTICLES_DRAFT_TOOLS_ENABLED`` are off, it returns ``({}, None)``, so
+    the review stays exactly as it is today. Otherwise, for a new-journey
+    organisation:
 
     - ``allow_preview_pending`` when ``ARTICLES_COPY_WITHOUT_PREVIEW_ENABLED``
       is on and the run is content_only (``founderDraft.copyWhilePreviewPending``);
@@ -171,6 +198,8 @@ def founder_draft_review(*, context, run, user):
       ``ARTICLES_DRAFT_TOOLS_ENABLED`` is on.
     """
     organization = getattr(context, "organization", None)
+    if not (copy_without_preview_enabled() or tools_enabled()):
+        return {}, None
     if organization is None or not cohort.is_new_journey(organization):
         return {}, None
     config = _config(organization)
@@ -203,8 +232,24 @@ def current_export(context, run):
     return export, None
 
 
+def _record_time(record):
+    """When a stored record last changed, for the 50-run cap; the oldest is dropped first."""
+    from datetime import datetime, timezone as dt_timezone
+    from django.utils.dateparse import parse_datetime
+    for key in ("updatedAt", "postedAt", "copiedAt"):
+        raw = record.get(key)
+        if isinstance(raw, str) and raw:
+            try:
+                value = parse_datetime(raw)
+            except ValueError:
+                value = None
+            if value is not None and not timezone.is_naive(value):
+                return value
+    return datetime.min.replace(tzinfo=dt_timezone.utc)
+
+
 def _store(organization, run_id, changes) -> dict:
-    """Merge ``changes`` into the run's record under the organisation lock; newest first, at most 50 runs."""
+    """Merge ``changes`` into the run's record under the organisation lock, keeping the 50 most recently changed runs."""
     from organizations.models import Organization
     from .models import OrganizationContentConfig
     run_id = str(run_id)
@@ -215,12 +260,10 @@ def _store(organization, run_id, changes) -> dict:
         config = OrganizationContentConfig.objects.select_for_update().get(organization_id=organization.pk)
         strategy = deepcopy(config.pillar_strategy) if isinstance(config.pillar_strategy, dict) else {}
         posted = _mapping(strategy.get(POSTED_KEY))
-        record = {**_mapping(posted.get(run_id)), **changes}
-        ordered = {run_id: record}
-        for key, value in posted.items():
-            if key != run_id and isinstance(value, dict) and len(ordered) < MAX_POSTED_RUNS:
-                ordered[key] = value
-        strategy[POSTED_KEY] = ordered
+        record = {**_mapping(posted.get(run_id)), **changes, "updatedAt": timezone.now().isoformat()}
+        others = sorted(((key, value) for key, value in posted.items() if key != run_id and isinstance(value, dict)),
+                        key=lambda item: _record_time(item[1]), reverse=True)
+        strategy[POSTED_KEY] = {run_id: record, **dict(others[:MAX_POSTED_RUNS - 1])}
         config.pillar_strategy = strategy
         config.save(update_fields=["pillar_strategy", "updated_at"])
     return record
@@ -336,6 +379,12 @@ def _contains_article(expected_html, observed) -> bool:
     return sum(1 for sentence in sentences if sentence in page) / len(sentences) >= MATCH_SHARE
 
 
+def _fetch_answered(code) -> bool:
+    """True when a failed live fetch means the page answered and is not this article (not transient)."""
+    from .website_github_failure import taxonomy_active
+    return code in _NOT_MATCHED_FETCH or code == "live_route_unavailable" and taxonomy_active()
+
+
 def check_posted_link(organization, url, host, export) -> str:
     """``matched``, ``not_matched`` or ``pending`` for a link on the founder's own site.
 
@@ -343,7 +392,8 @@ def check_posted_link(organization, url, host, export) -> str:
     public addresses only, bounded), then compared with
     ``article_live_evidence.compare_live_body``. A pasted article rarely
     reproduces the exact body hash, so a page that holds most of the article's
-    sentences also counts as matched. A transient fetch is ``pending``.
+    sentences also counts as matched. A 404 is ``not_matched`` while the
+    failure taxonomy is active; a transient fetch is ``pending`` (and stays so).
     """
     from .article_live_evidence import compare_live_body
     from .website_contract import WebsiteAuthorityError
@@ -355,7 +405,7 @@ def check_posted_link(organization, url, host, export) -> str:
     try:
         body, _headers = fetch_live_route(target, host)
     except WebsiteAuthorityError as exc:
-        return "not_matched" if getattr(exc, "authority_code", None) in _NOT_MATCHED_FETCH else "pending"
+        return "not_matched" if _fetch_answered(getattr(exc, "authority_code", None)) else "pending"
     except Exception:  # noqa: BLE001 - a fetch problem never fails the founder's save
         return "pending"
     expected = expected_article_html(export)
@@ -371,11 +421,10 @@ class FounderDraftPostedLinkView(_FounderDraftToolView):
     """POST: store the link where the founder posted this article."""
 
     def post(self, request, run_id):
-        from .run_state import ARTICLE_WORKFLOWS
         context, run, error = self._resolve(request, run_id)
         if error is not None:
             return error
-        if run.workflow not in ARTICLE_WORKFLOWS:
+        if not is_delivered_article(run):
             return _refusal(NOT_READY_COPY, "not_ready", 409)
         data = request.data if isinstance(request.data, dict) else {}
         cleaned = clean_posted_url(data.get("url"))

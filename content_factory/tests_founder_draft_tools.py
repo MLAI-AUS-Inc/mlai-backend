@@ -8,11 +8,13 @@ import io
 import json
 import zipfile
 from copy import deepcopy
+from datetime import timedelta
 from unittest import mock
 from uuid import uuid4
 
 from django.test import SimpleTestCase, TestCase, override_settings
 from django.urls import resolve
+from django.utils import timezone
 from rest_framework.test import APIClient
 
 from core.models import User
@@ -266,16 +268,53 @@ class DraftToolTests(TestCase):
         self.assertEqual(fetch.call_args.args, (f"https://blog.{self.org.domain}/post", f"blog.{self.org.domain}"))
 
     @override_settings(**FLAGS)
-    def test_records_are_newest_first_and_capped_at_fifty(self, _latest):
+    def test_the_cap_keeps_the_fifty_most_recent_records_whatever_the_key_order(self, _latest):
+        # Key order means nothing in jsonb: name the oldest records so they sort first.
+        base = timezone.now() - timedelta(days=60)
+        seeded = {f"{'a' if index < 5 else 'z'}-{index:02d}": {
+            "url": f"https://medium.com/p/{index}", "check": "skipped",
+            "postedAt": (base + timedelta(days=index)).isoformat()} for index in range(55)}
+        seeded["legacy-no-time"] = {"url": "https://medium.com/p/none", "check": "skipped"}
         config = OrganizationContentConfig.objects.get(organization=self.org)
-        config.pillar_strategy = {**config.pillar_strategy, "founder_posted_articles": {
-            f"old-{index}": {"url": f"https://medium.com/p/{index}", "check": "skipped"} for index in range(55)}}
+        config.pillar_strategy = {**config.pillar_strategy, "founder_posted_articles": seeded}
         config.save(update_fields=["pillar_strategy", "updated_at"])
         self.call("post", "posted-link", body={"url": "https://medium.com/@me/new"})
         posted = _posted(self.org)
         self.assertEqual(len(posted), 50)
-        self.assertEqual(list(posted)[:2], [self.run.run_id, "old-0"])
+        self.assertIn(self.run.run_id, posted)
+        self.assertTrue(posted[self.run.run_id]["updatedAt"])
+        # The new record plus the 49 most recent seeded ones (indexes 6 to 54) survive.
+        self.assertEqual(set(posted) - {self.run.run_id}, {f"z-{index:02d}" for index in range(6, 55)})
         self.assertIn("founder_journey", OrganizationContentConfig.objects.get(organization=self.org).pillar_strategy)
+
+    @override_settings(**FLAGS)
+    def test_a_link_needs_a_delivered_article_run(self, _latest):
+        discarded = _run(self.org)
+        ContentFactoryRun.objects.filter(pk=discarded.pk).update(
+            result={"delivery_mode": "content_only", "draft_deleted_at": timezone.now().isoformat()})
+        for run in (_run(self.org, status="running"), _run(self.org, status="failed"), _run(self.org, status="cancelled"),
+                    _run(self.org, status="queued", delivery_mode="review_draft"),
+                    _run(self.org, workflow="article_system_setup"), discarded):
+            with self.subTest(status=run.status, workflow=run.workflow, run=run.run_id):
+                response = self.call("post", "posted-link", run=run, body={"url": "https://medium.com/@me/post"})
+                self.assertEqual(response.status_code, 409)
+                self.assertEqual(response.json(), {"detail": "Your article isn't ready to copy yet.", "reason": "not_ready"})
+        self.assertEqual(_posted(self.org), {})
+        review_draft = _run(self.org, status="awaiting_approval", delivery_mode="review_draft")
+        response = self.call("post", "posted-link", run=review_draft, body={"url": "https://medium.com/@me/post"})
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(set(_posted(self.org)), {review_draft.run_id})
+
+    @override_settings(**FLAGS)
+    def test_a_missing_page_on_the_own_site_is_not_matched_while_the_taxonomy_is_active(self, _latest):
+        url = f"https://{self.org.domain}/blog/typo"
+        missing = mock.Mock(side_effect=WebsiteAuthorityError("live_route_unavailable", "Missing."))
+        for active, expected in ((True, "not_matched"), (False, "pending")):
+            with self.subTest(taxonomy=active), \
+                    mock.patch("content_factory.website_live_fetch.fetch_live_route", missing), \
+                    mock.patch("content_factory.website_github_failure.taxonomy_active", return_value=active):
+                link = self.call("post", "posted-link", body={"url": url}).json()["postedLink"]
+                self.assertEqual(link["check"], expected)
 
     # -- zip ----------------------------------------------------------------
 

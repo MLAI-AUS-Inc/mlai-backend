@@ -185,15 +185,22 @@ class DraftReadyOutboxTests(TestCase):
         self.assertFalse(_rows().filter(processed_at__isnull=True).exists())
 
     @override_settings(**FLAGS)
-    def test_a_transient_provider_failure_retries_and_a_permanent_one_stops(self):
+    def test_a_transient_provider_failure_backs_off_and_a_permanent_one_stops(self):
         run = _draft(self.org)
         outbox.enqueue_ready_drafts()
-        with mock.patch.object(transport, "post_webhook", return_value=WebhookResponse(503, b"{}")):
-            outbox.drain()
+        start = timezone.now()
+        with mock.patch.object(transport, "post_webhook", return_value=WebhookResponse(503, b"{}")) as failing:
+            self.assertEqual(outbox.drain(start)["retry"], 1)
+            failing.reset_mock()
+            # The next minute's tick does not pick the row again.
+            outbox.drain(start + timedelta(minutes=1))
+            failing.assert_not_called()
         email = _rows().get(event_id__endswith=":email")
         self.assertIsNone(email.processed_at)
-        self.assertIsNone(email.claimed_at)
-        outbox.drain()
+        self.assertIsNotNone(email.claimed_at)
+        outbox.drain(start + timedelta(minutes=1))
+        self.assertEqual(self.providers.emails, [])
+        outbox.drain(start + outbox.RETRY_MIN_DELAY + timedelta(seconds=1))
         self.assertEqual(len(self.providers.emails), 1)
         self.assertEqual(self.providers.emails[0][1], f"articles-draft-ready/{run.run_id}")
         other = _draft(self.org)
@@ -201,6 +208,54 @@ class DraftReadyOutboxTests(TestCase):
         with mock.patch.object(transport, "post_webhook", return_value=WebhookResponse(422, b"{}")):
             outbox.drain()
         self.assertIsNotNone(_rows().get(event_id=f"draft-ready:{self.org.pk}:{other.run_id}:email").processed_at)
+
+    @override_settings(**FLAGS)
+    def test_an_unexpected_error_also_backs_off(self):
+        _draft(self.org)
+        outbox.enqueue_ready_drafts()
+        start = timezone.now()
+        with mock.patch.object(outbox, "_send", side_effect=RuntimeError("boom")) as send:
+            outbox.drain(start)
+            calls = send.call_count
+            outbox.drain(start + timedelta(minutes=1))
+            self.assertEqual(send.call_count, calls)
+        self.assertFalse(_rows().filter(processed_at__isnull=False).exists())
+
+    def test_the_retry_delay_grows_with_the_row_age_between_its_bounds(self):
+        now = timezone.now()
+        row = ContentFactoryCallbackEvent(event_id="x", created_at=now)
+        self.assertEqual(outbox.retry_delay(row, now), outbox.RETRY_MIN_DELAY)
+        row.created_at = now - timedelta(minutes=40)
+        self.assertEqual(outbox.retry_delay(row, now), timedelta(minutes=20))
+        row.created_at = now - timedelta(hours=10)
+        self.assertEqual(outbox.retry_delay(row, now), outbox.RETRY_MAX_DELAY)
+
+    @override_settings(**FLAGS)
+    def test_a_slow_drain_stops_claiming_rows_after_its_time_budget(self):
+        _draft(self.org)
+        _draft(self.org)
+        outbox.enqueue_ready_drafts()
+        ticks = iter([0, 0, outbox.DRAIN_SECONDS + 1] + [outbox.DRAIN_SECONDS + 1] * 10)
+        result = outbox.drain(clock=lambda: next(ticks))
+        self.assertEqual(result["deferred"], 3)
+        self.assertEqual(_rows().filter(processed_at__isnull=True, claimed_at__isnull=True).count(), 3)
+        outbox.drain()
+        self.assertFalse(_rows().filter(processed_at__isnull=True).exists())
+        self.assertEqual(len(self.providers.emails), 2)
+
+    @override_settings(**FLAGS)
+    def test_a_launch_window_marker_written_mid_run_does_not_hide_the_draft(self):
+        from . import founder_journey_cohort as cohort
+        built = make_new_journey_org(marker=False)
+        self.assertTrue(cohort.is_new_journey(built.organization))
+        run = _draft(built.organization, status="running", created_at=timezone.now() - timedelta(minutes=20))
+        # The founder connects GitHub while the article writes: the first sticky key writes the marker.
+        marker = cohort.update_marker(built.organization, github_return="connected")
+        self.assertEqual(marker["assignedBy"], "launch_window")
+        ContentFactoryRun.objects.filter(pk=run.pk).update(status="completed")
+        _sweep()
+        self.assertEqual({row.job_id for row in _rows()}, {run.run_id})
+        self.assertEqual([payload["to"] for payload, _ in self.providers.emails], [[built.owner.email]])
 
     def test_nothing_is_enqueued_for_legacy_orgs_with_every_flag_on(self):
         for name in NAMED_LEGACY_ORGS:

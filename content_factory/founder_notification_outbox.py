@@ -26,6 +26,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import time
 from datetime import timedelta
 from email.utils import formataddr, parseaddr
 from urllib.parse import quote, urlencode
@@ -47,8 +48,18 @@ READY_WINDOW = timedelta(hours=48)
 # Resend keeps an idempotency key for 24 hours; stop retrying before then.
 RETRY_WINDOW = timedelta(hours=23)
 CLAIM_LEASE = timedelta(minutes=10)
+# A failed send waits before its next try: half the row's age, between these bounds.
+RETRY_MIN_DELAY = timedelta(minutes=2)
+RETRY_MAX_DELAY = timedelta(hours=1)
 ENQUEUE_LIMIT = 500
 DRAIN_LIMIT = 25
+# The drain shares the scheduler tick with every other runner, legacy ones
+# included, so it claims no new row after this many seconds. The send in
+# flight still finishes (each provider call has its own 10 second deadline).
+DRAIN_SECONDS = 20
+# Only these markers record a later join. ``create`` and ``launch_window``
+# organisations were new-journey from the day they were created.
+_JOINED_LATER = frozenset({"opt_in", "report_apply"})
 MAX_DM_RECIPIENTS = 8
 # Article runs that announce a draft. A revision child is a change the
 # founder asked for on the open page, so it is not announced again.
@@ -96,10 +107,20 @@ def _mapping(value):
 
 
 def _joined_at(marker):
-    """When the organisation joined the new journey: drafts ready before it are never announced."""
+    """When an existing organisation joined the new journey, else None.
+
+    Runs created before an ``opt_in`` or ``report_apply`` join are never
+    announced. A ``create`` or ``launch_window`` organisation (or one with no
+    marker yet) was new-journey from creation, so it has no lower bound: its
+    ``launch_window`` marker may be written mid-run, for example on a GitHub
+    return, and must not hide the draft that run produces.
+    """
     from django.utils.dateparse import parse_datetime
+    marker = _mapping(marker)
+    if marker.get("assignedBy") not in _JOINED_LATER:
+        return None
     for key in ("optedInAt", "assignedAt"):
-        raw = _mapping(marker).get(key)
+        raw = marker.get(key)
         if isinstance(raw, str) and raw:
             try:
                 value = parse_datetime(raw)
@@ -138,7 +159,11 @@ def _cohort_and_config(organization, cache):
 
 
 def enqueue_ready_drafts(now=None) -> dict:
-    """Create one row per channel for every new-journey draft that became ready in the last 48 hours.
+    """Create one row per channel for every ready new-journey draft created in the last 48 hours.
+
+    The run has no completion timestamp, and ``updated_at`` moves on any save
+    (reconciles, edits), so both the window and the join bound use
+    ``created_at``.
 
     Uses ``get_or_create`` on the unique ``event_id``, so a second sweep adds
     nothing. Legacy organisations, runs from before the organisation joined the
@@ -309,9 +334,21 @@ def _finish(row, now):
     ContentFactoryCallbackEvent.objects.filter(pk=row.pk).update(processed_at=now)
 
 
-def _release(row):
+def retry_delay(row, now) -> timedelta:
+    """How long a failed row waits: half its age, at least 2 minutes and at most an hour."""
+    age = now - row.created_at if row.created_at is not None else timedelta(0)
+    return min(max(RETRY_MIN_DELAY, age / 2), RETRY_MAX_DELAY)
+
+
+def _defer(row, now):
+    """Keep the lease after a failed send so the row is retried after :func:`retry_delay`, never on the next tick.
+
+    The row becomes claimable again once ``claimed_at`` is older than
+    ``CLAIM_LEASE``, so the stamp is set to ``now + delay - CLAIM_LEASE``.
+    """
     from .models import ContentFactoryCallbackEvent
-    ContentFactoryCallbackEvent.objects.filter(pk=row.pk, processed_at__isnull=True).update(claimed_at=None)
+    ContentFactoryCallbackEvent.objects.filter(pk=row.pk, processed_at__isnull=True).update(
+        claimed_at=now + retry_delay(row, now) - CLAIM_LEASE)
 
 
 def _deliverable(run, now):
@@ -326,11 +363,13 @@ def _deliverable(run, now):
     return organization, config
 
 
-def drain(now=None) -> dict:
+def drain(now=None, *, clock=time.monotonic) -> dict:
     """Claim unprocessed rows, send each channel once and mark it processed.
 
-    A transient provider failure releases the claim for the next sweep, until
-    23 hours after the row was created (the Resend idempotency window). A row
+    A transient provider failure keeps the row for a later sweep, after a
+    backoff of half its age (2 minutes to an hour), until 23 hours after the
+    row was created (the Resend idempotency window). No new row is claimed
+    once ``DRAIN_SECONDS`` have passed; the rest wait for the next tick. A row
     whose run is gone, no longer new-journey, already copied or posted, or
     whose founder has no email or verified device is marked processed without
     sending.
@@ -344,8 +383,12 @@ def drain(now=None) -> dict:
     rows = list(ContentFactoryCallbackEvent.objects.filter(event_type=EVENT_TYPE, processed_at__isnull=True)
                 .filter(Q(claimed_at__isnull=True) | Q(claimed_at__lt=now - CLAIM_LEASE))
                 .order_by("created_at")[:DRAIN_LIMIT])
-    counts = {"sent": 0, "skipped": 0, "retry": 0, "failed": 0}
-    for row in rows:
+    counts = {"sent": 0, "skipped": 0, "retry": 0, "failed": 0, "deferred": 0}
+    deadline = clock() + DRAIN_SECONDS
+    for index, row in enumerate(rows):
+        if clock() >= deadline:
+            counts["deferred"] = len(rows) - index
+            break
         if not _claim(row, now):
             continue
         run = ContentFactoryRun.objects.select_related("organization").filter(run_id=row.job_id).first()
@@ -360,7 +403,7 @@ def drain(now=None) -> dict:
             outcome = _send(row, run, organization, user, company)
         except transport.NotificationTransportError as exc:
             if exc.retryable and row.created_at is not None and now - row.created_at < RETRY_WINDOW:
-                _release(row)
+                _defer(row, now)
                 counts["retry"] += 1
             else:
                 _finish(row, now)
@@ -369,7 +412,7 @@ def drain(now=None) -> dict:
                                organization.pk, run.run_id, channel, exc.outcome)
             continue
         except Exception as exc:  # noqa: BLE001 - one row must never stop the sweep
-            _release(row)
+            _defer(row, now)
             counts["retry"] += 1
             logger.warning("founder_draft_ready_error org=%s run=%s channel=%s error=%s",
                            organization.pk, run.run_id, channel, type(exc).__name__)
