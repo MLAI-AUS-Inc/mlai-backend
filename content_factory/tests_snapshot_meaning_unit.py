@@ -48,8 +48,8 @@ class MeaningTests(SimpleTestCase):
         self.assertTrue(refuses("github_repo", "owner/site", None, drift))
         self.assertTrue(refuses("connection_generation", 2, "3", drift))
         self.assertEqual(drift, [])
-        self.assertFalse(refuses("requested_delivery_mode", "review_draft", "content_only", drift, path="run_request."))
-        self.assertEqual(drift, ["run_request.requested_delivery_mode"])
+        self.assertFalse(refuses("editorial_brief", {"topic": "a"}, {"topic": "b"}, drift, path="run_request."))
+        self.assertEqual(drift, ["run_request.editorial_brief"])
 
     def test_drift_counter_counts_names_and_never_values(self):
         from .snapshot_meaning import DRIFT_RESULT_KEY, record_drift
@@ -101,15 +101,18 @@ class RunRequestMergeTests(SimpleTestCase):
         from .editorial_run_state import EditorialRunConflict
         for change in ({"connection_generation": 3}, {"github_repo": "other/site"}, {"github_repo": None},
                        {"repository_id": 7}, {"roo_points_ledger_id": "forged"}, {"roo_points_ledger_id": None},
-                       {"roo_points_cost": 0}, {"client_request_id": "other"}):
+                       {"roo_points_cost": 0}, {"client_request_id": "other"},
+                       {"requested_delivery_mode": "content_only"}):
             with self.subTest(change=change), self.assertRaises(EditorialRunConflict):
                 self.merge(change, [])
 
-    def test_by_meaning_keeps_a_non_rail_saved_field_and_records_the_drift(self):
-        drift = []
-        merged = self.merge({"requested_delivery_mode": "content_only"}, drift)
-        self.assertEqual(merged["requested_delivery_mode"], "review_draft")
-        self.assertEqual(drift, ["run_request.requested_delivery_mode"])
+    def test_every_field_the_exact_merge_guarded_is_still_a_rail(self):
+        from .article_publication_evidence import SCOPE_FIELDS
+        from .snapshot_meaning import is_rail
+        guarded = {*SCOPE_FIELDS, "strategy_goal_id", "goal_budget", "delivery_mode", "requested_delivery_mode",
+                   "delivery_mode_confirmed", "article_publish_approval_receipt", "article_publish_approval_revoked",
+                   "website_access_lost", "first_article_goal_operation_id", "first_article_goal_id", "roo_points_cost"}
+        self.assertEqual({field for field in guarded if not is_rail(field)}, set())
 
 
 class EditorialBriefMergeTests(SimpleTestCase):

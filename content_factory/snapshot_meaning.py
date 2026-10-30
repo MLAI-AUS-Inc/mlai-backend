@@ -33,7 +33,8 @@ RAIL_FIELDS = frozenset({
     # The approved revision.
     "article_publish_approval_receipt", "article_publish_approval_revoked",
     # The publish target and the founder's delivery consent.
-    "connection_target_id", "branch", "app_root", "delivery_mode", "delivery_mode_confirmed",
+    "connection_target_id", "branch", "app_root", "delivery_mode", "requested_delivery_mode",
+    "delivery_mode_confirmed",
     # Organisation.
     "domain",
 })
