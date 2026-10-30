@@ -8,6 +8,13 @@ MLAI member account owns the receipt across devices.
 
 ## Configuration and supported offers
 
+Community free-ticket offers cost **32 Roo Points**, provide **100% off one ticket**,
+and require the ticket's live regular price to be **strictly below A$100**.
+The provider boundary rejects A$100 and above both at quote and before issuance.
+Use `configure_event_ticket_offer` to preview and save exact event/ticket terms;
+see [community ticket pricing](roo-event-ticket-price.md). The generic EVENT_TICKET
+redemption path is blocked because it cannot verify an event's live ticket price.
+
 The feature is off by default. Backend configuration is:
 
 ```dotenv

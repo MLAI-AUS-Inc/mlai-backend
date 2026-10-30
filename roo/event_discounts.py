@@ -20,6 +20,7 @@ from integrations.services.luma import LumaAPIError, LumaAttendeeReportService, 
 from .models import EventDiscountOffer, EventDiscountQuote, EventDiscountRedemption, PointsAccount, RewardsCatalog
 from .permissions import InsufficientBalanceError
 from .services import PointsService
+from .event_ticket_policy import EVENT_TICKET_POINTS
 
 
 class EventDiscountError(ValueError):
@@ -89,6 +90,11 @@ def _fingerprint(offer):
 
 def _available_offer(offer, now):
     reward = offer.reward
+    if (reward.code == "EVENT_TICKET" or reward.code.startswith("EVENT_TICKET_")) and (
+        reward.cost_points != EVENT_TICKET_POINTS
+        or offer.discount_type != "percent" or offer.percent_off != 100
+    ):
+        raise EventDiscountError("offer_unavailable", "A community event ticket requires 32 Roo Points for a 100% ticket discount.")
     if (
         not offer.is_active or not reward.is_active or reward.cost_points <= 0
         or (offer.valid_start_at and offer.valid_start_at > now) or offer.valid_end_at <= now

@@ -3037,7 +3037,7 @@ class RewardsService:
             reward = RewardsCatalog.objects.select_for_update().get(code=reward_code, is_active=True)
         except RewardsCatalog.DoesNotExist:
             raise ValueError(f"Reward {reward_code} not found or not available")
-        if hasattr(reward, "event_discount_offer"):
+        if reward.code == "EVENT_TICKET" or hasattr(reward, "event_discount_offer"):
             raise ValueError("Event discounts must be redeemed through a confirmed event quote")
         
         total_cost = reward.cost_points * quantity
@@ -3129,7 +3129,7 @@ class RewardsService:
             )
         
         reward = redemption.reward
-        if hasattr(reward, "event_discount_offer"):
+        if reward.code == "EVENT_TICKET" or hasattr(reward, "event_discount_offer"):
             raise ValueError("Event discounts must be redeemed through a confirmed event quote")
         total_cost = reward.cost_points * redemption.quantity
         

@@ -16,6 +16,8 @@ from urllib.parse import urlencode, urlsplit, urlunsplit
 import requests
 from django.conf import settings
 
+from roo.event_ticket_policy import EVENT_TICKET_MAX_CENTS_EXCLUSIVE
+
 
 class LumaEventDiscountError(RuntimeError):
     """Safe provider error, including whether a remote write may have happened."""
@@ -210,6 +212,8 @@ class LumaEventDiscountService:
         cents = _number(ticket.get("cents"))
         if ticket.get("type") != "paid" or ticket.get("currency") != "aud" or cents is None or cents <= 0 or cents != cents.to_integral_value():
             raise LumaEventDiscountError("ticket_not_paid_aud", "This discount requires a paid AUD ticket.")
+        if cents >= EVENT_TICKET_MAX_CENTS_EXCLUSIVE:
+            raise LumaEventDiscountError("ticket_price_limit", "Roo ticket rewards only cover tickets priced below A$100.")
         if ticket.get("is_hidden", False) is not False or ticket.get("require_approval", False) is not False or ticket.get("is_flexible", False) is not False:
             raise LumaEventDiscountError("ticket_not_supported", "This ticket type does not support Roo discounts.")
         for field, is_end in (("valid_start_at", False), ("valid_end_at", True)):
