@@ -488,6 +488,8 @@ jobs:
           community_chat.tests.test_api \
           community_chat.tests.test_device_auth \
           community_chat.tests.test_throttles \
+          community_chat.tests_client_events \
+          core.tests_auth_throttles_rolling \
           community_chat.tests.test_link_previews \
           community_chat.tests.test_message_references \
           community_chat.tests.test_preview_image_negotiation \

@@ -487,6 +487,26 @@ GMAIL_METADATA_PAGE_DEADLINE_SECONDS = float(os.getenv('GMAIL_METADATA_PAGE_DEAD
 
 AUTH_USER_MODEL = 'core.User'
 
+# Client IP for rate limits (core.client_ip.trusted_client_ip): the number of
+# proxies in front of Django that write X-Forwarded-For. Production nginx sets
+# X-Forwarded-For to $remote_addr (the CF-Connecting-IP real IP), so the
+# rightmost entry is the trusted one. 0 ignores the header and uses REMOTE_ADDR.
+TRUSTED_PROXY_HOPS = int(os.getenv('TRUSTED_PROXY_HOPS', '1'))
+# Per-IP ceilings for sign-in (core.auth_throttles). They sit well above a
+# workshop room on one venue network; per-email, per-installation and
+# per-challenge limits still bound each account and device.
+AUTH_THROTTLE_IP_CODE_REQUESTS_PER_HOUR = int(os.getenv('AUTH_THROTTLE_IP_CODE_REQUESTS_PER_HOUR', '600'))
+AUTH_THROTTLE_IP_VERIFY_PER_10M = int(os.getenv('AUTH_THROTTLE_IP_VERIFY_PER_10M', '300'))
+AUTH_THROTTLE_IP_PASSWORD_PER_10M = int(os.getenv('AUTH_THROTTLE_IP_PASSWORD_PER_10M', '200'))
+# Minimum per-IP ceiling for signed-in device enrolment (challenge, invite,
+# confirm) in community_chat.throttles.enforce_bootstrap_limits.
+AUTH_THROTTLE_IP_BOOTSTRAP_AUTHENTICATED_PER_10M = int(
+    os.getenv('AUTH_THROTTLE_IP_BOOTSTRAP_AUTHENTICATED_PER_10M', '300')
+)
+# Minimum per-IP ceiling for the anonymous desktop sign-in handoff
+# (auth/device/start and auth/device/exchange), still bounded per device key.
+AUTH_THROTTLE_IP_DEVICE_AUTH_PER_10M = int(os.getenv('AUTH_THROTTLE_IP_DEVICE_AUTH_PER_10M', '300'))
+
 REST_FRAMEWORK = {
     'DEFAULT_PERMISSION_CLASSES': [
         'rest_framework.permissions.IsAuthenticated',
@@ -540,6 +560,11 @@ REST_FRAMEWORK = {
         'community_chat_slack_delete': os.getenv(
             'COMMUNITY_CHAT_SLACK_DELETE_RATE', '20/minute'
         ),
+        # Founder copy fallback telemetry (community_chat.client_events):
+        # per signed-in account, or per trusted client IP when anonymous, plus
+        # a per-IP ceiling that applies to every caller.
+        'community_chat_client_events': os.getenv('COMMUNITY_CHAT_CLIENT_EVENTS_RATE', '60/minute'),
+        'community_chat_client_events_ip': os.getenv('COMMUNITY_CHAT_CLIENT_EVENTS_IP_RATE', '600/minute'),
     }
 }
 
