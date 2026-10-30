@@ -8738,6 +8738,7 @@ _DJANGO_OWNED_RUN_RESULT_KEYS = frozenset(
         "ops_alerts",
         "cancellation_reason",
         "cancelled_by",
+        "draft_deleted_at",
     }
 )
 _DJANGO_OWNED_RUN_RESULT_PREFIXES = (
@@ -8843,7 +8844,10 @@ def _merge_django_owned_run_request(existing_request, incoming_request):
     for key, value in existing.items():
         if key in immutable:
             if key in incoming and canonical_bytes(unset_as_none(incoming[key])) != canonical_bytes(unset_as_none(value)):
-                raise EditorialRunConflict("Worker snapshots cannot change original article identity or delivery consent")
+                conflict = EditorialRunConflict("Worker snapshots cannot change original article identity or delivery consent")
+                # The field's name (never its value) for the refused-snapshot log.
+                conflict.guard_field = key
+                raise conflict
             merged[key] = deepcopy(value)
             continue
         if key in {"setup_delivery_v1","article_delivery_v1","workflow_order_v1"}:
@@ -9032,6 +9036,10 @@ def _sync_content_factory_run_snapshot(*, run_id: str, data: dict, step_states: 
                 active_status=data["status"],
                 current_step=data.get("current_step") or "",
             )
+            if isinstance(data["result"], dict):
+                # A deleted draft's kept attempt that the worker revives is live
+                # work again, so it shows (run_cancellation.DRAFT_DELETED_AT_KEY).
+                data["result"].pop("draft_deleted_at", None)
         data["result"] = merge_reliability_fields(data.get("result"), data)
         if not created and _content_factory_run_snapshot_unchanged(existing_run, data=data, step_states=step_states):
             existing_run._content_factory_sync_unchanged = True
@@ -9147,9 +9155,13 @@ def _apply_cancellation_receipt(run_id, payload):
             preserved = cancellation_result(run, incoming)
         except (ValueError, TypeError):
             return Response({"code": "cancellation_scope_mismatch", "run_id": run_id}, status=409)
+        # Why it stopped and who asked (IF-20): the backend's own saved value wins
+        # over the worker's; a receipt carrying neither records unspecified/system.
+        from .run_cancellation import receipt_cancellation_fields
+        reasons = receipt_cancellation_fields(preserved, incoming)
         run.status, run.current_step, run.resume_available = "cancelled", "cancelled", False
         run.error = str(payload.get("error") or run.error or "Cancelled.")[:2000]
-        run.result = {**preserved, **metadata, "status": "cancelled", "cancelled": True,
+        run.result = {**preserved, **metadata, **reasons, "status": "cancelled", "cancelled": True,
             "cancellation_receipt": {"status": "recorded", "received_at": timezone.now().isoformat(), "repository_authority": False}}
         run.save(update_fields=["status", "current_step", "resume_available", "error", "result", "updated_at"])
         observe_workflow_status(run, {"status": "cancelled"})
@@ -9235,6 +9247,11 @@ def _apply_run_snapshot(run_id, payload, *, ack=False):
             )
             break
         except EditorialRunConflict as exc:
+            # Content Factory keeps only the code when it fails the run, so name
+            # the guard here (a fixed message, never article or founder text).
+            logger.warning("content_factory_editorial_run_conflict run_id=%s workflow=%s guard=%s field=%s",
+                run_id, str(data.get("workflow") or "")[:80], str(exc)[:200],
+                str(getattr(exc, "guard_field", "") or "-")[:80])
             return Response(
                 {"error": "editorial_run_conflict", "code": "editorial_run_conflict", "detail": str(exc), "run_id": run_id},
                 status=status.HTTP_409_CONFLICT,

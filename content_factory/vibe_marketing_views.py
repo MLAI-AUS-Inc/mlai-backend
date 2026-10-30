@@ -32,6 +32,15 @@ from .website_connections import (
 from .website_views import guarded_owner_operation
 from .website_comment_action_audit import capture as observe_comment_intent, after_transaction as observe_comment_dispatch
 from .portable_drafts import has_connected_website, original_portable_run, website_preview_delivery_mode
+from .run_cancellation import (
+    DRAFT_DELETE_KEEPS_STATUSES,
+    DRAFT_DELETED_AT_KEY,
+    cancellation_payload,
+    cancellation_request_fields,
+    hidden_by_draft_delete,
+    normalize_cancellation,
+    step_message,
+)
 from io import BytesIO
 from datetime import timedelta, timezone as datetime_timezone
 from urllib.parse import parse_qsl, quote, urlencode, urlsplit
@@ -1791,7 +1800,9 @@ def _latest_runs_for_org(organization, limit=24, *, config=None, prefetch_feedba
         if selected is not None:
             retained.append(selected)
     retained_ids = {run.run_id for run in retained}
-    ordinary = [run for run in candidates if run.run_id not in retained_ids and not article_setup_reset_ignores_run(config, run)]
+    # A finished attempt kept by a draft delete is hidden like a cancelled run.
+    ordinary = [run for run in candidates if run.run_id not in retained_ids and not article_setup_reset_ignores_run(config, run)
+        and not hidden_by_draft_delete(getattr(run, "status", ""), getattr(run, "result", None))]
     selected_runs = sorted(retained + ordinary[:max(limit - len(retained), 0)], key=lambda run: run.updated_at, reverse=True)
     # Prefetch only the final display window. Discarded candidates must not
     # acquire reverse-relation cycles that retain their large result JSON.
@@ -3389,6 +3400,9 @@ def _article_restart_available(run):
 
 def _serialize_article_draft(run, *, written_keys):
     if run.workflow not in ARTICLE_WORKFLOWS or run.status == ContentFactoryRunStatus.CANCELLED:
+        return None
+    if hidden_by_draft_delete(run.status, run.result):
+        # A finished attempt kept when the owner deleted its draft card.
         return None
     # Once a topic has a WrittenArticle it has graduated into the publish
     # lifecycle and lives in "recent articles", so it must not also appear as a
@@ -7499,7 +7513,14 @@ def _article_cancel_receipt_conflict(run, remote_data):
     return receipt is None and _run_has_external_publish_evidence(run)
 
 
-def _cancel_local_article_run(*, run, organization, remote_data=None):
+def _cancel_local_article_run(*, run, organization, remote_data=None, cancellation_reason="unspecified",
+                              cancelled_by="system"):
+    """Cancel an article run locally and record why it stopped and who asked (IF-20).
+
+    ``cancellation_reason``/``cancelled_by`` are allowlisted by run_cancellation;
+    an unknown reason is recorded as ``unspecified``, which ops are alerted on.
+    """
+    cancellation_reason, cancelled_by = normalize_cancellation(cancellation_reason, cancelled_by)
     remote_data = remote_data if isinstance(remote_data, dict) else {}
     now = timezone.now()
     warnings = []
@@ -7509,6 +7530,12 @@ def _cancel_local_article_run(*, run, organization, remote_data=None):
 
     with transaction.atomic():
         locked_run = ContentFactoryRun.objects.select_for_update().get(pk=run.pk)
+        saved = _run_mapping(locked_run.result)
+        if locked_run.status == ContentFactoryRunStatus.CANCELLED and saved.get("cancellation_reason"):
+            # Already stopped with a recorded reason (say a lost worker): a later
+            # owner delete or cancel of the same run never relabels that stop.
+            cancellation_reason, cancelled_by = normalize_cancellation(
+                saved.get("cancellation_reason"), saved.get("cancelled_by"))
         # Every caller is an owner action (cancel, delete-draft cascade, discard).
         # Settle a free first article from the pre-cancel state: consumed once
         # writing started on a live run, released by the bound no-effect stop
@@ -7524,7 +7551,7 @@ def _cancel_local_article_run(*, run, organization, remote_data=None):
         _release_cancelled_article_keyword(organization, locked_run)
         locked_run.steps.exclude(status=ContentFactoryStepStatus.COMPLETED).update(
             status=ContentFactoryStepStatus.CANCELLED,
-            message="Cancelled by user.",
+            message=step_message(cancelled_by),
             error="",
         )
         locked_run.status = ContentFactoryRunStatus.CANCELLED
@@ -7537,6 +7564,8 @@ def _cancel_local_article_run(*, run, organization, remote_data=None):
             "status": ContentFactoryRunStatus.CANCELLED,
             "cancelled": True,
             "cancelled_at": now.isoformat(),
+            "cancellation_reason": cancellation_reason,
+            "cancelled_by": cancelled_by,
             "cleanup": cleanup,
             "warnings": warnings,
         }
@@ -8374,6 +8403,9 @@ DJANGO_OWNED_ARTICLE_RESULT_KEYS = (
     "ops_alerts",
     "cancellation_reason",
     "cancelled_by",
+    # run_cancellation.DRAFT_DELETED_AT_KEY. A literal, as in service_views, so
+    # the AST-extracted merge tests can exec this tuple on its own.
+    "draft_deleted_at",
 )
 # Written by the backend itself (ops alert receipts, owner cancellation reason).
 # A saved non-empty value always wins over a worker snapshot or status poll.
@@ -8554,6 +8586,26 @@ def _article_draft_group_members(run, organization):
     if all(member.pk != run.pk for member in group):
         group.append(run)
     return group
+
+
+def _hide_kept_draft_sibling(sibling, *, now):
+    """Hide a finished sibling a draft delete kept, without changing its outcome.
+
+    Its status, error and billing state stay as they are. It is hidden wherever
+    a cancelled run is (the drafts list, latest runs, publish evidence), so the
+    deleted card does not come back as an older attempt. ``updated_at`` is left
+    alone so refund and alert sweeps keyed on it see the run exactly as before.
+    Returns False when the run is no longer finished (the worker revived it).
+    """
+    with transaction.atomic():
+        locked = ContentFactoryRun.objects.select_for_update().filter(pk=sibling.pk).first()
+        if locked is None or locked.status not in DRAFT_DELETE_KEEPS_STATUSES:
+            return False
+        result = dict(_run_mapping(locked.result))
+        if not result.get(DRAFT_DELETED_AT_KEY):
+            result[DRAFT_DELETED_AT_KEY] = now.isoformat()
+            ContentFactoryRun.objects.filter(pk=locked.pk).update(result=sanitize_json_for_postgres(result))
+        return True
 
 
 def _run_delivery_mode(run):
@@ -11485,7 +11537,6 @@ def _serialize_run(
     saved_request = _run_mapping(getattr(run, "run_request", {}))
     from content_factory.billing import public_run_billing_receipt
     from .first_article_entitlement import entitlement_payload
-    from .run_cancellation import cancellation_payload
     billing_receipt = public_run_billing_receipt(saved_request, result)
     saved_brief = saved_request.get("editorial_brief") or saved_request.get("editorialBrief")
     editorial_snapshot = ({"schema_version": 1, "writing_run_id": run.run_id,
@@ -15712,6 +15763,7 @@ class VibeMarketingWrittenArticleDiscardView(APIView):
                     "request_source": CONTENT_FACTORY_REQUEST_SOURCE,
                     "slack_user_id": actor_id,
                     "reason": "article_discarded",
+                    **cancellation_request_fields("article_discarded", "owner"),
                 },
                 workflow=member.workflow,
                 timeout=(2, 8),
@@ -15728,6 +15780,8 @@ class VibeMarketingWrittenArticleDiscardView(APIView):
                     run=member,
                     organization=context.organization,
                     remote_data=remote_results.get(member.pk),
+                    cancellation_reason="article_discarded",
+                    cancelled_by="owner",
                 )
                 cancelled_run_ids.append(member.run_id)
             # Reset keywords BEFORE the delete: written_article is SET_NULL, so
@@ -19107,7 +19161,14 @@ def control_article_run(*, user, context, run, action, data, run_id=None, goal_o
 
         if bool(payload.get("cancel_group") or payload.get("cancelGroup")):
             from .draft_pull_request_cleanup import blocked_detail, close_draft_pull_request
-            members = _article_draft_group_members(run, context.organization)
+            # The owner deleted this draft card: cancel the run they pressed and
+            # every sibling still going. Delivered, failed and earlier-stopped
+            # siblings keep their outcome; they are only hidden from the drafts list.
+            group = _article_draft_group_members(run, context.organization)
+            members = [member for member in group
+                if member.pk == run.pk or member.status not in DRAFT_DELETE_KEEPS_STATUSES]
+            kept_siblings = [member for member in group if member not in members]
+            payload.update(cancellation_request_fields("draft_deleted", "owner"))
             config = _get_config(context.organization)
             cancelled_ids = []
             protected_ids = []
@@ -19140,11 +19201,26 @@ def control_article_run(*, user, context, run, action, data, run_id=None, goal_o
                     cleanup = member_remote.get("cleanup") if isinstance(member_remote.get("cleanup"), dict) else {}
                     member_remote = {**member_remote, "cleanup": {**cleanup, "pull_requests": pull_requests}}
                 try:
-                    _cancel_local_article_run(run=member, organization=context.organization, remote_data=member_remote)
+                    _cancel_local_article_run(run=member, organization=context.organization, remote_data=member_remote,
+                        cancellation_reason="draft_deleted", cancelled_by="owner")
                 except (ValueError, TypeError):
                     protected_ids.append(member.run_id)
                     continue
                 cancelled_ids.append(member.run_id)
+            if run.run_id in cancelled_ids:
+                hidden_at = timezone.now()
+                for sibling in kept_siblings:
+                    if _run_has_external_publish_evidence(sibling):
+                        # A kept attempt's own draft PR is closed (or confirmed
+                        # closed) before it is hidden, exactly as a cancelled
+                        # member's is; one that cannot be closed stays visible.
+                        kept = [item for item in (close_draft_pull_request(config, url)
+                            for url in _draft_pull_request_urls(sibling)) if not item["ok"]]
+                        if kept:
+                            protected_ids.append(sibling.run_id)
+                            blocked_reasons.update(item["reason"] for item in kept)
+                            continue
+                    _hide_kept_draft_sibling(sibling, now=hidden_at)
 
             if not cancelled_ids and protected_ids:
                 detail = (
@@ -19160,13 +19236,15 @@ def control_article_run(*, user, context, run, action, data, run_id=None, goal_o
             body["protectedRunIds"] = protected_ids
             return Response(body, status=status.HTTP_202_ACCEPTED)
 
+        payload.update(cancellation_request_fields("owner_cancelled", "owner"))
         remote_data = _call_content_factory_run_action(run_id=run_id, action=action, payload=payload, workflow=run.workflow)
         if int(remote_data.get("content_factory_status_code") or 0) == 409 or _article_cancel_receipt_conflict(run, remote_data):
             detail = remote_data.get("error") or "Content Factory rejected cancellation for this run."
             return Response({"detail": detail}, status=status.HTTP_409_CONFLICT)
 
         try:
-            run = _cancel_local_article_run(run=run, organization=context.organization, remote_data=remote_data)
+            run = _cancel_local_article_run(run=run, organization=context.organization, remote_data=remote_data,
+                cancellation_reason="owner_cancelled", cancelled_by="owner")
         except (ValueError, TypeError):
             return Response({"detail": "The cancellation receipt no longer matches this article."}, status=409)
         run = ContentFactoryRun.objects.prefetch_related("steps").get(pk=run.pk)

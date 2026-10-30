@@ -597,6 +597,9 @@ def _stop_stalled_article(run, *, base_url, headers, now):
     from .article_publication_evidence import cancellation_receipt
     from .website_cancellation_retirement import expected_article_cancellation
     from .service_views import _apply_cancellation_receipt
+    from .run_cancellation import cancellation_request_fields
+    # A lost worker heartbeat is a system stop, never the owner's (IF-20).
+    reasons = cancellation_request_fields("worker_heartbeat_lost", "system")
     original_result = deepcopy(run.result)
     result = dict(original_result or {})
     attempts = result.get("article_stop_attempts", 0)
@@ -611,11 +614,12 @@ def _stop_stalled_article(run, *, base_url, headers, now):
         return "callback_won"
     try:
         response = requests.post(f"{base_url}/api/runs/{run.run_id}/cancel", headers=headers,
-            json={"reason": "worker_heartbeat_lost",
+            json={"reason": "worker_heartbeat_lost", **reasons,
                 "expected_cancellation_v1": expected_article_cancellation(run)}, timeout=(3, 15))
         remote = response.json() if response.status_code in {200, 202} else {}
         if cancellation_receipt(run, remote) is not None:
-            incoming = dict(remote.get("result") or {})
+            # An older worker does not echo the reason; ours still labels the stop.
+            incoming = {**reasons, **dict(remote.get("result") or {})}
             for key in ("article_cancellation_v1", "publication_evidence_v1"):
                 if key in remote:
                     incoming[key] = remote[key]
@@ -852,6 +856,9 @@ def _settle_exhausted_article_runs(*, limit, now):
     from .run_state import ARTICLE_WORKFLOWS
     from .vibe_marketing_views import _call_content_factory_run_action
     from .service_views import _apply_cancellation_receipt
+    from .run_cancellation import cancellation_request_fields
+    # Settling an exhausted or no-value run is a system stop (IF-20).
+    reasons = cancellation_request_fields("system_stop", "system")
     count = 0
     candidates = ContentFactoryRun.objects.filter(status__in=["blocked", *sorted(TERMINAL_REFUND_STATUSES)], workflow__in=ARTICLE_WORKFLOWS,
         updated_at__lt=now - _stale_after()).filter(
@@ -878,10 +885,10 @@ def _settle_exhausted_article_runs(*, limit, now):
         try:
             remote = _call_content_factory_run_action(run_id=run.run_id, action="cancel", workflow=run.workflow,
                 payload={"reason": "article_terminal_no_value" if run.status in TERMINAL_REFUND_STATUSES else "article_budget_exhausted",
-                    "expected_cancellation_v1": expected_article_cancellation(run)}, transport_errors_are_pending=True)
+                    **reasons, "expected_cancellation_v1": expected_article_cancellation(run)}, transport_errors_are_pending=True)
             if cancellation_receipt(run, remote) is None:
                 continue
-            incoming = dict(remote.get("result") or {})
+            incoming = {**reasons, **dict(remote.get("result") or {})}
             for key in ("article_cancellation_v1", "publication_evidence_v1"):
                 if key in remote:
                     incoming[key] = remote[key]

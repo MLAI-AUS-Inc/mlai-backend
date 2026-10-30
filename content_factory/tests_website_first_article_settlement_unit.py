@@ -341,6 +341,9 @@ class ParentSettlementTests(SimpleTestCase):
             selected.return_value.first.return_value = child
             settlement.stop_children(evidence, parent_id=self.op.pk)
         remote.assert_called_once()
+        # The goal ending is a system stop (IF-20), never the owner's.
+        sent = remote.call_args.kwargs["payload"]
+        self.assertEqual((sent["cancellation_reason"], sent["cancelled_by"]), ("system_stop", "system"))
         apply.assert_not_called()
         self.credit.assert_not_called()
 
