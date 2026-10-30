@@ -487,6 +487,26 @@ GMAIL_METADATA_PAGE_DEADLINE_SECONDS = float(os.getenv('GMAIL_METADATA_PAGE_DEAD
 
 AUTH_USER_MODEL = 'core.User'
 
+# Client IP for rate limits (core.client_ip.trusted_client_ip): the number of
+# proxies in front of Django that write X-Forwarded-For. Production nginx sets
+# X-Forwarded-For to $remote_addr (the CF-Connecting-IP real IP), so the
+# rightmost entry is the trusted one. 0 ignores the header and uses REMOTE_ADDR.
+TRUSTED_PROXY_HOPS = int(os.getenv('TRUSTED_PROXY_HOPS', '1'))
+# Per-IP ceilings for sign-in (core.auth_throttles). They sit well above a
+# workshop room on one venue network; per-email, per-installation and
+# per-challenge limits still bound each account and device.
+AUTH_THROTTLE_IP_CODE_REQUESTS_PER_HOUR = int(os.getenv('AUTH_THROTTLE_IP_CODE_REQUESTS_PER_HOUR', '600'))
+AUTH_THROTTLE_IP_VERIFY_PER_10M = int(os.getenv('AUTH_THROTTLE_IP_VERIFY_PER_10M', '300'))
+AUTH_THROTTLE_IP_PASSWORD_PER_10M = int(os.getenv('AUTH_THROTTLE_IP_PASSWORD_PER_10M', '200'))
+# Minimum per-IP ceiling for signed-in device enrolment (challenge, invite,
+# confirm) in community_chat.throttles.enforce_bootstrap_limits.
+AUTH_THROTTLE_IP_BOOTSTRAP_AUTHENTICATED_PER_10M = int(
+    os.getenv('AUTH_THROTTLE_IP_BOOTSTRAP_AUTHENTICATED_PER_10M', '300')
+)
+# Minimum per-IP ceiling for the anonymous desktop sign-in handoff
+# (auth/device/start and auth/device/exchange), still bounded per device key.
+AUTH_THROTTLE_IP_DEVICE_AUTH_PER_10M = int(os.getenv('AUTH_THROTTLE_IP_DEVICE_AUTH_PER_10M', '300'))
+
 REST_FRAMEWORK = {
     'DEFAULT_PERMISSION_CLASSES': [
         'rest_framework.permissions.IsAuthenticated',
@@ -540,6 +560,11 @@ REST_FRAMEWORK = {
         'community_chat_slack_delete': os.getenv(
             'COMMUNITY_CHAT_SLACK_DELETE_RATE', '20/minute'
         ),
+        # Founder copy fallback telemetry (community_chat.client_events):
+        # per signed-in account, or per trusted client IP when anonymous, plus
+        # a per-IP ceiling that applies to every caller.
+        'community_chat_client_events': os.getenv('COMMUNITY_CHAT_CLIENT_EVENTS_RATE', '60/minute'),
+        'community_chat_client_events_ip': os.getenv('COMMUNITY_CHAT_CLIENT_EVENTS_IP_RATE', '600/minute'),
     }
 }
 
@@ -976,6 +1001,18 @@ ESAFETY_URL = os.getenv('ESAFETY_URL') or DEFAULT_FRONTEND_URL
 WATT_THE_HACK_URL = os.getenv('WATT_THE_HACK_URL') or DEFAULT_FRONTEND_URL
 VIBE_RAISING_URL = os.getenv('VIBE_RAISING_URL') or DEFAULT_FRONTEND_URL
 FOUNDER_TOOLS_URL = os.getenv('FOUNDER_TOOLS_URL') or VIBE_RAISING_URL
+# A hidden research workspace holds its domain only this long; after that a real
+# startup save on the same domain releases it (founder_tools.services).
+try:
+    FOUNDER_RESEARCH_WORKSPACE_CLAIM_HOLD_HOURS = int(
+        os.getenv('FOUNDER_RESEARCH_WORKSPACE_CLAIM_HOLD_HOURS', '24') or 24
+    )
+except ValueError as exc:
+    raise ImproperlyConfigured(
+        'FOUNDER_RESEARCH_WORKSPACE_CLAIM_HOLD_HOURS must be a whole number of hours'
+    ) from exc
+if FOUNDER_RESEARCH_WORKSPACE_CLAIM_HOLD_HOURS < 1:
+    raise ImproperlyConfigured('FOUNDER_RESEARCH_WORKSPACE_CLAIM_HOLD_HOURS must be at least 1')
 CORE_ACTOR_MIGRATION_HISTORY_ATTESTATION = os.getenv(
     'CORE_ACTOR_MIGRATION_HISTORY_ATTESTATION',
     '',
@@ -1114,6 +1151,15 @@ CONTENT_FACTORY_SETUP_DELIVERY_ENROLLED_ORGANIZATIONS = tuple(
     if identifier.strip()
 )
 CONTENT_FACTORY_OPS_SLACK_CHANNEL_ID = os.getenv('CONTENT_FACTORY_OPS_SLACK_CHANNEL_ID', '').strip()
+# Founder-journey ops alerts (content_factory/founder_journey_alerts.py): one
+# alert per stuck founder run or startup, for every org (no goal enrolment or
+# website connection needed). Posts to CONTENT_FACTORY_OPS_SLACK_CHANNEL_ID and
+# always logs a 'founder_journey_alert' line, Slack configured or not. SINCE
+# bounds run/company created_at. The default replays every stuck run and startup
+# since 29 Sep at MAX_PER_TICK a minute; set SINCE to the flip date to start clean.
+ARTICLES_FOUNDER_JOURNEY_ALERTS_ENABLED = os.getenv('ARTICLES_FOUNDER_JOURNEY_ALERTS_ENABLED', 'false').lower() == 'true'
+ARTICLES_FOUNDER_JOURNEY_ALERTS_SINCE = os.getenv('ARTICLES_FOUNDER_JOURNEY_ALERTS_SINCE', '2026-09-29').strip()
+ARTICLES_FOUNDER_JOURNEY_ALERTS_MAX_PER_TICK = int(os.getenv('ARTICLES_FOUNDER_JOURNEY_ALERTS_MAX_PER_TICK', '20'))
 ARTICLES_WEBSITE_STATUS_V1_ENABLED = os.getenv('ARTICLES_WEBSITE_STATUS_V1_ENABLED', 'false').lower() == 'true'
 ARTICLES_WEBSITE_CONSISTENCY_ENABLED = os.getenv('ARTICLES_WEBSITE_CONSISTENCY_ENABLED', 'false').lower() == 'true'
 ARTICLES_WEBSITE_GOAL_RUNNER_ENABLED = os.getenv('ARTICLES_WEBSITE_GOAL_RUNNER_ENABLED', 'false').lower() == 'true'
@@ -1481,6 +1527,16 @@ CONTENT_ISLANDS_REFRESH_LOCAL_HOUR = int(
 CONTENT_ISLANDS_REFRESH_MAX_PER_TICK = int(
     os.environ.get("CONTENT_ISLANDS_REFRESH_MAX_PER_TICK", "3") or 3
 )
+# Scheduled founder workshops: a JSON list of {"start": ISO8601, "end": ISO8601}.
+# Nightly island refreshes dispatch nothing while now is inside a window, so
+# workshop research and first articles do not queue behind batch work. Parsed
+# by the island refresh scheduler, which logs and ignores malformed entries.
+ARTICLES_WORKSHOP_WINDOWS = os.environ.get("ARTICLES_WORKSHOP_WINDOWS", "[]").strip() or "[]"
+# Runs content-factory's interactive queue serves at once, used only for the
+# founder-facing queue ETA. 0 (the default) shows the place in line without an
+# ETA; set it once the interactive worker pool is deployed and sized.
+_interactive_queue_slots = os.getenv('CONTENT_FACTORY_INTERACTIVE_QUEUE_SLOTS', '0').strip()
+CONTENT_FACTORY_INTERACTIVE_QUEUE_SLOTS = int(_interactive_queue_slots) if _interactive_queue_slots.isdigit() else 0
 # An emerging island becomes visible only once it carries this much demand.
 CONTENT_ISLANDS_PROMOTION_MIN_KEYWORDS = int(
     os.environ.get("CONTENT_ISLANDS_PROMOTION_MIN_KEYWORDS", "5") or 5
@@ -2447,6 +2503,18 @@ ARTICLES_SETUP_CONSENT_ENABLED = _env_is_true("ARTICLES_SETUP_CONSENT_ENABLED", 
 ARTICLES_AUTO_PAGE_ENABLED = _env_is_true("ARTICLES_AUTO_PAGE_ENABLED", False)
 ARTICLES_PAGE_CONFIDENCE_MARGIN = float(os.getenv("ARTICLES_PAGE_CONFIDENCE_MARGIN", "0.15"))
 ARTICLES_FIRST_ARTICLE_GOAL_ENABLED = _env_is_true("ARTICLES_FIRST_ARTICLE_GOAL_ENABLED", False)
+# P0.2: free setup research and one free first article per startup (default
+# off). Content Factory must accept 'free' setup and 'entitled' authorizations
+# before either flag is turned on, or it refuses the work with 402.
+ARTICLES_FREE_SETUP_RESEARCH_ENABLED = _env_is_true("ARTICLES_FREE_SETUP_RESEARCH_ENABLED", False)
+# Free autofill and baseline uses per account email in a rolling 24 hours (0 = no cap).
+ARTICLES_FREE_SETUP_AUTOFILL_DAILY_CAP = int(os.getenv("ARTICLES_FREE_SETUP_AUTOFILL_DAILY_CAP", "5"))
+ARTICLES_FREE_SETUP_BASELINE_DAILY_CAP = int(os.getenv("ARTICLES_FREE_SETUP_BASELINE_DAILY_CAP", "2"))
+ARTICLES_FREE_FIRST_ARTICLE_ENABLED = _env_is_true("ARTICLES_FREE_FIRST_ARTICLE_ENABLED", False)
+# Global safety cap on free first-article reservations per rolling 24 hours (0 = off).
+ARTICLES_FREE_FIRST_ARTICLE_DAILY_CAP = int(os.getenv("ARTICLES_FREE_FIRST_ARTICLE_DAILY_CAP", "0"))
+# Reservations in one hour that raise a free_cap_spike ops alert (0 = off).
+ARTICLES_FREE_FIRST_ARTICLE_SPIKE_THRESHOLD = int(os.getenv("ARTICLES_FREE_FIRST_ARTICLE_SPIKE_THRESHOLD", "25"))
 ARTICLES_ARTICLE_RECOVERY_ENABLED = _env_is_true("ARTICLES_ARTICLE_RECOVERY_ENABLED", False)
 CONTENT_FACTORY_ARTICLE_DELIVERY_V1_APPLY_ENABLED = _env_is_true("CONTENT_FACTORY_ARTICLE_DELIVERY_V1_APPLY_ENABLED", False)
 

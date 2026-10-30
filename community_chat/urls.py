@@ -5,6 +5,7 @@ from .privacy_views import AccountDeletionView, AiConsentView
 from .device_management_views import AccountDevicesView, AccountDeviceView
 from .onboarding_views import MemberOnboardingView
 from .account_ban_views import AccountBanView
+from .client_events import ClientEventsView
 from .admin_views import AdminAccessView
 from .permission_views import ChatPermissionsView, RelayChatRoleView, ChatModeratorView, ChatMemberRolesView, ChatAdminView
 
@@ -158,6 +159,7 @@ urlpatterns = [
         name="community_chat_auth_exchange",
     ),
     path("session/", SessionView.as_view(), name="community_chat_session"),
+    path("client-events/", ClientEventsView.as_view(), name="community_chat_client_events"),
     path(
         "messages/delete-slack-origin/",
         SlackOriginMessageDeleteView.as_view(),

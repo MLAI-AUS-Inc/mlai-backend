@@ -186,8 +186,10 @@ class BillingClarityTests(SimpleTestCase):
         self.assertEqual(get_content_factory_setup_cost_points("customer.test"), 0)
         payload = build_roo_points_payload(domain="customer.test", action="article_generation", current_balance=2,
             account_email="sam@example.test", other_founder_has_points=True)
-        self.assertIn("s***@example.test", payload["message"])
-        self.assertIn("2 Roo points", payload["message"])
+        # The masked account stays in its own key; the sentence names numbers only.
+        self.assertEqual(payload["signed_in_account"], "s***@example.test")
+        self.assertTrue(payload["message"].startswith("This article uses 12 points. You have 2."))
+        self.assertNotIn("@", payload["message"])
         self.assertTrue(payload["other_founder_has_points"])
 
     def test_company_billing_can_only_charge_a_current_opted_in_founder(self):

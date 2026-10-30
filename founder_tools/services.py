@@ -1,13 +1,18 @@
 from __future__ import annotations
 
 import logging
+import uuid
 
 from dataclasses import dataclass
+from datetime import timedelta
 from urllib.parse import urlparse
 
+from django.conf import settings
 from django.db import IntegrityError, transaction
+from django.utils import timezone
 from rest_framework import status as drf_status
 from rest_framework.exceptions import APIException
+from rest_framework.response import Response
 
 from core.actor_ids import (
     actor_ids_for_user as shared_actor_ids_for_user,
@@ -87,22 +92,160 @@ class DomainOwnershipError(APIException):
     default_code = "domain_already_claimed"
 
 
-def organization_owner_user_id(organization) -> int | None:
-    """User id of the founder who owns this organization's Vibe Raising tenant.
+COMPANY_DOMAIN_CLAIMED_CODE = "company_domain_claimed"
+COMPANY_DOMAIN_CLAIMED_DETAIL = "This startup is already on MLAI."
 
-    First-claim-wins: the earliest ``VibeRaisingCompany`` bound to the org.
-    Returns ``None`` when there is no current founder claim. This does not
-    establish that the existing tenant is empty or available for reassignment.
+
+class CompanyDomainClaimedError(DomainOwnershipError):
+    """A startup save claimed a domain another founder's startup already holds.
+
+    Raised only at the startup claim sites (company save, a user-checked domain
+    change, and binding a company to an existing organisation). Other tenancy
+    guards keep the base ``DomainOwnershipError`` body. The founder can carry on
+    without the website, so the body says so and never names the owner. Callers
+    catch it outside any transaction that rolls back, queue the
+    ``domain_claim_disputed`` alert, and return :meth:`response`. Left
+    uncaught, DRF's exception handler renders the same body (``detail`` is kept
+    a plain dict, so ``canContinueWithoutDomain`` stays a JSON boolean) but no
+    alert is queued.
+    """
+
+    default_detail = COMPANY_DOMAIN_CLAIMED_DETAIL
+    default_code = COMPANY_DOMAIN_CLAIMED_CODE
+
+    def __init__(self, organization=None):
+        #: The organisation whose existing claim refused this save, if known.
+        self.organization = organization
+        super().__init__()
+        # APIException would turn every value into a string (True to "True").
+        self.detail = self.body()
+
+    def get_codes(self):
+        return COMPANY_DOMAIN_CLAIMED_CODE
+
+    def get_full_details(self):
+        return self.body()
+
+    @staticmethod
+    def body() -> dict:
+        """The 409 body shared by every claim site (no owner name or email)."""
+        return {
+            "code": COMPANY_DOMAIN_CLAIMED_CODE,
+            "detail": COMPANY_DOMAIN_CLAIMED_DETAIL,
+            "field": "domain",
+            "canContinueWithoutDomain": True,
+        }
+
+    def response(self) -> Response:
+        return Response(self.body(), status=drf_status.HTTP_409_CONFLICT)
+
+
+def claimed_organization(domain) -> Organization | None:
+    """The existing organisation a domain would join, if any."""
+    normalized = normalize_company_domain(domain)
+    return Organization.objects.filter(domain=normalized).first() if normalized else None
+
+
+_ALERT_HELPER_MODULE = "content_factory.founder_journey_alerts"
+
+
+def queue_domain_claim_alert(*, organization, claimant_user_id) -> str | None:
+    """Tell ops that a founder was refused a domain another startup holds.
+
+    Calls the founder-journey alert helper (IF-15, reason domain_claim_disputed)
+    and must run outside the transaction that rolled the refused save back.
+    Until that module is deployed with this code, a structured warning is the
+    alert; a module that exists but fails to import is logged as an error. Returns the alert id, or None when nothing could be queued. Alert
+    storage problems are logged and never change the founder's response.
     """
     if organization is None:
+        logger.warning("founder_journey_alert_missing_org alert_reason=domain_claim_disputed claimant=%s",
+                       claimant_user_id)
         return None
-    first = (
+    try:
+        from content_factory.founder_journey_alerts import queue_founder_journey_alert
+    except ImportError as exc:
+        if not (isinstance(exc, ModuleNotFoundError) and exc.name == _ALERT_HELPER_MODULE):
+            # The helper is deployed but cannot load: that is a fault, not a
+            # missing feature, so it is logged as an error with no receipt.
+            logger.exception("founder_journey_alert_helper_broken alert_reason=domain_claim_disputed org_id=%s",
+                             organization.pk)
+            return None
+        alert_id = str(uuid.uuid5(
+            uuid.NAMESPACE_URL,
+            f"mlai:founder-journey:{organization.pk}:claimant-user-{claimant_user_id}:domain_claim_disputed",
+        ))
+        logger.warning(
+            "founder_journey_alert alert_id=%s alert_reason=domain_claim_disputed org_id=%s claimant_user_id=%s",
+            alert_id, organization.pk, claimant_user_id,
+            extra={"alert_id": alert_id, "alert_reason": "domain_claim_disputed", "org_id": organization.pk,
+                   "domain": organization.domain, "claimant_user_id": claimant_user_id, "state": "unconfigured"},
+        )
+        return alert_id
+    try:
+        return queue_founder_journey_alert(
+            organization=organization, alert_reason="domain_claim_disputed", company_id=None,
+            details={"claimant_user_id": claimant_user_id},
+        )
+    except Exception:
+        logger.exception("founder_journey_alert_queue_failed alert_reason=domain_claim_disputed org_id=%s",
+                         organization.pk)
+        return None
+
+
+PREVIOUS_OWNER_KEY = "previous_owner"
+
+
+def research_workspace_claim_hold() -> timedelta:
+    """How long an unsaved research workspace holds its domain."""
+    return timedelta(hours=settings.FOUNDER_RESEARCH_WORKSPACE_CLAIM_HOLD_HOURS)
+
+
+def _organization_claims(organization):
+    """Companies bound to the org, oldest first, as (live, stale research workspaces).
+
+    A research workspace is the hidden company "Research my startup" creates
+    before anything is saved. Older than the hold, it no longer claims the
+    domain. The researchDraft marker is per organisation, so it cannot tell a
+    saved startup from a workspace on its own (an administrator's research sets
+    it on an org that already holds a real startup). A workspace is therefore
+    stale only when it is the org's one and only company and nobody has made it
+    their active startup; any other org keeps first-claim-wins and releases
+    nothing.
+    """
+    from .profile_fields import is_research_workspace
+
+    companies = list(
         VibeRaisingCompany.objects
         .filter(organization=organization)
         .select_related("profile")
         .order_by("created_at", "id")
-        .first()
     )
+    if len(companies) != 1:
+        return companies, []
+    [workspace] = companies
+    cutoff = timezone.now() - research_workspace_claim_hold()
+    if (
+        workspace.created_at > cutoff
+        or not is_research_workspace(workspace)
+        or VibeRaisingProfile.objects.filter(active_company=workspace).exists()
+    ):
+        return companies, []
+    return [], companies
+
+
+def organization_owner_user_id(organization) -> int | None:
+    """User id of the founder who owns this organization's Vibe Raising tenant.
+
+    First-claim-wins: the earliest ``VibeRaisingCompany`` bound to the org,
+    skipping research workspaces older than the claim hold unless they are all
+    there is. Returns ``None`` when there is no current founder claim. This does
+    not establish that the existing tenant is empty or available for reassignment.
+    """
+    if organization is None:
+        return None
+    live, stale = _organization_claims(organization)
+    first = (live or stale or [None])[0]
     return first.profile.user_id if first else None
 
 
@@ -112,15 +255,92 @@ def user_may_use_organization(user, organization) -> bool:
     return owner_id is not None and owner_id == getattr(user, "id", None)
 
 
+def previous_owner_matches(user, organization) -> bool:
+    """Whether ``user`` is the recorded owner of a startup they deleted here."""
+    from content_factory.models import OrganizationContentConfig
+
+    user_id = getattr(user, "id", None)
+    if organization is None or user_id is None:
+        return False
+    config = OrganizationContentConfig.objects.filter(organization=organization).first()
+    strategy = config.pillar_strategy if config and isinstance(config.pillar_strategy, dict) else {}
+    record = strategy.get(PREVIOUS_OWNER_KEY)
+    return isinstance(record, dict) and record.get("user_id") == user_id
+
+
+def user_may_claim_organization(user, organization) -> bool:
+    """Whether a founder's startup may bind to this existing organisation.
+
+    The owner may. With no live claim, the founder who deleted the startup may
+    take it back, and a domain held only by stale research workspaces is free.
+    Unowned history otherwise still needs review. Tenancy reads keep using
+    :func:`user_may_use_organization`, which this does not widen.
+    """
+    if user_may_use_organization(user, organization):
+        return True
+    live, stale = _organization_claims(organization)
+    if live:
+        return False
+    return previous_owner_matches(user, organization) or bool(stale)
+
+
 def domain_is_available_to(user, domain) -> bool:
     """New domains may be claimed; an existing unowned tenant needs review."""
-    normalized = normalize_company_domain(domain)
-    if not normalized:
-        return True
-    organization = Organization.objects.filter(domain=normalized).first()
+    organization = claimed_organization(domain)
     if organization is None:
         return True
-    return user_may_use_organization(user, organization)
+    return user_may_claim_organization(user, organization)
+
+
+def _settle_organization_claim(user, company, organization) -> None:
+    """Finish a permitted claim: reclaim a deleted startup or release stale workspaces.
+
+    Runs inside ensure_company_organization's transaction with the org locked,
+    so a refused or rolled-back save releases nothing.
+    """
+    from content_factory.models import OrganizationContentConfig
+    from .profile_fields import clear_research_draft
+
+    live, stale = _organization_claims(organization)
+    released = [workspace for workspace in stale
+                if workspace.pk != company.pk and workspace.profile.user_id != user.id]
+    if released and not live:
+        # Nothing the other account researched passes to this founder: its
+        # runs, approved catalogue and config go with the workspace. The hidden
+        # workspace would otherwise become this founder's owner (and a visible
+        # company for the researcher) once the marker is cleared.
+        _purge_org_marketing_data(organization)
+        VibeRaisingCompany.objects.filter(pk__in=[workspace.pk for workspace in released]).delete()
+        clear_research_draft(organization)
+        logger.info(
+            "research_workspace_released org=%s claimant=%s released=%s",
+            organization.pk, user.id, len(released),
+        )
+    config = OrganizationContentConfig.objects.select_for_update().filter(organization=organization).first()
+    strategy = config.pillar_strategy if config and isinstance(config.pillar_strategy, dict) else {}
+    record = strategy.get(PREVIOUS_OWNER_KEY)
+    if isinstance(record, dict) and record.get("user_id") == user.id:
+        strategy = dict(strategy)
+        strategy.pop(PREVIOUS_OWNER_KEY)
+        config.pillar_strategy = strategy
+        config.save(update_fields=["pillar_strategy", "updated_at"])
+        logger.info("company_domain_reclaimed org=%s user=%s", organization.pk, user.id)
+
+
+def _record_previous_owner(organization, *, user_id, company_id) -> None:
+    """Remember who deleted this sole-owned startup so they can add it again."""
+    from content_factory.models import OrganizationContentConfig
+
+    config, _ = OrganizationContentConfig.objects.get_or_create(organization=organization)
+    strategy = dict(config.pillar_strategy) if isinstance(config.pillar_strategy, dict) else {}
+    strategy[PREVIOUS_OWNER_KEY] = {
+        "user_id": user_id,
+        "company_id": str(company_id),
+        "offboarded_at": timezone.now().isoformat(),
+        "reason": "company_deleted",
+    }
+    config.pillar_strategy = strategy
+    config.save(update_fields=["pillar_strategy", "updated_at"])
 
 
 def summarize_organization_data(organization) -> dict:
@@ -194,7 +414,7 @@ def apply_company_domain_change(company: VibeRaisingCompany, new_domain, *, user
         return "noop"
 
     if user is not None and not domain_is_available_to(user, normalized_new):
-        raise DomainOwnershipError()
+        raise CompanyDomainClaimedError(claimed_organization(normalized_new))
 
     target_exists = Organization.objects.filter(domain=normalized_new).exclude(pk=organization.pk).exists()
     exclusive = not (
@@ -261,9 +481,11 @@ def offboard_company(company: VibeRaisingCompany, *, reason: str = "company_offb
       startup-update ingestion artifacts) is purged only when this company is the
       org's sole owner — never a co-owner's shared data.
     - The **Organization row is retained** (it is the tenant boundary; any later
-      reassignment requires explicit ownership review).
+      reassignment requires explicit ownership review). For a sole owner it
+      records ``pillar_strategy['previous_owner']``, so the same founder can add
+      the startup again; nobody else can claim the retained domain.
     - Re-points the profile's active company to a sibling (or clears it), then
-      deletes the company row. The retained domain is not automatically released.
+      deletes the company row.
 
     Best-effort and idempotent-ish: a provider hiccup is collected as a warning
     rather than aborting the offboard, since a half-connected startup is worse
@@ -330,6 +552,7 @@ def offboard_company(company: VibeRaisingCompany, *, reason: str = "company_offb
                 logger.exception("offboard_startup_purge_failed company=%s", company_id)
                 summary["warnings"].append(f"Startup data purge failed: {exc}")
             _purge_org_marketing_data(organization)
+            _record_previous_owner(organization, user_id=user.id, company_id=company_id)
             # The organisation and other retained records still exist. Do not
             # claim a complete tenant purge or permit automatic domain reuse.
             summary["targetedPurgeCompleted"] = not summary["warnings"]
@@ -487,11 +710,10 @@ def ensure_company_organization(company: VibeRaisingCompany) -> Organization | N
     if not created:
         user = company.profile.user
         is_admin = bool(user.is_staff or user.is_superuser)
-        if not is_admin and not user_may_use_organization(user, organization):
-            raise DomainOwnershipError(
-                "This domain has existing organisation history. "
-                "An administrator must review its ownership before it can be linked."
-            )
+        if not is_admin:
+            if not user_may_claim_organization(user, organization):
+                raise CompanyDomainClaimedError(organization)
+            _settle_organization_claim(user, company, organization)
     if not created and not organization.name:
         organization.name = company.name
         organization.save(update_fields=["name"])
@@ -666,6 +888,44 @@ def apply_shared_startup_details(*, user, company: VibeRaisingCompany, data: dic
     save_profile_details(organization, data, config=config)
     bind_user_to_startup(user=user, organization=organization, role="founder", is_default_for_gmail=True)
     return organization
+
+
+def _member_display_name(user) -> str:
+    """The member's own account name; never derived from the email address."""
+    name = str(getattr(user, "full_name", "") or "").strip() or str(getattr(user, "first_name", "") or "").strip()
+    return " ".join(name.split())[:255]
+
+
+def seed_new_company_founder_and_author(*, user, company: VibeRaisingCompany) -> None:
+    """Record the signed-in member as founder 1 and default article author.
+
+    Called only when a startup is first saved. Existing founders (profile rows
+    or legacy founder names) and existing authors are never overwritten, and a
+    member without a name seeds nothing, so the Founders step stays optional.
+    """
+    from content_factory.authors import normalize_author
+    from content_factory.models import OrganizationContentConfig
+    from founder_tools.profile_fields import profile_details, save_profile_details, validate_profile_fields
+    from startup_updates.services import resolve_or_create_profile
+
+    organization = company.organization if company.organization_id else None
+    name = _member_display_name(user)
+    if organization is None or not name:
+        return
+    with transaction.atomic():
+        Organization.objects.select_for_update().get(pk=organization.pk)
+        _, startup_profile = resolve_or_create_profile(domain=organization.domain)
+        if not profile_details(organization).get("founderProfiles") and not startup_profile.founder_names:
+            data = validate_profile_fields({"founderProfiles": [{"name": name}]})
+            save_profile_details(organization, data)
+            startup_profile.founder_names = data["founderNames"]
+            startup_profile.save(update_fields=["founder_names", "updated_at"])
+        config, _ = OrganizationContentConfig.objects.select_for_update().get_or_create(organization=organization)
+        if not config.authors:
+            author = normalize_author({"id": f"member-{user.id}", "name": name, "role": "Founder"})
+            config.authors = [author]
+            config.default_author_id = author["id"]
+            config.save(update_fields=["authors", "default_author_id", "updated_at"])
 
 
 def get_or_create_founder_profile(user) -> VibeRaisingProfile:

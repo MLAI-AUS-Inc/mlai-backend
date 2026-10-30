@@ -399,7 +399,7 @@ class CompanySaveContractTests(SimpleTestCase):
             patch.object(views, "apply_shared_startup_details"),
             patch("content_factory.vibe_marketing_views.http_client.get", return_value=_FakeResponse(text=xml)),
         ):
-            response = views.FounderToolsCompanyView.post.__wrapped__(views.FounderToolsCompanyView(), request)
+            response = views.FounderToolsCompanyView()._save_company(request)
         self.assertEqual(response.status_code, 200)
         return response.data
 
