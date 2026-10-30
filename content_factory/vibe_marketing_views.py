@@ -12433,7 +12433,10 @@ def _overlay_live_bootstrap_fields(payload, *, context, request, config=None, la
     runs = latest_runs if latest_runs is not None else _latest_runs_for_org(context.organization, limit=24,
         config=website_config, prefetch_feedback=True)
     if capabilities is None:
-        capabilities = _article_capabilities_for_context(context, website_config, latest_runs=runs, allow_probe=False)
+        from .no_website_capabilities import apply_no_website_capabilities
+        capabilities = apply_no_website_capabilities(
+            _article_capabilities_for_context(context, website_config, latest_runs=runs, allow_probe=False),
+            organization=context.organization, config=website_config)
     payload["articleCapabilities"] = capabilities
     from .website_journey import journey_for_context
     payload["websiteJourney"] = journey_for_context(context, website_config, capabilities=capabilities, owner_view=True)
@@ -12622,6 +12625,7 @@ def _compute_bootstrap_payload(context, request=None, *, view="summary", config=
         article_setup_state=article_setup_state,
         has_completed_article_flow=has_completed_article_flow,
     )
+    from .no_website_capabilities import apply_no_website_capabilities
     return {
         "company": {
             "id": str(context.company.id),
@@ -12665,7 +12669,9 @@ def _compute_bootstrap_payload(context, request=None, *, view="summary", config=
         "websiteBaseline": _serialize_baseline_snapshot(baseline_snapshot, config, compact=compact),
         "googleBaselineConnection": google_status,
         "checks": checks,
-        "articleCapabilities": _article_capabilities_for_context(context, config, latest_runs=latest_runs, allow_probe=False),
+        "articleCapabilities": apply_no_website_capabilities(
+            _article_capabilities_for_context(context, config, latest_runs=latest_runs, allow_probe=False),
+            organization=context.organization, config=config),
         "articleSetupState": article_setup_state,
         "article_setup_state": article_setup_state,
         "latestRuns": serialized_runs,
@@ -15815,6 +15821,16 @@ class VibeMarketingBootstrapView(APIView):
         if error_response is not None:
             return error_response
         if not normalize_company_domain(company.domain):
+            # P1.6 (IF-P1-08): a new-journey startup with no website gets the
+            # real bootstrap (capabilities, firstArticle, founderJourney). It
+            # skips the website verification refresh: there is nothing to verify.
+            from .no_website_capabilities import applies as no_website_applies
+            if company.organization_id and no_website_applies(company.organization):
+                context, error_response = _resolve_context_or_response(request, require_domain=False)
+                if error_response:
+                    return error_response
+                payload = _serialize_bootstrap(context, request=request, view=view)
+                return _timed_vibe_response(payload, started_at=started_at, metric_name="vibe_bootstrap", view=view)
             return _timed_vibe_response(
                 _serialize_bootstrap_without_domain(company, user=getattr(request, "user", None)),
                 started_at=started_at,
@@ -16912,6 +16928,11 @@ class VibeMarketingBaselineHistoryView(APIView):
 
 class VibeMarketingGitHubConnectView(APIView):
     def post(self, request):
+        # P1.6 (IF-P1-08, IF-P1-17): a new-journey startup with no website is
+        # refused before any GitHub state is minted.
+        from .no_website_capabilities import NO_WEBSITE_GITHUB_REFUSAL, resolve_no_website_context
+        if resolve_no_website_context(request) is not None:
+            return Response(dict(NO_WEBSITE_GITHUB_REFUSAL), status=status.HTTP_409_CONFLICT)
         context, error = _resolve_context_or_response(request)
         if error:
             return error
@@ -17637,6 +17658,11 @@ def start_article_research(*, user, context, data, request_hash=None):
 
 class VibeMarketingDiscoveryView(APIView):
     def post(self, request):
+        # P1.6 (IF-P1-08): no topic research is dispatched for a new-journey
+        # startup with no website; its first topics come from its description.
+        from .no_website_capabilities import NO_WEBSITE_TOPICS_REFUSAL, resolve_no_website_context
+        if resolve_no_website_context(request) is not None:
+            return Response(dict(NO_WEBSITE_TOPICS_REFUSAL), status=status.HTTP_409_CONFLICT)
         context, error_response = _resolve_context_or_response(request)
         if error_response:
             return error_response
@@ -18126,10 +18152,13 @@ def start_article_generation(*, user, context, data, request_hash=None, website_
         return Response({"detail": str(exc), "field": "editorialBrief"}, status=status.HTTP_400_BAD_REQUEST)
     if editorial_brief is not None:
         payload["editorial_brief"] = editorial_brief
+    # P1.6 (IF-P1-08): a startup with no website has no site to measure, so
+    # no analytics site is provisioned for its placeholder domain.
+    from .no_website_capabilities import applies as no_website_applies
     payload["analytics_config"] = analytics_config_for_content_factory(
         context.organization,
         analytics_article_id=payload["analytics_article_id"],
-        provision_if_missing=True,
+        provision_if_missing=not no_website_applies(context.organization, config),
     )
     if delivery_mode_explicit and delivery_mode:
         payload["delivery_mode"] = delivery_mode
@@ -18187,7 +18216,10 @@ def start_article_generation(*, user, context, data, request_hash=None, website_
 class VibeMarketingArticleView(APIView):
     @guarded_owner_operation("read", run_operation=False)
     def post(self, request):
-        context, error_response = _resolve_context_or_response(request)
+        # P1.6 (IF-P1-08): an explicit portable start from a new-journey
+        # startup with no website resolves without a domain.
+        from .no_website_capabilities import resolve_portable_context_or_response
+        context, error_response = resolve_portable_context_or_response(request)
         if error_response:
             return error_response
         return start_article_generation(user=request.user, context=context, data=request.data)

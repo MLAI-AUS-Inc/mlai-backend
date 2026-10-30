@@ -15,9 +15,19 @@ from .website_connections import (
 )
 
 
-def _context(request):
+def _context(request, *, portable=False, run_id=None):
+    """Resolve the selected company; ``portable`` owner operations may run without a website.
+
+    With ``portable`` (or a ``run_id``), a new-journey startup with no website
+    resolves for an explicit portable request or one of its portable runs
+    (P1.6, IF-P1-08). Every other request resolves exactly as before.
+    """
     from .vibe_marketing_views import _resolve_context_or_response, _explicit_company_scope_required_response, _get_config
-    context, error = _resolve_context_or_response(request)
+    if portable or run_id:
+        from .no_website_capabilities import resolve_portable_context_or_response
+        context, error = resolve_portable_context_or_response(request, run_id=run_id)
+    else:
+        context, error = _resolve_context_or_response(request)
     if error:
         return None, None, error
     error = _explicit_company_scope_required_response(request, context)
@@ -31,7 +41,9 @@ def guarded_owner_operation(action, *, bind_selected=False, run_operation=False,
         def wrapped(self, request, *args, **kwargs):
             from .vibe_marketing_views import _run_belongs_to_context
             from workflow_runs.models import ContentFactoryRun
-            context, config, error = _context(request)
+            context, config, error = _context(
+                request, portable=not run_operation and action == "read",
+                run_id=(kwargs.get("run_id") or (args[0] if args else None)) if run_operation else None)
             if error:
                 return error
             def invoke():
