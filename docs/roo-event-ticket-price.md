@@ -25,4 +25,6 @@ python manage.py configure_event_ticket_offer --event-id evt-EXAMPLE --ticket-ty
 # Add --apply only after reviewing the preview.
 ```
 
-This validates the exact managed event and ticket, saves a 100% single-use offer at 32 points, and expires it no later than event start or ticket sales close. It does not issue a coupon or spend any points. It rejects changes while an event has processing redemptions. Approval-required, hidden, flexible, non-AUD, unavailable and group-registration tickets remain excluded. Issuance rechecks the live ticket price before creating a coupon, including a price increase to A$100 after the quote.
+This validates the exact managed event and ticket, saves a 100% single-use offer at 32 points, and expires it no later than event start or ticket sales close. It does not issue a coupon or spend any points. It rejects changes while an event has processing redemptions. Hidden, flexible, non-AUD, unavailable and group-registration tickets remain excluded. Issuance rechecks the live ticket price before creating a coupon, including a price increase to A$100 after the quote.
+
+Approval-required tickets are allowed under the user's 30 October approval, including Stranger Builds. The quote explicitly states that organiser approval is not guaranteed and points are spent when the coupon is issued, before approval. A change to approval requirements after the quote prevents issuance and requires a new quote. Roo never changes Luma's admission settings.

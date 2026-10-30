@@ -64,6 +64,7 @@ class Command(BaseCommand):
             "event_name": snapshot["name"],
             "ticket_type_id": snapshot["event_ticket_type_id"],
             "ticket_cents": snapshot["ticket"]["cents"],
+            "requires_approval": snapshot["ticket"].get("requires_approval", False),
             "points_cost": EVENT_TICKET_POINTS,
             "percent_off": 100,
             "valid_end_at": snapshot["valid_end_at"],
@@ -107,7 +108,7 @@ class Command(BaseCommand):
                     code=code,
                     defaults={
                         "name": f"Free ticket: {snapshot['name']}"[:255],
-                        "description": "One ticket priced below A$100, fully covered for 32 Roo Points. Complete registration in Luma.",
+                        "description": "One ticket priced below A$100, fully covered for 32 Roo Points. Complete registration in Luma. Organiser approval may be required; points are spent when the coupon is issued.",
                         "cost_points": EVENT_TICKET_POINTS,
                         "fulfillment": "auto",
                         "is_active": True,

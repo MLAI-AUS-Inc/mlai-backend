@@ -13,7 +13,7 @@ from roo.management.commands.configure_event_ticket_offer import (
 )
 from integrations.services.luma_event_discounts import LumaEventDiscountError
 from roo.services import RewardsService
-from roo.event_discounts import EventDiscountError, _available_offer
+from roo.event_discounts import EventDiscountError, _available_offer, _description
 from django.utils import timezone
 from datetime import timedelta
 
@@ -199,3 +199,16 @@ class ConfigureEventTicketOfferTests(TestCase):
                 reward.cost_points, offer.percent_off = price, percent
                 with self.assertRaisesRegex(EventDiscountError, "32 Roo Points"):
                     _available_offer(offer, now)
+
+    def test_quote_discloses_approval_and_charge_timing_before_confirmation(self):
+        description = _description(
+            {
+                "discount": {"discount_type": "percent", "percent_off": 100},
+                "ticket": {"name": "Standard", "requires_approval": True},
+            }
+        )
+        self.assertIn("100% off one Standard ticket", description)
+        self.assertIn("Organiser approval is required", description)
+        self.assertIn(
+            "Points are spent when the coupon is issued, before approval", description
+        )

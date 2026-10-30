@@ -123,8 +123,12 @@ def _name_candidates(offers, query):
 def _description(snapshot):
     discount = snapshot["discount"]
     if discount["discount_type"] == "percent":
-        return f"{discount['percent_off']:g}% off one {snapshot['ticket']['name']} ticket"
-    return f"A${discount['cents_off'] / 100:.2f} off one {snapshot['ticket']['name']} ticket"
+        description = f"{discount['percent_off']:g}% off one {snapshot['ticket']['name']} ticket"
+    else:
+        description = f"A${discount['cents_off'] / 100:.2f} off one {snapshot['ticket']['name']} ticket"
+    if snapshot["ticket"].get("requires_approval", False):
+        description += ". Organiser approval is required and is not guaranteed. Points are spent when the coupon is issued, before approval."
+    return description
 
 
 def quote_payload(quote):

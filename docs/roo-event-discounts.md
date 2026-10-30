@@ -44,7 +44,7 @@ coupon and is rejected before spending or changing stock.
 
 MVP eligibility is a public future MLAI-managed Luma event, registration open,
 one ticket per registration, an available visible fixed-price AUD ticket with
-no approval requirement, and an active configured offer. Capped ticket types
+an explicit approval requirement where applicable, and an active configured offer. Approval-required tickets disclose approval and charge timing before confirmation; changed approval requirements invalidate the quote. Capped ticket types
 are checked using bounded approved-ticket evidence; that observation does not
 reserve a seat. Date-only ticket sales windows fail closed because their exact
 timezone boundary is not documented. Use explicit times or no sales window for

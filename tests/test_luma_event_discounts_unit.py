@@ -111,13 +111,24 @@ class LumaEventDiscountTests(unittest.TestCase):
                               ({"cents": True}, "ticket_not_paid_aud"),
                               ({"cents": 10.5}, "ticket_not_paid_aud"),
                               ({"is_hidden": True}, "ticket_not_supported"),
-                              ({"require_approval": True}, "ticket_not_supported"),
+                              ({"require_approval": "true"}, "ticket_not_supported"),
                               ({"is_flexible": True}, "ticket_not_supported")):
             with self.subTest(changes=changes):
                 self.assert_code(code, self.validate, ticket={**TICKET, **changes})
 
     def test_ticket_must_be_from_exact_event_listing(self):
         self.assert_code("ticket_unavailable", self.validate, ticket={**TICKET, "id": "ttype-other"})
+
+    def test_approval_required_ticket_is_recorded_without_changing_admission(self):
+        snapshot = self.validate(ticket={**TICKET, "require_approval": True})
+        self.assertIs(snapshot["ticket"]["requires_approval"], True)
+        self.assertTrue(all(call.args[0] == "GET" for call in self.session.request.call_args_list))
+
+    def test_approval_change_after_quote_requires_fresh_consent(self):
+        for originally_required in (False, True):
+            with self.subTest(originally_required=originally_required):
+                snapshot = self.validate(ticket={**TICKET, "require_approval": originally_required})
+                self.assert_code("ticket_terms_changed", self.validate, ticket={**TICKET, "require_approval": not originally_required}, terms=snapshot)
 
     def test_ticket_price_must_be_strictly_below_one_hundred_aud(self):
         snapshot = self.validate(ticket={**TICKET, "cents": 9999})
