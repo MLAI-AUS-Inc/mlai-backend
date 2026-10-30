@@ -1110,6 +1110,15 @@ CONTENT_FACTORY_SETUP_DELIVERY_ENROLLED_ORGANIZATIONS = tuple(
     if identifier.strip()
 )
 CONTENT_FACTORY_OPS_SLACK_CHANNEL_ID = os.getenv('CONTENT_FACTORY_OPS_SLACK_CHANNEL_ID', '').strip()
+# Founder-journey ops alerts (content_factory/founder_journey_alerts.py): one
+# alert per stuck founder run or startup, for every org (no goal enrolment or
+# website connection needed). Posts to CONTENT_FACTORY_OPS_SLACK_CHANNEL_ID and
+# always logs a 'founder_journey_alert' line, Slack configured or not. SINCE
+# bounds run/company created_at. The default replays every stuck run and startup
+# since 29 Sep at MAX_PER_TICK a minute; set SINCE to the flip date to start clean.
+ARTICLES_FOUNDER_JOURNEY_ALERTS_ENABLED = os.getenv('ARTICLES_FOUNDER_JOURNEY_ALERTS_ENABLED', 'false').lower() == 'true'
+ARTICLES_FOUNDER_JOURNEY_ALERTS_SINCE = os.getenv('ARTICLES_FOUNDER_JOURNEY_ALERTS_SINCE', '2026-09-29').strip()
+ARTICLES_FOUNDER_JOURNEY_ALERTS_MAX_PER_TICK = int(os.getenv('ARTICLES_FOUNDER_JOURNEY_ALERTS_MAX_PER_TICK', '20'))
 ARTICLES_WEBSITE_STATUS_V1_ENABLED = os.getenv('ARTICLES_WEBSITE_STATUS_V1_ENABLED', 'false').lower() == 'true'
 ARTICLES_WEBSITE_CONSISTENCY_ENABLED = os.getenv('ARTICLES_WEBSITE_CONSISTENCY_ENABLED', 'false').lower() == 'true'
 ARTICLES_WEBSITE_GOAL_RUNNER_ENABLED = os.getenv('ARTICLES_WEBSITE_GOAL_RUNNER_ENABLED', 'false').lower() == 'true'

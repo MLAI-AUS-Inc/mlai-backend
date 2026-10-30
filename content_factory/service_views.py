@@ -8735,6 +8735,9 @@ _DJANGO_OWNED_RUN_RESULT_KEYS = frozenset(
         "pr_number",
         "pr_url",
         "promoted_publish_job_id",
+        "ops_alerts",
+        "cancellation_reason",
+        "cancelled_by",
     }
 )
 _DJANGO_OWNED_RUN_RESULT_PREFIXES = (
@@ -8760,6 +8763,9 @@ def _merge_django_owned_run_result(existing_result, incoming_result):
     incoming = incoming_result if isinstance(incoming_result, dict) else {}
     backend_merge_keys = {"publish_merge_intent", "merge_response", "merge_status", "merged_at", "article_review_updates", "delivery_v1",
         "article_cancellation_v1", *SETTLEMENT_RESULT_KEYS}
+    # Backend-authored receipts a worker snapshot never replaces: a non-empty local
+    # value always wins (founder-journey alert receipts, cancellation reason/actor).
+    local_wins_keys = {"ops_alerts", "cancellation_reason", "cancelled_by"}
     merged = {key: value for key, value in incoming.items() if key not in backend_merge_keys or key in existing}
     for key, value in existing.items():
         if key == "delivery_v1":
@@ -8770,7 +8776,8 @@ def _merge_django_owned_run_result(existing_result, incoming_result):
         )
         if not django_owned:
             continue
-        if key in backend_merge_keys | {"article_review_approval", "approval_blocker", "article_image_billing"} or (merged.get(key) in (None, "", {}, []) and value not in (None, "", {}, [])):
+        authoritative = key in local_wins_keys and value not in (None, "", {}, [])
+        if authoritative or key in backend_merge_keys | {"article_review_approval", "approval_blocker", "article_image_billing"} or (merged.get(key) in (None, "", {}, []) and value not in (None, "", {}, [])):
             merged[key] = value
     # Older/untyped worker snapshots cannot erase a recorded publishing intent.
     # A setup receipt may explain a legacy setup link, but cannot downgrade an
