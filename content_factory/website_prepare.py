@@ -652,6 +652,12 @@ def _owner_request(op, context, config, step, *, user, journey=None):
         from .website_hosted_build import enabled as hosted_enabled
         if valid_consent(op.receipt["goal"]) and hosted_enabled(connection):
             data["verification_mode"] = op.receipt["goal"]["consent"]["answers"]["ci_mode"]
+    elif step == "setup":
+        from .website_live_verification import selected as live_url_selected
+        if live_url_selected(getattr(context, "organization", None)):
+            # MLAI builds the exact merged source and checks the live site; the
+            # setup writes no workflow file into the founder's repository.
+            data["verification_mode"] = "hosted"
     if step == "setup":
         mode, surface = _merged_setup_surface(op, config) or _superseded_setup_surface(op, config) or _setup_surface(
             config, journey or journey_for_context(context, config), goal=op.receipt.get("goal"))
@@ -732,6 +738,12 @@ def attach_selected_setup_run(config, run, *, company_id):
 
 def _dispatch_prepare_step(op, context, config, step, *, user, journey=None):
     from .vibe_marketing_views import VibeMarketingScanView, VibeMarketingArticleSystemSetupView, _article_capabilities_for_context
+    from .website_live_verification import selected as live_url_selected
+    live_url = live_url_selected(getattr(context, "organization", None)) and "goal" not in op.receipt
+    if step == "permissions" and live_url:
+        # Live-URL verification needs no workflow or CI grant, so a new-journey
+        # founder is never sent back to GitHub for one.
+        return {"status": "completed"}
     if step == "permissions":
         grants = (journey or {}).get("githubPermissions") or {}
         prerequisite = (journey or {}).get("prerequisites", {}).get("permissions") or {}
@@ -764,6 +776,13 @@ def _dispatch_prepare_step(op, context, config, step, *, user, journey=None):
     repository = (journey or {}).get("repository") or {}
     receipt = current_ci_attestation(website, target, capabilities={"repositorySourceSha": repository.get("observedSourceSha"),
         "repositoryBranch": repository.get("branch")}) if step == "verify" else None
+    if live_url and receipt is None:
+        # New-journey sites are verified by their live blog page. A current
+        # hosted proof, when one exists, still goes through the CI path below.
+        from .website_live_verification import verify_live_url
+        verified = verify_live_url(config, target,
+            setup_run_id=op.receipt.get("merged_setup_run_id") or op.receipt.get("setup_run_id") or "")
+        return {"status": "completed", "operation_id": verified["operation_id"]}
     if receipt is None:
         from .website_connections import observed_source_sha
         source_sha = observed_source_sha(website) or repository.get("observedSourceSha") or website.verified_sha

@@ -22,6 +22,9 @@ SOURCE_CHECK_FACTS = {"inventory": "scan", "verification": "preview", "deploymen
 SOURCE_CHECK_WINDOW = timedelta(hours=24)
 SOURCE_CHANGED_REASON = "Checking your latest website changes."
 SOURCE_RECHECK_REASON = "Checking your website again."
+# Proof a live-URL verified (new-journey) website never needs: no workflow file
+# is written and no CI artifact is read.
+LIVE_URL_SKIPPED_REQUIREMENTS = frozenset({"workflows_permission", "ci_artifact_digest"})
 
 
 def fact(complete=False, *, code="", reason="", status=None, verified_at=None, operation=None):
@@ -81,9 +84,12 @@ def project_journey(*, company_id, domain, website=None, capabilities=None, disc
     # Current verification paths use in-repository CI. Once its proof is
     # current, publishing needs neither workflow-file writes nor CI reads.
     hosted_selected = proof.get("hostedVerificationSelected") is True
-    workflow_needed = not hosted_selected and not proof.get("integrationVerified", verified)
-    ci_attestation_needed = proof.get("ciAttestationRequired") is True and not deployed
-    ci_read_needed = not hosted_selected and (not proof.get("buildVerified", verified) or verification_stale or ci_attestation_needed)
+    # New-journey sites are verified by their live blog page (IF-P1-16): no
+    # workflow file, no CI read and no CI attestation is ever needed for them.
+    live_selected = proof.get("liveVerificationSelected") is True
+    workflow_needed = not hosted_selected and not live_selected and not proof.get("integrationVerified", verified)
+    ci_attestation_needed = not live_selected and proof.get("ciAttestationRequired") is True and not deployed
+    ci_read_needed = not hosted_selected and not live_selected and (not proof.get("buildVerified", verified) or verification_stale or ci_attestation_needed)
     workflow_missing = workflow_needed and grants.get("workflows") is not True
     ci_missing = ci_read_needed and not (grants.get("checks") is True and grants.get("statuses") is True)
     permissions_ready = not (workflow_missing or ci_missing)
@@ -197,7 +203,9 @@ def project_journey(*, company_id, domain, website=None, capabilities=None, disc
     return {"version": 2, "companyId": str(company_id), "domain": domain,
         "revision": evidence_digest({"website": website, "capabilities": capabilities, "discovery": discovery, "operation": operation}),
         "connectionId": website.get("connectionId"), "connectionGeneration": website.get("connectionGeneration"),
-        "proofContract": {"version": 1, "requirements": ["pinned_source_sha", "safe_publish_target", "build_proof", "browser_proof", "workflows_permission", "ci_artifact_digest", "live_verification"]},
+        "proofContract": {"version": 1, "requirements": [requirement for requirement in ("pinned_source_sha", "safe_publish_target",
+            "build_proof", "browser_proof", "workflows_permission", "ci_artifact_digest", "live_verification")
+            if not live_selected or requirement not in LIVE_URL_SKIPPED_REQUIREMENTS]},
         "configurationRevision": website.get("configurationVersion", 0), "deletionEpoch": epoch, "repository": repository,
         "pricing": {"setupPoints": 0, "requiredPoints": 0, "free": True},
         "policy": {"allowed": write_allowed, "reasonCode": "" if write_allowed else reason_code, "reason": "" if write_allowed else reason},
@@ -355,9 +363,14 @@ def journey_for_context(context, config, *, capabilities=None, owner_view=False)
         prepared = bool(preview_target and preview_target.source_sha == connection.verified_sha and preview_proof.get("status") in {"passed", "verified", "preview_verified"})
         fresh = prepared and build_proof_fresh(connection, preview_target, capabilities)
         from .website_verification import current_ci_attestation
+        from .website_live_verification import selected as live_url_selected
+        live_selected = live_url_selected(getattr(context, "organization", None))
         proof = {"integrationVerified": prepared, "buildVerified": fresh, "verificationStale": prepared and not fresh,
             "verifiedAdapter": preview_target.adapter if fresh else None,
-            "ciAttestationRequired": bool(fresh and current_ci_attestation(connection, selected, capabilities=capabilities) is None)}
+            "ciAttestationRequired": bool(not live_selected and fresh
+                and current_ci_attestation(connection, selected, capabilities=capabilities) is None)}
+        if live_selected:
+            proof["liveVerificationSelected"] = True
         cleanup = connection.operations.filter(generation=connection.generation, action="cleanup", state="awaiting_deployment").order_by("-created_at").first()
         if cleanup:
             proof.update(cleanupAwaitingDeployment=True, cleanupOperationId=str(cleanup.pk))

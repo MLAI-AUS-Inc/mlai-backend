@@ -482,7 +482,9 @@ def authority_guard(data, *, action="read", domain="", github_repo="", require_s
             if target and (action == "publish" or action == "merge" and "requiredProofVersion" in (target.capabilities or {})):
                 from .website_sealed_workflow import required
                 from .website_verification import current_ci_attestation
-                if required(connection, target) and current_ci_attestation(connection, target) is None:
+                from .website_live_verification import accepted as live_url_accepted
+                if (required(connection, target) and not live_url_accepted(connection, target)
+                        and current_ci_attestation(connection, target) is None):
                     raise WebsiteAuthorityError("ci_attestation_required", "The selected target needs its current execution proof.")
             if action in {"publish", "merge"} and target and target.adapter == "custom_contract_v1":
                 raise WebsiteAuthorityError("publishing_adapter_required", "A verified build contract needs an implemented article publishing adapter. Portable drafts remain available.")
@@ -1064,7 +1066,9 @@ def record_scan_evidence(connection, data):
             if not target_update_allowed(previous, target, generation=connection.generation, sha=sha):
                 from .website_sealed_workflow import required
                 from .website_verification import current_ci_attestation
-                accepted_proof = not required(connection, previous) or current_ci_attestation(connection, previous) is not None
+                from .website_live_verification import accepted as live_url_accepted
+                accepted_proof = (not required(connection, previous) or live_url_accepted(connection, previous)
+                    or current_ci_attestation(connection, previous) is not None)
                 verified |= bool(native_allowed and accepted_proof and previous.source_sha == sha and previous.capabilities.get("publishingReady"))
                 preview |= bool(native_allowed and accepted_proof and previous.source_sha == sha and (previous.contract.get("verification") or {}).get("preview_capable"))
                 continue
@@ -1093,7 +1097,9 @@ def record_scan_evidence(connection, data):
         for accepted in accepted_targets:
             from .website_sealed_workflow import required
             from .website_verification import current_ci_attestation
-            if required(connection, accepted) and current_ci_attestation(connection, accepted) is None:
+            from .website_live_verification import accepted as live_url_accepted
+            if (required(connection, accepted) and not live_url_accepted(connection, accepted)
+                    and current_ci_attestation(connection, accepted) is None):
                 continue
             verified |= bool(native_allowed and accepted.capabilities.get("publishingReady"))
             preview |= bool(native_allowed and ((accepted.contract.get("verification") or {}).get("preview_capable")
