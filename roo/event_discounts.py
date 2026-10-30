@@ -20,6 +20,7 @@ from integrations.services.luma import LumaAPIError, LumaAttendeeReportService, 
 from .models import EventDiscountOffer, EventDiscountQuote, EventDiscountRedemption, PointsAccount, RewardsCatalog
 from .permissions import InsufficientBalanceError
 from .services import PointsService
+from .event_ticket_policy import EVENT_TICKET_POINTS
 
 
 class EventDiscountError(ValueError):
@@ -89,6 +90,11 @@ def _fingerprint(offer):
 
 def _available_offer(offer, now):
     reward = offer.reward
+    if (reward.code == "EVENT_TICKET" or reward.code.startswith("EVENT_TICKET_")) and (
+        reward.cost_points != EVENT_TICKET_POINTS
+        or offer.discount_type != "percent" or offer.percent_off != 100
+    ):
+        raise EventDiscountError("offer_unavailable", "A community event ticket requires 32 Roo Points for a 100% ticket discount.")
     if (
         not offer.is_active or not reward.is_active or reward.cost_points <= 0
         or (offer.valid_start_at and offer.valid_start_at > now) or offer.valid_end_at <= now
@@ -117,8 +123,12 @@ def _name_candidates(offers, query):
 def _description(snapshot):
     discount = snapshot["discount"]
     if discount["discount_type"] == "percent":
-        return f"{discount['percent_off']:g}% off one {snapshot['ticket']['name']} ticket"
-    return f"A${discount['cents_off'] / 100:.2f} off one {snapshot['ticket']['name']} ticket"
+        description = f"{discount['percent_off']:g}% off one {snapshot['ticket']['name']} ticket"
+    else:
+        description = f"A${discount['cents_off'] / 100:.2f} off one {snapshot['ticket']['name']} ticket"
+    if snapshot["ticket"].get("requires_approval", False):
+        description += ". Organiser approval is required and is not guaranteed. Points are spent when the coupon is issued, before approval."
+    return description
 
 
 def quote_payload(quote):
