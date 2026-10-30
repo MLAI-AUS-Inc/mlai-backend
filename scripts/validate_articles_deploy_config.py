@@ -24,6 +24,9 @@ FLAG_KEYS = (
     # Article preview switches: restart portable previews, and publish only a rendered one.
     "CONTENT_FACTORY_PORTABLE_PREVIEW_REARM",
     "HOSTED_PUBLISH_REQUIRES_RENDERED_PREVIEW",
+    # Run snapshots merge by meaning, and Content Factory run events are kept.
+    "ARTICLES_SNAPSHOT_MERGE_BY_MEANING_ENABLED",
+    "ARTICLES_RUN_EVENTS_ENABLED",
 )
 # 0 means "no cap", "off" or, for the queue slots, "no ETA".
 COUNT_KEYS = (
