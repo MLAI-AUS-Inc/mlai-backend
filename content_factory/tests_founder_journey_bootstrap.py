@@ -104,7 +104,9 @@ class FounderJourneyBootstrapTests(_Client, TestCase):
     def test_the_no_domain_bootstrap_carries_it_too(self):
         user = get_user_model().objects.create_user(email="nodomain@example.test", first_name="Ada")
         client = self.client_for(user)
-        with override_settings(**ALL_P1_FLAGS_ON):
+        # be-start's IF-P1-08 gives a new-journey no-website startup the real
+        # bootstrap; this test pins the without-domain serializer, so keep that off.
+        with override_settings(**{**ALL_P1_FLAGS_ON, "MY_STARTUP_NO_WEBSITE_ARTICLES_ENABLED": False}):
             created = client.post("/api/v1/founder-tools/companies/", {"name": "Ledger Mates", "createNew": True},
                                   format="json")
             self.assertEqual(created.status_code, 200, created.data)
