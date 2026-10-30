@@ -8,6 +8,7 @@ a lost verification proof can never move an org between cohorts.
 import json
 import re
 from datetime import timedelta
+from unittest import mock
 from uuid import uuid4
 
 from django.conf import settings
@@ -603,3 +604,121 @@ class NamedLegacyOrgProofTests(TestCase):
         self.assertIn("published_article", cohorts.legacy_reasons(mlai.organization))
         from .billing import FREE_CONTENT_FACTORY_DOMAINS
         self.assertIn(mlai.organization.domain, FREE_CONTENT_FACTORY_DOMAINS)
+
+
+@override_settings(**FLAGS)
+class LockOrderTests(TestCase):
+    """Every marker writer locks the Organization row before the config row.
+
+    The Content Factory strategy sync and catalogue edits lock only the
+    Organization row and then rewrite ``pillar_strategy``; a writer that
+    locked only the config row could interleave with them and lose a key.
+    """
+
+    def _locks(self, call):
+        calls = []
+        org_lock, config_lock = Organization.objects.select_for_update, OrganizationContentConfig.objects.select_for_update
+
+        def record(name, original):
+            def wrapper(*args, **kwargs):
+                calls.append(name)
+                return original(*args, **kwargs)
+            return wrapper
+
+        with mock.patch.object(Organization.objects, "select_for_update", side_effect=record("organization", org_lock)), \
+                mock.patch.object(OrganizationContentConfig.objects, "select_for_update",
+                                  side_effect=record("config", config_lock)):
+            call()
+        return calls
+
+    def assertOrganizationLockedFirst(self, calls):
+        self.assertIn("config", calls)
+        self.assertEqual(calls[0], "organization")
+        for index, name in enumerate(calls):
+            if name == "config":
+                self.assertIn("organization", calls[:index])
+
+    def test_update_marker(self):
+        built = make_new_journey_org()
+        calls = self._locks(lambda: cohorts.update_marker(built.organization, owner_click_required=True))
+        self.assertOrganizationLockedFirst(calls)
+        self.assertTrue(cohorts.read_marker(built.organization)["ownerClickRequired"])
+
+    def test_assign_on_create(self):
+        built = make_new_journey_org(marker=False)
+        calls = self._locks(lambda: cohorts.assign_on_create(built.organization, company_id=built.company.pk))
+        self.assertOrganizationLockedFirst(calls)
+        self.assertEqual(cohorts.read_marker(built.organization)["assignedBy"], "create")
+
+    def test_opt_in(self):
+        built = make_history_free_org()
+        calls = self._locks(lambda: cohorts.opt_in(built.organization, built.owner))
+        self.assertOrganizationLockedFirst(calls)
+
+    def test_apply(self):
+        from content_factory.management.commands.founder_journey_cohort import apply_markers
+        built = make_history_free_org()
+        calls = self._locks(lambda: apply_markers([built.organization]))
+        self.assertOrganizationLockedFirst(calls)
+        self.assertEqual(cohorts.read_marker(built.organization)["cohort"], "new_journey")
+
+
+class ConnectedWebsiteGenerationTests(TestCase):
+    def test_only_the_current_generation_counts(self):
+        org = _org()
+        connection_row = WebsiteConnection.objects.create(organization=org, github_repo="e/r", generation=2,
+                                                          state=WebsiteConnection.State.CONNECTED)
+        WebsiteConnectionTarget.objects.create(connection=connection_row, target_key="articles", generation=1,
+                                               verified_at=timezone.now() - timedelta(days=9))
+        current = WebsiteConnectionTarget.objects.create(connection=connection_row, target_key="articles", generation=2)
+        # A reconnect left the old generation's verified target behind.
+        self.assertFalse(cohorts.has_connected_website(org))
+        current.verified_at = timezone.now()
+        current.save()
+        self.assertTrue(cohorts.has_connected_website(org))
+
+    @override_settings(**FLAGS)
+    def test_opt_in_after_a_reconnect_does_not_publish_automatically(self):
+        built = make_history_free_org()
+        connection_row = WebsiteConnection.objects.create(organization=built.organization, github_repo="e/r",
+                                                          generation=3, state=WebsiteConnection.State.CONNECTED)
+        WebsiteConnectionTarget.objects.create(connection=connection_row, target_key="articles", generation=2,
+                                               verified_at=timezone.now())
+        WebsiteConnectionTarget.objects.create(connection=connection_row, target_key="articles", generation=3)
+        cohorts.opt_in(built.organization, built.owner)
+        self.assertIsNone(cohorts.read_marker(built.organization)["publishAutomatically"])
+
+
+class WorkerStrategyTests(TestCase):
+    """The founder-journey keys never reach a Content Factory scan, and a marker alone is no strategy."""
+
+    def test_a_marker_alone_does_not_count_as_a_saved_strategy(self):
+        from integrations.api_views_content_factory_app import scan_existing_artifacts
+        built = make_history_free_org()
+        _set_marker(built.config, _marker(cohorts.LEGACY))
+        built.config.company_context = "We make things."
+        built.config.save()
+        artifacts = scan_existing_artifacts(built.config)
+        self.assertNotIn("pillar_strategy", artifacts)
+        self.assertEqual(artifacts["company_context"], "We make things.")
+
+    def test_other_strategy_keys_reach_the_scan_unchanged(self):
+        from integrations.api_views_content_factory_app import scan_existing_artifacts
+        org = _org()
+        config = _config(org)
+        legacy_strategy = {"pillars": [{"slug": "a"}], "article_voice": {"tone": "warm"}, "ops_alerts": {"x": 1}}
+        config.pillar_strategy = legacy_strategy
+        config.save()
+        # Without founder keys the payload is exactly what it was before P1.
+        self.assertEqual(scan_existing_artifacts(config)["pillar_strategy"], legacy_strategy)
+        _set_marker(config, _marker(cohorts.LEGACY))
+        config.pillar_strategy = {**config.pillar_strategy, "founder_first_profile": {"y": 1},
+                                  "founder_posted_articles": {"r": {}}}
+        config.save()
+        self.assertEqual(scan_existing_artifacts(config)["pillar_strategy"], legacy_strategy)
+        self.assertEqual(scan_existing_artifacts(None), {})
+
+    def test_without_private_keys(self):
+        self.assertEqual(cohorts.without_private_keys({"pillars": [], "founder_journey": {}}), {"pillars": []})
+        self.assertIsNone(cohorts.without_private_keys(None))
+        self.assertEqual(cohorts.without_private_keys([1]), [1])

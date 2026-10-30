@@ -32,7 +32,7 @@ from datetime import timedelta
 
 from django.conf import settings
 from django.db import transaction
-from django.db.models import Q
+from django.db.models import F, Q
 from django.utils import timezone
 from django.utils.dateparse import parse_datetime
 
@@ -44,6 +44,19 @@ POSTED_ARTICLES_KEY = "founder_posted_articles"
 # pillar_strategy keys owned by the founder journey. A Content Factory
 # strategy sync must never drop them and workers must never see them.
 PRIVATE_STRATEGY_KEYS = (MARKER_KEY, FIRST_PROFILE_KEY, POSTED_ARTICLES_KEY)
+
+
+
+def without_private_keys(strategy):
+    """A copy of ``strategy`` without the founder-journey keys, for anything sent to a worker.
+
+    Every other key is kept as it is, so a strategy that never held a
+    founder-journey key comes back unchanged.
+    """
+    if not isinstance(strategy, dict):
+        return strategy
+    return {key: value for key, value in strategy.items() if key not in PRIVATE_STRATEGY_KEYS}
+
 
 MARKER_VERSION = 1
 LEGACY = "legacy"
@@ -193,8 +206,16 @@ _EmptyConfig = _EmptyConfigType()
 
 
 def _locked_config(organization, *, create: bool):
-    """The organisation's config row, locked for update (inside an atomic block)."""
+    """The organisation's config row, locked for update (inside an atomic block).
+
+    It locks the ``Organization`` row first, as every other ``pillar_strategy``
+    writer does (the Content Factory strategy sync, catalogue edits, the
+    article voice), so a marker write and a strategy merge never interleave
+    and neither loses the other's keys.
+    """
+    from organizations.models import Organization
     from .models import OrganizationContentConfig
+    Organization.objects.select_for_update().only("pk").get(pk=organization.pk)
     config = OrganizationContentConfig.objects.select_for_update().filter(organization_id=organization.pk).first()
     if config is None and create:
         OrganizationContentConfig.objects.get_or_create(organization_id=organization.pk)
@@ -461,7 +482,10 @@ def has_connected_website(organization) -> bool:
     from .website_models import WebsiteConnection
     if organization is None or not getattr(organization, "pk", None):
         return False
+    # Only a target of the connection's current generation counts: a reconnect
+    # bumps the generation and leaves the old generation's verified targets.
     return WebsiteConnection.objects.filter(organization_id=organization.pk, state=WebsiteConnection.State.CONNECTED,
+                                            targets__generation=F("generation"),
                                             targets__verified_at__isnull=False).exists()
 
 
