@@ -15841,8 +15841,10 @@ class VibeMarketingBootstrapView(APIView):
             # P1.6 (IF-P1-08): a new-journey startup with no website gets the
             # real bootstrap (capabilities, firstArticle, founderJourney). It
             # skips the website verification refresh: there is nothing to verify.
-            from .no_website_capabilities import applies as no_website_applies
-            if company.organization_id and no_website_applies(company.organization):
+            # The switch is read first, so with it off nothing new is read.
+            from .no_website_capabilities import applies as no_website_applies, no_website_articles_enabled
+            if (no_website_articles_enabled() and getattr(company, "organization_id", None)
+                    and no_website_applies(company.organization)):
                 context, error_response = _resolve_context_or_response(request, require_domain=False)
                 if error_response:
                     return error_response
