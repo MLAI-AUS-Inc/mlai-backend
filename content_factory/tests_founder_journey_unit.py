@@ -163,15 +163,19 @@ class ContractFixtureTests(JourneyFixture, TestCase):
                                                                 "actionId": None, "url": None}}
         self.assertStep(self.journey(), "first_article", None, next_kind="write_first_article")
 
-    def test_07_verified_site_without_an_article_offers_an_article(self):
-        # A verified site makes the startup an established publisher under P0's
-        # entitlement rule, so the article is paid (see the PR's deviations).
+    def test_07_verified_site_without_an_article_keeps_the_free_first_article(self):
         self.connection()
-        self.balance = 40
         body = self.journey()
-        self.assertStep(body, "first_article", None, next_kind="write_article")
-        self.assertEqual(body["next"]["label"], "Write an article · 12 points")
-        self.assertEqual(body["firstArticle"]["limit"], "established")
+        self.assertStep(body, "first_article", None, next_kind="write_first_article")
+        self.assertEqual(body["next"]["label"], "Write my first article · free")
+        self.assertEqual((body["firstArticle"]["status"], body["firstArticle"]["limit"]), ("available", None))
+        # Without the card flag the verified site still counts as established (P0's rule).
+        with override_settings(ARTICLES_FIRST_ARTICLE_CARD_ENABLED=False):
+            self.assertEqual(first_article.entitlement_state(self.org, self.owner)["limit"], "established")
+        # A written article still makes the startup established.
+        WrittenArticle.objects.create(organization=self.org, title="Older post", slug="older-post", category="guides",
+                                      primary_keyword="older post")
+        self.assertEqual(first_article.entitlement_state(self.org, self.owner)["limit"], "established")
 
     def test_08_queued(self):
         run = make_run(self.org, status="queued", step="queued")
@@ -413,6 +417,27 @@ class ExtraCaseTests(JourneyFixture, TestCase):
         self.assertIsNone(body["holdingReason"])
         self.assertEqual((body["body"], body["etaSeconds"]), ("Usually about 8 minutes.", 480))
 
+    def test_a_free_run_started_outside_the_card_never_offers_a_new_topic(self):
+        request = {**entitled(self.org, self.owner, company=self.company.pk), "client_request_id": "articles-page-1"}
+        Ledger.objects.filter(reference_type=first_article.REFERENCE_TYPE).update(
+            reference_id=first_article._reference("articles-page-1"))
+        make_run(self.org, status="running", step="write_article", request=request,
+                 created_at=timezone.now() - timedelta(minutes=40))
+        body = self.journey()
+        self.assertEqual(body["holdingReason"], "slow")
+        self.assertFalse(body["switchTopicAvailable"])
+
+    def test_no_new_topic_when_the_daily_cap_would_refuse_attempt_two(self):
+        request = entitled(self.org, self.owner, company=self.company.pk)
+        make_run(self.org, status="running", step="write_article", request=request,
+                 created_at=timezone.now() - timedelta(minutes=40))
+        self.assertTrue(self.journey()["switchTopicAvailable"])
+        # This founder's own attempt fills a cap of 1; a released attempt still counts.
+        with override_settings(ARTICLES_FREE_FIRST_ARTICLE_DAILY_CAP=1):
+            self.assertFalse(self.journey()["switchTopicAvailable"])
+        with override_settings(ARTICLES_FREE_FIRST_ARTICLE_DAILY_CAP=2):
+            self.assertTrue(self.journey()["switchTopicAvailable"])
+
     def test_a_paid_slow_run_never_offers_a_new_topic(self):
         make_run(self.org, status="running", step="write_article", created_at=timezone.now() - timedelta(minutes=40))
         body = self.journey()
@@ -459,6 +484,25 @@ class ExtraCaseTests(JourneyFixture, TestCase):
         self.built.config.pillar_strategy = strategy
         self.built.config.save(update_fields=["pillar_strategy", "updated_at"])
         self.assertEqual(self.journey()["website"]["publishAutomatically"], "on")
+
+    def test_publish_automatically_is_in_progress_only_while_something_is_underway(self):
+        website = lambda: self.journey()["website"]["publishAutomatically"]  # noqa: E731
+        connection = self.connection(verified=False)
+        self.assertEqual(website(), "in_progress")  # connecting, not verified yet
+        setup = self.setup_run("failed")
+        self.assertEqual(website(), "available")
+        ContentFactoryRun.objects.filter(pk=setup.pk).update(status="awaiting_approval")
+        self.assertEqual(website(), "in_progress")
+        ContentFactoryRun.objects.filter(pk=setup.pk).delete()
+        for state in (WebsiteConnection.State.DISCONNECTED, WebsiteConnection.State.REVOKED,
+                      WebsiteConnection.State.PAUSED):
+            with self.subTest(state=state):
+                WebsiteConnection.objects.filter(pk=connection.pk).update(state=state)
+                self.assertEqual(website(), "available")
+
+    def test_a_verified_site_never_approved_for_publishing_is_available(self):
+        self.connection()
+        self.assertEqual(self.journey()["website"]["publishAutomatically"], "available")
 
     @override_settings(COMMUNITY_CHAT_MEMBERSHIP_POLICY_VERSION="2026-10-30")
     def test_out_of_date_terms_ask_the_member_to_agree_again(self):

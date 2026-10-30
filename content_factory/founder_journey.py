@@ -327,6 +327,7 @@ def latest_article_run(organization):
 
 
 def delivery_mode(run) -> str:
+    """The run's delivery mode as recorded on its result, else as requested."""
     result, request = _result(run), _request(run)
     return str(result.get("delivery_mode") or request.get("resolved_delivery_mode")
                or request.get("delivery_mode") or "").strip()
@@ -340,6 +341,7 @@ def posted_record(config, run_id) -> dict:
 
 
 def copied_or_posted(config, run_id) -> bool:
+    """True when the founder copied this draft or posted its link (IF-P1-13): the run is done."""
     record = posted_record(config, run_id)
     return bool(record.get("copiedAt") or record.get("url"))
 
@@ -497,12 +499,26 @@ def _website_journey_facts(*, organization, company, config, user, connection, l
 
 
 def publish_automatically(*, organization, marker, connection, setup_run) -> str:
-    """``unavailable``, ``available``, ``in_progress`` or ``on`` (IF-P1-03)."""
+    """``unavailable``, ``available``, ``in_progress`` or ``on`` (IF-P1-03).
+
+    ``in_progress`` only while a setup run is going or awaiting its approval,
+    or a connection is still being verified. A stopped setup, a disconnected,
+    revoked or paused connection, or a verified site the owner never approved
+    for publishing is ``available``: nothing is underway.
+    """
+    from .website_models import WebsiteConnection
     if not cohorts.organization_has_website(organization):
         return "unavailable"
-    if marker.get("publishAutomatically") and cohorts.has_connected_website(organization):
+    verified = cohorts.has_connected_website(organization)
+    if marker.get("publishAutomatically") and verified:
         return "on"
-    if connection is None and setup_run is None:
+    if setup_run is not None and setup_run.status not in SETUP_STOPPED_STATUSES | {"completed"}:
+        return "in_progress"
+    if connection is None or verified:
+        return "available"
+    if connection.state != WebsiteConnection.State.CONNECTED:
+        return "available"
+    if setup_run is not None and setup_run.status in SETUP_STOPPED_STATUSES:
         return "available"
     return "in_progress"
 
@@ -615,11 +631,10 @@ def project_founder_journey(organization, *, user, company, now=None) -> dict:
 
     if decision is None and run is not None and (run.status in ACTIVE_STATUSES or is_retrying(run)):
         writing = writing_facts(run, now=now)
-        free_run = entitled_request(_request(run)) and not _request(run).get("original_billing_source_run_id")
         facts["etaSeconds"], facts["queuePosition"] = writing["etaSeconds"], writing["queuePosition"]
         facts["switchTopicAvailable"] = bool(
-            writing["slow"] and free_run and first_article["attemptsUsed"] < first_article["attemptsAllowed"]
-            and getattr(settings, "ARTICLES_FIRST_ARTICLE_CARD_ENABLED", False))
+            writing["slow"] and first_article["attemptsUsed"] < first_article["attemptsAllowed"]
+            and switch_topic_admissible(organization, user=user, company=company, run=run, config=config, now=now))
         if writing["retrying"]:
             case = "writing_retrying"
         elif writing["slow"]:
@@ -695,6 +710,29 @@ def project_founder_journey(organization, *, user, company, now=None) -> dict:
     logger.info("founder_journey_projection org=%s stage=%s state=%s action=%s", organization.pk,
                 payload["stage"], payload["state"], action_id or "")
     return _with_etag(payload)
+
+
+def switch_topic_admissible(organization, *, user, company, run, config=None, now=None) -> bool:
+    """Whether "Try a different topic (still free)" can be offered for this run (IF-P1-09).
+
+    The card flag is on; the run is the original free first-article run the
+    card started (its server-side ``first-article:{company}:`` request id, so
+    the superseded stop is one the alert sweep knows to skip); and releasing
+    its attempt would admit attempt 2 (attempts, account and daily caps). The
+    button is never offered when the switch would cancel the run and then
+    fail to start the next one.
+    """
+    from .first_article_entitlement import entitled_request, next_attempt_admissible
+    if not getattr(settings, "ARTICLES_FIRST_ARTICLE_CARD_ENABLED", False) or run is None:
+        return False
+    request = _request(run)
+    if not entitled_request(request) or request.get("original_billing_source_run_id"):
+        return False
+    prefix = f"first-article:{getattr(company, 'pk', '')}:"
+    if not str(request.get("client_request_id") or "").startswith(prefix):
+        return False
+    return next_attempt_admissible(organization, user, run, config=config if getattr(config, "pk", None) else None,
+                                   now=now)
 
 
 def _poll_after(decision) -> int:
