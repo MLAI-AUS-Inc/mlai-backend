@@ -70,6 +70,14 @@ for crm_setting in $CRM_DEPLOY_SETTINGS; do
 done
 LISTMONK_API_TOKEN="${LISTMONK_API_TOKEN:-}"
 python3 scripts/validate_crm_deploy_config.py
+# Founder-journey Articles switches, caps and sign-in limits. Empty values keep
+# the host's own, so a release never switches a founder path off by omission.
+ARTICLES_DEPLOY_SETTINGS="ARTICLES_FREE_SETUP_RESEARCH_ENABLED ARTICLES_FREE_FIRST_ARTICLE_ENABLED ARTICLES_FIRST_ARTICLE_GOAL_ENABLED ARTICLES_FOUNDER_JOURNEY_ALERTS_ENABLED ARTICLES_FREE_SETUP_AUTOFILL_DAILY_CAP ARTICLES_FREE_SETUP_BASELINE_DAILY_CAP ARTICLES_FREE_FIRST_ARTICLE_DAILY_CAP ARTICLES_FREE_FIRST_ARTICLE_SPIKE_THRESHOLD CONTENT_FACTORY_INTERACTIVE_QUEUE_SLOTS ARTICLES_FOUNDER_JOURNEY_ALERTS_MAX_PER_TICK AUTH_THROTTLE_IP_CODE_REQUESTS_PER_HOUR AUTH_THROTTLE_IP_VERIFY_PER_10M AUTH_THROTTLE_IP_PASSWORD_PER_10M AUTH_THROTTLE_IP_BOOTSTRAP_AUTHENTICATED_PER_10M AUTH_THROTTLE_IP_DEVICE_AUTH_PER_10M ARTICLES_FOUNDER_JOURNEY_ALERTS_SINCE ARTICLES_WORKSHOP_WINDOWS"
+for articles_setting in $ARTICLES_DEPLOY_SETTINGS; do
+    printf -v "$articles_setting" '%s' "${!articles_setting:-}"
+    export "$articles_setting"
+done
+python3 scripts/validate_articles_deploy_config.py
 MLAI_MCP_NATIVE_AGENTS_ENABLED="${MLAI_MCP_NATIVE_AGENTS_ENABLED:-false}"
 AGENT_RUNTIME_ENABLED="${AGENT_RUNTIME_ENABLED:-false}"
 AGENT_RUNTIME_NATIVE_ENABLED="${AGENT_RUNTIME_NATIVE_ENABLED:-false}"
@@ -467,6 +475,11 @@ fi
 for crm_setting in $CRM_DEPLOY_SETTINGS; do
     if [ -n "${!crm_setting}" ]; then
         install_remote_env_value "$crm_setting" "${!crm_setting}"
+    fi
+done
+for articles_setting in $ARTICLES_DEPLOY_SETTINGS; do
+    if [ -n "${!articles_setting}" ]; then
+        install_remote_env_value "$articles_setting" "${!articles_setting}"
     fi
 done
 if [ -n "$VALLEY_MCP_DOMAIN_VERIFICATION_TOKEN" ]; then
