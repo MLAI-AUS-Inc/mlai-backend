@@ -21,7 +21,7 @@ logger = logging.getLogger(__name__)
 
 EVENTS_RESULT_KEY = "run_events_v1"
 EVENT_TYPES = frozenset({"step_started", "step_done", "failure", "artifact", "cost"})
-DONE_STATUSES = frozenset({"completed", "skipped", "failed", "blocked"})
+DONE_STATUSES = frozenset({"completed", "skipped", "failed", "blocked", "cancelled"})
 MAX_BATCH = 100
 MAX_SEQ = 2 ** 53
 RECENT_LIMIT = 100
@@ -30,7 +30,7 @@ FAILURE_LIMIT = 20
 INTERVAL_LIMIT = 64
 CLOSED_RUN_STATUSES = frozenset({"cancelled", "denied"})
 _TOKEN = re.compile(r"[A-Za-z0-9_.:-]{1,120}")
-_RANK = {"pending": 0, "running": 1, "completed": 2, "skipped": 2, "failed": 2, "blocked": 2}
+_RANK = {"pending": 0, "running": 1, "completed": 2, "skipped": 2, "failed": 2, "blocked": 2, "cancelled": 2}
 _COST_COUNTS = ("calls", "tokens", "input_tokens", "output_tokens")
 
 

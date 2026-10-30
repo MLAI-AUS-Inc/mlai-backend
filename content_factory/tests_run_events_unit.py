@@ -146,6 +146,28 @@ class ProgressTests(SimpleTestCase):
         self.assertEqual(payload["step_states"]["plan"]["status"], "running")
 
 
+# A batch exactly as Content Factory's run_events module sends it (R7 CF half):
+# binding keys from RUN_REQUEST.json, typed events only, a segment-based seq.
+CONTENT_FACTORY_BATCH = {
+    "event": "run_events", "event_type": "run_events", "event_id": "4f1c0c3e9b8a4c51a1f0d2b7c6e5a493",
+    "emitted_at": "2026-10-30T03:50:40.050000+00:00", "run_id": "run-1", "domain": "example.test",
+    "client_request_id": "dispatch-1", **CONNECTION,
+    "events": [
+        {"at": "2026-10-30T03:50:38.901681+00:00", "attempt": 1, "generation": 0, "seq": 1793332238901001,
+         "step": "plan_article", "type": "step_started"},
+        {"at": "2026-10-30T03:50:38.907400+00:00", "generation": 0, "kind": "json", "seq": 1793332238901002,
+         "step": "plan_article", "type": "artifact"},
+        {"at": "2026-10-30T03:50:38.915287+00:00", "calls": 1, "generation": 0, "model": "gpt-test",
+         "seq": 1793332238901003, "step": "plan_article", "tokens": 120, "type": "cost", "usd": "0.001200"},
+        {"at": "2026-10-30T03:50:38.916022+00:00", "attempt": 1, "generation": 0, "seq": 1793332238901004,
+         "status": "failed", "step": "plan_article", "type": "step_done"},
+        {"at": "2026-10-30T03:50:40.049417+00:00", "code": "ARTICLE_DIRECTORY_AGENT_OUTPUT_INVALID",
+         "failure_class": "repairable", "generation": 0, "retryable": True, "seq": 1793332238901005,
+         "step": "plan_article", "type": "failure"},
+    ],
+}
+
+
 class ReceiveTests(SimpleTestCase):
     def setUp(self):
         self.run = SimpleNamespace(run_id="run-1", status="running", domain="example.test", result={},
@@ -200,6 +222,21 @@ class ReceiveTests(SimpleTestCase):
             with self.subTest(size=len(events)):
                 self.assertEqual(self.receive(events).status_code, 400)
         self.run.save.assert_not_called()
+
+    def test_a_content_factory_batch_is_kept_whole(self):
+        from .run_events import EVENTS_RESULT_KEY, receive_run_events
+        response = receive_run_events(CONTENT_FACTORY_BATCH)
+        self.assertEqual((response.status_code, response.data["accepted"], response.data["rejected"]), (200, 5, 0))
+        log = self.run.result[EVENTS_RESULT_KEY]
+        self.assertEqual(log["applied"], [[1793332238901001, 1793332238901005]])
+        self.assertEqual(log["steps"]["plan_article"]["status"], "failed")
+        self.assertEqual(log["steps"]["plan_article"]["artifacts"], 1)
+        self.assertEqual(log["cost"]["totals"]["tokens"], 120)
+        self.assertEqual(log["failures"][-1]["code"], "ARTICLE_DIRECTORY_AGENT_OUTPUT_INVALID")
+
+    def test_a_cancelled_step_is_a_finished_step(self):
+        response = self.receive([started(1, "plan"), {"seq": 2, "type": "step_done", "step": "plan", "status": "cancelled"}])
+        self.assertEqual((response.data["accepted"], response.data["rejected"]), (2, 0))
 
 
 class CallbackRoutingTests(SimpleTestCase):
