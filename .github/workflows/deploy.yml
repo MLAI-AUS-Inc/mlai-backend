@@ -73,7 +73,7 @@ jobs:
         python -m pip install --only-binary=:all: --require-hashes -r .github/requirements-ci.lock
 
     - name: Test deployment failure handling and live contract
-      run: python -m unittest tests.test_deploy_runtime_checks tests.test_message_sync_deploy_config tests.test_community_bridge_dependency_review_workflow tests.test_valley_mcp_deploy_config tests.test_crm_deploy_config tests.test_native_agent_deploy_config tests.test_slack_owner_inventory_deploy_config tests.test_member_room_provisioning_contract -v
+      run: python -m unittest tests.test_deploy_runtime_checks tests.test_message_sync_deploy_config tests.test_community_bridge_dependency_review_workflow tests.test_valley_mcp_deploy_config tests.test_crm_deploy_config tests.test_articles_deploy_config tests.test_native_agent_deploy_config tests.test_slack_owner_inventory_deploy_config tests.test_member_room_provisioning_contract -v
 
     - name: Check jobs delivery contracts without database access
       run: python -m unittest tests.test_jobs_delivery_unit -v
@@ -1075,6 +1075,23 @@ jobs:
         LISTMONK_API_USER: ${{ vars.LISTMONK_API_USER || '' }}
         LISTMONK_API_TOKEN: ${{ secrets.LISTMONK_API_TOKEN || '' }}
         TWILIO_MESSAGING_SERVICE_SID: ${{ vars.TWILIO_MESSAGING_SERVICE_SID || '' }}
+        ARTICLES_FREE_SETUP_RESEARCH_ENABLED: ${{ vars.ARTICLES_FREE_SETUP_RESEARCH_ENABLED || '' }}
+        ARTICLES_FREE_FIRST_ARTICLE_ENABLED: ${{ vars.ARTICLES_FREE_FIRST_ARTICLE_ENABLED || '' }}
+        ARTICLES_FIRST_ARTICLE_GOAL_ENABLED: ${{ vars.ARTICLES_FIRST_ARTICLE_GOAL_ENABLED || '' }}
+        ARTICLES_FOUNDER_JOURNEY_ALERTS_ENABLED: ${{ vars.ARTICLES_FOUNDER_JOURNEY_ALERTS_ENABLED || '' }}
+        ARTICLES_FREE_SETUP_AUTOFILL_DAILY_CAP: ${{ vars.ARTICLES_FREE_SETUP_AUTOFILL_DAILY_CAP || '' }}
+        ARTICLES_FREE_SETUP_BASELINE_DAILY_CAP: ${{ vars.ARTICLES_FREE_SETUP_BASELINE_DAILY_CAP || '' }}
+        ARTICLES_FREE_FIRST_ARTICLE_DAILY_CAP: ${{ vars.ARTICLES_FREE_FIRST_ARTICLE_DAILY_CAP || '' }}
+        ARTICLES_FREE_FIRST_ARTICLE_SPIKE_THRESHOLD: ${{ vars.ARTICLES_FREE_FIRST_ARTICLE_SPIKE_THRESHOLD || '' }}
+        CONTENT_FACTORY_INTERACTIVE_QUEUE_SLOTS: ${{ vars.CONTENT_FACTORY_INTERACTIVE_QUEUE_SLOTS || '' }}
+        ARTICLES_FOUNDER_JOURNEY_ALERTS_MAX_PER_TICK: ${{ vars.ARTICLES_FOUNDER_JOURNEY_ALERTS_MAX_PER_TICK || '' }}
+        AUTH_THROTTLE_IP_CODE_REQUESTS_PER_HOUR: ${{ vars.AUTH_THROTTLE_IP_CODE_REQUESTS_PER_HOUR || '' }}
+        AUTH_THROTTLE_IP_VERIFY_PER_10M: ${{ vars.AUTH_THROTTLE_IP_VERIFY_PER_10M || '' }}
+        AUTH_THROTTLE_IP_PASSWORD_PER_10M: ${{ vars.AUTH_THROTTLE_IP_PASSWORD_PER_10M || '' }}
+        AUTH_THROTTLE_IP_BOOTSTRAP_AUTHENTICATED_PER_10M: ${{ vars.AUTH_THROTTLE_IP_BOOTSTRAP_AUTHENTICATED_PER_10M || '' }}
+        AUTH_THROTTLE_IP_DEVICE_AUTH_PER_10M: ${{ vars.AUTH_THROTTLE_IP_DEVICE_AUTH_PER_10M || '' }}
+        ARTICLES_FOUNDER_JOURNEY_ALERTS_SINCE: ${{ vars.ARTICLES_FOUNDER_JOURNEY_ALERTS_SINCE || '' }}
+        ARTICLES_WORKSHOP_WINDOWS: ${{ vars.ARTICLES_WORKSHOP_WINDOWS || '' }}
         MLAI_MCP_ENABLED: ${{ vars.MLAI_MCP_ENABLED || 'false' }}
         VALLEY_MCP_UNIFIED_ALIAS_ENABLED: ${{ vars.VALLEY_MCP_UNIFIED_ALIAS_ENABLED || 'false' }}
         MLAI_MCP_COMMUNITY_ENABLED: ${{ vars.MLAI_MCP_COMMUNITY_ENABLED || 'false' }}
