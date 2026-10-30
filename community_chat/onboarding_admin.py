@@ -1,14 +1,77 @@
 """Committee review through Django's permissioned, audited administration UI."""
 
+import logging
+from functools import partial
+
 from django.conf import settings
 from django.contrib import admin, messages
 from django.contrib.admin.models import CHANGE, LogEntry
 from django.contrib.auth import get_user_model
 from django.contrib.contenttypes.models import ContentType
+from django.core.cache import cache
 from django.db import transaction
 from django.utils import timezone
 
+from integrations import http_client
+
 from .models import CommunityMemberConsent, CommunityMemberProfile, CommunityMemberReviewRule
+from .onboarding import name_is_complete
+
+logger = logging.getLogger(__name__)
+
+REVIEW_CLEARED_SUBJECT = "You're in"
+REVIEW_CLEARED_BODY = "Your MLAI membership is approved. You can now post in the community."
+REVIEW_CLEARED_FROM = "MLAI <notifications@mlai.au>"
+# Remember a sent "You're in" for a year; the provider key dedupes retries too.
+REVIEW_CLEARED_GUARD_SECONDS = 365 * 24 * 3600
+
+
+def review_cleared_email_enabled():
+    """Whether approving a pending member emails them. Code default off."""
+    return bool(getattr(settings, "COMMUNITY_CHAT_REVIEW_CLEARED_EMAIL_ENABLED", False))
+
+
+def review_cleared_idempotency_key(member_id):
+    """One "You're in" per member, whatever retries or re-reviews happen."""
+    return f"chat-review-cleared/{member_id}"
+
+
+def send_review_cleared_email(member_id, user_id):
+    """Send one "You're in" email through Resend, at most once per member.
+
+    Runs after the approval commits. Never raises: a failed send is logged with
+    ids only and the guard is released, so the approval itself always stands.
+    """
+    key = review_cleared_idempotency_key(member_id)
+    guard = f"community-chat:{key}"
+    if not cache.add(guard, "sent", REVIEW_CLEARED_GUARD_SECONDS):
+        return False
+    user = get_user_model().objects.filter(pk=user_id, is_active=True).only("email").first()
+    api_key = str(getattr(settings, "RESEND_API_KEY", "") or "").strip()
+    if user is None or not user.email or not api_key:
+        cache.delete(guard)
+        logger.warning("community_chat_review_cleared_email_skipped member=%s configured=%s",
+                       member_id, bool(api_key))
+        return False
+    try:
+        response = http_client.post(
+            "https://api.resend.com/emails",
+            json={"from": REVIEW_CLEARED_FROM, "to": [user.email],
+                  "subject": REVIEW_CLEARED_SUBJECT, "text": REVIEW_CLEARED_BODY},
+            headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json",
+                     "Idempotency-Key": key},
+            timeout=(3, 8),
+        )
+        sent = response.status_code < 300
+    except Exception as exc:  # The approval stands; log the failure, ids only.
+        sent = False
+        logger.warning("community_chat_review_cleared_email_failed member=%s error_type=%s",
+                       member_id, exc.__class__.__name__)
+    if not sent:
+        cache.delete(guard)
+        return False
+    logger.info("community_chat_review_cleared_email_sent member=%s", member_id)
+    return True
 
 
 @admin.register(CommunityMemberProfile)
@@ -37,7 +100,7 @@ class CommunityMemberProfileAdmin(admin.ModelAdmin):
                     continue
                 if status == CommunityMemberProfile.Status.APPROVED and (
                     not user.is_active or not user.email_verified_at or not profile.adult_confirmed_at
-                    or not profile.first_name.strip() or not profile.last_name.strip()
+                    or not name_is_complete(profile.first_name, profile.last_name)
                     or profile.policy_version != settings.COMMUNITY_CHAT_MEMBERSHIP_POLICY_VERSION
                 ):
                     continue
@@ -50,6 +113,9 @@ class CommunityMemberProfileAdmin(admin.ModelAdmin):
                 if status == CommunityMemberProfile.Status.APPROVED:
                     user.first_name, user.last_name = profile.first_name, profile.last_name
                     user.save(update_fields=("first_name", "last_name", "updated_at"))
+                    if review_cleared_email_enabled():
+                        # Only a real pending_review -> approved transition gets here.
+                        transaction.on_commit(partial(send_review_cleared_email, profile.pk, user.pk))
                 LogEntry.objects.log_action(
                     user_id=request.user.pk,
                     content_type_id=ContentType.objects.get_for_model(CommunityMemberProfile).pk,
