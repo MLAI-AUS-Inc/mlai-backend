@@ -104,7 +104,7 @@ jobs:
       run: python scripts/test_without_database.py integrations.tests_studio_report_source
 
     - name: Run isolated refactor checks without database access
-      run: python scripts/test_without_database.py content_factory.tests_run_sync_authority_unit content_factory.tests_pulse_sync_unit startup_updates.tests_source_throughput_unit content_factory.tests_current_connection_unit tests.test_refactor_unit tests.test_refactor_django_unit tests.test_refactor_migration_inventory roo.test_event_ticket_price
+      run: python scripts/test_without_database.py content_factory.tests_run_sync_authority_unit content_factory.tests_snapshot_meaning_unit content_factory.tests_run_events_unit content_factory.tests_pulse_sync_unit startup_updates.tests_source_throughput_unit content_factory.tests_current_connection_unit tests.test_refactor_unit tests.test_refactor_django_unit tests.test_refactor_migration_inventory roo.test_event_ticket_price
 
     - name: Check Roo Points GST and Xero capture contracts without database access
       run: python scripts/test_without_database.py roo.tests_purchase_tax_unit roo.tests_startup_update_benefits_unit tests.test_xero_capture_backoff_unit

@@ -2274,13 +2274,14 @@ def _record_article_admission_attention(data):
         if run is None:
             # A callback may precede the local row. Keep it in the sender's
             # outbox, without binding a key, creating a phantom run or refunding.
-            return Response({"error": "article_admission_run_not_found", "run_id": run_id}, status=status.HTTP_409_CONFLICT)
+            return Response({"error": "article_admission_run_not_found", "run_id": run_id, "retryable": True}, status=status.HTTP_409_CONFLICT)
         try:
             notice = notice_for_run({"run_id": run.run_id, "workflow": run.workflow,
                                      "domain": run.domain, "github_repo": run.github_repo,
                                      "run_request": run.run_request}, data, _callback_event_emitted_at(data))
         except ValueError:
-            return Response({"error": "article_admission_notice_conflict", "run_id": run_id}, status=status.HTTP_409_CONFLICT)
+            # Permanent for this notice. No ``code``: the run itself is not refused.
+            return Response({"error": "article_admission_notice_conflict", "run_id": run_id, "retryable": False}, status=status.HTTP_409_CONFLICT)
         result = dict(run.result or {})
         if not is_older_notice(result.get("article_admission_notice"), notice):
             result["article_admission_notice"] = notice
@@ -3747,6 +3748,12 @@ class ContentFactoryCallbackView(APIView):
         from .setup_delivery_receiver import is_setup_delivery, receive_setup_delivery
         if not isinstance(request.data, dict) or is_setup_delivery(request.data):
             return receive_setup_delivery(request.data, expected_kind="setup_callback")
+        from .run_events import is_run_events, receive_run_events
+        if is_run_events(request.data):
+            # Observation only: events append to the run's own log and never
+            # change its status, billing, approval or repository. The receiver
+            # checks the run's saved binding instead of the config-write fence.
+            return receive_run_events(request.data)
         return self._post_legacy(request)
 
     @guarded_service_write("config_write", only_repository=True, portable=True)
@@ -3823,6 +3830,7 @@ class ContentFactoryCallbackView(APIView):
                         ),
                         'job_id': job_id,
                         'event_id': event_id,
+                        'retryable': True,
                     },
                     status=status.HTTP_409_CONFLICT,
                 )
@@ -8665,7 +8673,10 @@ def _serialize_content_factory_run(run: ContentFactoryRun) -> dict:
             "latest_attempt_path": step.latest_attempt_path or None,
             "attempt_history": attempts,
         }
+    from .run_events import event_progress, run_events_enabled
+    progress = event_progress(run, steps) if run_events_enabled() else None
     return {
+        **({"event_progress": progress} if progress is not None else {}),
         "run_id": run.run_id,
         "workflow": run.workflow,
         "domain": run.domain,
@@ -8763,7 +8774,9 @@ def _merge_django_owned_run_result(existing_result, incoming_result):
     existing = existing_result if isinstance(existing_result, dict) else {}
     incoming = incoming_result if isinstance(incoming_result, dict) else {}
     backend_merge_keys = {"publish_merge_intent", "merge_response", "merge_status", "merged_at", "article_review_updates", "delivery_v1",
-        "article_cancellation_v1", *SETTLEMENT_RESULT_KEYS}
+        "article_cancellation_v1", *SETTLEMENT_RESULT_KEYS,
+        # R7 backend records (snapshot drift counter, run event log).
+        "snapshot_drift_v1", "run_events_v1"}
     # Backend-authored receipts a worker snapshot never replaces: a non-empty local
     # value always wins (founder-journey alert receipts, cancellation reason/actor).
     local_wins_keys = {"ops_alerts", "cancellation_reason", "cancelled_by"}
@@ -8817,17 +8830,19 @@ def _merge_django_owned_run_result(existing_result, incoming_result):
     return merged
 
 
-def _merge_django_owned_run_request(existing_request, incoming_request):
+def _merge_django_owned_run_request(existing_request, incoming_request, *, drift=None):
     """Retain backend billing and approval history across worker snapshots.
 
     Mirrors cannot replace a recorded charge or introduce new authorisation.
     This changes request metadata only; the ledger and job billing stay owned by
-    their existing backend paths.
+    their existing backend paths. A ``drift`` list compares by meaning: rails
+    still refuse a real change, other saved fields are kept and noted there.
     """
     from copy import deepcopy
     from .editorial_run_state import EditorialRunConflict
     from .article_publication_evidence import SCOPE_FIELDS
     from .website_failure_contract import canonical_bytes
+    from .snapshot_meaning import refuses
     immutable = set(SCOPE_FIELDS) | {"strategy_goal_id", "goal_budget", "delivery_mode", "requested_delivery_mode", "delivery_mode_confirmed"}
     existing = existing_request if isinstance(existing_request, dict) else {}
     incoming = incoming_request if isinstance(incoming_request, dict) else {}
@@ -8843,7 +8858,8 @@ def _merge_django_owned_run_request(existing_request, incoming_request):
 
     for key, value in existing.items():
         if key in immutable:
-            if key in incoming and canonical_bytes(unset_as_none(incoming[key])) != canonical_bytes(unset_as_none(value)):
+            if key in incoming and (refuses(key, value, incoming[key], drift, path="run_request.") if drift is not None
+                                    else canonical_bytes(unset_as_none(incoming[key])) != canonical_bytes(unset_as_none(value))):
                 conflict = EditorialRunConflict("Worker snapshots cannot change original article identity or delivery consent")
                 # The field's name (never its value) for the refused-snapshot log.
                 conflict.guard_field = key
@@ -8855,7 +8871,8 @@ def _merge_django_owned_run_request(existing_request, incoming_request):
             continue
         if not (key.startswith("roo_points_") or key in {"article_publish_approval_receipt", "article_publish_approval_revoked", "website_access_lost", "first_article_goal_operation_id", "first_article_goal_id"}):
             continue
-        if key in incoming and incoming[key] != value:
+        if key in incoming and (refuses(key, value, incoming[key], drift, path="run_request.") if drift is not None
+                                else incoming[key] != value):
             raise EditorialRunConflict("Worker snapshots cannot change backend billing or approval history")
         merged[key] = deepcopy(value)
     return merged
@@ -9000,6 +9017,8 @@ def _sync_content_factory_run_snapshot(*, run_id: str, data: dict, step_states: 
             data["domain"] = existing_run.domain
         # Worker observations may omit request fields. The known reader/offer
         # decision is immutable history, not a field a sparse callback can clear.
+        from .snapshot_meaning import merge_by_meaning_enabled, record_drift
+        drift = [] if merge_by_meaning_enabled() else None
         data = merge_editorial_run_snapshot(
             {
                 "workflow": existing_run.workflow,
@@ -9007,8 +9026,9 @@ def _sync_content_factory_run_snapshot(*, run_id: str, data: dict, step_states: 
                 "run_request": existing_run.run_request,
             } if existing_run is not None else None,
             data,
+            drift=drift,
         )
-        data["run_request"] = _merge_django_owned_run_request(original_request, data.get("run_request"))
+        data["run_request"] = _merge_django_owned_run_request(original_request, data.get("run_request"), drift=drift)
         if existing_run and stale_execution_event(existing_run.result, data, saved_status=existing_run.status):
             existing_run._content_factory_sync_unchanged = True
             return existing_run, False
@@ -9041,6 +9061,8 @@ def _sync_content_factory_run_snapshot(*, run_id: str, data: dict, step_states: 
                 # work again, so it shows (run_cancellation.DRAFT_DELETED_AT_KEY).
                 data["result"].pop("draft_deleted_at", None)
         data["result"] = merge_reliability_fields(data.get("result"), data)
+        if drift:
+            data["result"] = record_drift(data.get("result"), drift, run_id=run_id)
         if not created and _content_factory_run_snapshot_unchanged(existing_run, data=data, step_states=step_states):
             existing_run._content_factory_sync_unchanged = True
             from .island_research import refund_empty_or_failed_research
@@ -9145,7 +9167,7 @@ def _apply_cancellation_receipt(run_id, payload):
         if (not domain or domain != expected or (request.get("domain") and str(request["domain"]).strip().casefold() != expected)
                 or (payload.get("run_id") and payload["run_id"] != run_id)
                 or (request.get("run_id") and request["run_id"] != run_id)):
-            return Response({"code": "website_scope_mismatch", "detail": "Cancellation receipt does not match the saved run domain.", "run_id": run_id}, status=409)
+            return Response({"code": "website_scope_mismatch", "detail": "Cancellation receipt does not match the saved run domain.", "run_id": run_id, "retryable": False}, status=409)
         incoming = payload.get("result") if isinstance(payload.get("result"), dict) else {}
         metadata = _observations({key: incoming[key] for key in (
             "cancelled_at", "cancellation", "cleanup", "cleanup_pending", "remote_cleanup_pending", "mirror_rejection",
@@ -9154,7 +9176,7 @@ def _apply_cancellation_receipt(run_id, payload):
         try:
             preserved = cancellation_result(run, incoming)
         except (ValueError, TypeError):
-            return Response({"code": "cancellation_scope_mismatch", "run_id": run_id}, status=409)
+            return Response({"code": "cancellation_scope_mismatch", "run_id": run_id, "retryable": False}, status=409)
         # Why it stopped and who asked (IF-20): the backend's own saved value wins
         # over the worker's; a receipt carrying neither records unspecified/system.
         from .run_cancellation import receipt_cancellation_fields
@@ -9211,6 +9233,7 @@ def _apply_run_snapshot(run_id, payload, *, ack=False):
                 "detail": "This run was cancelled and cannot accept more workflow updates.",
                 "run_id": run_id,
                 "status": existing_run.status,
+                "retryable": False,
             },
             status=status.HTTP_409_CONFLICT,
         )
@@ -9253,7 +9276,8 @@ def _apply_run_snapshot(run_id, payload, *, ack=False):
                 run_id, str(data.get("workflow") or "")[:80], str(exc)[:200],
                 str(getattr(exc, "guard_field", "") or "-")[:80])
             return Response(
-                {"error": "editorial_run_conflict", "code": "editorial_run_conflict", "detail": str(exc), "run_id": run_id},
+                {"error": "editorial_run_conflict", "code": "editorial_run_conflict", "detail": str(exc), "run_id": run_id,
+                 "retryable": False},
                 status=status.HTTP_409_CONFLICT,
             )
         except OperationalError as exc:

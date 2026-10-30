@@ -2532,3 +2532,9 @@ ARTICLES_EXISTING_INVENTORY_DISPLAY_ENABLED = _env_is_true("ARTICLES_EXISTING_IN
 ARTICLES_GOAL_NOTIFICATIONS_ENABLED = _env_is_true("ARTICLES_GOAL_NOTIFICATIONS_ENABLED", False)
 # Registered first-party notifier identity; never a customer or Slack bridge key.
 ARTICLES_GOAL_NOTIFIER_PRIVATE_KEY = os.getenv("ARTICLES_GOAL_NOTIFIER_PRIVATE_KEY", "")
+
+# Robustness R7 (default off). Merge worker run snapshots by meaning: rails
+# still refuse a real mismatch, other fields record drift instead of refusing.
+ARTICLES_SNAPSHOT_MERGE_BY_MEANING_ENABLED = _env_is_true("ARTICLES_SNAPSHOT_MERGE_BY_MEANING_ENABLED", False)
+# Accept Content Factory's append-only run events into a bounded log on the run.
+ARTICLES_RUN_EVENTS_ENABLED = _env_is_true("ARTICLES_RUN_EVENTS_ENABLED", False)

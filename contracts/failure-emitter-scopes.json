@@ -1157,6 +1157,18 @@
       "test": "content_factory.tests_website_doctor_unit.DoctorTests.test_inspector_omits_secrets_even_in_old_legacy_fields"
     },
     {
+      "adapter": "validated_v1_projection",
+      "allowed_codes_ref": "contracts/failure-codes.json#/codes",
+      "expression": "entry['code']",
+      "field": "code",
+      "function": "_registered_failure",
+      "owner": "backend.run_events",
+      "path": "content_factory/run_events.py",
+      "site_sha256": "b3e2e326a872b67c1d301188da9191f0761f8eed0e5aed2074a765643f15f8d6",
+      "source": "website_failure_contract.load_registry by_code lookup; a code this registry does not know is dropped and the failure keeps no code",
+      "test": "content_factory.tests_run_events_unit.CleanEventTests.test_a_code_the_registry_does_not_know_keeps_the_failure_without_it"
+    },
+    {
       "adapter": "audited_v0_observation",
       "allowed_codes_ref": "contracts/failure-codes.json#/codes",
       "expression": "safe_code(failure.get('code') or receipt.get('reason_code'))",
