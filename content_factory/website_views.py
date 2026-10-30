@@ -1,6 +1,7 @@
 """Owner-scoped website management and internal worker authorization APIs."""
 
 from functools import wraps
+import importlib
 import re
 import uuid
 
@@ -313,6 +314,23 @@ def founder_cost_usage(value):
     if isinstance(value, list):
         return [founder_cost_usage(item) for item in value if not (isinstance(item, str) and _SHA_VALUE.fullmatch(item))]
     return value
+
+
+SETUP_OWNER_APPROVAL_MODULE = "content_factory.website_setup_owner_approval"
+
+
+def setup_owner_approval_hooks():
+    """The owner-click module (IF-P1-17), or None while it is not installed.
+
+    None means every caller keeps today's setup approve and merge path. Only a
+    missing module counts as absent; an error inside the module is raised.
+    """
+    try:
+        return importlib.import_module(SETUP_OWNER_APPROVAL_MODULE)
+    except ModuleNotFoundError as exc:
+        if exc.name not in {SETUP_OWNER_APPROVAL_MODULE, "content_factory"}:
+            raise
+        return None
 
 
 class WebsiteConnectionAuthorizeView(APIView):

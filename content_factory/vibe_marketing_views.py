@@ -7207,6 +7207,14 @@ def _maybe_auto_publish_setup(*, run, context):
         return
     if not _setup_pending_status_allows_auto_publish(run):
         return
+    # P1.14 (IF-P1-17): an organisation that needs the owner click merges a
+    # setup change only on that owner's "Add to my website" receipt. None
+    # (or no hook module yet) keeps today's policy.
+    from .website_views import setup_owner_approval_hooks
+    owner_approval = setup_owner_approval_hooks()
+    if owner_approval is not None and owner_approval.may_merge_setup(organization=context.organization, run=run) is False:
+        logger.info("vibe_marketing_setup_auto_publish_waits_for_owner run_id=%s", run.run_id)
+        return
     try:
         outcome = _attempt_setup_publish_merge(run=run, context=context, automatic=True)
         logger.info("vibe_marketing_setup_auto_publish run_id=%s outcome=%s", run.run_id, outcome.get("outcome"))
@@ -19931,6 +19939,24 @@ def control_article_run(*, user, context, run, action, data, run_id=None, goal_o
             {"detail": "The article preview changed before approval. Refresh and review the current preview."},
             status=status.HTTP_409_CONFLICT,
         )
+    setup_owner_approval = None
+    if action == "approve" and run.workflow == "article_system_setup":
+        # P1.14 (IF-P1-17): the owner's approve of a setup run is the owner
+        # click. Its receipt is recorded before anything can merge; "manual"
+        # means MLAI never merges this setup change server-side. No hook
+        # module, or an organisation that needs no owner click, is today's path.
+        from .website_views import setup_owner_approval_hooks
+        owner_approval = setup_owner_approval_hooks()
+        if owner_approval is not None and owner_approval.requires_owner_click(context.organization):
+            from founder_tools.services import user_may_use_organization
+            if not user_may_use_organization(command.user, context.organization):
+                return Response({"detail": "Only your startup's owner can add this to your website.",
+                                 "reason": "owner_required"}, status=status.HTTP_403_FORBIDDEN)
+            setup_owner_approval = owner_approval.on_owner_setup_approve(
+                organization=context.organization, user=command.user, run=run, data=command.data)
+            if setup_owner_approval is not None:
+                logger.info("founder_setup_owner_click org=%s run=%s merge=%s", context.organization.pk, run.run_id,
+                            setup_owner_approval.get("merge"))
     remote_data = _call_content_factory_run_action(
         run_id=remote_run.run_id,
         action=action,
@@ -20392,7 +20418,14 @@ def control_article_run(*, user, context, run, action, data, run_id=None, goal_o
         if approval_requires_receipt:
             from .article_review_views import record_review_approval
             record_review_approval(run, context, payload)
-        return Response(_serialize_run(run, context=context), status=status.HTTP_200_OK)
+        body = _serialize_run(run, context=context)
+        if isinstance(setup_owner_approval, dict) and setup_owner_approval.get("merge") == "manual":
+            # The founder reviews this setup change on GitHub instead.
+            number = _pull_request_number_from_run(run)
+            repo = run.github_repo or _get_config(context.organization).github_repo or ""
+            body = {**body, "merge": "manual",
+                    "setupPullRequestUrl": f"https://github.com/{repo}/pull/{number}" if number and repo else None}
+        return Response(body, status=status.HTTP_200_OK)
 
 
 class VibeMarketingRunControlView(APIView):
