@@ -22,14 +22,24 @@ Without a valid channel every alert still writes one structured
 ``founder_journey_alert`` warning and its receipt becomes ``unconfigured``.
 Alert text carries ids, the workflow, the error code and a staff admin link,
 never a founder's email, name or article text.
+
+P2 (IF-P2-19, IF-P2-23) adds the reasons in ``P2_REASON_LABELS``, a staff
+acknowledgement (``acknowledge_founder_journey_alert``), the acknowledgement due
+time ``details["ack_due_at"]`` (one Melbourne business day after queueing) and a
+seam through which be-staff's ``staff_alert_rules.enrich_alert_details`` adds ids
+to a receipt's details. Details still hold ids only; the staff console resolves
+names, emails and links at read time.
 """
 from __future__ import annotations
 
+from functools import lru_cache
+import importlib
 import logging
 import re
 from datetime import date, datetime, time, timedelta, timezone as dt_timezone
 from types import SimpleNamespace
 from uuid import NAMESPACE_URL, uuid5
+from zoneinfo import ZoneInfo
 
 from django.conf import settings
 from django.db import transaction
@@ -64,6 +74,36 @@ REASON_LABELS = {
     "first_article_attempts_exhausted": "A founder used every free first-article attempt",
     "free_cap_spike": "Free first-article reservations spiked",
 }
+# IF-P2-23: the P2 reasons, each queued by the package the contract names.
+P2_REASON_LABELS = {
+    "our_team_item": "A startup has an item no automatic path can finish",
+    "unregistered_failure_code": "A run reported a failure code the registry does not know",
+    "codeless_terminal": "A run stopped without a failure code",
+    "setup_attempts_spike": "A startup had more than 6 setup attempts today",
+    "queue_age": "A queued run has waited more than 10 minutes",
+    "provider_error_rate": "Provider errors passed 20% of active runs",
+    "throttle_spike": "Founders hit more than 5 rate limits in an hour",
+    "refresh_failure_spike": "Sign-in refresh failures passed 3 times the weekly baseline",
+    "github_callback_failures": "GitHub callback failures spiked",
+    "free_budget_exhausted": "A free article ran out of model budget",
+    "claim_findings_delivered": "A draft was delivered with claims to check",
+    "repair_loop_exhausted": "A preview repair loop ran out of attempts",
+    "pull_request_cap": "A startup reached 3 MLAI pull requests today",
+    "ladder_exhausted": "Every blog route failed for a startup's website",
+    "self_heal_capped": "Self-healing stopped retrying an item",
+    "source_change_repeated": "A run's website source changed a third time",
+    "deploy_not_detected": "A merged article was not deployed within 30 minutes",
+    "merge_rejected_twice": "GitHub rejected an MLAI merge twice",
+    "join_request_unanswered": "A team join request has waited 72 hours",
+}
+P2_ALERT_REASONS = frozenset(P2_REASON_LABELS)
+ALERT_REASONS = ALERT_REASONS | P2_ALERT_REASONS
+REASON_LABELS = {**REASON_LABELS, **P2_REASON_LABELS}
+ACK_TIMEZONE = ZoneInfo("Australia/Melbourne")
+ENRICH_MODULE = "content_factory.staff_alert_rules"
+ENRICH_FUNCTION = "enrich_alert_details"
+MAX_LAST_TRANSITIONS = 3
+TRANSITION_FIELDS = ("at", "from", "to")
 TERMINAL_STATUSES = frozenset({"failed", "cancelled", "denied", "stopped"})
 YOUR_TURN_STATUSES = frozenset({"awaiting_approval", "approval_required", "awaiting_confirmation", "awaiting_delivery_mode"})
 # IF-20 owner actions. Every other cancellation_reason, 'unspecified' included, alerts.
@@ -125,14 +165,16 @@ def queue_founder_journey_alert(*, organization, alert_reason: str, company_id=N
         run_id=getattr(run, "run_id", None), company_id=company_id,
         claimant_user_id=safe_details.get("claimant_user_id"),
     )
+    queued_at = timezone.now()
     receipt = {
         "alert_id": alert_id, "alert_reason": alert_reason, "state": "pending", "attempts": 0, "sent_at": None,
-        "queued_at": timezone.now().isoformat(),
+        "queued_at": queued_at.isoformat(),
         "company_id": str(company_id) if company_id else None,
         "run_id": str(run.run_id) if run is not None else None,
         "run_pk": run.pk if run is not None else None,
         "details": safe_details,
     }
+    receipt["details"] = _p2_details(receipt, organization=organization, run=run, queued_at=queued_at)
     if run is not None:
         mirrored = _receipts_in(ContentFactoryRun.objects.filter(pk=run.pk).values_list("result", flat=True).first())
         mirrored = mirrored.get(alert_reason)
@@ -143,6 +185,97 @@ def queue_founder_journey_alert(*, organization, alert_reason: str, company_id=N
     if run is not None:
         _mirror_run_receipt(run, alert_reason, stored)
     return alert_id
+
+
+# --- P2: acknowledgement, due time and enrichment (IF-P2-19) -----------------
+
+@lru_cache(maxsize=None)
+def _optional(module: str, name: str):
+    """The provider function ``module.name``, or None while that package is missing (IF-P2-24)."""
+    try:
+        return getattr(importlib.import_module(module), name)
+    except (ImportError, AttributeError):
+        return None
+
+
+def ack_due_at(queued_at: datetime) -> datetime:
+    """One business day after ``queued_at`` in ``Australia/Melbourne`` (Monday to Friday).
+
+    The same wall-clock time on the next day, moved past Saturday and Sunday,
+    so Friday 16:00 is due Monday 16:00. Returned in UTC.
+    """
+    if timezone.is_naive(queued_at):
+        queued_at = timezone.make_aware(queued_at, dt_timezone.utc)
+    local = queued_at.astimezone(ACK_TIMEZONE)
+    day = local.date() + timedelta(days=1)
+    while day.weekday() >= 5:
+        day += timedelta(days=1)
+    due = datetime.combine(day, local.timetz().replace(tzinfo=None), tzinfo=ACK_TIMEZONE)
+    return due.astimezone(dt_timezone.utc)
+
+
+def _ack_due_applies(alert_reason) -> bool:
+    """New P2 reasons always carry a due time; existing ones only once staff can act on it."""
+    return (alert_reason in P2_ALERT_REASONS
+            or bool(getattr(settings, "MY_STARTUP_STAFF_CONSOLE_ENABLED", False))
+            or bool(getattr(settings, "ARTICLES_STAFF_ALERT_RULES_ENABLED", False)))
+
+
+def _enriched(receipt, *, organization, run) -> dict:
+    """be-staff's extra ids for a receipt, through the IF-P2-24 seam; {} when missing, off or broken."""
+    if not getattr(settings, "ARTICLES_STAFF_ALERT_RULES_ENABLED", False):
+        return {}
+    enrich = _optional(ENRICH_MODULE, ENRICH_FUNCTION)
+    if enrich is None:
+        return {}
+    try:
+        extra = enrich(dict(receipt), organization=organization, run=run)
+    except Exception:  # noqa: BLE001 - enrichment must never stop an alert being recorded
+        logger.warning("founder_journey_alert_enrich_failed alert_reason=%s org_id=%s",
+                       receipt.get("alert_reason"), getattr(organization, "pk", None), exc_info=True)
+        return {}
+    return extra if isinstance(extra, dict) else {}
+
+
+def _p2_details(receipt, *, organization, run, queued_at) -> dict:
+    """The receipt's details with the enrichment and ``ack_due_at`` added, ids only."""
+    details = dict(receipt.get("details") or {})
+    extra = _enriched(receipt, organization=organization, run=run)
+    if extra:
+        details = _safe_details({**details, **extra})
+    if _ack_due_applies(receipt.get("alert_reason")):
+        details["ack_due_at"] = ack_due_at(queued_at).isoformat()
+    return details
+
+
+def acknowledge_founder_journey_alert(organization, alert_id, *, by_user) -> dict | None:
+    """Record a staff acknowledgement on one alert once, and return the stored receipt.
+
+    Sets ``acknowledged_at`` and ``acknowledged_by_user_id`` under the config row
+    lock with a queryset update, so ``updated_at`` never moves. A second call
+    changes nothing and returns the receipt as it is. Returns None when the org
+    has no such alert. A run-scoped receipt is mirrored onto its run afterwards.
+    """
+    from .models import OrganizationContentConfig
+    if organization is None or getattr(organization, "pk", None) is None or not alert_id:
+        return None
+    user_id = getattr(by_user, "pk", None)
+    with transaction.atomic():
+        row = OrganizationContentConfig.objects.select_for_update().filter(organization=organization).first()
+        if row is None:
+            return None
+        strategy = dict(row.pillar_strategy) if isinstance(row.pillar_strategy, dict) else {}
+        receipts = dict(_receipts_in(strategy))
+        receipt = receipts.get(str(alert_id))
+        if not isinstance(receipt, dict):
+            return None
+        if receipt.get("acknowledged_at"):
+            return dict(receipt)
+        receipt = {**receipt, "acknowledged_at": timezone.now().isoformat(), "acknowledged_by_user_id": user_id}
+        receipts[str(alert_id)] = receipt
+        OrganizationContentConfig.objects.filter(pk=row.pk).update(pillar_strategy={**strategy, RECEIPTS_KEY: receipts})
+    _mirror_settled(receipt)
+    return dict(receipt)
 
 
 def run_founder_journey_alert_sweep(now=None, limit=None) -> dict:
@@ -404,7 +537,11 @@ def _mirror_run_receipt(run, alert_reason, receipt):
 
 
 def _safe_details(details) -> dict:
-    """Keep only scalar, non-personal details; anything resembling text or identity is dropped."""
+    """Keep only scalar, non-personal details; anything resembling text or identity is dropped.
+
+    Two P2 shapes are also kept: a ``*_at`` timestamp (stored as UTC ISO) and
+    ``last_transitions``, at most 3 ``{"at", "from", "to"}`` entries of safe tokens.
+    """
     safe = {}
     for key, value in (details if isinstance(details, dict) else {}).items():
         key = str(key)
@@ -414,7 +551,28 @@ def _safe_details(details) -> dict:
             safe[key] = value
         elif isinstance(value, str) and SAFE_TOKEN.fullmatch(value) and "@" not in value:
             safe[key] = value
+        elif key.endswith("_at") and (moment := _timestamp(value)) is not None:
+            safe[key] = moment.astimezone(dt_timezone.utc).isoformat()
+        elif key == "last_transitions" and isinstance(value, list):
+            safe[key] = _safe_transitions(value)
     return safe
+
+
+def _safe_transitions(items) -> list[dict]:
+    transitions = []
+    for item in items[-MAX_LAST_TRANSITIONS:]:
+        if not isinstance(item, dict):
+            continue
+        entry = {}
+        for field in TRANSITION_FIELDS:
+            value = item.get(field)
+            if field == "at":
+                moment = _timestamp(value)
+                entry[field] = moment.astimezone(dt_timezone.utc).isoformat() if moment else None
+            else:
+                entry[field] = value if isinstance(value, str) and SAFE_TOKEN.fullmatch(value) and "@" not in value else None
+        transitions.append(entry)
+    return transitions
 
 
 # --- Delivery ----------------------------------------------------------------
@@ -584,6 +742,8 @@ def alert_text(receipt, context) -> str:
         if context["step_attempts"] is not None:
             parts.append(f"Step attempts {context['step_attempts']}.")
     details = receipt.get("details") if isinstance(receipt.get("details"), dict) else {}
+    # The P2 due time and transitions are for the staff console, not the Slack line.
+    details = {key: value for key, value in details.items() if key not in ("ack_due_at", "last_transitions")}
     if details:
         parts.append("Details " + ", ".join(f"{key}={_safe(value)}" for key, value in sorted(details.items())) + ".")
     parts.append(f"Alert delivery attempt {receipt.get('attempts') or 0} of {MAX_DELIVERY_ATTEMPTS}.")
