@@ -59,6 +59,7 @@ from .account_sessions import (
     rotate_account_session,
 )
 from .account_profiles import ProfileVersionConflict, update_account_profile
+from . import device_auth_v2
 from .inbox_accounts import bind_verified_device
 from .models import (
     CommunityChatAccountSession,
@@ -109,6 +110,7 @@ from .serializers import (
     CommunityChatProfileUpdateSerializer,
     CommunityChatDeviceAuthAuthorizeSerializer,
     CommunityChatDeviceAuthExchangeSerializer,
+    CommunityChatDeviceAuthRenewSerializer,
     CommunityChatDeviceAuthStartSerializer,
     CommunityChatEmailCodeRequestSerializer,
     CommunityChatEmailCodeVerifySerializer,
@@ -209,11 +211,17 @@ def _require_token_key(request, public_key):
         raise PermissionDenied("This authorization is bound to a different device key.")
 
 
-def _require_current_chat_credential_locked(request, locked_user):
-    """Revalidate a Chat credential after taking the shared user row lock."""
+def _require_current_chat_credential_locked(request, locked_user, *, allow_unapproved=False):
+    """Revalidate a Chat credential after taking the shared user row lock.
+
+    ``allow_unapproved`` lets desktop sign-in v2 admit a pending or new member
+    (``device_auth_v2.admits_unapproved_member``); every other caller keeps
+    today's community-eligibility requirement.
+    """
 
     now = timezone.now()
-    _require_eligible(locked_user)
+    if not (allow_unapproved and device_auth_v2.admits_unapproved_member(locked_user)):
+        _require_eligible(locked_user)
     account_session = getattr(request, "community_chat_account_session", None)
     if account_session is not None:
         authorization = str(request.headers.get("Authorization") or "")
@@ -846,6 +854,15 @@ class EmailCodeVerifyView(APIView):
                 {"error": "invalid_or_expired_code"},
                 status=status.HTTP_400_BAD_REQUEST,
             )
+        # Desktop sign-in v2: a code entered on the page that names a desktop
+        # request is the explicit confirmation ADR-006 requires. Remember it
+        # for this account and this browser session only.
+        device_auth_v2.record_fresh_code(
+            device_request_id=request.data.get("device_request_id"),
+            user=user,
+            account_session=account_session.session,
+            client_id=challenge.client_id,
+        )
         # Device rotation has already fenced every old Slack registration in
         # the committed transaction above. Adapter DELETEs are content-free,
         # durable work drained by the community-bridge maintenance worker.
@@ -1312,6 +1329,8 @@ class DeviceAuthStartView(APIView):
 
     def get(self, request):
         """Check an opaque handoff before sign-in without revealing its account."""
+        if request.query_params.get("probe") == "1":
+            return self._probe(request)
         serializer = CommunityChatDeviceAuthAuthorizeSerializer(
             data=request.query_params,
         )
@@ -1371,12 +1390,14 @@ class DeviceAuthStartView(APIView):
             expires_at=timezone.now()
             + timedelta(seconds=settings.COMMUNITY_CHAT_DEVICE_AUTH_TTL_SECONDS),
         )
+        device_auth_v2.remember_renew_proof(auth_request, data["state"])
         callback_path = f"/auth/desktop?request={auth_request.id}"
         response = Response(
             {
                 "request_id": str(auth_request.id),
                 "callback_path": callback_path,
                 "expires_at": auth_request.expires_at,
+                **device_auth_v2.start_fields(),
             },
             status=status.HTTP_201_CREATED,
         )
@@ -1384,20 +1405,114 @@ class DeviceAuthStartView(APIView):
         response["Pragma"] = "no-cache"
         return response
 
+    def _probe(self, request):
+        """Anonymous ``?probe=1``: the sign-in flow version, nothing about any account."""
+        request_id = request.query_params.get("request_id")
+        if request_id and device_auth_v2.enabled():
+            enforce_bootstrap_limits(
+                request,
+                action="auth-status",
+                public_key=str(request_id)[:64],
+                user_limit=120,
+                key_limit=120,
+                ip_limit=600,
+            )
+        response = Response(device_auth_v2.probe_payload(request_id))
+        response["Cache-Control"] = "no-store"
+        response["Pragma"] = "no-cache"
+        return response
+
+
+def _device_auth_admission(user):
+    """Return whether an unapproved member is admitted, or raise as today.
+
+    With desktop sign-in v2 off this is exactly the community-access check the
+    account authentication used to make. With it on, a pending or new member
+    (never a rejected or suspended one) may finish desktop sign-in.
+    """
+
+    from .onboarding import has_community_access, require_community_access
+
+    if has_community_access(user):
+        return False
+    if device_auth_v2.admits_unapproved_member(user):
+        return True
+    require_community_access(user)
+    return False
+
+
+def _require_browser_session_cookie(request):
+    """Device approval reads and writes need the Chat browser cookie session."""
+
+    cookie_access = str(request.COOKIES.get(ACCOUNT_ACCESS_COOKIE) or "")
+    cookie_hash = hashlib.sha256(cookie_access.encode("utf-8")).hexdigest()
+    if not cookie_access or not secrets.compare_digest(
+        cookie_hash,
+        request.community_chat_account_session.access_token_hash,
+    ):
+        raise PermissionDenied("Device approval requires a browser sign-in cookie.")
+    if request.community_chat_account_session.client_id != "mlai-chat-web":
+        raise PermissionDenied(
+            "Device approval requires an MLAI Chat browser session."
+        )
+    origin = _request_origin(request)
+    browser_origin = str(settings.COMMUNITY_CHAT_FRONTEND_URL).strip().rstrip("/")
+    if not secrets.compare_digest(origin, browser_origin):
+        raise PermissionDenied(
+            "Device approval must come from the MLAI Chat browser origin."
+        )
+
 
 class DeviceAuthAuthorizeView(APIView):
     """Explicitly authorize a pending app handoff with a Chat browser session."""
 
-    authentication_classes = (CommunityChatAccountAuthentication,)
+    # Onboarding authentication admits a member before approval; the handlers
+    # re-apply today's community-access check unless sign-in v2 admits them.
+    authentication_classes = (CommunityChatOnboardingAuthentication,)
     permission_classes = [IsAuthenticated]
 
+    def get(self, request):
+        """Sign-in v2: who is signed in here, and did they just enter a fresh code."""
+        if not device_auth_v2.enabled():
+            # Today a GET (a passive navigation) can never authorize anything.
+            return self.http_method_not_allowed(request)
+        _device_auth_admission(request.user)
+        _require_browser_session_cookie(request)
+        serializer = CommunityChatDeviceAuthAuthorizeSerializer(
+            data=request.query_params,
+        )
+        serializer.is_valid(raise_exception=True)
+        auth_request = device_auth_v2.pending_request(
+            serializer.validated_data["request_id"]
+        )
+        if auth_request is None:
+            return Response(
+                {"error": "authorization_not_found"}, status=status.HTTP_404_NOT_FOUND
+            )
+        if auth_request.user_id is not None and auth_request.user_id != request.user.pk:
+            raise PermissionDenied("Login request belongs to another MLAI account.")
+        response = Response(
+            device_auth_v2.authorize_payload(
+                auth_request,
+                user=request.user,
+                account_session=request.community_chat_account_session,
+            )
+        )
+        response["Cache-Control"] = "no-store"
+        response["Pragma"] = "no-cache"
+        return response
+
     def post(self, request):
+        # Today's account authentication refused an unadmitted member before
+        # anything else; keep that order so the refusal is unchanged.
+        unapproved = _device_auth_admission(request.user)
         if not settings.COMMUNITY_CHAT_DEVICE_AUTH_ENABLED:
             return Response(
                 {"error": "device_auth_disabled"},
                 status=status.HTTP_404_NOT_FOUND,
             )
-        _require_eligible(request.user)
+        if not unapproved:
+            _require_eligible(request.user)
         cookie_access = str(request.COOKIES.get(ACCOUNT_ACCESS_COOKIE) or "")
         cookie_hash = hashlib.sha256(cookie_access.encode("utf-8")).hexdigest()
         if not cookie_access or not secrets.compare_digest(
@@ -1423,7 +1538,9 @@ class DeviceAuthAuthorizeView(APIView):
                 locked_user = get_user_model().objects.select_for_update().get(
                     pk=request.user.pk
                 )
-                _require_current_chat_credential_locked(request, locked_user)
+                _require_current_chat_credential_locked(
+                    request, locked_user, allow_unapproved=unapproved
+                )
                 current_session = request.community_chat_account_session
                 if not secrets.compare_digest(
                     cookie_hash,
@@ -1463,6 +1580,7 @@ class DeviceAuthAuthorizeView(APIView):
                 auth_request.authorized_at = now
                 auth_request.save(update_fields=("user", "authorized_at"))
                 authorization_code = _issue_device_auth_authorization_code(auth_request)
+                device_auth_v2.clear_fresh(auth_request.id)
         except CommunityChatDeviceAuthRequest.DoesNotExist:
             return Response(
                 {"error": "authorization_not_found"}, status=status.HTTP_404_NOT_FOUND
@@ -1571,12 +1689,22 @@ class DeviceAuthExchangeView(APIView):
                     raise PermissionDenied("Login state or verifier is invalid.")
                 if auth_request.authorized_at is None:
                     raise PermissionDenied(DESKTOP_AUTHORIZATION_CODE_INVALID_DETAIL)
-                _require_eligible(locked_user)
-
-                raw_token, token, _ = _issue_email_code_bootstrap(
-                    locked_user,
-                    enrollment,
+                # Sign-in v2 lets a pending or new member finish desktop
+                # sign-in with an account session only: no relay bootstrap,
+                # exactly as EmailCodeVerifyView's onboarding_required branch.
+                eligible = _is_eligible(locked_user)
+                unapproved = not eligible and device_auth_v2.admits_unapproved_member(
+                    locked_user
                 )
+                if not eligible and not unapproved:
+                    _require_eligible(locked_user)
+
+                raw_token, token = "", None
+                if not unapproved:
+                    raw_token, token, _ = _issue_email_code_bootstrap(
+                        locked_user,
+                        enrollment,
+                    )
                 account_session = issue_account_session(
                     locked_user,
                     enrollment,
@@ -1602,6 +1730,24 @@ class DeviceAuthExchangeView(APIView):
 
         # See EmailCodeVerifyView: authentication succeeds once the privacy
         # fence is durable; the periodic worker owns adapter cleanup.
+        if token is None:
+            from .onboarding import onboarding_payload
+
+            response = Response(
+                {
+                    "status": "onboarding_required",
+                    "bootstrap_token": "",
+                    "expires_at": account_session.session.access_expires_at,
+                    "relay_url": settings.COMMUNITY_CHAT_RELAY_URL,
+                    "origin": enrollment.origin,
+                    "profile": own_chat_profile(auth_request.user),
+                    "session": _account_session_payload(account_session),
+                    "onboarding": onboarding_payload(auth_request.user),
+                }
+            )
+            response["Cache-Control"] = "no-store"
+            response["Pragma"] = "no-cache"
+            return response
         response = Response(
             {
                 "status": "authenticated",
@@ -1613,6 +1759,72 @@ class DeviceAuthExchangeView(APIView):
                 "session": _account_session_payload(account_session),
             }
         )
+        response["Cache-Control"] = "no-store"
+        response["Pragma"] = "no-cache"
+        return response
+
+
+class DeviceAuthRenewView(APIView):
+    """Sign-in v2: keep a pending desktop request alive while the browser step is open."""
+
+    authentication_classes = []
+    permission_classes = [AllowAny]
+
+    def post(self, request):
+        if not device_auth_v2.enabled():
+            return Response(
+                {"error": "device_auth_disabled"},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+        serializer = CommunityChatDeviceAuthRenewSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        data = serializer.validated_data
+        origin = _desktop_auth_origin(request)
+        try:
+            with transaction.atomic():
+                auth_request = (
+                    CommunityChatDeviceAuthRequest.objects.select_for_update().get(
+                        id=data["request_id"]
+                    )
+                )
+                enforce_bootstrap_limits(
+                    request,
+                    action="auth-renew",
+                    public_key=auth_request.public_key,
+                    user_limit=60,
+                    key_limit=60,
+                    ip_limit=300,
+                )
+                if auth_request.origin != origin:
+                    raise PermissionDenied("Login request origin does not match.")
+                if "device" in data:
+                    enrollment = _device_auth_enrollment_context(data, origin)
+                    owned = secrets.compare_digest(
+                        auth_request.state_hash,
+                        _device_auth_state_hash(data["state"], enrollment),
+                    )
+                else:
+                    owned = device_auth_v2.renew_proof_matches(auth_request, data["state"])
+                if not owned:
+                    raise PermissionDenied("Login state or verifier is invalid.")
+                try:
+                    expires_at = device_auth_v2.renewed_expiry(auth_request)
+                except device_auth_v2.RenewExpired:
+                    return Response(
+                        {
+                            "detail": device_auth_v2.EXPIRED_DETAIL,
+                            "code": "device_request_expired",
+                        },
+                        status=status.HTTP_410_GONE,
+                    )
+                if expires_at != auth_request.expires_at:
+                    auth_request.expires_at = expires_at
+                    auth_request.save(update_fields=("expires_at",))
+        except CommunityChatDeviceAuthRequest.DoesNotExist:
+            return Response(
+                {"error": "authorization_not_found"}, status=status.HTTP_404_NOT_FOUND
+            )
+        response = Response({"expiresAt": expires_at})
         response["Cache-Control"] = "no-store"
         response["Pragma"] = "no-cache"
         return response

@@ -2,15 +2,23 @@
 
 import unicodedata
 
-from rest_framework import serializers
-from rest_framework.permissions import IsAuthenticated
+from rest_framework import serializers, status
+from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
+from core.client_ip import trusted_client_ip
+
 from .authentication import CommunityChatOnboardingAuthentication
-from .onboarding import CITIES, INTERESTS, onboarding_payload, save_onboarding
+from .invite_tokens import TOKEN_MAX_LENGTH, InvalidInviteToken, invite_tokens_enabled, resolve_invite_token
+from .onboarding import (
+    CITIES, INTERESTS, JOIN_INTENTS, join_next, one_step_join_enabled, onboarding_payload, save_onboarding,
+)
 from .serializers import own_chat_profile
 from .throttles import CommunityChatScopedThrottle
+
+JOIN_ONLY_FIELDS = ("adult_and_terms", "intent", "invite")
+INVITE_INVALID_DETAIL = "This invite link has expired."
 
 
 class StrictBooleanField(serializers.BooleanField):
@@ -36,8 +44,27 @@ class MemberOnboardingSerializer(serializers.Serializer):
     marketing_opt_in = StrictBooleanField(required=False)
     skip_personalisation = StrictBooleanField(required=False)
 
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        if one_step_join_enabled():
+            # One-screen join (P1.3). With the switch off none of these fields
+            # exist, so a "join" step or a join field is refused as today.
+            self.fields["step"] = serializers.ChoiceField(choices=("basics", "complete", "join"))
+            self.fields["last_name"].allow_blank = True
+            self.fields["adult_and_terms"] = StrictBooleanField(required=False)
+            self.fields["intent"] = serializers.ChoiceField(choices=JOIN_INTENTS, required=False)
+            self.fields["invite"] = serializers.CharField(max_length=TOKEN_MAX_LENGTH, required=False)
+
     def validate(self, attrs):
         if set(self.initial_data) - set(self.fields):
+            raise serializers.ValidationError("Unknown onboarding fields.")
+        if attrs["step"] == "join":
+            missing = [key for key in ("first_name", "adult_and_terms", "policy_version", "intent") if key not in attrs]
+            if "first_name" in missing or not attrs.get("first_name", "").strip():
+                raise serializers.ValidationError({"first_name": "Enter your name."})
+            if missing:
+                raise serializers.ValidationError({missing[0]: "This field is required."})
+        elif any(key in attrs for key in JOIN_ONLY_FIELDS):
             raise serializers.ValidationError("Unknown onboarding fields.")
         for key in ("first_name", "last_name"):
             if attrs["step"] == "basics" and not attrs.get(key, "").strip():
@@ -63,13 +90,62 @@ class MemberOnboardingView(APIView):
     def put(self, request):
         serializer = MemberOnboardingSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
+        values = serializer.validated_data
         user = save_onboarding(
             authenticated_session=request.community_chat_account_session,
-            values=serializer.validated_data,
+            values=values,
         )
-        return self._response(user)
+        extra = {"next": join_next(values.get("intent"))} if values["step"] == "join" else {}
+        return self._response(user, **extra)
 
-    def _response(self, user):
-        response = Response({"onboarding": onboarding_payload(user), "profile": own_chat_profile(user)})
+    def _response(self, user, **extra):
+        response = Response({"onboarding": onboarding_payload(user), "profile": own_chat_profile(user), **extra})
+        response["Cache-Control"] = "no-store"
+        return response
+
+
+class InviteResolveSerializer(serializers.Serializer):
+    token = serializers.CharField(max_length=TOKEN_MAX_LENGTH, trim_whitespace=True)
+
+
+class InviteResolveThrottle(CommunityChatScopedThrottle):
+    """Anonymous resolve is keyed by the trusted client IP, never a spoofable header."""
+
+    def get_ident(self, request):
+        return trusted_client_ip(request)
+
+
+class InviteResolveView(APIView):
+    """Resolve an opaque invite token for prefill and routing; never blocks sign-in."""
+
+    authentication_classes = ()
+    permission_classes = (AllowAny,)
+    throttle_classes = (InviteResolveThrottle,)
+    community_chat_throttle_scope = "community_chat_invite_resolve"
+
+    def get_throttles(self):
+        # While the feature is off every caller gets the 404, never a 429.
+        return super().get_throttles() if invite_tokens_enabled() else []
+
+    def post(self, request):
+        if not invite_tokens_enabled():
+            return self._no_store(Response({"error": "invite_tokens_disabled"}, status=status.HTTP_404_NOT_FOUND))
+        serializer = InviteResolveSerializer(data=request.data)
+        if not serializer.is_valid():
+            return self._invalid()
+        try:
+            claims = resolve_invite_token(serializer.validated_data["token"])
+        except InvalidInviteToken:
+            return self._invalid()
+        return self._no_store(Response(claims.public_payload()))
+
+    def _invalid(self):
+        return self._no_store(Response(
+            {"detail": INVITE_INVALID_DETAIL, "code": "invite_invalid"},
+            status=status.HTTP_400_BAD_REQUEST,
+        ))
+
+    @staticmethod
+    def _no_store(response):
         response["Cache-Control"] = "no-store"
         return response

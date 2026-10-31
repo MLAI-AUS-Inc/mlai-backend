@@ -2,6 +2,7 @@
 
 from uuid import UUID
 
+from django.conf import settings
 from django.http import HttpResponseBadRequest
 from rest_framework.exceptions import AuthenticationFailed
 from rest_framework.permissions import IsAuthenticated
@@ -13,14 +14,81 @@ from community_chat.throttles import StartupThrottleMixin
 from .links import API_PREFIX, rewrite_payload
 
 
+def pending_member_access_enabled():
+    """Whether a member awaiting review may use My startup. Code default off."""
+    return bool(getattr(settings, "MY_STARTUP_PENDING_MEMBER_ACCESS_ENABLED", False))
+
+
+def _pending_member_is_new_journey(user):
+    """Whether a member awaiting review belongs only to the new-journey cohort.
+
+    Every startup the member owns must be ``is_new_journey``. A member with no
+    startup yet is judged by the cohort a startup added now would join, so a
+    founder still on the legacy path (V2 off, or before LAUNCHED_AT) is
+    refused exactly as today.
+    """
+    from content_factory.founder_journey_cohort import NEW_JOURNEY, is_new_journey, new_startup_cohort
+    from founder_tools.models import VibeRaisingCompany
+
+    companies = list(
+        VibeRaisingCompany.objects.filter(profile__user_id=user.pk, organization__isnull=False)
+        .select_related("organization")
+    )
+    if not companies:
+        return new_startup_cohort() == NEW_JOURNEY
+    return all(is_new_journey(company.organization) for company in companies)
+
+
+def require_my_startup_access(user):
+    """Admit approved members and, with the switch on, new-journey members awaiting review.
+
+    Decision 9: a name flagged for committee review holds only public posting,
+    so a ``pending_review`` member of the new-journey cohort keeps My startup.
+    A pending member who owns a legacy startup, and incomplete, rejected and
+    suspended members, are refused exactly as ``require_community_access`` does.
+    """
+    from community_chat.models import CommunityMemberProfile
+    from community_chat.onboarding import has_community_access, require_community_access
+
+    if not pending_member_access_enabled():
+        require_community_access(user)
+        return
+    if has_community_access(user):
+        return
+    if CommunityMemberProfile.objects.filter(
+        user=user, status=CommunityMemberProfile.Status.PENDING,
+    ).exists() and _pending_member_is_new_journey(user):
+        return
+    require_community_access(user)
+
+
+def _is_billing_or_purchase_view(view):
+    """Billing and points purchases stay approved-members-only (lazy imports)."""
+    from content_factory.company_billing import CompanyBillingView
+    from roo.views import CurrentUserPurchaseView
+
+    from .purchases import StartupPurchaseCheckoutView, StartupPurchaseCreateView, StartupPurchaseView
+
+    return isinstance(view, (
+        CompanyBillingView, CurrentUserPurchaseView,
+        StartupPurchaseCreateView, StartupPurchaseView, StartupPurchaseCheckoutView,
+    ))
+
+
 class MyStartupAuthentication(CommunityChatAccountAuthentication):
     """Reject explicit foreign credentials instead of falling back to cookies."""
+
+    # require_my_startup_access below makes the admission decision instead.
+    allow_pending_membership = True
 
     def authenticate(self, request):
         header = request.headers.get("Authorization", "")
         if header and not header.startswith(f"Bearer {ACCESS_TOKEN_PREFIX}"):
             raise AuthenticationFailed("Use your MLAI Chat account session.")
-        return super().authenticate(request)
+        result = super().authenticate(request)
+        if result is not None:
+            require_my_startup_access(result[0])
+        return result
 
 
 class MyStartupViewMixin(StartupThrottleMixin):
@@ -39,6 +107,14 @@ class MyStartupViewMixin(StartupThrottleMixin):
             request.GET = query
             request.META["QUERY_STRING"] = query.urlencode()
         return super().dispatch(request, *args, **kwargs)
+
+    def initial(self, request, *args, **kwargs):
+        super().initial(request, *args, **kwargs)
+        # A member awaiting review never reaches billing or purchases: they get
+        # the same refusal the account authentication gave them before.
+        if pending_member_access_enabled() and _is_billing_or_purchase_view(self):
+            from community_chat.onboarding import require_community_access
+            require_community_access(request.user)
 
     def get_permissions(self):
         return [IsAuthenticated(), *super().get_permissions()]

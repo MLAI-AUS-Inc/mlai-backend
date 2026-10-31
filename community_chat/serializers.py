@@ -160,6 +160,30 @@ class CommunityChatDeviceAuthAuthorizeSerializer(serializers.Serializer):
     request_id = serializers.UUIDField()
 
 
+class CommunityChatDeviceAuthRenewSerializer(serializers.Serializer):
+    """Desktop sign-in v2 renew: the start state proves ownership of the request.
+
+    The desktop may also resend its device context, which lets the server check
+    the full state binding even when the cached renew proof is gone.
+    """
+
+    request_id = serializers.UUIDField()
+    state = serializers.CharField(
+        min_length=32,
+        max_length=256,
+        trim_whitespace=False,
+    )
+    client_id = serializers.ChoiceField(choices=COMMUNITY_CHAT_DESKTOP_CLIENT_IDS, required=False)
+    device = CommunityChatDeviceLoginSerializer(required=False)
+
+    def validate(self, attrs):
+        if ("client_id" in attrs) != ("device" in attrs):
+            raise serializers.ValidationError("Send the client and device together, or neither.")
+        if "device" in attrs:
+            return validate_community_chat_client_device(attrs)
+        return attrs
+
+
 class CommunityChatDeviceAuthExchangeSerializer(serializers.Serializer):
     request_id = serializers.UUIDField()
     authorization_code = serializers.CharField(

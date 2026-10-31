@@ -3,7 +3,7 @@ from django.urls import include, path
 from .apple_iap_views import AppleIapView, AppleIapTransactionView, AppleIapNotificationView
 from .privacy_views import AccountDeletionView, AiConsentView
 from .device_management_views import AccountDevicesView, AccountDeviceView
-from .onboarding_views import MemberOnboardingView
+from .onboarding_views import InviteResolveView, MemberOnboardingView
 from .account_ban_views import AccountBanView
 from .client_events import ClientEventsView
 from .admin_views import AdminAccessView
@@ -17,6 +17,7 @@ from .views import (
     ConfirmView,
     DeviceAuthAuthorizeView,
     DeviceAuthExchangeView,
+    DeviceAuthRenewView,
     DeviceAuthStartView,
     EmailCodeRequestView,
     EmailCodeVerifyView,
@@ -68,6 +69,7 @@ urlpatterns = [
     path("apple-iap/notifications/production/", AppleIapNotificationView.as_view(), {"environment": "production"}),
     path("apple-iap/notifications/sandbox/", AppleIapNotificationView.as_view(), {"environment": "sandbox"}),
     path("account/onboarding/", MemberOnboardingView.as_view(), name="community_chat_onboarding"),
+    path("account/invite/resolve/", InviteResolveView.as_view(), name="community_chat_invite_resolve"),
     path("account/deletion/", AccountDeletionView.as_view(), name="community_chat_account_deletion"),
     path("account/ai-consent/", AiConsentView.as_view(), name="community_chat_ai_consent"),
     path("startups/", include("community_chat.startups.urls")),
@@ -157,6 +159,11 @@ urlpatterns = [
         "auth/device/exchange/",
         DeviceAuthExchangeView.as_view(),
         name="community_chat_auth_exchange",
+    ),
+    path(
+        "auth/device/renew/",
+        DeviceAuthRenewView.as_view(),
+        name="community_chat_auth_renew",
     ),
     path("session/", SessionView.as_view(), name="community_chat_session"),
     path("client-events/", ClientEventsView.as_view(), name="community_chat_client_events"),
