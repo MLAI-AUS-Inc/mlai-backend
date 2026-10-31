@@ -16,6 +16,8 @@ from urllib.parse import urlencode, urlsplit, urlunsplit
 import requests
 from django.conf import settings
 
+from roo.event_ticket_policy import EVENT_TICKET_MAX_CENTS_EXCLUSIVE
+
 
 class LumaEventDiscountError(RuntimeError):
     """Safe provider error, including whether a remote write may have happened."""
@@ -210,8 +212,13 @@ class LumaEventDiscountService:
         cents = _number(ticket.get("cents"))
         if ticket.get("type") != "paid" or ticket.get("currency") != "aud" or cents is None or cents <= 0 or cents != cents.to_integral_value():
             raise LumaEventDiscountError("ticket_not_paid_aud", "This discount requires a paid AUD ticket.")
-        if ticket.get("is_hidden", False) is not False or ticket.get("require_approval", False) is not False or ticket.get("is_flexible", False) is not False:
+        if cents >= EVENT_TICKET_MAX_CENTS_EXCLUSIVE:
+            raise LumaEventDiscountError("ticket_price_limit", "Roo ticket rewards only cover tickets priced below A$100.")
+        requires_approval = ticket.get("require_approval", False)
+        if ticket.get("is_hidden", False) is not False or type(requires_approval) is not bool or ticket.get("is_flexible", False) is not False:
             raise LumaEventDiscountError("ticket_not_supported", "This ticket type does not support Roo discounts.")
+        if "ticket" in terms and terms["ticket"].get("requires_approval", False) != requires_approval:
+            raise LumaEventDiscountError("ticket_terms_changed", "The ticket's approval requirements changed. Ask Roo for a new quote.")
         for field, is_end in (("valid_start_at", False), ("valid_end_at", True)):
             value = ticket.get(field)
             if value is not None:
@@ -234,7 +241,7 @@ class LumaEventDiscountService:
             "event_id": event_id, "event_ticket_type_id": ticket_id, "discount": discount,
             "valid_end_at": _iso(expires), "id": event_id, "name": str(event.get("name") or ""),
             "url": url, "starts_at": _iso(starts), "timezone": str(event.get("timezone") or ""),
-            "ticket": {"id": ticket_id, "name": str(ticket.get("name") or ""), "cents": int(cents), "currency": "aud"},
+            "ticket": {"id": ticket_id, "name": str(ticket.get("name") or ""), "cents": int(cents), "currency": "aud", "requires_approval": requires_approval},
         }
 
     def find_coupon(self, event_id, code):

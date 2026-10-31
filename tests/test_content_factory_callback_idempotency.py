@@ -550,3 +550,48 @@ class CallbackEventHelperTests(SimpleTestCase):
                 existing_run=ContentFactoryRun(), emitted_at=_utc(2026, 6, 10, 1, 0, 0)
             )
         )
+
+
+class RunEventsCallbackTests(ContentFactoryCallbackGuardTestCase):
+    """Append-only run events ride the callback channel and never change run state."""
+
+    EVENTS = [
+        {"seq": 1, "type": "step_started", "step": "plan_article", "attempt": 1},
+        {"seq": 2, "type": "step_done", "step": "plan_article", "attempt": 1, "status": "completed"},
+    ]
+
+    def setUp(self):
+        super().setUp()
+        self.run = ContentFactoryRun.objects.create(
+            run_id="events-run", workflow="direct_generate", domain="mlai.au",
+            organization=self.client.website_fixture.organization,
+            run_request=self.client._bound_payload({}), status="running", current_step="plan_article")
+
+    def _payload(self):
+        return {"event": "run_events", "run_id": self.run.run_id, "job_id": self.run.run_id,
+                "event_id": "run-events-batch-1", "events": self.EVENTS}
+
+    @override_settings(ARTICLES_RUN_EVENTS_ENABLED=True)
+    def test_events_are_kept_once_by_sequence_without_touching_run_state(self):
+        before = ContentFactoryRun.objects.get(pk=self.run.pk)
+        first = self.client.post(CALLBACK_URL, self._payload(), format="json")
+        self.assertEqual(first.status_code, status.HTTP_200_OK)
+        self.assertEqual(first.json()["accepted"], 2)
+        replay = self.client.post(CALLBACK_URL, self._payload(), format="json")
+        self.assertEqual(replay.status_code, status.HTTP_200_OK)
+        self.assertEqual((replay.json()["accepted"], replay.json()["duplicates"]), (0, 2))
+        self.run.refresh_from_db()
+        log = self.run.result["run_events_v1"]
+        self.assertEqual(log["last_seq"], 2)
+        self.assertEqual(log["steps"]["plan_article"]["status"], "completed")
+        self.assertEqual((self.run.status, self.run.current_step, self.run.updated_at),
+                         (before.status, before.current_step, before.updated_at))
+        # Sequence numbers are the idempotency key; no callback claim row is made.
+        self.assertFalse(ContentFactoryCallbackEvent.objects.filter(event_id="run-events-batch-1").exists())
+
+    def test_flag_off_leaves_run_events_on_the_legacy_ignored_path(self):
+        response = self.client.post(CALLBACK_URL, self._payload(), format="json")
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.json()["status"], "ignored")
+        self.run.refresh_from_db()
+        self.assertNotIn("run_events_v1", self.run.result or {})
