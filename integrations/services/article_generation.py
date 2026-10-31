@@ -926,13 +926,17 @@ def _charge_content_factory_user(
         raise error
     cost_points = original_cost or get_content_factory_article_cost_points(resolved_domain, user=requester)
     _require_expected_cost(article_request, cost_points, require_quote=not bool(original_cost))
-    existing_refunded = (
-        ContentFactoryJob.objects.filter(
+    from content_factory.job_view import job_runs, read_job_flag
+    existing_refunded = read_job_flag(
+        "billing_key_refunded",
+        from_job=lambda: ContentFactoryJob.objects.filter(
             client_request_id=client_request_id,
             billing_status=CONTENT_FACTORY_BILLING_STATUS_REFUNDED,
         )
         .order_by("-updated_at", "-created_at")
-        .first()
+        .first(),
+        from_run=lambda: job_runs().filter(client_request_id=client_request_id,
+            billing_status=CONTENT_FACTORY_BILLING_STATUS_REFUNDED).exists(),
     )
     if existing_refunded:
         raise ArticleGenerationError(
@@ -1161,6 +1165,10 @@ def _refund_content_factory_request(
         billing_amount=cost_points,
         billing_ledger_id=ledger.id,
     )
+    # The source and every child share the key; mirror each family member's run.
+    from content_factory.job_mirror import mirror_jobs_to_runs
+    mirror_jobs_to_runs(ContentFactoryJob.objects.filter(client_request_id=client_request_id),
+        fields=("billing_status", "billing_amount", "billing_ledger"))
     from django.db.models import Q
     from workflow_runs.models import ContentFactoryRun
     runs = ContentFactoryRun.objects.filter(domain=resolved_domain).filter(

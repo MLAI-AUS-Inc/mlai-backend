@@ -27,6 +27,10 @@ FLAG_KEYS = (
     # Run snapshots merge by meaning, and Content Factory run events are kept.
     "ARTICLES_SNAPSHOT_MERGE_BY_MEANING_ENABLED",
     "ARTICLES_RUN_EVENTS_ENABLED",
+    # Phase 3 job/run merge: dual write, shadow read, then read from the run.
+    "ARTICLES_RUN_JOB_DUAL_WRITE_ENABLED",
+    "ARTICLES_RUN_JOB_SHADOW_READ_ENABLED",
+    "ARTICLES_RUN_JOB_READ_ENABLED",
     # P1 founder journey ("one simple path"): the master switch, then the join,
     # sign-in and cohort-gated feature switches, in the P1 turn-on order.
     "MY_STARTUP_FOUNDER_JOURNEY_V2_ENABLED",
