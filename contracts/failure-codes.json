@@ -329,6 +329,25 @@
     {
       "action_id": null,
       "aliases": [],
+      "code": "ARTICLE_COMPONENT_CONTRACT_MISMATCH",
+      "emitter_scopes": [
+        "content_factory"
+      ],
+      "failure_class": "unsupported",
+      "fingerprint_profile": "semantic_findings_v1",
+      "introduced_in": 1,
+      "legacy": {
+        "code": "ARTICLE_COMPONENT_CONTRACT_MISMATCH",
+        "failure_class": "unsupported",
+        "retryable": false
+      },
+      "owner": "content_factory",
+      "retry_policy": "stop_contract",
+      "user_message": "The saved operation cannot safely continue. Review its diagnostics."
+    },
+    {
+      "action_id": null,
+      "aliases": [],
       "code": "ARTICLE_DEPENDENCY_STRATEGY_UNRESOLVED",
       "emitter_scopes": [
         "backend.website_authority"
@@ -592,6 +611,44 @@
       "owner": "content_factory",
       "retry_policy": "repair_owned_candidate",
       "user_message": "The saved operation requires the recorded recovery action."
+    },
+    {
+      "action_id": null,
+      "aliases": [],
+      "code": "ARTICLE_ORCHESTRATION_ENQUEUE_FAILED",
+      "emitter_scopes": [
+        "content_factory"
+      ],
+      "failure_class": "transient",
+      "fingerprint_profile": "semantic_findings_v1",
+      "introduced_in": 1,
+      "legacy": {
+        "code": "ARTICLE_ORCHESTRATION_ENQUEUE_FAILED",
+        "failure_class": "transient",
+        "retryable": true
+      },
+      "owner": "content_factory",
+      "retry_policy": "retry_same_step",
+      "user_message": "A service is temporarily unavailable. The same step can be resumed."
+    },
+    {
+      "action_id": null,
+      "aliases": [],
+      "code": "ARTICLE_PLAN_SCHEMA_MISMATCH",
+      "emitter_scopes": [
+        "content_factory"
+      ],
+      "failure_class": "unsupported",
+      "fingerprint_profile": "semantic_findings_v1",
+      "introduced_in": 1,
+      "legacy": {
+        "code": "ARTICLE_PLAN_SCHEMA_MISMATCH",
+        "failure_class": "unsupported",
+        "retryable": false
+      },
+      "owner": "content_factory",
+      "retry_policy": "stop_contract",
+      "user_message": "The saved operation cannot safely continue. Review its diagnostics."
     },
     {
       "action_id": null,
@@ -881,6 +938,25 @@
     {
       "action_id": null,
       "aliases": [],
+      "code": "ARTICLE_STATIC_VERIFICATION_FAILED",
+      "emitter_scopes": [
+        "content_factory"
+      ],
+      "failure_class": "unsupported",
+      "fingerprint_profile": "semantic_findings_v1",
+      "introduced_in": 1,
+      "legacy": {
+        "code": "ARTICLE_STATIC_VERIFICATION_FAILED",
+        "failure_class": "unsupported",
+        "retryable": false
+      },
+      "owner": "content_factory",
+      "retry_policy": "stop_contract",
+      "user_message": "The saved operation cannot safely continue. Review its diagnostics."
+    },
+    {
+      "action_id": null,
+      "aliases": [],
       "code": "ARTICLE_STATIC_WITNESS_UNAVAILABLE",
       "emitter_scopes": [
         "content_factory"
@@ -1011,6 +1087,25 @@
       "owner": "content_factory",
       "retry_policy": "stop_contract",
       "user_message": "The saved operation requires the recorded recovery action."
+    },
+    {
+      "action_id": null,
+      "aliases": [],
+      "code": "CATALOG_MISSING_REQUIRED_COMPONENTS",
+      "emitter_scopes": [
+        "content_factory"
+      ],
+      "failure_class": "unsupported",
+      "fingerprint_profile": "semantic_findings_v1",
+      "introduced_in": 1,
+      "legacy": {
+        "code": "CATALOG_MISSING_REQUIRED_COMPONENTS",
+        "failure_class": "unsupported",
+        "retryable": false
+      },
+      "owner": "content_factory",
+      "retry_policy": "stop_contract",
+      "user_message": "The saved operation cannot safely continue. Review its diagnostics."
     },
     {
       "action_id": null,
@@ -2250,6 +2345,25 @@
     {
       "action_id": null,
       "aliases": [],
+      "code": "HOSTED_PREVIEW_AUTHORIZATION_DENIED",
+      "emitter_scopes": [
+        "content_factory"
+      ],
+      "failure_class": "unsupported",
+      "fingerprint_profile": "semantic_findings_v1",
+      "introduced_in": 1,
+      "legacy": {
+        "code": "HOSTED_PREVIEW_AUTHORIZATION_DENIED",
+        "failure_class": "unsupported",
+        "retryable": false
+      },
+      "owner": "content_factory",
+      "retry_policy": "stop_contract",
+      "user_message": "The saved operation cannot safely continue. Review its diagnostics."
+    },
+    {
+      "action_id": null,
+      "aliases": [],
       "code": "HOSTED_PREVIEW_AUTHORIZATION_JOB_FAILED",
       "emitter_scopes": [
         "content_factory"
@@ -2516,6 +2630,25 @@
     {
       "action_id": null,
       "aliases": [],
+      "code": "IMAGE_ASSET_UNAVAILABLE",
+      "emitter_scopes": [
+        "content_factory"
+      ],
+      "failure_class": "unsupported",
+      "fingerprint_profile": "semantic_findings_v1",
+      "introduced_in": 1,
+      "legacy": {
+        "code": "IMAGE_ASSET_UNAVAILABLE",
+        "failure_class": "unsupported",
+        "retryable": false
+      },
+      "owner": "content_factory",
+      "retry_policy": "stop_contract",
+      "user_message": "The saved operation cannot safely continue. Review its diagnostics."
+    },
+    {
+      "action_id": null,
+      "aliases": [],
       "code": "IMAGE_DESCRIPTION_CONFLICT",
       "emitter_scopes": [
         "content_factory"
@@ -2563,6 +2696,25 @@
       "introduced_in": 1,
       "legacy": {
         "code": "IMAGE_GENERATION_FAILED",
+        "failure_class": "unsupported",
+        "retryable": false
+      },
+      "owner": "content_factory",
+      "retry_policy": "stop_contract",
+      "user_message": "The saved operation cannot safely continue. Review its diagnostics."
+    },
+    {
+      "action_id": null,
+      "aliases": [],
+      "code": "IMAGE_PROVIDER_ACCESS_DENIED",
+      "emitter_scopes": [
+        "content_factory"
+      ],
+      "failure_class": "unsupported",
+      "fingerprint_profile": "semantic_findings_v1",
+      "introduced_in": 1,
+      "legacy": {
+        "code": "IMAGE_PROVIDER_ACCESS_DENIED",
         "failure_class": "unsupported",
         "retryable": false
       },
@@ -2779,6 +2931,44 @@
       "owner": "content_factory",
       "retry_policy": "advance_strategy",
       "user_message": "This approach cannot continue with the recorded evidence."
+    },
+    {
+      "action_id": "review_setup",
+      "aliases": [],
+      "code": "NO_KEYWORDS",
+      "emitter_scopes": [
+        "content_factory"
+      ],
+      "failure_class": "needs_user",
+      "fingerprint_profile": "semantic_findings_v1",
+      "introduced_in": 1,
+      "legacy": {
+        "code": "NO_KEYWORDS",
+        "failure_class": "needs_user",
+        "retryable": false
+      },
+      "owner": "content_factory",
+      "retry_policy": "await_owner_action",
+      "user_message": "Review the required website action to continue."
+    },
+    {
+      "action_id": null,
+      "aliases": [],
+      "code": "NO_OPPORTUNITIES",
+      "emitter_scopes": [
+        "content_factory"
+      ],
+      "failure_class": "unsupported",
+      "fingerprint_profile": "semantic_findings_v1",
+      "introduced_in": 1,
+      "legacy": {
+        "code": "NO_OPPORTUNITIES",
+        "failure_class": "unsupported",
+        "retryable": false
+      },
+      "owner": "content_factory",
+      "retry_policy": "stop_contract",
+      "user_message": "The saved operation cannot safely continue. Review its diagnostics."
     },
     {
       "action_id": null,
@@ -3107,6 +3297,25 @@
     {
       "action_id": null,
       "aliases": [],
+      "code": "READER_TASK_REJECTED",
+      "emitter_scopes": [
+        "content_factory"
+      ],
+      "failure_class": "repairable",
+      "fingerprint_profile": "semantic_findings_v1",
+      "introduced_in": 1,
+      "legacy": {
+        "code": "READER_TASK_REJECTED",
+        "failure_class": "repairable",
+        "retryable": false
+      },
+      "owner": "content_factory",
+      "retry_policy": "repair_owned_candidate",
+      "user_message": "The generated candidate needs a validated repair."
+    },
+    {
+      "action_id": null,
+      "aliases": [],
       "code": "REPAIR_PATH_NOT_OWNED",
       "emitter_scopes": [
         "content_factory"
@@ -3274,6 +3483,44 @@
       "owner": "content_factory",
       "retry_policy": "stop_contract",
       "user_message": "The saved operation cannot safely continue. Review the recorded diagnostics."
+    },
+    {
+      "action_id": null,
+      "aliases": [],
+      "code": "REVIEW_INPUT_UNSUPPORTED",
+      "emitter_scopes": [
+        "content_factory"
+      ],
+      "failure_class": "unsupported",
+      "fingerprint_profile": "semantic_findings_v1",
+      "introduced_in": 1,
+      "legacy": {
+        "code": "REVIEW_INPUT_UNSUPPORTED",
+        "failure_class": "unsupported",
+        "retryable": false
+      },
+      "owner": "content_factory",
+      "retry_policy": "stop_contract",
+      "user_message": "The saved operation cannot safely continue. Review its diagnostics."
+    },
+    {
+      "action_id": null,
+      "aliases": [],
+      "code": "REVIEW_PROVIDER_UNAVAILABLE",
+      "emitter_scopes": [
+        "content_factory"
+      ],
+      "failure_class": "transient",
+      "fingerprint_profile": "semantic_findings_v1",
+      "introduced_in": 1,
+      "legacy": {
+        "code": "REVIEW_PROVIDER_UNAVAILABLE",
+        "failure_class": "transient",
+        "retryable": true
+      },
+      "owner": "content_factory",
+      "retry_policy": "retry_same_step",
+      "user_message": "A service is temporarily unavailable. The same step can be resumed."
     },
     {
       "action_id": null,
@@ -3849,6 +4096,25 @@
     {
       "action_id": null,
       "aliases": [],
+      "code": "SETUP_QUEUE_NOT_STARTED",
+      "emitter_scopes": [
+        "content_factory"
+      ],
+      "failure_class": "transient",
+      "fingerprint_profile": "semantic_findings_v1",
+      "introduced_in": 1,
+      "legacy": {
+        "code": "SETUP_QUEUE_NOT_STARTED",
+        "failure_class": "transient",
+        "retryable": true
+      },
+      "owner": "content_factory",
+      "retry_policy": "retry_same_step",
+      "user_message": "A service is temporarily unavailable. The same step can be resumed."
+    },
+    {
+      "action_id": null,
+      "aliases": [],
       "code": "SETUP_RESUME_ENQUEUE_FAILED",
       "emitter_scopes": [
         "content_factory"
@@ -3921,6 +4187,25 @@
       "owner": "content_factory",
       "retry_policy": "stop_contract",
       "user_message": "The saved operation cannot safely continue. Review its diagnostics."
+    },
+    {
+      "action_id": null,
+      "aliases": [],
+      "code": "SETUP_STEP_STALLED",
+      "emitter_scopes": [
+        "content_factory"
+      ],
+      "failure_class": "transient",
+      "fingerprint_profile": "semantic_findings_v1",
+      "introduced_in": 1,
+      "legacy": {
+        "code": "SETUP_STEP_STALLED",
+        "failure_class": "transient",
+        "retryable": true
+      },
+      "owner": "content_factory",
+      "retry_policy": "retry_same_step",
+      "user_message": "A service is temporarily unavailable. The same step can be resumed."
     },
     {
       "action_id": null,
@@ -4058,6 +4343,25 @@
     {
       "action_id": null,
       "aliases": [],
+      "code": "SYNC_FAILED",
+      "emitter_scopes": [
+        "content_factory"
+      ],
+      "failure_class": "unsupported",
+      "fingerprint_profile": "semantic_findings_v1",
+      "introduced_in": 1,
+      "legacy": {
+        "code": "SYNC_FAILED",
+        "failure_class": "unsupported",
+        "retryable": false
+      },
+      "owner": "content_factory",
+      "retry_policy": "stop_contract",
+      "user_message": "The saved operation cannot safely continue. Review its diagnostics."
+    },
+    {
+      "action_id": null,
+      "aliases": [],
       "code": "TEMPLATE_PROVIDER_FAILED",
       "emitter_scopes": [
         "content_factory"
@@ -4150,6 +4454,25 @@
       "owner": "content_factory",
       "retry_policy": "stop_contract",
       "user_message": "An unregistered failure was stopped for operator review."
+    },
+    {
+      "action_id": "review_setup",
+      "aliases": [],
+      "code": "VALIDATION_ERROR",
+      "emitter_scopes": [
+        "content_factory"
+      ],
+      "failure_class": "needs_user",
+      "fingerprint_profile": "semantic_findings_v1",
+      "introduced_in": 1,
+      "legacy": {
+        "code": "VALIDATION_ERROR",
+        "failure_class": "needs_user",
+        "retryable": false
+      },
+      "owner": "content_factory",
+      "retry_policy": "await_owner_action",
+      "user_message": "Review the required website action to continue."
     },
     {
       "action_id": null,
@@ -4701,6 +5024,25 @@
       "owner": "backend.website_authority",
       "retry_policy": "stop_contract",
       "user_message": "The saved website operation cannot safely continue. Review its diagnostics."
+    },
+    {
+      "action_id": null,
+      "aliases": [],
+      "code": "browser_repair_build_validation_failed",
+      "emitter_scopes": [
+        "content_factory"
+      ],
+      "failure_class": "unsupported",
+      "fingerprint_profile": "semantic_findings_v1",
+      "introduced_in": 1,
+      "legacy": {
+        "code": "browser_repair_build_validation_failed",
+        "failure_class": "unsupported",
+        "retryable": false
+      },
+      "owner": "content_factory",
+      "retry_policy": "stop_contract",
+      "user_message": "The saved operation cannot safely continue. Review its diagnostics."
     },
     {
       "action_id": null,
@@ -6116,6 +6458,253 @@
     {
       "action_id": null,
       "aliases": [],
+      "code": "environment_bundler_crash",
+      "emitter_scopes": [
+        "content_factory"
+      ],
+      "failure_class": "unsupported",
+      "fingerprint_profile": "semantic_findings_v1",
+      "introduced_in": 1,
+      "legacy": {
+        "code": "environment_bundler_crash",
+        "failure_class": "unsupported",
+        "retryable": false
+      },
+      "owner": "content_factory",
+      "retry_policy": "stop_contract",
+      "user_message": "The saved operation cannot safely continue. Review its diagnostics."
+    },
+    {
+      "action_id": null,
+      "aliases": [],
+      "code": "environment_bundler_unstable",
+      "emitter_scopes": [
+        "content_factory"
+      ],
+      "failure_class": "unsupported",
+      "fingerprint_profile": "semantic_findings_v1",
+      "introduced_in": 1,
+      "legacy": {
+        "code": "environment_bundler_unstable",
+        "failure_class": "unsupported",
+        "retryable": false
+      },
+      "owner": "content_factory",
+      "retry_policy": "stop_contract",
+      "user_message": "The saved operation cannot safely continue. Review its diagnostics."
+    },
+    {
+      "action_id": null,
+      "aliases": [],
+      "code": "environment_cache_permission",
+      "emitter_scopes": [
+        "content_factory"
+      ],
+      "failure_class": "unsupported",
+      "fingerprint_profile": "semantic_findings_v1",
+      "introduced_in": 1,
+      "legacy": {
+        "code": "environment_cache_permission",
+        "failure_class": "unsupported",
+        "retryable": false
+      },
+      "owner": "content_factory",
+      "retry_policy": "stop_contract",
+      "user_message": "The saved operation cannot safely continue. Review its diagnostics."
+    },
+    {
+      "action_id": null,
+      "aliases": [],
+      "code": "environment_dependency_install_failure",
+      "emitter_scopes": [
+        "content_factory"
+      ],
+      "failure_class": "unsupported",
+      "fingerprint_profile": "semantic_findings_v1",
+      "introduced_in": 1,
+      "legacy": {
+        "code": "environment_dependency_install_failure",
+        "failure_class": "unsupported",
+        "retryable": false
+      },
+      "owner": "content_factory",
+      "retry_policy": "stop_contract",
+      "user_message": "The saved operation cannot safely continue. Review its diagnostics."
+    },
+    {
+      "action_id": null,
+      "aliases": [],
+      "code": "environment_disk_full",
+      "emitter_scopes": [
+        "content_factory"
+      ],
+      "failure_class": "unsupported",
+      "fingerprint_profile": "semantic_findings_v1",
+      "introduced_in": 1,
+      "legacy": {
+        "code": "environment_disk_full",
+        "failure_class": "unsupported",
+        "retryable": false
+      },
+      "owner": "content_factory",
+      "retry_policy": "stop_contract",
+      "user_message": "The saved operation cannot safely continue. Review its diagnostics."
+    },
+    {
+      "action_id": null,
+      "aliases": [],
+      "code": "environment_native_module_compile",
+      "emitter_scopes": [
+        "content_factory"
+      ],
+      "failure_class": "unsupported",
+      "fingerprint_profile": "semantic_findings_v1",
+      "introduced_in": 1,
+      "legacy": {
+        "code": "environment_native_module_compile",
+        "failure_class": "unsupported",
+        "retryable": false
+      },
+      "owner": "content_factory",
+      "retry_policy": "stop_contract",
+      "user_message": "The saved operation cannot safely continue. Review its diagnostics."
+    },
+    {
+      "action_id": null,
+      "aliases": [],
+      "code": "environment_native_module_missing",
+      "emitter_scopes": [
+        "content_factory"
+      ],
+      "failure_class": "unsupported",
+      "fingerprint_profile": "semantic_findings_v1",
+      "introduced_in": 1,
+      "legacy": {
+        "code": "environment_native_module_missing",
+        "failure_class": "unsupported",
+        "retryable": false
+      },
+      "owner": "content_factory",
+      "retry_policy": "stop_contract",
+      "user_message": "The saved operation cannot safely continue. Review its diagnostics."
+    },
+    {
+      "action_id": null,
+      "aliases": [],
+      "code": "environment_package_manager_missing",
+      "emitter_scopes": [
+        "content_factory"
+      ],
+      "failure_class": "unsupported",
+      "fingerprint_profile": "semantic_findings_v1",
+      "introduced_in": 1,
+      "legacy": {
+        "code": "environment_package_manager_missing",
+        "failure_class": "unsupported",
+        "retryable": false
+      },
+      "owner": "content_factory",
+      "retry_policy": "stop_contract",
+      "user_message": "The saved operation cannot safely continue. Review its diagnostics."
+    },
+    {
+      "action_id": null,
+      "aliases": [],
+      "code": "environment_runtime_conflict",
+      "emitter_scopes": [
+        "content_factory"
+      ],
+      "failure_class": "unsupported",
+      "fingerprint_profile": "semantic_findings_v1",
+      "introduced_in": 1,
+      "legacy": {
+        "code": "environment_runtime_conflict",
+        "failure_class": "unsupported",
+        "retryable": false
+      },
+      "owner": "content_factory",
+      "retry_policy": "stop_contract",
+      "user_message": "The saved operation cannot safely continue. Review its diagnostics."
+    },
+    {
+      "action_id": null,
+      "aliases": [],
+      "code": "environment_runtime_mismatch",
+      "emitter_scopes": [
+        "content_factory"
+      ],
+      "failure_class": "unsupported",
+      "fingerprint_profile": "semantic_findings_v1",
+      "introduced_in": 1,
+      "legacy": {
+        "code": "environment_runtime_mismatch",
+        "failure_class": "unsupported",
+        "retryable": false
+      },
+      "owner": "content_factory",
+      "retry_policy": "stop_contract",
+      "user_message": "The saved operation cannot safely continue. Review its diagnostics."
+    },
+    {
+      "action_id": null,
+      "aliases": [],
+      "code": "environment_runtime_unavailable",
+      "emitter_scopes": [
+        "content_factory"
+      ],
+      "failure_class": "unsupported",
+      "fingerprint_profile": "semantic_findings_v1",
+      "introduced_in": 1,
+      "legacy": {
+        "code": "environment_runtime_unavailable",
+        "failure_class": "unsupported",
+        "retryable": false
+      },
+      "owner": "content_factory",
+      "retry_policy": "stop_contract",
+      "user_message": "The saved operation cannot safely continue. Review its diagnostics."
+    },
+    {
+      "action_id": null,
+      "aliases": [],
+      "code": "environment_toolchain_incomplete",
+      "emitter_scopes": [
+        "content_factory"
+      ],
+      "failure_class": "unsupported",
+      "fingerprint_profile": "semantic_findings_v1",
+      "introduced_in": 1,
+      "legacy": {
+        "code": "environment_toolchain_incomplete",
+        "failure_class": "unsupported",
+        "retryable": false
+      },
+      "owner": "content_factory",
+      "retry_policy": "stop_contract",
+      "user_message": "The saved operation cannot safely continue. Review its diagnostics."
+    },
+    {
+      "action_id": null,
+      "aliases": [],
+      "code": "environment_toolchain_unresolved",
+      "emitter_scopes": [
+        "content_factory"
+      ],
+      "failure_class": "unsupported",
+      "fingerprint_profile": "semantic_findings_v1",
+      "introduced_in": 1,
+      "legacy": {
+        "code": "environment_toolchain_unresolved",
+        "failure_class": "unsupported",
+        "retryable": false
+      },
+      "owner": "content_factory",
+      "retry_policy": "stop_contract",
+      "user_message": "The saved operation cannot safely continue. Review its diagnostics."
+    },
+    {
+      "action_id": null,
+      "aliases": [],
       "code": "generated_article_body_missing",
       "emitter_scopes": [
         "content_factory"
@@ -6207,6 +6796,44 @@
       "owner": "content_factory",
       "retry_policy": "repair_owned_candidate",
       "user_message": "The saved operation requires the recorded recovery action."
+    },
+    {
+      "action_id": null,
+      "aliases": [],
+      "code": "generated_materialization_failed",
+      "emitter_scopes": [
+        "content_factory"
+      ],
+      "failure_class": "unsupported",
+      "fingerprint_profile": "semantic_findings_v1",
+      "introduced_in": 1,
+      "legacy": {
+        "code": "generated_materialization_failed",
+        "failure_class": "unsupported",
+        "retryable": false
+      },
+      "owner": "content_factory",
+      "retry_policy": "stop_contract",
+      "user_message": "The saved operation cannot safely continue. Review its diagnostics."
+    },
+    {
+      "action_id": null,
+      "aliases": [],
+      "code": "generated_unresolved_import",
+      "emitter_scopes": [
+        "content_factory"
+      ],
+      "failure_class": "unsupported",
+      "fingerprint_profile": "semantic_findings_v1",
+      "introduced_in": 1,
+      "legacy": {
+        "code": "generated_unresolved_import",
+        "failure_class": "unsupported",
+        "retryable": false
+      },
+      "owner": "content_factory",
+      "retry_policy": "stop_contract",
+      "user_message": "The saved operation cannot safely continue. Review its diagnostics."
     },
     {
       "action_id": null,
@@ -8285,6 +8912,25 @@
     {
       "action_id": null,
       "aliases": [],
+      "code": "preview_runtime",
+      "emitter_scopes": [
+        "content_factory"
+      ],
+      "failure_class": "unsupported",
+      "fingerprint_profile": "semantic_findings_v1",
+      "introduced_in": 1,
+      "legacy": {
+        "code": "preview_runtime",
+        "failure_class": "unsupported",
+        "retryable": false
+      },
+      "owner": "content_factory",
+      "retry_policy": "stop_contract",
+      "user_message": "The saved operation cannot safely continue. Review its diagnostics."
+    },
+    {
+      "action_id": null,
+      "aliases": [],
       "code": "preview_runtime_failed",
       "emitter_scopes": [
         "content_factory"
@@ -8437,6 +9083,44 @@
     {
       "action_id": null,
       "aliases": [],
+      "code": "publish_preview_capability_missing",
+      "emitter_scopes": [
+        "content_factory"
+      ],
+      "failure_class": "unsupported",
+      "fingerprint_profile": "semantic_findings_v1",
+      "introduced_in": 1,
+      "legacy": {
+        "code": "publish_preview_capability_missing",
+        "failure_class": "unsupported",
+        "retryable": false
+      },
+      "owner": "content_factory",
+      "retry_policy": "stop_contract",
+      "user_message": "The saved operation cannot safely continue. Review its diagnostics."
+    },
+    {
+      "action_id": null,
+      "aliases": [],
+      "code": "publish_resolution_not_preview_ready",
+      "emitter_scopes": [
+        "content_factory"
+      ],
+      "failure_class": "unsupported",
+      "fingerprint_profile": "semantic_findings_v1",
+      "introduced_in": 1,
+      "legacy": {
+        "code": "publish_resolution_not_preview_ready",
+        "failure_class": "unsupported",
+        "retryable": false
+      },
+      "owner": "content_factory",
+      "retry_policy": "stop_contract",
+      "user_message": "The saved operation cannot safely continue. Review its diagnostics."
+    },
+    {
+      "action_id": null,
+      "aliases": [],
       "code": "publish_target_path_collision",
       "emitter_scopes": [
         "content_factory"
@@ -8570,6 +9254,82 @@
     {
       "action_id": null,
       "aliases": [],
+      "code": "repo_baseline_build_failure",
+      "emitter_scopes": [
+        "content_factory"
+      ],
+      "failure_class": "repairable",
+      "fingerprint_profile": "semantic_findings_v1",
+      "introduced_in": 1,
+      "legacy": {
+        "code": "repo_baseline_build_failure",
+        "failure_class": "repairable",
+        "retryable": false
+      },
+      "owner": "content_factory",
+      "retry_policy": "repair_owned_candidate",
+      "user_message": "The generated candidate needs a validated repair."
+    },
+    {
+      "action_id": null,
+      "aliases": [],
+      "code": "repo_code_build",
+      "emitter_scopes": [
+        "content_factory"
+      ],
+      "failure_class": "repairable",
+      "fingerprint_profile": "semantic_findings_v1",
+      "introduced_in": 1,
+      "legacy": {
+        "code": "repo_code_build",
+        "failure_class": "repairable",
+        "retryable": false
+      },
+      "owner": "content_factory",
+      "retry_policy": "repair_owned_candidate",
+      "user_message": "The generated candidate needs a validated repair."
+    },
+    {
+      "action_id": null,
+      "aliases": [],
+      "code": "repo_code_typecheck",
+      "emitter_scopes": [
+        "content_factory"
+      ],
+      "failure_class": "repairable",
+      "fingerprint_profile": "semantic_findings_v1",
+      "introduced_in": 1,
+      "legacy": {
+        "code": "repo_code_typecheck",
+        "failure_class": "repairable",
+        "retryable": false
+      },
+      "owner": "content_factory",
+      "retry_policy": "repair_owned_candidate",
+      "user_message": "The generated candidate needs a validated repair."
+    },
+    {
+      "action_id": null,
+      "aliases": [],
+      "code": "repo_dependency_conflict",
+      "emitter_scopes": [
+        "content_factory"
+      ],
+      "failure_class": "unsupported",
+      "fingerprint_profile": "semantic_findings_v1",
+      "introduced_in": 1,
+      "legacy": {
+        "code": "repo_dependency_conflict",
+        "failure_class": "unsupported",
+        "retryable": false
+      },
+      "owner": "content_factory",
+      "retry_policy": "stop_contract",
+      "user_message": "The saved operation cannot safely continue. Review its diagnostics."
+    },
+    {
+      "action_id": null,
+      "aliases": [],
       "code": "repo_domain_org_conflict",
       "emitter_scopes": [
         "backend.articles"
@@ -8585,6 +9345,25 @@
       "owner": "backend.articles",
       "retry_policy": "stop_contract",
       "user_message": "The saved article operation needs attention."
+    },
+    {
+      "action_id": null,
+      "aliases": [],
+      "code": "repo_manifest_contract",
+      "emitter_scopes": [
+        "content_factory"
+      ],
+      "failure_class": "repairable",
+      "fingerprint_profile": "semantic_findings_v1",
+      "introduced_in": 1,
+      "legacy": {
+        "code": "repo_manifest_contract",
+        "failure_class": "repairable",
+        "retryable": false
+      },
+      "owner": "content_factory",
+      "retry_policy": "repair_owned_candidate",
+      "user_message": "The generated candidate needs a validated repair."
     },
     {
       "action_id": null,
@@ -9322,6 +10101,25 @@
       "introduced_in": 1,
       "legacy": {
         "code": "token_refresh_unavailable",
+        "failure_class": "transient",
+        "retryable": true
+      },
+      "owner": "content_factory",
+      "retry_policy": "retry_same_step",
+      "user_message": "A service is temporarily unavailable. The same step can be resumed."
+    },
+    {
+      "action_id": null,
+      "aliases": [],
+      "code": "transient_install_network",
+      "emitter_scopes": [
+        "content_factory"
+      ],
+      "failure_class": "transient",
+      "fingerprint_profile": "semantic_findings_v1",
+      "introduced_in": 1,
+      "legacy": {
+        "code": "transient_install_network",
         "failure_class": "transient",
         "retryable": true
       },
@@ -10359,6 +11157,8 @@
     "UNDECLARED_MODEL_ADAPTER_DEPENDENCY",
     "UNDECLARED_MODEL_ADAPTER_IMPORT",
     "UNRESOLVED_PACKAGE_IMPORT",
+    "UNRESOLVED_RELATIVE_IMPORT",
+    "UNVERIFIED_COMPONENT_IMPORT",
     "UNVERIFIED_FRAMEWORK_VIRTUAL_IMPORT",
     "adopted_page_regression",
     "adoption_layout_proof_unavailable",
