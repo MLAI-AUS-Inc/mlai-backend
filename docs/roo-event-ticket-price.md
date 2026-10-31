@@ -1,6 +1,6 @@
-# Community event ticket: 15 Roo Points
+# Community event ticket: 32 Roo Points
 
-The approved EVENT_TICKET price is 15 Roo Points. The catalogue model remains the single source for the Home API, rewards API, affordability and redemption charge.
+The approved EVENT_TICKET price is 32 Roo Points for one fully covered ticket whose regular price is strictly below A$100. Tickets at A$100 or above are excluded. Already-free tickets do not need points. The catalogue model remains the single source for the Home API, rewards API, affordability and redemption charge.
 
 After deploying the command, preview against the intended environment:
 
@@ -14,6 +14,17 @@ Apply the approved catalogue update:
 python manage.py set_community_event_ticket_price --apply
 ```
 
-This locks and changes only EVENT_TICKET.cost_points. It does not create a migration, change balances or stock, or create a redemption. Repeating the command is safe. A missing reward fails without creating a replacement. Verify the rewards API returns 15 before publishing matching public website pricing.
+This locks and changes only EVENT_TICKET.cost_points. It does not create a migration, change balances or stock, or create a redemption. Repeating the command is safe. A missing reward fails without creating a replacement. Verify the rewards API returns 32 before publishing matching public website pricing.
 
-Manual redemptions use the catalogue price at approval time; already completed ledger entries are unchanged.
+New ticket redemptions must use an event-specific quote, so the generic reward path cannot bypass the live price and eligibility checks. Already completed ledger entries are unchanged.
+
+Configure each eligible event with the preview-first command:
+
+```sh
+python manage.py configure_event_ticket_offer --event-id evt-EXAMPLE --ticket-type-id ttype-EXAMPLE
+# Add --apply only after reviewing the preview.
+```
+
+This validates the exact managed event and ticket, saves a 100% single-use offer at 32 points, and expires it no later than event start or ticket sales close. It does not issue a coupon or spend any points. It rejects changes while an event has processing redemptions. Hidden, flexible, non-AUD, unavailable and group-registration tickets remain excluded. Issuance rechecks the live ticket price before creating a coupon, including a price increase to A$100 after the quote.
+
+Approval-required tickets are allowed under the user's 30 October approval, including Stranger Builds. The quote explicitly states that organiser approval is not guaranteed and points are spent when the coupon is issued, before approval. A change to approval requirements after the quote prevents issuance and requires a new quote. Roo never changes Luma's admission settings.
