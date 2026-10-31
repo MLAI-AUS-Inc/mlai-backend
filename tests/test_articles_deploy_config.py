@@ -14,6 +14,12 @@ from scripts.validate_articles_deploy_config import (
 
 ROOT = Path(__file__).resolve().parents[1]
 WINDOWS = '[{"start": "2026-11-07T22:00:00Z", "end": "2026-11-08T03:00:00Z"}]'
+# The P1 founder journey keys that are neither switches nor counts.
+JOURNEY_VALUES = {
+    "MY_STARTUP_FOUNDER_JOURNEY_V2_LAUNCHED_AT": "2026-11-07T09:00:00+11:00",
+    "MY_STARTUP_FOUNDER_JOURNEY_V2_DISABLED_ORGANIZATIONS": "123, pawshare.com.au",
+    "COMMUNITY_CHAT_INVITE_RESOLVE_RATE": "30/minute",
+}
 
 
 class ArticlesDeployConfigTests(unittest.TestCase):
@@ -26,7 +32,11 @@ class ArticlesDeployConfigTests(unittest.TestCase):
                   **{key: "0" for key in COUNT_KEYS},
                   **{key: "600" for key in POSITIVE_KEYS},
                   "ARTICLES_FOUNDER_JOURNEY_ALERTS_SINCE": "2026-10-30",
-                  "ARTICLES_WORKSHOP_WINDOWS": WINDOWS})
+                  "ARTICLES_WORKSHOP_WINDOWS": WINDOWS,
+                  **JOURNEY_VALUES})
+        validate({"MY_STARTUP_FOUNDER_JOURNEY_V2_LAUNCHED_AT": "2026-11-07T22:00Z",
+                  "MY_STARTUP_FOUNDER_JOURNEY_V2_DISABLED_ORGANIZATIONS": "none",
+                  "COMMUNITY_CHAT_INVITE_RESOLVE_RATE": "10/m"})
         validate({**{key: "false" for key in FLAG_KEYS},
                   **{key: "25" for key in COUNT_KEYS},
                   **{key: "1" for key in POSITIVE_KEYS},
@@ -57,7 +67,18 @@ class ArticlesDeployConfigTests(unittest.TestCase):
                            ("ARTICLES_WORKSHOP_WINDOWS", '[{"start": "2026-11-07T22:00:00Z", "end": "2026-11-31T03:00:00Z"}]'),
                            ("ARTICLES_WORKSHOP_WINDOWS", '[{"start": "2026-11-07T22:00:00Z", "end": "$sensitive"}]'),
                            ("ARTICLES_WORKSHOP_WINDOWS", "[" + ",".join([WINDOWS[1:-1]] * 51) + "]"),
-                           ("ARTICLES_FIRST_ARTICLE_GOAL_ENABLED", "true\nsensitive")):
+                           ("ARTICLES_FIRST_ARTICLE_GOAL_ENABLED", "true\nsensitive"),
+                           ("MY_STARTUP_FOUNDER_JOURNEY_V2_ENABLED", "on"),
+                           ("COMMUNITY_CHAT_INVITE_TOKEN_MAX_TTL_HOURS", "0"),
+                           # The backend ignores a naive launch time, so the launch would never happen.
+                           ("MY_STARTUP_FOUNDER_JOURNEY_V2_LAUNCHED_AT", "2026-11-07T09:00:00"),
+                           ("MY_STARTUP_FOUNDER_JOURNEY_V2_LAUNCHED_AT", "sensitive"),
+                           ("MY_STARTUP_FOUNDER_JOURNEY_V2_DISABLED_ORGANIZATIONS", "pawshare.com.au;sensitive"),
+                           ("MY_STARTUP_FOUNDER_JOURNEY_V2_DISABLED_ORGANIZATIONS", "123,,sensitive"),
+                           ("MY_STARTUP_FOUNDER_JOURNEY_V2_DISABLED_ORGANIZATIONS", "a" * 2001),
+                           ("COMMUNITY_CHAT_INVITE_RESOLVE_RATE", "30/fortnight"),
+                           ("COMMUNITY_CHAT_INVITE_RESOLVE_RATE", "0/minute"),
+                           ("COMMUNITY_CHAT_INVITE_RESOLVE_RATE", "sensitive")):
             with self.subTest(key=key, value=value[:40]), self.assertRaises(ValueError) as caught:
                 validate({key: value})
             self.assertNotIn("sensitive", str(caught.exception))
@@ -85,6 +106,8 @@ class ArticlesDeployConfigTests(unittest.TestCase):
                     value = "2026-10-30"
                 elif key == "ARTICLES_WORKSHOP_WINDOWS":
                     value = WINDOWS
+                elif key in JOURNEY_VALUES:
+                    value = JOURNEY_VALUES[key]
                 else:
                     value = "7"
                 result = upsert(key, value)
@@ -104,6 +127,9 @@ class ArticlesDeployConfigTests(unittest.TestCase):
             self.assertEqual(text.count("ARTICLES_FREE_FIRST_ARTICLE_ENABLED="), 1)
             self.assertIn("AUTH_THROTTLE_IP_DEVICE_AUTH_PER_10M=7\n", text)
             self.assertIn(f"ARTICLES_WORKSHOP_WINDOWS={WINDOWS}\n", text)
+            self.assertIn("MY_STARTUP_FOUNDER_JOURNEY_V2_ENABLED=true\n", text)
+            for key, value in JOURNEY_VALUES.items():
+                self.assertIn(f"{key}={value}\n", text)
 
     def test_every_setting_is_read_by_the_backend(self):
         # A misspelt name would install a value nothing reads.

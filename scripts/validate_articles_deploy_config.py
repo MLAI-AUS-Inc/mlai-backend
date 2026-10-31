@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Validate the founder-journey Articles switches before production mutation.
+"""Validate the founder-journey Articles and My startup switches before production mutation.
 
 Every setting is optional: an empty value keeps whatever the host's ``.env``
 already holds, so a release never switches a founder path off by omission.
@@ -27,6 +27,25 @@ FLAG_KEYS = (
     # Run snapshots merge by meaning, and Content Factory run events are kept.
     "ARTICLES_SNAPSHOT_MERGE_BY_MEANING_ENABLED",
     "ARTICLES_RUN_EVENTS_ENABLED",
+    # P1 founder journey ("one simple path"): the master switch, then the join,
+    # sign-in and cohort-gated feature switches, in the P1 turn-on order.
+    "MY_STARTUP_FOUNDER_JOURNEY_V2_ENABLED",
+    "MY_STARTUP_FOUNDER_JOURNEY_API_ENABLED",
+    "MY_STARTUP_FOUNDER_JOURNEY_OPT_IN_ENABLED",
+    "COMMUNITY_CHAT_ONE_STEP_JOIN_ENABLED",
+    "COMMUNITY_CHAT_INVITE_TOKENS_ENABLED",
+    "MY_STARTUP_PENDING_MEMBER_ACCESS_ENABLED",
+    "COMMUNITY_CHAT_REVIEW_CLEARED_EMAIL_ENABLED",
+    "COMMUNITY_CHAT_DEVICE_AUTH_V2_ENABLED",
+    "MY_STARTUP_ONE_FIELD_START_ENABLED",
+    "MY_STARTUP_NO_WEBSITE_ARTICLES_ENABLED",
+    "ARTICLES_FIRST_ARTICLE_CARD_ENABLED",
+    "ARTICLES_COPY_READY_BEFORE_VERIFICATION_ENABLED",
+    "ARTICLES_DRAFT_READY_NOTIFICATIONS_ENABLED",
+    "ARTICLES_COPY_WITHOUT_PREVIEW_ENABLED",
+    "ARTICLES_DRAFT_TOOLS_ENABLED",
+    "ARTICLES_LIVE_URL_VERIFICATION_ENABLED",
+    "MY_STARTUP_GITHUB_CALLBACK_REDIRECTS_ENABLED",
 )
 # 0 means "no cap", "off" or, for the queue slots, "no ETA".
 COUNT_KEYS = (
@@ -45,10 +64,25 @@ POSITIVE_KEYS = (
     "AUTH_THROTTLE_IP_PASSWORD_PER_10M",
     "AUTH_THROTTLE_IP_BOOTSTRAP_AUTHENTICATED_PER_10M",
     "AUTH_THROTTLE_IP_DEVICE_AUTH_PER_10M",
+    # Invite links and desktop sign-in requests must live at least an hour or a second.
+    "COMMUNITY_CHAT_INVITE_TOKEN_DEFAULT_TTL_HOURS",
+    "COMMUNITY_CHAT_INVITE_TOKEN_MAX_TTL_HOURS",
+    "COMMUNITY_CHAT_DEVICE_AUTH_MAX_LIFETIME_SECONDS",
 )
 ALERTS_SINCE = "ARTICLES_FOUNDER_JOURNEY_ALERTS_SINCE"
 WORKSHOP_WINDOWS = "ARTICLES_WORKSHOP_WINDOWS"
-KEYS = (*FLAG_KEYS, *COUNT_KEYS, *POSITIVE_KEYS, ALERTS_SINCE, WORKSHOP_WINDOWS)
+# Startups created at or after this time join the new journey. The backend
+# ignores a naive time, which would leave the launch silently switched off.
+JOURNEY_LAUNCHED_AT = "MY_STARTUP_FOUNDER_JOURNEY_V2_LAUNCHED_AT"
+# Per-organisation kill switch: organisation ids or domains, comma separated.
+# An empty release value keeps the host's list, so clear it with "none".
+JOURNEY_DISABLED_ORGANIZATIONS = "MY_STARTUP_FOUNDER_JOURNEY_V2_DISABLED_ORGANIZATIONS"
+# A Django REST framework rate such as 30/minute. A malformed one breaks every
+# invite resolve at request time.
+INVITE_RESOLVE_RATE = "COMMUNITY_CHAT_INVITE_RESOLVE_RATE"
+KEYS = (*FLAG_KEYS, *COUNT_KEYS, *POSITIVE_KEYS, ALERTS_SINCE, WORKSHOP_WINDOWS,
+        JOURNEY_LAUNCHED_AT, JOURNEY_DISABLED_ORGANIZATIONS, INVITE_RESOLVE_RATE)
+MAX_DISABLED_ORGANIZATIONS_LENGTH = 2000
 
 MAX_WORKSHOP_WINDOWS = 50
 # An explicit offset is required: the scheduler reads a naive time as UTC,
@@ -112,6 +146,16 @@ def validate_single(key: str, value: str, *, optional: bool = False) -> None:
             raise ValueError(f"{key} must be an ISO date (YYYY-MM-DD)") from exc
     elif key == WORKSHOP_WINDOWS:
         _validate_workshop_windows(key, value)
+    elif key == JOURNEY_LAUNCHED_AT:
+        if _window_time(value) is None:
+            raise ValueError(f"{key} must be an ISO 8601 time with an explicit offset")
+    elif key == JOURNEY_DISABLED_ORGANIZATIONS:
+        if (len(value) > MAX_DISABLED_ORGANIZATIONS_LENGTH
+                or not re.fullmatch(r"[A-Za-z0-9.-]+(?: *, *[A-Za-z0-9.-]+)*", value)):
+            raise ValueError(f"{key} must be comma-separated organisation ids or domains")
+    elif key == INVITE_RESOLVE_RATE:
+        if not re.fullmatch(r"[1-9][0-9]{0,6}/(?:s|sec|second|m|min|minute|h|hour|d|day)", value):
+            raise ValueError(f"{key} must be a rate such as 30/minute")
     else:
         raise ValueError("Unsupported Articles configuration key")
 
