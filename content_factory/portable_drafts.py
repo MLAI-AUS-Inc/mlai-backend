@@ -211,3 +211,83 @@ def requests_content_only(payload):
         return False
     return (flag(first("delivery_mode_explicit", "deliveryModeExplicit"))
             or flag(first("delivery_mode_confirmed", "deliveryModeConfirmed")))
+
+
+# P1.8 (IF-P1-10): for the new-journey cohort, any article started before the
+# website verifies is copy-ready, and a verified website upgrades an article
+# to a repository review draft only once the owner chose "Publish
+# automatically". Legacy organisations keep the 17 Oct rule above.
+COPY_READY_FLAG = "ARTICLES_COPY_READY_BEFORE_VERIFICATION_ENABLED"
+
+
+def copy_ready_before_verification(organization, config=None):
+    """True when ``ARTICLES_COPY_READY_BEFORE_VERIFICATION_ENABLED`` is on and the org is new-journey.
+
+    The switch is read first, so with it off no cohort read happens.
+    """
+    from django.conf import settings
+    if organization is None or not getattr(settings, COPY_READY_FLAG, False):
+        return False
+    from .founder_journey_cohort import is_new_journey
+    return is_new_journey(organization, config)
+
+
+def publishes_automatically(organization, config=None):
+    """True when the cohort marker records the owner's "Publish automatically" choice."""
+    from .founder_journey_cohort import read_marker
+    marker = read_marker(organization, config) or {}
+    return isinstance(marker.get("publishAutomatically"), dict)
+
+
+def keeps_copy_ready_start(organization, config, payload, *, can_generate_article):
+    """True when an explicit content_only start for a connected website stays copy-ready.
+
+    ``can_generate_article`` is a zero-argument callable returning today's
+    ``canGenerateArticle``; it is called only when the owner chose "Publish
+    automatically", the one case where a ready website still upgrades the
+    article to a review draft. False (today's preview rule) for every
+    organisation outside the gate and for any request that is not an explicit,
+    confirmed portable choice.
+
+    When this is True the caller must continue with :func:`copy_ready_request`,
+    so the start leaves as a portable run however the client spelled its
+    confirmation. A start that names no delivery mode is outside this gate and
+    keeps today's repository path: enforcing "Publish automatically" beyond the
+    content_only upgrade is P2.13.
+    """
+    if not copy_ready_before_verification(organization, config) or not explicit_portable_request(payload):
+        return False
+    if not publishes_automatically(organization, config):
+        return True
+    return not can_generate_article()
+
+
+def copy_ready_request(data):
+    """A copy of a start request that every later read sees as an explicit content_only choice.
+
+    :func:`explicit_portable_request` accepts ``deliveryModeConfirmed`` alone,
+    while the rest of the article start reads only the explicit marker. The
+    snake_case keys are read first by every alias lookup, so this copy makes
+    the start a portable run with no repository or connection ids.
+    """
+    items = data.items() if hasattr(data, "items") else ()
+    return {**dict(items), "delivery_mode": "content_only", "delivery_mode_explicit": True,
+            "delivery_mode_confirmed": True}
+
+
+def copy_ready_reported_mode(config):
+    """``"content_only"`` while a new-journey website would not upgrade articles, else None.
+
+    That is the case until the website has a verified connection and the owner
+    chose "Publish automatically". None (today's report) outside the gate.
+    """
+    from django.conf import settings
+    if config is None or not getattr(settings, COPY_READY_FLAG, False):
+        return None
+    organization = getattr(config, "organization", None)
+    if not copy_ready_before_verification(organization, config):
+        return None
+    from .founder_journey_cohort import has_connected_website as has_verified_website
+    if has_verified_website(organization) and publishes_automatically(organization, config):
+        return None
+    return "content_only"

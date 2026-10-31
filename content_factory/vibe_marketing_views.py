@@ -521,7 +521,16 @@ def _stored_article_delivery_mode(config) -> str:
 
 
 def _reported_article_delivery_mode(config) -> str:
-    """Saved mode for settings payloads; never content_only for a connected website."""
+    """Saved mode for settings payloads; never content_only for a connected website.
+
+    P1.8 (IF-P1-10): a new-journey organisation reports content_only until its
+    website verifies and the owner chose "Publish automatically". Stored
+    values are never rewritten.
+    """
+    from .portable_drafts import copy_ready_reported_mode
+    copy_ready = copy_ready_reported_mode(config)
+    if copy_ready:
+        return copy_ready
     return _stored_article_delivery_mode(config) or ("review_draft" if has_connected_website(config) else "content_only")
 
 
@@ -7198,6 +7207,14 @@ def _maybe_auto_publish_setup(*, run, context):
         return
     if not _setup_pending_status_allows_auto_publish(run):
         return
+    # P1.14 (IF-P1-17): an organisation that needs the owner click merges a
+    # setup change only on that owner's "Add to my website" receipt. None
+    # (or no hook module yet) keeps today's policy.
+    from .website_views import setup_owner_approval_hooks
+    owner_approval = setup_owner_approval_hooks()
+    if owner_approval is not None and owner_approval.may_merge_setup(organization=context.organization, run=run) is False:
+        logger.info("vibe_marketing_setup_auto_publish_waits_for_owner run_id=%s", run.run_id)
+        return
     try:
         outcome = _attempt_setup_publish_merge(run=run, context=context, automatic=True)
         logger.info("vibe_marketing_setup_auto_publish run_id=%s outcome=%s", run.run_id, outcome.get("outcome"))
@@ -12433,7 +12450,10 @@ def _overlay_live_bootstrap_fields(payload, *, context, request, config=None, la
     runs = latest_runs if latest_runs is not None else _latest_runs_for_org(context.organization, limit=24,
         config=website_config, prefetch_feedback=True)
     if capabilities is None:
-        capabilities = _article_capabilities_for_context(context, website_config, latest_runs=runs, allow_probe=False)
+        from .no_website_capabilities import apply_no_website_capabilities
+        capabilities = apply_no_website_capabilities(
+            _article_capabilities_for_context(context, website_config, latest_runs=runs, allow_probe=False),
+            organization=context.organization, config=website_config)
     payload["articleCapabilities"] = capabilities
     from .website_journey import journey_for_context
     payload["websiteJourney"] = journey_for_context(context, website_config, capabilities=capabilities, owner_view=True)
@@ -12622,6 +12642,7 @@ def _compute_bootstrap_payload(context, request=None, *, view="summary", config=
         article_setup_state=article_setup_state,
         has_completed_article_flow=has_completed_article_flow,
     )
+    from .no_website_capabilities import apply_no_website_capabilities
     return {
         "company": {
             "id": str(context.company.id),
@@ -12665,7 +12686,9 @@ def _compute_bootstrap_payload(context, request=None, *, view="summary", config=
         "websiteBaseline": _serialize_baseline_snapshot(baseline_snapshot, config, compact=compact),
         "googleBaselineConnection": google_status,
         "checks": checks,
-        "articleCapabilities": _article_capabilities_for_context(context, config, latest_runs=latest_runs, allow_probe=False),
+        "articleCapabilities": apply_no_website_capabilities(
+            _article_capabilities_for_context(context, config, latest_runs=latest_runs, allow_probe=False),
+            organization=context.organization, config=config),
         "articleSetupState": article_setup_state,
         "article_setup_state": article_setup_state,
         "latestRuns": serialized_runs,
@@ -15815,6 +15838,18 @@ class VibeMarketingBootstrapView(APIView):
         if error_response is not None:
             return error_response
         if not normalize_company_domain(company.domain):
+            # P1.6 (IF-P1-08): a new-journey startup with no website gets the
+            # real bootstrap (capabilities, firstArticle, founderJourney). It
+            # skips the website verification refresh: there is nothing to verify.
+            # The switch is read first, so with it off nothing new is read.
+            from .no_website_capabilities import applies as no_website_applies, no_website_articles_enabled
+            if (no_website_articles_enabled() and getattr(company, "organization_id", None)
+                    and no_website_applies(company.organization)):
+                context, error_response = _resolve_context_or_response(request, require_domain=False)
+                if error_response:
+                    return error_response
+                payload = _serialize_bootstrap(context, request=request, view=view)
+                return _timed_vibe_response(payload, started_at=started_at, metric_name="vibe_bootstrap", view=view)
             return _timed_vibe_response(
                 _serialize_bootstrap_without_domain(company, user=getattr(request, "user", None)),
                 started_at=started_at,
@@ -16912,6 +16947,11 @@ class VibeMarketingBaselineHistoryView(APIView):
 
 class VibeMarketingGitHubConnectView(APIView):
     def post(self, request):
+        # P1.6 (IF-P1-08, IF-P1-17): a new-journey startup with no website is
+        # refused before any GitHub state is minted.
+        from .no_website_capabilities import NO_WEBSITE_GITHUB_REFUSAL, resolve_no_website_context
+        if resolve_no_website_context(request) is not None:
+            return Response(dict(NO_WEBSITE_GITHUB_REFUSAL), status=status.HTTP_409_CONFLICT)
         context, error = _resolve_context_or_response(request)
         if error:
             return error
@@ -17637,6 +17677,11 @@ def start_article_research(*, user, context, data, request_hash=None):
 
 class VibeMarketingDiscoveryView(APIView):
     def post(self, request):
+        # P1.6 (IF-P1-08): no topic research is dispatched for a new-journey
+        # startup with no website; its first topics come from its description.
+        from .no_website_capabilities import NO_WEBSITE_TOPICS_REFUSAL, resolve_no_website_context
+        if resolve_no_website_context(request) is not None:
+            return Response(dict(NO_WEBSITE_TOPICS_REFUSAL), status=status.HTTP_409_CONFLICT)
         context, error_response = _resolve_context_or_response(request)
         if error_response:
             return error_response
@@ -17891,10 +17936,19 @@ def start_article_generation(*, user, context, data, request_hash=None, website_
     """Execute the canonical owned operation for HTTP and MCP transports."""
     command = ContentCommand(user=user, data=data)
     config = _get_config(context.organization)
-    from .portable_drafts import has_connected_website, requests_content_only
+    from .portable_drafts import copy_ready_request, has_connected_website, keeps_copy_ready_start, requests_content_only
     if requests_content_only(command.data) and has_connected_website(config):
-        return _start_website_preview_article(user=user, context=context, config=config, data=command.data,
-            request_hash=request_hash, website_contract=website_contract, goal_operation_id=goal_operation_id)
+        # P1.8 (IF-P1-10): a new-journey article started before the website
+        # verifies (or before the owner chose "Publish automatically") stays
+        # copy-ready and continues below as a portable run, made explicit so a
+        # confirmed-only request never leaves as a repository run.
+        if keeps_copy_ready_start(context.organization, config, command.data, can_generate_article=lambda: (
+                _article_capabilities_for_context(context, config, force=True)["canGenerateArticle"])):
+            logger.info("vibe_marketing_article_copy_ready_before_verification org_id=%s", context.organization.pk)
+            command = ContentCommand(user=command.user, data=copy_ready_request(command.data))
+        else:
+            return _start_website_preview_article(user=user, context=context, config=config, data=command.data,
+                request_hash=request_hash, website_contract=website_contract, goal_operation_id=goal_operation_id)
     blocked_response = _setup_blocked_response_for_generation(context, config, request_data=command.data)
     if blocked_response is not None:
         return blocked_response
@@ -18126,10 +18180,13 @@ def start_article_generation(*, user, context, data, request_hash=None, website_
         return Response({"detail": str(exc), "field": "editorialBrief"}, status=status.HTTP_400_BAD_REQUEST)
     if editorial_brief is not None:
         payload["editorial_brief"] = editorial_brief
+    # P1.6 (IF-P1-08): a startup with no website has no site to measure, so
+    # no analytics site is provisioned for its placeholder domain.
+    from .no_website_capabilities import applies as no_website_applies
     payload["analytics_config"] = analytics_config_for_content_factory(
         context.organization,
         analytics_article_id=payload["analytics_article_id"],
-        provision_if_missing=True,
+        provision_if_missing=not no_website_applies(context.organization, config),
     )
     if delivery_mode_explicit and delivery_mode:
         payload["delivery_mode"] = delivery_mode
@@ -18187,9 +18244,14 @@ def start_article_generation(*, user, context, data, request_hash=None, website_
 class VibeMarketingArticleView(APIView):
     @guarded_owner_operation("read", run_operation=False)
     def post(self, request):
-        context, error_response = _resolve_context_or_response(request)
-        if error_response:
-            return error_response
+        # P1.6 (IF-P1-08): an explicit portable start from a new-journey
+        # startup with no website resolves without a domain.
+        from .no_website_capabilities import portable_no_website_context
+        context = portable_no_website_context(request)
+        if context is None:
+            context, error_response = _resolve_context_or_response(request)
+            if error_response:
+                return error_response
         return start_article_generation(user=request.user, context=context, data=request.data)
 
 
@@ -19883,6 +19945,26 @@ def control_article_run(*, user, context, run, action, data, run_id=None, goal_o
             {"detail": "The article preview changed before approval. Refresh and review the current preview."},
             status=status.HTTP_409_CONFLICT,
         )
+    setup_owner_approval = owner_approval_snapshot = None
+    if action == "approve" and run.workflow == "article_system_setup":
+        # P1.14 (IF-P1-17): the owner's approve of a setup run is the owner
+        # click. Its receipt is recorded before anything can merge; "manual"
+        # means MLAI never merges this setup change server-side. No hook
+        # module, or an organisation that needs no owner click, is today's path.
+        from .website_views import setup_owner_approval_hooks
+        owner_approval = setup_owner_approval_hooks()
+        if owner_approval is not None and owner_approval.requires_owner_click(context.organization):
+            from founder_tools.services import user_may_use_organization
+            if not user_may_use_organization(command.user, context.organization):
+                return Response({"detail": "Only your startup's owner can add this to your website.",
+                                 "reason": "owner_required"}, status=status.HTTP_403_FORBIDDEN)
+            from .website_views import setup_owner_approval_snapshot
+            owner_approval_snapshot = setup_owner_approval_snapshot(context.organization)
+            setup_owner_approval = owner_approval.on_owner_setup_approve(
+                organization=context.organization, user=command.user, run=run, data=command.data)
+            if setup_owner_approval is not None:
+                logger.info("founder_setup_owner_click org=%s run=%s merge=%s", context.organization.pk, run.run_id,
+                            setup_owner_approval.get("merge"))
     remote_data = _call_content_factory_run_action(
         run_id=remote_run.run_id,
         action=action,
@@ -19895,6 +19977,12 @@ def control_article_run(*, user, context, run, action, data, run_id=None, goal_o
         ),
         transport_errors_are_pending=action in {"promote-bundle", "publish-pr"},
     )
+    if setup_owner_approval is not None:
+        # The owner click counts only for an approve Content Factory accepted.
+        from .website_views import restore_setup_owner_approval, setup_approve_rejected
+        if setup_approve_rejected(remote_data):
+            restore_setup_owner_approval(context.organization, owner_approval_snapshot)
+            logger.info("founder_setup_owner_click_reverted org=%s run=%s", context.organization.pk, run.run_id)
 
     with _remote_response_write_guard(remote_data, workflow="article_generation"):
         run.refresh_from_db()
@@ -20344,7 +20432,14 @@ def control_article_run(*, user, context, run, action, data, run_id=None, goal_o
         if approval_requires_receipt:
             from .article_review_views import record_review_approval
             record_review_approval(run, context, payload)
-        return Response(_serialize_run(run, context=context), status=status.HTTP_200_OK)
+        body = _serialize_run(run, context=context)
+        if isinstance(setup_owner_approval, dict) and setup_owner_approval.get("merge") == "manual":
+            # The founder reviews this setup change on GitHub instead.
+            number = _pull_request_number_from_run(run)
+            repo = run.github_repo or _get_config(context.organization).github_repo or ""
+            body = {**body, "merge": "manual",
+                    "setupPullRequestUrl": f"https://github.com/{repo}/pull/{number}" if number and repo else None}
+        return Response(body, status=status.HTTP_200_OK)
 
 
 class VibeMarketingRunControlView(APIView):
