@@ -381,6 +381,9 @@ jobs:
     - name: Check setup merge observation without database access
       run: python scripts/test_without_database.py content_factory.tests_setup_merge_observation_unit
 
+    - name: Run one-screen join and desktop sign-in tests
+      run: python manage.py test community_chat.tests.test_device_auth_v2 community_chat.tests.test_invite_tokens community_chat.tests.test_one_step_join community_chat.tests.test_pending_member_access community_chat.tests.test_review_cleared_email --noinput --verbosity 2
+
     - name: Check article draft review contracts without database access
       run: python scripts/test_article_review.py
 
