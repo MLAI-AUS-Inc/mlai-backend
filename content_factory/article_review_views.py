@@ -423,8 +423,15 @@ class VibeMarketingArticleReviewView(views.VibeMarketingRunCommentsMixin, APIVie
         reconcile_image_charges(user=request.user, run=run, snapshot=result)
         latest = views._latest_review_ready_component_revision(run, context)
         from .article_review_billing import image_regeneration_cost
-        response = Response({**result, "imageRegenerationCostPoints": image_regeneration_cost(context.organization.domain), "componentFeedback": views._component_feedback_from_run(run),
-            "articleExport": article_export(result, run_id=run.run_id, latest_run_id=latest.run_id if latest else None)})
+        # New-journey founders (P1.10): copy while the preview rebuilds, the
+        # copy formats and ``founderDraft``. Legacy orgs get today's payload.
+        from .founder_draft_views import founder_draft_review
+        export_options, founder_draft = founder_draft_review(context=context, run=run, user=request.user)
+        payload = {**result, "imageRegenerationCostPoints": image_regeneration_cost(context.organization.domain), "componentFeedback": views._component_feedback_from_run(run),
+            "articleExport": article_export(result, run_id=run.run_id, latest_run_id=latest.run_id if latest else None, **export_options)}
+        if founder_draft is not None:
+            payload["founderDraft"] = founder_draft
+        response = Response(payload)
         response["Cache-Control"] = "private, no-store"
         return response
 

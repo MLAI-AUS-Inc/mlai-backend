@@ -2,6 +2,7 @@ from .website_metrics import WebsiteMetricsView
 from .company_billing import CompanyBillingView
 from .article_preview_lease import ArticlePreviewLeaseView, ArticlePreviewLeaseProxyView
 from .article_review_views import VibeMarketingArticleReviewView
+from .founder_draft_views import FounderDraftCopiedView, FounderDraftDownloadView, FounderDraftPostedLinkView
 from .hosted_article_views import HostedArticlePublishView
 from .website_views import WebsiteConnectionView, WebsiteConnectionActionView, WebsiteConnectionOperationView, WebsiteCostUsageView
 from django.urls import include, path
@@ -83,6 +84,14 @@ urlpatterns = [
     path("article-preview/<str:token>/<str:run_id>/<path:proxy_path>", ArticlePreviewLeaseProxyView.as_view()),
     path("runs/<str:run_id>/hosted-publish", HostedArticlePublishView.as_view(), name="vibe-hosted-publish"),
     path("runs/<str:run_id>/hosted-publish/", HostedArticlePublishView.as_view()),
+    # P1.10 draft tools (IF-P1-13). They sit above the runs/<run_id>/<action>
+    # catch-all so they never reach VibeMarketingRunControlView.
+    path("runs/<str:run_id>/copied", FounderDraftCopiedView.as_view(), name="vibe-founder-draft-copied-no-slash"),
+    path("runs/<str:run_id>/copied/", FounderDraftCopiedView.as_view(), name="vibe-founder-draft-copied"),
+    path("runs/<str:run_id>/posted-link", FounderDraftPostedLinkView.as_view(), name="vibe-founder-draft-posted-link-no-slash"),
+    path("runs/<str:run_id>/posted-link/", FounderDraftPostedLinkView.as_view(), name="vibe-founder-draft-posted-link"),
+    path("runs/<str:run_id>/article/download", FounderDraftDownloadView.as_view(), name="vibe-founder-draft-download-no-slash"),
+    path("runs/<str:run_id>/article/download/", FounderDraftDownloadView.as_view(), name="vibe-founder-draft-download"),
     path("runs/<str:run_id>/article-review", VibeMarketingArticleReviewView.as_view(), name="vibe-article-review"),
     path("runs/<str:run_id>/article-review/", VibeMarketingArticleReviewView.as_view(), name="vibe-article-review-slash"),
     path("islands/research", ContentIslandResearchView.as_view(), name="vibe-marketing-island-research-no-slash"),
