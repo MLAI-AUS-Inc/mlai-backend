@@ -442,6 +442,50 @@ class EditorialSnapshotPersistenceSeamTests(unittest.TestCase):
         self.assertEqual(self.rows["race-run"].run_request["editorial_brief"]["country"], "NZ")
         self.model.objects.update_or_create.assert_not_called()
 
+    def by_meaning(self):
+        from unittest.mock import patch
+        return patch("content_factory.snapshot_meaning.merge_by_meaning_enabled", return_value=True)
+
+    def test_by_meaning_put_accepts_charge_spelling_and_keeps_saved_values(self):
+        self.existing.run_request.update(roo_points_ledger_id="123", roo_points_cost=6)
+        before = deepcopy(self.existing.run_request)
+        incoming = {"workflow": "article_generation", "status": "running",
+                    "run_request": {"roo_points_ledger_id": 123, "roo_points_cost": "6"}}
+        refused = self.put(incoming)  # Flag off: the exact comparison still refuses,
+        # and not as final, or the worker would block the run over a spelling.
+        self.assertEqual((refused.status_code, refused.data.get("retryable")), (409, None))
+        self.assertEqual(self.existing.run_request, before)
+        with self.by_meaning():
+            response = self.put(incoming)
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(self.existing.run_request, before)
+        self.assertNotIn("snapshot_drift_v1", self.existing.result)
+
+    def test_by_meaning_put_keeps_the_stored_brief_and_counts_drift(self):
+        incoming = snapshot()
+        incoming["run_request"]["editorial_brief"]["reader_task"] = "Private conflicting task"
+        with self.by_meaning():
+            response = self.put(incoming)
+            self.assertEqual(response.status_code, 200)
+            self.assertEqual(self.existing.run_request["editorial_brief"], selected_brief())
+            drift = self.existing.result["snapshot_drift_v1"]
+            self.assertEqual((drift["count"], drift["fields"]), (1, {"run_request.editorial_brief": 1}))
+            self.assertNotIn("Private conflicting task", str(self.existing.result))
+            # A worker echo of the counter cannot reset the backend's record.
+            self.put({"workflow": "article_generation", "status": "running",
+                      "result": {"snapshot_drift_v1": {"schema_version": 1, "count": 0, "fields": {}}}})
+        self.assertEqual(self.existing.result["snapshot_drift_v1"]["count"], 1)
+
+    def test_by_meaning_put_still_refuses_a_real_charge_change(self):
+        self.existing.run_request.update(roo_points_ledger_id="123", roo_points_cost=6)
+        before = deepcopy(self.existing.run_request)
+        with self.by_meaning():
+            for change in ({"roo_points_ledger_id": "forged"}, {"roo_points_ledger_id": None}, {"roo_points_cost": 0}):
+                with self.subTest(change=change):
+                    response = self.put({"workflow": "article_generation", "status": "running", "run_request": change})
+                    self.assertEqual((response.status_code, response.data["retryable"]), (409, False))
+                    self.assertEqual(self.existing.run_request, before)
+
     def test_terminal_and_cancelled_callbacks_keep_existing_response_contract(self):
         incoming = {"workflow": "article_generation", "status": "running"}
         self.existing.status = "cancelled"

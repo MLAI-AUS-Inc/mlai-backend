@@ -9,6 +9,7 @@ from .editorial_contract import ArticleEditorialAdmission, ArticleEditorialBrief
 from .run_state import ARTICLE_WORKFLOWS
 
 BRIEF_KEYS = ("editorial_brief", "editorialBrief")
+_UNREADABLE = object()
 
 
 class EditorialRunConflict(ValueError):
@@ -54,18 +55,32 @@ def _admission(request, brief, *, stored=False):
         ) from None
 
 
-def merge_editorial_run_snapshot(existing, incoming):
+def merge_editorial_run_snapshot(existing, incoming, *, drift=None):
     """Return a new snapshot, preserving a known brief when the worker omits it.
 
     A first-seen worker brief is structurally checked, not certified as a human
     selection or approved against current policy. No generation is authorised.
+    A ``drift`` list compares by meaning: the stored brief is the backend's own
+    record, so a worker copy that differs is noted there instead of refused.
+    The admission, organisation and dispatch key stay rails.
     """
     existing = existing or {}
     result = deepcopy(incoming)
     old_request = _request(existing.get("run_request"))
     new_request = _request(incoming.get("run_request"))
     old_brief = _brief(old_request, stored=True)
-    new_brief = _brief(new_request)
+    if drift is not None and old_brief is not None:
+        from .snapshot_meaning import same_meaning
+        if any(key in new_request for key in BRIEF_KEYS):
+            try:
+                reported = _brief(new_request)
+            except EditorialRunConflict:
+                reported = _UNREADABLE
+            if reported is _UNREADABLE or not same_meaning(old_brief, reported, "editorial_brief"):
+                drift.append("run_request.editorial_brief")
+        new_brief = old_brief
+    else:
+        new_brief = _brief(new_request)
     old_admission = _admission(old_request, old_brief, stored=True)
     new_admission = _admission(new_request, new_brief if new_brief is not None else old_brief)
     if old_admission is not None and "editorial_admission" in new_request and new_admission != old_admission:
@@ -108,7 +123,12 @@ def merge_editorial_run_snapshot(existing, incoming):
     old_key = old_request.get("client_request_id")
     new_key = new_request.get("client_request_id")
     if old_key:
-        if new_key and new_key != old_key:
+        if drift is not None:
+            from .snapshot_meaning import same_meaning
+            changed_key = bool(new_key) and not same_meaning(old_key, new_key, "client_request_id")
+        else:
+            changed_key = bool(new_key) and new_key != old_key
+        if changed_key:
             raise EditorialRunConflict("An editorial run cannot change its dispatch key")
         merged_request["client_request_id"] = old_key
     result["run_request"] = merged_request
