@@ -56,6 +56,7 @@ def lazy_view(module: str, attr: str):
         return target(request, *args, **kwargs)
 
     view.lazy_target = (module, attr)
+    view.lazy_reset = resolved.clear  # tests only: forget a resolved view
     view.__name__ = f"lazy_{attr}"
     view.__qualname__ = view.__name__
     return view
