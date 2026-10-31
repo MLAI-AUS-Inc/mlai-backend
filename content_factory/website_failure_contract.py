@@ -28,6 +28,15 @@ CONTRACT_ROOT = SOURCE_CONTRACT_ROOT if (SOURCE_CONTRACT_ROOT / "failure-codes.j
 PRE_P2_OVERLAY_PATH = Path(__file__).resolve().parent / "failure_registry_pre_p2.json"
 PRE_P2_OVERLAY_RESERVED_KEYS = frozenset({"actions", "source_revision"})
 OVERLAY_FIELDS = frozenset({"failure_class", "retry_policy", "action_id", "retryable"})
+# Five codes P2 registers that a pre-P2 Content Factory path already emits. This
+# backend did not know them before P2, so its pre-P2 view leaves them out: every
+# existing reader keeps today's unregistered (drift) path for them. Their
+# overlay entry (the unregistered stop) is CF's own pre-P2 reading of the same
+# fact. `by_code_v2` holds their P2 entries.
+EMITTED_BEFORE_P2 = frozenset({
+    "HOSTED_PREVIEW_UNAVAILABLE", "INVALID_NEXT_APP_ROUTE_PATH", "NEXT_APP_ROOT_LAYOUT_MISSING",
+    "NEXT_ROUTE_ROOT_NOT_DETECTED", "render_dependency_contract_violation",
+})
 CLASSES = ("transient", "waiting", "repairable", "strategy", "needs_user", "unsupported")
 MAX_FINDINGS = 64
 IDENTIFIER_FIELDS = {"code", "slot", "adapter", "framework", "provider_operation", "route_role", "constraint"}
@@ -81,6 +90,8 @@ def load_registry() -> dict:
     views: dict[str, dict] = {}
     pre_view = {}
     for name, entry in codes.items():
+        if entry["code"] in EMITTED_BEFORE_P2:
+            continue
         values = overlay.get(entry["code"])
         if values is None:
             pre_view[name] = entry
@@ -145,7 +156,9 @@ def _accepted_action_ids(registry: dict, pre_view: dict, by_code_v2: dict) -> di
         if entry["code"] != name:
             continue
         ids = set()
-        for index, view in enumerate((pre_view[name], entry)):
+        for index, view in enumerate((pre_view.get(name), entry)):
+            if view is None:
+                continue
             action_id = view.get("action_id") if view["failure_class"] == "needs_user" else None
             if not action_id:
                 continue

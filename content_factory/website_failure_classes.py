@@ -18,8 +18,9 @@ CODE_CLASSES = {
 # P2 (IF-P2-02): the new codes that only P2 sites emit are classified through
 # the registry's pre-P2 view (`by_code`, where they read as registered). The
 # five new codes a pre-P2 path already emits (HOSTED_PREVIEW_UNAVAILABLE, the
-# three scaffold-blocker literals and render_dependency_contract_violation)
-# keep today's codeless classification: HOSTED_PREVIEW_UNAVAILABLE through
+# three scaffold-blocker literals and render_dependency_contract_violation;
+# `website_failure_contract.EMITTED_BEFORE_P2`, absent from `by_code`) keep
+# today's codeless classification: HOSTED_PREVIEW_UNAVAILABLE through
 # CODE_CLASSES above, the other four through the fallbacks below.
 P2_REGISTRY_CLASSIFIED_CODES = frozenset({
     "ARTICLE_STATIC_SOURCE_READ_INCOMPLETE", "BRANCH_PROTECTION_APPROVAL_REQUIRED", "CONNECTION_BINDING_CHANGED",
