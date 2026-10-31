@@ -6,6 +6,7 @@ from django.conf import settings
 from django.contrib.auth import get_user_model
 from django.core import signing
 from django.core.cache import cache
+from django.core.exceptions import ValidationError as DjangoValidationError
 from django.http import HttpResponseBadRequest, QueryDict
 from django.shortcuts import redirect
 from django.urls import reverse
@@ -49,6 +50,11 @@ def github_settings_return(value, company_id):
     except ValueError:
         return None
     query = parse_qs(parsed.query)
+    if parsed.path == "/my-startup/website":
+        # P1.14: the new-journey website page (accepted only while the
+        # GitHub callback redirects are on; see github_callback_reasons).
+        from integrations.services.github_callback_reasons import website_settings_return
+        return website_settings_return(value, company_id)
     if parsed.path != "/my-startup/connections/github" or query.get("company_id") != [str(company_id)]:
         return None
     target = {"company_id": str(company_id)}
@@ -64,6 +70,77 @@ def github_settings_return(value, company_id):
     return "/my-startup/connections/github?" + urlencode(target)
 
 
+def _new_journey_organization(company):
+    """The company's existing organisation when it is in the new journey, else None."""
+    if getattr(company, "organization_id", None) is None:
+        return None
+    from integrations.services.github_callback_reasons import is_new_journey_organization
+    organization = company.organization
+    return organization if is_new_journey_organization(organization) else None
+
+
+def _new_journey_github_refusal(company):
+    """IF-P1-08: a new-journey startup without a website cannot start a GitHub connection."""
+    organization = _new_journey_organization(company)
+    if organization is None:
+        return None
+    from content_factory.founder_journey_cohort import organization_has_website
+    if organization_has_website(organization):
+        return None
+    from integrations.services.github_callback_reasons import NO_WEBSITE, NO_WEBSITE_DETAIL, log_return
+    log_return(organization, NO_WEBSITE)
+    return Response({"detail": NO_WEBSITE_DETAIL, "reason": NO_WEBSITE}, status=409)
+
+
+def _peek_github_ticket(ticket):
+    """A valid, unexpired GitHub ticket's owned company, read without consuming it."""
+    try:
+        payload = signing.loads(ticket, salt=SALT, max_age=300)
+        if payload.get("provider") != "github":
+            return None, None
+        session = CommunityChatAccountSession.objects.filter(pk=payload["session"], user_id=payload["uid"]).first()
+        if not _valid_session(session, timezone.now()):
+            return None, None
+        company = VibeRaisingCompany.objects.select_related("organization").get(
+            pk=payload["company"], profile__user_id=payload["uid"])
+    except (signing.BadSignature, KeyError, ValueError, TypeError, AttributeError, VibeRaisingCompany.DoesNotExist):
+        return None, None
+    return payload, company
+
+
+def _bad_ticket_is_new_journey(ticket):
+    """Whether a bad GitHub ticket goes to the fixed route rather than today's 400.
+
+    Only a ticket whose signature still checks out (expired, replayed, or for
+    a revoked Chat session) and whose company's organisation is new-journey.
+    Its age is deliberately not checked: it is read only to find the cohort,
+    and the fixed route carries nothing from it. A tampered or unsigned
+    ticket, and every legacy one, keeps today's 400.
+    """
+    try:
+        payload = signing.loads(ticket, salt=SALT)
+        if not isinstance(payload, dict) or payload.get("provider") != "github":
+            return False
+        company = VibeRaisingCompany.objects.select_related("organization").filter(
+            pk=payload["company"], profile__user_id=payload["uid"]).first()
+    except (signing.BadSignature, KeyError, ValueError, TypeError, DjangoValidationError):
+        return False
+    return company is not None and _new_journey_organization(company) is not None
+
+
+def _new_journey_return(payload, company):
+    """The new-journey return: the website page on the web, today's native link on the desktop."""
+    from integrations.services.github_callback_reasons import chat_return_url
+    return chat_return_url(company_id=company.pk, return_to=payload.get("return_to"),
+                           editor_return=github_settings_return(payload.get("github_settings_return"), company.pk))
+
+
+def _new_journey_redirect(reason, payload, company, organization):
+    from integrations.services.github_callback_reasons import redirect_with_reason
+    return redirect_with_reason(reason, organization=organization, company_id=company.pk,
+                                return_url=_new_journey_return(payload, company))
+
+
 class ConnectView(ChatStartupAccess, APIView):
     def post(self, request, provider):
         provider = PROVIDER_ALIASES.get(provider, provider)
@@ -76,6 +153,10 @@ class ConnectView(ChatStartupAccess, APIView):
             return response
         if provider not in PROVIDERS:
             raise ValidationError("This source does not support browser connection.")
+        if provider == "github":
+            refusal = _new_journey_github_refusal(self.company)
+            if refusal is not None:
+                return refusal
         ticket = signing.dumps({"uid": request.user.pk, "company": str(self.company.pk),
             "session": str(request.auth.pk), "provider": provider,
             "return_to": getattr(request, "data", {}).get("returnTo") if getattr(request, "data", {}).get("returnTo") in {"mobile", "desktop-dev"} else None,
@@ -108,7 +189,13 @@ class DisconnectView(ChatStartupAccess, APIView):
 
 def connect_browser(request):
     """Only signed server-selected company/provider data reaches the OAuth view."""
+    from integrations.services import github_callback_reasons as reasons
     if not enabled():
+        if reasons.redirects_enabled():
+            peeked, peeked_company = _peek_github_ticket(request.GET.get("ticket", ""))
+            organization = _new_journey_organization(peeked_company) if peeked_company is not None else None
+            if organization is not None:
+                return _new_journey_redirect(reasons.UNAVAILABLE, peeked, peeked_company, organization)
         return HttpResponseBadRequest("Startup connections are unavailable.")
     try:
         payload = consume_ticket(request.GET.get("ticket", ""))
@@ -123,7 +210,16 @@ def connect_browser(request):
         if provider not in PROVIDERS:
             raise ValueError("Unknown provider")
     except (signing.BadSignature, KeyError, ValueError, get_user_model().DoesNotExist, VibeRaisingCompany.DoesNotExist):
+        bad_ticket = request.GET.get("ticket", "")
+        if (reasons.redirects_enabled() and reasons.is_github_chat_ticket(bad_ticket)
+                and _bad_ticket_is_new_journey(bad_ticket)):
+            # Nothing in a bad ticket is used: the fixed route only.
+            fixed = reasons.state_expired_redirect()
+            if fixed is not None:
+                return fixed
         return HttpResponseBadRequest("This connection link expired or was already used. Start again in MLAI Chat.")
+    new_journey_org = (_new_journey_organization(company)
+                       if provider == "github" and reasons.redirects_enabled() else None)
     request.user = user
     request.chat_oauth_context = {"chat_session_id": str(session.pk), "chat_company_id": str(company.pk), "user_id": user.pk}
     if getattr(company, "organization_id", None) is not None:
@@ -134,6 +230,8 @@ def connect_browser(request):
     editor_return = github_settings_return(payload.get("github_settings_return"), company.pk)
     if provider == "github" and editor_return:
         return_url = f"{frontend}{editor_return}"
+    if new_journey_org is not None:
+        return_url = _new_journey_return(payload, company)
     if payload.get("return_to") in {"mobile", "desktop-dev"}:
         scheme = "mlaichat-dev" if payload["return_to"] == "desktop-dev" else "mlaichat"
         return_url = f"{scheme}://connections?" + urlencode({"company_id": str(company.pk), "provider": provider})
@@ -146,10 +244,17 @@ def connect_browser(request):
     if provider == "github":
         from founder_tools.services import ensure_company_organization, founder_actor_id_for_user
         from integrations.services.github_connections import build_github_oauth_state, build_github_installation_url
-        organization = ensure_company_organization(company)
+        from content_factory.founder_journey_cohort import organization_has_website
+        refuse_no_website = _new_journey_organization(company) is not None and not organization_has_website(company.organization)
+        organization = None if refuse_no_website else ensure_company_organization(company)
         if organization is None:
+            # IF-P1-08: a new-journey startup without a website mints no GitHub state.
+            if refuse_no_website and new_journey_org is not None:
+                return _new_journey_redirect(reasons.NO_WEBSITE, payload, company, new_journey_org)
             return HttpResponseBadRequest("Add your startup website in Startup details first.")
         if not (getattr(settings, "GITHUB_OAUTH_CLIENT_ID", "") and getattr(settings, "GITHUB_OAUTH_CLIENT_SECRET", "")):
+            if new_journey_org is not None:
+                return _new_journey_redirect(reasons.UNAVAILABLE, payload, company, new_journey_org)
             return HttpResponseBadRequest("GitHub is not available yet. Please try again later.")
         state = build_github_oauth_state(domain=organization.domain,
             slack_user_id=founder_actor_id_for_user(user), return_url=return_url,
