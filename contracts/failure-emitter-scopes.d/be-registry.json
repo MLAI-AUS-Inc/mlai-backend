@@ -1,4 +1,18 @@
 {
   "dynamic_adapters": [],
-  "nonfailure_sites": []
+  "nonfailure_sites": [
+    {
+      "adapter": "nonfailure_category",
+      "allowed_codes_ref": "contracts/failure-codes.json#/codes",
+      "category": "test-only receipt builder; never imported by production code and never a causal run failure",
+      "expression": "code",
+      "field": "code",
+      "function": "self_heal_receipt",
+      "owner": "backend.self_heal_testing",
+      "path": "content_factory/self_heal_testing.py",
+      "site_sha256": "f332bb974ffb7816a19c9eaa80e4c9a06a885e4d689952910a4d3bb42239d57a",
+      "source": "test-only receipt builder; never imported by production code and never a causal run failure",
+      "test": "content_factory.tests_p2_registry_foundation.P2ReceiptBuilderTests.test_every_section_10_receipt_has_a_builder"
+    }
+  ]
 }
