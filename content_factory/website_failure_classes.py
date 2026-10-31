@@ -15,6 +15,27 @@ CODE_CLASSES = {
     "manual_merge_required": "needs_user",
     "code_review_ready": "needs_user",
 }
+# P2 (IF-P2-02): the new codes that only P2 sites emit are classified through
+# the registry's pre-P2 view (`by_code`, where they read as registered). The
+# five new codes a pre-P2 path already emits (HOSTED_PREVIEW_UNAVAILABLE, the
+# three scaffold-blocker literals and render_dependency_contract_violation)
+# keep today's codeless classification: HOSTED_PREVIEW_UNAVAILABLE through
+# CODE_CLASSES above, the other four through the fallbacks below.
+P2_REGISTRY_CLASSIFIED_CODES = frozenset({
+    "ARTICLE_STATIC_SOURCE_READ_INCOMPLETE", "BRANCH_PROTECTION_APPROVAL_REQUIRED", "CONNECTION_BINDING_CHANGED",
+    "CONNECTION_REPOSITORY_CHANGED", "DEPLOYMENT_NOT_DETECTED", "HOSTED_PROXY_UNVERIFIED", "SCAN_QUEUE_NOT_STARTED",
+    "SELF_HEAL_ATTEMPTS_EXHAUSTED", "SELF_HEAL_DEADLINE_REACHED", "SITE_TEST_CHANGE_REQUIRED", "TERMINAL_CODE_MISSING",
+    "pull_request_daily_cap", "source_repin_limit_reached", "source_repin_refused",
+})
+
+
+def _registry_class(code):
+    """The pre-P2 registry class of a P2-only new code, or None."""
+    if code not in P2_REGISTRY_CLASSIFIED_CODES:
+        return None
+    from .website_failure_contract import load_registry
+    entry = load_registry()["by_code"].get(code)
+    return entry["failure_class"] if entry is not None else None
 
 
 def legacy_failure_class(code, result=None, *, retryable=False, status=None):
@@ -28,6 +49,9 @@ def legacy_failure_class(code, result=None, *, retryable=False, status=None):
     code = str(code or "")
     if code in CODE_CLASSES:
         return CODE_CLASSES[code]
+    registered = _registry_class(code)
+    if registered is not None:
+        return registered
     if code.startswith("ADOPTED_") or code.startswith("DIRECTORY_") and code.endswith("_MISSING"):
         return "repairable"
     provider_status = result.get("provider_status_code") or result.get("content_factory_status_code") or status

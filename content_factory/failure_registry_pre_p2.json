@@ -1,0 +1,281 @@
+{
+  "ARTICLE_STATIC_VERIFICATION_FAILED": {
+    "action_id": null,
+    "failure_class": "unsupported",
+    "retry_policy": "stop_contract",
+    "retryable": false
+  },
+  "ARTICLE_SURFACE_HINT_REVIEW_REQUIRED": {
+    "action_id": "review_setup",
+    "failure_class": "needs_user",
+    "retry_policy": "await_owner_action",
+    "retryable": false
+  },
+  "ARTICLE_SYSTEM_ACTION_REQUIRED": {
+    "action_id": "review_setup",
+    "failure_class": "needs_user",
+    "retry_policy": "await_owner_action",
+    "retryable": false
+  },
+  "ARTICLE_SYSTEM_SETUP_REQUIRED": {
+    "action_id": "review_setup",
+    "failure_class": "needs_user",
+    "retry_policy": "await_owner_action",
+    "retryable": false
+  },
+  "CI_EVIDENCE_READ_ONLY": {
+    "action_id": "review_setup",
+    "failure_class": "needs_user",
+    "retry_policy": "await_owner_action",
+    "retryable": false
+  },
+  "COMPANY_CONTEXT_INCOMPLETE": {
+    "action_id": "review_setup",
+    "failure_class": "needs_user",
+    "retry_policy": "await_owner_action",
+    "retryable": false
+  },
+  "CONNECTION_READ_ONLY": {
+    "action_id": "review_setup",
+    "failure_class": "needs_user",
+    "retry_policy": "await_owner_action",
+    "retryable": false
+  },
+  "CONNECTION_REVIEW_REQUIRED": {
+    "action_id": "review_setup",
+    "failure_class": "needs_user",
+    "retry_policy": "await_owner_action",
+    "retryable": false
+  },
+  "CONTENT_FACTORY_ARTICLES_ACTIVATION_REQUIRED": {
+    "action_id": "review_setup",
+    "failure_class": "needs_user",
+    "retry_policy": "await_owner_action",
+    "retryable": false
+  },
+  "HOSTED_PREVIEW_UNAVAILABLE": {
+    "action_id": null,
+    "failure_class": "unsupported",
+    "retry_policy": "stop_contract",
+    "retryable": false
+  },
+  "INVALID_CREDENTIALS": {
+    "action_id": "review_setup",
+    "failure_class": "needs_user",
+    "retry_policy": "await_owner_action",
+    "retryable": false
+  },
+  "INVALID_NEXT_APP_ROUTE_PATH": {
+    "action_id": null,
+    "failure_class": "unsupported",
+    "retry_policy": "stop_contract",
+    "retryable": false
+  },
+  "MISSING_CONFIG": {
+    "action_id": "review_setup",
+    "failure_class": "needs_user",
+    "retry_policy": "await_owner_action",
+    "retryable": false
+  },
+  "NEXT_APP_ROOT_LAYOUT_MISSING": {
+    "action_id": null,
+    "failure_class": "unsupported",
+    "retry_policy": "stop_contract",
+    "retryable": false
+  },
+  "NEXT_ROUTE_ROOT_NOT_DETECTED": {
+    "action_id": null,
+    "failure_class": "unsupported",
+    "retry_policy": "stop_contract",
+    "retryable": false
+  },
+  "NO_KEYWORDS": {
+    "action_id": "review_setup",
+    "failure_class": "needs_user",
+    "retry_policy": "await_owner_action",
+    "retryable": false
+  },
+  "PORTABLE_REVIEW_PROTECTED": {
+    "action_id": "review_setup",
+    "failure_class": "needs_user",
+    "retry_policy": "await_owner_action",
+    "retryable": false
+  },
+  "PROFILE_DRAFT_UNAVAILABLE": {
+    "action_id": null,
+    "failure_class": "unsupported",
+    "retry_policy": "stop_contract",
+    "retryable": false
+  },
+  "PUBLISH_TARGET_ACTION_REQUIRED": {
+    "action_id": "review_setup",
+    "failure_class": "needs_user",
+    "retry_policy": "await_owner_action",
+    "retryable": false
+  },
+  "REPOSITORY_SCAN_FAILED": {
+    "action_id": null,
+    "failure_class": "unsupported",
+    "retry_policy": "stop_contract",
+    "retryable": false
+  },
+  "SCAFFOLD_APPROVAL_REQUIRED": {
+    "action_id": "review_setup",
+    "failure_class": "needs_user",
+    "retry_policy": "await_owner_action",
+    "retryable": false
+  },
+  "SCAFFOLD_PREP_FAILED": {
+    "action_id": null,
+    "failure_class": "unsupported",
+    "retry_policy": "stop_contract",
+    "retryable": false
+  },
+  "SETUP_EXAMPLE_CLEANUP_REQUIRED": {
+    "action_id": "remove_setup_example",
+    "failure_class": "needs_user",
+    "retry_policy": "await_owner_action",
+    "retryable": false
+  },
+  "SOURCE_CHANGED": {
+    "action_id": null,
+    "failure_class": "unsupported",
+    "retry_policy": "stop_contract",
+    "retryable": false
+  },
+  "VALIDATION_ERROR": {
+    "action_id": "review_setup",
+    "failure_class": "needs_user",
+    "retry_policy": "await_owner_action",
+    "retryable": false
+  },
+  "WEBSITE_CONNECTION_REQUIRED": {
+    "action_id": "review_setup",
+    "failure_class": "needs_user",
+    "retry_policy": "await_owner_action",
+    "retryable": false
+  },
+  "actions": {
+    "authorize_github": "Authorize github",
+    "buy_points": "Buy points",
+    "choose_articles_page": "Choose articles page",
+    "configure_website": "Configure website",
+    "deploy_site": "Deploy site",
+    "merge_pr": "Merge pr",
+    "provide_credentials": "Provide credentials",
+    "remove_setup_example": "Remove the setup example",
+    "review_draft": "Review draft",
+    "review_github_app_permissions": "Review github app permissions",
+    "review_github_permissions": "Review github permissions",
+    "review_setup": "Review setup"
+  },
+  "articles_page_choice_required": {
+    "action_id": "choose_articles_page",
+    "failure_class": "needs_user",
+    "retry_policy": "await_owner_action",
+    "retryable": false
+  },
+  "cleanup_proposal_changed": {
+    "action_id": "review_setup",
+    "failure_class": "needs_user",
+    "retry_policy": "await_owner_action",
+    "retryable": false
+  },
+  "cleanup_proposal_required": {
+    "action_id": "review_setup",
+    "failure_class": "needs_user",
+    "retry_policy": "await_owner_action",
+    "retryable": false
+  },
+  "cleanup_restoration_marker_required": {
+    "action_id": "review_setup",
+    "failure_class": "needs_user",
+    "retry_policy": "await_owner_action",
+    "retryable": false
+  },
+  "cleanup_review_changed": {
+    "action_id": "review_setup",
+    "failure_class": "needs_user",
+    "retry_policy": "await_owner_action",
+    "retryable": false
+  },
+  "code_review_ready": {
+    "action_id": "review_setup",
+    "failure_class": "needs_user",
+    "retry_policy": "await_owner_action",
+    "retryable": false
+  },
+  "github_ci_evidence_permission_required": {
+    "action_id": "review_github_permissions",
+    "failure_class": "needs_user",
+    "retry_policy": "await_owner_action",
+    "retryable": false
+  },
+  "github_revocation_review_required": {
+    "action_id": "review_setup",
+    "failure_class": "needs_user",
+    "retry_policy": "await_owner_action",
+    "retryable": false
+  },
+  "github_workflow_permission_required": {
+    "action_id": "review_github_permissions",
+    "failure_class": "needs_user",
+    "retry_policy": "await_owner_action",
+    "retryable": false
+  },
+  "manual_merge_required": {
+    "action_id": "merge_pr",
+    "failure_class": "needs_user",
+    "retry_policy": "await_owner_action",
+    "retryable": false
+  },
+  "publish_write_access_required": {
+    "action_id": "review_setup",
+    "failure_class": "needs_user",
+    "retry_policy": "await_owner_action",
+    "retryable": false
+  },
+  "published_content_review_required": {
+    "action_id": "review_setup",
+    "failure_class": "needs_user",
+    "retry_policy": "await_owner_action",
+    "retryable": false
+  },
+  "render_dependency_contract_violation": {
+    "action_id": null,
+    "failure_class": "unsupported",
+    "retry_policy": "stop_contract",
+    "retryable": false
+  },
+  "restoration_approval_required": {
+    "action_id": "review_setup",
+    "failure_class": "needs_user",
+    "retry_policy": "await_owner_action",
+    "retryable": false
+  },
+  "reviewed_contract_required": {
+    "action_id": "review_setup",
+    "failure_class": "needs_user",
+    "retry_policy": "await_owner_action",
+    "retryable": false
+  },
+  "source_revision": "a4324bcace92cb6d00dba77b76763e3ec1ad5a1e",
+  "website_owner_review_required": {
+    "action_id": "review_setup",
+    "failure_class": "needs_user",
+    "retry_policy": "await_owner_action",
+    "retryable": false
+  },
+  "website_source_changed": {
+    "action_id": null,
+    "failure_class": "unsupported",
+    "retry_policy": "stop_contract",
+    "retryable": false
+  },
+  "website_source_review_required": {
+    "action_id": "review_setup",
+    "failure_class": "needs_user",
+    "retry_policy": "await_owner_action",
+    "retryable": false
+  }
+}
