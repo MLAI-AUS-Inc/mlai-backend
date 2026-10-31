@@ -1283,10 +1283,16 @@ def _refresh_target(connection, config):
         return None
     key = str(config.default_publish_target_id or "")
     target = connection.targets.filter(generation=connection.generation, target_key=key).first() if key else None
+    from .website_live_verification import accepted as live_url_accepted
+    live = target is not None and live_url_accepted(connection, target)
     if (target is None or target.source_sha != connection.verified_sha or not target.verified_at
             or not mapping(target.capabilities).get("publishingReady") or target.adapter == "custom_contract_v1"
-            or required(connection, target)):
+            or (required(connection, target) and not live)):
         return None
+    if live:
+        # A new-journey website's live-URL proof is renewed by observing its
+        # live blog page again (website_live_verification.verify_live_url).
+        return target
     accepted = connection.operations.filter(generation=connection.generation, action="ci-verify", state="completed",
         payload__source_sha=connection.verified_sha, payload__target_id=target.target_key).order_by("-updated_at").first()
     if accepted is None or mapping(accepted.receipt).get("attestation_origin") != "authenticated_ci":
@@ -1430,6 +1436,12 @@ def refresh_verification_for_page(organization, *, now=None):
     return _process_source_reverification(due, now) if due else None
 
 
+def _renews_by_live_url(website, target):
+    """Whether this website's source check re-verifies by live URL instead of CI proof."""
+    from .website_live_verification import applicable, selected
+    return selected(website.organization) and applicable(target)
+
+
 def _process_source_reverification(identifier, now):
     """Re-scan external changes and then authenticate current CI/live proof."""
     from .website_connections import authority_guard, require_unlocked_remote_call
@@ -1530,6 +1542,18 @@ def _process_source_reverification(identifier, now):
                 message="No publishing target exists at this source. Setting up articles verifies it.")
         elif target is None:
             raise WebsiteAuthorityError("verified_target_required", "Waiting for a current verified publishing target.", retryable=True)
+        elif _renews_by_live_url(website, target):
+            # New-journey websites have no CI workflow: their proof is the scan's
+            # build proof plus the live blog page, observed again here.
+            from .website_live_verification import verify_live_url
+            if target.source_sha != op.payload["source_sha"]:
+                # The rescan has not recorded this source's build proof yet.
+                raise WebsiteAuthorityError("verified_target_required", "Waiting for a current verified publishing target.", retryable=True)
+            config = OrganizationContentConfig.objects.get(website_connection=website)
+            verified = verify_live_url(config, target, setup_run_id=op.payload.get("owned_merge_run_id") or "")
+            state, receipt = "completed", {**receipt, "status": "verified", "source_sha": op.payload["source_sha"],
+                "target_id": target.target_key, "ci_operation_id": "", "ci_reused": False, "method": "live_url",
+                "deployment_operation_id": verified["operation_id"], "repository_modified": False}
         else:
             ci, attested = None, None
             if op.payload.get("renew") == "deployment":
