@@ -196,7 +196,7 @@ def run_alert_reasons(run, *, now) -> list[str]:
         return []
     reasons = []
     status = str(run.status or "")
-    if status in TERMINAL_STATUSES and not is_owner_cancel(run):
+    if status in TERMINAL_STATUSES and not is_owner_cancel(run) and not is_first_article_switch(run):
         reasons.append("run_terminal")
     if status == "blocked":
         reasons.append("startup_autofill_blocked" if run.workflow == "startup_autofill" else "run_blocked")
@@ -204,6 +204,25 @@ def run_alert_reasons(run, *, now) -> list[str]:
     if waiting and run.updated_at and run.updated_at <= now - YOUR_TURN_AFTER:
         reasons.append("your_turn_72h")
     return reasons
+
+
+FIRST_ARTICLE_REQUEST_PREFIX = "first-article:"
+
+
+def is_first_article_switch(run) -> bool:
+    """A free first article the owner replaced with a new topic (P1.7), which is not an incident.
+
+    Only a run started by the first-article card (request id
+    ``first-article:...``) and cancelled as ``superseded`` qualifies, and only
+    while ``ARTICLES_FIRST_ARTICLE_CARD_ENABLED`` is on. Other superseded stops
+    (website reconciliation, retirement) still alert as before.
+    """
+    if run.status != "cancelled" or not getattr(settings, "ARTICLES_FIRST_ARTICLE_CARD_ENABLED", False):
+        return False
+    result = run.result if isinstance(run.result, dict) else {}
+    request = run.run_request if isinstance(run.run_request, dict) else {}
+    return (result.get("cancellation_reason") == "superseded"
+            and str(request.get("client_request_id") or "").startswith(FIRST_ARTICLE_REQUEST_PREFIX))
 
 
 def is_scheduler_run(run) -> bool:

@@ -30,6 +30,7 @@ running, or whose restart already delivered, never gives the attempt back.
 """
 from __future__ import annotations
 
+import hashlib
 import logging
 import re
 from dataclasses import dataclass, field
@@ -38,7 +39,7 @@ from types import SimpleNamespace
 from typing import Optional
 
 from django.conf import settings
-from django.db import transaction
+from django.db import connection, transaction
 from django.utils import timezone
 
 logger = logging.getLogger(__name__)
@@ -184,6 +185,35 @@ def _lock(organization_id, user=None) -> None:
     if user is not None and getattr(user, "pk", None):
         # Account caps span startups; one account's presses queue behind each other.
         get_user_model().objects.select_for_update().filter(pk=user.pk).first()
+        _lock_normalised_email(organization_id, user)
+
+
+EMAIL_LOCK_SCOPE = "first-article-account"
+
+
+def _email_lock_key(normalised: str) -> int:
+    digest = hashlib.blake2b(f"{EMAIL_LOCK_SCOPE}:{normalised}".encode("utf-8"), digest_size=8).digest()
+    return int.from_bytes(digest, byteorder="big", signed=True)
+
+
+def _lock_normalised_email(organization_id, user) -> None:
+    """Serialise every account sharing a normalised email (P1.9) on PostgreSQL.
+
+    The normalised cap reads rows written by other accounts (``jo+a@`` and
+    ``jo+b@``), which the per-user row lock does not cover, so two of them
+    could otherwise reserve at once. A transaction-scoped advisory lock keyed
+    on the normalised email, taken after the organisation and user row locks,
+    queues them. Legacy startups and the flag-off path take no extra lock.
+    """
+    if connection.vendor != "postgresql":
+        return
+    from organizations.models import Organization
+    organization = Organization.objects.filter(pk=organization_id).first()
+    normalised = normalised_email(getattr(user, "email", "")) if _normalises_email(organization) else ""
+    if not normalised:
+        return
+    with connection.cursor() as cursor:
+        cursor.execute("SELECT pg_advisory_xact_lock(%s)", [_email_lock_key(normalised)])
 
 
 def _lock_attempt(organization_id, request):
@@ -204,20 +234,72 @@ def _lock_attempt(organization_id, request):
     return rows, number, attempt
 
 
-def _account_rows(user, *, now):
-    """Entitlement rows of every account sharing this account's email in the window."""
+GMAIL_DOMAINS = ("gmail.com", "googlemail.com")
+
+
+def normalised_email(email) -> str:
+    """The account email the P1 free-article cap keys on.
+
+    Lowercased; any ``+tag`` is dropped from the local part on every domain;
+    for gmail.com and googlemail.com the local part's dots are removed and
+    googlemail.com becomes gmail.com. Empty for an empty or malformed email.
+    """
+    text = str(email or "").strip().lower()
+    local, at, domain = text.rpartition("@")
+    if not at or not local or not domain:
+        return ""
+    local = local.split("+", 1)[0]
+    if domain in GMAIL_DOMAINS:
+        local, domain = local.replace(".", ""), "gmail.com"
+    return f"{local}@{domain}" if local else ""
+
+
+def _normalises_email(organization) -> bool:
+    """P1.9: only a new-journey startup with ``MY_STARTUP_NO_WEBSITE_ARTICLES_ENABLED`` normalises."""
+    from django.conf import settings
+    if organization is None or not getattr(organization, "pk", None):
+        return False
+    if not getattr(settings, "MY_STARTUP_NO_WEBSITE_ARTICLES_ENABLED", False):
+        return False
+    from .founder_journey_cohort import is_new_journey
+    return is_new_journey(organization)
+
+
+def _account_rows(user, *, now, organization=None):
+    """Entitlement rows of every account sharing this account's email in the window.
+
+    Legacy startups (and every startup while the P1 flag is off) match the
+    email case-insensitively, as before. A new-journey startup matches the
+    normalised email, so ``jo+1@gmail.com`` and ``j.o@googlemail.com`` share
+    one cap.
+    """
     from django.db.models import Q
     from roo.models import Ledger
     email = str(getattr(user, "email", "") or "").strip()
+    normalised = normalised_email(email) if email and _normalises_email(organization) else ""
+    if normalised:
+        domain = normalised.rpartition("@")[2]
+        domains = GMAIL_DOMAINS if domain == "gmail.com" else (domain,)
+        owner = Q(user_id=getattr(user, "pk", None))
+        for item in domains:
+            owner |= Q(user__email__iendswith=f"@{item}")
+        rows = Ledger.objects.filter(owner, reference_type=REFERENCE_TYPE,
+                                     created_at__gte=now - ACCOUNT_WINDOW).select_related("user")
+        return [row for row in rows if row.user_id == getattr(user, "pk", None)
+                or normalised_email(getattr(row.user, "email", "")) == normalised]
     owner = Q(user__email__iexact=email) if email else Q(user_id=getattr(user, "pk", None))
     return list(Ledger.objects.filter(owner, reference_type=REFERENCE_TYPE, created_at__gte=now - ACCOUNT_WINDOW))
 
 
-def _account_limited(user, *, topics: bool, now) -> bool:
-    """Apply the email-keyed cap: one live grant and three grants in any outcome."""
+def _account_limited(user, *, topics: bool, now, organization=None, assume_released=frozenset()) -> bool:
+    """Apply the email-keyed cap: one live grant and three grants in any outcome.
+
+    ``assume_released`` names grant keys to count as released (a topic switch
+    asking whether its next attempt would be admitted once this one is let go).
+    """
     if user is None:
         return True
-    rows = _account_rows(user, now=now)
+    rows = _account_rows(user, now=now, organization=organization)
     keys = {row.idempotency_key for row in rows}
     if topics:
         grants = [row for row in rows if (row.idempotency_key or "").endswith((":topics", ":topics:retry"))]
@@ -226,7 +308,8 @@ def _account_limited(user, *, topics: bool, now) -> bool:
     from roo.models import Ledger
     released = keys | set(Ledger.objects.filter(
         idempotency_key__in=[f"{row.idempotency_key}:released" for row in grants]).values_list("idempotency_key", flat=True))
-    live = [row for row in grants if f"{row.idempotency_key}:released" not in released]
+    live = [row for row in grants if f"{row.idempotency_key}:released" not in released
+            and row.idempotency_key not in assume_released]
     return len(live) >= ACCOUNT_ACTIVE_LIMIT or len(grants) >= ACCOUNT_RESERVATION_LIMIT
 
 
@@ -325,13 +408,39 @@ def is_established_publisher(organization, config=None) -> bool:
     article that was not the free one, or a paid article charge. The same rule
     defines the cohort that keeps today's flow.
     """
+    return _established(organization, config, count_website=True)
+
+
+def verified_site_keeps_free_article(organization, config=None) -> bool:
+    """P1 (IF-P1-03 fixture 7): a verified website alone does not use up a new founder's free article.
+
+    Only for a new-journey startup with ``ARTICLES_FIRST_ARTICLE_CARD_ENABLED``
+    on. Such a founder may verify the site before writing; a written, charged
+    or non-free completed article still makes them established. Legacy
+    startups keep :func:`is_established_publisher` as it is.
+    """
+    if organization is None or not getattr(organization, "pk", None):
+        return False
+    if not getattr(settings, "ARTICLES_FIRST_ARTICLE_CARD_ENABLED", False):
+        return False
+    from .founder_journey_cohort import is_new_journey
+    return is_new_journey(organization, config if getattr(config, "pk", None) else None)
+
+
+def _established_for_entitlement(organization, config=None) -> bool:
+    """The established rule the free first article applies to this startup."""
+    return _established(organization, config,
+                        count_website=not verified_site_keeps_free_article(organization, config))
+
+
+def _established(organization, config, *, count_website: bool) -> bool:
     from content_factory.models import ContentFactoryJob, OrganizationContentConfig, WrittenArticle
     from workflow_runs.models import ContentFactoryRun
     from .portable_drafts import has_connected_website
     from .run_state import ARTICLE_WORKFLOWS
     if config is None:
         config = OrganizationContentConfig.objects.filter(organization=organization).select_related("website_connection").first()
-    if has_connected_website(config):
+    if count_website and has_connected_website(config):
         return True
     if WrittenArticle.objects.filter(organization=organization).exists():
         return True
@@ -348,7 +457,7 @@ def is_established_publisher(organization, config=None) -> bool:
 def _topic_batch_free(organization, user, rows: _Rows, *, now, established: bool) -> bool:
     if established or (rows.topics is not None and (not rows.topics_released or rows.topics_retry is not None)):
         return False
-    return not _account_limited(user, topics=True, now=now)
+    return not _account_limited(user, topics=True, now=now, organization=organization)
 
 
 def entitlement_state(organization, user, *, config=None, now=None) -> dict:
@@ -368,7 +477,7 @@ def entitlement_state(organization, user, *, config=None, now=None) -> dict:
     if organization is None or not getattr(organization, "pk", None):
         return {**state, "limit": "disabled"}
     if not free_first_article_enabled():
-        established = is_established_publisher(organization, config)
+        established = _established_for_entitlement(organization, config)
         return {**state, "limit": "established" if established else "disabled"}
     now = now or timezone.now()
     rows = _rows(organization.pk)
@@ -382,7 +491,7 @@ def entitlement_state(organization, user, *, config=None, now=None) -> dict:
         run = delivered or _run_for_attempt(runs, next((row for row in rows.attempts.values()
             if row.reference_id == rows.consumed.reference_id), rows.consumed))
         return {**state, "status": "used", "run_id": getattr(run, "run_id", None)}
-    established = is_established_publisher(organization, config)
+    established = _established_for_entitlement(organization, config)
     state["topic_batch_free"] = _topic_batch_free(organization, user, rows, now=now, established=established)
     live = [row for number, row in sorted(rows.attempts.items()) if rows.attempt_state(number) == "reserved"]
     if live:
@@ -392,11 +501,40 @@ def entitlement_state(organization, user, *, config=None, now=None) -> dict:
         return {**state, "limit": "established"}
     if len(rows.attempts) >= ATTEMPTS_ALLOWED:
         return {**state, "limit": "attempts"}
-    if _account_limited(user, topics=False, now=now):
+    if _account_limited(user, topics=False, now=now, organization=organization):
         return {**state, "limit": "account"}
     if _daily_cap_reached(now):
         return {**state, "limit": "daily_cap"}
     return {**state, "status": "available", "free": True}
+
+
+def next_attempt_admissible(organization, user, run, *, config=None, now=None) -> bool:
+    """Whether releasing ``run``'s live free attempt would admit the next one (P1.9 switch-topic).
+
+    The answer reserve_entitlement would give once this attempt is released:
+    the run's attempt is live and reserved, nothing on the grant has
+    delivered, a further attempt is allowed, the startup is not established,
+    the account cap holds with this attempt counted as released, and the
+    global daily cap has room (a released attempt still counts toward it, so
+    the cap is read as it stands). Reads only.
+    """
+    if not free_first_article_enabled() or organization is None or not getattr(organization, "pk", None):
+        return False
+    now = now or timezone.now()
+    rows = _rows(organization.pk)
+    number, attempt = _matching_attempt(rows, getattr(run, "run_request", None))
+    if attempt is None or rows.attempt_state(number) != "reserved" or rows.consumed is not None:
+        return False
+    if len(rows.attempts) >= ATTEMPTS_ALLOWED:
+        return False
+    if any(_delivered(other) for other in _entitled_runs(organization.pk)):
+        return False
+    if _established_for_entitlement(organization, config):
+        return False
+    if _account_limited(user, topics=False, now=now, organization=organization,
+                        assume_released=frozenset({attempt.idempotency_key})):
+        return False
+    return not _daily_cap_reached(now)
 
 
 def reserve_allowed(data, config) -> bool:

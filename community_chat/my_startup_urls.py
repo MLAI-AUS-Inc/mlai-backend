@@ -1,5 +1,6 @@
 """Explicit paths only: no arbitrary proxy, admin, billing, or worker endpoints."""
 from django.urls import path
+from . import my_startup_journey_views as journey
 from . import my_startup_views as views
 
 ROUTES = (
@@ -41,6 +42,12 @@ ROUTES = (
     ("vibe-marketing/runs/<str:run_id>/comments", views.ArticleCommentsView),
     ("vibe-marketing/runs/<str:run_id>/comments/<uuid:comment_id>", views.ArticleCommentView),
     ("vibe-marketing/runs/<str:run_id>/cancel", views.CancelRunView),
+    # P1 founder journey (each answers 404 while its flag is off).
+    ("journey", journey.FounderJourneyView),
+    ("founder-journey/opt-in", journey.FounderJourneyOptInView),
+    ("first-article", journey.FirstArticleCardView),
+    ("first-article/start", journey.FirstArticleStartView),
+    ("first-article/switch-topic", journey.FirstArticleSwitchTopicView),
 )
 
 urlpatterns = [path(route + suffix, view.as_view()) for route, view in ROUTES for suffix in ("", "/")]
