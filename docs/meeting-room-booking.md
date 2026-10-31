@@ -28,9 +28,9 @@ The facade accepts the same room slug, timestamp, confirmation and expected
 price fields as the Roo API, except it derives the member identity from the
 account session and does not permit administrative target-member bookings.
 
-The default `rooms/` list contains active `small-meeting-room` and
-`big-meeting-room` records only. The distinct `conference-room` resource is
-accessed by an explicit room slug and is never included in the default list.
+The default `rooms/` list contains active **Lovelace** (`small-meeting-room`)
+and **Turing** (`big-meeting-room`) records only. The distinct `conference-room`
+resource is accessed by an explicit room slug and is never included in the default list.
 
 ## Booking duration
 
@@ -98,3 +98,21 @@ pricing, admin target identity, repeated access checks, private denials, default
 list filtering, inactive/missing rooms, replay and cancellation. It runs in the
 existing meeting-room CI selection. The existing room API regressions protect
 authentication, conflicts, refunds, daily limits and signature/request binding.
+
+## Lovelace and Turing rename
+
+Migration `roo.0042_rename_meeting_rooms` changes the existing Small Meeting
+Room name to **Lovelace**, and Big Meeting Room name to **Turing**. It updates
+only the name on each existing slug. Room IDs, active status, bookings, blocks,
+prices, and API request fields remain unchanged. Missing rooms are not created.
+The reverse migration restores the original display names.
+
+Roo recognizes the new names without requiring the word `room`, and continues
+to accept the old names and size-based aliases. Keep the stable API slugs
+`small-meeting-room` and `big-meeting-room` in integrations and stored callbacks.
+
+Apply the separately approved production migration with the backend release
+before releasing the companion Roo change, so all backend-provided availability,
+confirmation, booking-list and cancellation labels use the new names. Historical
+Slack messages are not rewritten; their legacy action payloads still work.
+Production deployment and migration application are separate authorized actions.
