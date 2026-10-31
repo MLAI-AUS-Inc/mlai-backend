@@ -31,6 +31,7 @@ from core.models import (
     OrganizationContentConfig,
     WebsiteDesignSnapshot,
 )
+from content_factory.founder_journey_cohort import without_private_keys
 from content_factory.portable_drafts import website_preview_delivery_mode
 from content_factory.run_status_contract import ACTIVE, AWAITING
 from content_factory.service_views import _serialize_content_factory_run, _sync_content_factory_run_snapshot
@@ -116,7 +117,7 @@ def _serialize_config(config: OrganizationContentConfig | None) -> dict | None:
         "scan_summary": config.scan_summary,
         "tech_stack": config.tech_stack or {},
         "installed_packages": config.installed_packages or {},
-        "pillar_strategy": config.pillar_strategy or {},
+        "pillar_strategy": without_private_keys(config.pillar_strategy) or {},
         "build_healing_hints": config.build_healing_hints or [],
         "repo_execution_contract": config.repo_execution_contract or {},
         "article_path_pattern": config.article_path_pattern,
@@ -530,6 +531,43 @@ class ContentFactoryAppGitHubConnectView(APIView):
         )
 
 
+_SCAN_ARTIFACT_FIELDS = (
+    "article_template",
+    "design_guide",
+    "resource_prompt",
+    "company_context",
+    "tech_stack",
+    "installed_packages",
+    "pillar_strategy",
+    "build_healing_hints",
+    "repo_execution_contract",
+    "article_path_pattern",
+    "registry_path",
+    "publish_targets",
+    "default_publish_target_id",
+    "article_system",
+)
+
+
+def scan_existing_artifacts(config) -> dict:
+    """The config's saved artifacts that a scan reuses instead of regenerating.
+
+    The founder-journey keys are backend bookkeeping, not strategy: they never
+    reach the worker, and a strategy holding only them counts as empty, so the
+    scan still generates pillars for it.
+    """
+    existing_artifacts = {}
+    if not config:
+        return existing_artifacts
+    for source_field in _SCAN_ARTIFACT_FIELDS:
+        value = getattr(config, source_field, None)
+        if source_field == "pillar_strategy":
+            value = without_private_keys(value)
+        if value:
+            existing_artifacts[source_field] = value
+    return existing_artifacts
+
+
 class ContentFactoryAppScanView(APIView):
     permission_classes = [IsAuthenticated]
 
@@ -554,27 +592,7 @@ class ContentFactoryAppScanView(APIView):
         if not github_repo:
             return Response({"error": "github_repo is required"}, status=status.HTTP_400_BAD_REQUEST)
 
-        existing_artifacts = {}
-        if config:
-            for source_field in (
-                "article_template",
-                "design_guide",
-                "resource_prompt",
-                "company_context",
-                "tech_stack",
-                "installed_packages",
-                "pillar_strategy",
-                "build_healing_hints",
-                "repo_execution_contract",
-                "article_path_pattern",
-                "registry_path",
-                "publish_targets",
-                "default_publish_target_id",
-                "article_system",
-            ):
-                value = getattr(config, source_field, None)
-                if value:
-                    existing_artifacts[source_field] = value
+        existing_artifacts = scan_existing_artifacts(config)
 
         payload = {
             "domain": normalized_domain,
