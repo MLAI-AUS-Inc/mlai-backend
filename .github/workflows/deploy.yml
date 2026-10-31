@@ -378,6 +378,9 @@ jobs:
           content_factory.tests_topic_metrics_unit \
           integrations.tests_slack_content
 
+    - name: Run one-field start and first profile tests
+      run: python manage.py test content_factory.tests_founder_journey_bootstrap content_factory.tests_startup_first_profile founder_tools.tests_company_create_idempotency --noinput --verbosity 2
+
     - name: Check setup merge observation without database access
       run: python scripts/test_without_database.py content_factory.tests_setup_merge_observation_unit
 
