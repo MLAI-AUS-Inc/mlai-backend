@@ -5,10 +5,14 @@ gate. The management commands ``backfill_run_job_fields`` and
 ``compare_run_job_fields`` are thin wrappers over this module.
 
 The backfill only fills empty run columns. It never overwrites a non-empty
-value (a differing one is counted as a conflict), never deletes a Job, and
-creates a run only for a Job that has none, tagged in ``result`` so ``--undo``
-can find it. Reports carry field names and counts only: no ids, domains,
-founder names or emails.
+value (a differing one is counted as a conflict) and never deletes a Job.
+Creating runs is opt in (``create=True``, ``--create``): only for a Job that has
+none, only when the Job's phase maps to a terminal run status, and tagged in
+``result`` so ``--undo`` can find it. A created queued, running, blocked or
+awaiting run would be probed and failed by the reconciliation sweep or shown
+to the founder as work to do, so a live Job is left for CF's own callback.
+Reports carry field names and counts only: no ids, domains, founder names or
+emails.
 """
 from collections import Counter
 from datetime import datetime
@@ -18,6 +22,7 @@ from django.db.models import Q
 from django.utils import timezone
 
 from .job_mirror import JOB_TO_RUN_FIELDS, RUN_JOB_COLUMN_DEFAULTS, RUN_JOB_COLUMNS, run_values_for_job
+from .run_status_contract import is_terminal
 
 BACKFILL_RESULT_KEY = "backfilled_from_job"
 DISPATCH_TOKEN_PREFIX = "vibe-dispatch:"
@@ -157,12 +162,12 @@ class BackfillReport:
         fill_verb = "Filled" if self.apply else "Would fill"
         lines = [f"Mode: {mode}"]
         for key in ("jobs_scanned", "matched_by_run_id", "matched_by_token", "orphan_token_jobs",
-                    "ambiguous_token_jobs", "jobs_without_run", "create_skipped", "create_races"):
+                    "ambiguous_token_jobs", "jobs_without_run", "create_skipped", "create_skipped_live",
+                    "create_races"):
             lines.append(f"{key}: {self.counts[key]}")
         lines.append(f"{verb} runs: {self.counts['runs_created']}")
         lines.append(f"  by workflow: {_counter_text(self.create_workflows)}")
         lines.append(f"  by status: {_counter_text(self.create_statuses)}")
-        lines.append(f"  active (queued/running; the reconciliation sweep probes these): {self.counts['created_active']}")
         lines.append(f"{fill_verb} runs: {self.counts['runs_filled']} ({self.counts['columns_filled']} columns)")
         lines.append(f"{'Linked' if self.apply else 'Would link'} written articles: {self.counts['articles_linked']}")
         lines.append(f"Conflicts (kept the run's value): {_counter_text(self.conflicts)}")
@@ -217,9 +222,11 @@ def _backfill_job(job, report, *, at, create, create_since):
             report.counts["create_skipped"] += 1
             return
         kwargs = _created_run_kwargs(job, at=at)
+        if not is_terminal(kwargs["status"]):
+            report.counts["create_skipped_live"] += 1
+            return
         report.create_workflows[kwargs["workflow"]] += 1
         report.create_statuses[kwargs["status"]] += 1
-        report.counts["created_active"] += kwargs["status"] in {"queued", "running"}
         if not report.apply:
             report.counts["runs_created"] += 1
             report.counts["articles_linked"] += job.articles.filter(run__isnull=True).count()
@@ -251,7 +258,7 @@ def _backfill_job(job, report, *, at, create, create_since):
     _link_articles(job, run, report)
 
 
-def backfill_run_job_fields(*, apply=False, batch_size=DEFAULT_BATCH_SIZE, create=True, create_since=None, now=None):
+def backfill_run_job_fields(*, apply=False, batch_size=DEFAULT_BATCH_SIZE, create=False, create_since=None, now=None):
     """Copy every Job's facts into its run's empty columns (design 4.2).
 
     Jobs are read by pk in batches, each batch in its own transaction with

@@ -393,6 +393,9 @@ class BackfillTest(TestCase):
     def test_dry_run_is_the_default_and_reports_counts_only(self):
         output = self._call()
         self.assertIn("Mode: dry run", output)
+        self.assertIn("jobs_without_run: 1", output)
+        self.assertIn("Would create runs: 0", output)  # creating runs is opt in
+        output = self._call("--create")
         self.assertIn("Would create runs: 1", output)
         self.assertIn("by workflow: repo_scan=1", output)
         self.assertEqual(_run_columns(self.matched_run), _blank())
@@ -402,7 +405,7 @@ class BackfillTest(TestCase):
 
     def test_apply_fills_creates_tagged_runs_links_articles_and_is_idempotent(self):
         at = timezone.now()
-        first = backfill_run_job_fields(apply=True, now=at)
+        first = backfill_run_job_fields(apply=True, create=True, now=at)
         self.assertEqual(first.counts["runs_created"], 1)
         self.assertEqual(first.counts["runs_filled"], 1)
         self.assertEqual(job_field_mismatches(self.matched_job, job_view("run-bf-matched")), [])
@@ -417,7 +420,7 @@ class BackfillTest(TestCase):
         self.article.refresh_from_db()
         self.assertEqual(self.article.run_id, self.matched_run.pk)
         state = list(ContentFactoryRun.objects.order_by("pk").values())
-        second = backfill_run_job_fields(apply=True)
+        second = backfill_run_job_fields(apply=True, create=True)
         self.assertEqual((second.counts["runs_created"], second.counts["runs_filled"],
                           second.counts["articles_linked"]), (0, 0, 0))
         self.assertEqual(list(ContentFactoryRun.objects.order_by("pk").values()), state)
@@ -436,7 +439,7 @@ class BackfillTest(TestCase):
         self.assertFalse(ContentFactoryRun.objects.filter(run_id="legacy-slack-job").exists())
 
     def test_creates_only_for_jobs_without_a_run_and_honours_the_cutoff(self):
-        report = backfill_run_job_fields(apply=True, create_since=timezone.now() - timedelta(days=30))
+        report = backfill_run_job_fields(apply=True, create=True, create_since=timezone.now() - timedelta(days=30))
         self.assertEqual(report.counts["create_skipped"], 1)
         self.assertEqual(ContentFactoryRun.objects.filter(result__has_key=BACKFILL_RESULT_KEY).count(), 0)
         self.assertEqual(ContentFactoryRun.objects.count(), 1)
@@ -459,9 +462,17 @@ class BackfillTest(TestCase):
         self.assertEqual(report.conflicts["billing_status"], 1)
         self.assertEqual(ContentFactoryRun.objects.get(run_id="cf-real-bf-owned").billing_status, "reused")
 
+    def test_never_creates_a_run_for_a_live_job(self):
+        with override_settings(ARTICLES_RUN_JOB_DUAL_WRITE_ENABLED=False):
+            _job("legacy-live-job", status="generating", request_meta={}, client_request_id=None)
+        report = backfill_run_job_fields(apply=True, create=True)
+        self.assertEqual(report.counts["create_skipped_live"], 1)
+        self.assertEqual(report.create_statuses, {"completed": 1})
+        self.assertFalse(ContentFactoryRun.objects.filter(run_id="legacy-live-job").exists())
+
     def test_undo_restores_the_previous_state(self):
         before = list(ContentFactoryRun.objects.order_by("pk").values())
-        backfill_run_job_fields(apply=True)
+        backfill_run_job_fields(apply=True, create=True)
         output = self._call("--undo")
         self.assertIn("created_runs_deleted: 1", output)
         self.assertTrue(ContentFactoryRun.objects.filter(run_id="legacy-slack-job").exists())  # dry run
@@ -472,7 +483,7 @@ class BackfillTest(TestCase):
         self.assertEqual(ContentFactoryJob.objects.count(), 2)
 
     def test_undo_keeps_a_created_run_something_updated(self):
-        backfill_run_job_fields(apply=True)
+        backfill_run_job_fields(apply=True, create=True)
         created = ContentFactoryRun.objects.get(run_id="legacy-slack-job")
         created.current_step = "callback"
         created.save(update_fields=["current_step", "updated_at"])
@@ -654,3 +665,38 @@ class JobViewLogPrivacyTest(TestCase):
                                         from_run=lambda: calls.append(1) or "run"), "job")
         self.assertEqual(calls, [])
 
+
+
+@override_settings(ROO_API_KEY="test-run-job-fold-key")
+class WrittenArticleRunLinkTest(TestCase):
+    """A new article is linked to its run as well as its Job, under dual write only."""
+
+    def setUp(self):
+        from django.urls import reverse
+        from rest_framework.test import APIClient
+        with override_settings(ARTICLES_RUN_JOB_DUAL_WRITE_ENABLED=False):
+            Organization.objects.create(domain=DOMAIN, name="Synthetic Startup")
+            self.run = _run("run-article-link")
+            _job("run-article-link")
+        self.client = APIClient()
+        self.client.credentials(HTTP_X_API_KEY="test-run-job-fold-key")
+        self.url = reverse("seo_article_create")
+
+    def _post(self, slug):
+        response = self.client.post(self.url, {
+            "domain": DOMAIN, "title": "Synthetic", "slug": slug, "category": "guide",
+            "primary_keyword": "synthetic keyword", "job_id": "run-article-link",
+        }, format="json")
+        self.assertIn(response.status_code, {200, 201}, response.data)
+        return WrittenArticle.objects.get(slug=slug)
+
+    def test_flag_off_links_only_the_job(self):
+        article = self._post("synthetic-off")
+        self.assertEqual(article.job.job_id, "run-article-link")
+        self.assertIsNone(article.run_id)
+
+    @DUAL_WRITE
+    def test_dual_write_links_the_run_too(self):
+        article = self._post("synthetic-on")
+        self.assertEqual(article.job.job_id, "run-article-link")
+        self.assertEqual(article.run_id, self.run.pk)

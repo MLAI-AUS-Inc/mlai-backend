@@ -12,8 +12,9 @@ class Command(BaseCommand):
     help = (
         "Fill each ContentFactoryRun's Job columns from its ContentFactoryJob. Dry run by "
         "default; pass --apply to write. Never overwrites a non-empty run value (conflicts are "
-        "counted by field), never deletes a Job, and creates a tagged run only for a Job that "
-        "has none. --undo deletes the untouched runs it created and blanks the new columns. "
+        "counted by field) and never deletes a Job. With --create it also makes a tagged run for "
+        "a finished Job that has none (never for a live one). --undo deletes the untouched runs "
+        "it created and blanks the new columns. "
         "Output is field names and counts only."
     )
 
@@ -22,7 +23,8 @@ class Command(BaseCommand):
         parser.add_argument("--dry-run", action="store_true", help="Report only. This is the default.")
         parser.add_argument("--undo", action="store_true", help="Reverse a backfill (design 4.3).")
         parser.add_argument("--batch-size", type=int, default=DEFAULT_BATCH_SIZE)
-        parser.add_argument("--no-create", action="store_true", help="Never create runs for Jobs that have none.")
+        parser.add_argument("--create", action="store_true",
+                            help="Also create runs for finished Jobs that have none (default: fill existing runs only).")
         parser.add_argument("--create-since", default="",
                             help="Create runs only for Jobs created on or after this date (YYYY-MM-DD).")
 
@@ -50,6 +52,6 @@ class Command(BaseCommand):
                 raise CommandError("--create-since must be YYYY-MM-DD.") from exc
             create_since = timezone.make_aware(datetime.combine(day, time.min), timezone.get_default_timezone())
         report = backfill_run_job_fields(apply=apply, batch_size=options["batch_size"],
-                                         create=not options["no_create"], create_since=create_since)
+                                         create=options["create"], create_since=create_since)
         for line in report.lines():
             self.stdout.write(line)
