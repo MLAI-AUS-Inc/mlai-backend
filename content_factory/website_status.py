@@ -111,6 +111,58 @@ def project_status(op, *, scope, source_sha, journey, now=None):
         "milestones": milestones, "expectedTime": None, "mode": "goal" if not legacy else "legacy"}
 
 
+def _p2_flags_on() -> bool:
+    return bool(getattr(settings, "ARTICLES_FAILURE_POLICY_V2_ENABLED", False)
+                or getattr(settings, "MY_STARTUP_CANONICAL_ACTION_IDS_ENABLED", False))
+
+
+def add_p2_fields(result, op, *, organization):
+    """The P2 additions (IF-P2-05, IF-P2-06), for a P2-cohort organisation only.
+
+    With canonical action ids on, the action travels as its canonical ask with
+    the registry label; with them off it keeps today's id. ``copyId`` is added
+    only while ``copy_id_for`` returns one (the policy flag on and the org in the
+    P2 cohort), and never for a finished goal. A legacy organisation, or any
+    organisation with both flags off, gets ``result`` back unchanged.
+    """
+    if not _p2_flags_on() or not isinstance(result, dict):
+        return result
+    from . import registry_policy
+    from .p2_foundation import p2_applies, policy_v2_applies
+    if not p2_applies(organization):
+        return result
+    action = result.get("action")
+    if registry_policy.canonical_ids_enabled() and isinstance(action, dict):
+        canonical = registry_policy.canonical_action_id(action.get("id"))
+        if canonical is not None and canonical != action.get("id"):
+            from .website_failure_contract import load_registry
+            label = load_registry()["actions"].get(canonical)
+            result["action"] = {**action, "id": canonical, **({"label": label} if label else {})}
+    state = result.get("state")
+    if state == "done":
+        return result
+    receipt = goals.mapping(op.receipt)
+    copy_id = None
+    if state == "needs_you" and isinstance(result.get("action"), dict):
+        ask = registry_policy.canonical_action_id(result["action"].get("id"))
+        candidate = f"ask_{ask}" if ask else None
+        if candidate in _founder_copy_ids() and policy_v2_applies(organization):
+            copy_id = candidate
+    if copy_id is None:
+        code = receipt.get("reason_code")
+        copy_id = registry_policy.copy_id_for(code if isinstance(code, str) and code else None,
+                                              organization=organization, terminal=state == "stopped",
+                                              self_heal=goals.mapping(receipt.get("self_heal_v1")) or None)
+    if copy_id is not None:
+        result["copyId"] = copy_id
+    return result
+
+
+def _founder_copy_ids() -> frozenset:
+    from .website_failure_contract import load_registry
+    return frozenset(load_registry().get("founder_copy_ids") or ())
+
+
 def status_for_context(context, config, *, journey, now=None):
     """Select one current owned operation; feature-off responses remain unchanged."""
     if not getattr(settings, "ARTICLES_WEBSITE_STATUS_V1_ENABLED", False) or config.website_connection is None:
@@ -129,6 +181,7 @@ def status_for_context(context, config, *, journey, now=None):
             "milestones": [], "expectedTime": None, "mode": "goal"}
     scope, source = goals.scope_for(connection, context.company.pk), source_for(connection, journey)
     result = project_status(op, scope=scope, source_sha=source, journey=journey, now=now)
+    result = add_p2_fields(result, op, organization=connection.organization)
     from .website_native_inventory import add_display
     result = add_display(result, op)
     if getattr(settings, "ARTICLES_WEBSITE_DOCTOR_ENABLED", False):
