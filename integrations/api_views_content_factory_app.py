@@ -33,6 +33,7 @@ from core.models import (
 )
 from content_factory.founder_journey_cohort import without_private_keys
 from content_factory.portable_drafts import website_preview_delivery_mode
+from content_factory.run_status_contract import ACTIVE, AWAITING
 from content_factory.service_views import _serialize_content_factory_run, _sync_content_factory_run_snapshot
 from content_factory.website_contract import WebsiteAuthorityError, connection_contract
 from content_factory.website_connections import (
@@ -64,15 +65,10 @@ from integrations.utils import normalize_domain
 logger = logging.getLogger(__name__)
 
 
-ACTIVE_RUN_STATUSES = {
-    ContentFactoryRunStatus.QUEUED,
-    ContentFactoryRunStatus.RUNNING,
-    ContentFactoryRunStatus.BLOCKED,
-    ContentFactoryRunStatus.AWAITING_CONFIRMATION,
-    ContentFactoryRunStatus.AWAITING_DELIVERY_MODE,
-    ContentFactoryRunStatus.AWAITING_APPROVAL,
-    ContentFactoryRunStatus.APPROVAL_REQUIRED,
-}
+# Runs whose remote record can still change, so reading one refreshes it from
+# content-factory: active runs, runs awaiting the owner, and blocked runs
+# (a resume reopens them). Blocked counts here on purpose; it is not active.
+REMOTE_REFRESH_RUN_STATUSES = ACTIVE | AWAITING | {ContentFactoryRunStatus.BLOCKED.value}
 
 
 def _ensure_actor_id(user) -> str:
@@ -791,7 +787,7 @@ class ContentFactoryAppRunView(APIView):
         if run is None or not _run_belongs_to_actor(run, actor_ids):
             return Response({"error": "Run not found"}, status=status.HTTP_404_NOT_FOUND)
 
-        should_fetch_remote = refresh or (run.status in ACTIVE_RUN_STATUSES)
+        should_fetch_remote = refresh or (run.status in REMOTE_REFRESH_RUN_STATUSES)
         if should_fetch_remote:
             try:
                 response = _content_factory_request("get", f"/api/runs/{run_id}")

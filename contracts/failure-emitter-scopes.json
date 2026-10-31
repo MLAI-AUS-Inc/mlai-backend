@@ -727,6 +727,18 @@
     {
       "adapter": "validated_v1_projection",
       "allowed_codes_ref": "contracts/failure-codes.json#/codes",
+      "expression": "failure['code']",
+      "field": "code",
+      "function": "legacy_view",
+      "owner": "backend.website_failure_contract",
+      "path": "content_factory/website_failure_contract.py",
+      "site_sha256": "6d8af6b5a241c6f4d7480960ce7561415bb13e05e8aea3d72b4e6f9627ae3086",
+      "source": "website_failure_contract.validate_failure membership fallback: an envelope code this registry lacks keeps its own validated code, class and retryable",
+      "test": "content_factory.tests_failure_contract_unit.MembershipTests.test_membership_accepts_unknown_codes_and_registry_drift"
+    },
+    {
+      "adapter": "validated_v1_projection",
+      "allowed_codes_ref": "contracts/failure-codes.json#/codes",
       "expression": "code",
       "field": "code",
       "function": "resolve_failure",
@@ -1155,6 +1167,18 @@
       "site_sha256": "d1477205315d5746f12a60d7fcc0e1c5bc30472f965364397d092446ca56a3c8",
       "source": "Saved diagnostic observation through safe_code; never authorizes failure policy, dispatch or readiness. Arbitrary bodies and credentials omitted.",
       "test": "content_factory.tests_website_doctor_unit.DoctorTests.test_inspector_omits_secrets_even_in_old_legacy_fields"
+    },
+    {
+      "adapter": "validated_v1_projection",
+      "allowed_codes_ref": "contracts/failure-codes.json#/codes",
+      "expression": "entry['code']",
+      "field": "code",
+      "function": "_registered_failure",
+      "owner": "backend.run_events",
+      "path": "content_factory/run_events.py",
+      "site_sha256": "b3e2e326a872b67c1d301188da9191f0761f8eed0e5aed2074a765643f15f8d6",
+      "source": "website_failure_contract.load_registry by_code lookup; a code this registry does not know is dropped and the failure keeps no code",
+      "test": "content_factory.tests_run_events_unit.CleanEventTests.test_a_code_the_registry_does_not_know_keeps_the_failure_without_it"
     },
     {
       "adapter": "audited_v0_observation",

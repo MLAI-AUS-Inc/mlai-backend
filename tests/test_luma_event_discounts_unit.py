@@ -111,13 +111,46 @@ class LumaEventDiscountTests(unittest.TestCase):
                               ({"cents": True}, "ticket_not_paid_aud"),
                               ({"cents": 10.5}, "ticket_not_paid_aud"),
                               ({"is_hidden": True}, "ticket_not_supported"),
-                              ({"require_approval": True}, "ticket_not_supported"),
+                              ({"require_approval": "true"}, "ticket_not_supported"),
                               ({"is_flexible": True}, "ticket_not_supported")):
             with self.subTest(changes=changes):
                 self.assert_code(code, self.validate, ticket={**TICKET, **changes})
 
     def test_ticket_must_be_from_exact_event_listing(self):
         self.assert_code("ticket_unavailable", self.validate, ticket={**TICKET, "id": "ttype-other"})
+
+    def test_approval_required_ticket_is_recorded_without_changing_admission(self):
+        snapshot = self.validate(ticket={**TICKET, "require_approval": True})
+        self.assertIs(snapshot["ticket"]["requires_approval"], True)
+        self.assertTrue(all(call.args[0] == "GET" for call in self.session.request.call_args_list))
+
+    def test_approval_change_after_quote_requires_fresh_consent(self):
+        for originally_required in (False, True):
+            with self.subTest(originally_required=originally_required):
+                snapshot = self.validate(ticket={**TICKET, "require_approval": originally_required})
+                self.assert_code("ticket_terms_changed", self.validate, ticket={**TICKET, "require_approval": not originally_required}, terms=snapshot)
+
+    def test_ticket_price_must_be_strictly_below_one_hundred_aud(self):
+        snapshot = self.validate(ticket={**TICKET, "cents": 9999})
+        self.assertEqual(snapshot["ticket"]["cents"], 9999)
+        for cents in (10000, 10001, 50000):
+            with self.subTest(cents=cents):
+                self.assert_code("ticket_price_limit", self.validate, ticket={**TICKET, "cents": cents})
+
+    def test_full_ticket_reward_preserves_one_use_and_exact_ticket_scope(self):
+        snapshot = self.validate(terms={**TERMS, "discount": {"discount_type": "percent", "percent_off": 100}})
+        self.session.request.side_effect = None
+        self.session.request.return_value = response({**COUPON, "percent_off": 100})
+        self.service.create_coupon(snapshot, "ROO-SYNTHETIC")
+        body = self.session.request.call_args.kwargs["json"]
+        self.assertEqual(body["remaining_count"], 1)
+        self.assertEqual(body["event_ticket_type_id"], "ttype-test")
+        self.assertEqual(body["discount"], {"discount_type": "percent", "percent_off": 100.0})
+
+    def test_price_increase_to_limit_invalidates_an_existing_snapshot(self):
+        snapshot = self.validate(ticket={**TICKET, "cents": 9999})
+        self.assert_code("ticket_price_limit", self.validate, ticket={**TICKET, "cents": 10000}, terms=snapshot)
+        self.assertTrue(all(call.args[0] == "GET" for call in self.session.request.call_args_list))
 
     def test_ticket_sales_window_and_coupon_expiry_are_checked(self):
         for changes, code in (({"valid_start_at": "2026-10-21T00:00:00Z"}, "ticket_sales_closed"),

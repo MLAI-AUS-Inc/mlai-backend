@@ -51,15 +51,14 @@ from django.utils.dateparse import parse_datetime
 
 from workflow_runs.models import ContentFactoryRun, ContentFactoryRunStatus
 
+from .run_status_contract import ACTIVE
+
 logger = logging.getLogger(__name__)
 
 # Runs in these statuses are owned by content-factory: progress arrives via
 # callbacks, so one that stops updating is either still (slowly) working,
 # lost its terminal callback, or never existed remotely at all.
-ACTIVE_RUN_STATUSES = (
-    ContentFactoryRunStatus.QUEUED,
-    ContentFactoryRunStatus.RUNNING,
-)
+ACTIVE_RUN_STATUSES = tuple(sorted(ACTIVE))
 
 # content-factory's GET /api/runs/{run_id} reads the durable store for these
 # workflows only (main.py _load_durable_run). A 404 for any other workflow is

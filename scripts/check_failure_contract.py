@@ -3,6 +3,8 @@
 
 Offline validation is explicit about its limit. CI must use --remote; unavailable
 private-source access fails without printing tokens, response bodies or URLs.
+Receivers validate failure codes by membership, so a difference from the pinned
+Content Factory copy is reported as drift (codes and classes), not a failure.
 """
 from __future__ import annotations
 
@@ -217,8 +219,30 @@ def check_emitters(root=ROOT):
     return errors, rows
 
 
+def describe_drift(path, local, peer):
+    """Report how the vendored copy differs from the pinned Content Factory copy."""
+    if path != ARTIFACTS[0]:
+        return [f"DRIFT {path}: bytes differ from the pinned Content Factory revision"]
+    try:
+        ours, theirs = ({entry["code"]: entry["failure_class"] for entry in json.loads(raw)["codes"]} for raw in (local, peer))
+    except (ValueError, KeyError, TypeError):
+        return [f"DRIFT {path}: the pinned Content Factory copy is not a readable registry"]
+    def safe(value):
+        return value if isinstance(value, str) and re.fullmatch(r"[A-Za-z][A-Za-z0-9_]{0,127}", value) else "<invalid>"
+    lines = [f"DRIFT {path}: only in Content Factory: {safe(code)}" for code in sorted(theirs.keys() - ours.keys(), key=str)]
+    lines += [f"DRIFT {path}: only here: {code}" for code in sorted(ours.keys() - theirs.keys())]
+    lines += [f"DRIFT {path}: {code} is {ours[code]} here and {safe(theirs[code])} in Content Factory"
+              for code in sorted(ours.keys() & theirs.keys()) if ours[code] != theirs[code]]
+    return lines or [f"DRIFT {path}: bytes differ; codes and classes agree"]
+
+
 def verify_vendor(root=ROOT, *, remote=False, token=None, fetch=None):
-    """Verify exact local digests and optionally the pinned private source bytes."""
+    """Verify exact local digests; with remote, return drift from the pinned source.
+
+    Local digests, the immutable pin and private-source access still fail
+    closed. Byte differences from the pinned Content Factory copy are returned
+    as drift lines because receivers accept codes by membership.
+    """
     lock = json.loads((root / "contracts/failure-codes.lock.json").read_text())
     if type(lock.get("schema_version")) is not int or lock["schema_version"] != 1:
         raise ContractCheckError("invalid_vendor_lock_version")
@@ -229,6 +253,7 @@ def verify_vendor(root=ROOT, *, remote=False, token=None, fetch=None):
         raise ContractCheckError("invalid_vendor_file_set")
     if remote and not token:
         raise ContractCheckError("CONTENT_FACTORY_CONTRACT_READ_TOKEN_required_for_pinned_private_source")
+    drift = []
     for path in ARTIFACTS:
         raw = (root / path).read_bytes()
         if hashlib.sha256(raw).hexdigest() != lock["files"][path]:
@@ -236,8 +261,8 @@ def verify_vendor(root=ROOT, *, remote=False, token=None, fetch=None):
         if remote:
             peer = fetch(path, revision, token) if fetch else fetch_source(path, revision, token)
             if peer != raw:
-                raise ContractCheckError("pinned_source_byte_mismatch")
-    return lock
+                drift.extend(describe_drift(path, raw, peer))
+    return drift
 
 
 def fetch_source(path, revision, token):
@@ -267,13 +292,17 @@ def main():
         print(json.dumps(inventory(), sort_keys=True, indent=2)); return 0
     try:
         errors, rows = check_emitters()
-        verify_vendor(remote=args.remote, token=os.getenv("CONTENT_FACTORY_CONTRACT_READ_TOKEN"))
+        drift = verify_vendor(remote=args.remote, token=os.getenv("CONTENT_FACTORY_CONTRACT_READ_TOKEN"))
         if errors:
             print("\n".join(errors)); return 1
     except (ContractCheckError, OSError, ValueError) as exc:
         print(f"Failure contract check failed: {exc}"); return 1
     print(f"Failure contract: {len(rows)} production emissions audited; vendored digests valid.")
-    print("Pinned Content Factory provenance verified." if args.remote else "OFFLINE: remote pinned provenance was not rechecked.")
+    if drift:
+        print("\n".join(drift))
+        print("Pinned Content Factory copy differs (reported, not a gate); bump source_revision once both repos agree.")
+    else:
+        print("Pinned Content Factory provenance verified." if args.remote else "OFFLINE: remote pinned provenance was not rechecked.")
     return 0
 
 

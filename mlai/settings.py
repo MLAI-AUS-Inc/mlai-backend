@@ -2536,6 +2536,11 @@ ARTICLES_GOAL_NOTIFICATIONS_ENABLED = _env_is_true("ARTICLES_GOAL_NOTIFICATIONS_
 # Registered first-party notifier identity; never a customer or Slack bridge key.
 ARTICLES_GOAL_NOTIFIER_PRIVATE_KEY = os.getenv("ARTICLES_GOAL_NOTIFIER_PRIVATE_KEY", "")
 
+# Robustness R7 (default off). Merge worker run snapshots by meaning: rails
+# still refuse a real mismatch, other fields record drift instead of refusing.
+ARTICLES_SNAPSHOT_MERGE_BY_MEANING_ENABLED = _env_is_true("ARTICLES_SNAPSHOT_MERGE_BY_MEANING_ENABLED", False)
+# Accept Content Factory's append-only run events into a bounded log on the run.
+ARTICLES_RUN_EVENTS_ENABLED = _env_is_true("ARTICLES_RUN_EVENTS_ENABLED", False)
 # P1 founder journey ("one simple path"). Every switch defaults off, so a
 # deploy alone changes nothing. New behaviour applies only to the new-journey
 # cohort (content_factory.founder_journey_cohort.is_new_journey); the legacy
