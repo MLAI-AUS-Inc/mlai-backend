@@ -104,7 +104,7 @@ jobs:
       run: python scripts/test_without_database.py integrations.tests_studio_report_source
 
     - name: Run isolated refactor checks without database access
-      run: python scripts/test_without_database.py content_factory.tests_run_sync_authority_unit content_factory.tests_pulse_sync_unit startup_updates.tests_source_throughput_unit content_factory.tests_current_connection_unit tests.test_refactor_unit tests.test_refactor_django_unit tests.test_refactor_migration_inventory roo.test_event_ticket_price
+      run: python scripts/test_without_database.py content_factory.tests_run_sync_authority_unit content_factory.tests_snapshot_meaning_unit content_factory.tests_run_events_unit content_factory.tests_pulse_sync_unit startup_updates.tests_source_throughput_unit content_factory.tests_current_connection_unit tests.test_refactor_unit tests.test_refactor_django_unit tests.test_refactor_migration_inventory roo.test_event_ticket_price
 
     - name: Check Roo Points GST and Xero capture contracts without database access
       run: python scripts/test_without_database.py roo.tests_purchase_tax_unit roo.tests_startup_update_benefits_unit tests.test_xero_capture_backoff_unit
@@ -226,6 +226,11 @@ jobs:
 
     - name: Check Articles failure taxonomy without database access
       run: python scripts/test_without_database.py content_factory.tests_failure_contract_unit
+
+    - name: Check generated run-status module without database access
+      run: |
+        python scripts/generate_run_status_contract.py --check
+        python scripts/test_without_database.py content_factory.tests_run_status_contract_unit
 
     - name: Check article recovery controller policy without database access
       run: python scripts/test_without_database.py content_factory.tests_website_article_recovery_unit
@@ -1092,6 +1097,10 @@ jobs:
         AUTH_THROTTLE_IP_DEVICE_AUTH_PER_10M: ${{ vars.AUTH_THROTTLE_IP_DEVICE_AUTH_PER_10M || '' }}
         ARTICLES_FOUNDER_JOURNEY_ALERTS_SINCE: ${{ vars.ARTICLES_FOUNDER_JOURNEY_ALERTS_SINCE || '' }}
         ARTICLES_WORKSHOP_WINDOWS: ${{ vars.ARTICLES_WORKSHOP_WINDOWS || '' }}
+        CONTENT_FACTORY_PORTABLE_PREVIEW_REARM: ${{ vars.CONTENT_FACTORY_PORTABLE_PREVIEW_REARM || '' }}
+        HOSTED_PUBLISH_REQUIRES_RENDERED_PREVIEW: ${{ vars.HOSTED_PUBLISH_REQUIRES_RENDERED_PREVIEW || '' }}
+        ARTICLES_SNAPSHOT_MERGE_BY_MEANING_ENABLED: ${{ vars.ARTICLES_SNAPSHOT_MERGE_BY_MEANING_ENABLED || '' }}
+        ARTICLES_RUN_EVENTS_ENABLED: ${{ vars.ARTICLES_RUN_EVENTS_ENABLED || '' }}
         MLAI_MCP_ENABLED: ${{ vars.MLAI_MCP_ENABLED || 'false' }}
         VALLEY_MCP_UNIFIED_ALIAS_ENABLED: ${{ vars.VALLEY_MCP_UNIFIED_ALIAS_ENABLED || 'false' }}
         MLAI_MCP_COMMUNITY_ENABLED: ${{ vars.MLAI_MCP_COMMUNITY_ENABLED || 'false' }}

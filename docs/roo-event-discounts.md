@@ -8,6 +8,13 @@ MLAI member account owns the receipt across devices.
 
 ## Configuration and supported offers
 
+Community free-ticket offers cost **32 Roo Points**, provide **100% off one ticket**,
+and require the ticket's live regular price to be **strictly below A$100**.
+The provider boundary rejects A$100 and above both at quote and before issuance.
+Use `configure_event_ticket_offer` to preview and save exact event/ticket terms;
+see [community ticket pricing](roo-event-ticket-price.md). The generic EVENT_TICKET
+redemption path is blocked because it cannot verify an event's live ticket price.
+
 The feature is off by default. Backend configuration is:
 
 ```dotenv
@@ -37,7 +44,7 @@ coupon and is rejected before spending or changing stock.
 
 MVP eligibility is a public future MLAI-managed Luma event, registration open,
 one ticket per registration, an available visible fixed-price AUD ticket with
-no approval requirement, and an active configured offer. Capped ticket types
+an explicit approval requirement where applicable, and an active configured offer. Approval-required tickets disclose approval and charge timing before confirmation; changed approval requirements invalidate the quote. Capped ticket types
 are checked using bounded approved-ticket evidence; that observation does not
 reserve a seat. Date-only ticket sales windows fail closed because their exact
 timezone boundary is not documented. Use explicit times or no sales window for
