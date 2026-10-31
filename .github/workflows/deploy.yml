@@ -399,6 +399,9 @@ jobs:
           tests.test_vibe_marketing_component_comments.VibeMarketingComponentCommentTests.test_merge_setup_pr_marks_setup_merged_and_daily_ready \
           --noinput --verbosity=2 --failfast
 
+    - name: Run founder journey cohort tests
+      run: python manage.py test content_factory.tests_founder_journey_cohort content_factory.tests_founder_journey_cohort_command content_factory.tests_founder_journey_cors content_factory.tests_founder_journey_sweeps --noinput --verbosity 2
+
     - name: Run Pulse sync persistence and response tests
       run: python manage.py test content_factory.tests_pulse_sync --verbosity 2
 
