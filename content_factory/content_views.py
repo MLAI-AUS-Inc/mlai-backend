@@ -2,7 +2,6 @@ from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework import status
 from core.permissions import HasRooApiKey, HasStrictRooApiKey
-from django.db.models import Q
 from django.utils import timezone
 from typing import Optional
 import logging
@@ -300,7 +299,7 @@ def _resolve_publishable_job_for_thread(
     slack_thread_ts: str,
     domain: Optional[str] = None,
 ):
-    from content_factory.models import ContentFactoryJob
+    from content_factory.job_view import read_thread_jobs
 
     resolved_user_id = str(slack_user_id or "").strip()
     resolved_channel_id = str(slack_channel_id or "").strip()
@@ -310,13 +309,14 @@ def _resolve_publishable_job_for_thread(
     if not (resolved_user_id and resolved_channel_id and resolved_thread_ts):
         return None
 
-    jobs = list(
-        ContentFactoryJob.objects.filter(
-            slack_channel_id=resolved_channel_id,
-        ).filter(
-            Q(slack_thread_ts=resolved_thread_ts) | Q(slack_root_message_ts=resolved_thread_ts)
-        )
+    return read_thread_jobs(
+        "publishable_thread", resolved_channel_id, resolved_thread_ts,
+        lambda jobs, get_job: _publishable_job_in_thread(jobs, get_job, resolved_user_id, resolved_domain),
     )
+
+
+def _publishable_job_in_thread(jobs, get_job, resolved_user_id, resolved_domain):
+    """Pick a thread's publishable source job from its Job-shaped records."""
     jobs = [
         job
         for job in jobs
@@ -363,7 +363,7 @@ def _resolve_publishable_job_for_thread(
         return resolved
 
     if source_publish_stage in PUBLISH_IN_PROGRESS_SOURCE_STAGES and promoted_publish_job_id:
-        child_job = ContentFactoryJob.objects.filter(job_id=promoted_publish_job_id).first()
+        child_job = get_job(promoted_publish_job_id)
         child_meta = dict(getattr(child_job, "request_meta", {}) or {})
         child_publish_stage = str(child_meta.get("publish_stage") or "").strip()
         effective_publish_stage = child_publish_stage or source_publish_stage
@@ -394,7 +394,7 @@ def _resolve_confirm_job_for_thread(
     domain: Optional[str] = None,
     source_job_id: Optional[str] = None,
 ):
-    from content_factory.models import ContentFactoryJob
+    from content_factory.job_view import read_thread_jobs
 
     resolved_user_id = str(slack_user_id or "").strip()
     resolved_channel_id = str(slack_channel_id or "").strip()
@@ -405,13 +405,39 @@ def _resolve_confirm_job_for_thread(
     if not (resolved_user_id and resolved_channel_id and resolved_thread_ts):
         return None
 
-    jobs = list(
-        ContentFactoryJob.objects.filter(
-            slack_channel_id=resolved_channel_id,
-        ).filter(
-            Q(slack_thread_ts=resolved_thread_ts) | Q(slack_root_message_ts=resolved_thread_ts)
-        )
+    resolved_job = read_thread_jobs(
+        "confirm_thread", resolved_channel_id, resolved_thread_ts,
+        lambda jobs, _get_job: _confirm_job_in_thread(jobs, resolved_user_id, resolved_domain, resolved_source_job_id),
     )
+    if resolved_job is None:
+        return None
+    request_meta = dict(resolved_job.request_meta or {})
+    error_code = str(request_meta.get("blocked_error_code") or "").strip()
+    if not error_code and str(resolved_job.status or "").strip() == "auth_required":
+        error_code = "AUTH_REQUIRED"
+
+    payload = {
+        "resolution": "in_progress",
+        "requested_action": "confirm_topic",
+        "job_id": resolved_job.job_id,
+        "active_job_id": resolved_job.job_id,
+        "status": resolved_job.status,
+        "domain": resolved_job.domain,
+        "source_run_id": str(request_meta.get("source_run_id") or resolved_job.job_id).strip(),
+    }
+    requested_by_slack_user_id = str(request_meta.get("requested_by_slack_user_id") or "").strip()
+    if requested_by_slack_user_id:
+        payload["requested_by_slack_user_id"] = requested_by_slack_user_id
+    if error_code:
+        payload["error_code"] = error_code
+    if resolved_job.error_message:
+        payload["error"] = resolved_job.error_message
+        payload["message"] = resolved_job.error_message
+    return payload
+
+
+def _confirm_job_in_thread(jobs, resolved_user_id, resolved_domain, resolved_source_job_id):
+    """Rank a thread's Job-shaped records and return its active confirm job, or None."""
     jobs = [
         job
         for job in jobs
@@ -467,30 +493,8 @@ def _resolve_confirm_job_for_thread(
             -int(job.created_at.timestamp()),
         )
 
-    resolved_job = sorted(candidates, key=sort_key)[0]
-    request_meta = dict(resolved_job.request_meta or {})
-    error_code = str(request_meta.get("blocked_error_code") or "").strip()
-    if not error_code and str(resolved_job.status or "").strip() == "auth_required":
-        error_code = "AUTH_REQUIRED"
+    return sorted(candidates, key=sort_key)[0]
 
-    payload = {
-        "resolution": "in_progress",
-        "requested_action": "confirm_topic",
-        "job_id": resolved_job.job_id,
-        "active_job_id": resolved_job.job_id,
-        "status": resolved_job.status,
-        "domain": resolved_job.domain,
-        "source_run_id": str(request_meta.get("source_run_id") or resolved_job.job_id).strip(),
-    }
-    requested_by_slack_user_id = str(request_meta.get("requested_by_slack_user_id") or "").strip()
-    if requested_by_slack_user_id:
-        payload["requested_by_slack_user_id"] = requested_by_slack_user_id
-    if error_code:
-        payload["error_code"] = error_code
-    if resolved_job.error_message:
-        payload["error"] = resolved_job.error_message
-        payload["message"] = resolved_job.error_message
-    return payload
 
 class ContentQuoteView(APIView):
     """Read the exact owned founder's article price without billing or setup."""

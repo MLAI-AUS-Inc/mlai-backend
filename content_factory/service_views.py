@@ -8485,6 +8485,12 @@ class SEOWrittenArticleCreateView(APIView):
             'published_at': timezone.now(),
             'publish_status': ArticlePublishStatus.PR_OPEN if serializer.validated_data.get('pr_url') else ArticlePublishStatus.WRITTEN,
         }
+        from .job_mirror import dual_write_enabled, run_for_job_id
+        if job is not None and dual_write_enabled():
+            # R7 job/run merge: link the article to its run as well as its Job.
+            linked_run = run_for_job_id(job.job_id)
+            if linked_run is not None:
+                defaults['run'] = linked_run
         from .article_editorial import upsert_written_article, ArticleEditorialConflict
         try:
             article, created = upsert_written_article(
