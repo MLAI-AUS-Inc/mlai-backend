@@ -323,6 +323,9 @@ def carry_charge(*, source_run, new_run) -> dict:
         source, target = locked[source_run.pk], locked[new_run.pk]
         if source.organization_id != target.organization_id:
             raise ValueError("A charge cannot move between startups.")
+        from .run_ownership import owner_receipt
+        if owner_receipt(target) is not None:
+            raise ValueError("An admitted continuation cannot replace its original payment request.")
         spend = _original_spend(source) if paid_article_request(_mapping(source.run_request)) else None
         if spend and spend.service_refunds.exists():
             raise ValueError("A refunded charge cannot fund another run.")

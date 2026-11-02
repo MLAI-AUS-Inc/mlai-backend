@@ -26,6 +26,7 @@ CHILDREN_RESULT_KEY = "run_owner_children_v1"
 ARTICLE_CHARGE_RESULT_KEY = "run_owner_article_charge_v1"
 ARTICLE_PUBLISH_APPROVAL_RESULT_KEY = "run_owner_article_publish_approval_v1"
 ARTICLE_PUBLISH_CONTROL_RESULT_KEY = "run_owner_article_publish_control_v1"
+STAFF_SUPPORT_RESULT_KEY = "run_owner_staff_support_v1"
 VERIFIED_DELIVERY_RESULT_KEY = "run_owner_verified_delivery_v1"
 USER_STOP_RESULT_KEY = "run_owner_user_stop_v1"
 REVIEW_SOURCE_RESULT_KEY = "review_source_v1"
@@ -36,7 +37,7 @@ BUDGET_KEY = "backend_run_budget_v1"
 R3_BACKEND_RESULT_KEYS = frozenset({OWNER_RESULT_KEY, OWNER_EXECUTION_KEY, EVENT_RESULT_KEY,
                                   DISPATCH_RESULT_KEY, HOSTED_OBSERVATION_KEY,
                                   RECONCILIATION_RESULT_KEY, CONTROL_RESULT_KEY, CHILDREN_RESULT_KEY,
-                                  ARTICLE_CHARGE_RESULT_KEY, ARTICLE_PUBLISH_APPROVAL_RESULT_KEY, ARTICLE_PUBLISH_CONTROL_RESULT_KEY,
+                                  ARTICLE_CHARGE_RESULT_KEY, ARTICLE_PUBLISH_APPROVAL_RESULT_KEY, ARTICLE_PUBLISH_CONTROL_RESULT_KEY, STAFF_SUPPORT_RESULT_KEY,
                                   VERIFIED_DELIVERY_RESULT_KEY, USER_STOP_RESULT_KEY, REVIEW_SOURCE_RESULT_KEY,
                                   HOSTED_PUBLICATION_OBSERVATION_KEY})
 R3_BACKEND_REQUEST_KEYS = frozenset({WIRE_REQUEST_KEY, WIRE_EXECUTION_KEY, BUDGET_KEY})
@@ -398,16 +399,18 @@ def reserve_admitted_run(*, organization, principal, workflow, payload, reserved
     return run
 
 
-def seal_new_run_admission(run, *, created, principal):
+def seal_new_run_admission(run, *, created, principal, fixed_run_id=True):
     """Seal only a caller's newly created named Run before its first dispatch.
 
     ``created`` must be the trusted ORM creation result, never request data.
     The caller owns the creation transaction and must finish any original
     charge carry before this call. Existing legacy rows are never enrolled.
+    A provisional outbox reservation may explicitly allow its first worker ID
+    to bind later; named producer IDs remain fixed by default.
     """
     if not admission_enabled():
         return run
-    if created is not True or not transaction.get_connection().in_atomic_block:
+    if created is not True or type(fixed_run_id) is not bool or not transaction.get_connection().in_atomic_block:
         raise RunOwnershipConflict("New named admission requires its actual creation transaction.")
     from workflow_runs.models import ContentFactoryRun
     from .models import ContentFactoryJob
@@ -440,7 +443,7 @@ def seal_new_run_admission(run, *, created, principal):
     events = getattr(settings, "ARTICLES_RUN_EVENT_AUTHORITY_ENABLED", False) is True
     if events and not facts:
         raise RunOwnershipConflict("Event authority requires the complete backend fact owner.")
-    receipt = {"schema_version": 1, "identity": identity, "reservation_run_id": locked.run_id, "fixed_run_id": True,
+    receipt = {"schema_version": 1, "identity": identity, "reservation_run_id": locked.run_id, "fixed_run_id": fixed_run_id,
                "authority": {"backend_facts": facts, "event_protocol": 1 if events else None}}
     wire = wire_identity(receipt)
     ticket = {"schema_version": 1, "execution_id": "admit:" + evidence_digest(wire), "generation": 0,

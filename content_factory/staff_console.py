@@ -199,7 +199,11 @@ def _start_copy_ready(run, organization, *, key, carry):
         return {"status": "refused", "detail": "This startup has no owning founder."}
     context = SimpleNamespace(organization=organization, company=company, profile=company.profile)
     config = _config(organization)
-    actor = founder_actor_id_for_user(company.profile.user)
+    from .run_ownership import admission_enabled
+    from .run_staff_support import issued_staff_user, staff_support_required
+    staff_user = issued_staff_user() if staff_support_required(run) else None
+    requester = staff_user or company.profile.user
+    actor = founder_actor_id_for_user(requester)
     try:
         payload = views._restart_article_payload_from_run(run=run, context=context, config=config, actor_id=actor)
     except ValueError:
@@ -207,7 +211,7 @@ def _start_copy_ready(run, organization, *, key, carry):
     if not payload:
         return {"status": "refused", "detail": "Review the article topic and audience first."}
     payload.update(client_request_id=key, delivery_mode="content_only", delivery_mode_explicit=True, delivery_mode_confirmed=True,
-                   roo_points_requested_by_user_id=company.profile.user_id, mcp_company_id=str(company.pk))
+                   roo_points_requested_by_user_id=requester.pk, mcp_company_id=str(company.pk))
     from .website_contract import CONNECTION_FIELDS
     for field in (*CONNECTION_FIELDS, "github_token", "source_sha", "expected_source_sha", "repo_head_sha", "branch", "app_root"):
         payload.pop(field, None)
@@ -224,16 +228,29 @@ def _start_copy_ready(run, organization, *, key, carry):
         error = views._refresh_article_editorial_payload(organization=organization, payload=payload)
         if error is not None:
             raise ValueError("Review the current article audience before dispatch.")
-        existing = ContentFactoryDispatchOutbox.objects.filter(organization=organization,
-            payload__request__staff_switch_source_run_id=source.run_id).first()
+        source_match = Q(payload__request__staff_switch_source_run_id=source.run_id)
+        if staff_user is not None:
+            source_match |= Q(payload__request__staff_switch_source_pk=source.pk)
+        existing = ContentFactoryDispatchOutbox.objects.filter(source_match, organization=organization).first()
         if existing:
+            if staff_user is not None:
+                from .run_staff_support import require_staff_support
+                from .run_ownership import admitted_run_for_key
+                saved_child = admitted_run_for_key(existing.client_request_id, lock=True)
+                if saved_child is None:
+                    raise ValueError("The saved staff continuation has no current admission.")
+                require_staff_support(saved_child)
             return {"status": "already_done", "detail": "Your draft is already queued.",
                     "receipt": {"runId": existing.run_id or existing.client_request_id, "channel": "copy_ready", "charged": False}}
+        if staff_user is not None and not admission_enabled():
+            raise ValueError("Starting a new admitted staff continuation is currently disabled.")
         prefix = f"staff-switch:{organization.pk}:"
         key = prefix + str(ContentFactoryDispatchOutbox.objects.filter(organization=organization,
             client_request_id__startswith=prefix).count() + 1)
         payload.update(client_request_id=key, staff_switch_source_run_id=source.run_id)
-        child, _ = ContentFactoryRun.objects.get_or_create(run_id=key, defaults={"organization": organization,
+        if staff_user is not None:
+            payload["staff_switch_source_pk"] = source.pk
+        child, created = ContentFactoryRun.objects.get_or_create(run_id=key, defaults={"organization": organization,
             "domain": organization.domain, "workflow": "article_generation", "status": "queued", "run_request": payload})
         if child.organization_id != organization.pk:
             raise ValueError("The continuation belongs to another startup.")
@@ -241,12 +258,26 @@ def _start_copy_ready(run, organization, *, key, carry):
         if carried.get("state") != "carried":
             raise ValueError("The original payment could not be carried.")
         payload = {**child.run_request, "dispatch_outbox_reserved": True}
-        ContentFactoryRun.objects.filter(pk=child.pk).update(run_request=payload)
-        reserve_dispatch(organization=organization, payload=payload, billing_user_id=company.profile.user_id, actor_id=actor)
+        if staff_user is not None:
+            from .p2_foundation import stamp_run_request
+            from .run_ownership import seal_new_run_admission, user_principal
+            from .run_staff_support import seal_staff_support
+            payload["roo_points_requested_by_user_id"] = staff_user.pk
+            stamp_run_request(payload, organization=organization, requester_user_id=staff_user.pk)
+            ContentFactoryRun.objects.filter(pk=child.pk).update(run_request=payload)
+            child.run_request = payload
+            seal_new_run_admission(child, created=created, principal=user_principal(staff_user.pk, actor), fixed_run_id=False)
+            seal_staff_support(child, source=source, company=company)
+            payload = dict(child.run_request)
+        else:
+            ContentFactoryRun.objects.filter(pk=child.pk).update(run_request=payload)
+        reserve_dispatch(organization=organization, payload=payload,
+            billing_user_id=payload.get("roo_points_billing_user_id") or company.profile.user_id, actor_id=actor,
+            **({"_staff_support_run": child} if staff_user is not None else {}))
     return {"status": "done", "detail": "Your draft is queued.", "receipt": {"runId": child.run_id, "channel": "copy_ready", "charged": False}}
 
 
-def _perform(action, run, org, user, *, now):
+def _perform(action, run, org, user, *, now, command_key=None):
     unavailable = {"status": "refused", "detail": "Not available yet.", "receipt": None}
     if action == "retry_now":
         decide, apply = provider("failure_policy_engine", "decide"), provider("failure_policy_engine", "apply")
@@ -262,15 +293,25 @@ def _perform(action, run, org, user, *, now):
         switch, carry = provider("channel_switch", "switch_to_copy_ready"), provider("no_delivery_refunds", "carry_charge")
         if not switch or not carry:
             return unavailable
-        result = mapping(run.result)
-        if result.get("draft_ready_v1") or result.get("content_package") or run.status in {"completed", "awaiting_approval", "approval_required"}:
+        from copy import deepcopy
+        result = deepcopy(mapping(run.result))
+        from .run_reconciliation import authoritative_run
+        from .run_verified_delivery import verified_draft_ready
+        delivered = verified_draft_ready(run) if authoritative_run(run) else bool(
+            result.get("draft_ready_v1") or result.get("content_package") or run.status in {"completed", "awaiting_approval", "approval_required"})
+        if delivered:
             receipt = switch(run=run, reason="staff_switch", now=now)
         else:
             previous = mapping(result.get("staff_switch_v1"))
             key = previous.get("client_request_id") or f"staff-switch:{org.pk}:{1+sum(a.get('action') == action for a in result.get('staff_actions_v1', []) if isinstance(a, dict))}"
             result["staff_switch_v1"] = {"client_request_id": key}
-            ContentFactoryRun.objects.filter(pk=run.pk).update(result=result)
+            from .run_provider_facts import save_provider_result
+            save_provider_result(run, result, baseline=mapping(run.result), legacy_fields=["result"])
             try:
+                from .run_staff_support import staff_action_authority, staff_support_required
+                if staff_support_required(run):
+                    with staff_action_authority(run, user=user, command_key=command_key):
+                        return _start_copy_ready(run, org, key=key, carry=carry)
                 return _start_copy_ready(run, org, key=key, carry=carry)
             except ValueError as exc:
                 return {"status": "refused", "detail": str(exc), "receipt": None}
@@ -330,7 +371,7 @@ def perform_action(organization_id, data, *, by_user):
             idem.abandon(scope, key, digest)
             return 409, {"status": "refused", "detail": idem.CONFLICT_DETAIL, "reason": idem.CONFLICT_REASON}, False
         try:
-            response = _perform(action, run, org, by_user, now=now)
+            response = _perform(action, run, org, by_user, now=now, command_key=key)
             with transaction.atomic():
                 current = ContentFactoryRun.objects.select_for_update().get(pk=run.pk, organization_id=org.pk)
                 result = mapping(current.result)

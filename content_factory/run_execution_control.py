@@ -101,6 +101,14 @@ def require_current_principal(run):
     from .run_ownership import user_stop_intent
     if user_stop_intent(run):
         raise ExecutionControlDenied("execution_stop_requested")
+    from .run_ownership import STAFF_SUPPORT_RESULT_KEY
+    if STAFF_SUPPORT_RESULT_KEY in (run.result or {}):
+        from .run_staff_support import require_staff_support
+        try:
+            require_staff_support(run)
+            return
+        except ValueError as exc:
+            raise ExecutionControlDenied("execution_permission_changed") from exc
     principal = owner_receipt(run)["identity"]["principal"]
     if principal.get("kind") != "user":
         # Scheduler continuation needs a service-specific current permission
