@@ -7,7 +7,10 @@ def article_return_path(value):
     """Return a canonical article-sheet URL or None for untrusted metadata."""
     if not isinstance(value, str) or not 1 <= len(value) <= 512:
         return None
-    parsed = urlsplit(value)
+    try:
+        parsed = urlsplit(value)
+    except ValueError:
+        return None
     if parsed.scheme or parsed.netloc or parsed.fragment or parsed.path != '/my-startup/articles':
         return None
     pairs = parse_qsl(parsed.query, keep_blank_values=True)

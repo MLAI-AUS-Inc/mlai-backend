@@ -23,7 +23,7 @@ class StartupCheckoutReturnTests(SimpleTestCase):
                 self.assertEqual(parse_qs(result.query), {'returnTo': [self.target], 'returnRuntime': [runtime], 'checkout': [outcome]})
 
     def test_external_duplicate_extra_or_malformed_targets_cannot_be_checkout_redirects(self):
-        for target in ('https://evil.test' + self.target, '//evil.test/my-startup/articles', self.target + '&next=https://evil.test',
+        for target in ('https://[', 'https://evil.test' + self.target, '//evil.test/my-startup/articles', self.target + '&next=https://evil.test',
                        self.target + '&company_id=' + str(uuid4()), self.target + '#fragment', '/my-startup/settings',
                        '/my-startup/articles?company_id=1&articlePlan=2', '/my-startup/articles?company_id=%0a&articlePlan=x'):
             self.assertIsNone(article_return_path(target), target)
