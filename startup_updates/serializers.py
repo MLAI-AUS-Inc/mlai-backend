@@ -92,10 +92,23 @@ class StartupUpdateRunCreateSerializer(serializers.Serializer):
     user_id = serializers.IntegerField()
     domain = serializers.CharField()
     window_months = serializers.IntegerField(required=False, default=1, min_value=1, max_value=24)
-    input_sources = serializers.ListField(child=serializers.CharField(), required=False, default=list)
-    inputSources = serializers.ListField(child=serializers.CharField(), required=False, default=list)
+    input_sources = serializers.ListField(child=serializers.CharField(), required=False)
+    inputSources = serializers.ListField(child=serializers.CharField(), required=False)
     target_month = serializers.CharField(required=False, allow_blank=True, allow_null=True)
     targetMonth = serializers.CharField(required=False, allow_blank=True, allow_null=True)
+
+    def validate(self, attrs):
+        """Preserve legacy omission while rejecting empty or conflicting selections."""
+        from startup_updates.preflight import selected_sources
+
+        fields = [key for key in ("input_sources", "inputSources") if key in attrs]
+        for key in fields:
+            attrs[key] = selected_sources(attrs[key])
+        if len(fields) == 2 and attrs[fields[0]] != attrs[fields[1]]:
+            raise serializers.ValidationError({"input_sources": "Provide one consistent source selection."})
+        if not fields:
+            attrs["input_sources"] = ["gmail"]
+        return attrs
 
 
 class StartupUpdateIngestSerializer(serializers.Serializer):

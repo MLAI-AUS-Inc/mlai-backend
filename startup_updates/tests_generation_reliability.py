@@ -25,6 +25,19 @@ from startup_updates.revisions import save_revision, worker_revision_payload
 
 
 class SelectionMatrixTests(SimpleTestCase):
+    def test_legacy_service_omission_and_explicit_selection_are_distinct(self):
+        from startup_updates.serializers import StartupUpdateRunCreateSerializer
+
+        base = {"user_id": 1, "domain": "synthetic.invalid"}
+        omitted = StartupUpdateRunCreateSerializer(data=base)
+        self.assertTrue(omitted.is_valid(), omitted.errors)
+        self.assertEqual(omitted.validated_data["input_sources"], ["gmail"])
+        for fields in ({"input_sources": []}, {"inputSources": []},
+                {"input_sources": ["gmail"], "inputSources": ["slack"]},
+                {"input_sources": ["gmail", "unknown"]}):
+            with self.subTest(fields=fields):
+                self.assertFalse(StartupUpdateRunCreateSerializer(data={**base, **fields}).is_valid())
+
     def test_every_nonempty_source_subset_checks_exactly_the_selected_sources(self):
         providers = sorted(PROVIDERS)
         for size in range(1, len(providers) + 1):

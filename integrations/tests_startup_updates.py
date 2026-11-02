@@ -76,6 +76,8 @@ from startup_updates.services import (
     build_cancel_backup_for_metric,
     cancel_startup_update_run,
     create_startup_update_run,
+    refresh_startup_update_run_source_context,
+    build_startup_update_target_windows,
     render_monthly_update_markdown,
     score_message_for_profile,
     set_startup_update_run_cancel_backups,
@@ -87,6 +89,29 @@ from startup_updates.slack_lineage import (
 )
 
 User = get_user_model()
+
+
+def create_checked_startup_update_run(**kwargs):
+    """Collection fixtures begin after successful source admission.
+
+    This keeps the existing ingestion/privacy/lineage suites focused on their
+    stage. tests_generation_reliability exercises the real mandatory barrier;
+    API run-creation requests still use the production factory directly.
+    """
+    run = create_startup_update_run(**kwargs)
+    request = run.run_request
+    windows = build_startup_update_target_windows(
+        date.fromisoformat(request["current_month"]),
+        timezone_name=request.get("reporting_timezone", "UTC"),
+    )
+    refresh_startup_update_run_source_context(
+        run=run, organization=kwargs["organization"], input_sources=request["input_sources"],
+        start_date=windows["financial_start_date"], end_date=windows["financial_end_date"],
+        manual_document_ids=request.get("manual_document_ids"), manual_summary=request.get("manual_summary", ""),
+    )
+    run.run_request = {**run.run_request, "source_preflight_complete": True}
+    run.save(update_fields=["run_request", "updated_at"])
+    return run
 
 
 class FakeSlackResponse:
@@ -260,7 +285,7 @@ class StartupProfileAndRunViewTest(StartupUpdateApiTestCase):
             google_connection=self.google_connection,
             is_default_for_gmail=True,
         )
-        active_run = create_startup_update_run(
+        active_run = create_checked_startup_update_run(
             organization=self.organization,
             binding=binding,
             target_month=date(2026, 4, 1),
@@ -325,7 +350,7 @@ class StartupProfileAndRunViewTest(StartupUpdateApiTestCase):
             google_connection=self.google_connection,
             is_default_for_gmail=True,
         )
-        run = create_startup_update_run(
+        run = create_checked_startup_update_run(
             organization=self.organization,
             binding=binding,
             window_months=6,
@@ -416,7 +441,7 @@ class StartupUpdateCancellationTest(StartupUpdateApiTestCase):
         )
 
     def test_cancel_service_restores_previous_outputs_and_deletes_current_only_rows(self):
-        older_run = create_startup_update_run(
+        older_run = create_checked_startup_update_run(
             organization=self.organization,
             binding=self.binding,
             window_months=6,
@@ -461,7 +486,7 @@ class StartupUpdateCancellationTest(StartupUpdateApiTestCase):
             },
         }
 
-        current_run = create_startup_update_run(
+        current_run = create_checked_startup_update_run(
             organization=self.organization,
             binding=self.binding,
             window_months=6,
@@ -548,7 +573,7 @@ class StartupUpdateCancellationTest(StartupUpdateApiTestCase):
         )
 
     def test_cancelled_run_rejects_late_draft_result_writes(self):
-        run = create_startup_update_run(
+        run = create_checked_startup_update_run(
             organization=self.organization,
             binding=self.binding,
             window_months=6,
@@ -590,7 +615,7 @@ class StartupUpdateIngestViewTest(StartupUpdateApiTestCase):
             google_connection=self.google_connection,
             is_default_for_gmail=True,
         )
-        self.run = create_startup_update_run(
+        self.run = create_checked_startup_update_run(
             organization=self.organization,
             binding=self.binding,
             window_months=6,
@@ -859,7 +884,7 @@ class StartupUpdateSlackBackfillViewTest(StartupUpdateApiTestCase):
             channel_name="wins",
             selected=True,
         )
-        self.run = create_startup_update_run(
+        self.run = create_checked_startup_update_run(
             organization=self.organization,
             binding=self.binding,
             input_sources=["gmail", "slack"],
@@ -1784,7 +1809,7 @@ class StartupUpdateSlackLineagePostgresTests(TransactionTestCase):
             access_token="xoxp-race",
             external_account_id="T-RACE",
         )
-        self.run = create_startup_update_run(
+        self.run = create_checked_startup_update_run(
             organization=self.organization,
             binding=self.binding,
             input_sources=["gmail", "slack"],
@@ -2474,7 +2499,7 @@ class StartupUpdateWorkflowViewsTest(StartupUpdateApiTestCase):
             google_connection=self.google_connection,
             is_default_for_gmail=True,
         )
-        self.run = create_startup_update_run(
+        self.run = create_checked_startup_update_run(
             organization=self.organization,
             binding=self.binding,
             window_months=6,
@@ -2683,6 +2708,12 @@ class StartupUpdateWorkflowViewsTest(StartupUpdateApiTestCase):
     def test_draft_results_use_only_pinned_verified_metrics(self):
         self.profile.default_currency = "AUD"
         self.profile.save(update_fields=["default_currency"])
+        xero = ExternalServiceConnection.objects.create(
+            provider=ExternalServiceProvider.XERO, user=self.user, organization=self.organization,
+            access_token="synthetic-xero", status=ExternalServiceConnectionStatus.CONNECTED,
+        )
+        self.run.run_request["source_connection_pins"]["xero"] = xero.pk
+        self.run.run_request["reporting_config"]["currency"] = "AUD"
         month_bucket = date(2026, 3, 1)
         self._set_run_month(month_bucket)
         revenue_metric = StartupMetricObservation.objects.create(
@@ -2697,6 +2728,7 @@ class StartupUpdateWorkflowViewsTest(StartupUpdateApiTestCase):
             period_month=month_bucket,
             confidence=1.0,
             source_metadata={
+                "connection_id": xero.pk,
                 "report_name": "ProfitAndLoss",
                 "report_start_date": "2026-03-01",
                 "source_metric": "xero_profit_and_loss_revenue",
@@ -2715,7 +2747,7 @@ class StartupUpdateWorkflowViewsTest(StartupUpdateApiTestCase):
             unit="AUD",
             period_month=month_bucket,
             confidence=1.0,
-            source_metadata={"report_name": "ProfitAndLoss"},
+            source_metadata={"connection_id": xero.pk, "report_name": "ProfitAndLoss"},
         )
         monthly_costs_metric = StartupMetricObservation.objects.create(
             organization=self.organization,
@@ -2729,6 +2761,7 @@ class StartupUpdateWorkflowViewsTest(StartupUpdateApiTestCase):
             period_month=month_bucket,
             confidence=1.0,
             source_metadata={
+                "connection_id": xero.pk,
                 "report_name": "ProfitAndLoss",
                 "calculation_basis": "cost_of_sales_plus_operating_expenses_when_available_otherwise_total_expenses",
             },
@@ -3875,7 +3908,7 @@ class StartupUpdateOpenRunsViewTest(StartupUpdateApiTestCase):
             google_connection=self.google_connection,
             is_default_for_gmail=True,
         )
-        create_startup_update_run(
+        create_checked_startup_update_run(
             organization=self.organization,
             binding=binding,
             window_months=6,
@@ -4345,7 +4378,7 @@ class StartupUpdateGoogleAnalyticsPipelineViewTest(StartupUpdateApiTestCase):
             account_id="100",
             selected=True,
         )
-        self.run = create_startup_update_run(
+        self.run = create_checked_startup_update_run(
             organization=self.organization,
             binding=self.binding,
             input_sources=["gmail", "google_analytics"],
