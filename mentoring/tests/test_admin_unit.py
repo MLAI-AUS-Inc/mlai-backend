@@ -285,3 +285,37 @@ class MemberSearchTests(Fixture):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class PostgreSQLLockTests(unittest.TestCase):
+    """Compile the real ORM queries with PostgreSQL, without opening a database."""
+
+    def test_admin_writes_lock_only_the_mutated_row(self):
+        from django.db.backends.postgresql.base import DatabaseWrapper
+        from mentoring.models import MentorInvite, MentorProfile
+
+        connection = DatabaseWrapper({'ENGINE': 'django.db.backends.postgresql', 'NAME': 'unused'}, 'lock_sql_test')
+        cases = (
+            (MentorInvite, 'revoke_invite', (STAFF, 3)),
+            (MentorProfile, 'approve_application', (STAFF, 9)),
+            (MentorProfile, 'reject_application', (STAFF, 9)),
+            (MentorProfile, 'set_paused', (STAFF, 9, True)),
+            (MentorProfile, 'set_paused', (STAFF, 9, False)),
+        )
+        for model, method, args in cases:
+            with self.subTest(method=method, args=args):
+                queries = []
+
+                def capture(queryset):
+                    queries.append(queryset.query)
+                    return None
+
+                with patch.object(svc, 'transaction', MagicMock()), \
+                        patch('django.db.models.query.QuerySet.first', capture):
+                    with self.assertRaises(MentoringError):
+                        getattr(MentoringAdminService, method)(*args)
+                self.assertEqual(len(queries), 1)
+                with patch.object(connection, 'get_autocommit', return_value=False):
+                    sql, _ = queries[0].get_compiler(connection=connection).as_sql()
+                self.assertIn('LEFT OUTER JOIN', sql)
+                self.assertTrue(sql.endswith(f'FOR UPDATE OF "{model._meta.db_table}"'), sql)

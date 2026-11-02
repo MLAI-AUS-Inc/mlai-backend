@@ -219,9 +219,10 @@ class MentoringAdminService:
 
     @staticmethod
     def revoke_invite(actor, invite_id):
+        # Nullable audit joins cannot be locked on PostgreSQL; lock the invite only.
         with transaction.atomic():
             invite = (
-                MentorInvite.objects.select_for_update().select_related('user', 'created_by', 'revoked_by')
+                MentorInvite.objects.select_for_update(of=('self',)).select_related('user', 'created_by', 'revoked_by')
                 .filter(pk=invite_id).first()
             )
             if invite is None:
@@ -257,8 +258,9 @@ class MentoringAdminService:
 
     @staticmethod
     def _lock_application(profile_id):
+        # Keep the profile locked without locking its nullable reviewer join.
         profile = (
-            MentorProfile.objects.select_for_update().select_related('user', 'reviewed_by')
+            MentorProfile.objects.select_for_update(of=('self',)).select_related('user', 'reviewed_by')
             .filter(pk=profile_id).first()
         )
         if profile is None:
@@ -301,9 +303,10 @@ class MentoringAdminService:
 
     @staticmethod
     def set_paused(actor, profile_id, paused):
+        # Keep the profile locked without locking its nullable reviewer join.
         with transaction.atomic():
             profile = (
-                MentorProfile.objects.select_for_update().select_related('user', 'reviewed_by')
+                MentorProfile.objects.select_for_update(of=('self',)).select_related('user', 'reviewed_by')
                 .filter(pk=profile_id).first()
             )
             if profile is None:
