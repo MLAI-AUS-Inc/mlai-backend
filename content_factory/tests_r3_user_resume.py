@@ -141,9 +141,17 @@ class UserResumeTests(TestCase):
         for field in before.keys() - {"result"}:
             self.assertEqual(after[field], before[field], field)
 
-    def test_authenticated_app_denial_is_an_explicit_local_stop_without_worker_status_or_clock_authority(self):
+    def test_authenticated_app_denial_records_intent_until_actual_typed_producer_stops_execution(self):
         from rest_framework.test import APIRequestFactory, force_authenticate
         from integrations import api_views_content_factory_app as views
+        from .tests_run_event_authority import batch
+        from .run_event_authority import receive_authoritative_run_events
+        # This class normally seeds a failed run for resume tests. Denial here
+        # starts from the real admitted/typed-running state instead.
+        ContentFactoryRun.objects.filter(pk=self.run.pk).update(status="queued")
+        self.run.refresh_from_db()
+        self.assertEqual(receive_authoritative_run_events(batch(self.run, [{"status": "running"}])).status_code, 200)
+        self.run.refresh_from_db()
         before = ContentFactoryRun.objects.values().get(pk=self.run.pk)
         remote = Mock(status_code=202, content=b"{}")
         remote.json.return_value = {"run_id": self.run.run_id, "status": "completed"}
@@ -153,6 +161,40 @@ class UserResumeTests(TestCase):
             response = views.ContentFactoryAppRunControlView.as_view()(request, run_id=self.run.run_id, action="deny")
         self.assertEqual(response.status_code, 200, response.data)
         after = ContentFactoryRun.objects.values().get(pk=self.run.pk)
-        self.assertEqual(after["status"], "denied")
-        for field in before.keys() - {"status", "resume_available"}:
+        from .run_ownership import user_stop_intent
+        self.run.refresh_from_db()
+        self.assertIsNotNone(user_stop_intent(self.run))
+        self.assertEqual(after["status"], before["status"])
+        for field in before.keys() - {"result"}:
+            self.assertEqual(after[field], before[field], field)
+        self.assertEqual(receive_authoritative_run_events(batch(self.run, [{"status": "running"}, {"status": "denied"}])).status_code, 200)
+        self.run.refresh_from_db()
+        self.assertEqual(self.run.status, "denied")
+
+    def test_lost_denial_ack_keeps_same_durable_consent_withdrawal_for_retry(self):
+        from rest_framework.test import APIRequestFactory, force_authenticate
+        from integrations import api_views_content_factory_app as views
+        from integrations.services.article_generation import ArticleGenerationError
+        from .run_ownership import user_stop_intent
+        before = ContentFactoryRun.objects.values().get(pk=self.run.pk)
+
+        def request():
+            command = APIRequestFactory().post("/app/owned/deny", {}, format="json")
+            force_authenticate(command, user=self.user)
+            return command
+
+        with patch.object(views, "_content_factory_request", side_effect=ArticleGenerationError("Synthetic unknown acknowledgement")):
+            response = views.ContentFactoryAppRunControlView.as_view()(request(), run_id=self.run.run_id, action="deny")
+        self.assertEqual(response.status_code, 503)
+        self.run.refresh_from_db()
+        original = user_stop_intent(self.run)
+        self.assertIsNotNone(original)
+        remote = Mock(status_code=202, content=b"{}")
+        remote.json.return_value = {"run_id": self.run.run_id, "status": "cancelled"}
+        with patch.object(views, "_content_factory_request", return_value=remote):
+            self.assertEqual(views.ContentFactoryAppRunControlView.as_view()(request(), run_id=self.run.run_id, action="deny").status_code, 200)
+        self.run.refresh_from_db()
+        self.assertEqual(user_stop_intent(self.run), original)
+        after = ContentFactoryRun.objects.values().get(pk=self.run.pk)
+        for field in before.keys() - {"result"}:
             self.assertEqual(after[field], before[field], field)

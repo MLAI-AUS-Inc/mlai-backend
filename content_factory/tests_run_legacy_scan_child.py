@@ -24,7 +24,7 @@ class LegacyScanChildTests(TransactionTestCase):
         scan_fixture.ScanChildAdmissionTests.setUp(self)
         self.parent = ContentFactoryRun.objects.create(organization=self.org, domain=self.org.domain,
             github_repo=self.connection.github_repo, workflow="scan", run_id="actual-legacy-scan",
-            status="awaiting_approval", run_request={key: value for key, value in self.parent.run_request.items()
+            status="awaiting_approval", slack_user_id=self.actor, run_request={key: value for key, value in self.parent.run_request.items()
                 if key not in {WIRE_REQUEST_KEY, WIRE_EXECUTION_KEY}}, result={"scaffold_plan": {"retained": True}})
         self.descriptor = resigned({**DESCRIPTOR, "source_run_id": self.parent.run_id, "domain": self.parent.domain,
             "github_repo": self.parent.github_repo,
@@ -118,3 +118,37 @@ class LegacyScanChildTests(TransactionTestCase):
         self.assertEqual(denied.exception.code, "website_source_changed")
         self.assertEqual(WebsiteConnectionOperation.objects.count(), 0)
         self.assertEqual(ContentFactoryRun.objects.values().get(pk=self.parent.pk), before)
+
+    def test_actual_web_scan_approval_sends_child_descriptor_with_no_parent_echoes(self):
+        from . import vibe_marketing_views as views
+        response = Mock(status_code=202, content=b"{}")
+        response.json.return_value = {"run_id": self.parent.run_id, "scaffold_job_id": "legacy-web-setup-child"}
+        with patch.object(views.http_client, "get", return_value=self.remote()), \
+                patch.object(views.http_client, "post", return_value=response) as post:
+            result = views._call_content_factory_run_action(run_id=self.parent.run_id, action="approve",
+                workflow=self.parent.workflow, payload={"slack_user_id": self.actor})
+        sent = post.call_args.kwargs["json"]
+        self.assertNotIn(WIRE_REQUEST_KEY, sent)
+        self.assertNotIn(WIRE_EXECUTION_KEY, sent)
+        self.assertEqual(sent["child_dispatch_v1"]["legacy_source_v1"], self.descriptor)
+        child = ContentFactoryRun.objects.get(run_id=result["scaffold_job_id"])
+        self.assertEqual(child.run_request["legacy_source_v1"], self.descriptor)
+        self.parent.refresh_from_db()
+        self.assertIsNone(owner_receipt(self.parent))
+
+    def test_actual_authenticated_app_scan_approval_sends_the_separate_owned_child(self):
+        from integrations import api_views_content_factory_app as app_views
+        from . import vibe_marketing_views as views
+        from rest_framework.test import APIRequestFactory, force_authenticate
+        response = Mock(status_code=202, content=b"{}")
+        response.json.return_value = {"run_id": self.parent.run_id, "scaffold_job_id": "legacy-app-setup-child"}
+        request = APIRequestFactory().post("/approve", {}, format="json")
+        force_authenticate(request, user=self.user)
+        with patch.object(views.http_client, "get", return_value=self.remote()), \
+                patch.object(app_views, "_content_factory_request", return_value=response) as post:
+            result = app_views.ContentFactoryAppRunControlView.as_view()(request, run_id=self.parent.run_id, action="approve")
+        self.assertEqual(result.status_code, 200, result.data)
+        sent = post.call_args.kwargs["payload"]
+        self.assertNotIn(WIRE_REQUEST_KEY, sent)
+        self.assertEqual(sent["child_dispatch_v1"]["legacy_source_v1"], self.descriptor)
+        self.assertIsNotNone(owner_receipt(ContentFactoryRun.objects.get(run_id="legacy-app-setup-child")))

@@ -8,6 +8,27 @@ from .run_ownership import (WIRE_EXECUTION_KEY, WIRE_REQUEST_KEY, RunOwnershipCo
     require_event_execution, require_event_identity)
 
 
+def refresh_owned_run(run):
+    """Read typed history and verified artifacts, never the supplied snapshot."""
+    from django.db import connection
+    from .run_reconciliation import authoritative_run, reconcile_authoritative_run
+    from .run_verified_delivery import project_verified_delivery
+    from .website_contract import WebsiteAuthorityError
+    import requests
+    if not authoritative_run(run):
+        return None
+    if not connection.in_atomic_block:
+        reconcile_authoritative_run(run.run_id, refresh=True)
+        try:
+            project_verified_delivery(run.run_id)
+        except (ValueError, TypeError, KeyError, requests.RequestException, WebsiteAuthorityError):
+            # Typed lifecycle remains visible when independent artifact proof
+            # is pending; an old snapshot never supplies that missing proof.
+            pass
+    run.refresh_from_db()
+    return run
+
+
 def maybe_receive_owned_observation(payload, *, run_id=None, expected_kind=None):
     """Return None only for genuinely unmarked legacy input.
 
@@ -17,8 +38,7 @@ def maybe_receive_owned_observation(payload, *, run_id=None, expected_kind=None)
     from workflow_runs.models import ContentFactoryRun
     from .run_reconciliation import authoritative_run
     from .run_verified_delivery import project_verified_delivery
-    from .setup_delivery_contract import DeliveryContractError, validate_envelope
-    from .setup_delivery_receiver import acknowledgement
+    from .setup_delivery_contract import DeliveryContractError
     if not isinstance(payload, dict):
         return None
     wrapped = "delivery_v1" in payload
@@ -38,6 +58,7 @@ def maybe_receive_owned_observation(payload, *, run_id=None, expected_kind=None)
         return None
     try:
         if wrapped:
+            from .setup_delivery_contract import validate_envelope
             if (set(payload) != {"schema_version", WIRE_REQUEST_KEY, WIRE_EXECUTION_KEY, "delivery_v1"}
                     or type(payload.get("schema_version")) is not int or payload["schema_version"] != 1):
                 raise RunOwnershipConflict("The owned delivery wrapper is invalid.")
@@ -70,5 +91,6 @@ def maybe_receive_owned_observation(payload, *, run_id=None, expected_kind=None)
             return Response({"error": "run_observation_pending", "retryable": True, "run_id": run.run_id}, status=409)
         raise
     if envelope is not None:
+        from .setup_delivery_receiver import acknowledgement
         return Response(acknowledgement(envelope, "observation_only"), status=200)
     return Response(outcome, status=200)

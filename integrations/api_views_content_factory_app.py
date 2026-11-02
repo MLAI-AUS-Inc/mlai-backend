@@ -895,13 +895,23 @@ class ContentFactoryAppRunControlView(APIView):
         try:
             control_payload = {}
             admitted_child = None
+            from content_factory.run_reconciliation import authoritative_run
+            if authoritative_run(run) and action in {"approve", "deny"} and (action != "approve" or run.workflow not in {"scan", "repo_scan", "content_factory_scan"}):
+                from content_factory.run_execution_control import current_execution_request
+                from content_factory.run_ownership import (SCOPE_FIELDS, WIRE_REQUEST_KEY, WIRE_EXECUTION_KEY,
+                    current_execution_ticket, owner_receipt, wire_identity)
+                current = current_execution_request(run)
+                control_payload.update({field: current[field] for field in (*SCOPE_FIELDS,
+                    "configuration_revision", "github_installation_id") if field in current})
+                control_payload.update({WIRE_REQUEST_KEY: wire_identity(owner_receipt(run)),
+                    WIRE_EXECUTION_KEY: current_execution_ticket(run)})
             if action != "deny":
                 with _run_projection_scope(run, {}, action="setup"):
                     pass
             if action == "approve":
                 from content_factory.run_child_admission import prepare_scan_child_dispatch
-                from content_factory.run_ownership import owner_receipt
-                if owner_receipt(run) is not None and run.workflow in {"scan", "repo_scan", "content_factory_scan"}:
+                from content_factory.run_ownership import owner_receipt, admission_enabled
+                if (owner_receipt(run) is not None or admission_enabled()) and run.workflow in {"scan", "repo_scan", "content_factory_scan"}:
                     admitted_child = prepare_scan_child_dispatch(run=run, user=request.user,
                         actor_id=actor_id, payload=control_payload)
             elif action == "resume":
@@ -917,6 +927,9 @@ class ContentFactoryAppRunControlView(APIView):
                         ("idempotency_key", "idempotencyKey", "clientRequestId") if request.data.get(key)), None)
                     control_payload = user_resume_payload(run=run, user=request.user,
                         command_key=command_key, payload=control_payload)
+            if action == "deny" and authoritative_run(run):
+                from content_factory.run_user_stop import record_user_denial
+                record_user_denial(run, user=request.user, actor_id=actor_id)
             response = _content_factory_request("post", f"/api/runs/{run_id}/{action}", payload=control_payload)
         except WebsiteAuthorityError as exc:
             return Response(exc.as_dict(), status=exc.status)
@@ -937,10 +950,8 @@ class ContentFactoryAppRunControlView(APIView):
             # A transport acknowledgement cannot become lifecycle authority.
             # The appended typed events own status/steps and execution clocks.
             if action == "deny":
-                # This stop is the authenticated user's explicit command,
-                # independently of any lifecycle label in the remote answer.
-                ContentFactoryRun.objects.filter(pk=run.pk).update(
-                    status=ContentFactoryRunStatus.DENIED, resume_available=False)
+                from content_factory.run_owned_observations import refresh_owned_run
+                refresh_owned_run(run)
             run.refresh_from_db()
             return Response(_serialize_content_factory_run(run), status=status.HTTP_200_OK)
         remote_run = _sync_remote_run_payload(run_id, payload)

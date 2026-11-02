@@ -7796,6 +7796,9 @@ def _cancel_local_article_system_setup_run(*, run, organization, remote_data=Non
 
     with transaction.atomic():
         locked_run = ContentFactoryRun.objects.select_for_update().get(pk=run.pk)
+        from .run_reconciliation import authoritative_run
+        if authoritative_run(locked_run):
+            return locked_run
         previous_result = dict(_run_mapping(locked_run.result))
         previous_setup = dict(_run_mapping(previous_result.get("article_system_setup")))
         cancelled_setup = {
@@ -7959,6 +7962,9 @@ def _cancel_local_article_run(*, run, organization, remote_data=None, cancellati
 
     with transaction.atomic():
         locked_run = ContentFactoryRun.objects.select_for_update().get(pk=run.pk)
+        from .run_reconciliation import authoritative_run
+        if authoritative_run(locked_run):
+            return locked_run
         saved = _run_mapping(locked_run.result)
         if locked_run.status == ContentFactoryRunStatus.CANCELLED and saved.get("cancellation_reason"):
             # Already stopped with a recorded reason (say a lost worker): a later
@@ -8068,6 +8074,9 @@ def _cancel_local_scan_run(*, run, remote_data=None):
 
     with transaction.atomic():
         locked_run = ContentFactoryRun.objects.select_for_update().get(pk=run.pk)
+        from .run_reconciliation import authoritative_run
+        if authoritative_run(locked_run):
+            return locked_run
         locked_run.steps.exclude(status=ContentFactoryStepStatus.COMPLETED).update(
             status=ContentFactoryStepStatus.CANCELLED,
             message="Cancelled by user.",
@@ -14164,6 +14173,15 @@ def _create_local_run_authorized(*, workflow, domain, github_repo="", actor_id="
 
 def _call_content_factory_run_status(run_id, *, workflow="", include_review_draft=False):
     require_unlocked_remote_call()
+    from .run_reconciliation import authoritative_run
+    current = ContentFactoryRun.objects.filter(run_id=run_id).first()
+    if authoritative_run(current):
+        from .run_owned_observations import refresh_owned_run
+        from .run_ownership import public_run_value
+        current = refresh_owned_run(current)
+        return {"run_id": current.run_id, "workflow": current.workflow, "status": current.status,
+            "current_step": current.current_step, "result": public_run_value(current.result),
+            "approval_state": current.approval_state, "resume_available": current.resume_available}
     remote_config = _content_factory_remote_config()
     if not remote_config["enabled"]:
         if workflow == "startup_autofill" or _remote_required_for_workflow(workflow):
@@ -14271,6 +14289,9 @@ def _call_content_factory_run_status(run_id, *, workflow="", include_review_draf
 
 
 def _sync_steps_from_remote(run, remote_data):
+    from .run_reconciliation import authoritative_run
+    if authoritative_run(run):
+        return
     remote_data = sanitize_json_for_postgres(remote_data if isinstance(remote_data, dict) else {})
     raw_steps = remote_data.get("steps") or remote_data.get("step_states")
     if not raw_steps:
@@ -14321,6 +14342,10 @@ def _sync_steps_from_remote(run, remote_data):
 
 
 def _sync_local_run_from_remote(run, remote_data):
+    from .run_owned_observations import refresh_owned_run
+    owned = refresh_owned_run(run)
+    if owned is not None:
+        return owned
     from content_factory.run_state import stale_execution_event
     from .portable_drafts import portable_run_update_allowed
     if not isinstance(remote_data, dict) or not remote_data:
@@ -14345,6 +14370,9 @@ def _sync_local_run_from_remote(run, remote_data):
 
 
 def _sync_local_run_from_remote_locked(run, remote_data):
+    from .run_reconciliation import authoritative_run
+    if authoritative_run(run):
+        return run
     if not isinstance(remote_data, dict) or not remote_data:
         return run
     remote_data = sanitize_json_for_postgres(remote_data)
@@ -15309,9 +15337,25 @@ def _call_content_factory_run_action(
 ):
     require_unlocked_remote_call()
     admitted_child = None
+    if action in {"cancel", "deny", "approve"}:
+        from .run_reconciliation import authoritative_run
+        from .run_execution_control import current_execution_request
+        from .run_ownership import current_execution_ticket, owner_receipt, wire_identity, WIRE_REQUEST_KEY, WIRE_EXECUTION_KEY, SCOPE_FIELDS
+        current_run = ContentFactoryRun.objects.filter(run_id=run_id).first()
+        if authoritative_run(current_run) and (action != "approve" or current_run.workflow not in SCAN_WORKFLOWS | {"scan"}):
+            current = current_execution_request(current_run)
+            payload = {**{key: value for key, value in dict(payload or {}).items() if key not in {*SCOPE_FIELDS,
+                "configuration_revision", "github_installation_id"}}, **{field: current.get(field) for field in (*SCOPE_FIELDS,
+                "configuration_revision", "github_installation_id") if field in current},
+                       WIRE_REQUEST_KEY: wire_identity(owner_receipt(current_run)),
+                       WIRE_EXECUTION_KEY: current_execution_ticket(current_run)}
     if action not in {"cancel", "deny"}:
         from .portable_drafts import portable_run_control_allowed
         scoped_run = ContentFactoryRun.objects.filter(run_id=run_id).first()
+        from .run_ownership import admission_enabled
+        if action == "approve" and workflow in SCAN_WORKFLOWS | {"scan"} and scoped_run is None and admission_enabled():
+            return {"status": "needs_user", "error": "Run a fresh website scan before approving this setup.",
+                    "content_factory_status_code": 409, "retryable": False}
         if (scoped_run and scoped_run.workflow in REPOSITORY_WORKFLOWS
                 and not portable_run_control_allowed(scoped_run, action, payload)):
             try:
@@ -15334,8 +15378,8 @@ def _call_content_factory_run_action(
                 return {**exc.as_dict(), "status": "blocked", "content_factory_status_code": exc.status}
         if action == "approve" and scoped_run and scoped_run.workflow in SCAN_WORKFLOWS | {"scan"}:
             from .run_child_admission import prepare_scan_child_dispatch
-            from .run_ownership import RunOwnershipConflict, owner_receipt
-            if owner_receipt(scoped_run) is not None:
+            from .run_ownership import RunOwnershipConflict, owner_receipt, admission_enabled
+            if owner_receipt(scoped_run) is not None or admission_enabled():
                 from integrations.services.github_installations import resolve_user_for_actor_id
                 actor = str(payload.get("requested_by_slack_user_id") or payload.get("slack_user_id") or "")
                 try:
@@ -19949,7 +19993,7 @@ def control_article_run(*, user, context, run, action, data, run_id=None, goal_o
     if action == "cancel":
         from .island_research_cancel import is_island_research_run, cancel_island_research
         if is_island_research_run(run):
-            return cancel_island_research(run=run, context=context, payload=payload)
+            return cancel_island_research(run=run, context=context, payload=payload, user=command.user)
         if run.workflow in SCAN_WORKFLOWS:
             remote_data = _call_content_factory_run_action(
                 run_id=run_id,

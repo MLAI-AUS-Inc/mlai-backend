@@ -1349,6 +1349,11 @@ class ArticleSystemDecisionView(APIView):
         if not config:
             return Response({"error": f"No content config found for {normalized_domain}"}, status=status.HTTP_404_NOT_FOUND)
 
+        from .run_ownership import admission_enabled
+        if decision == "scaffold" and admission_enabled():
+            from integrations.services.github import standalone_reviewed_setup_required
+            return Response(standalone_reviewed_setup_required(), status=status.HTTP_409_CONFLICT)
+
         if decision == 'use_detected':
             article_system = resolve_article_system(config)
             article_system.update(
@@ -1396,6 +1401,8 @@ class ArticleSystemDecisionView(APIView):
             github_token=creds['token'],
             github_repo=creds['repo'],
         )
+        if isinstance(scaffold_result, dict) and scaffold_result.get("status") == "needs_user":
+            return Response(scaffold_result, status=status.HTTP_409_CONFLICT)
         return Response(
             {
                 "status": "queued",

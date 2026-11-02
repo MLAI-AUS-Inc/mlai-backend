@@ -27,7 +27,7 @@ def record_user_denial(run, *, user, actor_id):
             "admission_digest": evidence_digest(wire_identity(receipt)), "commands": {}}))
         if (not isinstance(state, dict) or state.get("schema_version") != 1
                 or state.get("admission_digest") != evidence_digest(wire_identity(receipt))
-                or not isinstance(state.get("commands"), dict) or len(state["commands"]) >= 1024):
+                or not isinstance(state.get("commands"), dict) or len(state["commands"]) > 1024):
             raise RunOwnershipConflict("The saved denial history could not be verified.")
         identity = {"action": "deny", "user_id": str(user.pk), "actor_id": actor_id,
             "execution_id": ticket["execution_id"], "execution_sha256": evidence_digest(ticket)}
@@ -37,6 +37,8 @@ def record_user_denial(run, *, user, actor_id):
             if not isinstance(previous, dict) or any(previous.get(field) != value for field, value in identity.items()):
                 raise RunOwnershipConflict("The saved denial command changed.")
         else:
+            if len(state["commands"]) >= 1024:
+                raise RunOwnershipConflict("The saved denial history is full.")
             state["commands"][key] = {**identity, "requested_at": timezone.now().isoformat()}
             current.result = {**current.result, USER_STOP_RESULT_KEY: state}
             ContentFactoryRun.objects.filter(pk=current.pk).update(result=current.result)

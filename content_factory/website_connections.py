@@ -541,6 +541,22 @@ def guarded_service_write(action, *, only_repository=False, remote_actions=(), p
             payload = dict(data.items())
             if kwargs.get("run_id"):
                 payload["run_id"] = kwargs["run_id"]
+            if action == "config_write" and request.method != "GET":
+                from workflow_runs.models import ContentFactoryRun
+                from .run_reconciliation import authoritative_run
+                from .run_ownership import WIRE_REQUEST_KEY, admitted_run_for_key
+                saved_request = payload.get("run_request") if isinstance(payload.get("run_request"), dict) else {}
+                wire = payload.get(WIRE_REQUEST_KEY, saved_request.get(WIRE_REQUEST_KEY))
+                key = wire.get("dispatch_key") if isinstance(wire, dict) else payload.get("client_request_id", saved_request.get("client_request_id"))
+                candidate = admitted_run_for_key(key)
+                identifier = str(payload.get("run_id") or payload.get("job_id") or "")
+                if candidate is None and identifier:
+                    candidate = ContentFactoryRun.objects.filter(run_id=identifier).first()
+                if authoritative_run(candidate):
+                    # Callbacks/snapshots enter their typed observation adapter
+                    # before this decorator. Any other old worker write remains
+                    # held before method effects, claims, notifications or money.
+                    return Response({"code": "owned_execution_requires_typed_observation", "retryable": False}, status=409)
             # A status-only cancellation receipt never requests repository
             # authority, including after reconnect or for an unbound draft.
             if (cancellation_receipts and request.method == "PUT" and payload.get("status") == "cancelled"
@@ -603,7 +619,8 @@ def guarded_service_write(action, *, only_repository=False, remote_actions=(), p
                         wake_prepare_after_commit(connection.pk)
                         if run_id:
                             run = ContentFactoryRun.objects.filter(run_id=run_id).first()
-                            if run:
+                            from .run_reconciliation import authoritative_run
+                            if run and not authoritative_run(run):
                                 updated_request = {**(run.run_request or {}), **connection_contract(payload),
                                     **{key: payload[key] for key in ("operation_id", "operation_attempt", "deletion_epoch") if key in payload}}
                                 if updated_request != run.run_request:
@@ -1567,6 +1584,9 @@ def record_denied_terminal_callback(payload, denial):
         website = WebsiteConnection.objects.select_for_update().filter(pk=received["website_connection_id"],
             organization_id=candidate.organization_id).first()
         run = ContentFactoryRun.objects.select_for_update().get(pk=candidate.pk)
+        from .run_reconciliation import authoritative_run
+        if authoritative_run(run):
+            return False
         if website is None or website.generation != received["connection_generation"] or website.state not in {"connected", "paused"}:
             return False
         original = connection_contract(run.run_request or {})
