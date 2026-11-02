@@ -509,7 +509,7 @@ class IncidentFacadeReplays(SimpleTestCase):
         with patch.object(review.views, "_run_has_external_publish_evidence", return_value=False), \
                 patch.object(review.views, "_latest_review_ready_component_revision", return_value=None), \
                 patch.object(review, "remote_review", return_value={"revision": "next"}) as remote:
-            result = view.post(SimpleNamespace(data=payload), run.run_id)
+            result = view.post(SimpleNamespace(data=payload, user=SimpleNamespace(pk=9)), run.run_id)
         self.assertEqual(result.status_code, 200)
         self.assertEqual(remote.call_args.kwargs["payload"], payload)
 
