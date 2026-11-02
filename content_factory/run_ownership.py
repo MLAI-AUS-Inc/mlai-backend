@@ -6,6 +6,8 @@ authorized execution generation. Legacy records are deliberately not enrolled.
 """
 from copy import deepcopy
 import json
+from urllib.parse import urlsplit
+from uuid import UUID
 
 from django.conf import settings
 from django.db import IntegrityError, transaction
@@ -18,10 +20,11 @@ OWNER_EXECUTION_KEY = "run_owner_execution_v1"
 EVENT_RESULT_KEY = "run_owner_events_v1"
 DISPATCH_RESULT_KEY = "run_owner_dispatch_v1"
 HOSTED_OBSERVATION_KEY = "hosted_verification_observation_v1"
+RECONCILIATION_RESULT_KEY = "run_owner_reconciliation_v1"
 WIRE_REQUEST_KEY = "backend_run_admission_v1"
 WIRE_EXECUTION_KEY = "backend_run_execution_v1"
 R3_BACKEND_RESULT_KEYS = frozenset({OWNER_RESULT_KEY, OWNER_EXECUTION_KEY, EVENT_RESULT_KEY,
-                                  DISPATCH_RESULT_KEY, HOSTED_OBSERVATION_KEY})
+                                  DISPATCH_RESULT_KEY, HOSTED_OBSERVATION_KEY, RECONCILIATION_RESULT_KEY})
 R3_BACKEND_REQUEST_KEYS = frozenset({WIRE_REQUEST_KEY, WIRE_EXECUTION_KEY})
 SCOPE_FIELDS = (*CONNECTION_FIELDS, *OPERATION_FIELDS, "expected_source_sha", "source_run_id")
 SCHEDULER_SERVICES = frozenset({"island_refresh", "daily_discovery", "research_automation", "hosted_auto_register"})
@@ -41,10 +44,31 @@ def admission_enabled():
     return getattr(settings, "ARTICLES_RUN_OWNERSHIP_ENABLED", False) is True
 
 
-def worker_workflow_allowed(admitted, actual):
+def is_hosted_proxy_request(request):
+    """Recognize the saved server-owned proxy recipe, never an arbitrary setup."""
+    if not isinstance(request, dict):
+        return False
+    try:
+        site = UUID(request.get("hosted_site_id"))
+        worker = urlsplit(request.get("worker_url") or "")
+        port = worker.port
+    except (ValueError, TypeError, AttributeError):
+        return False
+    generation = request.get("connection_generation")
+    return (type(generation) is int and generation > 0 and request.get("hosted_site_id") == str(site)
+            and request.get("run_id") == f"hosted-proxy-{site.hex}-{generation}"
+            and request.get("merge_policy") == "backend_worker"
+            and worker.scheme == "https" and bool(worker.hostname)
+            and worker.hostname.endswith(".workers.dev") and not worker.username and not worker.password
+            and port in (None, 443) and worker.path in {"", "/"} and not worker.query and not worker.fragment)
+
+
+def worker_workflow_allowed(admitted, actual, *, request=None):
     """Check only verified backend-to-worker aliases; never rewrite admission."""
     return type(admitted) is str and type(actual) is str and (
-        actual == admitted or actual in WORKER_WORKFLOW_ALIASES.get(admitted, ()))
+        actual == admitted or actual in WORKER_WORKFLOW_ALIASES.get(admitted, ())
+        or admitted == "article_system_setup" and actual == "hosted_native_verification"
+        and is_hosted_proxy_request(request))
 
 
 def public_run_value(value):
@@ -122,7 +146,7 @@ def require_admission_identity(run, payload):
                             ("domain", identity["domain"]), ("workflow", identity["workflow"])):
         if field in payload and payload[field] != expected:
             raise RunOwnershipConflict("The event envelope changed its admitted identity.")
-    if "worker_workflow" in payload and not worker_workflow_allowed(identity["workflow"], payload["worker_workflow"]):
+    if "worker_workflow" in payload and not worker_workflow_allowed(identity["workflow"], payload["worker_workflow"], request=run.run_request):
         raise RunOwnershipConflict("The worker workflow does not match its admitted operation.")
     return receipt
 
@@ -162,7 +186,7 @@ def prepare_owned_callback(payload, remote_run_id):
                 return None
         receipt = owner_receipt(run)
         observed_workflow = payload.get("workflow")
-        if observed_workflow is not None and not worker_workflow_allowed(receipt["identity"]["workflow"], observed_workflow):
+        if observed_workflow is not None and not worker_workflow_allowed(receipt["identity"]["workflow"], observed_workflow, request=run.run_request):
             raise RunOwnershipConflict("The worker workflow does not match the admitted operation.")
         envelope = {**payload, WIRE_REQUEST_KEY: wire, "workflow": receipt["identity"]["workflow"]}
         require_admission_identity(run, envelope)
