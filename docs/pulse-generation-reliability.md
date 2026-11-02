@@ -47,6 +47,9 @@ and 60 seconds before requiring user action. HTTP 429 and connector quota errors
 instead retain `retry_after_seconds`, `retry_at` and `reason: rate_limited` in
 each affected source check. Valley checkpoints the longest provider wait and
 resumes preflight after it without consuming the short transient retry budget.
+Provider probes, resource discovery and Linear preparation share this failure
+classification. Temporary connector failures do not request a reconnect; only
+revoked credentials or missing permissions do.
 No collection/model work starts during the wait. Revoked permissions and
 unsupported sources stop immediately, including when another source is limited. Clients
 show each failed source, keep saved progress visible after reload, and offer

@@ -4644,7 +4644,7 @@ class StartupUpdateSourcePreflightView(APIView):
     permission_classes = [HasRooApiKey]
 
     def post(self, request, run_id):
-        from startup_updates.preflight import require_source_preflight, SourcesNotReady, apply_xero_cooldown
+        from startup_updates.preflight import require_source_preflight, SourcesNotReady, apply_xero_cooldown, source_failure_check
         from startup_updates.activity_scope import discover_resource_page
         from startup_updates.services import refresh_startup_update_run_source_context, build_startup_update_target_windows
         run = _get_run_or_404(run_id)
@@ -4693,9 +4693,8 @@ class StartupUpdateSourcePreflightView(APIView):
                 if not discovery.get(provider, {}).get("complete"):
                     try:
                         discovery[provider] = discover_resource_page(binding.user, organization, provider, discovery.get(provider))
-                    except Exception:
-                        return failed_checks([{**c, "status": "temporarily_unavailable",
-                            "message": "This source could not finish discovering its resources. Check it again."}
+                    except Exception as exc:
+                        return failed_checks([{**c, **source_failure_check(provider, exc)}
                             if c["provider"] == provider else c for c in checks])
                     break
         complete = not saved.get("automatic_source_scope_requested") or all(discovery.get(p, {}).get("complete") for p in
@@ -4707,10 +4706,11 @@ class StartupUpdateSourcePreflightView(APIView):
             try:
                 warnings = _sync_selected_connector_sources_for_draft(binding.user, saved["input_sources"],
                     organization=organization, automatic_scope=bool(saved.get("automatic_source_scope_requested")))
-            except (ConnectorOAuthError, ConnectorRateLimitError, requests.RequestException):
+            except (ConnectorOAuthError, ConnectorRateLimitError, requests.RequestException) as exc:
                 # Linear is the only preparation branch that raises these;
                 # Xero returns its failures in the warnings mapping.
-                warnings = {"linear": ["Source preparation is unavailable."]}
+                return failed_checks([{**c, **source_failure_check("linear", exc)}
+                    if c["provider"] == "linear" else c for c in checks])
             if any(warnings.values()):
                 return failed_checks(apply_xero_cooldown([
                     {**c, "status": "temporarily_unavailable", "message": "This source could not refresh. Check it before continuing."}

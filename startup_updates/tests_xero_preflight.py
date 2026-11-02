@@ -107,6 +107,23 @@ class XeroPreflightHttpTests(SimpleTestCase):
         self.assertEqual([c["provider"] for c in results], ["slack", "xero", "gmail", "stripe"])
         self.assertEqual([c["status"] for c in results], ["ready", "temporarily_unavailable", "needs_reconnect", "ready"])
 
+    def test_google_style_and_headerless_quota_errors_keep_safe_retry_hints(self):
+        google_error = RuntimeError("synthetic provider detail")
+        google_error.resp = type("GoogleHeaders", (dict,), {"status": 429})({"retry-after": "27384"})
+        api_error = RuntimeError("synthetic provider detail")
+        api_error.status_code = 429
+        for error, seconds in ((google_error, 27384), (api_error, 60)):
+            with self.subTest(error=type(error).__name__):
+                result = check_sources(["gmail"], Mock(side_effect=error))[0]
+                self.assertEqual(result["retry_after_seconds"], seconds)
+                self.assertEqual(result["reason"], "rate_limited")
+                self.assertNotIn("synthetic provider detail", json.dumps(result))
+
+    def test_temporary_linear_failure_does_not_request_reconnect(self):
+        result = check_sources(["linear"], Mock(side_effect=ec.ConnectorTemporarilyUnavailable("linear", "synthetic provider detail")))[0]
+        self.assertEqual(result["status"], "temporarily_unavailable")
+        self.assertNotIn("synthetic provider detail", json.dumps(result))
+
     def test_quota_during_report_refresh_keeps_other_sources_and_connection_pins(self):
         checks = [{"provider": "gmail", "status": "ready", "connectionId": 1},
             {"provider": "xero", "status": "ready", "connectionId": 7, "accountId": "tenant-a"}]
@@ -153,6 +170,62 @@ class XeroPreflightScopeTests(TestCase):
         self.assertEqual(connection.sync_cursor, {"saved": True})
         self.assertIsNone(connection.last_synced_at)
         self.assertEqual(result["syncRuns"][0]["retry_after_seconds"], 27384)
+
+    def test_discovery_and_linear_preparation_preserve_quota_and_auth_outcomes(self):
+        from rest_framework.test import APIRequestFactory
+        from startup_updates.api_views import StartupUpdateSourcePreflightView
+        from startup_updates.models import StartupProfile, UserStartupBinding
+        from workflow_runs.models import ContentFactoryRun
+        StartupProfile.objects.create(organization=self.orgs[0])
+        binding = UserStartupBinding.objects.create(user=self.users[0], organization=self.orgs[0])
+        scenarios = [("discovery", p, ec.ConnectorRateLimitError(27384), "temporarily_unavailable")
+            for p in ("slack", "linear", "google_analytics")]
+        scenarios += [
+            ("preparation", "linear", ec.ConnectorRateLimitError(27384), "temporarily_unavailable"),
+            ("preparation", "linear", ec.ConnectorTemporarilyUnavailable("linear", "synthetic provider detail"), "temporarily_unavailable"),
+            ("preparation", "linear", ec.ConnectorOAuthError("synthetic provider detail"), "needs_reconnect")]
+        for index, (stage, provider, error, expected_status) in enumerate(scenarios):
+            with self.subTest(stage=stage, provider=provider, error=type(error).__name__):
+                checks = [{"provider": "gmail", "status": "ready", "connectionId": 1},
+                    {"provider": provider, "status": "ready", "connectionId": 7}]
+                run = ContentFactoryRun.objects.create(run_id=f"quota-discovery-{index}", workflow="startup_monthly_update",
+                    organization=self.orgs[0], domain=self.orgs[0].domain, status="queued",
+                    run_request={"organization_id": self.orgs[0].pk, "binding_id": binding.pk,
+                        "source_preflight_version": 1, "input_sources": ["gmail", provider],
+                        "automatic_source_scope_requested": stage == "discovery", "current_month": "2026-08-01"})
+                with override_settings(MLAI_API_KEY="synthetic"), patch("startup_updates.preflight.require_source_preflight", return_value=checks), patch(
+                    "startup_updates.activity_scope.discover_resource_page", side_effect=error if stage == "discovery" else None), patch(
+                    "vibe_raising.views._sync_selected_connector_sources_for_draft", side_effect=error if stage == "preparation" else None), patch(
+                    "startup_updates.services.refresh_startup_update_run_source_context") as collect:
+                    result = StartupUpdateSourcePreflightView.as_view()(APIRequestFactory().post(
+                        "/", {}, format="json", HTTP_X_API_KEY="synthetic"), run_id=run.run_id)
+                self.assertEqual(result.status_code, 200, result.data)
+                self.assertFalse(result.data["ready"])
+                self.assertEqual(result.data["checks"][0], checks[0])
+                failed = result.data["checks"][1]
+                self.assertEqual(failed["status"], expected_status)
+                self.assertEqual(failed["connectionId"], 7)
+                if isinstance(error, ec.ConnectorRateLimitError):
+                    self.assertEqual(failed["retry_after_seconds"], 27384)
+                self.assertNotIn("synthetic provider detail", json.dumps(result.data))
+                collect.assert_not_called()
+                run.refresh_from_db()
+                self.assertFalse(run.run_request["source_preflight_complete"])
+                self.assertEqual(run.result["source_preflight"]["checks"], result.data["checks"])
+
+    def test_old_sync_quota_cannot_replace_a_newer_connection_status(self):
+        connection = ExternalServiceConnection.objects.create(user=self.users[0], organization=self.orgs[0], provider="xero",
+            status="connected", access_token="synthetic", external_account_id="tenant-concurrent",
+            token_expires_at=timezone.now() + timedelta(hours=1))
+        def provider(*args, **kwargs):
+            ExternalServiceConnection.objects.filter(pk=connection.pk).update(status="error",
+                last_error="A newer credential needs attention.", updated_at=timezone.now() + timedelta(seconds=1))
+            return response(429, 27384)
+        with patch.object(http_client.requests, "request", side_effect=provider):
+            ec.mark_sources_sync_requested(self.users[0], ["xero"], organization=self.orgs[0])
+        connection.refresh_from_db()
+        self.assertEqual(connection.status, "error")
+        self.assertEqual(connection.last_error, "A newer credential needs attention.")
 
     def test_preparation_and_report_refresh_quota_keep_real_endpoint_barrier_closed(self):
         from rest_framework.test import APIRequestFactory

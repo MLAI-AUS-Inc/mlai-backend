@@ -6442,8 +6442,13 @@ def mark_sources_sync_requested(
                     seconds = requests._retry_after_seconds(exc.response.headers.get("Retry-After"))
                     # Quota is not a credential failure. Do not lose the last
                     # successful sync/cursor or tell the user to reconnect.
+                    # A concurrent reconnect/sync owns any newer status.
+                    ExternalServiceConnection.objects.filter(pk=connection.pk,
+                        user_id=connection.user_id, organization_id=connection.organization_id,
+                        status=ExternalServiceConnectionStatus.SYNCING,
+                        updated_at=connection.updated_at).update(
+                            status=prior_status, last_error=prior_error, updated_at=timezone.now())
                     connection.status, connection.last_error = prior_status, prior_error
-                    connection.save(update_fields=["status", "last_error", "updated_at"])
                     updated.append({"connectionId": connection.id, "connection_id": connection.id,
                         "provider": connection.provider, "status": "error",
                         "error": f"Xero API rate limit reached; retry after {seconds} seconds.",

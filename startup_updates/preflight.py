@@ -1,6 +1,7 @@
 """Check every explicitly selected provider before admitting expensive generation."""
 
 from concurrent.futures import ThreadPoolExecutor
+from collections.abc import Mapping
 from datetime import timedelta
 
 from integrations import http_client as requests
@@ -204,6 +205,31 @@ def probe_source(provider, *, user, organization):
     return {"connectionId": connection.pk, "accountId": connection.external_account_id}
 
 
+def source_failure_check(provider, exc):
+    """Use the same safe failure contract for probes, discovery and preparation."""
+    from integrations.services import external_connectors as ec
+
+    response = getattr(exc, "response", None)
+    if response is None:
+        response = getattr(exc, "resp", None)
+    status = getattr(response, "status_code", None) or getattr(response, "status", None) or getattr(exc, "status_code", None)
+    if status == 429 or isinstance(exc, ec.ConnectorRateLimitError):
+        seconds = getattr(exc, "retry_after_seconds", None)
+        if seconds is None:
+            headers = getattr(response, "headers", response if isinstance(response, Mapping) else {})
+            seconds = requests._retry_after_seconds(headers.get("Retry-After") or headers.get("retry-after"))
+        return rate_limited_check(provider, seconds)
+    if isinstance(exc, NotImplementedError):
+        code, message = "unsupported", "This connection does not support Pulse imports yet."
+    elif isinstance(exc, ManualInputNotReady):
+        code, message = "needs_input", "Add notes or wait for selected documents to finish processing."
+    elif status in (401, 403) or (isinstance(exc, (PermissionError, ec.ConnectorOAuthError)) and not isinstance(exc, ec.ConnectorTemporarilyUnavailable)):
+        code, message = "needs_reconnect", "Reconnect this source and check its required permissions."
+    else:
+        code, message = "temporarily_unavailable", "This source could not be checked. Try checking it again shortly."
+    return {"provider": provider, "status": code, "message": message}
+
+
 def check_sources(sources, probe):
     """Return every outcome in selection order, even when several probes fail."""
 
@@ -212,41 +238,7 @@ def check_sources(sources, probe):
             details = probe(provider) or {}
             return {"provider": provider, "status": "ready", **details}
         except Exception as exc:  # noqa: BLE001 - aggregate every independent provider failure safely
-            from integrations.services import external_connectors as ec
-
-            status = getattr(
-                getattr(exc, "response", None), "status_code", None
-            ) or getattr(exc, "status_code", None)
-            status = status or getattr(getattr(exc, "resp", None), "status", None)
-            if status == 429 or isinstance(exc, ec.ConnectorRateLimitError):
-                seconds = getattr(exc, "retry_after_seconds", None)
-                if seconds is None:
-                    headers = getattr(getattr(exc, "response", None), "headers", {})
-                    seconds = requests._retry_after_seconds(headers.get("Retry-After"))
-                return rate_limited_check(provider, seconds)
-            if isinstance(exc, NotImplementedError):
-                code, message = (
-                    "unsupported",
-                    "This connection does not support Pulse imports yet.",
-                )
-            elif isinstance(
-                exc, (PermissionError, ec.ConnectorOAuthError)
-            ) or status in (401, 403):
-                code, message = (
-                    "needs_reconnect",
-                    "Reconnect this source and check its required permissions.",
-                )
-            elif isinstance(exc, ManualInputNotReady):
-                code, message = (
-                    "needs_input",
-                    "Add notes or wait for selected documents to finish processing.",
-                )
-            else:
-                code, message = (
-                    "temporarily_unavailable",
-                    "This source could not be checked. Try checking it again shortly.",
-                )
-            return {"provider": provider, "status": code, "message": message}
+            return source_failure_check(provider, exc)
 
     # No shared result mutations; executor.map preserves selection order.
     with ThreadPoolExecutor(max_workers=min(4, max(1, len(sources)))) as pool:
