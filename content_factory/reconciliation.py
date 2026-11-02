@@ -52,6 +52,7 @@ from django.utils.dateparse import parse_datetime
 from workflow_runs.models import ContentFactoryRun, ContentFactoryRunStatus
 
 from .run_status_contract import ACTIVE
+from .nightly_refresh_reconciliation import admitted_nightly_refresh, nightly_refresh_candidates
 
 logger = logging.getLogger(__name__)
 
@@ -231,6 +232,9 @@ def _finalize_run_failure(run_id: str, *, error: str, outcome: str, now) -> bool
         run = ContentFactoryRun.objects.select_for_update().filter(run_id=run_id).first()
         if run is None or run.status not in ACTIVE_RUN_STATUSES or run.organization_id != original["organization_id"]:
             return False
+        nightly_refresh = run.workflow == "island_refresh"
+        if nightly_refresh and (not admitted_nightly_refresh(run) or run.run_request != request):
+            return False
         try:
             current_binding = connection_contract(run.run_request or {})
         except WebsiteAuthorityError:
@@ -240,7 +244,7 @@ def _finalize_run_failure(run_id: str, *, error: str, outcome: str, now) -> bool
             return False
         result = dict(run.result or {})
         result["reconciliation"] = {"outcome": outcome, "checked_at": now.isoformat()}
-        result["reconciliation_refund_pending"] = True
+        result["reconciliation_refund_pending"] = not nightly_refresh
         run.status = ContentFactoryRunStatus.FAILED
         run.error = error
         run.resume_available = False
@@ -260,6 +264,8 @@ def _finalize_run_failure(run_id: str, *, error: str, outcome: str, now) -> bool
             operation.state = "cancelled"
             operation.receipt = {**(operation.receipt or {}), "status": "failed", "reason_code": outcome, "run_id": run.run_id}
             operation.save(update_fields=["state", "receipt", "updated_at"])
+    if nightly_refresh:
+        return True
     try:
         _refund_failed_run(run, reason=outcome)
     except Exception:
@@ -282,7 +288,7 @@ def _adopt_remote_payload(run: ContentFactoryRun, payload: dict) -> str:
     step_states = payload.get("step_states") or payload.get("steps") or {}
     if not isinstance(step_states, dict):
         step_states = {}
-    if run.workflow == "auto_discovery":
+    if run.workflow in {"auto_discovery", "island_refresh"}:
         # Status polling does not return the admitted request or identity.
         # Preserve those from the current row, not the pre-network snapshot,
         # and let a callback/cancellation that already finished it win.
@@ -292,18 +298,20 @@ def _adopt_remote_payload(run: ContentFactoryRun, payload: dict) -> str:
                 return run.status
             if current.workflow != run.workflow or current.status not in ACTIVE_RUN_STATUSES:
                 return current.status
+            if current.workflow == "island_refresh" and not admitted_nightly_refresh(current):
+                raise ValueError("Nightly refresh has no admitted saved recovery scope.")
             if sync_payload["workflow"] != current.workflow:
-                raise ValueError("Discovery status belongs to another workflow.")
+                raise ValueError("Research status belongs to another workflow.")
             for key in ("run_id", "job_id", "task_id"):
                 if payload.get(key) not in (None, "", current.run_id):
-                    raise ValueError("Discovery status belongs to another execution.")
+                    raise ValueError("Research status belongs to another execution.")
             remote_request = payload.get("run_request")
             for key in ("domain", "github_repo", "slack_user_id"):
                 saved = getattr(current, key) or ""
                 for observation in (payload, remote_request if isinstance(remote_request, dict) else {}):
                     observed = observation.get(key)
                     if observed not in (None, "") and observed != saved:
-                        raise ValueError("Discovery status changes the saved identity.")
+                        raise ValueError("Research status changes the saved identity.")
                 sync_payload[key] = saved
             sync_payload["run_request"] = deepcopy(current.run_request or {})
             observed, _ = _sync_content_factory_run_snapshot(
@@ -378,6 +386,11 @@ def run_content_factory_reconciliation_sweep(*, limit: Optional[int] = None, now
     )
     if discovery_since is not None:
         covered |= Q(workflow="auto_discovery", created_at__gte=discovery_since)
+    nightly_since = discovery_reconciliation_since(
+        getattr(settings, "CONTENT_FACTORY_NIGHTLY_REFRESH_RECONCILIATION_SINCE", ""),
+    )
+    if nightly_since is not None:
+        covered |= nightly_refresh_candidates(nightly_since)
     candidates = list(_stale_run_candidates(now).filter(covered)[:limit])
 
     summary = {
@@ -411,6 +424,8 @@ def run_content_factory_reconciliation_sweep(*, limit: Optional[int] = None, now
     recovery_supported = None
 
     for run in candidates:
+        if run.workflow == "island_refresh" and not admitted_nightly_refresh(run):
+            continue
         summary["checked"] += 1
 
         from .dispatch_binding import run_is_dispatch_token_keyed
@@ -483,11 +498,11 @@ def run_content_factory_reconciliation_sweep(*, limit: Optional[int] = None, now
             try:
                 from workflow_runs.status import normalize_run_status
                 remote_status = normalize_run_status(payload.get("status"))
-                # Discovery's lease-aware orphan sweeper owns worker recovery.
+                # CF's lease-aware orphan sweeper owns research worker recovery.
                 # CF's /recover endpoint currently supports article orchestration
-                # only; do not start its cancel/refund ladder for discovery.
+                # only; do not start its cancel/refund ladder for research.
                 if (
-                    run.workflow != "auto_discovery"
+                    run.workflow not in {"auto_discovery", "island_refresh"}
                     and remote_status in ACTIVE_RUN_STATUSES
                     and remote_heartbeat_stale(payload, now=now)
                 ):
