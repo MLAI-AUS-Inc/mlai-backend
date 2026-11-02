@@ -15293,6 +15293,8 @@ def _call_content_factory_run_action(
     timeout=(3, 15),
     transport_errors_are_pending=False,
     preserve_run_clock=False,
+    control_user=None,
+    control_command_key=None,
 ):
     require_unlocked_remote_call()
     admitted_child = None
@@ -15330,6 +15332,17 @@ def _call_content_factory_run_action(
                         user=resolve_user_for_actor_id(actor), actor_id=actor, payload=payload)
                 except (RunOwnershipConflict, WebsiteAuthorityError):
                     return {"status": "blocked", "error": "The scan approval or current website permission changed.",
+                            "content_factory_status_code": 409, "retryable": False}
+        if action == "resume" and scoped_run:
+            from .run_ownership import owner_receipt, RunOwnershipConflict
+            if (owner_receipt(scoped_run) or {}).get("authority", {}).get("event_protocol") == 1:
+                from .run_user_resume import user_resume_payload
+                try:
+                    payload = user_resume_payload(run=scoped_run, user=control_user,
+                        command_key=control_command_key, payload=payload)
+                except RunOwnershipConflict as exc:
+                    return {"status": "blocked", "error": "This resume needs a current account and saved command identity.",
+                            "code": getattr(exc, "reason", "execution_resume_refused"),
                             "content_factory_status_code": 409, "retryable": False}
     remote_config = _content_factory_remote_config()
     if not remote_config["enabled"]:
@@ -20231,6 +20244,9 @@ def control_article_run(*, user, context, run, action, data, run_id=None, goal_o
             (3, 20) if action in {"promote-bundle", "publish-pr"} else (3, 15)
         ),
         transport_errors_are_pending=action in {"promote-bundle", "publish-pr"},
+        **({"control_user": command.user, "control_command_key": next((command.data.get(key) for key in
+            ("_backend_control_command_key", "idempotency_key", "idempotencyKey", "clientRequestId")
+            if command.data.get(key)), None)} if action == "resume" else {}),
     )
     if setup_owner_approval is not None:
         # The owner click counts only for an approve Content Factory accepted.
@@ -20707,7 +20723,12 @@ class VibeMarketingRunControlView(APIView):
         if not _run_belongs_to_context(run, context):
             return Response({"detail": "Run not found."}, status=status.HTTP_404_NOT_FOUND)
 
-        return control_article_run(user=request.user, context=context, data=request.data, run=run, action=action, run_id=run_id)
+        data = request.data
+        if action == "resume":
+            from .run_ownership import owner_receipt
+            if owner_receipt(run) is not None and request.headers.get("Idempotency-Key"):
+                data = {**request.data, "_backend_control_command_key": request.headers["Idempotency-Key"]}
+        return control_article_run(user=request.user, context=context, data=data, run=run, action=action, run_id=run_id)
 
 
 class VibeMarketingDailyReplayView(APIView):
