@@ -462,7 +462,7 @@ def start_campaign(blast_id, campaign_id: int, *, now) -> str:
 
     from . import sender_pool
     candidate = Blast.objects.select_related("mailbox").get(pk=blast_id)
-    if sender_pool.child_parent(candidate) or candidate.mailbox.email in sender_pool.addresses():
+    if sender_pool.child_parent(candidate) or (candidate.mailbox_id and candidate.mailbox.email in sender_pool.addresses()):
         return sender_pool.start_campaign(blast_id, campaign_id, now=now)
     with transaction.atomic():
         sender_pool.lock_senders(warmup=True)

@@ -176,6 +176,17 @@ class SenderPoolDatabaseTests(TestCase):
         self.assertFalse(SenderMailbox.objects.filter(email__in=SENDERS, enabled=True).exists())
         self.assertEqual(CrmAuditEvent.objects.filter(target_type='resend_event').count(), 1)
 
+    def test_review_hold_added_after_loading_prevents_final_start(self):
+        child = self.ready_child(self.queue())
+        delivery = child.deliveries.get()
+        delivery.status = 'submitting'
+        delivery.save()
+        Contact.objects.filter(pk=delivery.contact_id).update(attributes={'marketing_review_hold': True})
+        with patch('crm.listmonk.set_campaign_status') as start:
+            self.assertEqual(sender_pool.start_campaign(child.pk, 123, now=self.now), 'held')
+        start.assert_not_called()
+        self.assertFalse(CrmAuditEvent.objects.filter(target_type=sender_pool.ATTEMPT).exists())
+
     def test_recent_send_for_an_old_snapshot_correlates_feedback(self):
         child = self.ready_child(self.queue()); blasts.dispatch_blast(child.pk, now=self.now)
         delivery = child.deliveries.get()

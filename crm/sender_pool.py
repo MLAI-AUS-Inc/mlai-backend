@@ -157,6 +157,9 @@ def start_block(blast, now, *, reserved=False):
         return "delivery_not_pending"
     contact = Contact.objects.select_for_update().get(pk=delivery.contact_id)
     from .queries import banned
+    from .engagement import marketing_review_hold
+    if blast.purpose == Blast.Purpose.MARKETING and marketing_review_hold(contact.attributes):
+        return "marketing_review_hold"
     if (contact.email_status != Contact.EmailStatus.ACTIVE
             or contact.marketing_consent != Contact.MarketingConsent.GRANTED
             or contact.email.lower() != delivery.address
