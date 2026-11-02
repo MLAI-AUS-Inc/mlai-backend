@@ -15,7 +15,7 @@ from zoneinfo import ZoneInfo
 from django.conf import settings
 from django.contrib.auth import get_user_model
 from django.core.cache import cache
-from django.db.models import Count, Max, Q
+from django.db.models import Count, Exists, Max, OuterRef, Q
 from django.db.models.functions import Lower
 
 from integrations.models import (
@@ -209,26 +209,51 @@ def slack_message_time(value):
         return None
 
 
+def _monitored_slack_channel(row):
+    """Expect freshness only for an active reader or an established source feed."""
+    if (not row.get("enabled", True) or row.get("slack_archived", False)
+            or row.get("mirror_decision") != "mirror"
+            or row.get("sync_paused_reason") or row.get("hold_reason")):
+        return False
+    current_reader = (row.get("reader_grant_id") is not None
+        and row.get("reader_grant__status") == "active"
+        and row.get("reader_grant__revoked_at") is None)
+    source_history = (row.get("has_source_history") is True
+        or bool(row.get("sync_state__latest_source_activity"))
+        or row.get("sync_state__last_successful_delivery_at") is not None)
+    return current_reader or source_history
+
+
 def _slack(users, activities, since, now, counts):
     workspace = str(getattr(settings, "MESSAGE_SYNC_SLACK_BOT_WORKSPACE_ID", "") or "")
     if not workspace:
         return _unavailable("Public Slack ingestion is not configured; private/DM activity is excluded.", expected=False)
-    channels = list(CommunityBridgeChannel.objects.filter(slack_workspace_id=workspace).values(
-        "id", "enabled", "slack_archived", "slack_visibility", "slack_deleted", "slack_channel_name", "pilot_settings", "sync_state__last_successful_scan_at",
+    channels = list(CommunityBridgeChannel.objects.filter(slack_workspace_id=workspace).annotate(
+        # Any retained source history establishes prior ingestion, including a
+        # subsequently deleted message; no message content is loaded here.
+        has_source_history=Exists(CommunityBridgeMessageLink._base_manager.filter(
+            channel_id=OuterRef("pk"), source_platform="slack")),
+    ).values(
+        "id", "enabled", "slack_archived", "slack_visibility", "slack_deleted", "slack_channel_name", "pilot_settings",
+        "mirror_decision", "sync_paused_reason", "hold_reason", "reader_grant_id", "reader_grant__status", "reader_grant__revoked_at",
+        "has_source_history", "sync_state__latest_source_activity", "sync_state__last_successful_delivery_at", "sync_state__last_successful_scan_at",
     ))
     channels = [row for row in channels if _public_channel(row)]
-    observed = [_instant(row["sync_state__last_successful_scan_at"]) for row in channels]
+    monitored = [row for row in channels if _monitored_slack_channel(row)]
+    observed = [_instant(row["sync_state__last_successful_scan_at"]) for row in monitored]
     observed = [value for value in observed if value]
-    coverage = _freshness(max(observed) if observed else None, now, expected=True,
-        detail="Public human messages with exact account email mapping only; no private/DM, bot, reaction or test activity. Raw receipt retention limits human verification.",
+    coverage = _freshness(max(observed) if observed else None, now, expected=bool(monitored),
+        detail="Public human messages with exact account email mapping only; no private/DM, bot, reaction or test activity. Raw receipt retention limits human verification. Empty mappings without reader authority or source history are coverage gaps.",
         channels=len(channels), channels_without_scan=sum(row["sync_state__last_successful_scan_at"] is None for row in channels),
+        monitored_channels=len(monitored), unmonitored_channels=len(channels) - len(monitored),
         query_window={"from": _iso(since), "through": _iso(now)})
+    if channels and not monitored:
+        coverage["status"] = "partial"
     stale_channels = sum(
-        row.get("enabled", True) and not row.get("slack_archived", False)
-        and _instant(row["sync_state__last_successful_scan_at"]) is not None
+        _instant(row["sync_state__last_successful_scan_at"]) is not None
         and (now - _instant(row["sync_state__last_successful_scan_at"]) > timedelta(days=2)
              or _instant(row["sync_state__last_successful_scan_at"]) > now)
-        for row in channels
+        for row in monitored
     )
     coverage["stale_active_channels"] = stale_channels
     if stale_channels:

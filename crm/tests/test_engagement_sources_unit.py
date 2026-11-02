@@ -61,6 +61,9 @@ def receipt(author=AUTHOR, **changes):
 def channel(**changes):
     return {"id": 1, "slack_visibility": "public", "slack_deleted": False,
         "slack_channel_name": "community", "pilot_settings": {},
+        "enabled": True, "mirror_decision": "mirror", "sync_paused_reason": "", "hold_reason": "",
+        "reader_grant_id": None, "reader_grant__status": None, "reader_grant__revoked_at": None,
+        "has_source_history": True, "sync_state__latest_source_activity": "", "sync_state__last_successful_delivery_at": None,
         "sync_state__last_successful_scan_at": NOW - timedelta(minutes=20), **changes}
 
 
@@ -186,6 +189,41 @@ class ActivitySourceTests(SimpleTestCase):
         self.assertEqual(result["coverage"]["slack"]["stale_active_channels"], 1)
         self.channels.rows[-1]["slack_archived"] = True
         self.assertEqual(self.collect()["coverage"]["slack"]["status"], "partial")
+
+    def test_empty_orphan_mapping_is_a_coverage_gap_not_a_global_outage(self):
+        orphan = channel(id=2, has_source_history=False, sync_state__last_successful_scan_at=NOW - timedelta(days=10))
+        self.channels.rows.append(orphan)
+        coverage = self.collect()["coverage"]["slack"]
+        self.assertEqual(coverage["status"], "partial")
+        self.assertEqual(coverage["stale_active_channels"], 0)
+        self.assertEqual(coverage["unmonitored_channels"], 1)
+        self.channels.rows = [orphan]
+        coverage = self.collect()["coverage"]["slack"]
+        self.assertEqual(coverage["status"], "partial")
+        self.assertFalse(coverage["expected"])
+
+    def test_current_reader_or_source_activity_keeps_stale_feed_protected(self):
+        for authority in (
+            {"has_source_history": True},
+            {"reader_grant_id": 1, "reader_grant__status": "active"},
+            {"sync_state__latest_source_activity": "1793000000.000001"},
+            {"sync_state__last_successful_delivery_at": RECENT},
+        ):
+            with self.subTest(authority=authority):
+                self.channels.rows = [channel(has_source_history=False,
+                    sync_state__last_successful_scan_at=NOW - timedelta(days=10)) | authority]
+                coverage = self.collect()["coverage"]["slack"]
+                self.assertEqual(coverage["status"], "stale")
+                self.assertEqual(coverage["stale_active_channels"], 1)
+
+    def test_explicitly_paused_held_disabled_or_archived_feed_is_not_expected(self):
+        for state in ({"sync_paused_reason": "no_reader"}, {"mirror_decision": "hold"},
+            {"hold_reason": "source_closed"}, {"enabled": False}, {"slack_archived": True}):
+            with self.subTest(state=state):
+                self.channels.rows = [channel(sync_state__last_successful_scan_at=NOW - timedelta(days=10)) | state]
+                coverage = self.collect()["coverage"]["slack"]
+                self.assertEqual(coverage["status"], "partial")
+                self.assertEqual(coverage["stale_active_channels"], 0)
 
     def test_luma_pass_freshness_handles_empty_catalog_and_partial_failure(self):
         self.events.stats["last_success"] = NOW - timedelta(days=10)
