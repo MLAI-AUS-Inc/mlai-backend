@@ -1102,6 +1102,109 @@
         "failure",
         "capabilities"
       ]
+    },
+    "FounderJourneyBootstrapV2": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "version": {
+          "const": 1
+        },
+        "contractVersion": {
+          "const": 2
+        },
+        "cohort": {
+          "const": "new_journey"
+        },
+        "optInAvailable": {
+          "type": "boolean"
+        },
+        "staffView": {
+          "type": "boolean"
+        },
+        "copyReadyBeforeVerification": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "version",
+        "contractVersion",
+        "cohort",
+        "optInAvailable",
+        "staffView",
+        "copyReadyBeforeVerification"
+      ]
+    },
+    "AccountFounderJourneyV2": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "version": {
+          "const": 1
+        },
+        "contractVersion": {
+          "const": 2
+        },
+        "newStartupCohort": {
+          "enum": [
+            "legacy",
+            "new_journey"
+          ]
+        },
+        "companies": {
+          "type": "object",
+          "additionalProperties": {
+            "const": "new_journey"
+          }
+        }
+      },
+      "required": [
+        "version",
+        "contractVersion",
+        "newStartupCohort",
+        "companies"
+      ]
+    },
+    "FounderArticleErrorV2": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "contractVersion": {
+          "const": 2
+        },
+        "failure": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "code": {
+              "type": "string",
+              "pattern": "^[A-Za-z][A-Za-z0-9_]{0,127}$"
+            },
+            "copy": {
+              "$ref": "#/$defs/FounderCopy"
+            }
+          },
+          "required": [
+            "code",
+            "copy"
+          ]
+        },
+        "supportCode": {
+          "anyOf": [
+            {
+              "type": "string",
+              "maxLength": 200
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "contractVersion",
+        "failure"
+      ]
     }
   }
 }
