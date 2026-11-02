@@ -51,7 +51,8 @@ class CurrentArticleBriefTests(unittest.TestCase):
     def test_ci_includes_the_no_database_editorial_regressions(self):
         workflow = (Path(__file__).resolve().parent.parent / ".github/workflows/deploy.yml").read_text()
         step = workflow.split("- name: Run no-database editorial contract checks\n", 1)[1].split("\n    - ", 1)[0]
-        self.assertIn("python -m unittest", step)
+        self.assertIn("python scripts/test_without_database.py", step)
+        self.assertNotIn("python -m unittest", step)
         for module in ("tests_editorial_catalog_unit", "tests_editorial_catalog_api_unit", "tests_editorial_snapshot_unit", "tests_editorial_revision_unit", "tests_article_admission_notice_unit"):
             self.assertIn("content_factory." + module, step)
         self.assertNotIn("manage.py", step)
