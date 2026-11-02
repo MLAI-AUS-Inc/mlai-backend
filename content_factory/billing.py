@@ -42,7 +42,7 @@ def normalized_account_key(user) -> str:
     return f"email:{email}" if email else f"user:{getattr(user, 'pk', '')}"
 
 
-def _free_setup_uses(user, action: str, now: Optional[float]):
+def _free_setup_uses(user, action: str, now: Optional[float], *, include_reservations=True):
     """Return (cap, cache key, current time, uses in the rolling window) for an account."""
     import hashlib
     import time
@@ -57,7 +57,71 @@ def _free_setup_uses(user, action: str, now: Optional[float]):
     key = f"content_factory:free_setup:{action}:{digest}"
     window = FREE_SETUP_RESEARCH_WINDOW_SECONDS
     recent = sorted(stamp for stamp in (cache.get(key) or []) if isinstance(stamp, (int, float)) and current - stamp < window)
+    if include_reservations:
+        recent = sorted([*recent, *_free_setup_reservations(key, current).values()])
     return cap, key, current, recent
+
+
+def _free_setup_reservations(key, current):
+    from django.core.cache import cache
+    value = cache.get(key+':reserved')
+    return {identity: at for identity, at in (value.items() if isinstance(value, dict) else [])
+            if isinstance(identity, str) and isinstance(at, (int, float))
+            and current-at < FREE_SETUP_RESEARCH_WINDOW_SECONDS}
+
+
+def _lock_free_setup_quota(user, action, now, *, cache_key=None):
+    """Hold the account and normalized-account quota lock inside a short transaction."""
+    import hashlib
+    from django.contrib.auth import get_user_model
+    from django.db import connection
+    current_user = get_user_model().objects.select_for_update().get(pk=user.pk)
+    key = cache_key or _free_setup_uses(current_user, action, now, include_reservations=False)[1]
+    if connection.vendor == 'postgresql':
+        lock_id = int.from_bytes(hashlib.blake2b(('free-setup:'+key).encode(), digest_size=8).digest(), 'big', signed=True)
+        with connection.cursor() as cursor:
+            cursor.execute('SELECT pg_advisory_xact_lock(%s)', [lock_id])
+    return current_user, key
+
+
+def reserve_free_setup_use(user, action: str, identity: str, *, now: Optional[float] = None):
+    """Reserve one original free action before HTTP, idempotently by dispatch identity.
+
+    Count reservations alongside historic timestamp uses. The opaque handle is
+    internal only; a confirmed no-work manual start can release its own slot.
+    No payment or ledger row is created, and no transaction spans remote work.
+    """
+    from django.core.cache import cache
+    from django.db import transaction
+    from rest_framework.exceptions import Throttled
+    if not isinstance(identity, str) or not 0 < len(identity) <= 200:
+        raise ValueError('A bounded original free-action identity is required.')
+    with transaction.atomic():
+        current_user, key = _lock_free_setup_quota(user, action, now)
+        cap, _, current, recent = _free_setup_uses(current_user, action, now)
+        if cap <= 0:
+            return None
+        reserved = _free_setup_reservations(key, current)
+        if identity in reserved:
+            return key, identity
+        if len(recent) >= cap:
+            raise Throttled(wait=max(1, int(recent[len(recent)-cap]+FREE_SETUP_RESEARCH_WINDOW_SECONDS-current)+1))
+        cache.set(key+':reserved', {**reserved, identity: current}, timeout=FREE_SETUP_RESEARCH_WINDOW_SECONDS)
+        return key, identity
+
+
+def release_free_setup_use(user, action: str, handle) -> None:
+    """Release only this internal reservation after a confirmed no-work result."""
+    from django.core.cache import cache
+    from django.db import transaction
+    if not handle:
+        return
+    key, identity = handle
+    with transaction.atomic():
+        _lock_free_setup_quota(user, action, None, cache_key=key)
+        value = cache.get(key+':reserved')
+        if isinstance(value, dict) and identity in value:
+            cache.set(key+':reserved', {k: v for k, v in value.items() if k != identity}, timeout=FREE_SETUP_RESEARCH_WINDOW_SECONDS)
 
 
 def check_free_setup_daily_cap(user, action: str, *, now: Optional[float] = None) -> None:
@@ -79,7 +143,7 @@ def record_free_setup_use(user, action: str, *, now: Optional[float] = None) -> 
     """Remember one free setup research run for the account's rolling 24 hour cap."""
     from django.core.cache import cache
 
-    cap, key, current, recent = _free_setup_uses(user, action, now)
+    cap, key, current, recent = _free_setup_uses(user, action, now, include_reservations=False)
     if cap > 0:
         cache.set(key, [*recent, current], timeout=FREE_SETUP_RESEARCH_WINDOW_SECONDS)
 

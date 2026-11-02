@@ -21,11 +21,11 @@ from organizations.models import Organization
 from founder_tools.models import VibeRaisingCompany
 from founder_tools.services import FounderCompanyContext, organization_owner_user_id, normalize_company_domain
 from workflow_runs.models import ContentFactoryRun
-from .billing import free_setup_actions, check_free_setup_daily_cap, record_free_setup_use
+from .billing import free_setup_actions, reserve_free_setup_use
 from .founder_funnel import has_first_draft, mapping, timestamp
 from .models import OrganizationContentConfig, WebsiteBaselineSnapshot
 from .p2_foundation import p2_applies
-from .founder_journey_cohort import v2_enabled
+from .founder_journey_cohort import v2_enabled, is_disabled
 
 logger = logging.getLogger(__name__)
 KEY = 'website_check_schedule_v1'
@@ -82,7 +82,7 @@ def _claim(config_id, now):
     with transaction.atomic():
         org = Organization.objects.select_for_update().filter(pk=org_id).first()
         config = OrganizationContentConfig.objects.select_for_update().filter(pk=config_id, organization=org).first()
-        if org is None or config is None or not _enabled() or not p2_applies(org) or not has_first_draft(org):
+        if org is None or config is None or not _enabled() or is_disabled(org) or not p2_applies(org) or not has_first_draft(org):
             return 'skipped', None
         context = _context(org)
         if context is None:
@@ -91,6 +91,13 @@ def _claim(config_id, now):
                 workflow='website_baseline', status__in=ACTIVE).exists():
             return 'waiting', None
         previous = mapping(_receipt(config))
+        unresolved = ContentFactoryRun.objects.filter(organization=org, domain=org.domain,
+            workflow='website_baseline', run_request__dispatch_pending_resolution=True)
+        if unresolved.exists() and not (previous.get('state') == 'pending'
+                and unresolved.filter(run_request__client_request_id=previous.get('key')).exists()):
+            # A manual or prior unknown dispatch must be resolved before a new
+            # daily identity is admitted. Its blocked label is not no-effect proof.
+            return 'waiting', None
         if previous.get('state') == 'pending':
             if not _scope_matches(previous, context):
                 _save(config, {**previous, 'state': 'cancelled', 'reason': 'scope_changed'})
@@ -137,31 +144,43 @@ def _mutate(config_id, receipt, **changes):
         return True
 
 
+def _current_claim(config, receipt, now):
+    current = mapping(_receipt(config))
+    lease = timestamp(current.get('lease_until'))
+    return bool(current.get('key') == receipt['key'] and current.get('nonce') == receipt['nonce']
+                and current.get('state') == 'pending' and lease and lease > now)
+
+
 def _dispatch(claim, now):
-    from django.contrib.auth import get_user_model
     from .vibe_marketing_views import _start_website_baseline
     config_id, context, receipt = claim
+    quota_handle = receipt.get('quota_handle')
     if not receipt.get('usage_reserved'):
-        # Serializes background reservations across different startups owned by
-        # this account. No remote call or organization lock is held here.
-        with transaction.atomic():
-            user = get_user_model().objects.select_for_update().get(pk=context.profile.user_id, is_active=True)
-            check_free_setup_daily_cap(user, 'website_baseline', now=now.timestamp())
-            record_free_setup_use(user, 'website_baseline', now=now.timestamp())
-        if not _mutate(config_id, receipt, usage_reserved=True):
+        quota_handle = reserve_free_setup_use(context.profile.user, 'website_baseline', receipt['key'], now=now.timestamp())
+        if not _mutate(config_id, receipt, usage_reserved=True, quota_handle=quota_handle):
             return 'waiting'
     # Fresh ownership, cohort and free eligibility immediately before dispatch.
     context.organization.refresh_from_db()
     current_context = _context(context.organization)
-    if (not _enabled() or not p2_applies(context.organization) or current_context is None
+    if (not _enabled() or is_disabled(context.organization) or not p2_applies(context.organization) or current_context is None
             or not _scope_matches(receipt, current_context)):
         _mutate(config_id, receipt, state='cancelled', reason='scope_changed')
         return 'skipped'
     config = OrganizationContentConfig.objects.get(pk=config_id)
+    if not _current_claim(config, receipt, now):
+        return 'waiting'
     run, error = _start_website_baseline(context=current_context, config=config, user=current_context.profile.user,
         payload=receipt['payload'], background_reserved=True)
     if error is not None or run is None:
         return 'waiting'
+    if mapping(run.run_request).get('dispatch_pending_resolution') is True:
+        _mutate(config_id, receipt, run_id=run.run_id, reason='dispatch_pending_resolution')
+        return 'waiting'
+    if run.status in {'failed', 'blocked', 'cancelled', 'denied'}:
+        from .billing import release_free_setup_use
+        release_free_setup_use(current_context.profile.user, 'website_baseline', quota_handle)
+        _mutate(config_id, receipt, state='failed', run_id=run.run_id, lease_until=None, usage_reserved=False, quota_handle=None)
+        return 'failed'
     _mutate(config_id, receipt, state='queued', run_id=run.run_id, lease_until=None)
     return 'queued'
 
@@ -195,3 +214,9 @@ def run_founder_website_check_sweep(*, now=None, limit=25):
             result['failed'] += 1
             logger.warning('founder_website_check_failed config_id=%s error_type=%s', config_id, type(exc).__name__)
     return result
+
+
+def scheduled_founder_website_checks():
+    """Return the shared scheduler's required status envelope, including when disabled."""
+    result = run_founder_website_check_sweep()
+    return {'status': 'failed' if result['failed'] else 'completed' if result['visited'] else 'skipped', **result}
