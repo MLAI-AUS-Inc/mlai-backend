@@ -24,8 +24,12 @@ def resolve_content_billing_user(requester, domain):
     from founder_tools.services import user_may_use_organization
     from .billing import normalize_content_factory_domain
     organization = Organization.objects.select_related("billing_user").filter(domain=normalize_content_factory_domain(domain)).first()
-    if organization is None or not user_may_use_organization(requester, organization):
+    if organization is None:
         return requester
+    if not user_may_use_organization(requester, organization):
+        from founder_tools.startup_team import member_may_spend
+        if not member_may_spend(requester, organization):
+            return requester
     return billing_user_for_organization(organization, requester)
 
 

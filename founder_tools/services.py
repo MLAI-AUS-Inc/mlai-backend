@@ -244,6 +244,10 @@ def organization_owner_user_id(organization) -> int | None:
     """
     if organization is None:
         return None
+    from .startup_team import pinned_owner
+    pinned, owner_id = pinned_owner(organization)
+    if pinned:
+        return owner_id
     live, stale = _organization_claims(organization)
     first = (live or stale or [None])[0]
     return first.profile.user_id if first else None
@@ -460,11 +464,18 @@ def _purge_org_marketing_data(organization) -> None:
     from workflow_runs.models import ContentFactoryRun
 
     from content_factory.website_connections import offboard_website_connections
+    saved = OrganizationContentConfig.objects.filter(organization=organization).values_list('pillar_strategy', flat=True).first() or {}
+    roster = saved.get('startup_team') if isinstance(saved, dict) else None
+    retained_roster = roster if isinstance(roster, dict) and roster.get('frozen') is True else None
     offboard_website_connections(organization, purge=True)
     MonthlyUpdateDraft.objects.filter(organization=organization).delete()
     # Cascades ContentFactoryRunStep; ContentFactoryJob is domain-keyed, not FK.
     ContentFactoryRun.objects.filter(organization=organization).delete()
     OrganizationContentConfig.objects.filter(organization=organization).delete()
+    if retained_roster is not None:
+        # Keep the immutable owner pin without retaining article/settings data
+        # when no member remains. The normal previous-owner marker follows.
+        OrganizationContentConfig.objects.create(organization=organization, pillar_strategy={'startup_team': retained_roster})
 
 
 def offboard_company(company: VibeRaisingCompany, *, reason: str = "company_offboarding") -> dict:
@@ -514,11 +525,14 @@ def offboard_company(company: VibeRaisingCompany, *, reason: str = "company_offb
     }
 
     if organization is not None:
+        from .startup_team import freeze_for_offboard
+        team_retained = freeze_for_offboard(organization, user)
         org_shared = (
             VibeRaisingCompany.objects.filter(organization=organization)
             .exclude(pk=company.pk)
             .exists()
         )
+        org_shared = org_shared or team_retained
         summary["orgShared"] = org_shared
         if org_shared:
             from content_factory.website_connections import offboard_website_connections
@@ -964,18 +978,27 @@ class FounderCompanyContext:
     profile: VibeRaisingProfile
     company: VibeRaisingCompany
     organization: Organization
+    role: str = 'owner'
+    rights: frozenset = frozenset()
 
 
 def get_founder_company_context(user, company_id=None, *, persist_active=False) -> FounderCompanyContext:
     profile = get_or_create_founder_profile(user)
-    if profile.role != VibeRaisingProfile.ROLE_FOUNDER:
+    from .startup_team import bound_member_context
+    member = bound_member_context(user, company_id) if company_id else None
+    if profile.role != VibeRaisingProfile.ROLE_FOUNDER and member is None:
         raise PermissionError("Only founders can access this product.")
 
     companies = profile.companies.select_related("organization")
     if company_id:
         # `companies` is already scoped to this profile, so .get() enforces
         # ownership (DoesNotExist for a company the user does not own).
-        company = companies.get(pk=company_id)
+        try:
+            company = companies.get(pk=company_id)
+        except VibeRaisingCompany.DoesNotExist:
+            if member is not None:
+                return member
+            raise
         # By default a per-request company_id only SCOPES this request; it does
         # NOT mutate the profile's shared active_company. Only the explicit
         # switch endpoint (and write/setup flows that opt in via persist_active)

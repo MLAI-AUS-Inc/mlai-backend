@@ -77,10 +77,13 @@ class ArticlePreviewLeaseView(APIView):
         if not views._run_belongs_to_context(run, context):
             return Response({"detail": "Run not found."}, status=404)
         portable = original_portable_run(run)
+        team_grant = {}
+        if getattr(context, 'role', 'owner') == 'member':
+            team_grant = {'member_user_id': request.user.pk, 'member_company_id': str(context.company.pk)}
         token = signing.dumps({"run": run.run_id, "organization": context.organization.id,
                                "domain": context.organization.domain, "portable": portable,
                                "intent_digest": evidence_digest({key: (run.run_request or {}).get(key) for key in ("delivery_mode", "delivery_mode_confirmed", "source_run_id")}) if portable else None,
-                               **connection_contract(run.run_request or {})}, salt=SALT, compress=True)
+                               **connection_contract(run.run_request or {}), **team_grant}, salt=SALT, compress=True)
         prefix = f"/api/v1/vibe-marketing/article-preview/{quote(token, safe='')}/{quote(run.run_id, safe='')}/"
         return Response({"url": request.build_absolute_uri(prefix + "?cfInspector=1"), "expiresIn": LIFETIME},
                         headers={"Cache-Control": "no-store"})
@@ -104,6 +107,13 @@ class ArticlePreviewLeaseProxyView(views.VibeMarketingRunLivePreviewProxyView):
         context = SimpleNamespace(organization=SimpleNamespace(id=grant["organization"], domain=grant["domain"]))
         if not views._run_belongs_to_context(run, context):
             return None, None, Response({"detail": "Preview not found."}, status=404)
+        if grant.get('member_user_id') is not None:
+            from core.models import User
+            from founder_tools.startup_team import member_context, member_may_use_run
+            user = User.objects.filter(pk=grant['member_user_id'], is_active=True).first()
+            member = member_context(user, grant.get('member_company_id'), need='read') if user else None
+            if member is None or member.organization.pk != run.organization_id or not member_may_use_run(user, run):
+                return None, None, Response({'detail': 'Preview not found.'}, status=404)
         if grant.get("portable") is True:
             if not original_portable_run(run) or grant.get("intent_digest") != evidence_digest({key: (run.run_request or {}).get(key) for key in ("delivery_mode", "delivery_mode_confirmed", "source_run_id")}):
                 return None, None, Response({"code": "portable_preview_changed", "detail": "Preview access expired."}, status=409)
