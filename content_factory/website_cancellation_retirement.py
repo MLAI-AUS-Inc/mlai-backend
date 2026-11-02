@@ -93,7 +93,16 @@ def bindings_for(runs):
 
 def expected_article_cancellation(run):
     """The worker compares this captured intent while holding its lifecycle lock."""
-    return {"version": 1, "run_id": run.run_id, "goal_id": original_goal(run), "scope": _scope(_request(run))}
+    scope = _scope(_request(run))
+    from .run_reconciliation import authoritative_run
+    if authoritative_run(run):
+        from .run_ownership import owner_receipt, RunOwnershipConflict
+        if run.github_repo != owner_receipt(run)["identity"].get("github_repo"):
+            raise RunOwnershipConflict("The cancellation repository differs from its original admission.")
+        # CF's typed RunRequest always carries its canonical empty repository
+        # for a portable run. Original inputs may legitimately omit that key.
+        scope.setdefault("github_repo", run.github_repo)
+    return {"version": 1, "run_id": run.run_id, "goal_id": original_goal(run), "scope": scope}
 
 
 def scoped_nonarticle_request(run):
