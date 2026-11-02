@@ -948,7 +948,24 @@ ssh "$DEPLOY_SSH_TARGET" <<EOF | tee "$remote_deploy_log"
     # cold imports and 30-second worker timeouts. Firebase initializes a
     # Firestore gRPC client during route import, so warming must be post-fork.
     upsert_env_value GUNICORN_WORKERS "4"
-    upsert_env_value GUNICORN_TIMEOUT "90"
+    # Preserve the serving web timeout across code-only deployments. A host's
+    # .env can lag an explicit runtime override used by long Studio reports.
+    if ! gunicorn_timeout=\$(docker compose exec -T web sh -lc 'printf "%s" "\$GUNICORN_TIMEOUT"' </dev/null 2>/dev/null); then
+        gunicorn_timeout=""
+    fi
+    if [ -z "\$gunicorn_timeout" ]; then
+        gunicorn_timeout=\$(read_env_value GUNICORN_TIMEOUT)
+    fi
+    # Compose accepts quoted integer values in .env as well as bare values.
+    case "\$gunicorn_timeout" in
+        \"*\") gunicorn_timeout=\${gunicorn_timeout#\"}; gunicorn_timeout=\${gunicorn_timeout%\"} ;;
+        \'*\') gunicorn_timeout=\${gunicorn_timeout#\'}; gunicorn_timeout=\${gunicorn_timeout%\'} ;;
+    esac
+    gunicorn_timeout=\${gunicorn_timeout:-90}
+    case "\$gunicorn_timeout" in
+        *[!0-9]*) echo "Invalid existing web timeout; refusing to replace it." >&2; exit 1 ;;
+    esac
+    upsert_env_value GUNICORN_TIMEOUT "\$gunicorn_timeout"
     print_redacted_env_status CONTENT_FACTORY_URL GITHUB_APP_ID GITHUB_APP_PRIVATE_KEY VALLEY_HARNESS_URL REDIS_URL ROO_SERVICE_URL ROO_SIM_PATIENT_KEY HEALTH_HACK_API_KEY ROO_API_KEY INTERNAL_API_KEY UMAMI_BASE_URL CONTENT_ANALYTICS_HOST_URL COMMUNITY_CHAT_ADAPTER_URL COMMUNITY_CHAT_ADAPTER_TOKEN COMMUNITY_CHAT_EMAIL_CODE_PEPPER COMMUNITY_CHAT_EMAIL_CODE_DELIVERY_SECRET CUSTOMERIO_API_KEY CUSTOMERIO_COMMUNITY_CHAT_CODE_MESSAGE_ID
     require_env_value CONTENT_FACTORY_URL "Set CONTENT_FACTORY_URL to http://<content-factory-private-ip>:8000 for the cross-droplet Content Factory deployment."
     require_env_value GITHUB_APP_ID "Set GITHUB_APP_ID to the MLAI Tools GitHub App id so Content Factory can receive installation tokens."

@@ -42,6 +42,46 @@ def _rendered_remote_script(release):
 
 class DeploymentRuntimeChecksTests(unittest.TestCase):
 
+    def test_deploy_preserves_the_effective_web_timeout_before_file_or_default(self):
+        # Execute the real rendered remote decision, with only Docker and the
+        # existing env read/write seams replaced. No host/service is contacted.
+        remote = _rendered_remote_script("a" * 40)
+        start = remote.index("    # Preserve the serving web timeout")
+        end_line = '    upsert_env_value GUNICORN_TIMEOUT "$gunicorn_timeout"'
+        end = remote.index(end_line, start) + len(end_line)
+        decision = remote[start:end]
+        cases = [
+            ("180", "90", 0, "180"),
+            ("90", "180", 0, "90"),
+            ("", "240", 0, "240"),
+            ("", "", 0, "90"),
+            ("0", "90", 0, "0"),
+            ("", '\"180\"', 0, "180"),
+            ("", "'180'", 0, "180"),
+            ("partial failed read", "180", 1, "180"),
+            ("bad timeout", "180", 0, None),
+            ("", "12; touch forbidden", 0, None),
+        ]
+        for live, saved, read_exit, expected in cases:
+            with self.subTest(live=live, saved=saved, read_exit=read_exit):
+                script = "\n".join([
+                    "set -euo pipefail",
+                    'docker() { printf "%s" "$LIVE_TIMEOUT"; return "$LIVE_READ_EXIT"; }',
+                    'read_env_value() { printf "%s" "$SAVED_TIMEOUT"; }',
+                    'upsert_env_value() { printf "changed:%s=%s\\n" "$1" "$2"; }',
+                    decision,
+                ])
+                result = subprocess.run(["bash", "-c", script], text=True,
+                    capture_output=True, timeout=5, env={"PATH": os.environ["PATH"],
+                        "LIVE_TIMEOUT": live, "SAVED_TIMEOUT": saved,
+                        "LIVE_READ_EXIT": str(read_exit)})
+                self.assertEqual(result.returncode, 0 if expected is not None else 1, result.stderr)
+                if expected is None:
+                    self.assertNotIn("changed:", result.stdout)
+                else:
+                    self.assertEqual(result.stdout, f"changed:GUNICORN_TIMEOUT={expected}\n")
+
+
     def test_migration_free_release_keeps_runtime_online_during_checks(self):
         # Execute the deployment's actual decision block with stubbed Django
         # commands. No database or production service is involved.
