@@ -804,7 +804,9 @@ def _quoted_price_response(request, *, cost_points, require_quote=False):
     expected = _request_value(request.data, "expectedCostPoints", "expected_cost_points", default=None)
     if expected is None and not require_quote:
         return None  # Research and verified original-paid retries retain compatibility.
-    if isinstance(expected, bool) or not isinstance(expected, int) or expected != cost_points:
+    # A confirmed quote is a spending ceiling. A cheaper current price needs
+    # no second confirmation; a higher one must be reviewed before admission.
+    if isinstance(expected, bool) or not isinstance(expected, int) or expected < cost_points:
         return Response({"detail": "The Roo point price changed. Review the updated price before continuing.",
                          "code": "roo_points_quote_changed", "costPoints": cost_points}, status=409)
     return None
