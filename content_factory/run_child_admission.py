@@ -3,7 +3,7 @@ from copy import deepcopy
 
 from .run_ownership import (
     BUDGET_KEY, CHILDREN_RESULT_KEY, WIRE_EXECUTION_KEY, WIRE_REQUEST_KEY,
-    RunOwnershipConflict, current_execution_ticket, owner_receipt, require_event_execution, reserve_admitted_run,
+    RunOwnershipConflict, admitted_run_for_key, current_execution_ticket, owner_receipt, require_event_execution, reserve_admitted_run,
     user_principal, wire_identity,
 )
 from .website_contract import CONNECTION_FIELDS, evidence_digest
@@ -54,6 +54,34 @@ def prepare_scan_child_dispatch(*, run, user, actor_id, payload):
             parent_ticket = current_execution_ticket(locked)
             key = "r3-scan-child:" + evidence_digest({"parent_admission": parent_wire,
                 "parent_execution": parent_ticket, "workflow": "scaffold_articles"})
+            children = deepcopy((locked.result or {}).get(CHILDREN_RESULT_KEY,
+                {"schema_version": 1, "dispatches": {}}))
+            if (not isinstance(children, dict) or children.get("schema_version") != 1
+                    or not isinstance(children.get("dispatches"), dict)):
+                raise RunOwnershipConflict("The saved child admission receipt is not readable.")
+            previous = children["dispatches"].get(key)
+            if previous is not None:
+                # Original dispatch retries are observations, including after
+                # the child has resumed or completed. Never reserve another
+                # operation, rehash its current attempt or replace its proof.
+                child = admitted_run_for_key(key, lock=True)
+                child_owner = owner_receipt(child)
+                old_ticket = previous.get(WIRE_EXECUTION_KEY) if isinstance(previous, dict) else None
+                if (child_owner is None or not isinstance(old_ticket, dict)
+                        or previous.get("client_request_id") != key or previous.get("workflow") != "scaffold_articles"
+                        or previous.get("source_run_id") != locked.run_id
+                        or previous.get(WIRE_REQUEST_KEY) != wire_identity(child_owner)
+                        or child_owner["identity"]["principal"] != user_principal(user.pk, actor_id)
+                        or child.organization_id != locked.organization_id or child.domain != locked.domain
+                        or child.workflow != "scaffold_articles" or child.status in {"cancelled", "denied"}
+                        or child.run_request.get("parent_run_id") != locked.run_id
+                        or child.run_request.get("parent_admission_digest") != evidence_digest(parent_wire)
+                        or previous.get(BUDGET_KEY) != child.run_request.get(BUDGET_KEY)):
+                    raise RunOwnershipConflict("The original child dispatch no longer matches this approval.")
+                require_event_execution(child, previous, generation=old_ticket.get("generation"))
+                payload.update({WIRE_REQUEST_KEY: parent_wire, WIRE_EXECUTION_KEY: parent_ticket,
+                                "child_dispatch_v1": deepcopy(previous)})
+                return child
             child_request = {key: value for key, value in binding.items()
                              if key in {*CONNECTION_FIELDS, "expected_source_sha"}}
             child_request.update(domain=locked.domain, github_repo=locked.github_repo, client_request_id=key,
@@ -72,20 +100,6 @@ def prepare_scan_child_dispatch(*, run, user, actor_id, payload):
                 WIRE_EXECUTION_KEY: deepcopy(child_request[WIRE_EXECUTION_KEY])}
             if BUDGET_KEY in child_request:
                 dispatch[BUDGET_KEY] = deepcopy(child_request[BUDGET_KEY])
-            children = deepcopy((locked.result or {}).get(CHILDREN_RESULT_KEY,
-                {"schema_version": 1, "dispatches": {}}))
-            if (not isinstance(children, dict) or children.get("schema_version") != 1
-                    or not isinstance(children.get("dispatches"), dict)):
-                raise RunOwnershipConflict("The saved child admission receipt is not readable.")
-            previous = children["dispatches"].get(key)
-            if previous is not None:
-                if ({key: value for key, value in previous.items() if key != WIRE_EXECUTION_KEY}
-                        != {key: value for key, value in dispatch.items() if key != WIRE_EXECUTION_KEY}):
-                    raise RunOwnershipConflict("The original child approval identity changed.")
-                require_event_execution(child, previous, generation=previous[WIRE_EXECUTION_KEY]["generation"])
-                # Repeated parent approval observes its first child dispatch.
-                # It never grants a later resume ticket to the old enqueue.
-                dispatch = previous
             children["dispatches"][key] = dispatch
             ContentFactoryRun.objects.filter(pk=locked.pk).update(result={**locked.result, CHILDREN_RESULT_KEY: children})
     payload.update({WIRE_REQUEST_KEY: parent_wire, WIRE_EXECUTION_KEY: parent_ticket, "child_dispatch_v1": dispatch})

@@ -68,6 +68,43 @@ class ScanChildAdmissionTests(TestCase):
         self.assertEqual(ContentFactoryRun.objects.count(), 2)
         self.assertEqual(WebsiteConnectionOperation.objects.count(), 1)
 
+    def test_saved_child_replay_survives_new_admission_switch_off(self):
+        first_body, repeated = {}, {}
+        first = self.prepare(first_body)
+        with override_settings(ARTICLES_RUN_OWNERSHIP_ENABLED=False):
+            self.assertEqual(self.prepare(repeated).pk, first.pk)
+        self.assertEqual(first_body, repeated)
+        self.assertEqual(ContentFactoryRun.objects.count(), 2)
+
+    def test_saved_child_replay_preserves_completed_operation_proof_and_all_its_clocks(self):
+        child = self.prepare()
+        ContentFactoryRun.objects.filter(pk=child.pk).update(status="completed")
+        operation = WebsiteConnectionOperation.objects.get(pk=child.run_request["operation_id"])
+        WebsiteConnectionOperation.objects.filter(pk=operation.pk).update(state="completed",
+            receipt={"status": "completed", "retained_actual_proof": {"head_sha": "b" * 40}})
+        before = WebsiteConnectionOperation.objects.values().get(pk=operation.pk)
+        self.assertEqual(self.prepare().pk, child.pk)
+        self.assertEqual(WebsiteConnectionOperation.objects.values().get(pk=operation.pk), before)
+
+    def test_saved_child_replay_observes_original_ticket_after_later_authorized_operation_resume(self):
+        from django.db import transaction
+        from .run_execution_control import append_execution_ticket
+        from .run_ownership import current_execution_ticket
+        first_body = {}
+        child = self.prepare(first_body)
+        operation = WebsiteConnectionOperation.objects.get(pk=child.run_request["operation_id"])
+        WebsiteConnectionOperation.objects.filter(pk=operation.pk).update(
+            payload={**operation.payload, "attempt": 2, "resume_pending": True})
+        with transaction.atomic():
+            child = ContentFactoryRun.objects.select_for_update().get(pk=child.pk)
+            append_execution_ticket(child, control_key="c" * 64, reason="operation_resume",
+                scope={**current_execution_ticket(child)["scope"], "operation_attempt": 2})
+        before = ContentFactoryRun.objects.values().get(pk=child.pk)
+        repeated = {}
+        self.assertEqual(self.prepare(repeated).pk, child.pk)
+        self.assertEqual(repeated, first_body)
+        self.assertEqual(ContentFactoryRun.objects.values().get(pk=child.pk), before)
+
     @override_settings(ARTICLES_RUN_CONTROL_MODEL_USD="5.00", ARTICLES_RUN_CONTROL_MODEL_TOKENS=50000,
                        ARTICLES_RUN_SDK_CONTROL_ENABLED=True)
     def test_exact_server_sdk_budget_is_inside_original_digest_and_child_transport(self):
