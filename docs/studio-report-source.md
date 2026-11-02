@@ -98,6 +98,16 @@ email bodies or credentials. A finance sync never advances work coverage.
 The private worker retries every five minutes and freezes one ready snapshot
 for both recipients and all charts at the original Friday cutoff.
 
+On-demand Roo reports use the same endpoint with their original request time as
+the cutoff. HTTP 429 from Xero produces the safe `finance_rate_limited` gap and
+a signed `retry_at` timestamp derived from `Retry-After` (seconds or HTTP date).
+Absent/invalid retry headers use a five-minute minimum. A private mode-0600
+`finance-cooldown-*.json` receipt in `review_directory` prevents other cutoffs for
+the same configured connection/contact from calling Xero before that deadline,
+including after a process restart. Roo respects longer retry times. No provider
+response body or credentials enter the response. Provider recovery never advances
+reviewed work coverage or approves new invoice candidates.
+
 Activation order: deploy with the feature disabled, provision/verify private
 files and key, exercise the scoped endpoint, then enable Roo's private refresh
 flag. Preserve existing grants and schedule IDs. Do not run migrations during
