@@ -33,4 +33,4 @@ def purchase_return_fields(purchase):
     target = article_return_path(origin.get('return_path'))
     if not target:
         return {}
-    return {'returnTo': target, 'returnRuntime': 'tauri' if origin.get('return_runtime') == 'tauri' else 'browser'}
+    return {'returnTo': target, 'returnRuntime': origin['return_runtime'] if origin.get('return_runtime') in {'tauri', 'tauri-dev'} else 'browser'}

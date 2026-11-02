@@ -14,7 +14,7 @@ class StartupCheckoutReturnTests(SimpleTestCase):
         self.purchase = SimpleNamespace(id=uuid4(), purchase_from={'surface': 'my-startup', 'return_path': self.target})
 
     def test_browser_and_native_return_keep_same_plan_after_success_or_cancel(self):
-        for runtime in ('browser', 'tauri'):
+        for runtime in ('browser', 'tauri', 'tauri-dev'):
             self.purchase.purchase_from['return_runtime'] = runtime
             for outcome in ('success', 'cancelled'):
                 result = urlsplit(PointsPurchaseService.stripe_return_url(self.purchase, outcome))
