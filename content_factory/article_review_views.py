@@ -12,6 +12,7 @@ from rest_framework.views import APIView
 
 from . import vibe_marketing_views as views
 from .article_export import article_export
+from .founder_article_review_contract import scoped_review_response
 
 
 def remote_review(run, *, payload=None, child_operation=False):
@@ -476,9 +477,10 @@ class VibeMarketingArticleReviewView(views.VibeMarketingRunCommentsMixin, APIVie
             return error
         result = remote_review(run)
         if isinstance(result, Response):
-            return result
+            return scoped_review_response(result, context=context, run=run, user=request.user)
         if run.workflow == "article_system_setup":
-            return Response({**result, "componentFeedback": views._component_feedback_from_run(run)}, headers={"Cache-Control": "private, no-store"})
+            return scoped_review_response(Response({**result, "componentFeedback": views._component_feedback_from_run(run)},
+                headers={"Cache-Control": "private, no-store"}), context=context, run=run, user=request.user)
         from .article_review_billing import reconcile_image_charges
         reconcile_image_charges(user=request.user, run=run, snapshot=result)
         latest = views._latest_review_ready_component_revision(run, context)
@@ -493,7 +495,7 @@ class VibeMarketingArticleReviewView(views.VibeMarketingRunCommentsMixin, APIVie
             payload["founderDraft"] = founder_draft
         response = Response(payload)
         response["Cache-Control"] = "private, no-store"
-        return response
+        return scoped_review_response(response, context=context, run=run, user=request.user, latest_run=latest)
 
     def post(self, request, run_id):
         context, run, error = self._resolve_run(request, run_id)
@@ -512,7 +514,8 @@ class VibeMarketingArticleReviewView(views.VibeMarketingRunCommentsMixin, APIVie
         if data.get("action") in {"applyUpdate", "applyReview"}:
             from .website_review_action_audit import observe_review
             observe_review(request, context, run, data)
-            return self._apply_update(request, context, run, data)
+            return scoped_review_response(self._apply_update(request, context, run, data),
+                context=context, run=run, user=request.user)
         latest = views._latest_review_ready_component_revision(run, context)
         if latest is not None:
             return Response({"detail": "A newer draft is ready. Open it before editing.",
@@ -541,7 +544,8 @@ class VibeMarketingArticleReviewView(views.VibeMarketingRunCommentsMixin, APIVie
             rejected = isinstance(result, Response) and result.status_code in {400, 404, 409, 422}
             pending = isinstance(result, Response) and not rejected
             settle_image_charge(user=request.user, run=run, receipt=receipt, rejected=rejected, pending=pending)
-        return result if isinstance(result, Response) else Response(result)
+        return scoped_review_response(result if isinstance(result, Response) else Response(result),
+            context=context, run=run, user=request.user, latest_run=latest)
 
     def _apply_update(self, request, context, run, data):
         return apply_article_review_update(user=request.user, context=context, run=run, data=data)

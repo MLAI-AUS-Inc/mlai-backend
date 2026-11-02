@@ -11,6 +11,18 @@
       "allowed_codes_ref": "contracts/failure-codes.json#/codes",
       "source": "Read-only presentation admits only exact membership in the server-owned registry view; any unknown retained observation becomes UNREGISTERED_FAILURE_CODE. It cannot authorize work.",
       "test": "content_factory.tests_founder_article_contract"
+    },
+    {
+      "path": "content_factory/founder_article_review_contract.py",
+      "function": "candidate_failures",
+      "field": "code",
+      "expression": "candidate.get('reasonCode')",
+      "site_sha256": "5d5ea535b62a29b6db708d3d9c4d672be720c0c1aed92a1af440ce348b943a51",
+      "adapter": "authority_registry_boundary",
+      "owner": "backend.run_ownership",
+      "allowed_codes_ref": "contracts/failure-codes.json#/codes",
+      "source": "The actual failed candidate reasonCode is passed only to article_error_envelope, whose closed registry and server copy catalog map any unknown or absent code to UNREGISTERED_FAILURE_CODE. Raw provider errors never enter candidateFailures. Presentation only; no execution authority.",
+      "test": "content_factory.tests_founder_article_review_contract"
     }
   ],
   "nonfailure_sites": [
