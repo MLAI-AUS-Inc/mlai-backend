@@ -14,7 +14,8 @@ from vibe_raising import views
 class QueuedDeliveryTimingTests(SimpleTestCase):
     def start(self, *, age=timedelta(minutes=5), status="queued", refresh_error=None):
         now = timezone.now()
-        run = SimpleNamespace(run_id="synthetic-stale-run", status=status, result={}, updated_at=now - age)
+        run = SimpleNamespace(run_id="synthetic-stale-run", status=status, result={}, updated_at=now - age,
+            run_request={"input_sources": ["gmail"], "source_preflight_version": 1})
         organization = SimpleNamespace(pk=16, id=16, domain="example.test")
         user = SimpleNamespace(pk=17, id=17)
         google = SimpleNamespace(id=18)
@@ -47,10 +48,10 @@ class QueuedDeliveryTimingTests(SimpleTestCase):
             response = views.VibeRaisingStartupUpdateRunView().post(request)
         return response, run, mocks
 
-    def test_stale_queued_delivery_is_redispatched_after_source_refresh(self):
+    def test_stale_queued_delivery_is_redispatched_without_changing_frozen_inputs(self):
         response, run, mocks = self.start()
         self.assertEqual(response.status_code, 200)
-        mocks["refresh_startup_update_run_source_context"].assert_called_once()
+        mocks["refresh_startup_update_run_source_context"].assert_not_called()
         mocks["_dispatch_run_to_valley"].assert_called_once_with(run)
 
     def test_recent_queue_and_running_work_are_not_redispatched(self):
@@ -60,7 +61,8 @@ class QueuedDeliveryTimingTests(SimpleTestCase):
                 self.assertEqual(response.status_code, 200)
                 mocks["_dispatch_run_to_valley"].assert_not_called()
 
-    def test_failed_authority_refresh_does_not_dispatch_a_stale_run(self):
-        response, _, mocks = self.start(refresh_error=ConnectorOAuthError("Synthetic authority revoked"))
-        self.assertEqual(response.status_code, 401)
-        mocks["_dispatch_run_to_valley"].assert_not_called()
+    def test_queued_retry_defers_authority_refresh_to_the_all_source_barrier(self):
+        response, run, mocks = self.start(refresh_error=ConnectorOAuthError("Synthetic authority revoked"))
+        self.assertEqual(response.status_code, 200)
+        mocks["refresh_startup_update_run_source_context"].assert_not_called()
+        mocks["_dispatch_run_to_valley"].assert_called_once_with(run)

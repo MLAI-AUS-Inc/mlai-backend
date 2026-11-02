@@ -97,8 +97,14 @@ jobs:
         python scripts/check_native_inventory_summary_contract.py --remote
         python -m unittest tests.test_native_inventory_summary_contract -q
 
+    - name: Test Pulse source selection and cached-account boundaries
+      run: python scripts/test_without_database.py startup_updates.tests_generation_reliability.SelectionMatrixTests startup_updates.tests_generation_reliability.CachedAccountScopeTests
+
     - name: Check test-module assignment
       run: python scripts/check_test_assignment.py
+
+    - name: Validate selected test labels without database access
+      run: python scripts/test_without_database.py --collect-ci-selection
 
     - name: Test private Studio source preparation without database access
       run: python scripts/test_without_database.py integrations.tests_studio_report_source
@@ -426,6 +432,25 @@ jobs:
     - name: Run Pulse sync persistence and response tests
       run: python manage.py test content_factory.tests_pulse_sync --verbosity 2
 
+    - name: Test account-authenticated event member perks
+      run: python manage.py test community_chat.tests.test_member_perks --noinput --verbosity 2
+
+    - name: Test Pulse preflight, recovery and immutable source pages
+      run: |
+        python manage.py test \
+          startup_updates.tests_generation_reliability.ReceiptFlowTests.test_connection_lookup_never_uses_another_user_or_startup \
+          startup_updates.tests_generation_reliability.ReceiptFlowTests.test_manual_only_preflight_does_not_require_any_connection \
+          startup_updates.tests_generation_reliability.ReceiptFlowTests.test_company_owner_can_use_delegated_upload_but_another_startup_cannot \
+          startup_updates.tests_generation_reliability.PreflightBarrierTests.test_real_endpoint_checks_all_sources_and_stops_before_any_full_collection \
+          startup_updates.tests_generation_reliability.PreflightBarrierTests.test_fences_reject_old_worker_and_resume_never_resurrects_cancellation \
+          startup_updates.tests_generation_reliability.PreflightBarrierTests.test_slack_batch_checks_preflight_and_fence_before_touching_connector \
+          startup_updates.tests_generation_reliability.PreflightBarrierTests.test_preparation_failures_remain_visible_after_reloading_run \
+          startup_updates.tests_generation_reliability.PreflightBarrierTests.test_every_singleton_pair_and_all_sources_pass_real_preflight_before_collection \
+          startup_updates.tests_generation_reliability.PreflightBarrierTests.test_automatic_recovery_is_bounded_and_clears_old_dead_letters \
+          startup_updates.tests_generation_reliability.CatalogAndBankEvidenceTests \
+          startup_updates.tests_generation_reliability.ConcurrentExecutionTests \
+          --noinput --verbosity 2
+
     - name: Run targeted Django tests
       run: |
         python manage.py test \
@@ -615,10 +640,10 @@ jobs:
           integrations.tests_slack_connector_authority \
           integrations.tests_startup_updates.StartupUpdateSlackBackfillViewTest \
           vibe_raising.tests.VibeRaisingApiTests.test_startup_update_run_maps_create_authority_error_to_connector_auth_response \
-          vibe_raising.tests.VibeRaisingApiTests.test_startup_update_run_maps_refresh_authority_error_to_connector_auth_response \
+          vibe_raising.tests.VibeRaisingApiTests.test_startup_update_run_keeps_active_authority_frozen \
           vibe_raising.tests.VibeRaisingApiTests.test_email_draft_start_maps_create_authority_error_to_connector_auth_response \
-          vibe_raising.tests.VibeRaisingApiTests.test_email_draft_start_maps_redispatch_refresh_authority_error_to_connector_auth_response \
-          vibe_raising.tests.VibeRaisingApiTests.test_email_draft_start_maps_active_refresh_authority_error_to_connector_auth_response \
+          vibe_raising.tests.VibeRaisingApiTests.test_email_draft_start_redispatches_without_replacing_frozen_authority \
+          vibe_raising.tests.VibeRaisingApiTests.test_email_draft_start_keeps_active_authority_frozen \
           integrations.tests_humanitix \
           integrations.tests_xero_reconciliation \
           integrations.tests_smart_scan \

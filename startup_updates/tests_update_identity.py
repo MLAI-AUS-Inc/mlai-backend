@@ -259,7 +259,7 @@ class IndependentPipelineTests(StartupUpdateApiTestCase):
         # Retain pre-existing independent records as history during rollout.
         self.first = MonthlyUpdateDraft.objects.create(organization=self.organization, month=date(2026, 3, 1), creation_key=uuid4(), update_date=date(2026, 3, 8))
         self.target = MonthlyUpdateDraft.objects.create(organization=self.organization, month=date(2026, 3, 1), creation_key=uuid4(), update_date=date(2026, 3, 15))
-        self.run.run_request.update({"update_id": self.target.pk, "creation_key": str(self.target.creation_key), "base_revision": None,
+        self.run.run_request.update({"source_preflight_complete": True, "update_id": self.target.pk, "creation_key": str(self.target.creation_key), "base_revision": None,
             "narrative_period": {"start": "2026-03-01T00:00:00+11:00", "end": "2026-04-01T00:00:00+11:00", "timezone": "Australia/Melbourne", "end_exclusive": True}})
         self.run.save(update_fields=["run_request"])
 

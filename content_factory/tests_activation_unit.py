@@ -364,7 +364,7 @@ class PulseSourceAdmissionTests(SimpleTestCase):
         self.view.company = SimpleNamespace(organization=SimpleNamespace(pk=2))
         self.user = SimpleNamespace(pk=1)
 
-    def test_selected_disconnected_or_unconfigured_source_blocks_before_shared_generation(self):
+    def test_stale_cached_status_cannot_replace_the_durable_all_source_barrier(self):
         from vibe_raising.views import VibeRaisingEmailDraftStartView
         for row in ({"key": "gmail", "status": "reauth_required", "selected": False},
                     {"key": "google_analytics", "status": "connected", "selected": False, "usableForUpdates": False},
@@ -372,12 +372,13 @@ class PulseSourceAdmissionTests(SimpleTestCase):
                     {"key": "gmail", "status": "connected", "selected": True, "available": False},
                     {"key": "gmail", "status": "connected", "selected": True, "usableForUpdates": False}):
             request = SimpleNamespace(user=self.user, data={"inputSources": [row["key"]], "manualSummary": "Founder notes"})
-            with self.subTest(row=row), patch("integrations.services.external_connectors.serialize_source_status", return_value={"sources": [row]}), \
-                 patch.object(VibeRaisingEmailDraftStartView, "post") as generate:
+            with self.subTest(row=row), patch("integrations.services.external_connectors.serialize_source_status", return_value={"sources": [row]}) as cached, \
+                 patch.object(VibeRaisingEmailDraftStartView, "post", return_value=Response({}, status=201)) as generate:
                 response = self.view.post(request)
-                self.assertEqual(response.status_code, 409)
-                self.assertEqual(response.data["unavailableSources"], [row["key"]])
-                generate.assert_not_called()
+                self.assertEqual(response.status_code, 201)
+                generate.assert_called_once_with(request)
+                cached.assert_not_called()
+                self.assertEqual(request.data["inputSources"], [row["key"]])
 
     def test_explicit_source_exclusion_preserves_notes_only_and_usable_sources(self):
         from vibe_raising.views import VibeRaisingEmailDraftStartView

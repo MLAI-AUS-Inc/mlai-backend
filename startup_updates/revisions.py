@@ -36,6 +36,13 @@ def capture_snapshot(organization, month, *, run=None, manual_metrics=None, base
     profile, _ = StartupProfile.objects.get_or_create(organization=organization)
     try:
         request = (run.run_request or {}) if run else {}
+        config = request.get("reporting_config")
+        if isinstance(config, dict):
+            profile = copy.copy(profile)
+            profile.default_currency = config["currency"]
+            profile.reporting_timezone = config["timezone"]
+            profile.kpi_definitions = copy.deepcopy(config["kpi_definitions"])
+            profile.reporting_config_version = config["config_version"]
         zone = request.get("reporting_timezone") or profile.reporting_timezone
         window_end = request.get("financial_cutoff") or request.get("backfill_window_end")
         if base_snapshot is not None:
@@ -70,7 +77,8 @@ def capture_snapshot(organization, month, *, run=None, manual_metrics=None, base
     definitions_by_key = {item.get("key"): item for item in definitions}
     metrics = []
     for key in sorted(keys):
-        candidates = by_key.get(key, [])
+        from startup_updates.connection_scope import metric_in_scope
+        candidates = [item for item in by_key.get(key, []) if metric_in_scope(item, request.get("source_connection_pins"), run_id=run.pk if run else None)]
         # Revenue is only from deterministic financial publishers.
         if key == "revenue":
             candidates = [item for item in candidates if (
@@ -129,7 +137,7 @@ def capture_snapshot(organization, month, *, run=None, manual_metrics=None, base
     chart_sources = None
     if run and (run.run_request or {}).get("input_sources"):
         chart_sources = ({"xero"} if "xero" in sources else set()) | ({"financial"} if "stripe" in sources else set())
-    payload["charts"] = copy.deepcopy(base_snapshot.payload.get("charts", {})) if base_snapshot else build_monthly_financial_snapshot(organization=organization, target_month=month, source_providers=chart_sources)
+    payload["charts"] = copy.deepcopy(base_snapshot.payload.get("charts", {})) if base_snapshot else build_monthly_financial_snapshot(organization=organization, target_month=month, source_providers=chart_sources, connection_pins=request.get("source_connection_pins"))
     # A manual change must affect charts as well as cards. Unparseable assertions produce gaps.
     from startup_updates.evidence_contract import decimal_value
     if not payload.get("charts") and manual_metrics and any(
@@ -255,6 +263,22 @@ def revision_payload(revision, *, include_evidence=True):
         "evidenceSnapshot": evidence,
         "audience": revision.audience,
     }
+
+
+def worker_revision_payload(revision, *, version=1):
+    """Return negotiated worker evidence without changing the immutable snapshot."""
+    if version == 1:
+        return revision_payload(revision)
+    if version != 2:
+        raise ValueError("Unsupported worker receipt version.")
+    legacy = revision_payload(revision)
+    proof = legacy["evidenceSnapshot"].get("financial_history_evidence")
+    return {**legacy, "receiptVersion": 2,
+        "organizationId": revision.snapshot.organization_id,
+        "updateId": revision.draft_id, "month": revision.snapshot.month.isoformat(),
+        "snapshotHash": revision.snapshot.content_hash,
+        "evidenceSnapshot": copy.deepcopy(revision.snapshot.payload),
+        "reviewContext": {"financialHistoryEvidence": proof}}
 
 
 def frozen_memo(draft, *, published=False):
