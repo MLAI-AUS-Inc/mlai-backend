@@ -13,7 +13,8 @@ class Command(BaseCommand):
         "Fill each ContentFactoryRun's Job columns from its ContentFactoryJob. Dry run by "
         "default; pass --apply to write. Never overwrites a non-empty run value (conflicts are "
         "counted by field) and never deletes a Job. With --create it also makes a tagged run for "
-        "a finished Job that has none (never for a live one). --undo deletes the untouched runs "
+        "an explicitly supported finished Job that has none (never live, blocked or awaiting work). "
+        "--undo deletes the untouched runs "
         "it created and blanks the new columns. "
         "Output is field names and counts only."
     )
@@ -24,7 +25,7 @@ class Command(BaseCommand):
         parser.add_argument("--undo", action="store_true", help="Reverse a backfill (design 4.3).")
         parser.add_argument("--batch-size", type=int, default=DEFAULT_BATCH_SIZE)
         parser.add_argument("--create", action="store_true",
-                            help="Also create runs for finished Jobs that have none (default: fill existing runs only).")
+                            help="Also create runs for supported finished Jobs that have none; excludes blocked and awaiting work (default: fill existing runs only).")
         parser.add_argument("--create-since", default="",
                             help="Create runs only for Jobs created on or after this date (YYYY-MM-DD).")
 
