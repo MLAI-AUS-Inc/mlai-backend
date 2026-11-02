@@ -152,6 +152,50 @@ This approval does not cover production migrations.
 
 ## CSV import
 
+### Reviewed engagement snapshots
+
+`crm_import_engagement` imports the reviewed merged contact CSV into the existing
+contact store. It uses existing JSON attributes; no migration is required.
+
+```bash
+python manage.py crm_import_engagement /private/path/merged.csv \
+  --expected-sha256 <reviewed-file-sha256> --actor-email <MLAI-admin-email> \
+  --permission-evidence /private/path/luma-marketing-evidence.json
+# Review the rollback-only counts, then repeat with --apply to persist.
+```
+
+The complete file is validated before writes. Duplicate addresses, invalid
+ratings and a checksum mismatch abort the operation. The default preview rolls
+back all writes, including its import/audit records. Application is atomic and
+reimporting the same snapshot leaves contact data unchanged. An older snapshot
+cannot replace a newer rating. Banned addresses are skipped.
+
+The import stores typed `engagement_rating` metadata (stars, score, rule version,
+as-of date, reason and source coverage) and namespaced source evidence. It fills
+only blank display names. It does not modify existing consent, email/SMS/WhatsApp
+status, opt-out timestamps, provider IDs or consent-event history. It does not
+create blasts/deliveries or call a mail provider. Positive or partner-scoped form
+answers remain evidence for review, never an automatic marketing consent grant.
+
+New contacts, existing contacts with unknown permission, and contacts with a
+declined MLAI/event-update preference receive a monotonic
+`marketing_review_hold`. Existing holds are never cleared by an import. This is
+a review flag, not a formal unsubscribe or consent withdrawal. Marketing
+audience selection, send-time loading/campaign start and warm-up admission honor
+the hold. Source-consent synchronization still processes genuine withdrawals
+without turning the review flag itself into an unsubscribe.
+
+Admin contact list/detail responses expose `engagement_rating` (or null),
+`engagement_stars`, `engagement_score` and `marketing_review_hold`. Filters accept
+`stars`, `min_stars`, `max_stars` (1–5); `sort=engagement` ranks stars then score,
+with unrated contacts last. Segments support an `engagement_stars` rule. Ordinary
+attribute edits cannot replace reserved ratings or remove a review hold.
+
+The 2 November 2026 import is a provisional snapshot. Public Slack visibility
+begins 4 August, some event guest lists are unavailable, and app usage frequency
+is not included. Ratings do not automatically age until a new reviewed snapshot
+is imported. One star can reflect limited observed evidence.
+
 ```bash
 python manage.py crm_import_contacts PATH --consent granted|none [--consent-source TEXT] \
   [--tag TAG ...] [--map HEADER=FIELD ...] [--actor-email EMAIL] [--dry-run]
