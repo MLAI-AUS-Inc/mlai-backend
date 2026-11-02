@@ -131,6 +131,53 @@ class MemberPerksTests(TestCase):
             ]
         )
 
+    def test_missing_offer_is_clear_availability_without_spending(self):
+        self.offer.delete()
+        response = self.client.get(self.url)
+        self.assertEqual(response.status_code, 200, response.data)
+        self.assertEqual(response.data["options"], [])
+        self.assertEqual(response.data["reason_code"], "offer_unavailable")
+        self.assertIn("below A$100", response.data["message"])
+        self.assertEqual(response["Cache-Control"], "private, no-store")
+        self.gateway.validate_offer.assert_not_called()
+        self.assertFalse(EventDiscountQuote.objects.exists())
+
+    def test_expired_offer_is_clear_availability_without_provider_calls(self):
+        self.offer.valid_end_at = timezone.now() - timedelta(seconds=1)
+        self.offer.save()
+        response = self.client.get(self.url)
+        self.assertEqual(response.status_code, 200, response.data)
+        self.assertEqual(response.data["options"], [])
+        self.assertIn("below A$100", response.data["message"])
+        self.gateway.validate_offer.assert_not_called()
+
+    def test_ineligible_live_ticket_is_availability_and_cannot_be_quoted(self):
+        self.gateway.validate_offer.side_effect = LumaEventDiscountError(
+            "ticket_price_limit", "Roo ticket rewards only cover tickets priced below A$100."
+        )
+        response = self.client.get(self.url)
+        self.assertEqual(response.status_code, 200, response.data)
+        self.assertEqual(response.data["options"], [])
+        self.assertEqual(response.data["reason_code"], "ticket_price_limit")
+        self.assertIn("below A$100", response.data["message"])
+        quoted = self.client.post(
+            self.url, {"action": "quote", "perk": "free_ticket"}, format="json"
+        )
+        self.assertEqual(quoted.status_code, 409, quoted.data)
+        self.assertFalse(EventDiscountQuote.objects.exists())
+        self.assertFalse(EventDiscountRedemption.objects.exists())
+        self.gateway.create_coupon.assert_not_called()
+
+    def test_provider_outage_remains_retryable_without_spending(self):
+        self.gateway.validate_offer.side_effect = LumaEventDiscountError(
+            "luma_unavailable", "Please try again shortly.", retryable=True
+        )
+        response = self.client.get(self.url)
+        self.assertEqual(response.status_code, 503, response.data)
+        self.assertEqual(response.data["code"], "luma_unavailable")
+        self.assertFalse(EventDiscountQuote.objects.exists())
+        self.gateway.create_coupon.assert_not_called()
+
     def test_half_price_confirm_and_lost_ack_replay_spend_once(self):
         quote = self.quote()
         self.assertEqual(quote["points_cost"], 16)

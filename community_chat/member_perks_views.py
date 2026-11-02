@@ -55,6 +55,15 @@ class MemberPerksView(APIView):
         if not re.fullmatch(r"evt-[A-Za-z0-9_-]{1,96}", event_id):
             raise EventDiscountError("invalid_event", "Choose a valid event.", 400)
 
+    def _unavailable(self, event_id, code, message):
+        return Response({
+            "event_id": event_id,
+            "enabled": True,
+            "options": [],
+            "reason_code": code,
+            "message": message,
+        })
+
     def get(self, request, event_id):
         self._event(event_id)
         if request.query_params.get("redemption_id"):
@@ -114,14 +123,34 @@ class MemberPerksView(APIView):
             .first()
         )
         if offer is None:
-            raise EventDiscountError(
+            return self._unavailable(
+                event_id,
                 "offer_unavailable",
-                "Member perks are not available for this event.",
-                404,
+                "No member perk is available for this event. "
+                "Perks cover selected paid AUD tickets priced below A$100.",
             )
-        _available_offer(offer, timezone.now())
-        terms, _ = member_perk_terms(offer, "free_ticket")
-        snapshot = LumaEventDiscountService().validate_offer(terms, now=timezone.now())
+        try:
+            _available_offer(offer, timezone.now())
+            terms, _ = member_perk_terms(offer, "free_ticket")
+            snapshot = LumaEventDiscountService().validate_offer(terms, now=timezone.now())
+        except EventDiscountError as exc:
+            if exc.code != "offer_unavailable":
+                raise
+            return self._unavailable(
+                event_id, exc.code,
+                "No member perk is currently available for this event. "
+                "Perks cover selected paid AUD tickets priced below A$100.",
+            )
+        except LumaEventDiscountError as exc:
+            if exc.retryable or exc.code not in {
+                "event_not_managed", "event_registration_closed",
+                "group_registration_enabled", "event_offer_expired",
+                "event_sold_out", "ticket_unavailable", "ticket_not_paid_aud",
+                "ticket_price_limit", "ticket_not_supported", "ticket_sales_closed",
+                "ticket_sold_out",
+            }:
+                raise
+            return self._unavailable(event_id, exc.code, str(exc))
         balance = PointsService.microroo_to_legacy_whole(
             PointsService.get_available_microroo(request.user)
         )

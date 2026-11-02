@@ -66,6 +66,10 @@ The first-party member modal uses
 - `GET` checks the configured offer, live event/ticket eligibility and the
   caller's spendable general points. It returns both server-priced tiers and
   affordability without creating a quote, reserving stock or spending points.
+  Missing, expired or ineligible offers return an empty options list and an
+  availability message; the selected-ticket limit remains strictly below A$100.
+  Transient provider failures remain retryable errors. Quote and redemption
+  validation remain strict even if availability changes after the initial read.
 - `POST {"action":"quote","perk":"half_price"}` (or `free_ticket`) revalidates
   the live ticket and freezes the displayed terms in a ten-minute account quote.
 - `POST {"action":"redeem","quote_id":"…","request_id":"…","confirmed":true}`
