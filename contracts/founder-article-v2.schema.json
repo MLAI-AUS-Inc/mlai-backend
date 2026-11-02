@@ -3605,7 +3605,7 @@
             },
             "runId": {
               "type": "string",
-              "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,99}$"
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,99}$"
             },
             "alreadyStarted": {
               "type": "boolean"
@@ -4000,7 +4000,7 @@
       "properties": {
         "runId": {
           "type": "string",
-          "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,99}$",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,99}$",
           "x-wire-name": "run_id"
         },
         "status": {
@@ -4046,13 +4046,18 @@
             "article",
             "advanced"
           ]
+        },
+        "requestedRunId": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,99}$"
         }
       },
       "required": [
         "contractVersion",
         "companyId",
         "runId",
-        "kind"
+        "kind",
+        "requestedRunId"
       ]
     },
     "FounderCompanyBilling": {
