@@ -22,13 +22,21 @@ hold the same key for investigation rather than minting another day's task.
 Current ownership, scope, cohort and free eligibility are checked again before
 publication; all HTTP happens outside database transactions.
 
-The original rolling per-account free research cap is reserved under an account
-row lock before dispatch, including for founders with points. An uncertain crash
-between cap reservation and its receipt may conservatively retain an extra free
-slot; it cannot grant extra work or spend points. An exhausted allowance starts no
-work. A restored receipt never reserves the same free slot again. The record has
-no payment/ledger side effects and does not create points history. Private-only
-state changes preserve config/run update clocks and other concurrent JSON data.
+The original rolling per-account free research cap uses idempotent reservations
+under account and normalized-account quota locks before HTTP. Automatic checks and
+the existing manual free-waiver path share these reservations; historic timestamp
+uses count alongside them. A crash between reservation and its receipt retains the
+same original slot, and an exhausted allowance starts no work. Confirmed no-work
+manual failure releases its slot; unresolved dispatch retains it. Funded manual
+admission keeps its existing behavior. The record has no payment/ledger side effects
+and does not create points history. Private-only state changes preserve config/run
+update clocks and other concurrent JSON data.
+
+A returned BLOCKED run with dispatch_pending_resolution remains pending and keeps
+its original key across local dates. A superseded nonce cannot publish. Per-org
+journey kill switches are checked even for P2 legacy opt-ins. The scheduler-facing
+wrapper returns an explicit skipped/completed/failed status, so a disabled optional
+feature does not poison the shared heartbeat.
 
 Enablement remains a rollout decision. No production checks or provider calls
 were made by the synthetic acceptance suite.

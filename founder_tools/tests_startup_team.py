@@ -172,6 +172,24 @@ class TeamTests(TransactionTestCase):
             teams.update_member(organization=self.org, user=self.owner, member_id=row['memberId'], rights={'billing': False})
             self.assertEqual(billing_summary(self.org, self.member)['balance'], 4)
 
+    @override_settings(COMMUNITY_CHAT_STARTUP_UPDATES_ENABLED=True)
+    def test_account_bootstrap_recognizes_member_workspace_without_profile_tenant_grant(self):
+        from community_chat.startups.views import BootstrapView
+        from .models import VibeRaisingProfile
+        row = self.approve()
+        response = self.call(BootstrapView, user=self.member, company=False)
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(response.data['capabilities']['hasStartupWorkspace'])
+        self.assertEqual(response.data['profile']['companies'], [])
+        self.assertFalse(VibeRaisingCompany.objects.filter(profile__user=self.member).exists())
+        self.assertIsNone(VibeRaisingProfile.objects.get(user=self.member).active_company_id)
+        self.assertNotIn(self.owner.email, json.dumps(response.data))
+        teams.update_member(organization=self.org, user=self.owner, member_id=row['memberId'], remove=True)
+        self.assertFalse(self.call(BootstrapView, user=self.member, company=False).data['capabilities']['hasStartupWorkspace'])
+        with override_settings(MY_STARTUP_TEAM_ENABLED=False), patch.object(teams, 'member_companies') as membership:
+            self.assertNotIn('hasStartupWorkspace', self.call(BootstrapView, user=self.member, company=False).data['capabilities'])
+            membership.assert_not_called()
+
     def test_T8_invite_is_hashed_fragment_revocable_and_five_uses(self):
         invitation = teams.invite_link(organization=self.org, user=self.owner, action='create')
         token = invitation['url'].split('#')[1]

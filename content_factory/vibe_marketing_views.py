@@ -16923,6 +16923,7 @@ def _start_website_baseline(*, context, config, user, payload=None, background_r
     requires the live free action and a durable scheduler reservation, never a
     paid fallback or a body-supplied bypass.
     """
+    free_reservation = None
     if background_reserved:
         from content_factory.billing import free_setup_actions
         if 'website_baseline' not in free_setup_actions() or not isinstance(payload, dict):
@@ -16938,15 +16939,25 @@ def _start_website_baseline(*, context, config, user, payload=None, background_r
             domain=context.organization.domain, action='website_baseline')
         if gate_response is not None:
             return None, gate_response
+        payload = _website_baseline_payload(context=context, config=config, user=user)
+        payload['client_request_id'] = _mint_dispatch_client_request_id('website_baseline')
+        from content_factory.billing import free_setup_actions, reserve_free_setup_use
+        if (gate_balance is None and 'website_baseline' in free_setup_actions()
+                and get_content_factory_ai_agent_required_points(context.organization.domain) > 0):
+            free_reservation = reserve_free_setup_use(user, 'website_baseline', payload['client_request_id'])
         config.baseline_skipped_at = None
         config.baseline_skip_reason = ''
         config.save(update_fields=['baseline_skipped_at', 'baseline_skip_reason', 'updated_at'])
-        payload = _website_baseline_payload(context=context, config=config, user=user)
         _mark_roo_points_gate_authorized(payload, domain=context.organization.domain,
             action='website_baseline', current_balance=gate_balance)
     run = _queue_content_factory_run(endpoint='baseline', workflow='website_baseline',
         context=context, config=config, payload=payload)
-    if not background_reserved:
+    run_request = getattr(run, 'run_request', None)
+    if (free_reservation is not None and run.status in FAILED_RUN_STATUSES
+            and not (run_request if isinstance(run_request, dict) else {}).get('dispatch_pending_resolution')):
+        from content_factory.billing import release_free_setup_use
+        release_free_setup_use(user, 'website_baseline', free_reservation)
+    elif not background_reserved and free_reservation is None:
         _record_free_setup_research(user, action='website_baseline', gate_balance=gate_balance, run=run)
     if run.status == ContentFactoryRunStatus.COMPLETED:
         _persist_baseline_snapshot_from_payload(organization=context.organization, run=run)

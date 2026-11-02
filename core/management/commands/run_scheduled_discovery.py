@@ -12,7 +12,7 @@ from core.slack_founder_link_retention import (
 from content_analytics.services.report_scheduler import run_daily_article_report_scheduler
 from content_factory.founder_journey_alerts import run_founder_journey_alert_sweep
 from content_factory.founder_journey_sweeps import scheduled_founder_journey_sweeps
-from content_factory.founder_website_checks import run_founder_website_check_sweep
+from content_factory.founder_website_checks import scheduled_founder_website_checks
 from content_factory.self_heal_sweeps import scheduled_self_heal_sweeps
 from content_factory.reconciliation import run_content_factory_reconciliation_sweep
 from content_factory.website_reconciliation import process_website_connection_operations
@@ -112,7 +112,7 @@ class Command(BaseCommand):
             # Runs only while MY_STARTUP_FOUNDER_JOURNEY_V2_ENABLED is on;
             # each sweep checks its own flag and never raises.
             ("founder_journey_sweeps", scheduled_founder_journey_sweeps),
-            ("founder_website_checks", run_founder_website_check_sweep),
+            ("founder_website_checks", scheduled_founder_website_checks),
             # Prunes stale GitHub App installations (founder uninstalled the
             # App) from the founder registry so dead rows stop poisoning the
             # "registry exists" guards. Self-throttling (min-age + probe

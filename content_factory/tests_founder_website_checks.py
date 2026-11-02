@@ -98,7 +98,7 @@ class WebsiteCheckTests(TransactionTestCase):
         self.assertTrue(first['usage_reserved'])
         self.assertEqual(self.sweep()['waiting'], 1)
         self.org.seed_keywords = ['changed after original admission']; self.org.save(update_fields=['seed_keywords'])
-        with patch('content_factory.founder_website_checks.record_free_setup_use') as usage:
+        with patch('content_factory.founder_website_checks.reserve_free_setup_use') as usage:
             self.assertEqual(self.sweep(now=self.now+timedelta(minutes=3))['queued'], 1)
             usage.assert_not_called()
         self.assertEqual(self.queued[0], self.queued[1])
