@@ -52,10 +52,51 @@ def _failure(run):
             or _mapping(result.get("authority_denied")).get("code"))
 
 
-def _delivery(run):
+def _direct_delivery(run):
     result = _mapping(run.result)
     return (bool(result.get("draft_ready_v1")) or useful_delivery(run) or delivered_content(run)
-            or publication_state(run) == "article")
+            or publication_state(run) == "article" or points_receipt(run).get("state") == "captured")
+
+
+def _delivery(run):
+    """A publish-only continuation cannot undo delivery on its proven original charge."""
+    if _direct_delivery(run):
+        return True
+    request = _mapping(getattr(run, "run_request", None))
+    source_id = request.get("original_billing_source_run_id")
+    if not source_id or not getattr(run, "organization_id", None):
+        return False
+    # Verify actual ledger/grant backing before trusting any sender-supplied lineage field.
+    from .first_article_entitlement import lineage_entitlement
+    grant = lineage_entitlement(run) if entitled_request(request) else None
+    spend = _original_spend(run) if paid_article_request(request) else None
+    if grant is None and spend is None:
+        return False
+    from workflow_runs.models import ContentFactoryRun
+    seen = {run.run_id}
+    for _ in range(16):
+        if source_id in seen:
+            return False
+        seen.add(source_id)
+        source = ContentFactoryRun.objects.filter(run_id=source_id, organization_id=run.organization_id,
+            domain__iexact=run.domain).first()
+        if source is None:
+            return False
+        saved = _mapping(source.run_request)
+        if spend is not None:
+            original = _original_spend(source)
+            same = original is not None and original.pk == spend.pk
+        else:
+            original = lineage_entitlement(source) if entitled_request(saved) else None
+            same = original is not None and original.pk == grant.pk
+        if not same:
+            return False
+        if _direct_delivery(source):
+            return True
+        source_id = saved.get("original_billing_source_run_id")
+        if not source_id:
+            return False
+    return False
 
 
 def _writing_started(run):
