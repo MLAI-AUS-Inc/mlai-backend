@@ -956,6 +956,11 @@ def _charge_roo_points_for_article(request, *, context, payload: dict, goal_oper
         stabilize_article_request_metadata(payload, organization=context.organization, user=request.user)
     except WebsiteAuthorityError as exc:
         return None, None, None, Response(exc.as_dict(), status=exc.status)
+    # The first workflow reservation hashes the complete execution intent.
+    # Freeze policy and requester-dependent merge ownership before that digest
+    # and escrow exist; later dispatch must reuse the same stamp.
+    from .p2_foundation import stamp_run_request
+    stamp_run_request(payload, organization=context.organization, requester_user_id=request.user.pk)
     actor_id = founder_actor_id_for_user(request.user)
     article_request = {
         **payload,
