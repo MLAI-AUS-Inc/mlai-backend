@@ -171,6 +171,16 @@ class RetiredRunWriterTests(TransactionTestCase):
         self.assertEqual(calls, [])
         self.assertEqual(self.snapshot(), before)
 
+    def test_old_valley_telemetry_refuses_owned_before_mutating_history_or_clocks(self):
+        from .service_views import ContentFactoryRunValleyJobView
+        from rest_framework.test import APIRequestFactory
+        before = self.snapshot()
+        request = APIRequestFactory().post("/valley-jobs", {"job_id": "old-celery-job", "transition": "started"},
+            format="json", HTTP_X_API_KEY="synthetic-retired-service-key")
+        response = ContentFactoryRunValleyJobView.as_view()(request, run_id=self.run.run_id)
+        self.assertEqual(response.status_code, 409, response.data)
+        self.assertEqual(self.snapshot(), before)
+
     def test_actual_old_service_controls_refuse_owned_before_approval_resume_or_publish_effects(self):
         from .service_views import ContentFactoryRunControlView
         from rest_framework.test import APIRequestFactory

@@ -7,7 +7,7 @@ from unittest.mock import Mock, patch
 from django.db import transaction
 from django.test import TransactionTestCase, override_settings
 from django.utils import timezone
-from rest_framework.test import APIRequestFactory
+from rest_framework.test import APIClient, APIRequestFactory
 
 from workflow_runs.models import ContentFactoryRun
 from .run_artifact_observations import ArtifactObservationInvalid, _digest
@@ -25,7 +25,7 @@ from .founder_journey_testing import ALL_P1_FLAGS_ON
 class VerifiedDeliveryTests(TransactionTestCase):
     def setUp(self):
         fixture = make_p2_org()
-        self.org, self.user = fixture.organization, fixture.owner
+        self.org, self.user, self.company = fixture.organization, fixture.owner, fixture.company
         self.key = "verified-original"
         raw = {"domain": self.org.domain, "client_request_id": self.key, "topic": "Retained article",
             "delivery_mode": "content_only", "delivery_mode_confirmed": True, "expected_cost_points": 0}
@@ -94,6 +94,43 @@ class VerifiedDeliveryTests(TransactionTestCase):
         from .founder_funnel import has_first_draft
         self.assertTrue(has_first_draft(self.org))
         self.immutable(before)
+
+    def test_delivered_draft_review_copy_and_download_survive_pending_and_typed_denial(self):
+        from io import BytesIO
+        from zipfile import ZipFile
+        from .run_user_stop import record_user_denial
+        from .run_event_authority import receive_authoritative_run_events
+        from .first_article_entitlement import entitlement_payload
+        with self.reads():
+            project_verified_delivery(self.run.run_id)
+        self.run.refresh_from_db()
+        record_user_denial(self.run, user=self.user, actor_id=f"mlai_user:{self.user.pk}")
+        client = APIClient()
+        client.force_authenticate(self.user)
+        remote = Mock(status_code=200)
+        remote.json.side_effect = lambda: deepcopy(self.review)
+        for typed in (False, True):
+            if typed:
+                self.assertEqual(receive_authoritative_run_events(batch(self.run, [{"status": "denied"}])).status_code, 200)
+                self.run.refresh_from_db()
+                self.assertEqual(self.run.status, "denied")
+            before = ContentFactoryRun.objects.values().get(pk=self.run.pk)
+            url = f"/api/v1/vibe-marketing/runs/{self.run.run_id}"
+            with patch("content_factory.article_review_views.views.http_client.request", return_value=remote) as get:
+                review = client.get(f"{url}/article-review/?company_id={self.company.pk}")
+                copied = client.post(f"{url}/copied/?company_id={self.company.pk}", {"revision": self.revision}, format="json")
+                download = client.get(f"{url}/article/download/?company_id={self.company.pk}")
+            self.assertEqual(review.status_code, 200, review.data)
+            self.assertEqual(review.data["articleExport"]["status"], "ready")
+            self.assertEqual(review.data["articleExport"]["markdown"], self.body)
+            self.assertEqual(copied.status_code, 200, copied.data)
+            self.assertEqual(download.status_code, 200)
+            with ZipFile(BytesIO(download.content)) as archive:
+                self.assertEqual(archive.read("article.md").decode(), self.body)
+            self.assertTrue(get.call_args_list)
+            self.assertTrue(all(call.args[0] == "GET" and call.kwargs["json"] is None for call in get.call_args_list))
+            self.assertEqual(ContentFactoryRun.objects.values().get(pk=self.run.pk), before)
+            self.assertEqual(entitlement_payload(self.run)["entitlementStatus"], "consumed")
 
     def test_completed_event_and_package_step_cannot_consume_entitlement_or_mark_first_delivery(self):
         from .run_event_authority import receive_authoritative_run_events

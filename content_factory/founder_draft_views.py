@@ -116,6 +116,10 @@ def is_delivered_article(run) -> bool:
     from .article_publication_evidence import useful_delivery
     from .run_cancellation import DRAFT_DELETED_AT_KEY
     from .run_state import ARTICLE_WORKFLOWS
+    from .run_reconciliation import authoritative_run
+    if authoritative_run(run):
+        from .run_verified_delivery import verified_draft_ready
+        return not _mapping(run.result).get(DRAFT_DELETED_AT_KEY) and verified_draft_ready(run)
     if is_content_only(run):
         return is_delivered_content_only(run)
     if run.workflow not in ARTICLE_WORKFLOWS or run.status in {"cancelled", "denied"}:
@@ -132,7 +136,13 @@ def is_delivered_content_only(run) -> bool:
     from .run_state import ARTICLE_WORKFLOWS
     if run.workflow not in ARTICLE_WORKFLOWS or not is_content_only(run):
         return False
-    if run.status in {"cancelled", "denied"} or _mapping(run.result).get(DRAFT_DELETED_AT_KEY):
+    if _mapping(run.result).get(DRAFT_DELETED_AT_KEY):
+        return False
+    from .run_reconciliation import authoritative_run
+    if authoritative_run(run):
+        from .run_verified_delivery import verified_draft_ready
+        return verified_draft_ready(run)
+    if run.status in {"cancelled", "denied"}:
         return False
     return run.status == "completed" or useful_delivery(run)
 

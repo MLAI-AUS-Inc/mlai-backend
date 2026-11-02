@@ -9575,6 +9575,11 @@ class ContentFactoryRunValleyJobView(APIView):
         if not run:
             return Response({"error": "Run not found"}, status=status.HTTP_404_NOT_FOUND)
 
+        from .run_reconciliation import authoritative_run
+        if authoritative_run(run):
+            return Response({"code": "owned_execution_requires_typed_observation",
+                "detail": "Read the current typed execution history for this run."}, status=409)
+
         serializer = ContentFactoryRunValleyJobSerializer(data=request.data or {})
         serializer.is_valid(raise_exception=True)
         job_id = serializer.validated_data["job_id"]
