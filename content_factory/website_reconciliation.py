@@ -923,6 +923,17 @@ def process_website_connection_operations(*, limit=20, now=None, connection_id=N
                 for run_id in cancel_ids[:20]:
                     bounded_cancel = cancel_work.applicable(op)
                     run = cancel_work.run_for(op, run_id) if bounded_cancel else None
+                    from .run_reconciliation import authoritative_run
+                    owned_cancel = authoritative_run(run)
+                    if not bounded_cancel:
+                        from workflow_runs.models import ContentFactoryRun
+                        candidate = ContentFactoryRun.objects.filter(run_id=run_id, organization_id=op.connection.organization_id).first()
+                        if authoritative_run(candidate):
+                            owned_cancel = True
+                            run = cancel_work.run_for(op, run_id)
+                            if run is None:
+                                pending.append(run_id)
+                                continue
                     if bounded_cancel and (not cancel_work.can_call(op, now=now) or run is None
                             or run_id not in op.receipt[cancel_work.KEY]["run_ids"]):
                         pending.append(run_id)
@@ -939,8 +950,10 @@ def process_website_connection_operations(*, limit=20, now=None, connection_id=N
                         # A website connection change supersedes the run (IF-20).
                         payload = {"reason": "website_connection_changed",
                             **cancellation_request_fields("superseded", "system")}
-                        if bounded_cancel:
-                            payload["expected_cancellation_v1"] = cancel_work.expected_article_cancellation(run)
+                        if bounded_cancel or owned_cancel:
+                            if run.workflow in ARTICLE_WORKFLOWS:
+                                payload["expected_cancellation_v1"] = cancel_work.expected_article_cancellation(run)
+                            payload.update(cancel_work.cancellation_echoes(run))
                         response = http_client.post(f"{remote['base_url']}/api/runs/{run_id}/cancel",
                             headers=_content_factory_headers(), json=payload, timeout=(3, 15))
                     try:
@@ -948,7 +961,7 @@ def process_website_connection_operations(*, limit=20, now=None, connection_id=N
                     except (ValueError, AttributeError):
                         body = {}
                     cleanup_pending = isinstance(body, dict) and (body.get("cleanup_pending") is True or body.get("cleanupPending") is True)
-                    if bounded_cancel:
+                    if bounded_cancel or owned_cancel:
                         if not cancel_work.acknowledge(op, run, run_id, response.status_code, body):
                             pending.append(run_id)
                     elif response.status_code not in {200, 204, 404} or cleanup_pending:
@@ -959,8 +972,18 @@ def process_website_connection_operations(*, limit=20, now=None, connection_id=N
                     if not remote["enabled"]:
                         preview_pending.append(run_id)
                         continue
+                    preview_payload = {"reason": "website_connection_changed"}
+                    from workflow_runs.models import ContentFactoryRun
+                    from .run_reconciliation import authoritative_run
+                    candidate = ContentFactoryRun.objects.filter(run_id=run_id, organization_id=op.connection.organization_id).first()
+                    if authoritative_run(candidate):
+                        current = cancel_work.run_for(op, run_id)
+                        if current is None:
+                            preview_pending.append(run_id)
+                            continue
+                        preview_payload.update(cancel_work.cancellation_echoes(current))
                     response = http_client.post(f"{remote['base_url']}/api/runs/{run_id}/preview/stop",
-                        headers=_content_factory_headers(), json={"reason": "website_connection_changed"}, timeout=(3, 15))
+                        headers=_content_factory_headers(), json=preview_payload, timeout=(3, 15))
                     try:
                         body = response.json()
                     except (ValueError, AttributeError):

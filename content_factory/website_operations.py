@@ -410,8 +410,21 @@ def cancel_operation(config, *, data, idempotency_key):
             from .website_first_article_refunds import reserve_refund
             reserve_refund(op)
         from django.db.models import Q
-        run_ids = list(ContentFactoryRun.objects.filter(organization=connection.organization).filter(
-            Q(run_request__operation_id=str(op.pk)) | Q(run_request__first_article_goal_operation_id=str(op.pk))).values_list("run_id", flat=True))
+        candidates = ContentFactoryRun.objects.filter(organization=connection.organization).filter(
+            Q(run_request__operation_id=str(op.pk)) | Q(run_request__first_article_goal_operation_id=str(op.pk))
+            | Q(result__run_owner_execution_v1__current_scope__operation_id=str(op.pk)))
+        from .run_reconciliation import authoritative_run
+        from .run_execution_control import current_execution_request
+        run_ids = []
+        for candidate in candidates:
+            if authoritative_run(candidate):
+                try:
+                    current = current_execution_request(candidate)
+                except (ValueError, TypeError, KeyError):
+                    current = None
+                if current is not None and str(op.pk) not in {current.get("operation_id"), current.get("first_article_goal_operation_id")}:
+                    continue
+            run_ids.append(candidate.run_id)
         child_operations = []
         if op.action == "prepare":
             child_id = op.receipt.get("child_run_id") or op.payload.get("run_id")
@@ -427,9 +440,11 @@ def cancel_operation(config, *, data, idempotency_key):
             connection.operations.filter(pk__in=child_operations).exclude(state__in=["completed", "failed", "denied", "deleted"]).update(
                 state="cancelled", next_attempt_at=None, updated_at=timezone.now())
         from .website_cancellation_retirement import bindings_for
-        cancel_bindings = bindings_for(ContentFactoryRun.objects.select_for_update().filter(
+        cancel_runs = list(ContentFactoryRun.objects.select_for_update().filter(
             run_id__in=run_ids, organization=connection.organization).order_by("pk"))
-        ContentFactoryRun.objects.filter(run_id__in=run_ids, organization=connection.organization).update(status="cancelled", resume_available=False, error="Website operation cancelled.", updated_at=timezone.now())
+        cancel_bindings = bindings_for(cancel_runs)
+        ContentFactoryRun.objects.filter(pk__in=[run.pk for run in cancel_runs if not authoritative_run(run)]).update(
+            status="cancelled", resume_available=False, error="Website operation cancelled.", updated_at=timezone.now())
         followup, _ = WebsiteConnectionOperation.objects.get_or_create(idempotency_key=f"{connection.pk}:cancel:{idempotency_key}", defaults={
             "connection": connection, "generation": connection.generation, "action": "cancel-operation", "payload": {"cancel_run_ids": run_ids,
                 "stop_preview_run_ids": run_ids, "cancelled_operation_id": str(op.pk), "cancelled_action": op.action,

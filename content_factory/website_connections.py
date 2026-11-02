@@ -981,11 +981,29 @@ def transition_connection(config, *, action, expected, idempotency_key="", verif
             ResearchAutomation.objects.filter(organization=connection.organization, status="active").update(status="paused", updated_at=timezone.now())
         from workflow_runs.models import ContentFactoryRun
         scoped_runs = ContentFactoryRun.objects.filter(organization=connection.organization, workflow__in=REPOSITORY_WORKFLOWS).filter(
-            Q(run_request__website_connection_id=str(connection.pk)) | Q(github_repo__iexact=connection.github_repo, run_request__website_connection_id__isnull=True))
-        runs = list(scoped_runs.exclude(status__in=["completed", "failed", "cancelled", "denied"]).values_list("run_id", flat=True))
+            Q(run_request__website_connection_id=str(connection.pk))
+            | Q(result__run_owner_execution_v1__current_scope__website_connection_id=str(connection.pk))
+            | Q(github_repo__iexact=connection.github_repo, run_request__website_connection_id__isnull=True))
+        from .run_reconciliation import authoritative_run
+        from .run_execution_control import current_execution_request
+        scoped_run_rows = []
+        for run in scoped_runs:
+            if authoritative_run(run):
+                try:
+                    current = current_execution_request(run)
+                except (ValueError, TypeError, KeyError):
+                    # Revocation must still commit; an unreadable command
+                    # identity remains held for explicit reconciliation.
+                    current = None
+                if current is not None and (current.get("website_connection_id") != str(connection.pk)
+                        or current.get("connection_generation") != old_generation):
+                    continue
+            scoped_run_rows.append(run)
+        active_runs = [run for run in scoped_run_rows if run.status not in {"completed", "failed", "cancelled", "denied"}]
+        runs = [run.run_id for run in active_runs]
         # A terminal run can still own a hosted preview. Stop its runtime without
         # changing completed article history or claiming that a PR was undone.
-        stop_preview_runs = list(scoped_runs.values_list("run_id", flat=True))
+        stop_preview_runs = [run.run_id for run in scoped_run_rows]
         pending_auto_merge_prs = []
         for saved in ContentFactoryRun.objects.filter(organization=connection.organization, github_repo__iexact=connection.github_repo).values_list("result", flat=True):
             if not isinstance(saved, dict):
@@ -997,9 +1015,13 @@ def transition_connection(config, *, action, expected, idempotency_key="", verif
                     pending_auto_merge_prs.append(str(url))
         # Keep the records and remote outcome evidence; this is a durable consent
         # cancellation, not a claim that an already-issued remote write vanished.
-        ContentFactoryRun.objects.filter(run_id__in=runs).update(status="cancelled", error="Website connection changed.", resume_available=False, updated_at=timezone.now())
+        from .website_cancellation_retirement import bindings_for
+        cancel_bindings = bindings_for(scoped_run_rows)
+        ContentFactoryRun.objects.filter(pk__in=[run.pk for run in active_runs if not authoritative_run(run)]).update(
+            status="cancelled", error="Website connection changed.", resume_available=False, updated_at=timezone.now())
         return WebsiteConnectionOperation.objects.create(connection=connection, generation=connection.generation, idempotency_key=key,
             action=action, state="pending", payload={"cancel_run_ids": runs, "stop_preview_run_ids": stop_preview_runs, "previous_generation": old_generation, "disable_auto_merge_prs": sorted(set(pending_auto_merge_prs)), "attempt": 1, "deletion_epoch": watermark,
+                "cancel_run_bindings": cancel_bindings,
                 "preserve_published_articles": True},
             receipt={"authority_revoked": action != "reconnect", "repository_modified": False,
                 "retained": ["published_articles", "website_files", "company_details", "editorial_policy", "history"],
@@ -1058,7 +1080,7 @@ def offboard_website_connections(organization, *, user=None, purge=False):
                 if operation.action=="goal-refund":
                     continue
                 operation.payload = {key: operation.payload[key] for key in
-                    ("previous_generation", "cancel_run_ids", "stop_preview_run_ids", "disable_auto_merge_prs") if key in operation.payload}
+                    ("previous_generation", "cancel_run_ids", "stop_preview_run_ids", "disable_auto_merge_prs", "cancel_run_bindings") if key in operation.payload}
                 operation.payload["purge_after_reconciliation"] = True
                 operation.receipt = {"authority_revoked": True, "website_database_evidence_erased": True,
                     "database_erasure_scope": ["scan_snapshots", "template_revisions", "publication_targets", "mutation_receipts"],
