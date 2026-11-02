@@ -4,7 +4,8 @@ The approved work manifest is reloaded on every preparation. Mail discovery
 detects unreviewed invoices; it never converts money or prose into work hours.
 """
 from copy import deepcopy
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
+from email.utils import parsedate_to_datetime
 from decimal import Decimal
 import hashlib
 import json
@@ -14,6 +15,8 @@ import re
 import tempfile
 import time
 from zoneinfo import ZoneInfo
+
+import requests
 
 TZ = ZoneInfo("Australia/Melbourne")
 
@@ -246,8 +249,58 @@ def save_candidate(scope, request, response, snapshot, unknown_mail):
             os.unlink(temporary)
 
 
+def finance_retry_at(error, now):
+    """Keep provider throttling distinct from other safe read failures."""
+    response = getattr(error, 'response', None)
+    if not isinstance(error, requests.HTTPError) or response is None or response.status_code != 429:
+        return None
+    value = response.headers.get('Retry-After', '')
+    retry = now + timedelta(minutes=5)
+    try:
+        delay = int(value)
+        candidate = now + timedelta(seconds=max(0, delay))
+    except (ValueError, TypeError, OverflowError):
+        try:
+            candidate = parsedate_to_datetime(value)
+            if candidate.tzinfo is None:
+                return retry
+        except (ValueError, TypeError, OverflowError):
+            return retry
+    return max(retry, candidate)
+
+
+def finance_cooldown(scope, now, *, until=None):
+    """One durable cooldown across cutoffs for this private finance scope."""
+    if not scope.get('review_directory'):
+        return None
+    root = Path(scope['review_directory'])
+    key = digest({'connection': scope.get('xero_connection_id'),
+                  'contact': scope.get('xero_contact_id')})
+    path = root / ('finance-cooldown-' + key + '.json')
+    if until is None:
+        try:
+            value = instant(json.loads(path.read_text())['retry_at'])
+            return value if value > now else None
+        except (OSError, ValueError, KeyError, TypeError):
+            return None
+    root.mkdir(parents=True, exist_ok=True, mode=0o700)
+    fd, temporary = tempfile.mkstemp(dir=root, prefix='.finance-cooldown-')
+    try:
+        with os.fdopen(fd, 'w') as handle:
+            os.fchmod(handle.fileno(), 0o600)
+            json.dump({'retry_at': until.isoformat()}, handle)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+    finally:
+        if os.path.exists(temporary):
+            os.unlink(temporary)
+    return until
+
+
 def prepare(scope, request, *, get, mail, now=None):
     now = now or datetime.now(timezone.utc)
+    started = time.monotonic()
     cutoff = instant(request["cutoff"])
     owner = request["owner"]
     manifest = json.loads(Path(scope["work_manifest"]).read_text())
@@ -277,7 +330,10 @@ def prepare(scope, request, *, get, mail, now=None):
             missing.append("new_invoices_require_review")
     except Exception:
         missing.append("contractor_invoice_sync_failed")
+    retry_at = finance_cooldown(scope, now)
     try:
+        if retry_at:
+            raise SourceIncomplete('finance_rate_limited')
         invoices = all_invoices(get, scope["xero_contact_id"])
         snapshot = refresh_finance(snapshot, owner, invoices, get, request["cutoff"],
                                    scope.get("legacy_invoice_ids", []), scope["xero_contact_id"])
@@ -286,13 +342,24 @@ def prepare(scope, request, *, get, mail, now=None):
         checks["client_invoices"] = {"checked_at": now.isoformat(), "count": len(invoices)}
         checks["payments"] = {"checked_at": now.isoformat(), "count": len(snapshot["clients"][owner]["payments"])}
     except Exception as exc:
-        missing.append(str(exc) if isinstance(exc, SourceIncomplete) else "finance_sync_failed")
+        # Retry-After starts when the provider failed, not before mailbox and
+        # finance reads that may already have consumed most of the deadline.
+        failed_at = now + timedelta(seconds=max(0, time.monotonic() - started))
+        limited_until = finance_retry_at(exc, failed_at)
+        if limited_until:
+            retry_at = limited_until
+            finance_cooldown(scope, now, until=retry_at)
+            missing.append('finance_rate_limited')
+        else:
+            missing.append(str(exc) if isinstance(exc, SourceIncomplete) else "finance_sync_failed")
     if now < cutoff:
         missing.append("closing_refresh_required")
     response = {"version": 1, "owner": owner, "team": request["team"], "organization": scope["linear_organization"],
         "project_ids": sorted(scope["project_ids"]), "cutoff": request["cutoff"], "nonce": request["nonce"],
         "checked_at": now.isoformat(), "checks": checks, "missing": sorted(set(missing)),
         "status": "waiting_data" if missing else "ready"}
+    if retry_at:
+        response['retry_at'] = retry_at.isoformat()
     if not missing:
         dataset = snapshot["clients"][owner]
         # Only extend the common envelope after independently verified work,

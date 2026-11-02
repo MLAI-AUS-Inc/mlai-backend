@@ -5,6 +5,8 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest.mock import Mock, patch
 
+import requests
+
 from django.test import SimpleTestCase, override_settings
 from rest_framework.test import APIRequestFactory
 
@@ -153,6 +155,48 @@ class PreparationTests(SimpleTestCase):
         result = self.run_prepare(now=datetime(2026, 10, 23, 5, 30, tzinfo=timezone.utc))
         self.assertEqual(result["status"], "waiting_data")
         self.assertIn("closing_refresh_required", result["missing"])
+
+    def test_rate_limit_preserves_retry_after_and_blocks_other_cutoffs_until_reset(self):
+        self.scope['review_directory'] = str(Path(self.directory.name) / 'review')
+        response = requests.Response()
+        response.status_code = 429
+        response.headers['Retry-After'] = '21600'
+        get = Mock(side_effect=requests.HTTPError('private provider detail', response=response))
+        with patch('integrations.services.studio_report_source.time.monotonic', side_effect=[100, 220]):
+            result = prepare(self.scope, self.request, get=get, mail=Mock(return_value={'reviewed'}), now=NOW)
+        self.assertEqual(result['status'], 'waiting_data')
+        self.assertIn('finance_rate_limited', result['missing'])
+        self.assertEqual(result['retry_at'], (NOW + timedelta(hours=6, minutes=2)).isoformat())
+        self.assertNotIn('snapshot', result)
+        self.assertNotIn('private provider detail', json.dumps(result))
+        get.reset_mock()
+        later = prepare(self.scope, {**self.request, 'cutoff': NOW.isoformat()}, get=get,
+                        mail=Mock(return_value={'reviewed'}), now=NOW + timedelta(minutes=6))
+        get.assert_not_called()
+        self.assertEqual(later['retry_at'], result['retry_at'])
+        self.assertIn('finance_rate_limited', later['missing'])
+        # A subsequent process can read again after the persisted deadline.
+        get.side_effect = None
+        get.return_value = {'Invoices': []}
+        recovered = prepare(self.scope, self.request, get=get, mail=Mock(return_value={'reviewed'}),
+                            now=NOW + timedelta(hours=6, minutes=2, seconds=1))
+        self.assertEqual(recovered['status'], 'ready')
+        self.assertNotIn('retry_at', recovered)
+        for path in Path(self.scope['review_directory']).glob('finance-cooldown-*.json'):
+            self.assertEqual(path.stat().st_mode & 0o777, 0o600)
+
+    def test_rate_limit_http_date_and_invalid_headers_have_safe_backoff(self):
+        from .services.studio_report_source import finance_retry_at
+        response = requests.Response()
+        response.status_code = 429
+        error = requests.HTTPError(response=response)
+        response.headers['Retry-After'] = 'Fri, 23 Oct 2026 12:01:00 GMT'
+        self.assertEqual(finance_retry_at(error, NOW), NOW + timedelta(hours=6))
+        for value in ['', 'not-a-date', '-10', '99999999999999999999999999999']:
+            response.headers['Retry-After'] = value
+            self.assertGreaterEqual(finance_retry_at(error, NOW), NOW + timedelta(minutes=5))
+        response.status_code = 401
+        self.assertIsNone(finance_retry_at(error, NOW))
 
 
 class EndpointTests(SimpleTestCase):
