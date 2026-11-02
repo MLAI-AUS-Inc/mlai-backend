@@ -15,7 +15,7 @@ from . import publish_merge_worker as worker
 from . import vibe_marketing_views as views
 from .article_publish_approval import article_review_identity, make_article_publish_approval_receipt
 from .p2_foundation import P2_BACKEND_RESULT_KEYS
-from .self_heal_testing import ALL_FLAGS_ON, fake_member_context, make_p2_org, make_stamped_run, make_unstamped_run
+from .self_heal_testing import ALL_FLAGS_ON, fake_member_context, fake_provider, make_p2_org, make_stamped_run, make_unstamped_run
 from .website_models import WebsiteConnection
 from workflow_runs.models import ContentFactoryRun
 
@@ -402,6 +402,18 @@ class MergeWorkerTests(TransactionTestCase):
             with patch.object(worker, "_api", side_effect=responses) as api:
                 self.assertEqual(worker.deployment_evidence(self.website, "test", MERGED), provider)
             self.assertIn("/deployments/3/statuses", api.call_args.args[3])
+
+    def test_attested_deployment_calls_source_article_projection_after_receipt_is_durable(self):
+        run = self.watch_fixture()
+        observed = []
+        def sync(current):
+            self.assertFalse(connection.in_atomic_block)
+            saved = ContentFactoryRun.objects.get(pk=current.pk)
+            self.assertEqual(saved.result["deploy_v1"], current.result["deploy_v1"])
+            observed.append(saved.run_id)
+        with fake_provider("content_factory.publish_reviewed_draft", sync_published_article=sync), self.providers(), patch.object(worker, "deployment_evidence", return_value="vercel"), patch("content_factory.website_live_fetch.fetch_live_route", return_value=(b"article", {})):
+            self.assertEqual(worker.run_deployment_watch_sweep(now=self.now)["live"], 1)
+        self.assertEqual(observed, [run.run_id])
 
     def test_deployment_wait_alert_once_schedule_hourly_then_48_hour_wall(self):
         run = self.watch_fixture(minutes=30)
