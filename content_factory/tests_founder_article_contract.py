@@ -65,7 +65,7 @@ class FounderArticleContractTests(JourneyFixture, TestCase):
 
     def test_actual_first_article_http_cards_keep_nullable_topic_and_original_schema(self):
         from rest_framework.test import APIRequestFactory, force_authenticate
-        from community_chat.my_startup_journey_views import FirstArticleCardView
+        from community_chat.my_startup_journey_views import FirstArticleCardView, FounderJourneyView
         cases = []
         for name, description in (("suggested", self.one_liner), ("custom_required", "")):
             self.describe(description)
@@ -79,7 +79,13 @@ class FounderArticleContractTests(JourneyFixture, TestCase):
             self.assertEqual(response.data["version"], 1)
             self.assertEqual(response.data["access"], {"canStart": True})
             self.assertEqual(response.data["topic"] is None, name == "custom_required")
-            cases.append({"name": name, "companyId": str(self.company.pk), "payload": response.data})
+            journey_request = APIRequestFactory().get("/api/v1/my-startup/journey/", {"company_id": str(self.company.pk)})
+            force_authenticate(journey_request, user=self.owner)
+            with patch("community_chat.throttles.StartupScopedThrottle.allow_request", return_value=True):
+                journey_response = FounderJourneyView.as_view()(journey_request)
+            self.assertEqual(journey_response.status_code, 200)
+            cases.append({"name": name, "companyId": str(self.company.pk), "payload": response.data,
+                "journey": journey_response.data})
         target = os.environ.get("FOUNDER_EXPORT_R5_FIRST_CARD")
         if target:
             Path(target).write_text(json.dumps({"source": "actual authenticated HTTP card; synthetic local organization, nullable case uses empty topic source, no worker/model effects", "cases": cases}, indent=2) + "\n")
