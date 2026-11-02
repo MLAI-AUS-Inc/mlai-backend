@@ -376,3 +376,26 @@ class DispatchSettlementTests(TransactionTestCase):
         self.assertEqual(Ledger.objects.filter(kind="SPEND").count(), 1)
         for name in ("run_request", "status", "created_at", "updated_at", "reconciled_at"):
             self.assertEqual(getattr(run, name), before[name], name)
+
+    def test_real_unstamped_free_grant_is_valid_but_another_company_grant_never_replaces_it(self):
+        from .first_article_entitlement import reserve_entitlement
+        from .models import ContentFactoryJob
+        from .run_backend_facts import BackendFactConflict, save_job_facts
+        run, grant = self.free()
+        run.refresh_from_db()
+        self.assertNotIn("roo_points_billing_user_id", run.run_request)
+        self.assertEqual(run.billing_ledger_id, grant.pk)
+        job = ContentFactoryJob.objects.get(job_id=run.run_id)
+        job.billing_ledger = grant
+        save_job_facts(job, update_fields=["billing_ledger"])
+        foreign = make_p2_org()
+        with override_settings(ARTICLES_FREE_FIRST_ARTICLE_ENABLED=True, ARTICLES_FIRST_ARTICLE_GOAL_ENABLED=False):
+            other = reserve_entitlement(organization=foreign.organization, user=foreign.owner,
+                client_request_id="foreign-entitlement", data={"delivery_mode": "content_only",
+                    "delivery_mode_confirmed": True, "expected_cost_points": 0}, config=foreign.config)
+        self.assertIsNotNone(other)
+        before = ContentFactoryRun.objects.values().get(pk=run.pk)
+        job.billing_ledger = other
+        with self.assertRaises(BackendFactConflict):
+            save_job_facts(job, update_fields=["billing_ledger"])
+        self.assertEqual(ContentFactoryRun.objects.values().get(pk=run.pk), before)

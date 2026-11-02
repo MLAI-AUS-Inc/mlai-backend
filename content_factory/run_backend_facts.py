@@ -184,7 +184,8 @@ def _require_billing_reference(run, value):
             and ledger.kind == "ADJUST" and ledger.source == "CONTENT_FACTORY"
             and ledger.delta_microroo == 0 and ledger.reference_type == REFERENCE_TYPE
             and str(ledger.idempotency_key).startswith(f"content_factory:first_article:org:{run.organization_id}:")
-            and str(saved.get("roo_points_billing_user_id")) == str(ledger.user_id)):
+            and (saved.get("roo_points_billing_user_id") in (None, "")
+                 or str(saved["roo_points_billing_user_id"]) == str(ledger.user_id))):
         return
     raise BackendFactConflict("The billing reference does not prove this admission's charge.")
 
