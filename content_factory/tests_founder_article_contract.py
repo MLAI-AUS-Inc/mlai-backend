@@ -1,5 +1,8 @@
 """Real scoped journey/DTO projection, strict drift and historical boundaries."""
 from copy import deepcopy
+import json
+import os
+from pathlib import Path
 from unittest.mock import patch
 
 from django.http import Http404
@@ -83,3 +86,34 @@ class FounderArticleContractTests(JourneyFixture, TestCase):
             with self.subTest(keys=sorted(value)), self.assertRaises(FounderContractMismatch) as error:
                 validate_journey(value)
             self.assertNotIn("synthetic-secret", str(error.exception))
+
+    def test_actual_selected_http_response_has_one_scoped_contract_without_writes(self):
+        from rest_framework.test import APIRequestFactory, force_authenticate
+        from community_chat.my_startup_journey_views import FounderJourneyView
+        from workflow_runs.models import ContentFactoryRunStep
+        run = make_run(self.org, status="running", step="research_topic")
+        newer = make_run(self.org, status="running", step="assemble")
+        step = ContentFactoryRunStep.objects.create(run=run, step_key="research_topic", status="running",
+            message="Raw worker sentence must not become founder copy")
+        before = type(run).objects.values().get(pk=run.pk)
+        before_step = ContentFactoryRunStep.objects.values().get(pk=step.pk)
+        request = APIRequestFactory().get("/api/v1/my-startup/journey/", {
+            "company_id": str(self.company.pk), "runId": run.run_id})
+        force_authenticate(request, user=self.owner)
+        with patch("community_chat.throttles.StartupScopedThrottle.allow_request", return_value=True):
+            response = FounderJourneyView.as_view()(request)
+        self.assertEqual(response.status_code, 200, response.data)
+        value = response.data
+        self.assertEqual(value["article"]["runId"], run.run_id)
+        self.assertNotEqual(value["article"]["runId"], newer.run_id)
+        self.assertEqual(value["article"]["progress"][0]["id"], "research_topic")
+        self.assertNotIn("Raw worker sentence", str(value))
+        self.assertEqual(validate_journey(value), value)
+        self.assertEqual(type(run).objects.values().get(pk=run.pk), before)
+        self.assertEqual(ContentFactoryRunStep.objects.values().get(pk=step.pk), before_step)
+        target = os.environ.get("FOUNDER_EXPORT_R5_JOURNEY")
+        if target:
+            Path(target).write_text(json.dumps({"schemaVersion": 1,
+                "source": "actual authenticated in-process HTTP over synthetic real PostgreSQL Run/Step; no CF event or live provider claim",
+                "request": {"companyId": str(self.company.pk), "runId": run.run_id},
+                "payload": value}, indent=2) + "\n")
