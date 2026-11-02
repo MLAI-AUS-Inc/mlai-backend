@@ -62,6 +62,10 @@ def bind_dispatch_token_run(*, client_request_id, remote_run_id):
                 return None
             existing_real = ContentFactoryRun.objects.select_for_update().filter(run_id=real).first()
             if existing_real is not None:
+                if owner_receipt(existing_real) is not None:
+                    # An old callback/lookup cannot turn its separate legacy
+                    # token into input for an already admitted canonical row.
+                    return None
                 real_org = getattr(existing_real, "organization_id", None)
                 token_org = getattr(token_run, "organization_id", None)
                 if ((real_org is not None and token_org is not None and real_org != token_org)
@@ -169,6 +173,9 @@ def _merge_provisional_into_real(token_run, real_run) -> None:
     """Copy what only the provisional record knows (the dispatch payload with
     its billing lineage) onto the callback-materialized run, without touching
     remote-authoritative fields."""
+    from .run_ownership import owner_receipt, RunOwnershipConflict
+    if owner_receipt(token_run) is not None or owner_receipt(real_run) is not None:
+        raise RunOwnershipConflict("Legacy dispatch merging cannot mutate admitted history.")
     update_fields = []
     token_request = token_run.run_request if isinstance(token_run.run_request, dict) else {}
     real_request = real_run.run_request if isinstance(real_run.run_request, dict) else {}
