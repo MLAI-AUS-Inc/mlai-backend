@@ -191,10 +191,46 @@ Admin contact list/detail responses expose `engagement_rating` (or null),
 with unrated contacts last. Segments support an `engagement_stars` rule. Ordinary
 attribute edits cannot replace reserved ratings or remove a review hold.
 
-The 2 November 2026 import is a provisional snapshot. Public Slack visibility
-begins 4 August, some event guest lists are unavailable, and app usage frequency
-is not included. Ratings do not automatically age until a new reviewed snapshot
-is imported. One star can reflect limited observed evidence.
+The 2 November 2026 import is a provisional snapshot. Daily refresh (below)
+uses dated source evidence without turning unknown coverage into inactivity.
+One star can reflect limited observed evidence.
+
+### Daily engagement refresh
+
+`CRM_ENGAGEMENT_REFRESH_ENABLED=true` enables the activity-only scheduler runner.
+`CRM_ENGAGEMENT_REFRESH_HOUR=6` starts each day's sweep after 06:00 in
+Australia/Melbourne, including daylight saving. Thirty-five-second passes
+resume on subsequent ticks, with a shared Redis lock, per-contact day/version
+receipts and a durable completed-day audit record. Repeated ticks are cheap.
+Transient expected-source failures preserve the previous rating and retry after
+15 minutes. A permanently unavailable source is explicitly partial coverage.
+
+The job reads:
+
+- Luma's existing successfully ingested registrations and actual check-ins.
+  Dated imported history outside the calendar key remains available; only a
+  complete newer sync can replace that event's historical evidence.
+- Public Slack human-message metadata from the bridge, dated by source Slack
+  timestamp. Bots, reactions, system notices, private/DM and test activity are
+  excluded. Exact active account email mappings are required.
+- Explicit `User.last_login` recency. This contributes at most five points;
+  background refresh/device timestamps are not usage frequency.
+- Dated CRM email-click feedback and the imported Substack last-click history.
+  There is **no connected live per-subscriber Substack feed**. New Substack
+  reading/click activity cannot be observed until one is supplied. Historical
+  evidence ages normally. Undated aggregate counters cannot become invented
+  activity dates, and email opens always earn zero points.
+
+Only rating/refresh metadata in `Contact.attributes` is changed. Consent,
+unsubscribe/delivery states, review holds, consent history, blasts, provider
+audiences and sending configuration are not modified. Malformed legacy
+attributes are retained under a protected key and remain effectively held.
+
+`crm_refresh_engagement --actor-email <admin>` is rollback-only by default;
+`--apply` executes a bounded pass. It never invokes source synchronization or a
+sender. The initial dated-history seed command is also rollback-first and
+requires exact input checksums. Namespace keys are protected from ordinary
+attribute editing.
 
 ```bash
 python manage.py crm_import_contacts PATH --consent granted|none [--consent-source TEXT] \

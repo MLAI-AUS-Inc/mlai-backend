@@ -2295,6 +2295,8 @@ LUMA_UPCOMING_EVENTS_CACHE_SECONDS = max(
 # Contacts store (crm app). The scheduled Luma guest sync stays off until an
 # operator enables it; the backfill and import commands work regardless.
 CRM_LUMA_SYNC_ENABLED = _env_is_true('CRM_LUMA_SYNC_ENABLED', False)
+CRM_ENGAGEMENT_REFRESH_ENABLED = _env_is_true('CRM_ENGAGEMENT_REFRESH_ENABLED', False)
+CRM_ENGAGEMENT_REFRESH_HOUR = max(0, min(23, int(os.environ.get('CRM_ENGAGEMENT_REFRESH_HOUR', '6'))))
 CRM_LUMA_SYNC_INTERVAL_SECONDS = max(
     300,
     int(os.environ.get('CRM_LUMA_SYNC_INTERVAL_SECONDS', '1800')),

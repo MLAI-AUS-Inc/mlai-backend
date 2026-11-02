@@ -20,12 +20,13 @@ FLAG_KEYS = (
     "CRM_SMS_ENABLED",
     "CRM_WHATSAPP_ENABLED",
     "CRM_WARMUP_ENABLED",
+    "CRM_ENGAGEMENT_REFRESH_ENABLED",
 )
 LISTMONK_BASE_URL = "LISTMONK_BASE_URL"
 LISTMONK_API_USER = "LISTMONK_API_USER"
 MESSAGING_SERVICE = "TWILIO_MESSAGING_SERVICE_SID"
 KEYS = (*FLAG_KEYS, LISTMONK_BASE_URL, LISTMONK_API_USER, MESSAGING_SERVICE,
-        "CRM_RESEND_MONITORED_SENDERS", "CRM_WARMUP_RUN_ID")
+        "CRM_RESEND_MONITORED_SENDERS", "CRM_WARMUP_RUN_ID", "CRM_ENGAGEMENT_REFRESH_HOUR")
 
 
 def validate_single(key: str, value: str, *, optional: bool = False) -> None:
@@ -57,6 +58,9 @@ def validate_single(key: str, value: str, *, optional: bool = False) -> None:
     elif key == "CRM_WARMUP_RUN_ID":
         if not re.fullmatch(r"[a-z0-9-]{1,48}", value):
             raise ValueError(f"{key} must be a lowercase run identifier")
+    elif key == "CRM_ENGAGEMENT_REFRESH_HOUR":
+        if not re.fullmatch(r"(?:[0-9]|1[0-9]|2[0-3])", value):
+            raise ValueError(f"{key} must be an integer from 0 through 23")
     elif key == MESSAGING_SERVICE:
         if not re.fullmatch(r"MG[0-9a-f]{32}", value):
             raise ValueError(f"{key} must be a Twilio Messaging Service SID")
