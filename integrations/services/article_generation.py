@@ -1124,6 +1124,10 @@ def _refund_content_factory_request(
     from roo.services import PointsService
     from roo.models import Ledger
 
+    from content_factory.run_refund_boundary import no_start_refund_allowed
+    if not no_start_refund_allowed(user=user, article_request=article_request, resolved_domain=resolved_domain):
+        return None
+
     from content_factory.website_first_article_billing import defer_goal_settlement
     if defer_goal_settlement(article_request, resolved_domain=resolved_domain):
         return None
@@ -1164,7 +1168,8 @@ def _refund_content_factory_request(
         reference_type="CONTENT_FACTORY",
         reference_id=_ledger_reference_id(client_request_id),
     )
-    update_job_facts(ContentFactoryJob.objects.filter(client_request_id=client_request_id),
+    from content_factory.run_backend_facts import job_client_key
+    update_job_facts(ContentFactoryJob.objects.filter(client_request_id=job_client_key(client_request_id)),
         billing_status=CONTENT_FACTORY_BILLING_STATUS_REFUNDED,
         billing_amount=cost_points,
         billing_ledger_id=ledger.id,
@@ -1178,6 +1183,9 @@ def _refund_content_factory_request(
     runs = ContentFactoryRun.objects.filter(domain=resolved_domain).filter(
         Q(run_request__client_request_id=client_request_id) | Q(run_request__roo_points_ledger_id=str(original.id)))
     for run in runs:
+        from content_factory.run_ownership import owner_receipt
+        if owner_receipt(run) is not None:
+            continue
         run.run_request = {**(run.run_request or {}), "roo_points_billing_status": "refunded",
             "roo_points_authorized": False, "roo_points_refund_ledger_id": str(ledger.id)}
         run.save(update_fields=["run_request", "updated_at"])
@@ -1210,6 +1218,10 @@ def refund_content_factory_topic_generation_for_user(
     reason: str,
 ):
     from roo.services import PointsService
+
+    from content_factory.run_refund_boundary import no_start_refund_allowed
+    if not no_start_refund_allowed(user=user, article_request=article_request, resolved_domain=resolved_domain):
+        return None
 
     client_request_id = _get_client_request_id(article_request)
     from content_factory.first_article_entitlement import entitled_request, release_topic_batch
@@ -1556,6 +1568,9 @@ def maybe_auto_refund_terminal_failure(
     if entitled_request(topic_request) and topic_request.get("roo_points_action") in TOPIC_ACTIONS:
         # The free first topic batch has no spend to credit (billing_amount 0).
         # A failed batch gives its one free re-run back instead.
+        from content_factory.run_reconciliation import authoritative_run
+        if authoritative_run(ContentFactoryRun.objects.filter(run_id=job.job_id).first()):
+            return False, 0
         release_topic_batch(client_request_id=str(getattr(job, "client_request_id", "") or "").strip()
             or topic_request.get("client_request_id"))
         return False, 0
@@ -1656,10 +1671,12 @@ def maybe_auto_refund_terminal_failure(
         refund_points = int(getattr(billed_job, "billing_amount", 0) or 0)
         if refund_points <= 0:
             return False, 0
-        refund_content_factory_topic_generation_for_user(user=user,
+        refund_ledger = refund_content_factory_topic_generation_for_user(user=user,
             actor_id=request_meta.get("requested_by_slack_user_id") or billed_job.slack_user_id,
             article_request=request_meta, resolved_domain=resolved_domain,
             reason=str(error_message or resolved_error_code or "Research could not complete."))
+        if refund_ledger is None:
+            return False, 0
         billed_job.billing_status = CONTENT_FACTORY_BILLING_STATUS_REFUNDED
         save_job_facts(billed_job, update_fields=["billing_status", "updated_at"])
         return True, refund_points

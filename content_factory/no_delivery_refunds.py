@@ -217,10 +217,15 @@ def apply_refund_decision(run, decision, *, now=None) -> dict:
     from content_factory.run_backend_facts import save_job_facts
     from workflow_runs.models import ContentFactoryRun
     from roo.services import PointsService, IdempotencyConflictError
+    from .run_reconciliation import authoritative_run
+    if authoritative_run(run):
+        return points_receipt(run)
     if not enabled():
         return points_receipt(run)
     with transaction.atomic():
         locked = ContentFactoryRun.objects.select_for_update().get(pk=run.pk)
+        if authoritative_run(locked):
+            return points_receipt(locked)
         previous = points_receipt(locked)
         if previous.get("state") in {"refunded", "released", "kept"}:
             return previous
@@ -340,7 +345,8 @@ def run_refund_sweep(now=None, limit=None) -> dict:
         return {"skipped": "flag_off"}
     from workflow_runs.models import ContentFactoryRun
     limit = max(1, min(int(limit or getattr(settings, "ARTICLES_SELF_HEAL_SWEEP_LIMIT", 50)), 500))
-    query = ContentFactoryRun.objects.filter(status__in=TERMINAL_STATUSES).filter(
+    from .run_reconciliation import legacy_event_rows
+    query = ContentFactoryRun.objects.filter(legacy_event_rows(), status__in=TERMINAL_STATUSES).filter(
         ~Q(result__has_key="points_v1") | ~Q(result__points_v1__state__in=SETTLED_STATES)).order_by("pk")
     result = {"processed": 0, "refunded": 0, "released": 0}
     remaining = []
