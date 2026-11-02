@@ -275,3 +275,29 @@ class OwnedNativeVerificationTests(WebsiteDatabaseFixture, TransactionTestCase):
         self.assertEqual(after["result"][STATE_KEY]["managed_slugs"], [])
         for field in ("status", "run_request", "updated_at", "created_at", "last_event_emitted_at", "reconciled_at"):
             self.assertEqual(after[field], before[field], field)
+
+    @override_settings(CONTENT_FACTORY_IMAGE_REGENERATION_COST_POINTS=2)
+    def test_image_charge_and_original_refund_preserve_owned_clock_and_concurrent_event_history(self):
+        from roo.models import Ledger
+        from roo.services import PointsService
+        from .article_review_billing import reserve_image_charge, settle_image_charge
+        from .run_event_authority import receive_authoritative_run_events
+        from .tests_run_event_authority import batch
+        PointsService.credit_purchased_topup(user=self.user, delta=10,
+            description="Synthetic image price funding", idempotency_key="image-clock-funding")
+        response = receive_authoritative_run_events(batch(self.run, [{"status": "running"}]))
+        self.assertEqual(response.status_code, 200, response.data)
+        before = ContentFactoryRun.objects.values().get(pk=self.run.pk)
+        payload = {"operationId": "image-clock", "fieldId": "cover", "expectedCostPoints": 2}
+        receipt, error = reserve_image_charge(user=self.user, context=self.context, run=self.run, payload=payload)
+        self.assertIsNone(error)
+        self.assertEqual(Ledger.objects.filter(kind="SPEND", reference_type="CONTENT_FACTORY_IMAGE").count(), 1)
+        settle_image_charge(user=self.user, run=self.run, receipt=receipt, pending=True)
+        settle_image_charge(user=self.user, run=self.run, receipt=receipt, rejected=True)
+        settle_image_charge(user=self.user, run=self.run, receipt=receipt, rejected=True)
+        after = ContentFactoryRun.objects.values().get(pk=self.run.pk)
+        for field in ("status", "run_request", "updated_at", "created_at", "last_event_emitted_at", "reconciled_at"):
+            self.assertEqual(after[field], before[field], field)
+        self.assertEqual(after["result"]["run_owner_events_v1"], before["result"]["run_owner_events_v1"])
+        self.assertEqual(after["result"]["article_image_billing"][receipt["identity"]]["status"], "refunded")
+        self.assertEqual(Ledger.objects.filter(kind="REFUND", refund_of_id=receipt["ledgerId"]).count(), 1)
