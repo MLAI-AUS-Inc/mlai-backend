@@ -285,14 +285,23 @@ class ActivitySourceTests(SimpleTestCase):
         self.assertFalse(rating["coverage"]["refresh_safe"])
 
     @override_settings(CRM_SUBSTACK_ACTIVITY_ENABLED=True)
-    def test_before_first_export_is_an_explicit_partial_coverage_gap(self):
+    def test_before_first_export_defers_with_existing_history_intact(self):
         self.cursor.side_effect = lambda key: None if key == sources.SUBSTACK_CURSOR_KEY else NOW.isoformat()
-        coverage = self.collect()["coverage"]["newsletter"]
-        self.assertEqual(coverage["status"], "partial")
+        person = contact(**{"Last clicked at": RECENT.isoformat()})
+        person.attributes["engagement_newsletter"] = {"source": "substack_export", "exported_at": RECENT.isoformat(), "last_clicked_at": RECENT.isoformat()}
+        before = deepcopy(person.attributes)
+        result = self.collect(person)
+        coverage = result["coverage"]["newsletter"]
+        self.assertEqual(coverage["status"], "unavailable")
+        self.assertTrue(coverage["expected"])
         self.assertEqual(coverage["substack_status"], "awaiting_first_export")
         self.assertFalse(coverage["substack_automatic"])
         self.assertFalse(coverage["substack_export_available"])
         self.assertIn("awaits its first successful import", coverage["detail"])
+        self.assertEqual(person.attributes, before)
+        self.assertTrue(any(item.kind == "newsletter_click" and item.occurred_at == RECENT for item in result["activities"][EMAIL]))
+        rating = score_engagement(result["activities"][EMAIL], as_of=NOW, coverage=result["coverage"])
+        self.assertFalse(rating["coverage"]["refresh_safe"])
 
     @override_settings(CRM_SUBSTACK_ACTIVITY_ENABLED=True)
     def test_blank_substack_click_keeps_actual_legacy_click_evidence(self):

@@ -344,6 +344,7 @@ def _newsletter(contacts, activities, since, now, counts):
         else:
             coverage["status"] = "partial"
         if substack_status == "awaiting_first_export":
+            coverage["status"] = "unavailable"
             coverage["detail"] += " Substack browser-export ingestion is enabled but awaits its first successful import."
         elif export_fresh:
             coverage["detail"] += " Daily Substack subscriber data comes from an authenticated browser export, not an API."
