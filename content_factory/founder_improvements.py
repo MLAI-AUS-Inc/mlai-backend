@@ -74,4 +74,6 @@ def summary(organization, *, user=None):
             can_edit = bool(member_may_publish(user, organization))
         except (ImportError, AttributeError):
             pass
-    return {"available": available, "completed": receipt["completed"], "canEdit": can_edit}
+    from .billing import free_setup_actions
+    return {"available": available, "completed": receipt["completed"], "canEdit": can_edit,
+            "websiteCheckFree": "website_baseline" in free_setup_actions()}
