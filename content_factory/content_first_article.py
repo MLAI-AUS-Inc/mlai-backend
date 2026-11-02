@@ -930,15 +930,18 @@ def _approve(context, user, config, prepared) -> dict:
     return _with_existing_posts(brief, config)
 
 
-def _dispatch(context, user, prepared, brief, entitlement, *, attempt_source):
+def _dispatch(context, user, prepared, brief, entitlement, *, attempt_source, command_data=None):
     """Start the ``content_only`` run on the real charge path. Returns ``(status, body)`` or raises."""
     from . import vibe_marketing_views as views
     organization, company = context.organization, context.company
     free = bool(entitlement.get("free"))
     attempt = int(entitlement.get("attempts_used") or 0) + 1
-    client_request_id = request_id(company, attempt) if free else paid_request_id(company, organization)
-    response = views.start_article_generation(user=user, context=context, data=_start_data(
-        prepared["topic"], brief, client_request_id=client_request_id, expected=prepared["expected"]))
+    if command_data is None:
+        client_request_id = request_id(company, attempt) if free else paid_request_id(company, organization)
+        data = _start_data(prepared["topic"], brief, client_request_id=client_request_id, expected=prepared["expected"])
+    else:
+        data = command_data
+    response = views.start_article_generation(user=user, context=context, data=data)
     if response.status_code == 202:
         body = _mapping(response.data)
         run_id = str(body.get("runId") or body.get("run_id") or "")
@@ -954,7 +957,7 @@ def _dispatch(context, user, prepared, brief, entitlement, *, attempt_source):
     raise FirstArticleRefusal(409, DETAIL_NOT_AVAILABLE, "not_available")
 
 
-def start_first_article(context, user, data, *, attempt_source="start"):
+def start_first_article(context, user, data, *, attempt_source="start", idempotency_key=None):
     """Run the one-press start (IF-P1-09). Returns ``(status, body)``; refusals raise FirstArticleRefusal.
 
     Order: save profile edits, approve the audience (and the call to action's
@@ -967,6 +970,32 @@ def start_first_article(context, user, data, *, attempt_source="start"):
     organization, company = context.organization, context.company
     require_owner(user, organization)
     press = parse_press(data)
+    if idempotency_key is not None:
+        from . import first_article_commands as commands
+        def prepare(config, client_key):
+            entitlement = entitlement_state(organization, user, config=config)
+            replay = _replay_or_refuse(context, entitlement)
+            if replay is not None:
+                return None, replay
+            if entitlement.get('limit') == 'daily_cap':
+                raise FirstArticleRefusal(409, DETAIL_DAILY_CAP, 'daily_cap')
+            prepared = _prepare(context, press, config)
+            save_profile_edits(company, organization, press)
+            brief = _approve(context, user, config, prepared)
+            return {'data': _start_data(prepared['topic'], brief, client_request_id=client_key,
+                expected=prepared['expected']), 'entitlement': entitlement}, None
+        claim, replay = commands.claim(context, user, idempotency_key, data, prepare)
+        if replay is not None:
+            return 200, replay
+        result = None
+        try:
+            payload = claim[1]['payload']
+            with commands.dispatch_claim(context, user, claim):
+                result = _dispatch(context, user, {}, {}, payload['entitlement'], attempt_source=attempt_source,
+                    command_data=payload['data'])
+            return result
+        finally:
+            commands.finish(context, claim, result[1] if result and result[0] in {200, 201} else None)
     with press_lock(organization):
         config = _config(organization)
         entitlement = entitlement_state(organization, user, config=config)

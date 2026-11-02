@@ -892,6 +892,15 @@ class _FreeArticleUnavailable(Exception):
     """Roll back an article start whose free attempt could not be reserved."""
 
 
+def _normalize_portable_article_payload(payload):
+    """Freeze the actual portable scope before its first billing/admission digest."""
+    if payload.get('delivery_mode') == 'content_only':
+        from .website_contract import CONNECTION_FIELDS
+        for field in (*CONNECTION_FIELDS, 'github_token', 'expected_source_sha', 'source_sha', 'repo_head_sha', 'app_root', 'branch'):
+            payload.pop(field, None)
+        payload['github_repo'] = ''
+
+
 def _charge_roo_points_for_article(request, *, context, payload: dict, goal_operation_id=None):
     # Only the internal goal dispatcher can supply this argument. HTTP/MCP body
     # fields cannot bypass the normal current-price and wallet checks.
@@ -941,6 +950,7 @@ def _charge_roo_points_for_article(request, *, context, payload: dict, goal_oper
                 quote_error = _quoted_price_response(request, cost_points=original_cost)
         if quote_error is not None:
             return None, None, None, quote_error
+    _normalize_portable_article_payload(payload)
     editorial_error = _refresh_article_editorial_payload(organization=context.organization, payload=payload)
     if editorial_error is not None:
         return None, None, None, editorial_error
@@ -982,6 +992,8 @@ def _charge_roo_points_for_article(request, *, context, payload: dict, goal_oper
         with transaction.atomic():
             # Admission may call providers; it stays outside this transaction.
             # A failed debit must roll back its provisional operation as well.
+            from .first_article_commands import recheck_current_claim
+            recheck_current_claim(context, request.user, payload)
             connection_error = _reserve_article_start_connection(context, payload)
             if connection_error is not None:
                 return None, None, None, connection_error
@@ -14984,13 +14996,7 @@ def _queue_content_factory_run(*, endpoint, workflow, context, config, payload, 
     from .p2_foundation import stamp_run_request
     stamp_run_request(payload, organization=context.organization,
         requester_user_id=getattr(getattr(getattr(context, "profile", None), "user", None), "pk", None))
-    if payload.get("delivery_mode") == "content_only":
-        # Portable editorial work has no repository authority, even when the
-        # company retains a disconnected repository in its settings.
-        from .website_contract import CONNECTION_FIELDS
-        for field in (*CONNECTION_FIELDS, "github_token", "expected_source_sha", "source_sha", "repo_head_sha", "app_root", "branch"):
-            payload.pop(field, None)
-        payload["github_repo"] = ""
+    _normalize_portable_article_payload(payload)
     if workflow in REPOSITORY_WORKFLOWS and payload.get("delivery_mode") != "content_only":
         config.refresh_from_db()
         website = config.website_connection

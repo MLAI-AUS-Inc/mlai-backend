@@ -366,7 +366,7 @@ class ExecutionControlApiTests(TransactionTestCase):
         self.before_history = changed_body
         with patch("requests.get", side_effect=self.get):
             result = self.post()
-        self.assertEqual((result.status_code, result.data["reason"]), (409, "execution_budget_unavailable"))
+        self.assertEqual((result.status_code, result.data["reason"]), (409, "execution_obligation_unavailable"))
         self.assert_no_grant()
 
     def test_another_authorized_source_ticket_during_http_fences_the_stale_automatic_grant(self):

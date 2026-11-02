@@ -267,9 +267,9 @@ class RunMergePolicyTests(TestCase):
 
 
 class PrivateStrategyKeyTests(TestCase):
-    """IF-P2-28: the three P2 keys never leave the backend and never make an org refresh-eligible."""
+    """IF-P2-28: private bookkeeping never leaves the backend or requests a refresh."""
 
-    KEYS = ("self_heal", "startup_team", "founder_notices", "founder_funnel")
+    KEYS = ("self_heal", "startup_team", "founder_notices", "founder_funnel", "first_article_commands")
 
     def _strategy(self):
         return {"pillars": [{"slug": "p"}], "ops_alerts": {"a": {"state": "sent"}},
