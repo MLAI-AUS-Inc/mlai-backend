@@ -15969,7 +15969,7 @@ class VibeMarketingCompanyAvatarView(APIView):
 
 
 class VibeMarketingAuthorPhotoPreviewView(APIView):
-    """Preview a pasted author photo link as a ``data:`` URL; saving the profile stores the copy."""
+    """Preview a pasted photo or store a scoped image upload for a Founder profile."""
 
     def post(self, request):
         from content_factory.author_photos import AuthorPhotoError, needs_copy, preview_photo

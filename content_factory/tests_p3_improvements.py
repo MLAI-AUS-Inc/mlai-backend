@@ -33,7 +33,7 @@ class ImprovementTests(TransactionTestCase):
         before = config.updated_at
         with patch.object(improvements, "has_first_draft", return_value=True):
             first = improvements.summary(self.org, user=self.owner)
-        self.assertEqual(first, {"available": True, "completed": ["founders"], "canEdit": True})
+        self.assertEqual(first, {"available": True, "completed": ["founders"], "canEdit": True, "websiteCheckFree": False})
         OrganizationContentConfig.objects.filter(pk=config.pk).update(authors=[])
         with patch.object(improvements, "has_first_draft", return_value=False):
             again = improvements.summary(self.org, user=self.owner)
@@ -55,3 +55,21 @@ class ImprovementTests(TransactionTestCase):
             result = improvements.summary(self.org, user=member)
         self.assertTrue(result["available"])
         self.assertFalse(result["canEdit"])
+
+    def test_free_copy_requires_explicit_research_allowance_even_for_funded_owner(self):
+        with override_settings(ARTICLES_FREE_SETUP_RESEARCH_ENABLED=False):
+            self.assertFalse(improvements.summary(self.org, user=self.owner)["websiteCheckFree"])
+        with override_settings(ARTICLES_FREE_SETUP_RESEARCH_ENABLED=True):
+            self.assertTrue(improvements.summary(self.org, user=self.owner)["websiteCheckFree"])
+
+    def test_real_first_draft_receipt_unlocks_progress_and_survives_delivery_removal(self):
+        config = self.fixture.config
+        strategy = dict(config.pillar_strategy)
+        strategy["founder_funnel"] = {"first_draft": {"version": 1, "runId": "delivered-draft", "at": "2026-11-02T10:00:00Z"}}
+        OrganizationContentConfig.objects.filter(pk=config.pk).update(pillar_strategy=strategy)
+        self.assertTrue(improvements.summary(self.org, user=self.owner)["available"])
+        config.refresh_from_db()
+        strategy = dict(config.pillar_strategy)
+        strategy.pop("founder_funnel")
+        OrganizationContentConfig.objects.filter(pk=config.pk).update(pillar_strategy=strategy)
+        self.assertTrue(improvements.summary(self.org, user=self.owner)["available"])
