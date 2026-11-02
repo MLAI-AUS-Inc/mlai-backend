@@ -318,6 +318,11 @@ class FounderDraftCopiedView(_FounderDraftToolView):
         at = timezone.now().isoformat()
         record = _store(context.organization, run.run_id, {"copiedAt": at, "copiedRevision": revision})
         logger.info("founder_draft_copied org=%s run=%s", context.organization.pk, run.run_id)
+        from .founder_funnel import emit_event
+        from .founder_funnel_events import after_commit
+        after_commit(lambda: emit_event('copied', user_id=request.user.pk, organization_id=context.organization.pk,
+                   run_id=run.run_id, at=at, signed_up_at=request.user.date_joined,
+                   source='article.copy_receipt'), using='default')
         return Response({"copied": _copied(record)}, headers={"Cache-Control": "private, no-store"})
 
 

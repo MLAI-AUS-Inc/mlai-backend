@@ -95,6 +95,17 @@ class MemberOnboardingView(APIView):
             authenticated_session=request.community_chat_account_session,
             values=values,
         )
+        if values['step'] in {'join', 'complete'}:
+            from content_factory.founder_funnel import emit_event
+            from content_factory.founder_funnel_events import after_commit
+            from .onboarding_models import CommunityMemberProfile
+            profile = CommunityMemberProfile.objects.filter(user=user).first()
+            if profile and profile.submitted_at:
+                after_commit(lambda: emit_event('joined', user_id=user.pk, at=profile.submitted_at,
+                           signed_up_at=user.date_joined, source='membership.submitted'), using='default')
+                if values.get('intent') == 'startup' or 'startups' in values.get('interests', []):
+                    after_commit(lambda: emit_event('intent', user_id=user.pk, signed_up_at=user.date_joined,
+                               source='membership.startup_intent'), using='default')
         extra = {"next": join_next(values.get("intent"))} if values["step"] == "join" else {}
         return self._response(user, **extra)
 

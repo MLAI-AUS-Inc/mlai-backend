@@ -200,6 +200,7 @@ _admin_access = next(index for index, pattern in enumerate(urlpatterns) if str(p
 urlpatterns[_admin_access + 1:_admin_access + 1] = [
     path(route, lazy_view("community_chat.staff_console_views", view)) for route, view in (
         ("admin/startups/", "StartupListView"),
+        ("admin/startups/funnel/", "FounderFunnelView"),
         ("admin/startups/<int:organization_id>/", "StartupDetailView"),
         ("admin/startups/<int:organization_id>/actions/", "StartupActionView"),
         ("admin/alerts/", "AlertListView"),

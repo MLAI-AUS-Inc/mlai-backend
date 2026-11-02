@@ -33,6 +33,33 @@ class StartupListView(StaffConsoleView):
         return Response(staff_console.startup_list(request.query_params))
 
 
+class FounderFunnelView(StaffConsoleView):
+    """Reproduce the staff command's signup cohort and proved draft timings."""
+
+    def get(self, request):
+        from datetime import timedelta
+        from django.core.management import CommandError
+        from django.db import connection, transaction
+        from django.utils import timezone
+        from content_factory.founder_funnel import journey_funnel
+        from content_factory.management.commands.founder_funnel_report import founder_funnel, parse_window_bound
+        try:
+            since = parse_window_bound(request.query_params['since'], end=False) if request.query_params.get('since') else timezone.now()-timedelta(days=30)
+            until = parse_window_bound(request.query_params['until'], end=True) if request.query_params.get('until') else timezone.now()
+            if until <= since or until-since > timedelta(days=366):
+                raise ValueError('Choose a window of up to 366 days.')
+            with transaction.atomic():
+                if connection.vendor == 'postgresql':
+                    with connection.cursor() as cursor:
+                        cursor.execute('SET TRANSACTION READ ONLY')
+                report = founder_funnel(since=since, until=until)
+                report['journey'] = journey_funnel(since=since, until=until)
+                transaction.set_rollback(True)
+        except (ValueError, CommandError):
+            return Response({'detail': 'Choose valid dates within a window of up to 366 days.', 'reason': 'invalid_window'}, status=400)
+        return Response(report, headers={'Cache-Control': 'private, no-store'})
+
+
 class StartupDetailView(StaffConsoleView):
     """Resolve a startup's ten recent runs and website support evidence."""
     def get(self, request, organization_id):
