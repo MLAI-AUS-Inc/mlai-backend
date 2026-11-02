@@ -33,6 +33,7 @@ SEED_VERSION = "source-events-v1"
 TEST_CHANNEL = re.compile(r"(^|[-_ ])(test|testing|sandbox|staging|fixture|synthetic|e2e)([-_ ]|$)", re.I)
 SLACK_STAMP = re.compile(r"^\d{9,12}\.\d{1,9}$")
 SLACK_USER = re.compile(r"^[UW][A-Z0-9]{8,}$")
+SUBSTACK_CURSOR_KEY = "crm:substack-activity:last-exported-at"
 
 
 def source_time(value):
@@ -299,6 +300,18 @@ def _slack(users, activities, since, now, counts):
     return coverage
 
 
+def _substack_export_cursor():
+    """Read successful whole-export freshness, including zero-click imports."""
+    try:
+        cached = source_time(cache.get(SUBSTACK_CURSOR_KEY))
+    except Exception:
+        cached = None
+    detail = CrmAuditEvent.objects.filter(action="import", target_type="crm_substack_activity", detail__status="completed").order_by("-created_at", "-pk").values_list("detail", flat=True).first()
+    persisted = source_time(detail.get("exported_at")) if isinstance(detail, dict) else None
+    candidates = [value for value in (cached, persisted) if isinstance(value, datetime)]
+    return max(candidates) if candidates else None
+
+
 def _newsletter(contacts, activities, since, now, counts):
     configured = all(str(getattr(settings, key, "") or "").strip() for key in ("LISTMONK_BASE_URL", "LISTMONK_API_USER", "LISTMONK_API_TOKEN"))
     cursor = source_time(cache.get("crm:listmonk-sync:cursor"))
@@ -306,9 +319,38 @@ def _newsletter(contacts, activities, since, now, counts):
         detail = CrmAuditEvent.objects.filter(action="sync", target_type="listmonk").order_by("-created_at").values_list("detail", flat=True).first()
         cursor = source_time(detail.get("cursor")) if isinstance(detail, dict) else None
     coverage = _freshness(cursor, now, expected=configured,
-        detail="CRM/listmonk clicks plus dated historical newsletter export. Clicks may be scanners; opens earn zero. Substack has no connected per-subscriber ingestion; undated aggregate counts are excluded.",
+        detail="CRM/listmonk clicks plus dated newsletter export evidence. Clicks may be scanners; opens earn zero. Undated aggregate counts are excluded.",
         listmonk_click_time="first_observed_by_sync", substack_automatic=False, email_opens_scored=False,
         query_window={"from": _iso(since), "through": _iso(now)})
+    substack_enabled = bool(getattr(settings, "CRM_SUBSTACK_ACTIVITY_ENABLED", False))
+    exported_at = _substack_export_cursor()
+    export_fresh = exported_at is not None and timedelta(0) <= now - exported_at <= timedelta(days=2)
+    substack_status = ("disabled" if not substack_enabled else "awaiting_first_export" if exported_at is None
+        else "fresh" if export_fresh else "stale")
+    coverage.update(
+        substack_mode="browser_export", substack_enabled=substack_enabled,
+        substack_status=substack_status, substack_last_exported_at=_iso(exported_at),
+        substack_export_available=substack_enabled and export_fresh,
+        substack_automatic=substack_enabled and exported_at is not None and exported_at <= now,
+    )
+    if substack_enabled:
+        coverage["expected"] = True
+        if substack_status == "stale":
+            coverage["status"] = "stale"
+            coverage["detail"] += " The expected daily Substack browser export is overdue or has an invalid future timestamp."
+        elif configured and coverage["status"] in {"stale", "unavailable"}:
+            # A healthy export cannot hide an outage in the other expected feed.
+            coverage["status"] = "stale"
+        else:
+            coverage["status"] = "partial"
+        if substack_status == "awaiting_first_export":
+            coverage["detail"] += " Substack browser-export ingestion is enabled but awaits its first successful import."
+        elif export_fresh:
+            coverage["detail"] += " Daily Substack subscriber data comes from an authenticated browser export, not an API."
+        successful = [value for value in (_instant(coverage["last_success"]), exported_at) if value and value <= now]
+        coverage["last_success"] = _iso(max(successful)) if successful else None
+    else:
+        coverage["detail"] += " Automatic Substack browser-export ingestion is not enabled; dated imported history remains usable."
     ids = {contact.pk: email for email, contact in contacts.items()}
     rows = _bounded(BlastDelivery.objects.filter(
         contact_id__in=ids, channel="email", first_clicked_at__gte=since, first_clicked_at__lte=now,
@@ -319,6 +361,16 @@ def _newsletter(contacts, activities, since, now, counts):
         counts["newsletter_clicks"] += 1
     for email, contact in contacts.items():
         attributes = contact.attributes if isinstance(contact.attributes, dict) else {}
+        newsletter = attributes.get("engagement_newsletter")
+        if isinstance(newsletter, dict) and newsletter.get("source") == "substack_export":
+            imported_at = source_time(newsletter.get("exported_at"))
+            current_click = source_time(newsletter.get("last_clicked_at"))
+            if isinstance(imported_at, datetime) and imported_at <= now:
+                counts["substack_export_contacts"] += 1
+                if _inside(current_click, since, now) and _instant(current_click) <= imported_at:
+                    activities[email].append(ActivityEvidence("newsletter", "newsletter_click",
+                        f"newsletter-export-click:{_iso(current_click)}", current_click, False))
+                    counts["substack_clicks"] += 1
         imported = attributes.get("engagement_import")
         columns = imported.get("source_columns") if isinstance(imported, dict) else None
         click = source_time(columns.get("Last clicked at")) if isinstance(columns, dict) else None
@@ -327,7 +379,8 @@ def _newsletter(contacts, activities, since, now, counts):
             counts["newsletter_export_clicks"] += 1
         if isinstance(columns, dict):
             counts["newsletter_export_contacts"] += 1
-    if coverage["status"] == "unavailable" and not configured and counts["newsletter_export_contacts"]:
+    if (coverage["status"] == "unavailable" and not configured and not substack_enabled
+            and (counts["newsletter_export_contacts"] or counts["substack_export_contacts"])):
         coverage.update(status="partial", expected=False)
     return coverage
 

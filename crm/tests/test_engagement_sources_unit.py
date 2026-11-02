@@ -8,7 +8,7 @@ from unittest.mock import patch
 from django.test import SimpleTestCase, override_settings
 
 from crm import engagement_sources as sources
-from crm.engagement_scoring import ActivityEvidence
+from crm.engagement_scoring import ActivityEvidence, score_engagement
 
 NOW = datetime(2026, 11, 3, 1, tzinfo=timezone.utc)
 RECENT = NOW - timedelta(days=5)
@@ -246,6 +246,78 @@ class ActivitySourceTests(SimpleTestCase):
         self.assertEqual(result["coverage"]["newsletter"]["status"], "partial")
         self.assertFalse(result["coverage"]["newsletter"]["expected"])
         self.assertEqual([row.kind for row in result["activities"][EMAIL] if row.source == "newsletter"], ["newsletter_click"])
+
+    @override_settings(CRM_SUBSTACK_ACTIVITY_ENABLED=True)
+    def test_fresh_substack_browser_export_uses_explicit_unverified_clicks_only(self):
+        person = contact()
+        person.attributes["engagement_newsletter"] = {"source": "substack_export", "exported_at": NOW.isoformat(),
+            "sha256": "a" * 64, "last_clicked_at": RECENT.isoformat(), "last_opened_at": NOW.isoformat(), "Comments (30d)": 100}
+        before = deepcopy(person.attributes)
+        result = self.collect(person)
+        coverage = result["coverage"]["newsletter"]
+        self.assertEqual(coverage["status"], "partial")
+        self.assertEqual(coverage["substack_mode"], "browser_export")
+        self.assertEqual(coverage["substack_status"], "fresh")
+        self.assertTrue(coverage["substack_automatic"])
+        self.assertTrue(coverage["substack_export_available"])
+        self.assertFalse(coverage["email_opens_scored"])
+        activity = [item for item in result["activities"][EMAIL] if item.source == "newsletter"]
+        self.assertEqual(activity, [ActivityEvidence("newsletter", "newsletter_click", f"newsletter-export-click:{RECENT.isoformat()}", RECENT, False)])
+        self.assertEqual(person.attributes, before)
+
+    @override_settings(CRM_SUBSTACK_ACTIVITY_ENABLED=True)
+    def test_global_export_freshness_does_not_require_batch_clicks(self):
+        result = self.collect()
+        self.assertFalse(any(item.source == "newsletter" for item in result["activities"][EMAIL]))
+        self.assertTrue(result["coverage"]["newsletter"]["substack_export_available"])
+        self.assertEqual(result["coverage"]["newsletter"]["substack_last_exported_at"], NOW.isoformat())
+
+    @override_settings(CRM_SUBSTACK_ACTIVITY_ENABLED=True)
+    def test_stale_expected_substack_export_defers_even_when_listmonk_is_fresh(self):
+        self.cursor.side_effect = lambda key: (NOW - timedelta(days=3)).isoformat() if key == sources.SUBSTACK_CURSOR_KEY else NOW.isoformat()
+        result = self.collect(contact(**{"Last clicked at": RECENT.isoformat()}))
+        coverage = result["coverage"]["newsletter"]
+        self.assertEqual(coverage["status"], "stale")
+        self.assertTrue(coverage["expected"])
+        self.assertTrue(coverage["substack_automatic"])
+        self.assertFalse(coverage["substack_export_available"])
+        rating = score_engagement(result["activities"][EMAIL], as_of=NOW, coverage=result["coverage"])
+        self.assertFalse(rating["coverage"]["refresh_safe"])
+
+    @override_settings(CRM_SUBSTACK_ACTIVITY_ENABLED=True)
+    def test_before_first_export_is_an_explicit_partial_coverage_gap(self):
+        self.cursor.side_effect = lambda key: None if key == sources.SUBSTACK_CURSOR_KEY else NOW.isoformat()
+        coverage = self.collect()["coverage"]["newsletter"]
+        self.assertEqual(coverage["status"], "partial")
+        self.assertEqual(coverage["substack_status"], "awaiting_first_export")
+        self.assertFalse(coverage["substack_automatic"])
+        self.assertFalse(coverage["substack_export_available"])
+        self.assertIn("awaits its first successful import", coverage["detail"])
+
+    @override_settings(CRM_SUBSTACK_ACTIVITY_ENABLED=True)
+    def test_blank_substack_click_keeps_actual_legacy_click_evidence(self):
+        person = contact(**{"Last clicked at": RECENT.isoformat()})
+        person.attributes["engagement_newsletter"] = {"source": "substack_export", "exported_at": NOW.isoformat(), "last_clicked_at": None}
+        result = self.collect(person)
+        clicks = [item for item in result["activities"][EMAIL] if item.kind == "newsletter_click"]
+        self.assertEqual(len(clicks), 1)
+        self.assertEqual(clicks[0].occurred_at, RECENT)
+        self.assertFalse(clicks[0].human_verified)
+
+    def test_global_export_cursor_recovers_from_audit_and_uses_newest_success(self):
+        self.audit.rows = [{"status": "completed", "exported_at": NOW.isoformat(), "changed": 0, "clicks": 0}]
+        self.cursor.return_value = (NOW - timedelta(days=3)).isoformat()
+        self.assertEqual(sources._substack_export_cursor(), NOW)
+        self.cursor.side_effect = RuntimeError("Cache unavailable")
+        self.assertEqual(sources._substack_export_cursor(), NOW)
+
+    @override_settings(CRM_SUBSTACK_ACTIVITY_ENABLED=True)
+    def test_export_after_refresh_time_is_not_fresh_or_valid_automatic_evidence(self):
+        self.cursor.side_effect = lambda key: (NOW + timedelta(hours=1)).isoformat() if key == sources.SUBSTACK_CURSOR_KEY else NOW.isoformat()
+        coverage = self.collect()["coverage"]["newsletter"]
+        self.assertEqual(coverage["status"], "stale")
+        self.assertFalse(coverage["substack_export_available"])
+        self.assertFalse(coverage["substack_automatic"])
 
     def test_timestamp_validation_keeps_unknown_and_future_activity_out(self):
         self.assertIsNone(sources.source_time("2026-11-02T12:00:00"))
