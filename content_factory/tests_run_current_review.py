@@ -227,6 +227,50 @@ class CurrentReviewTests(TransactionTestCase):
         self.assertEqual(ContentFactoryRun.objects.count(), 1)
         self.assertFalse(Ledger.objects.filter(kind="SPEND").exists())
 
+    def test_earned_body_survives_typed_negative_status_in_selected_journey_and_copy(self):
+        self._assert_earned_body_survives_statuses(("failed", "blocked", "denied"))
+
+    def test_earned_body_survives_typed_cancellation_in_selected_journey_and_copy(self):
+        self._assert_earned_body_survives_statuses(("cancelled",))
+
+    def _assert_earned_body_survives_statuses(self, statuses):
+        from django.db import transaction
+        from .run_execution_control import append_execution_ticket
+        from .run_event_authority import receive_authoritative_run_events
+        from .tests_run_event_authority import batch
+        from .founder_journey_p2 import ready_before_preview
+        with self.reads():
+            project_verified_delivery(self.run.run_id)
+        self.run.refresh_from_db()
+        journey_url = f"/api/v1/my-startup/journey/?company_id={self.company.pk}&runId={self.run.run_id}"
+        for index, status in enumerate(statuses):
+            if index:
+                with transaction.atomic():
+                    append_execution_ticket(self.run, control_key=f"{index:064x}", reason="user_resume")
+            self.assertEqual(receive_authoritative_run_events(batch(self.run, [{"status": "running"},
+                {"type": "failure", "failure": {"code": "worker_unavailable", "stage": "draft"}},
+                {"status": status}])).status_code, 200)
+            self.run.refresh_from_db()
+            self.assertTrue(verified_draft_ready(self.run))
+            self.assertTrue(ready_before_preview(self.run, self.org))
+            before = ContentFactoryRun.objects.values().get(pk=self.run.pk)
+            with patch("community_chat.throttles.StartupScopedThrottle.allow_request", return_value=True):
+                selected = self.client.get(journey_url)
+            self.assertEqual(selected.status_code, 200, selected.data)
+            self.assertEqual(selected.data["article"]["status"], status)
+            self.assertTrue(selected.data["capabilities"]["canCopyDraft"])
+            self.assertIn(selected.data["stage"], {"review", "done"})
+            self.assertFalse(selected.data["capabilities"]["canWriteArticle"])
+            with patch("content_factory.vibe_marketing_views.http_client.request",
+                    return_value=response(self.fixture["article_review_response"])):
+                copied = self.client.post(f"/api/v1/vibe-marketing/runs/{self.run.run_id}/copied/?company_id={self.company.pk}",
+                    {"revision": self.fixture["canonical_export"]["revision"]}, format="json")
+            self.assertEqual(copied.status_code, 200, copied.data)
+            with patch("community_chat.throttles.StartupScopedThrottle.allow_request", return_value=True):
+                done = self.client.get(journey_url)
+            self.assertEqual(done.data["stage"], "done")
+            self.assertEqual(ContentFactoryRun.objects.values().get(pk=self.run.pk), before)
+
     def test_actual_daily_automation_command_merges_backend_facts_without_owned_clocks_or_lost_metadata(self):
         from . import vibe_marketing_views as views
         before = ContentFactoryRun.objects.values().get(pk=self.run.pk)

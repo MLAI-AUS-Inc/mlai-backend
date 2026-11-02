@@ -628,7 +628,21 @@ def project_founder_journey(organization, *, user, company, now=None, run_id=Non
     from . import founder_journey_p2 as p2
     from .p2_foundation import policy_v2_applies, p2_applies
     p2_active = p2_applies(organization)
-    if policy_v2_applies(organization):
+    from .run_reconciliation import authoritative_run
+    from .founder_draft_views import is_delivered_article
+    if (run is not None and run.status in {"failed", "blocked", "cancelled", "denied"}
+            and authoritative_run(run) and is_delivered_article(run)):
+        # A later execution stop cannot revoke the independently earned body.
+        # This affects presentation only; the article DTO retains typed status.
+        live = _live_article(organization, run)
+        if live is not None and _https_or_none(live.live_url):
+            decision = _decide("done", "done", "done_live", next_kind="view_article", run_id=run.run_id,
+                url=_https_or_none(live.live_url))
+        elif copied_or_posted(config, run.run_id):
+            decision = _decide("done", "done", "done_copy_ready", next_kind="view_draft", run_id=run.run_id)
+        else:
+            decision = _decide("review", "your_turn", "review", action="review_draft", run_id=run.run_id)
+    if decision is None and policy_v2_applies(organization):
         queue = writing_facts(run, now=now) if run is not None and run.status == "queued" else None
         decision = p2.run_decision(organization, run, config=config, user=user, now=now, queue=queue)
         if decision is None:
