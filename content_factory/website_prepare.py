@@ -172,7 +172,8 @@ def _cancel_prepare_child(op, config):
             _queue_superseded_setup_cleanup(op, child)
         if child is None or child.status in {"completed", "failed", "blocked", "cancelled", "denied"}:
             continue
-        saved = child.run_request if isinstance(child.run_request, dict) else {}
+        from .website_run_authority import execution_request
+        saved = execution_request(child)
         cancel_operation(config, data={**contract_for(op.connection), "operation_id": saved.get("operation_id"),
             "operation_attempt": saved.get("operation_attempt", 1), "deletion_epoch": deletion_epoch(op.connection)},
             idempotency_key=f"prepare-retry:{op.pk}:{op.payload.get('attempt', 1)}:{child_id}")
@@ -838,7 +839,8 @@ def _unverified_authorization_is_transient(op, child, code, classification, step
     run, so it is resumed (a bounded number of times) instead of waiting for
     Try again. The resumed run re-authorizes each of its actions.
     """
-    if code != UNVERIFIED_AUTHORIZATION_CODE or classification != "repairable":
+    from .website_run_authority import event_owned
+    if event_owned(child) or code != UNVERIFIED_AUTHORIZATION_CODE or classification != "repairable":
         return False
     from .website_connections import scoped_run_contract
     contract, connection = scoped_run_contract(child), op.connection
@@ -853,6 +855,9 @@ def _unverified_authorization_is_transient(op, child, code, classification, step
 
 def _resume_prepare_child(op, child, *, user, context):
     """Resume the saved run through existing guarded control and attempt fencing."""
+    from .website_run_authority import event_owned
+    if event_owned(child):
+        raise WebsiteAuthorityError("run_execution_owned", "Continue this execution from its saved run.", status=409)
     from .vibe_marketing_views import VibeMarketingRunControlView
     from .website_connections import scoped_run_contract
     request = SimpleNamespace(method="POST", user=user, META={}, query_params={}, headers={},

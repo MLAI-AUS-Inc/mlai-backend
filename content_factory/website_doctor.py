@@ -123,7 +123,8 @@ def read_doctor(op, *, scope, source_sha, milestones=None):
         if not identifier or any(item["runId"]==identifier for item in children):
             continue
         child=ContentFactoryRun.objects.filter(run_id=identifier,organization_id=op.connection.organization_id).first()
-        saved=goals.mapping(getattr(child,"run_request",None))
+        from .website_run_authority import execution_request
+        saved=goals.mapping(execution_request(child)) if child else {}
         if child and saved.get("website_connection_id")==str(op.connection_id) and saved.get("connection_generation")==op.generation and saved.get("repository_id")==op.connection.repository_id and saved.get("deletion_epoch")==deletion_epoch(op.connection):
             children.append({"runId":identifier,"status":child.status})
     children = children[:3]

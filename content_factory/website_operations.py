@@ -441,7 +441,8 @@ def cancel_operation(config, *, data, idempotency_key):
 
 def observe_workflow_status(run, payload=None):
     """Acknowledge an accepted worker observation for the current attempt only."""
-    request = run.run_request or {}
+    from .website_run_authority import event_owned, execution_request
+    request = execution_request(run)
     identifier = request.get("operation_id")
     if not identifier:
         return
@@ -453,7 +454,7 @@ def observe_workflow_status(run, payload=None):
             or op.state in {"cancelled", "deleted", "denied"}):
         return
     state = str(run.status)
-    if op.payload.get("resume_pending") and state in {"failed", "blocked"}:
+    if not event_owned(run) and op.payload.get("resume_pending") and state in {"failed", "blocked"}:
         from .run_state import execution_version
         incoming = payload if isinstance(payload, dict) else {}
         incoming_request = incoming.get("run_request") if isinstance(incoming.get("run_request"), dict) else {}
@@ -465,7 +466,7 @@ def observe_workflow_status(run, payload=None):
     state = workflow_operation_state(run)
     if op.state == "completed" and state != op.state:
         return
-    if op.state in {"failed", "blocked"} and state != op.state and state not in {"cancelled", "denied"}:
+    if not event_owned(run) and op.state in {"failed", "blocked"} and state != op.state and state not in {"cancelled", "denied"}:
         return
     op.state = state
     op.payload = {**op.payload, "resume_pending": False}

@@ -16,7 +16,8 @@ def _child(op, connection):
         workflow="article_system_setup").first()
     if not run:
         return None
-    saved = mapping(run.run_request)
+    from .website_run_authority import execution_request
+    saved = mapping(execution_request(run))
     if (saved.get("website_connection_id") != str(connection.pk)
             or saved.get("connection_generation") != connection.generation
             or saved.get("repository_id") != connection.repository_id
@@ -112,7 +113,8 @@ def collect_proofs(op, context, config, journey, *, now):
 
     child = _child(op, connection)
     if child:
-        result, saved = mapping(child.result), mapping(child.run_request)
+        from .website_run_authority import execution_request
+        result, saved = mapping(child.result), mapping(execution_request(child))
         head = result.get("branch_commit_sha")
         preview = mapping(result.get("directory_quality_verification"))
         exact = (isinstance(head, str) and SHA.fullmatch(head)

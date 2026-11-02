@@ -113,6 +113,11 @@ def goal_journey(op, context, config, journey, *, now):
     from .website_setup_consent import valid as valid_consent
     if goal.get("consent") is not None and not valid_consent(goal) or goal.get("target") == "first_article_live" and not valid_consent(goal):
         raise WebsiteAuthorityError("website_prepare_blocked", "The saved setup consent has changed. Review the current goal choices.")
+    from .website_run_authority import owned_goal_child, execution_request, wait_for_execution
+    owned_child = owned_goal_child(op, include_completed=False)
+    if owned_child is not None and owned_child.status in {"failed", "blocked", "cancelled", "denied"}:
+        wait_for_execution(op, owned_child, now=now)
+        return {**journey, "nextAction": None}
     try:
         proofs, source = collect_proofs(op, context, config, journey, now=now)
     except (ValueError, TypeError, OverflowError) as exc:
@@ -120,7 +125,7 @@ def goal_journey(op, context, config, journey, *, now):
     if goal.get("strategy_requires_candidate"):
         from .website_goal_evidence import _child
         child = _child(op, config.website_connection)
-        original = goals.mapping(getattr(child, "run_request", None))
+        original = goals.mapping(execution_request(child)) if child else {}
         pin = goals.mapping(goal.get("strategy_pin"))
         fresh_candidate = (goals.mapping(proofs.get("integrated")).get("kind") == "setup_candidate"
             and original.get("strategy_goal_id") == goal["goal_id"]
@@ -144,6 +149,10 @@ def goal_journey(op, context, config, journey, *, now):
     op.receipt = {**op.receipt, "goal": goal}
     milestone = goals.next_milestone(goal)
     op._goal_milestone = milestone
+    if owned_child is not None and (milestone in {"access", "understood"}
+            or execution_request(owned_child).get("expected_source_sha") != source):
+        wait_for_execution(op, owned_child, now=now, source_changed=True)
+        return {**journey, "nextAction": None}
     action = goals.ACTION_FOR.get(milestone)
     if milestone and budget.enabled():
         reason = budget.exhaustion(goal, now=now, action=None if getattr(op, "_goal_has_active_child", False) else action)
@@ -220,6 +229,12 @@ def finish_goal(op, *, now=None):
             fresh = occurrence not in goal.get("failure_occurrences", [])
             goal = goals.record_failure(goal, failure_class=classification,
                 fingerprint=failure.get("failure_fingerprint"), occurrence=occurrence)
+            from .website_run_authority import owned_goal_child, wait_for_execution
+            owned_child = owned_goal_child(op)
+            if owned_child is not None and op.state != "completed" and not goals.complete(goal):
+                op.receipt["goal"] = goal
+                wait_for_execution(op, owned_child, now=now)
+                return
             from . import website_goal_budget as budget, website_strategy as strategy
             effective = classification
             if budget.enabled():
@@ -279,6 +294,11 @@ def wake_goal_for_source(config, *, company_id, user, now):
         if not goals.enrolled(connection.organization_id) or latest.state in {"cancelled", "denied", "deleted"}:
             return None
         if goal.get("current_source_sha") == connection.verified_sha:
+            return latest
+        from .website_run_authority import owned_goal_child
+        if owned_goal_child(latest, include_completed=False) is not None:
+            # Source refresh and repair belong to the current ticket controller.
+            # Keep the original goal/child/consent rather than minting a new key.
             return latest
         if latest.state in TERMINAL:
             return start_prepare(config, company_id=company_id, user=user, force_successor=True, target=goal.get("target", "ready"))
@@ -351,7 +371,8 @@ def account_child_usage(op, goal):
         if isinstance(value := goals.mapping(op.receipt).get(key), str) and value}
     for identifier in sorted(identifiers):
         child = ContentFactoryRun.objects.filter(run_id=identifier, organization_id=op.connection.organization_id).first()
-        saved = goals.mapping(getattr(child, "run_request", None))
+        from .website_run_authority import execution_request
+        saved = goals.mapping(execution_request(child)) if child else {}
         if not child or (saved.get("website_connection_id") != str(op.connection_id)
                 or saved.get("connection_generation") != op.generation or saved.get("repository_id") != op.connection.repository_id
                 or saved.get("deletion_epoch") != deletion_epoch(op.connection)):
@@ -383,6 +404,11 @@ def account_child_usage(op, goal):
 
 def retry_goal_action(op, goal, *, now, occurrence, step=None):
     """Retry a repairable action on its rung with a distinct, durable attempt key."""
+    from .website_run_authority import owned_goal_child, wait_for_execution
+    owned_child = owned_goal_child(op)
+    if owned_child is not None:
+        wait_for_execution(op, owned_child, now=now)
+        return goal
     goal = retain_child_references(goal, op.receipt)
     step = step or op.receipt.get("current_step") or "setup"
     op.payload = {**op.payload, "attempt": op.payload.get("attempt", 1) + 1,
