@@ -14794,6 +14794,7 @@ def _queue_content_factory_run_authorized(*, endpoint, workflow, context, config
         payload["client_request_id"] = dispatch_key
     keyed_dispatch = endpoint in CONTENT_FACTORY_KEYED_DISPATCH_ENDPOINTS
     dispatch_unresolved = False
+    confirmed_dispatch_outcome = None
     portable_reservation = None
     editorial_rejection = None
     requires_remote = workflow == "startup_autofill" or _remote_required_for_workflow(workflow)
@@ -14911,7 +14912,14 @@ def _queue_content_factory_run_authorized(*, endpoint, workflow, context, config
                 dispatch_key,
             )
         elif response is not None and response.status_code in (200, 202):
-            remote_data = response.json() if response.content else {}
+            try:
+                accepted_payload = response.json() if response.content else {}
+            except (TypeError, ValueError):
+                if not (requires_remote and keyed_dispatch):
+                    raise
+                accepted_payload = {}
+            remote_data = (accepted_payload if isinstance(accepted_payload, dict)
+                or not (requires_remote and keyed_dispatch) else {})
             run_id = str(remote_data.get("run_id") or remote_data.get("job_id") or remote_data.get("task_id") or "").strip()
             remote_run_id = run_id
             logger.info(
@@ -14923,15 +14931,71 @@ def _queue_content_factory_run_authorized(*, endpoint, workflow, context, config
                 bool(remote_data.get("idempotent")) if isinstance(remote_data, dict) else False,
             )
             if requires_remote and not run_id:
-                remote_data = _blocked_worker_payload(
-                    workflow=workflow,
-                    detail="Content Factory did not return a run id.",
-                    technical_error="Content Factory queue response did not include run_id, job_id, or task_id.",
-                    status_code=response.status_code,
-                    response_payload=remote_data,
-                    diagnostics=_content_factory_diagnostics(remote_config, workflow=workflow, endpoint=endpoint),
-                    retryable=True,
-                )
+                # An accepted response without its identity is still an uncertain
+                # dispatch. Resolve the original key; never manufacture a child
+                # or treat a missing field as proof that no work was accepted.
+                outcome, lookup_payload = ("unknown", {})
+                if keyed_dispatch:
+                    outcome, lookup_payload = _lookup_content_factory_dispatch_by_key(remote_config, dispatch_key)
+                    expected_receipt = {"client_request_id": dispatch_key, "domain": context.organization.domain,
+                        "workflow": workflow, "endpoint": endpoint}
+                    if any(lookup_payload.get(field) is not None and lookup_payload[field] != expected
+                            for field, expected in expected_receipt.items()):
+                        outcome = "unknown"
+                if outcome == "started":
+                    observed_id = str(lookup_payload["run_id"]).strip()
+                    provisional = ContentFactoryRun.objects.filter(run_id=dispatch_key).first()
+                    observed = ContentFactoryRun.objects.filter(run_id=observed_id).first()
+                    local_rows = [row for row in (provisional, observed) if row is not None]
+                    if any((row.organization_id is not None and row.organization_id != context.organization.pk)
+                            or (row.domain and row.domain != context.organization.domain)
+                            or (row.workflow and row.workflow != workflow)
+                            or (isinstance(row.run_request, dict) and row.run_request.get("client_request_id")
+                                and row.run_request["client_request_id"] != dispatch_key) for row in local_rows):
+                        outcome = "unknown"
+                    else:
+                        bound = bind_dispatch_token_run(client_request_id=dispatch_key, remote_run_id=observed_id)
+                        if provisional is not None and observed_id != dispatch_key and bound is None:
+                            # A concurrent authenticated callback can win the bind.
+                            bound = ContentFactoryRun.objects.filter(run_id=observed_id,
+                                organization=context.organization, domain=context.organization.domain,
+                                workflow=workflow, run_request__client_request_id=dispatch_key).first()
+                            if bound is None:
+                                outcome = "unknown"
+                        if outcome == "started":
+                            acknowledged = bound or observed
+                            if acknowledged is not None:
+                                with transaction.atomic():
+                                    acknowledged = ContentFactoryRun.objects.select_for_update().get(pk=acknowledged.pk)
+                                    request = dict(acknowledged.run_request or {})
+                                    if request.get("client_request_id") == dispatch_key:
+                                        request.pop("dispatch_pending_resolution", None)
+                                        ContentFactoryRun.objects.filter(pk=acknowledged.pk).update(run_request=request)
+                if outcome == "started":
+                    remote_run_id = str(lookup_payload["run_id"]).strip()
+                    remote_data = {"run_id": remote_run_id,
+                        "status": lookup_payload.get("run_status") or lookup_payload.get("status") or "queued",
+                        "client_request_id": dispatch_key, "dispatch_recovered_by_key": True}
+                    payload.pop("dispatch_pending_resolution", None)
+                else:
+                    remote_data = _blocked_worker_payload(
+                        workflow=workflow,
+                        detail="Content Factory did not return a run id.",
+                        technical_error="Content Factory queue response did not include run_id, job_id, or task_id.",
+                        status_code=response.status_code,
+                        response_payload=remote_data,
+                        diagnostics=_content_factory_diagnostics(remote_config, workflow=workflow, endpoint=endpoint),
+                        retryable=True,
+                    )
+                    if outcome in {"received_not_started", "rejected"}:
+                        # Keep legacy receipt vocabulary in its existing audited
+                        # writer, after the ordinary local/refund transaction.
+                        confirmed_dispatch_outcome = (outcome, lookup_payload)
+                        payload["dispatch_pending_resolution"] = False
+                    else:
+                        # Immediate absence can race an in-flight accepted POST;
+                        # the existing keyed grace resolver owns later no-work proof.
+                        dispatch_unresolved = keyed_dispatch
         elif response is not None:
             try:
                 response_payload = response.json()
@@ -15102,7 +15166,10 @@ def _queue_content_factory_run_authorized(*, endpoint, workflow, context, config
                 run.result = {**(run.result or {}), "reconciliation_refund_pending": True}
                 run.save(update_fields=["result", "updated_at"])
                 logger.warning("content_factory_late_dispatch_refund_pending run_id=%s", run.run_id)
-        return run
+    if confirmed_dispatch_outcome is not None:
+        outcome, lookup_payload = confirmed_dispatch_outcome
+        return _fail_unconfirmed_dispatch_run(run, outcome=outcome, lookup_payload=lookup_payload)
+    return run
 
 
 def _run_start_payload(run):
