@@ -4461,14 +4461,13 @@ class ContentFactoryCallbackView(APIView):
         except (TypeError, ValueError):
             milestone_count = 0
 
-        job = self._update_content_factory_job(
-            job_id=job_id,
-            domain=domain,
-            slack_user_id=slack_user_id,
-            status_value=status_value,
-        )
-
-        posted_progress_ids = list(job.posted_progress_ids or [])
+        # Decide whether this observation is new before writing Job facts. The
+        # execution dispatcher holds the existing Run lock around this handler.
+        # Updating first would let an ignored replay reopen a cancelled Job,
+        # replace its owner and refresh its timestamps (including the mirror).
+        from content_factory.models import ContentFactoryJob
+        job = ContentFactoryJob.objects.filter(job_id=job_id).first()
+        posted_progress_ids = list(job.posted_progress_ids or []) if job else []
         if progress_id in posted_progress_ids:
             logger.info("Ignoring duplicate %s callback for %s (%s)", event_name, job_id, progress_id)
             return Response(
@@ -4481,7 +4480,7 @@ class ContentFactoryCallbackView(APIView):
                 status=status.HTTP_200_OK,
             )
 
-        if milestone_index and milestone_index <= int(job.last_progress_milestone_index or 0):
+        if job and milestone_index and milestone_index <= int(job.last_progress_milestone_index or 0):
             logger.info(
                 "Ignoring stale %s callback for %s (%s <= %s)",
                 event_name,
@@ -4498,6 +4497,13 @@ class ContentFactoryCallbackView(APIView):
                 },
                 status=status.HTTP_200_OK,
             )
+
+        job = self._update_content_factory_job(
+            job_id=job_id,
+            domain=domain,
+            slack_user_id=slack_user_id,
+            status_value=status_value,
+        )
 
         channel_id, _root_message_ts, thread_ts = self._resolve_job_thread_context(job=job, data=data)
         if not channel_id or not thread_ts:
