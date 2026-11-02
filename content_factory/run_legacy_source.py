@@ -8,12 +8,15 @@ from copy import deepcopy
 import hashlib
 import json
 import re
+import time
 from urllib.parse import quote
 
 from .run_ownership import RunOwnershipConflict, owner_receipt
 
 _FIELDS = frozenset({"schema_version", "source_run_id", "workflow", "domain", "github_repo",
     "request_sha256", "content_sha256", "descriptor_sha256"})
+MAX_DESCRIPTOR_BYTES = 16 * 1024
+DESCRIPTOR_DEADLINE_SECONDS = 15
 _SHA = re.compile(r"[a-f0-9]{64}\Z")
 _ALIASES = {
     "scan": {"repo_scan"}, "content_factory_scan": {"repo_scan"},
@@ -53,13 +56,30 @@ def fetch_legacy_source(run):
     config = views._content_factory_remote_config()
     if not config["enabled"]:
         raise RunOwnershipConflict("The original legacy source is temporarily unavailable.")
+    response = None
+    deadline = time.monotonic() + DESCRIPTOR_DEADLINE_SECONDS
     try:
         response = views.http_client.get(
             f"{config['base_url']}/api/runs/{quote(run.run_id, safe='')}/continuation-source",
-            headers=views._content_factory_headers(), timeout=(5, 15))
+            headers=views._content_factory_headers(), timeout=(5, 15), stream=True, allow_redirects=False)
         if response.status_code != 200:
             raise RunOwnershipConflict("The original legacy source could not be verified.")
-        value = response.json()
+        length = response.headers.get("Content-Length")
+        if length is not None and (not str(length).isdigit() or int(length) > MAX_DESCRIPTOR_BYTES):
+            raise RunOwnershipConflict("The original legacy source exceeds its supported bounds.")
+        raw = bytearray()
+        # One-byte iteration also bounds a slow trickle: requests' read timeout
+        # alone resets for every received byte. Check the total deadline too.
+        for chunk in response.iter_content(chunk_size=1):
+            if time.monotonic() > deadline or len(raw) + len(chunk) > MAX_DESCRIPTOR_BYTES:
+                raise RunOwnershipConflict("The original legacy source exceeds its supported bounds.")
+            raw.extend(chunk)
+        if time.monotonic() > deadline:
+            raise RunOwnershipConflict("The original legacy source exceeded its verification deadline.")
+        value = json.loads(raw.decode("utf-8"))
     except (views.http_client.RequestException, ValueError) as exc:
         raise RunOwnershipConflict("The original legacy source could not be verified.") from exc
+    finally:
+        if response is not None:
+            response.close()
     return validate_legacy_source(current, value)

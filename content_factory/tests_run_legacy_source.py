@@ -80,7 +80,9 @@ class LegacySourceFetchTests(TransactionTestCase):
             self.assertEqual(url, "http://synthetic-worker/api/runs/synthetic-legacy-scan/continuation-source")
             self.assertEqual(kwargs["headers"], {"X-API-KEY": "synthetic-internal-key"})
             self.assertEqual(kwargs["timeout"], (5, 15))
-            return Mock(status_code=200, json=Mock(return_value=self.descriptor))
+            self.assertIs(kwargs["stream"], True)
+            self.assertIs(kwargs["allow_redirects"], False)
+            return Mock(status_code=200, headers={}, iter_content=Mock(return_value=iter([json.dumps(self.descriptor).encode()])))
         with patch("content_factory.vibe_marketing_views._content_factory_remote_config", return_value={"enabled": True, "base_url": "http://synthetic-worker"}), \
                 patch("content_factory.vibe_marketing_views._content_factory_headers", return_value={"X-API-KEY": "synthetic-internal-key"}), \
                 patch("content_factory.vibe_marketing_views.http_client.get", side_effect=provider):
@@ -92,3 +94,15 @@ class LegacySourceFetchTests(TransactionTestCase):
                 patch("content_factory.vibe_marketing_views.http_client.get", return_value=Mock(status_code=404)):
             with self.assertRaises(RunOwnershipConflict):
                 fetch_legacy_source(self.run)
+
+    def test_size_and_total_deadline_are_bounded_and_always_close_response(self):
+        from .run_legacy_source import MAX_DESCRIPTOR_BYTES
+        for chunks, clock in [([b"x" * (MAX_DESCRIPTOR_BYTES + 1)], [0, 0]),
+                ([b"{"], [0, 16])]:
+            response = Mock(status_code=200, headers={}, iter_content=Mock(return_value=iter(chunks)))
+            with patch("content_factory.vibe_marketing_views._content_factory_remote_config", return_value={"enabled": True, "base_url": "http://synthetic-worker"}), \
+                    patch("content_factory.vibe_marketing_views.http_client.get", return_value=response), \
+                    patch("content_factory.run_legacy_source.time.monotonic", side_effect=clock):
+                with self.assertRaises(RunOwnershipConflict):
+                    fetch_legacy_source(self.run)
+            response.close.assert_called_once()
