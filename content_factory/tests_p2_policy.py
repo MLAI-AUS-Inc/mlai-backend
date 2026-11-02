@@ -189,8 +189,8 @@ class PolicyTests(TransactionTestCase):
         run = self.run_for('PUBLISHING_ADAPTER_REQUIRED')
         with patch('content_factory.vibe_marketing_views._call_content_factory_run_action', side_effect=[
                 {'status': 'pending', 'reason': 'article_worker_active'}, {'status': 'queued'}]) as remote:
-            for _ in range(2):
-                receipt = channel_switch.switch_to_copy_ready(run=run, reason='strategy', now=self.now)
+            for attempt in range(2):
+                receipt = channel_switch.switch_to_copy_ready(run=run, reason='strategy', now=self.now + timedelta(minutes=3*attempt))
                 self.assertEqual(receipt['dispatch_state'], 'pending')
         self.assertEqual(remote.call_count, 2)
 
