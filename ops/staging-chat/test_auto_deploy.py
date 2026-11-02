@@ -272,7 +272,7 @@ class ReadinessTests(AutoDeployTests):
         calls=[]
         def smoke():
             calls.append(1)
-            if len(calls)==1:raise module.Failure('signed-in-check')
+            if len(calls)==2:raise module.Failure('signed-in-check')
         self.c.smoke=smoke
         self.assertEqual(self.c.tick(),'failed')
         self.assertEqual(self.c.load()['active_sha'],'0'*40)
@@ -326,9 +326,51 @@ class ReadinessTests(AutoDeployTests):
         import hashlib
         check=module.Controller({**self.cfg,'smoke_hash':hashlib.sha256(b'approved helper').hexdigest()})
         check.values=lambda path: {'STAGING_API_SOURCE_SHA':'a'*40}
-        check.run=lambda args,**kw: self.assertEqual(args[-2:],['--sha','a'*40]) or ''
+        check.run=lambda args,**kw: self.assertEqual(args[-2:],['--sha','a'*40]) or '{"ok":true}'
         stat=type('Stat',(),{'st_uid':0,'st_mode':0o600})()
         with patch.object(module.Path,'is_symlink',return_value=False),patch.object(module.Path,'stat',return_value=stat),patch.object(module.Path,'read_bytes',return_value=b'approved helper'),patch.object(module.Path,'read_text',return_value='STAGING_API_SOURCE_SHA='+'a'*40),patch.object(module,'private_file'):
             check.smoke()
             check.cfg['smoke_hash']='0'*64
             with self.assertRaisesRegex(module.Failure,'installed-smoke'):check.smoke()
+
+    def test_failed_current_auth_probe_waits_before_retry(self):
+        self.c.tick();self.now=1400;calls=[]
+        def failed():
+            calls.append(1);raise module.Failure('signed-in-check')
+        self.c.smoke=failed
+        self.assertEqual(self.c.tick(),'failed')
+        self.now=1445
+        self.assertEqual(self.c.tick(),'waiting')
+        self.assertEqual(len(calls),1)
+        self.assertEqual(self.c.status()['readiness'],'needs-attention')
+        self.now=2001
+        self.assertEqual(self.c.tick(),'failed')
+        self.assertEqual(len(calls),2)
+
+    def test_inflight_candidate_status_never_claims_previous_release_is_ready(self):
+        self.c.tick();self.tip='b'*40;seen=[]
+        self.c.smoke=lambda:seen.append(self.c.status().copy())
+        self.assertEqual(self.c.tick(),'deployed')
+        candidate_checks=[s for s in seen if s['desired_sha']=='b'*40]
+        self.assertTrue(candidate_checks)
+        self.assertTrue(all(s['readiness']!='ready' for s in candidate_checks))
+
+    def test_invalid_probe_credentials_block_before_build_or_activation(self):
+        self.c.smoke=lambda:(_ for _ in ()).throw(module.Failure('signed-in-check'))
+        self.assertEqual(self.c.tick(),'failed')
+        self.assertEqual(self.built,[])
+        self.assertEqual(self.activations,[])
+
+    def test_probe_account_failure_is_visible_without_secret_detail(self):
+        self.c.smoke=lambda:(_ for _ in ()).throw(module.Failure('smoke-account'))
+        self.c.tick()
+        self.assertEqual(self.c.status()['reason'],'smoke-account')
+
+    def test_operator_pause_and_rollback_failure_publish_attention_immediately(self):
+        self.c.tick();self.c.pause()
+        self.assertEqual(self.c.status()['readiness'],'needs-attention')
+        self.c.resume();self.tip='b'*40
+        self.c.activate=lambda p:(_ for _ in ()).throw(module.Failure('activation'))
+        self.assertEqual(self.c.tick(),'paused')
+        self.assertEqual(self.c.status()['readiness'],'needs-attention')
+        self.assertTrue(self.c.status()['recovery_pending'])

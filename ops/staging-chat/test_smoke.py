@@ -14,7 +14,7 @@ class SmokeTests(unittest.TestCase):
         def request(path, body=None):
             calls.append((path,body))
             if path.endswith('/build/'):return {'environment':'chat-staging','release':'a'*12}
-            return {}
+            return {'email':'smoke@staging.mlai.au','authenticated':True,'profile':{},'points':{},'feature_flags':{},'mentors':[]}
         result=m.check({'email':'smoke@staging.mlai.au','password':'private','public_key':'b'*64,'installation_id':'88f58ea6-3968-4534-a27d-d7335554fd1a'},'a'*40,request)
         self.assertEqual(result,{'ok':True,'check':'signed-in','release':'a'*12})
         self.assertEqual(calls[0][1]['client_id'],'mlai-chat-web')
@@ -25,7 +25,8 @@ class SmokeTests(unittest.TestCase):
         calls=[]
         def request(path,body=None):
             calls.append(path)
-            return {'environment':'chat-staging','release':'b'*12}
+            if path.endswith('/build/'):return {'environment':'chat-staging','release':'b'*12}
+            return {'email':'smoke@staging.mlai.au','authenticated':True,'profile':{},'points':{},'feature_flags':{},'mentors':[]}
         with self.assertRaisesRegex(m.SmokeFailure,'release'):m.check({'email':'smoke@staging.mlai.au','password':'p','public_key':'b'*64,'installation_id':'88f58ea6-3968-4534-a27d-d7335554fd1a'},'a'*40,request)
         self.assertEqual(calls[-1],'/community-chat/auth/session/logout/')
     def test_invalid_target_or_credentials_never_sends(self):
@@ -41,3 +42,18 @@ class SmokeTests(unittest.TestCase):
             with self.assertRaises(m.SmokeFailure):m.read_credentials(p)
             p.chmod(0o600);link=Path(d)/'link';link.symlink_to(p)
             with self.assertRaises(m.SmokeFailure):m.read_credentials(link)
+
+    def test_failure_categories_are_allowlisted_without_raw_messages(self):
+        self.assertEqual(m.failure_category(m.SmokeFailure('credentials')),'configuration')
+        self.assertEqual(m.failure_category(m.SmokeFailure('release')),'release')
+        self.assertEqual(m.failure_category(RuntimeError('password=secret')),'service')
+        self.assertEqual(m.failure_category(m.SmokeFailure('account')),'account')
+    def test_core_payload_contract_rejects_empty_success_body(self):
+        with self.assertRaisesRegex(m.SmokeFailure,'core-pages'):m.validate_payload('/community-chat/account/',{},'smoke@staging.mlai.au')
+        with self.assertRaisesRegex(m.SmokeFailure,'account'):m.validate_payload('/auth/me/',{'email':'someone@staging.mlai.au'},'smoke@staging.mlai.au')
+
+    def test_malformed_private_config_is_configuration_failure(self):
+        with tempfile.TemporaryDirectory() as d:
+            p=Path(d)/'secret';p.write_text('invalid');p.chmod(0o600)
+            with self.assertRaises(m.SmokeFailure) as error:m.read_credentials(p)
+            self.assertEqual(m.failure_category(error.exception),'configuration')

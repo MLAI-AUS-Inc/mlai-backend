@@ -88,16 +88,24 @@ class Controller:
             lines=dict(line.split('=',1) for line in backend.read_text().splitlines() if '=' in line and not line.startswith('#'))
             sha=lines['STAGING_API_SOURCE_SHA']
         if not SHA.fullmatch(sha):raise Failure('smoke-release')
-        self.run(['python3',str(path),'--sha',sha],timeout=150)
+        result=json.loads(self.run(['python3',str(path),'--report','--sha',sha],timeout=150))
+        if result.get('ok') is not True:
+            category=result.get('category')
+            if category not in {'configuration','account','release','core-pages','browser-access'}:category='service'
+            raise Failure('smoke-'+category)
 
     def verify_current(self,state):
         try:self.health()
         except Failure:
             # Repair the pinned current containers once; never change accounts/origins.
             self.activate(self.env);self.health()
+        if state.get('readiness')=='needs-attention' and self.clock()-state.get('last_smoke_attempt',0)<300:
+            return False
         if self.clock()-state.get('last_smoke_at',0)>=300 or not state.get('last_smoke_at'):
+            state.update(last_smoke_attempt=self.clock(),readiness='checking');self.save(state)
             self.smoke();state['last_smoke_at']=self.clock()
         state.update(readiness='ready',last_checked_at=self.clock(),reason='')
+        return True
 
 
     @contextlib.contextmanager
@@ -257,8 +265,8 @@ class Controller:
             result=self.run(['curl','--noproxy','*','--fail','--silent','--show-error','--max-time','15','--output','/dev/null','--write-out','%{http_code}','--resolve',host+':443:127.0.0.1','https://'+host+path],timeout=20).strip()
             if result!='200':raise Failure('https-health')
 
-    def mark_failure(self,state,sha,outcome):
-        state.update(desired_sha=sha,outcome=outcome,failed_sha=sha,retry_at=self.clock()+600,readiness='needs-attention',last_checked_at=self.clock(),reason='deployment-or-readiness-check')
+    def mark_failure(self,state,sha,outcome,reason='deployment-or-readiness-check'):
+        state.update(desired_sha=sha,outcome=outcome,failed_sha=sha,retry_at=self.clock()+600,readiness='needs-attention',last_checked_at=self.clock(),reason=reason)
         self.save(state)
 
     def recover(self):
@@ -279,7 +287,7 @@ class Controller:
             if self.journal.exists():
                 try:self.recover()
                 except (Failure,ValueError,OSError,KeyError):
-                    self.write_bytes(self.paused,b'recovery-failed\n');return 'paused'
+                    self.write_bytes(self.paused,b'recovery-failed\n');self.report_paused('recovery-failed');return 'paused'
             if self.peer_recovery_pending() or self.paused.exists():
                 state=self.load();result='paused' if self.paused.exists() else 'peer-recovery'
                 state.update(outcome=result,readiness='needs-attention',last_checked_at=self.clock(),reason=result);self.save(state);return result
@@ -287,12 +295,15 @@ class Controller:
             try:
                 sha=self.fetch();state['desired_sha']=sha
                 if sha==state['active_sha']:
-                    self.verify_current(state);state['outcome']='unchanged';self.save(state);return 'unchanged'
+                    verified=self.verify_current(state);result='unchanged' if verified else 'waiting'
+                    state['outcome']=result;self.save(state);return result
                 if sha==state.get('incompatible_sha'):return 'incompatible'
                 if sha==state.get('failed_sha') and self.clock()<state.get('retry_at',0):return 'waiting'
                 if shutil.disk_usage(self.root).free < 5*1024**3:raise Failure('disk-capacity')
                 source=self.checkout(sha);self.compatible(source)
                 self.running(self.values(self.env))
+                state.update(outcome='checking',readiness='checking',last_checked_at=self.clock(),last_smoke_attempt=self.clock());self.save(state)
+                self.smoke()  # Preflight the current account/probe before touching a candidate.
                 release=self.releases/sha;release.mkdir(mode=0o700,exist_ok=True)
                 candidate=release/'candidate.env'
                 self.build(sha,source,candidate)
@@ -305,24 +316,29 @@ class Controller:
                 previous=release/'previous.env';self.write_bytes(previous,self.env.read_bytes())
                 old=self.values(previous)
                 self.write_json(self.journal,{'previous_env':str(previous),'candidate_env':str(candidate),'previous_sha':old['STAGING_API_SOURCE_SHA'],'previous_image':old['STAGING_API_IMAGE_ID'],'candidate_sha':sha,'candidate_image':values['STAGING_API_IMAGE_ID'],'previous_state':state})
+                state.update(outcome='activating',readiness='checking');self.save(state)
                 self.install_env(candidate);self.activate(self.env);self.health();self.smoke()
                 state.update(active_sha=sha,active_image=values['STAGING_API_IMAGE_ID'],previous={'sha':old['STAGING_API_SOURCE_SHA'],'image':old['STAGING_API_IMAGE_ID'],'env':str(previous)},outcome='deployed',failed_sha='',retry_at=0,incompatible_sha='',reason='',readiness='ready',last_successful_sha=sha,last_successful_at=self.clock(),last_checked_at=self.clock(),last_smoke_at=self.clock())
                 self.save(state);self.journal.unlink();self.save(state);self.cleanup();return 'deployed'
             except Incompatible as exc:
                 state.update(desired_sha=sha,incompatible_sha=sha,outcome='incompatible',reason=str(exc),readiness='needs-attention',last_checked_at=self.clock());self.save(state);return 'incompatible'
-            except (Failure,ValueError,OSError,KeyError):
+            except (Failure,ValueError,OSError,KeyError) as error:
                 if self.journal.exists():
                     try:self.recover()
                     except (Failure,ValueError,OSError,KeyError):
-                        self.write_bytes(self.paused,b'rollback-failed\n');return 'paused'
+                        self.write_bytes(self.paused,b'rollback-failed\n');self.report_paused('rollback-failed');return 'paused'
                 # A failed activation must never advance the successful image/SHA.
-                self.mark_failure(self.load(),sha,'failed');return 'failed'
+                reason=str(error) if str(error) in {'smoke-configuration','smoke-account','smoke-release','smoke-core-pages','smoke-browser-access','smoke-service','installed-smoke'} else 'deployment-or-readiness-check'
+                self.mark_failure(self.load(),sha,'failed',reason);return 'failed'
+
+    def report_paused(self,reason):
+        state=self.load();state.update(outcome='paused',readiness='needs-attention',reason=reason,last_checked_at=self.clock());self.save(state)
 
     def pause(self):
         self.validate()
         # Persist before waiting: an in-flight build also checks this before activation.
         self.write_bytes(self.paused,b'operator\n')
-        with self.locked(blocking=True,host=False):pass
+        with self.locked(blocking=True,host=False):self.report_paused('operator')
         return 'paused'
 
     def resume(self):

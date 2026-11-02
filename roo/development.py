@@ -38,7 +38,10 @@ def read_staging_status(directory=None, *, now=None, release=None):
             elif data.get('paused') or data.get('recovery_pending') or data.get('readiness')=='needs-attention':
                 status='needs-attention'
                 if data.get('outcome')=='incompatible':action='A deployment change needs operator review.'
-                else:action='Automatic checks found a problem. The operator needs to investigate.'
+                elif data.get('reason') in {'smoke-configuration','installed-smoke'}:action='The automatic check configuration needs operator attention.'
+                elif data.get('reason')=='smoke-account':action='The staging check account needs operator attention. Your account has not been changed.'
+                elif data.get('reason')=='smoke-browser-access':action='Staging browser sign-in checks failed. The operator needs to investigate.'
+                else:action='Automatic service checks found a problem. The operator needs to investigate.'
             elif component=='backend' and release not in (sha,sha[:12]):status='checking'
             elif desired!=sha:status='checking'
             elif data.get('readiness')=='ready':status='ready'
