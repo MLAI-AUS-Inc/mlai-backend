@@ -15295,6 +15295,7 @@ def _call_content_factory_run_action(
     preserve_run_clock=False,
 ):
     require_unlocked_remote_call()
+    admitted_child = None
     if action not in {"cancel", "deny"}:
         from .portable_drafts import portable_run_control_allowed
         scoped_run = ContentFactoryRun.objects.filter(run_id=run_id).first()
@@ -15318,6 +15319,18 @@ def _call_content_factory_run_action(
                     payload.update(connection_contract(saved))
             except WebsiteAuthorityError as exc:
                 return {**exc.as_dict(), "status": "blocked", "content_factory_status_code": exc.status}
+        if action == "approve" and scoped_run and scoped_run.workflow in SCAN_WORKFLOWS | {"scan"}:
+            from .run_child_admission import prepare_scan_child_dispatch
+            from .run_ownership import RunOwnershipConflict, owner_receipt
+            if owner_receipt(scoped_run) is not None:
+                from integrations.services.github_installations import resolve_user_for_actor_id
+                actor = str(payload.get("requested_by_slack_user_id") or payload.get("slack_user_id") or "")
+                try:
+                    admitted_child = prepare_scan_child_dispatch(run=scoped_run,
+                        user=resolve_user_for_actor_id(actor), actor_id=actor, payload=payload)
+                except (RunOwnershipConflict, WebsiteAuthorityError):
+                    return {"status": "blocked", "error": "The scan approval or current website permission changed.",
+                            "content_factory_status_code": 409, "retryable": False}
     remote_config = _content_factory_remote_config()
     if not remote_config["enabled"]:
         technical_error = _content_factory_unavailable_message(remote_config)
@@ -15343,6 +15356,11 @@ def _call_content_factory_run_action(
             timeout=timeout,
         )
     except http_client.RequestException as exc:
+        if admitted_child is not None:
+            from .dispatch_admission import resolve_dispatch_outcome
+            holding = resolve_dispatch_outcome(admitted_child)
+            return {"status": "action_pending", "action": action, "child_run_id": holding.json()["run_id"],
+                    "child_dispatch_pending_resolution": True, "retryable": True}
         if transport_errors_are_pending:
             return {
                 "status": "action_pending",
@@ -15366,7 +15384,19 @@ def _call_content_factory_run_action(
         )
 
     if response.status_code in (200, 202):
-        return response.json() if response.content else {}
+        try:
+            data = response.json() if response.content else {}
+        except ValueError:
+            if admitted_child is None:
+                raise
+            from .dispatch_admission import resolve_dispatch_outcome
+            holding = resolve_dispatch_outcome(admitted_child)
+            return {"status": "action_pending", "action": action, "child_run_id": holding.json()["run_id"],
+                    "child_dispatch_pending_resolution": True, "retryable": True}
+        if admitted_child is not None:
+            from .run_child_admission import accept_scan_child_response
+            accept_scan_child_response(admitted_child, data, status_code=response.status_code)
+        return data
 
     try:
         response_payload = response.json()

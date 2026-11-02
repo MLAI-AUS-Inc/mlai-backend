@@ -1,0 +1,113 @@
+"""Reserve the independent setup child before approving an admitted scan."""
+from copy import deepcopy
+
+from .run_ownership import (
+    BUDGET_KEY, CHILDREN_RESULT_KEY, WIRE_EXECUTION_KEY, WIRE_REQUEST_KEY,
+    RunOwnershipConflict, current_execution_ticket, owner_receipt, require_event_execution, reserve_admitted_run,
+    user_principal, wire_identity,
+)
+from .website_contract import CONNECTION_FIELDS, evidence_digest
+
+
+def prepare_scan_child_dispatch(*, run, user, actor_id, payload):
+    """Attach only server-derived child consent after fresh current setup rights.
+
+    The caller performs its existing action gates. This helper adds current
+    actual-requester validation and a separate child admission; it never
+    approves or inherits a worker's plan/body/child identity from the request.
+    Existing unadmitted scans keep their original continuation protocol.
+    """
+    receipt = owner_receipt(run)
+    if receipt is None:
+        return None
+    from integrations.services.article_generation import ArticleGenerationError, _validate_authenticated_content_factory_actor
+    from founder_tools import startup_team
+    from .run_execution_control import current_execution_request
+    from .website_connections import authority_guard, dispatch_contract
+    from .website_operations import reserve_workflow_operation, bind_operation_run
+    from workflow_runs.models import ContentFactoryRun
+    if (run.workflow not in {"scan", "repo_scan", "content_factory_scan"}
+            or user is None or not user.is_active):
+        raise RunOwnershipConflict("A current admitted scan and requester are required.")
+    try:
+        _validate_authenticated_content_factory_actor(user=user, actor_id=actor_id)
+    except (ArticleGenerationError, ValueError) as exc:
+        raise RunOwnershipConflict("The current setup requester changed.") from exc
+    if "child_dispatch_v1" in payload:
+        raise RunOwnershipConflict("A caller cannot supply a child execution identity.")
+    # Provider/native/source checks happen before the local write transaction.
+    binding = dispatch_contract(run.domain, {}, action="setup", source_run_id=run.run_id)
+    current_request = current_execution_request(run)
+    binding.update(domain=run.domain, github_repo=run.github_repo)
+    with authority_guard(binding, action="setup") as connection:
+        with startup_team._locked(run.organization) as (_, roster):
+            if (roster and roster.get("frozen") or startup_team._owner(run.organization) != user.pk):
+                raise RunOwnershipConflict("The current startup owner must approve its setup.")
+            locked = ContentFactoryRun.objects.select_for_update().get(pk=run.pk)
+            saved = owner_receipt(locked)
+            if (saved != receipt or locked.run_id != run.run_id or locked.organization_id != connection.organization_id
+                    or locked.status in {"cancelled", "denied", "failed", "blocked"}
+                    or current_execution_ticket(locked) != current_execution_ticket(run)
+                    or current_execution_request(locked) != current_request):
+                raise RunOwnershipConflict("The approved scan changed before child admission.")
+            parent_wire = wire_identity(saved)
+            parent_ticket = current_execution_ticket(locked)
+            key = "r3-scan-child:" + evidence_digest({"parent_admission": parent_wire,
+                "parent_execution": parent_ticket, "workflow": "scaffold_articles"})
+            child_request = {key: value for key, value in binding.items()
+                             if key in {*CONNECTION_FIELDS, "expected_source_sha"}}
+            child_request.update(domain=locked.domain, github_repo=locked.github_repo, client_request_id=key,
+                parent_run_id=locked.run_id, scan_run_id=locked.run_id, source_run_id=locked.run_id,
+                parent_admission_digest=evidence_digest(parent_wire), parent_execution_id=parent_ticket["execution_id"])
+            operation = reserve_workflow_operation(connection, workflow="scaffold_articles", payload=child_request)
+            child = reserve_admitted_run(organization=locked.organization,
+                principal=user_principal(user.pk, actor_id), workflow="scaffold_articles", payload=child_request)
+            if child is None:
+                # An already admitted parent cannot silently spawn an unowned
+                # child if the new-admission switch changes during its pause.
+                raise RunOwnershipConflict("The child execution cannot be admitted.")
+            bind_operation_run(operation, child)
+            dispatch = {"schema_version": 1, "client_request_id": key, "workflow": "scaffold_articles",
+                "source_run_id": locked.run_id, WIRE_REQUEST_KEY: deepcopy(child_request[WIRE_REQUEST_KEY]),
+                WIRE_EXECUTION_KEY: deepcopy(child_request[WIRE_EXECUTION_KEY])}
+            if BUDGET_KEY in child_request:
+                dispatch[BUDGET_KEY] = deepcopy(child_request[BUDGET_KEY])
+            children = deepcopy((locked.result or {}).get(CHILDREN_RESULT_KEY,
+                {"schema_version": 1, "dispatches": {}}))
+            if (not isinstance(children, dict) or children.get("schema_version") != 1
+                    or not isinstance(children.get("dispatches"), dict)):
+                raise RunOwnershipConflict("The saved child admission receipt is not readable.")
+            previous = children["dispatches"].get(key)
+            if previous is not None:
+                if ({key: value for key, value in previous.items() if key != WIRE_EXECUTION_KEY}
+                        != {key: value for key, value in dispatch.items() if key != WIRE_EXECUTION_KEY}):
+                    raise RunOwnershipConflict("The original child approval identity changed.")
+                require_event_execution(child, previous, generation=previous[WIRE_EXECUTION_KEY]["generation"])
+                # Repeated parent approval observes its first child dispatch.
+                # It never grants a later resume ticket to the old enqueue.
+                dispatch = previous
+            children["dispatches"][key] = dispatch
+            ContentFactoryRun.objects.filter(pk=locked.pk).update(result={**locked.result, CHILDREN_RESULT_KEY: children})
+    payload.update({WIRE_REQUEST_KEY: parent_wire, WIRE_EXECUTION_KEY: parent_ticket, "child_dispatch_v1": dispatch})
+    return child
+
+
+def accept_scan_child_response(child, data, *, status_code=202):
+    """Bind only the independently returned setup child, never its parent ID."""
+    if child is None:
+        return None
+    from .dispatch_admission import pending_response, resolve_dispatch_outcome
+    from .run_ownership import bind_admitted_run
+    if not isinstance(data, dict):
+        return resolve_dispatch_outcome(child)
+    expected = owner_receipt(child)["identity"]["dispatch_key"]
+    if data.get("child_client_request_id") not in (None, "", expected):
+        return pending_response(child)
+    if 200 <= status_code < 300:
+        remote_id = data.get("scaffold_job_id") or data.get("child_run_id")
+        if remote_id:
+            return bind_admitted_run(child, remote_id)
+        return resolve_dispatch_outcome(child)
+    if status_code >= 500:
+        return resolve_dispatch_outcome(child)
+    return None

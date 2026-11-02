@@ -890,13 +890,24 @@ class ContentFactoryAppRunControlView(APIView):
         if action not in {"approve", "deny", "resume"}:
             return Response({"error": "Unsupported action"}, status=status.HTTP_400_BAD_REQUEST)
 
+        from content_factory.run_ownership import RunOwnershipConflict
         try:
+            control_payload = {}
+            admitted_child = None
             if action != "deny":
                 with _run_projection_scope(run, {}, action="setup"):
                     pass
-            response = _content_factory_request("post", f"/api/runs/{run_id}/{action}", payload={})
+            if action == "approve":
+                from content_factory.run_child_admission import prepare_scan_child_dispatch
+                from content_factory.run_ownership import owner_receipt
+                if owner_receipt(run) is not None and run.workflow in {"scan", "repo_scan", "content_factory_scan"}:
+                    admitted_child = prepare_scan_child_dispatch(run=run, user=request.user,
+                        actor_id=actor_id, payload=control_payload)
+            response = _content_factory_request("post", f"/api/runs/{run_id}/{action}", payload=control_payload)
         except WebsiteAuthorityError as exc:
             return Response(exc.as_dict(), status=exc.status)
+        except RunOwnershipConflict:
+            return Response({"error": "The scan approval or current website permission changed."}, status=409)
         except (http_requests.exceptions.RequestException, ArticleGenerationError) as exc:
             return Response({"error": str(exc)}, status=status.HTTP_503_SERVICE_UNAVAILABLE)
 
@@ -904,6 +915,9 @@ class ContentFactoryAppRunControlView(APIView):
             return _proxy_error(response)
 
         payload = _response_json(response)
+        if admitted_child is not None:
+            from content_factory.run_child_admission import accept_scan_child_response
+            accept_scan_child_response(admitted_child, payload, status_code=response.status_code)
         remote_run = _sync_remote_run_payload(run_id, payload)
         if remote_run:
             return Response(_serialize_content_factory_run(remote_run), status=status.HTTP_200_OK)

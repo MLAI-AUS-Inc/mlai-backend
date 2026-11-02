@@ -846,16 +846,38 @@ def decide_scan_scaffold(
         domain,
     )
 
+    admitted_child = None
+    from content_factory.run_ownership import RunOwnershipConflict
     try:
         from content_factory.website_connections import dispatch_contract
         binding = dispatch_contract(domain, {}, action="setup", source_run_id=scan_run_id) if normalized_decision == "approve" else {}
+        if normalized_decision == "approve":
+            from workflow_runs.models import ContentFactoryRun
+            from content_factory.run_child_admission import prepare_scan_child_dispatch
+            from integrations.services.github_installations import resolve_user_for_actor_id
+            parent = ContentFactoryRun.objects.filter(run_id=scan_run_id).first()
+            if parent is not None:
+                if parent.domain != domain:
+                    raise ScanError("The approved scan belongs to a different startup.")
+                admitted_child = prepare_scan_child_dispatch(run=parent,
+                    user=resolve_user_for_actor_id(slack_user_id), actor_id=slack_user_id, payload=binding)
         response = http_requests.post(
             action_endpoint,
             json=binding,
             headers=headers,
             timeout=(3, 30),
         )
-        data = response.json() if response.content else {}
+        try:
+            data = response.json() if response.content else {}
+        except ValueError:
+            if admitted_child is None:
+                raise
+            from content_factory.dispatch_admission import resolve_dispatch_outcome
+            holding = resolve_dispatch_outcome(admitted_child)
+            return {"status_code": holding.status_code, "data": holding.json()}
+        if admitted_child is not None:
+            from content_factory.run_child_admission import accept_scan_child_response
+            accept_scan_child_response(admitted_child, data, status_code=response.status_code)
 
         if response.status_code in [200, 202]:
             from content_factory.vibe_marketing_views import _remote_response_write_guard
@@ -908,7 +930,13 @@ def decide_scan_scaffold(
             "status_code": response.status_code,
             "data": data or {"error": response.text or "Unknown Content Factory error"},
         }
+    except RunOwnershipConflict as exc:
+        raise ScanError("The scan approval or current website permission changed.") from exc
     except http_requests.exceptions.RequestException as e:
+        if admitted_child is not None:
+            from content_factory.dispatch_admission import resolve_dispatch_outcome
+            holding = resolve_dispatch_outcome(admitted_child)
+            return {"status_code": holding.status_code, "data": holding.json()}
         logger.error("Failed to connect to Content Factory for scaffold %s: %s", normalized_decision, e)
         raise ScanError(f"Failed to submit scaffold {normalized_decision}: {str(e)}")
 
