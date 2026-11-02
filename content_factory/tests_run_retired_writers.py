@@ -11,7 +11,8 @@ from .tests_run_event_authority import FLAGS
 from . import vibe_marketing_views as views
 
 
-@override_settings(**FLAGS, CONTENT_FACTORY_URL="https://cf.fixture.invalid", CONTENT_FACTORY_API_KEY="synthetic-cancel-key")
+@override_settings(**FLAGS, CONTENT_FACTORY_URL="https://cf.fixture.invalid", CONTENT_FACTORY_API_KEY="synthetic-cancel-key",
+                   ROO_API_KEY="synthetic-retired-service-key")
 class RetiredRunWriterTests(TransactionTestCase):
     def setUp(self):
         fixture = make_p2_org()
@@ -168,4 +169,95 @@ class RetiredRunWriterTests(TransactionTestCase):
         response = worker_write(SimpleNamespace(), request)
         self.assertEqual(response.status_code, 409)
         self.assertEqual(calls, [])
+        self.assertEqual(self.snapshot(), before)
+
+    def test_actual_old_service_controls_refuse_owned_before_approval_resume_or_publish_effects(self):
+        from .service_views import ContentFactoryRunControlView
+        from rest_framework.test import APIRequestFactory
+        before = self.snapshot()
+        for action in ("approve", "deny", "resume", "promote-bundle", "publish-pr"):
+            request = APIRequestFactory().post("/old-service-control", {"actor": self.actor}, format="json",
+                HTTP_X_API_KEY="synthetic-retired-service-key")
+            with self.subTest(action=action), \
+                    patch("integrations.services.article_generation.publish_article_as_pr") as publish, \
+                    patch("content_factory.website_connections.authority_guard") as old_guard:
+                response = ContentFactoryRunControlView.as_view()(request, run_id=self.run.run_id, action=action)
+                self.assertEqual(response.status_code, 409)
+                publish.assert_not_called()
+                old_guard.assert_not_called()
+                self.assertEqual(self.snapshot(), before)
+
+    def test_pending_user_denial_blocks_actual_provider_and_worker_reauthorization_before_effects(self):
+        from .website_models import WebsiteConnection
+        from . import website_connections as connections
+        from .website_views import WebsiteConnectionAuthorizeView
+        from .run_user_stop import record_user_denial
+        from .website_contract import WebsiteAuthorityError
+        from rest_framework.test import APIRequestFactory
+        website = WebsiteConnection.objects.create(organization=self.org, authorized_by=self.user,
+            github_repo="synthetic/stopped", repository_id=42, installation_id="1001", branch="main", verified_sha="a" * 40)
+        self.config.website_connection, self.config.github_repo = website, website.github_repo
+        self.config.save(update_fields=["website_connection", "github_repo"])
+        run = bind_admitted_run(reserve_admitted_run(organization=self.org,
+            principal=user_principal(self.user.pk, self.actor), workflow="article_system_setup",
+            payload={**connections.contract_for(website), "domain": self.org.domain, "github_repo": website.github_repo,
+                "client_request_id": "pending-provider-stop", "expected_source_sha": "a" * 40}), "pending-provider-worker")
+        record_user_denial(run, user=self.user, actor_id=self.actor)
+        before = self.snapshot(run)
+        binding = connections.scoped_run_contract(run)
+        with patch("integrations.services.github_connections.read_bound_repository") as provider:
+            with self.assertRaises(WebsiteAuthorityError) as denied:
+                with connections.authority_guard(binding, action="setup"):
+                    self.fail("Denied consent cannot enter a provider mutation scope")
+            self.assertEqual(denied.exception.code, "run_stop_requested")
+            marker = connections._backend_provider_scope.set((binding, "setup"))
+            try:
+                with self.assertRaises(WebsiteAuthorityError):
+                    connections.authorize_backend_provider_mutation("PUT", "/contents/articles/example.md")
+            finally:
+                connections._backend_provider_scope.reset(marker)
+            query = {**connections.contract_for(website), "run_id": run.run_id, "domain": run.domain,
+                "github_repo": run.github_repo, "action": "read"}
+            request = APIRequestFactory().get("/worker-authorize", query, HTTP_X_API_KEY="synthetic-retired-service-key")
+            self.assertEqual(WebsiteConnectionAuthorizeView.as_view()(request).status_code, 409)
+            provider.assert_not_called()
+        self.assertEqual(self.snapshot(run), before)
+
+    def test_denial_arriving_during_readonly_preflight_is_rechecked_before_effect_scope(self):
+        from .website_models import WebsiteConnection
+        from . import website_connections as connections
+        from .run_user_stop import record_user_denial
+        from .website_contract import WebsiteAuthorityError
+        website = WebsiteConnection.objects.create(organization=self.org, authorized_by=self.user,
+            github_repo="synthetic/raced", repository_id=42, installation_id="1001", branch="main", verified_sha="a" * 40)
+        self.config.website_connection, self.config.github_repo = website, website.github_repo
+        self.config.save(update_fields=["website_connection", "github_repo"])
+        run = bind_admitted_run(reserve_admitted_run(organization=self.org,
+            principal=user_principal(self.user.pk, self.actor), workflow="article_system_setup",
+            payload={**connections.contract_for(website), "domain": self.org.domain, "github_repo": website.github_repo,
+                "client_request_id": "raced-provider-stop", "expected_source_sha": "a" * 40}), "raced-provider-worker")
+        response = Mock(status_code=200)
+        response.json.return_value = {"id": 42, "full_name": website.github_repo, "default_branch": "main"}
+
+        def readonly(*args, **kwargs):
+            record_user_denial(run, user=self.user, actor_id=self.actor)
+            return response
+
+        with patch("integrations.services.github_connections.read_bound_repository", side_effect=readonly), \
+                self.assertRaises(WebsiteAuthorityError) as denied:
+            with connections.authority_guard(connections.scoped_run_contract(run), action="setup"):
+                self.fail("An acknowledgement cannot outlive a denial arriving during preflight")
+        self.assertEqual(denied.exception.code, "run_stop_requested")
+
+    def test_old_v1_reconciler_cannot_claim_owned_transport_or_reconciliation_clock(self):
+        from .setup_delivery_reconciliation import enrolled_run, _claim_pull
+        from django.utils import timezone
+        self.run.run_request["setup_delivery_v1"] = {"schema_version": 1}
+        # A legacy marker is not an authority transfer, even when a test row
+        # carries both protocols. No claim or HTTP is allowed for this owner.
+        before = self.snapshot()
+        self.assertFalse(enrolled_run(self.run))
+        with patch("content_factory.setup_delivery_reconciliation._locked_context") as legacy_scope:
+            self.assertIsNone(_claim_pull(self.run, timezone.now()))
+        legacy_scope.assert_not_called()
         self.assertEqual(self.snapshot(), before)

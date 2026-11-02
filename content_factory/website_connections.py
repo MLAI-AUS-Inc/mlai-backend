@@ -382,6 +382,28 @@ def verify_repository_head(connection, expected_sha):
     return current_sha
 
 
+def require_run_not_stopped(payload, *, lock=False):
+    """Recheck saved user denial before a current run can authorize effects."""
+    from workflow_runs.models import ContentFactoryRun
+    from .run_ownership import WIRE_REQUEST_KEY, admitted_run_for_key, user_stop_intent
+    wire = payload.get(WIRE_REQUEST_KEY)
+    run = admitted_run_for_key(wire.get("dispatch_key"), lock=lock) if isinstance(wire, dict) else None
+    query = ContentFactoryRun.objects.select_for_update() if lock else ContentFactoryRun.objects
+    identifier = payload.get("run_id") or payload.get("job_id")
+    if run is None and identifier:
+        run = query.filter(run_id=identifier).first()
+    if run is None and payload.get("operation_id"):
+        try:
+            op = WebsiteConnectionOperation.objects.filter(pk=payload["operation_id"]).first()
+        except (TypeError, ValueError):
+            op = None
+        identifier = (op.payload or {}).get("run_id") if op else None
+        if identifier:
+            run = query.filter(run_id=identifier).first()
+    if run is not None and user_stop_intent(run):
+        raise WebsiteAuthorityError("run_stop_requested", "This run was denied. Review a new run before changing the website.")
+
+
 @contextmanager
 def authority_guard(data, *, action="read", domain="", github_repo="", require_selected=True,
                     require_current_head=False):
@@ -395,6 +417,8 @@ def authority_guard(data, *, action="read", domain="", github_repo="", require_s
     from .website_rollout import require_repository_write_policy
     from .website_contract import SHA_PATTERN
     payload = _payload_with_context(data)
+    if action in {"setup", "publish", "merge", "config_write", "preview"}:
+        require_run_not_stopped(payload)
     inventory = payload.get("repository_inventory") if isinstance(payload.get("repository_inventory"), dict) else {}
     if inventory:
         for key in ("source_sha", "repo_head_sha"):
@@ -458,6 +482,8 @@ def authority_guard(data, *, action="read", domain="", github_repo="", require_s
         with transaction.atomic():
             Organization.objects.select_for_update().get(pk=candidate.organization_id)
             connection = WebsiteConnection.objects.select_for_update().select_related("organization").get(pk=candidate.pk)
+            if action in {"setup", "publish", "merge", "config_write", "preview"}:
+                require_run_not_stopped(payload, lock=True)
             current = (connection.generation, connection.configuration_version, connection.state, connection.installation_id, connection.authorized_by_id, observed_source_sha(connection))
             if current != snapshot:
                 from .website_github_failure import taxonomy_active
@@ -1530,6 +1556,7 @@ def authorize_backend_provider_mutation(method, path):
     if scope is None or method.upper() in {"GET", "HEAD", "OPTIONS"}:
         return None
     binding, action = scope
+    require_run_not_stopped(binding)
     with authority_guard(binding, action=action) as website:
         identifier = binding.get("operation_id")
         op = website.operations.filter(pk=identifier).first() if identifier else None

@@ -372,6 +372,9 @@ class WebsiteConnectionAuthorizeView(APIView):
     def get(self, request):
         try:
             action = str(request.query_params.get("action") or "read")
+            if action not in {"worker_cleanup", "restoration", "restoration_read", "cancel_operation", "cancel_receipt"}:
+                from .website_connections import require_run_not_stopped
+                require_run_not_stopped(dict(request.query_params.items()))
             with authority_guard(dict(request.query_params.items()), action="read" if action == "ci_attestation" else action) as connection:
                 if action == "ci_attestation":
                     from .website_verification import ci_attestation_for

@@ -9724,8 +9724,16 @@ class ContentFactoryRunControlView(APIView):
     authentication_classes = []
     permission_classes = [HasRooApiKey]
 
-    @guarded_service_write("publish", remote_actions={"promote-bundle", "publish-pr"})
     def post(self, request, run_id: str, action: str):
+        from .run_reconciliation import authoritative_run
+        run = ContentFactoryRun.objects.filter(run_id=run_id).first()
+        if authoritative_run(run):
+            return Response({"code": "owned_run_requires_user_control", "retryable": False,
+                "detail": "Use the current account's run controls or the scoped execution-ticket endpoint."}, status=409)
+        return self._post_legacy_control(request, run_id=run_id, action=action)
+
+    @guarded_service_write("publish", remote_actions={"promote-bundle", "publish-pr"})
+    def _post_legacy_control(self, request, run_id: str, action: str):
         from integrations.services.article_generation import ArticleGenerationError, publish_article_as_pr
         from content_factory.models import ContentFactoryJob
 
