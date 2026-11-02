@@ -445,11 +445,15 @@ def authority_guard(data, *, action="read", domain="", github_repo="", require_s
             generation=candidate.generation, source_sha=expected, verified_at__isnull=False,
             capabilities__publishingReady=True).exists()
         needs_head = needs_head or target_promotion or retains_publication_proof or require_current_head
+        # A reviewed child may pin an independently verified working branch.
+        # This never replaces the selected default branch consent/observation.
+        from .run_review_source import review_source_preflight, reviewed_source_scope
+        reviewed_source = review_source_preflight(payload, candidate) if not cleanup else None
         if needs_native or needs_head:
             require_unlocked_remote_call()
         if needs_native:
             verify_repository_native_target(candidate)
-        if needs_head:
+        if needs_head and reviewed_source is None:
             verify_repository_head(candidate, expected or candidate.verified_sha)
         with transaction.atomic():
             Organization.objects.select_for_update().get(pk=candidate.organization_id)
@@ -493,9 +497,10 @@ def authority_guard(data, *, action="read", domain="", github_repo="", require_s
             native_token = _verified_native_targets.set(_verified_native_targets.get() | {(str(connection.pk), connection.generation)} if needs_native else _verified_native_targets.get())
             depth_token = _authority_depth.set(_authority_depth.get() + 1)
             try:
-                if needs_head and observed and expected != observed:
-                    check_source_identity(connection, payload)
-                yield connection
+                with reviewed_source_scope(payload, connection, reviewed_source):
+                    if needs_head and reviewed_source is None and observed and expected != observed:
+                        check_source_identity(connection, payload)
+                    yield connection
             finally:
                 _authority_depth.reset(depth_token)
                 _verified_heads.reset(heads_token)

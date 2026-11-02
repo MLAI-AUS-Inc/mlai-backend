@@ -194,6 +194,8 @@ def append_execution_ticket(run, *, control_key, reason, scope=None, increment_g
                                      "execution_id": ticket["execution_id"]}
     from workflow_runs.models import ContentFactoryRun
     result = {**run.result, OWNER_EXECUTION_KEY: execution, CONTROL_KEY: control}
+    from .run_review_source import append_review_source_ticket
+    append_review_source_ticket(run, old, ticket)
     ContentFactoryRun.objects.filter(pk=run.pk).update(result=result)
     run.result = result
     return deepcopy(ticket)

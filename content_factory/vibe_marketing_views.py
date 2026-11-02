@@ -15447,7 +15447,7 @@ def _content_factory_action_transport_pending(remote_data):
     return isinstance(remote_data, dict) and bool(remote_data.get("content_factory_transport_error"))
 
 
-def _call_content_factory_component_revision(*, organization, run_id, payload):
+def _call_content_factory_component_revision(*, organization, run_id, payload, user=None):
     require_unlocked_remote_call()
     original = ContentFactoryRun.objects.filter(run_id=run_id).first()
     remote_config = _content_factory_remote_config()
@@ -15467,6 +15467,12 @@ def _call_content_factory_component_revision(*, organization, run_id, payload):
     if original and connection_contract(scoped_run_contract(original)):
         from .revision_operations import reserve_revision_operation
         reserve_revision_operation(original, payload)
+    from .run_revision_child_admission import prepare_component_revision_child, accept_revision_child_response
+    from .run_ownership import RunOwnershipConflict
+    try:
+        child = prepare_component_revision_child(run=original, user=user, payload=payload) if original else None
+    except (RunOwnershipConflict, WebsiteAuthorityError):
+        return Response({"detail": "The saved revision or current startup permission changed."}, status=409)
     try:
         response = http_client.post(
             f"{remote_config['base_url']}/api/runs/{run_id}/component-revisions",
@@ -15483,7 +15489,10 @@ def _call_content_factory_component_revision(*, organization, run_id, payload):
         )
 
     if response.status_code in (200, 202):
-        return response.json() if response.content else {}
+        data = response.json() if response.content else {}
+        if child is not None:
+            accept_revision_child_response(child, data)
+        return data
 
     try:
         response_payload = response.json()
@@ -15557,7 +15566,7 @@ def _request_editorial_learnings_fold(*, organization, github_repo=""):
         return {}
 
 
-def _call_content_factory_article_system_revision(*, run_id, payload):
+def _call_content_factory_article_system_revision(*, run_id, payload, user=None):
     require_unlocked_remote_call()
     original = ContentFactoryRun.objects.filter(run_id=run_id).first()
     if original and connection_contract(scoped_run_contract(original)):
@@ -15574,6 +15583,14 @@ def _call_content_factory_article_system_revision(*, run_id, payload):
             retryable=True,
         )
 
+    from .run_revision_child_admission import prepare_setup_revision_ticket
+    from .run_ownership import RunOwnershipConflict
+    try:
+        if original:
+            prepare_setup_revision_ticket(run=original, user=user, payload=payload)
+    except (RunOwnershipConflict, WebsiteAuthorityError):
+        return {"error": "The saved setup feedback or current owner permission changed.",
+                "content_factory_status_code": 409, "retryable": False}
     try:
         response = http_client.post(
             f"{remote_config['base_url']}/api/runs/{run_id}/article-system-revisions",
@@ -18904,7 +18921,7 @@ class VibeMarketingArticleSystemRevisionsView(APIView):
             action="article_system_revision",
             current_balance=gate_balance,
         )
-        remote_data = _call_content_factory_article_system_revision(run_id=run.run_id, payload=remote_payload)
+        remote_data = _call_content_factory_article_system_revision(run_id=run.run_id, payload=remote_payload, user=request.user)
         with _remote_response_write_guard(remote_data, workflow="article_system_setup"):
             if remote_data.get("error") and int(remote_data.get("content_factory_status_code") or 0) in {400, 404, 409, 422}:
                 # Content Factory definitively rejected this batch (4xx). Roll the pins THIS request
@@ -18933,8 +18950,8 @@ class VibeMarketingArticleSystemRevisionsView(APIView):
                     "error": remote_data.get("error"),
                     "retryable": bool(remote_data.get("retryable")),
                 }
-                run.result = result
-                run.save(update_fields=["result", "updated_at"])
+                from .run_revision_child_admission import persist_revision_metadata
+                persist_revision_metadata(run, result, keys={"latest_article_system_revision_response", "component_feedback_latest_batch"})
                 return Response({"detail": remote_data["error"], "remote": remote_data}, status=status.HTTP_409_CONFLICT)
             if remote_data.get("error"):
                 result = dict(run.result or {})
@@ -18947,8 +18964,8 @@ class VibeMarketingArticleSystemRevisionsView(APIView):
                     "error": remote_data.get("error"),
                     "retryable": retryable,
                 }
-                run.result = result
-                run.save(update_fields=["result", "updated_at"])
+                from .run_revision_child_admission import persist_revision_metadata
+                persist_revision_metadata(run, result, keys={"latest_article_system_revision_response", "component_feedback_latest_batch"})
                 # A retryable failure (CF 5xx / network / worker unavailable) must NOT be
                 # reported as 202: the frontend redirects on any 2xx, so a 202 here silently
                 # drops the reviewer's comments and looks like a successful send. Return 502 so
@@ -18990,11 +19007,17 @@ class VibeMarketingArticleSystemRevisionsView(APIView):
                 result["livePreview"] = remote_data.get("livePreview") or remote_data.get("live_preview")
             if remote_data.get("live_preview_url"):
                 result["live_preview_url"] = remote_data.get("live_preview_url")
-            run.result = result
-            if run.status in {ContentFactoryRunStatus.AWAITING_APPROVAL, ContentFactoryRunStatus.APPROVAL_REQUIRED, ContentFactoryRunStatus.COMPLETED}:
-                run.status = ContentFactoryRunStatus.RUNNING
-                run.current_step = "revision_preview_building"
-            run.save(update_fields=["status", "current_step", "result", "updated_at"])
+            from .run_ownership import owner_receipt
+            if (owner_receipt(run) or {}).get("authority", {}).get("event_protocol") == 1:
+                from .run_revision_child_admission import persist_revision_metadata
+                persist_revision_metadata(run, result, keys={"article_system_review_comments",
+                    "latest_article_system_revision_response", "component_feedback_latest_batch"})
+            else:
+                run.result = result
+                if run.status in {ContentFactoryRunStatus.AWAITING_APPROVAL, ContentFactoryRunStatus.APPROVAL_REQUIRED, ContentFactoryRunStatus.COMPLETED}:
+                    run.status = ContentFactoryRunStatus.RUNNING
+                    run.current_step = "revision_preview_building"
+                run.save(update_fields=["status", "current_step", "result", "updated_at"])
             return Response(_serialize_run(run, context=context), status=status.HTTP_202_ACCEPTED)
 
 
@@ -19294,7 +19317,7 @@ class VibeMarketingRunCommentsSubmitView(VibeMarketingRunCommentsMixin, APIView)
         }
         remote_payload.update(billing_payload)
         remote_data = _call_content_factory_component_revision(
-            organization=context.organization, run_id=source_run.run_id, payload=remote_payload,
+            organization=context.organization, run_id=source_run.run_id, payload=remote_payload, user=request.user,
         )
         with _remote_response_write_guard(remote_data, workflow="article_revision"):
             if isinstance(remote_data, Response):
@@ -19306,8 +19329,8 @@ class VibeMarketingRunCommentsSubmitView(VibeMarketingRunCommentsMixin, APIView)
                     "id": batch_id, "sourceRunId": source_run.run_id, "status": "submitted",
                     "error": remote_data.data.get("detail"), "policyBlocked": True,
                 }
-                source_run.result = result
-                source_run.save(update_fields=["result", "updated_at"])
+                from .run_revision_child_admission import persist_revision_metadata
+                persist_revision_metadata(source_run, result, keys={"component_feedback_latest_batch"})
                 return remote_data
             new_run_id = str(remote_data.get("run_id") or remote_data.get("runId") or "").strip()
             if remote_data.get("error") and not new_run_id:
@@ -19320,8 +19343,8 @@ class VibeMarketingRunCommentsSubmitView(VibeMarketingRunCommentsMixin, APIView)
                     "error": remote_data.get("error"),
                     "retryable": retryable,
                 }
-                source_run.result = result
-                source_run.save(update_fields=["result", "updated_at"])
+                from .run_revision_child_admission import persist_revision_metadata
+                persist_revision_metadata(source_run, result, keys={"component_feedback_latest_batch"})
                 if retryable:
                     return Response(_serialize_run(source_run, context=context), status=status.HTTP_202_ACCEPTED)
                 return Response(
@@ -19340,15 +19363,18 @@ class VibeMarketingRunCommentsSubmitView(VibeMarketingRunCommentsMixin, APIView)
                 # Never infer it from a result or a caller-supplied revision body.
                 revision_request.update(delivery_mode="content_only", delivery_mode_confirmed=True,
                                         delivery_mode_explicit=True)
-            revision_run = _create_local_run(
-                workflow="article_revision",
-                domain=context.organization.domain,
-                github_repo="" if portable_revision else config.github_repo or run.github_repo or "",
-                actor_id=founder_actor_id_for_user(request.user),
-                payload=revision_request,
-                remote_data=remote_data,
-            )
-            if remote_payload.get("operation_id"):
+            if remote_payload.get("child_dispatch_v1"):
+                from .run_ownership import admitted_run_for_key
+                from .run_revision_child_admission import accept_revision_child_response
+                revision_run = admitted_run_for_key(remote_payload["child_dispatch_v1"]["client_request_id"])
+                accept_revision_child_response(revision_run, remote_data)
+            else:
+                revision_run = _create_local_run(
+                    workflow="article_revision", domain=context.organization.domain,
+                    github_repo="" if portable_revision else config.github_repo or run.github_repo or "",
+                    actor_id=founder_actor_id_for_user(request.user), payload=revision_request, remote_data=remote_data,
+                )
+            if remote_payload.get("operation_id") and not remote_payload.get("child_dispatch_v1"):
                 from .website_models import WebsiteConnectionOperation
                 from .website_operations import bind_operation_run
                 operation = WebsiteConnectionOperation.objects.get(pk=remote_payload["operation_id"])
@@ -19361,8 +19387,8 @@ class VibeMarketingRunCommentsSubmitView(VibeMarketingRunCommentsMixin, APIView)
                     "submitted_component_comments": [_serialize_component_comment(comment) for comment in draft_comments],
                 }
             )
-            revision_run.result = revision_result
-            revision_run.save(update_fields=["result", "updated_at"])
+            from .run_revision_child_admission import persist_revision_metadata
+            persist_revision_metadata(revision_run, revision_result, keys={"source_run_id", "feedback_batch_id", "submitted_component_comments"})
 
             result = source_run.result or {}
             result["component_feedback_latest_batch"] = {
@@ -19373,8 +19399,7 @@ class VibeMarketingRunCommentsSubmitView(VibeMarketingRunCommentsMixin, APIView)
                 "retry": retry_existing_batch,
             }
             result["component_feedback_revision_run_id"] = revision_run.run_id
-            source_run.result = result
-            source_run.save(update_fields=["result", "updated_at"])
+            persist_revision_metadata(source_run, result, keys={"component_feedback_latest_batch", "component_feedback_revision_run_id"})
             return Response(_serialize_run(revision_run, context=context), status=status.HTTP_202_ACCEPTED)
 
 

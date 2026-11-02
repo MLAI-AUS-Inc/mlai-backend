@@ -30,7 +30,21 @@ def remote_review(run, *, payload=None, child_operation=False):
             binding = views.connection_contract(original)
             if supplied and any(binding.get(key) != value for key, value in supplied.items()):
                 raise views.WebsiteAuthorityError("website_connection_changed", "The article belongs to a previous website connection.")
-            if binding or original.get("delivery_mode") != "content_only":
+            owned_child = payload.get("child_dispatch_v1")
+            if owned_child is not None:
+                from .run_ownership import admitted_run_for_key, require_admission_identity, require_event_execution
+                from .run_revision_child_admission import accept_revision_child_response
+                child = admitted_run_for_key(owned_child.get("client_request_id")) if isinstance(owned_child, dict) else None
+                if child is None or child.run_request.get("parent_run_id") != run.run_id:
+                    raise views.WebsiteAuthorityError("review_source_changed", "The saved review child changed.")
+                require_admission_identity(child, owned_child)
+                require_event_execution(child, owned_child)
+                if binding:
+                    with views.authority_guard(original, action="read"):
+                        pass
+                    with views.authority_guard(views.scoped_run_contract(child), action="read"):
+                        pass
+            elif binding or original.get("delivery_mode") != "content_only":
                 guarded = {**original, **{key: payload[key] for key in (
                     "operation_id", "operation_attempt", "deletion_epoch",
                 ) if key in payload}}
@@ -59,6 +73,8 @@ def remote_review(run, *, payload=None, child_operation=False):
                 payload = {**payload, **binding}
         except views.WebsiteAuthorityError as exc:
             return Response(exc.as_dict(), status=exc.status)
+        except ValueError:
+            return Response({"detail": "The saved review execution changed."}, status=409)
     config = views._content_factory_remote_config()
     if not config["enabled"]:
         return Response({"detail": "Article editing is temporarily unavailable."}, status=503)
@@ -76,6 +92,11 @@ def remote_review(run, *, payload=None, child_operation=False):
         failure = {key: data[key] for key in ("code", "error_code", "reasonCode", "retryable", "next_action", "failure", "errors", "revision") if key in data}
         return Response({**failure, "detail": data.get("detail") or data.get("error") or "The article changed. Reload and try again."},
                         status=response.status_code if response.status_code in (400, 404, 409, 422, 503) else 502)
+    if payload is not None and payload.get("child_dispatch_v1") is not None:
+        try:
+            accept_revision_child_response(child, data)
+        except ValueError:
+            return Response({"detail": "The review response identified a different child."}, status=409)
     return data
 
 
@@ -223,7 +244,11 @@ def _record_update_result(run, operation, entry, feedback=None):
                     feedback["status"] = "running"
             result["component_feedback_latest_batch"] = feedback
         fresh.result = result
-        fresh.save(update_fields=["result", "updated_at"])
+        from .run_ownership import owner_receipt
+        if owner_receipt(fresh) is not None:
+            views.ContentFactoryRun.objects.filter(pk=fresh.pk).update(result=result)
+        else:
+            fresh.save(update_fields=["result", "updated_at"])
         run.result = result
     return None
 
@@ -250,15 +275,33 @@ def _revert_update_submission(run, operation, request_hash):
             else:
                 result.pop("component_feedback_latest_batch", None)
         fresh.result = result
-        fresh.save(update_fields=["result", "updated_at"])
+        from .run_ownership import owner_receipt
+        if owner_receipt(fresh) is not None:
+            views.ContentFactoryRun.objects.filter(pk=fresh.pk).update(result=result)
+        else:
+            fresh.save(update_fields=["result", "updated_at"])
         run.result = result
     return True
 
 
 
-def _review_dispatch_contract(run, payload):
+def _review_dispatch_contract(run, payload, *, user=None):
     """Reserve fresh review work under the source's original website consent."""
     original = views.scoped_run_contract(run)
+    from .run_ownership import owner_receipt, RunOwnershipConflict, WIRE_REQUEST_KEY, WIRE_EXECUTION_KEY, BUDGET_KEY
+    if owner_receipt(run) is not None:
+        from .run_revision_child_admission import prepare_review_update_child
+        try:
+            prepare_review_update_child(run=run, user=user, payload=payload, snapshot=lambda: remote_review(run))
+            from .website_contract import CONNECTION_FIELDS
+            from .website_operations import OPERATION_FIELDS
+            return {key: deepcopy(payload[key]) for key in (*CONNECTION_FIELDS, *OPERATION_FIELDS,
+                WIRE_REQUEST_KEY, WIRE_EXECUTION_KEY, BUDGET_KEY, "child_dispatch_v1", "expected_source_sha",
+                "reviewed_source_ref", "reviewed_revision", "requested_run_id", "branch", "app_root", "configuration_revision") if key in payload}
+        except views.WebsiteAuthorityError as exc:
+            return Response(exc.as_dict(), status=exc.status)
+        except RunOwnershipConflict:
+            return Response({"detail": "The saved review update or current startup permission changed."}, status=409)
     try:
         binding = views.connection_contract(original)
         if not binding and original.get("delivery_mode") == "content_only":
@@ -348,7 +391,7 @@ def apply_article_review_update(*, user, context, run, data):
     remote_payload["comments"] = deepcopy(recorded["remoteComments"])
     contract = recorded.get("dispatchContract")
     if contract is None:
-        contract = _review_dispatch_contract(run, remote_payload)
+        contract = _review_dispatch_contract(run, remote_payload, user=command.user)
         if isinstance(contract, Response):
             if _revert_update_submission(run, payload["operationId"], request_hash) and payload["commentIds"]:
                 views.VibeMarketingComponentComment.objects.filter(run=run, id__in=payload["commentIds"],
@@ -386,7 +429,7 @@ def apply_article_review_update(*, user, context, run, data):
         "commentIds": payload["commentIds"], "recordedAt": views.timezone.now().isoformat()}
     feedback = {"id": payload["operationId"], "sourceRunId": run.run_id,
                 "revisionRunId": revision_id, "status": "running" if accepted else "submitted"} if comments or payload.get("restoredSentences") else None
-    if accepted and revision_id and revision_id != run.run_id:
+    if accepted and revision_id and revision_id != run.run_id and "child_dispatch_v1" not in contract:
         child = views._create_local_run(
             workflow="article_system_setup" if run.workflow == "article_system_setup" else "article_revision",
             domain=context.organization.domain, github_repo=run.github_repo or "",
