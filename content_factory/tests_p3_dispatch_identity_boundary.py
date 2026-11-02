@@ -206,3 +206,10 @@ class MissingAcceptedIdentityTests(TransactionTestCase):
             self.assertEqual(run.status, 'blocked')
             self.assertIs(run.run_request['dispatch_pending_resolution'], True)
         self.assertEqual(self.slots(), 2)
+
+    def test_nonkeyed_scan_invalid_body_keeps_its_legacy_failure_behavior(self):
+        for accepted, exception in [('invalid-json', ValueError), (['unexpected-list'], AttributeError)]:
+            with self.subTest(body=accepted), self.remote(accepted=accepted), self.assertRaises(exception):
+                views._queue_content_factory_run_authorized(endpoint='scan', workflow='repo_scan',
+                    context=self.context, config=self.config, payload={'domain':self.org.domain})
+        self.assertFalse(ContentFactoryRun.objects.filter(organization=self.org, workflow='repo_scan').exists())

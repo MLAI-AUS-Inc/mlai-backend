@@ -14915,8 +14915,11 @@ def _queue_content_factory_run_authorized(*, endpoint, workflow, context, config
             try:
                 accepted_payload = response.json() if response.content else {}
             except (TypeError, ValueError):
+                if not (requires_remote and keyed_dispatch):
+                    raise
                 accepted_payload = {}
-            remote_data = accepted_payload if isinstance(accepted_payload, dict) else {}
+            remote_data = (accepted_payload if isinstance(accepted_payload, dict)
+                or not (requires_remote and keyed_dispatch) else {})
             run_id = str(remote_data.get("run_id") or remote_data.get("job_id") or remote_data.get("task_id") or "").strip()
             remote_run_id = run_id
             logger.info(
