@@ -213,3 +213,15 @@ class PolicyReviewTests(TransactionTestCase):
         run = self.helper.run_for(result={"first_failed_at": (self.now+timedelta(days=365)).isoformat()})
         decision = engine.decide(run, now=self.now)
         self.assertEqual(decision.at, self.now+timedelta(minutes=1))
+
+    def test_old_or_wrong_cf_ack_keeps_same_policy_attempt_pending(self):
+        run = self.helper.run_for()
+        from dataclasses import replace
+        decision = replace(engine.decide(run, now=self.now), at=self.now)
+        ack = {'version': 1, 'run_id': run.run_id, 'key': f'{run.run_id}:1', 'intent': 'resume', 'state': 'accepted'}
+        for response in ({'status': 'queued'}, {'status': 'queued', 'self_heal_resume': {**ack, 'key': 'foreign:1'}},
+                         {'status': 'queued', 'self_heal_resume': {**ack, 'intent': 'rescan'}}):
+            with patch('content_factory.vibe_marketing_views._call_content_factory_run_action', return_value=response):
+                self.assertEqual(engine._execute_run(run, decision, now=self.now)['dispatch_state'], 'pending')
+        with patch('content_factory.vibe_marketing_views._call_content_factory_run_action', return_value={'status': 'queued', 'self_heal_resume': ack}):
+            self.assertEqual(engine._execute_run(run, decision, now=self.now)['self_heal_resume'], ack)

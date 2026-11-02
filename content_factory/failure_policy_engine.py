@@ -342,8 +342,17 @@ def _execute_run(run, decision, *, now):
             payload['repin'] = {'to': 'latest'}
         if decision.action == 'rescan':
             payload['self_heal_rescan'] = True
-        return _call_content_factory_run_action(run_id=run.run_id, workflow=run.workflow,
+        outcome = _call_content_factory_run_action(run_id=run.run_id, workflow=run.workflow,
             action='resume', payload=payload, transport_errors_are_pending=True)
+        ack = mapping(mapping(outcome).get('self_heal_resume'))
+        intent = 're_pin' if decision.action == 're_pin' else 'rescan' if decision.action == 'rescan' else 'resume'
+        if ack != {'version': 1, 'run_id': run.run_id, 'key': payload['self_heal_key'],
+                   'intent': intent, 'state': 'accepted'}:
+            # Older CF versions ignored these keys and could accidentally queue
+            # ordinary work. Only the exact durable task reservation acknowledges
+            # policy intent; uncertainty keeps this same attempt and charge held.
+            return {**mapping(outcome), 'status': 'action_pending', 'dispatch_state': 'pending'}
+        return outcome
     if decision.action == 'advance_rung':
         from .website_models import WebsiteConnectionOperation
         from .website_connections import authority_guard, scoped_run_contract

@@ -45,7 +45,8 @@ class PolicyTests(TransactionTestCase):
         def resume(**kwargs):
             self.assertFalse(connection.in_atomic_block)
             calls.append(kwargs)
-            return {'status': 'queued'}
+            return {'status': 'queued', 'self_heal_resume': {'version': 1, 'run_id': run.run_id,
+                'key': kwargs['payload']['self_heal_key'], 'intent': 'resume', 'state': 'accepted'}}
         with patch('content_factory.vibe_marketing_views._call_content_factory_run_action', side_effect=resume):
             for attempt, minute in enumerate([1, 3, 8], 1):
                 early = self.now if attempt == 1 else self.now + timedelta(minutes=[0, 1, 3][attempt - 1])
