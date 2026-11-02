@@ -1,0 +1,1107 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://mlai.au/contracts/founder-article-v2.schema.json",
+  "title": "Canonical founder article boundary v2",
+  "version": 2,
+  "$ref": "#/$defs/FounderJourney",
+  "$defs": {
+    "FounderCopy": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "headline": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 1024
+        },
+        "body": {
+          "anyOf": [
+            {
+              "type": "string",
+              "maxLength": 8192
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "button": {
+          "anyOf": [
+            {
+              "type": "string",
+              "maxLength": 1024
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "headline",
+        "body",
+        "button"
+      ]
+    },
+    "FounderCapabilities": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "canWriteArticle": {
+          "type": "boolean"
+        },
+        "canCopyDraft": {
+          "type": "boolean"
+        },
+        "canPublish": {
+          "type": "boolean"
+        },
+        "canUpgradeWebsite": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "canWriteArticle",
+        "canCopyDraft",
+        "canPublish",
+        "canUpgradeWebsite"
+      ]
+    },
+    "FounderFailure": {
+      "anyOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "code": {
+              "type": "string",
+              "pattern": "^[A-Za-z][A-Za-z0-9_]{0,127}$"
+            },
+            "copy": {
+              "$ref": "#/$defs/FounderCopy"
+            }
+          },
+          "required": [
+            "code",
+            "copy"
+          ]
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "FounderJourney": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "version": {
+          "const": 1
+        },
+        "contractVersion": {
+          "const": 2
+        },
+        "companyId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 100
+        },
+        "cohort": {
+          "const": "new_journey"
+        },
+        "stage": {
+          "enum": [
+            "website",
+            "first_article",
+            "writing",
+            "review",
+            "setup",
+            "publishing",
+            "done"
+          ]
+        },
+        "state": {
+          "anyOf": [
+            {
+              "enum": [
+                "working",
+                "your_turn",
+                "done"
+              ]
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "headline": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 1024
+        },
+        "body": {
+          "anyOf": [
+            {
+              "type": "string",
+              "maxLength": 8192
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "holdingReason": {
+          "anyOf": [
+            {
+              "enum": [
+                "slow",
+                "website_update",
+                "busy_today"
+              ]
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "action": {
+          "anyOf": [
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "id": {
+                  "enum": [
+                    "review_draft",
+                    "describe_customer",
+                    "agree_terms",
+                    "authorize_github",
+                    "approve_setup",
+                    "approve_on_github",
+                    "buy_points",
+                    "approve_join_request"
+                  ]
+                },
+                "label": {
+                  "type": "string",
+                  "maxLength": 8192
+                },
+                "url": {
+                  "anyOf": [
+                    {
+                      "type": "string",
+                      "maxLength": 8192
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                }
+              },
+              "required": [
+                "id",
+                "label",
+                "url"
+              ]
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "next": {
+          "anyOf": [
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "kind": {
+                  "enum": [
+                    "add_website",
+                    "write_first_article",
+                    "write_article",
+                    "view_progress",
+                    "view_draft",
+                    "view_article"
+                  ]
+                },
+                "label": {
+                  "type": "string",
+                  "maxLength": 8192
+                },
+                "runId": {
+                  "anyOf": [
+                    {
+                      "type": "string",
+                      "maxLength": 8192
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "url": {
+                  "anyOf": [
+                    {
+                      "type": "string",
+                      "maxLength": 8192
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                }
+              },
+              "required": [
+                "kind",
+                "label",
+                "runId",
+                "url"
+              ]
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "runId": {
+          "anyOf": [
+            {
+              "type": "string",
+              "maxLength": 8192
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "etaSeconds": {
+          "anyOf": [
+            {
+              "type": "integer",
+              "minimum": 0
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "queuePosition": {
+          "anyOf": [
+            {
+              "type": "integer",
+              "minimum": 0
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "draftReadyNotifications": {
+          "type": "boolean"
+        },
+        "switchTopicAvailable": {
+          "type": "boolean"
+        },
+        "githubReturn": {
+          "anyOf": [
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "reason": {
+                  "enum": [
+                    "connected",
+                    "multiple_repos",
+                    "no_repo",
+                    "state_expired",
+                    "owner_approval_requested",
+                    "authorization_failed",
+                    "repository_access",
+                    "owned_elsewhere",
+                    "no_website",
+                    "startup_changed",
+                    "cancelled",
+                    "unavailable"
+                  ]
+                },
+                "at": {
+                  "type": "string",
+                  "maxLength": 8192
+                }
+              },
+              "required": [
+                "reason",
+                "at"
+              ]
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "website": {
+          "anyOf": [
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "hasWebsite": {
+                  "type": "boolean"
+                },
+                "domain": {
+                  "anyOf": [
+                    {
+                      "type": "string",
+                      "maxLength": 8192
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "platform": {
+                  "anyOf": [
+                    {
+                      "type": "string",
+                      "maxLength": 8192
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "blogUrl": {
+                  "anyOf": [
+                    {
+                      "type": "string",
+                      "maxLength": 8192
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "publishAutomatically": {
+                  "enum": [
+                    "unavailable",
+                    "available",
+                    "in_progress",
+                    "on"
+                  ]
+                },
+                "connectedBy": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "properties": {
+                    "firstName": {
+                      "type": "string",
+                      "maxLength": 8192
+                    }
+                  },
+                  "required": [
+                    "firstName"
+                  ]
+                }
+              },
+              "required": [
+                "hasWebsite",
+                "domain",
+                "platform",
+                "blogUrl",
+                "publishAutomatically"
+              ]
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "firstArticle": {
+          "anyOf": [
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "version": {
+                  "const": 1
+                },
+                "status": {
+                  "enum": [
+                    "available",
+                    "in_progress",
+                    "used",
+                    "unavailable"
+                  ]
+                },
+                "free": {
+                  "type": "boolean"
+                },
+                "attemptsUsed": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "attemptsAllowed": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "topicBatchFree": {
+                  "type": "boolean"
+                },
+                "runId": {
+                  "anyOf": [
+                    {
+                      "type": "string",
+                      "maxLength": 8192
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "limit": {
+                  "anyOf": [
+                    {
+                      "type": "string",
+                      "maxLength": 8192
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "deliveryMode": {
+                  "const": "content_only"
+                }
+              },
+              "required": [
+                "version",
+                "status",
+                "free",
+                "attemptsUsed",
+                "attemptsAllowed",
+                "topicBatchFree",
+                "runId",
+                "limit",
+                "deliveryMode"
+              ]
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "pollAfterMs": {
+          "type": "integer",
+          "minimum": 2000,
+          "maximum": 60000
+        },
+        "supportCode": {
+          "anyOf": [
+            {
+              "type": "string",
+              "maxLength": 8192
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "etag": {
+          "anyOf": [
+            {
+              "type": "string",
+              "pattern": "^[a-f0-9]{32}$"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "capabilities": {
+          "$ref": "#/$defs/FounderCapabilities"
+        },
+        "deliveryMode": {
+          "anyOf": [
+            {
+              "enum": [
+                "contentOnly",
+                "hosted",
+                "website"
+              ]
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "steps": {
+          "type": "array",
+          "minItems": 7,
+          "maxItems": 7,
+          "prefixItems": [
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "id": {
+                  "const": "website"
+                },
+                "state": {
+                  "enum": [
+                    "pending",
+                    "working",
+                    "blocked",
+                    "done",
+                    "optional"
+                  ]
+                },
+                "copy": {
+                  "$ref": "#/$defs/FounderCopy"
+                }
+              },
+              "required": [
+                "id",
+                "state",
+                "copy"
+              ]
+            },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "id": {
+                  "const": "first_article"
+                },
+                "state": {
+                  "enum": [
+                    "pending",
+                    "working",
+                    "blocked",
+                    "done",
+                    "optional"
+                  ]
+                },
+                "copy": {
+                  "$ref": "#/$defs/FounderCopy"
+                }
+              },
+              "required": [
+                "id",
+                "state",
+                "copy"
+              ]
+            },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "id": {
+                  "const": "writing"
+                },
+                "state": {
+                  "enum": [
+                    "pending",
+                    "working",
+                    "blocked",
+                    "done",
+                    "optional"
+                  ]
+                },
+                "copy": {
+                  "$ref": "#/$defs/FounderCopy"
+                }
+              },
+              "required": [
+                "id",
+                "state",
+                "copy"
+              ]
+            },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "id": {
+                  "const": "review"
+                },
+                "state": {
+                  "enum": [
+                    "pending",
+                    "working",
+                    "blocked",
+                    "done",
+                    "optional"
+                  ]
+                },
+                "copy": {
+                  "$ref": "#/$defs/FounderCopy"
+                }
+              },
+              "required": [
+                "id",
+                "state",
+                "copy"
+              ]
+            },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "id": {
+                  "const": "setup"
+                },
+                "state": {
+                  "enum": [
+                    "pending",
+                    "working",
+                    "blocked",
+                    "done",
+                    "optional"
+                  ]
+                },
+                "copy": {
+                  "$ref": "#/$defs/FounderCopy"
+                }
+              },
+              "required": [
+                "id",
+                "state",
+                "copy"
+              ]
+            },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "id": {
+                  "const": "publishing"
+                },
+                "state": {
+                  "enum": [
+                    "pending",
+                    "working",
+                    "blocked",
+                    "done",
+                    "optional"
+                  ]
+                },
+                "copy": {
+                  "$ref": "#/$defs/FounderCopy"
+                }
+              },
+              "required": [
+                "id",
+                "state",
+                "copy"
+              ]
+            },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "id": {
+                  "const": "done"
+                },
+                "state": {
+                  "enum": [
+                    "pending",
+                    "working",
+                    "blocked",
+                    "done",
+                    "optional"
+                  ]
+                },
+                "copy": {
+                  "$ref": "#/$defs/FounderCopy"
+                }
+              },
+              "required": [
+                "id",
+                "state",
+                "copy"
+              ]
+            }
+          ]
+        },
+        "failure": {
+          "$ref": "#/$defs/FounderFailure"
+        },
+        "copyId": {
+          "type": "string",
+          "maxLength": 8192
+        },
+        "cost": {
+          "anyOf": [
+            {
+              "type": "integer",
+              "minimum": 0
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "balance": {
+          "anyOf": [
+            {
+              "type": "integer",
+              "minimum": 0
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "missing": {
+          "anyOf": [
+            {
+              "type": "integer",
+              "minimum": 0
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "expectedPages": {
+          "anyOf": [
+            {
+              "type": "integer",
+              "minimum": 0
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "deployHost": {
+          "anyOf": [
+            {
+              "enum": [
+                "Vercel",
+                "Netlify",
+                "Cloudflare Pages"
+              ]
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "deployWaitMinutes": {
+          "anyOf": [
+            {
+              "type": "integer",
+              "minimum": 0
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "emailable": {
+          "type": "boolean"
+        },
+        "pointsOutcome": {
+          "anyOf": [
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "state": {
+                  "enum": [
+                    "no_charge",
+                    "refunded",
+                    "charged",
+                    "kept",
+                    "pending"
+                  ]
+                },
+                "points": {
+                  "anyOf": [
+                    {
+                      "type": "integer",
+                      "minimum": 0
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                }
+              },
+              "required": [
+                "state",
+                "points"
+              ]
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "claims": {
+          "anyOf": [
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "count": {
+                  "type": "integer",
+                  "minimum": 0
+                }
+              },
+              "required": [
+                "count"
+              ]
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "developerNote": {
+          "anyOf": [
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "subject": {
+                  "type": "string",
+                  "maxLength": 8192
+                },
+                "body": {
+                  "type": "string",
+                  "maxLength": 8192
+                }
+              },
+              "required": [
+                "subject",
+                "body"
+              ]
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "publishOffer": {
+          "anyOf": [
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "runId": {
+                  "type": "string",
+                  "maxLength": 8192
+                },
+                "blogHost": {
+                  "type": "string",
+                  "maxLength": 8192
+                },
+                "postedHost": {
+                  "anyOf": [
+                    {
+                      "type": "string",
+                      "maxLength": 8192
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                }
+              },
+              "required": [
+                "runId",
+                "blogHost",
+                "postedHost"
+              ]
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "team": {
+          "anyOf": [
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "pendingRequests": {
+                  "type": "integer",
+                  "minimum": 0
+                }
+              },
+              "required": [
+                "pendingRequests"
+              ]
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "viewerRole": {
+          "enum": [
+            "member"
+          ]
+        },
+        "staffConsole": {
+          "type": "boolean"
+        },
+        "article": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ArticleStatus"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "version",
+        "contractVersion",
+        "companyId",
+        "cohort",
+        "stage",
+        "state",
+        "headline",
+        "body",
+        "holdingReason",
+        "action",
+        "next",
+        "runId",
+        "etaSeconds",
+        "queuePosition",
+        "draftReadyNotifications",
+        "switchTopicAvailable",
+        "githubReturn",
+        "website",
+        "firstArticle",
+        "pollAfterMs",
+        "supportCode",
+        "etag",
+        "capabilities",
+        "deliveryMode",
+        "steps",
+        "failure",
+        "article"
+      ]
+    },
+    "ArticleStatus": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "runId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 100
+        },
+        "status": {
+          "enum": [
+            "approval_required",
+            "awaiting_approval",
+            "awaiting_confirmation",
+            "awaiting_delivery_mode",
+            "blocked",
+            "cancelled",
+            "completed",
+            "denied",
+            "failed",
+            "queued",
+            "running"
+          ]
+        },
+        "approvalState": {
+          "enum": [
+            "not_required",
+            "approval_required",
+            "approved",
+            "denied"
+          ]
+        },
+        "currentStep": {
+          "anyOf": [
+            {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 120
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "deliveryMode": {
+          "enum": [
+            "contentOnly",
+            "hosted",
+            "website"
+          ]
+        },
+        "resumeAvailable": {
+          "type": "boolean"
+        },
+        "pollAfterMs": {
+          "type": "integer",
+          "minimum": 2000,
+          "maximum": 60000
+        },
+        "progress": {
+          "type": "array",
+          "maxItems": 100,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "id": {
+                "type": "string",
+                "pattern": "^[A-Za-z0-9_.:-]{1,120}$"
+              },
+              "status": {
+                "enum": [
+                  "pending",
+                  "running",
+                  "completed",
+                  "failed",
+                  "blocked",
+                  "cancelled",
+                  "skipped"
+                ]
+              },
+              "copy": {
+                "$ref": "#/$defs/FounderCopy"
+              }
+            },
+            "required": [
+              "id",
+              "status",
+              "copy"
+            ]
+          }
+        },
+        "failure": {
+          "$ref": "#/$defs/FounderFailure"
+        },
+        "capabilities": {
+          "$ref": "#/$defs/FounderCapabilities"
+        }
+      },
+      "required": [
+        "runId",
+        "status",
+        "approvalState",
+        "currentStep",
+        "deliveryMode",
+        "resumeAvailable",
+        "pollAfterMs",
+        "progress",
+        "failure",
+        "capabilities"
+      ]
+    }
+  }
+}

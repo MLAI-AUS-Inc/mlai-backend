@@ -39,7 +39,8 @@ class FounderJourneyView(MyStartupAccess, APIView):
         if not journeys.api_enabled():
             return _not_found()
         company = self.company
-        payload = journeys.project_founder_journey(company.organization, user=request.user, company=company)
+        payload = journeys.project_founder_journey(company.organization, user=request.user, company=company,
+            run_id=request.query_params.get("runId"))
         etag = payload["etag"]
         if journeys.matches_if_none_match(request.headers.get("If-None-Match"), etag):
             response = HttpResponseNotModified()

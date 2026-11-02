@@ -230,7 +230,8 @@ def run_decision(organization, run, *, config, user, now, queue=None, follow_pub
             copy_id = "done_copy_ready_ladder_exhausted" if mapping(exhausted).get("exhausted_at") else "done_copy_ready_strategy"
     if copy_id is None and count:
         copy_id = "ask_check_highlighted"
-    if copy_id is None and ready_before_preview(run, organization) and getattr(run, "approval_state", None) != "approved":
+    from .founder_journey_contract import effective_approval_state
+    if copy_id is None and ready_before_preview(run, organization) and effective_approval_state(run) != "approved":
         copy_id = "ask_review_draft"
     if copy_id is None and code in {"SITE_TEST_CHANGE_REQUIRED", "BRANCH_PROTECTION_APPROVAL_REQUIRED"}:
         copy_id = "ask_approve_on_github_site_test" if code == "SITE_TEST_CHANGE_REQUIRED" else "ask_approve_on_github_protected"
