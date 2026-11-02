@@ -521,4 +521,3 @@ class CheckerDefectTests(SimpleTestCase):
                 contract.load_registry()
         contract.load_registry.cache_clear()
         self.assertIn("by_code_v2", contract.load_registry())
-
