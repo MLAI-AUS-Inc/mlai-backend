@@ -278,7 +278,7 @@ def carry_charge(*, source_run, new_run) -> dict:
         saved, incoming = _mapping(source.run_request), _mapping(target.run_request)
         if spend is None:
             from .first_article_entitlement import entitlement_payload
-            if not entitled_request(saved) or entitlement_payload(source).get("entitlementStatus") == "released":
+            if not entitled_request(saved) or entitlement_payload(source).get("entitlementStatus") not in {"reserved", "consumed"}:
                 raise ValueError("The source has no available charge or entitlement.")
         candidate = incoming.get("roo_points_ledger_id")
         if candidate not in (None, "") and str(candidate) != str(saved.get("roo_points_ledger_id")):

@@ -170,6 +170,36 @@ class RefundTests(TestCase):
         self.assertEqual(Ledger.objects.filter(idempotency_key__endswith=":released").count(), 1)
         self.assertFalse(Ledger.objects.filter(kind="REFUND").exists())
 
+    @override_settings(ARTICLES_FREE_FIRST_ARTICLE_ENABLED=True, ARTICLES_FIRST_ARTICLE_GOAL_ENABLED=False,
+                       ARTICLES_FREE_FIRST_ARTICLE_DAILY_CAP=0)
+    def test_real_reserved_or_consumed_entitlement_can_be_carried(self):
+        key = "carry-free-"+uuid4().hex
+        reservation = reserve_entitlement(organization=self.org, user=self.user, client_request_id=key,
+            data={"expectedCostPoints": 0, "delivery_mode": "content_only", "delivery_mode_confirmed": True},
+            config=self.built.config)
+        request = {"client_request_id": key, "roo_points_billing_status": "entitled",
+                   "roo_points_entitlement": ENTITLEMENT, "roo_points_ledger_id": str(reservation.pk)}
+        source = ContentFactoryRun.objects.create(run_id="real-free", organization=self.org, domain=self.org.domain,
+            workflow="article_generation", run_request=request)
+        child = ContentFactoryRun.objects.create(run_id="real-child", organization=self.org, domain=self.org.domain,
+            workflow="article_generation")
+        self.assertEqual(refunds.carry_charge(source_run=source, new_run=child)["state"], "carried")
+        from .first_article_entitlement import consume_entitlement
+        consume_entitlement(organization=self.org, run=source)
+        self.assertEqual(refunds.carry_charge(source_run=source, new_run=child)["state"], "carried")
+
+    def test_declared_entitlement_without_original_reservation_cannot_be_carried(self):
+        source = ContentFactoryRun.objects.create(run_id="forged-free", organization=self.org,
+            domain=self.org.domain, workflow="article_generation", run_request={"roo_points_billing_status": "entitled",
+            "roo_points_entitlement": ENTITLEMENT, "roo_points_ledger_id": "999999999"})
+        child = ContentFactoryRun.objects.create(run_id="forged-child", organization=self.org, domain=self.org.domain,
+            workflow="article_generation")
+        with self.assertRaises(ValueError):
+            refunds.carry_charge(source_run=source, new_run=child)
+        child.refresh_from_db()
+        self.assertEqual(child.run_request, {})
+        self.assertNotIn("points_v1", child.result)
+
     def test_sweep_is_bounded_and_batches_no_debit_receipts(self):
         import time
         from django.test.utils import CaptureQueriesContext
