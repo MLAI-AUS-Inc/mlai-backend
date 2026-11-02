@@ -714,6 +714,13 @@ def get_latest_repo_sha(token: str, repo_name: str) -> str:
     return data['sha']
 
 
+def standalone_reviewed_setup_required():
+    """Return the closed handoff for an old command without current setup consent."""
+    return {"status": "needs_user", "error_code": "reviewed_setup_required",
+        "next_action": "review_website_setup", "next_path": "/my-startup/website",
+        "message": "Open My startup, then Website, and review the current articles setup before starting."}
+
+
 def scaffold_articles_directory(
     domain: str,
     slack_user_id: str,
@@ -737,7 +744,12 @@ def scaffold_articles_directory(
     """
     from content_factory.website_connections import require_unlocked_remote_call
     require_unlocked_remote_call()
-    from content_factory.models import ContentFactoryJob
+    from content_factory.run_ownership import admission_enabled
+    if admission_enabled():
+        # This legacy command carries no reviewed surface or Roo receipt.
+        # The current setup route owns the complete typed recipe and admission.
+        return standalone_reviewed_setup_required()
+    from content_factory.run_backend_facts import create_job_facts
 
     content_factory_url = getattr(settings, 'CONTENT_FACTORY_URL', 'http://localhost:8001')
     scaffold_endpoint = f"{content_factory_url.rstrip('/')}/api/runs/scaffold"
@@ -774,7 +786,7 @@ def scaffold_articles_directory(
                 job_id = data.get('job_id')
 
                 if job_id:
-                    ContentFactoryJob.objects.create(
+                    create_job_facts(
                         job_id=job_id,
                         domain=domain,
                         slack_user_id=slack_user_id,
