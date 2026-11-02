@@ -1,7 +1,9 @@
 # Roo points for event discounts
 
-Members ask Public Roo for an eligible event discount, review a ten-minute quote,
-and confirm in the same private Slack-backed Roo thread. The backend reserves
+Members open **Member perks** on an upcoming event in web, desktop or mobile,
+choose a half-price ticket for **16 Roo Points** or a free ticket for **32 Roo
+Points**, review a ten-minute quote and explicitly confirm the points cost.
+The existing private Public Roo conversation remains supported. The backend reserves
 general Roo points, creates one event/ticket-specific Luma coupon, records one
 `EVENT` ledger spend, then returns the pre-applied booking link. The canonical
 MLAI member account owns the receipt across devices.
@@ -57,6 +59,45 @@ restricted to digital services. Coding reservations are projected into the
 correct general/digital buckets; event holds are visible to all spending paths.
 
 ## Interfaces and authority
+
+The first-party member modal uses
+`/api/v1/community-chat/event-discounts/events/<event_id>/`:
+
+- `GET` checks the configured offer, live event/ticket eligibility and the
+  caller's spendable general points. It returns both server-priced tiers and
+  affordability without creating a quote, reserving stock or spending points.
+- `POST {"action":"quote","perk":"half_price"}` (or `free_ticket`) revalidates
+  the live ticket and freezes the displayed terms in a ten-minute account quote.
+- `POST {"action":"redeem","quote_id":"…","request_id":"…","confirmed":true}`
+  confirms that exact quote. The same request ID must be reused after a timeout;
+  the existing transactional reservation and coupon reconciliation prevent a
+  duplicate spend. No client-supplied price, member ID or Slack scope is accepted.
+- `GET ?redemption_id=<uuid>` reads only that member's receipt for that event,
+  including pending, reviewed and failed outcomes. It does not repeat provider
+  reads or spend points. Only fulfilled receipts include the issued code/link.
+
+These routes require the existing browser cookie or native account session.
+Cookie writes enforce the session's trusted Origin. A Slack account or Roo DM
+is not required. Quotes use an account-derived namespace in the existing scope
+columns; they cannot be confirmed through the Slack-service route, or vice versa.
+All responses are private/no-store. Clients fence late results and link callbacks
+on account/community changes. Selecting a perk only quotes it; the **Use N Roo
+Points** button performs confirmation. Closing the modal does not cancel pending
+issuance, and reopening recovers the same event receipt.
+
+Both tiers derive from an explicitly configured active 32-point, 100% event
+offer. The half-price tier uses the same ticket and allocation at 16 points for
+50% off. Existing event, stock, AUD price-below-A$100, approval and one-per-member
+rules still apply. No offers, balances or live coupons are created by this code
+release. The modal never uses the generic reward redemption path.
+
+Direct redemption requires `ROO_EVENT_DISCOUNTS_ENABLED=true`, the existing
+`LUMA_API_KEY` and `ROO_EVENT_DISCOUNT_WORKER_ENABLED=true`. The worker flag is
+now also read into Django settings, matching the existing deployment flag.
+The modal does not call Roo or require a linked Slack identity; existing
+platform-wide secret checks remain unchanged. The account routes do not accept
+Roo-service credentials. Release still requires
+the existing schema, worker supervision and an approved managed event offer.
 
 Strict isolated Roo-service endpoints under `/api/v1/points/event-discounts/`:
 
@@ -171,6 +212,16 @@ uses `run_periodic_command` every 30 seconds. Manual one-shot/loop commands neve
 create a new member request or change uncertain holds into refunds.
 
 ## Verification
+
+The member-modal increment adds real account-session/cookie authentication,
+origin enforcement, 16/32-point charges, insufficient balances, immutable quotes,
+duplicate confirmation, foreign-account denial and pending/failed receipt reads.
+The combined disposable PostgreSQL run passed **199 tests**, including the
+existing Pulse regressions, event discount service/API and row-lock concurrency
+suite. Another **53 database-free checks** cover provider, worker and ticket
+policy behavior, including reading the worker flag from a fresh runtime environment.
+The same previously approved 374-file local migration inventory was used;
+no new model or migration is required.
 
 Database-free provider/worker checks forbid database and network access:
 

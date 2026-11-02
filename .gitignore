@@ -84,6 +84,7 @@ cookies.txt
 /output/event-discount-verification/
 !/docs/mlai-community-agent.md
 !/docs/startup-monthly-groups.md
+!/docs/pulse-generation-reliability.md
 !/docs/backend-api-web-handoff.md
 !/docs/apple-iap-and-deletion-migrations.md
 !/docs/apple-app-review-operations.md

@@ -331,6 +331,7 @@ class DraftResultSerializer(serializers.Serializer):
         required=False,
         default=GroundednessStatus.PENDING,
     )
+    repair_revision_id = serializers.IntegerField(required=False, min_value=1)
     structured_memo = serializers.DictField()
     evidence_event_ids = serializers.ListField(child=serializers.IntegerField(), required=False, default=list)
     evidence_metric_ids = serializers.ListField(child=serializers.IntegerField(), required=False, default=list)
