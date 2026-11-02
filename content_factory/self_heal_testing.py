@@ -131,6 +131,8 @@ def fake_provider(module: str, **functions):
     """
     sentinel = object()
     previous = sys.modules.get(module, sentinel)
+    if module == TEAM_MODULE:
+        functions.setdefault("pinned_owner", lambda organization: (False, None))
     fake = types.ModuleType(module)
     for name, function in functions.items():
         setattr(fake, name, function)
