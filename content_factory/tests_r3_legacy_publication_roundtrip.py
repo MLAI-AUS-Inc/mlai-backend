@@ -77,6 +77,11 @@ class CompleteLegacyPublicationRoundTripTests(TransactionTestCase):
         self.assertNotIn(WIRE_EXECUTION_KEY, payload)
         self.assertEqual(payload["child_dispatch_v1"]["legacy_source_v1"], fixture["legacy_source_v1"])
         self.assertEqual(child.run_request["legacy_source_v1"], fixture["legacy_source_v1"])
+        evidence = payload["child_dispatch_v1"]["reviewed_publication_source_v1"]
+        self.assertEqual(child.run_request["reviewed_publication_source_v1"], evidence)
+        self.assertEqual(set(evidence), {"schema_version", "source_run_id", "reviewed_revision",
+            "reviewed_source_ref", "expected_source_sha", "source_admission_digest",
+            "source_execution_id", "source_ticket_digest", "review_source_proof_digest"})
         self.assertEqual(child.run_request["roo_points_ledger_id"], str(ledger.pk))
         self.assertEqual(list(Ledger.objects.values()), money_before)
         self.assertNotEqual(fixture["source_request"], source.run_request, "CF defaults must not be reconstructed from backend fields")

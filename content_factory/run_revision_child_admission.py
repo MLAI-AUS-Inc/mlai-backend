@@ -812,7 +812,9 @@ def _publication_evidence(run, *, user, descriptor=None):
         "review_source_proof_digest": proof_digest}
     if receipt is None:
         from .run_legacy_source import validate_legacy_source
-        evidence["legacy_source_v1"] = validate_legacy_source(run, descriptor)
+        # The descriptor is a sibling in the original child request/dispatch.
+        # Keep this closed source-evidence schema identical for both lineages.
+        validate_legacy_source(run, descriptor)
     return evidence
 
 

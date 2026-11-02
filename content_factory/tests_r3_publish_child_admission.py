@@ -264,7 +264,10 @@ class LegacyPublishChildAdmissionTests(PublishChildAdmissionTests):
         source = nested["reviewed_publication_source_v1"]
         for key in ("source_admission_digest", "source_execution_id", "source_ticket_digest", "review_source_proof_digest"):
             self.assertIsNone(source[key])
-        self.assertEqual(source["legacy_source_v1"], self.descriptor)
+        self.assertNotIn("legacy_source_v1", source)
+        self.assertEqual(set(source), {"schema_version", "source_run_id", "reviewed_revision",
+            "reviewed_source_ref", "expected_source_sha", "source_admission_digest",
+            "source_execution_id", "source_ticket_digest", "review_source_proof_digest"})
         self.assertEqual(ContentFactoryRun.objects.values().get(pk=self.parent.pk), before)
         self.assertEqual(Ledger.objects.count(), 1)
         if os.environ.get("R3_LEGACY_PUBLISH_CHILD_FIXTURE_OUTPUT"):
