@@ -8863,9 +8863,10 @@ DJANGO_OWNED_ARTICLE_RESULT_PREFIXES = (
 def _merge_django_owned_article_result(local_result, remote_result):
     from content_factory.article_publication_evidence import SETTLEMENT_RESULT_KEYS
     from .p2_foundation import P2_BACKEND_RESULT_KEYS
+    from .run_ownership import R3_BACKEND_RESULT_KEYS
     local = _run_mapping(local_result)
     # A status poll of a failed run must not erase, or invent, its refund work.
-    backend_merge_keys = {"publish_merge_intent", "merge_response", "merge_status", "merge_sha", "merged_at", *SETTLEMENT_RESULT_KEYS, *P2_BACKEND_RESULT_KEYS}
+    backend_merge_keys = {"publish_merge_intent", "merge_response", "merge_status", "merge_sha", "merged_at", *SETTLEMENT_RESULT_KEYS, *P2_BACKEND_RESULT_KEYS, *R3_BACKEND_RESULT_KEYS}
     merged = {key: value for key, value in _run_mapping(remote_result).items()
         if key not in backend_merge_keys or key in local}
     remote_quality = _run_mapping(merged.get("article_preview_quality"))
@@ -11932,6 +11933,7 @@ def _serialize_run(
     run, *, context=None, latest_runs=None, checks=None, mode="full",
     topic_candidates=None, precomputed_article_setup_state=None, config=None, include_workflow_progress=True,
 ):
+    from .run_ownership import public_run_value
     from .setup_status_projection import terminal_setup_projection
     run = terminal_setup_projection(_setup_pr_creation_failure_view(run))
     compact = mode in {"summary", "status"}
@@ -12058,7 +12060,7 @@ def _serialize_run(
             "workflowProgress": _workflow_progress(
                 context=context, run=run, latest_runs=latest_runs, checks=checks, topic_candidates=topic_candidates, config=config
             ) if include_workflow_progress else None,
-            "result": _strip_missing_setup_run_refs(_compact_result_for_run(run)),
+            "result": public_run_value(_strip_missing_setup_run_refs(_compact_result_for_run(run))),
             **reliability_presentation(result, status=run.status, workflow=run.workflow,
                                        current_step=run.current_step, resume_available=run.resume_available,
                                        approval_state=run.approval_state),
@@ -12141,7 +12143,7 @@ def _serialize_run(
         "workflowProgress": _workflow_progress(
             context=context, run=run, latest_runs=latest_runs, checks=checks, topic_candidates=topic_candidates, config=config
         ) if include_workflow_progress else None,
-        "result": _strip_missing_setup_run_refs(response_result),
+        "result": public_run_value(_strip_missing_setup_run_refs(response_result)),
         **reliability_presentation(result, status=run.status, workflow=run.workflow,
                                    current_step=run.current_step, resume_available=run.resume_available,
                                    approval_state=run.approval_state),
@@ -14032,6 +14034,16 @@ def _create_local_run(*, workflow, domain, github_repo="", actor_id="", payload=
     remote cleanup. It can never resurrect readiness or adopt a replacement site.
     """
     payload = dict(payload or {})
+    from .run_ownership import WIRE_REQUEST_KEY, RunOwnershipConflict, admitted_run_for_key, bind_admitted_run, require_admission_identity
+    if WIRE_REQUEST_KEY in payload:
+        admitted = admitted_run_for_key(payload.get("client_request_id"))
+        if admitted is None:
+            raise RunOwnershipConflict("The original dispatch reservation is not available.")
+        require_admission_identity(admitted, payload)
+        response = remote_data if isinstance(remote_data, dict) else {}
+        remote_id = response.get("run_id") or response.get("job_id") or response.get("task_id")
+        if remote_id:
+            bind_admitted_run(admitted, remote_id)
     kwargs = dict(workflow=workflow, domain=domain, github_repo=github_repo,
         actor_id=actor_id, payload=payload, remote_data=remote_data, fallback_run_id=fallback_run_id, preserve_existing=preserve_existing)
     try:
@@ -14074,6 +14086,18 @@ def _create_local_run(*, workflow, domain, github_repo="", actor_id="", payload=
 def _create_local_run_authorized(*, workflow, domain, github_repo="", actor_id="", payload=None, remote_data=None, fallback_run_id="", preserve_existing=False):
     remote_data = sanitize_json_for_postgres(remote_data or {})
     payload = sanitize_json_for_postgres(payload or {})
+    from .run_ownership import WIRE_REQUEST_KEY, admitted_run_for_key, require_admission_identity
+    if WIRE_REQUEST_KEY in payload:
+        admitted = admitted_run_for_key(payload.get("client_request_id"))
+        require_admission_identity(admitted, payload)
+        if payload.get("dispatch_pending_resolution"):
+            from .dispatch_admission import pending_response
+            pending_response(admitted, deferred_refund=payload.get("pending_billing_refund"))
+            admitted.refresh_from_db()
+        # An HTTP acknowledgement is identity evidence, not a newer execution
+        # checkpoint. Callback-first state and its clocks must survive it.
+        _persist_web_article_billing_to_job(admitted, payload)
+        return admitted
     # A dispatch-key lookup acknowledges identity after a lost response. It is
     # not a worker snapshot: its status omits linked repair/evidence fields and
     # can already lag callbacks. Never replace those callbacks with this receipt.
@@ -14609,6 +14633,12 @@ def _lookup_content_factory_dispatch_by_key(remote_config, client_request_id):
 def _run_pending_remote_dispatch(run) -> bool:
     """True for a provisional run awaiting dispatch resolution: still keyed by
     its dispatch token and stamped for resolution at dispatch time."""
+    from .run_ownership import DISPATCH_RESULT_KEY, owner_receipt
+    receipt = owner_receipt(run)
+    if receipt is not None:
+        result = run.result if isinstance(run.result, dict) else {}
+        return (run.run_id == receipt.get("reservation_run_id", receipt["identity"]["dispatch_key"])
+            and _run_mapping(result.get(DISPATCH_RESULT_KEY)).get("state") == "pending_resolution")
     if not run_is_dispatch_token_keyed(run):
         return False
     run_request = run.run_request if isinstance(run.run_request, dict) else {}
@@ -14720,6 +14750,13 @@ def _resolve_dispatch_token_run(run):
       honestly + release the withheld refund;
     - anything else → stay pending; the next poll retries.
     """
+    from .run_ownership import owner_receipt
+    if owner_receipt(run) is not None:
+        from .dispatch_admission import resolve_dispatch_outcome
+        original_id = run.run_id
+        resolve_dispatch_outcome(run)
+        run.refresh_from_db()
+        return run if run.run_id != original_id else None
     if run.workflow not in CONTENT_FACTORY_KEYED_DISPATCH_WORKFLOWS:
         return None
     remote_config = _content_factory_remote_config()
@@ -14845,9 +14882,15 @@ def _queue_content_factory_run_authorized(*, endpoint, workflow, context, config
                 editorial_rejection = _refresh_article_editorial_payload(organization=context.organization, payload=payload)
                 if editorial_rejection is not None:
                     break
-                if payload.get("delivery_mode") == "content_only" and payload.get("delivery_mode_confirmed") is True:
+                from .run_ownership import admission_enabled
+                if (payload.get("delivery_mode") == "content_only" and payload.get("delivery_mode_confirmed") is True
+                        and not admission_enabled() and "backend_run_admission_v1" not in payload):
                     portable_reservation = reserve_portable_dispatch_intent(
                         organization=context.organization, workflow=workflow, actor_id=actor_id, payload=payload)
+            from .run_ownership import WIRE_REQUEST_KEY, admission_enabled, reserve_admitted_run, user_principal
+            if admission_enabled() or WIRE_REQUEST_KEY in payload:
+                reserve_admitted_run(organization=context.organization,
+                    principal=user_principal(context.profile.user.pk, actor_id), workflow=workflow, payload=payload)
             try:
                 post_attempted = True
                 from content_factory.run_queue_position import with_interactive_queue_class

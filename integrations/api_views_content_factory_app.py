@@ -228,6 +228,15 @@ def _content_factory_request(method: str, path: str, *, payload: dict | None = N
     kwargs = {"headers": _content_factory_headers(), "timeout": (3, 30)}
     if payload is not None:
         kwargs["json"] = payload
+    if method.lower() == "post" and path == "/api/runs/scan" and payload is not None:
+        from content_factory.dispatch_admission import post_dispatch, reserve_user_dispatch
+        from content_factory.run_ownership import WIRE_REQUEST_KEY, admission_enabled
+        if admission_enabled() or WIRE_REQUEST_KEY in payload:
+            from content_factory.website_connections import dispatch_contract
+            payload.update(dispatch_contract(payload.get("domain"), payload, action="scan"))
+            admitted = reserve_user_dispatch(payload=payload, workflow="repo_scan", domain=payload.get("domain"),
+                actor_id=payload.get("requested_by_slack_user_id") or payload.get("slack_user_id"))
+            return post_dispatch(admitted, request, url, **kwargs)
     return request(url, **kwargs)
 
 

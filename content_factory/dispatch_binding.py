@@ -55,6 +55,11 @@ def bind_dispatch_token_run(*, client_request_id, remote_run_id):
             )
             if token_run is None or not run_is_dispatch_token_keyed(token_run):
                 return None
+            from .run_ownership import owner_receipt
+            if owner_receipt(token_run) is not None:
+                # The admitted router validates scope/version before binding.
+                # This legacy helper may neither clear nor delete its history.
+                return None
             existing_real = ContentFactoryRun.objects.select_for_update().filter(run_id=real).first()
             if existing_real is not None:
                 real_org = getattr(existing_real, "organization_id", None)

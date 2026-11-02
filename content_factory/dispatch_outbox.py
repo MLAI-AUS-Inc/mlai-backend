@@ -62,6 +62,11 @@ def reserve_dispatch(*, organization, payload, endpoint="article", workflow="art
         raise ValueError("A bounded article request identity is required.")
     from .p2_foundation import stamp_run_request, P2_BACKEND_REQUEST_KEYS
     stamp_run_request(payload, organization=organization, requester_user_id=payload.get("roo_points_requested_by_user_id"))
+    from .run_ownership import WIRE_REQUEST_KEY, admission_enabled, reserve_admitted_run, user_principal
+    if admission_enabled() or WIRE_REQUEST_KEY in payload:
+        reserve_admitted_run(organization=organization,
+            principal=user_principal(payload.get("roo_points_requested_by_user_id"), actor_id),
+            workflow=workflow, payload=payload)
     saved = sanitized_evidence(payload)
     identity = {key: value for key, value in saved.items() if not key.startswith("roo_points_") and key not in {"dispatch_outbox_reserved", "roo_points_gate", *P2_BACKEND_REQUEST_KEYS}}
     envelope = {"request": saved, "endpoint": endpoint, "workflow": workflow,

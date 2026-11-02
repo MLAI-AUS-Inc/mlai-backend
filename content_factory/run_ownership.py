@@ -17,9 +17,11 @@ OWNER_RESULT_KEY = "run_owner_v1"
 OWNER_EXECUTION_KEY = "run_owner_execution_v1"
 EVENT_RESULT_KEY = "run_owner_events_v1"
 DISPATCH_RESULT_KEY = "run_owner_dispatch_v1"
+HOSTED_OBSERVATION_KEY = "hosted_verification_observation_v1"
 WIRE_REQUEST_KEY = "backend_run_admission_v1"
 WIRE_EXECUTION_KEY = "backend_run_execution_v1"
-R3_BACKEND_RESULT_KEYS = frozenset({OWNER_RESULT_KEY, OWNER_EXECUTION_KEY, EVENT_RESULT_KEY, DISPATCH_RESULT_KEY})
+R3_BACKEND_RESULT_KEYS = frozenset({OWNER_RESULT_KEY, OWNER_EXECUTION_KEY, EVENT_RESULT_KEY,
+                                  DISPATCH_RESULT_KEY, HOSTED_OBSERVATION_KEY})
 R3_BACKEND_REQUEST_KEYS = frozenset({WIRE_REQUEST_KEY, WIRE_EXECUTION_KEY})
 SCOPE_FIELDS = (*CONNECTION_FIELDS, *OPERATION_FIELDS, "expected_source_sha", "source_run_id")
 SCHEDULER_SERVICES = frozenset({"island_refresh", "daily_discovery", "research_automation", "hosted_auto_register"})
@@ -43,6 +45,16 @@ def worker_workflow_allowed(admitted, actual):
     """Check only verified backend-to-worker aliases; never rewrite admission."""
     return type(admitted) is str and type(actual) is str and (
         actual == admitted or actual in WORKER_WORKFLOW_ALIASES.get(admitted, ()))
+
+
+def public_run_value(value):
+    """Remove internal admission/ticket/receipt namespaces before public output."""
+    if isinstance(value, dict):
+        return {key: public_run_value(item) for key, item in value.items()
+                if key not in R3_BACKEND_RESULT_KEYS | R3_BACKEND_REQUEST_KEYS}
+    if isinstance(value, list):
+        return [public_run_value(item) for item in value]
+    return value
 
 
 def owner_receipt(run):
@@ -368,6 +380,7 @@ def bind_admitted_run(run, remote_run_id):
         carrier = jobs.filter(job_id=locked.run_id).first()
         if carrier is not None and jobs.filter(job_id=remote_run_id).exclude(pk=carrier.pk).exists():
             raise RunOwnershipConflict("The worker identity already has another legacy carrier.")
+        original_id = locked.run_id
         try:
             with transaction.atomic():
                 ContentFactoryRun.objects.filter(pk=locked.pk).update(run_id=remote_run_id)
@@ -377,5 +390,8 @@ def bind_admitted_run(run, remote_run_id):
         if carrier is not None:
             # Preserve billing/source identity and the exact Job clocks. This
             # is a routing rename, not a new charge or a full Job fact mirror.
-            ContentFactoryJob.objects.filter(pk=carrier.pk).update(job_id=remote_run_id)
+            from .dispatch_binding import _rebind_billing_job
+            _rebind_billing_job(original_id, remote_run_id)
+            if not ContentFactoryJob.objects.filter(pk=carrier.pk, job_id=remote_run_id).exists():
+                raise RunOwnershipConflict("The admitted legacy carrier could not be projected atomically.")
         return locked

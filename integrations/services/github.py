@@ -488,7 +488,9 @@ def scan_github_project(
 
         from content_factory.website_connections import dispatch_contract
         payload.update(dispatch_contract(resolved_domain, payload, action="scan"))
-        cf_response = http_requests.post(
+        from content_factory.dispatch_admission import post_dispatch, reserve_user_dispatch
+        admitted = reserve_user_dispatch(payload=payload, workflow="repo_scan", domain=resolved_domain, actor_id=slack_user_id)
+        cf_response = post_dispatch(admitted, http_requests.post,
             scan_endpoint,
             json=payload,
             headers=headers,
@@ -755,7 +757,9 @@ def scaffold_articles_directory(
     try:
         from content_factory.website_connections import dispatch_contract
         payload.update(dispatch_contract(domain, payload, action="setup"))
-        response = http_requests.post(
+        from content_factory.dispatch_admission import post_dispatch, reserve_user_dispatch
+        admitted = reserve_user_dispatch(payload=payload, workflow="scaffold_articles", domain=domain, actor_id=slack_user_id)
+        response = post_dispatch(admitted, http_requests.post,
             scaffold_endpoint,
             json=payload,
             headers=headers,

@@ -208,6 +208,27 @@ class RunAdmissionTests(TestCase):
             bind_admitted_run(run, real.run_id)
         self.assertEqual(list(ContentFactoryRun.objects.order_by("pk").values()), before)
 
+    def test_binding_renames_only_the_existing_job_carrier_without_new_charge_or_clocks(self):
+        from .models import ContentFactoryJob
+        run = self.reserve()
+        job = ContentFactoryJob.objects.create(job_id=run.run_id, domain=self.org.domain, slack_user_id="U_SYNTH",
+            billing_source_job_id="original-charge-source", billing_status="charged", billing_amount=6)
+        before = ContentFactoryJob.objects.values().get(pk=job.pk)
+        bind_admitted_run(run, "actual-worker-with-carrier")
+        self.assertEqual(ContentFactoryJob.objects.values().get(pk=job.pk), {**before, "job_id": "actual-worker-with-carrier"})
+
+    def test_occupied_job_carrier_refuses_before_alias_rename(self):
+        from .models import ContentFactoryJob
+        run = self.reserve()
+        ContentFactoryJob.objects.create(job_id=run.run_id, domain=self.org.domain, slack_user_id="U_SYNTH")
+        ContentFactoryJob.objects.create(job_id="legacy-occupied", domain="foreign.example", slack_user_id="U_FOREIGN")
+        before = list(ContentFactoryJob.objects.order_by("pk").values())
+        with self.assertRaises(RunOwnershipConflict):
+            bind_admitted_run(run, "legacy-occupied")
+        run.refresh_from_db()
+        self.assertEqual(run.run_id, "admitted-key")
+        self.assertEqual(list(ContentFactoryJob.objects.order_by("pk").values()), before)
+
     @override_settings(ARTICLES_RUN_FACT_AUTHORITY_ENABLED=True, ARTICLES_RUN_EVENT_AUTHORITY_ENABLED=True)
     def test_event_echo_requires_complete_exact_scope_and_protocol(self):
         payload = self.payload()

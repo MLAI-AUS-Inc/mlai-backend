@@ -1351,6 +1351,21 @@ def _post_content_factory_queue_request(
     if endpoint.rstrip("/").endswith(("/article", "/confirm-topic")) and payload.get("delivery_mode") != "content_only":
         from content_factory.website_connections import dispatch_contract
         payload.update(dispatch_contract(domain, payload, action="read", source_run_id=str(payload.get("source_run_id") or "")))
+    from content_factory.run_ownership import WIRE_REQUEST_KEY, admission_enabled
+    admitted = None
+    if admission_enabled() or WIRE_REQUEST_KEY in payload:
+        from content_factory.dispatch_admission import reserve_scheduler_dispatch, reserve_user_dispatch
+        if operation == "island_refresh":
+            admitted = reserve_scheduler_dispatch(payload=payload, workflow="island_refresh",
+                organization=Organization.objects.get(domain=domain), service="island_refresh")
+        else:
+            workflow = {"queue_discovery": "auto_discovery", "queue_article": "article_generation",
+                        "confirm_topic": "confirmed_topic"}.get(operation)
+            if workflow is None:
+                from content_factory.run_ownership import RunOwnershipConflict
+                raise RunOwnershipConflict("This dispatch has no admitted workflow.")
+            admitted = reserve_user_dispatch(payload=payload, workflow=workflow, domain=domain,
+                actor_id=str(payload.get("requested_by_slack_user_id") or payload.get("slack_user_id") or ""))
     attempts = CONTENT_FACTORY_FAST_QUEUE_RETRY_COUNT + 1
     timeout = (
         CONTENT_FACTORY_FAST_QUEUE_CONNECT_TIMEOUT_SECONDS,
@@ -1376,6 +1391,9 @@ def _post_content_factory_queue_request(
             )
             if attempt < attempts:
                 continue
+            if admitted is not None:
+                from content_factory.dispatch_admission import resolve_dispatch_outcome
+                return resolve_dispatch_outcome(admitted)
             _raise_content_factory_backend_unavailable(
                 operation=operation,
                 endpoint=endpoint,
@@ -1396,6 +1414,9 @@ def _post_content_factory_queue_request(
             )
             if attempt < attempts:
                 continue
+            if admitted is not None:
+                from content_factory.dispatch_admission import resolve_dispatch_outcome
+                return resolve_dispatch_outcome(admitted)
             _raise_content_factory_backend_unavailable(
                 operation=operation,
                 endpoint=endpoint,
@@ -1405,7 +1426,8 @@ def _post_content_factory_queue_request(
                 status_code=response.status_code,
             )
 
-        return response
+        from content_factory.dispatch_admission import accept_dispatch_response
+        return accept_dispatch_response(admitted, response)
 
     _raise_content_factory_backend_unavailable(
         operation=operation,

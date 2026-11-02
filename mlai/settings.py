@@ -2557,6 +2557,11 @@ ARTICLES_RUN_EVENTS_ENABLED = _env_is_true("ARTICLES_RUN_EVENTS_ENABLED", False)
 ARTICLES_RUN_JOB_DUAL_WRITE_ENABLED = _env_is_true("ARTICLES_RUN_JOB_DUAL_WRITE_ENABLED", False)
 ARTICLES_RUN_JOB_SHADOW_READ_ENABLED = _env_is_true("ARTICLES_RUN_JOB_SHADOW_READ_ENABLED", False)
 ARTICLES_RUN_JOB_READ_ENABLED = _env_is_true("ARTICLES_RUN_JOB_READ_ENABLED", False)
+# R3 admission, backend facts and event authority are distinct rollout stages.
+# Existing observational events/mirrors and historical readers retain their flags.
+ARTICLES_RUN_OWNERSHIP_ENABLED = _env_is_true("ARTICLES_RUN_OWNERSHIP_ENABLED", False)
+ARTICLES_RUN_FACT_AUTHORITY_ENABLED = _env_is_true("ARTICLES_RUN_FACT_AUTHORITY_ENABLED", False)
+ARTICLES_RUN_EVENT_AUTHORITY_ENABLED = _env_is_true("ARTICLES_RUN_EVENT_AUTHORITY_ENABLED", False)
 # P1 founder journey ("one simple path"). Every switch defaults off, so a
 # deploy alone changes nothing. New behaviour applies only to the new-journey
 # cohort (content_factory.founder_journey_cohort.is_new_journey); the legacy

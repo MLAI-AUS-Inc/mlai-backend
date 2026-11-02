@@ -1522,7 +1522,10 @@ def _process_source_reverification(identifier, now):
                     raise WebsiteAuthorityError("source_reverification_unavailable",
                         "Waiting for the earlier repository scan to settle.", retryable=True) from exc
                 raise
-            response = http_client.post(f"{remote['base_url']}/api/runs/scan", json=scan_payload,
+            from .dispatch_admission import post_dispatch, reserve_user_dispatch
+            admitted = reserve_user_dispatch(payload=scan_payload, workflow="repo_scan", domain=website.organization.domain,
+                actor_id=founder_actor_id_for_user(owner), user=owner)
+            response = post_dispatch(admitted, http_client.post, f"{remote['base_url']}/api/runs/scan", json=scan_payload,
                 headers=_content_factory_headers(), timeout=(3, 30))
             response.raise_for_status()
             remote_run = response.json()

@@ -3870,6 +3870,11 @@ class ContentFactoryCallbackView(APIView):
         # Order before *any* handler can mutate state, refund or notify. Use the
         # existing run JSON and row lock; no schema migration is required.
         run_id = str(data.get("run_id") or job_id)
+        from .run_ownership import RunOwnershipConflict, prepare_owned_callback
+        try:
+            prepare_owned_callback(data, run_id)
+        except RunOwnershipConflict:
+            return Response({"error": "run_admission_mismatch", "retryable": True}, status=409)
         bind_dispatch_token_run(client_request_id=data.get("client_request_id"), remote_run_id=run_id)
         try:
             version = execution_version(data)
@@ -8666,7 +8671,8 @@ def _set_content_factory_run_meta(run: ContentFactoryRun, meta: dict) -> None:
     run.result = payload
 
 
-def _serialize_content_factory_run(run: ContentFactoryRun) -> dict:
+def _serialize_content_factory_run(run: ContentFactoryRun, *, include_admission=False) -> dict:
+    from .run_ownership import public_run_value
     from .setup_status_projection import terminal_setup_projection
     run = terminal_setup_projection(run)
     steps = {}
@@ -8719,8 +8725,8 @@ def _serialize_content_factory_run(run: ContentFactoryRun) -> dict:
         "approval_state": run.approval_state,
         "resume_available": run.resume_available,
         "error": run.error or None,
-        "result": run.result or {},
-        "run_request": run.run_request or {},
+        "result": public_run_value(run.result or {}),
+        "run_request": (run.run_request or {}) if include_admission else public_run_value(run.run_request or {}),
         "step_states": steps,
         **{key: run.result[key] for key in RELIABILITY_FIELDS if key in (run.result or {})},
         "created_at": run.created_at.isoformat(),
@@ -8801,10 +8807,11 @@ def _merge_django_owned_run_result(existing_result, incoming_result):
     from django.conf import settings
     from content_factory.article_publication_evidence import SETTLEMENT_RESULT_KEYS
     from .p2_foundation import P2_BACKEND_RESULT_KEYS
+    from .run_ownership import R3_BACKEND_RESULT_KEYS
     existing = existing_result if isinstance(existing_result, dict) else {}
     incoming = incoming_result if isinstance(incoming_result, dict) else {}
     backend_merge_keys = {"publish_merge_intent", "merge_response", "merge_status", "merged_at", "article_review_updates", "delivery_v1",
-        "article_cancellation_v1", *SETTLEMENT_RESULT_KEYS, *P2_BACKEND_RESULT_KEYS,
+        "article_cancellation_v1", *SETTLEMENT_RESULT_KEYS, *P2_BACKEND_RESULT_KEYS, *R3_BACKEND_RESULT_KEYS,
         # R7 backend records (snapshot drift counter, run event log).
         "snapshot_drift_v1", "run_events_v1"}
     if getattr(settings, "ARTICLES_NO_CODELESS_TERMINAL_ENABLED", False):
@@ -8876,10 +8883,11 @@ def _merge_django_owned_run_request(existing_request, incoming_request, *, drift
     from .website_failure_contract import canonical_bytes
     from .snapshot_meaning import refuses
     from .p2_foundation import P2_BACKEND_REQUEST_KEYS
+    from .run_ownership import R3_BACKEND_REQUEST_KEYS
     immutable = set(SCOPE_FIELDS) | {"strategy_goal_id", "goal_budget", "delivery_mode", "requested_delivery_mode", "delivery_mode_confirmed"}
     existing = existing_request if isinstance(existing_request, dict) else {}
     incoming = incoming_request if isinstance(incoming_request, dict) else {}
-    incoming = {key: value for key, value in incoming.items() if key not in P2_BACKEND_REQUEST_KEYS}
+    incoming = {key: value for key, value in incoming.items() if key not in P2_BACKEND_REQUEST_KEYS | R3_BACKEND_REQUEST_KEYS}
     existing = deepcopy(existing)
     saved_result = backend_result if isinstance(backend_result, dict) else {}
     publish_approval = saved_result.get("article_approval_v1")
@@ -8927,7 +8935,7 @@ def _merge_django_owned_run_request(existing_request, incoming_request, *, drift
                 raise conflict
             merged[key] = deepcopy(value)
             continue
-        if key in {"setup_delivery_v1","article_delivery_v1","workflow_order_v1"} | P2_BACKEND_REQUEST_KEYS | publish_owned:
+        if key in {"setup_delivery_v1","article_delivery_v1","workflow_order_v1"} | P2_BACKEND_REQUEST_KEYS | R3_BACKEND_REQUEST_KEYS | publish_owned:
             merged[key] = deepcopy(value)
             continue
         if not (key.startswith("roo_points_") or key in {"article_publish_approval_receipt", "article_publish_approval_revoked", "website_access_lost", "first_article_goal_operation_id", "first_article_goal_id"}):
@@ -9249,12 +9257,17 @@ class ContentFactoryRunView(APIView):
         run = ContentFactoryRun.objects.filter(run_id=run_id).first()
         if not run:
             return Response({"error": "Run not found"}, status=status.HTTP_404_NOT_FOUND)
-        return Response(_serialize_content_factory_run(run), status=status.HTTP_200_OK)
+        return Response(_serialize_content_factory_run(run, include_admission=True), status=status.HTTP_200_OK)
 
     def put(self, request, run_id: str):
         from .setup_delivery_receiver import is_setup_delivery, receive_setup_delivery
         if not isinstance(request.data, dict) or is_setup_delivery(request.data):
             return receive_setup_delivery(request.data, expected_kind="run_snapshot", path_run_id=run_id)
+        from .run_ownership import RunOwnershipConflict, prepare_owned_callback
+        try:
+            prepare_owned_callback(request.data, run_id)
+        except RunOwnershipConflict:
+            return Response({"error": "run_admission_mismatch", "retryable": True}, status=409)
         return self._put_legacy(request, run_id=run_id)
 
     @guarded_service_write("config_write", only_repository=True, portable=True, cancellation_receipts=True, observation_fallback=True)
