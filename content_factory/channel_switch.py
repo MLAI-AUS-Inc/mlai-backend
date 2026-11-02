@@ -58,9 +58,12 @@ def switch_to_copy_ready(*, run, reason, now=None):
             response = _call_content_factory_run_action(run_id=current.run_id, workflow=current.workflow, action='resume',
                 payload={'channel_switch': {'delivery_mode': 'content_only', 'key': f'{current.run_id}:copy-ready'}},
                 transport_errors_are_pending=True)
-            if (isinstance(response, dict) and not response.get('content_factory_transport_error')
-                    and response.get('content_factory_status_code', 200) < 400
-                    and response.get('status') not in {'blocked', 'action_pending', 'refused'}):
+            acknowledgement = mapping(mapping(response).get('channel_switch'))
+            if (type(acknowledgement.get('version')) is int and acknowledgement['version'] == 1
+                    and acknowledgement.get('run_id') == current.run_id
+                    and acknowledgement.get('key') == f'{current.run_id}:copy-ready'
+                    and acknowledgement.get('state') in {'applied', 'completed'}
+                    and acknowledgement.get('delivery_mode') == 'content_only'):
                 receipt['dispatch_state'] = 'accepted'
         else:
             receipt['dispatch_state'] = 'accepted'

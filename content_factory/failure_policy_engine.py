@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone as dt_timezone
+import importlib
 import logging
 from typing import Literal
 
@@ -289,6 +290,14 @@ def _execute_run(run, decision, *, now):
         run.refresh_from_db()
         return apply_refund_decision(run, refund_decision(run, now=now), now=now)
     if decision.action in {'retry', 'resume', 're_pin', 'rescan'}:
+        result = mapping(run.result)
+        if result.get('publish_reviewed_v1') and mapping(result.get('article_approval_v1')).get('source') == 'publish_reviewed':
+            try:
+                retry_publish = getattr(importlib.import_module('content_factory.publish_reviewed_draft'), 'retry_publish')
+            except (ImportError, AttributeError):
+                return {'status': 'refused'}
+            # A publish-only continuation must never enter the article writer.
+            return retry_publish(run)
         # This is the existing authority-checked resume path, including its
         # durable operation-attempt reservation for ambiguous retransmission.
         from .vibe_marketing_views import _call_content_factory_run_action
@@ -383,7 +392,10 @@ def apply(subject, decision, *, now=None):
         _write_run(current, receipt)
     # A setup resume may create a PR. Owner-click continuations bypass this
     # reservation in their own services, but are still counted on ingest.
-    if (current.workflow in {'article_system_setup', 'repo_scan'} or mapping(current.run_request).get('website_connection_id')) and decision.action in {'retry', 'resume', 're_pin', 'rescan', 'advance_rung'}:
+    explicit_publish = mapping(mapping(current.result).get('article_approval_v1')).get('source') == 'publish_reviewed'
+    if (not explicit_publish and (current.workflow in {'article_system_setup', 'repo_scan'}
+            or mapping(current.run_request).get('website_connection_id'))
+            and decision.action in {'retry', 'resume', 're_pin', 'rescan', 'advance_rung'}):
         if not claim_pull_request_slot(organization, key=f'{current.run_id}:{decision.attempt}', now=now):
             with transaction.atomic():
                 locked = ContentFactoryRun.objects.select_for_update().get(pk=current.pk)

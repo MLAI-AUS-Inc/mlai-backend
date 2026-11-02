@@ -172,7 +172,9 @@ class PolicyTests(TransactionTestCase):
     def test_copy_ready_switch_is_once_and_preserves_original_authority_and_charge(self):
         run = self.run_for('PUBLISHING_ADAPTER_REQUIRED', run_request={'expected_source_sha': 'a' * 40, 'website_connection_id': 'original'})
         old_request, old_at = dict(run.run_request), run.updated_at
-        with patch('content_factory.vibe_marketing_views._call_content_factory_run_action', return_value={'status': 'queued'}) as remote:
+        acknowledgement = {'status': 'queued', 'channel_switch': {'version': 1, 'run_id': run.run_id,
+            'key': f'{run.run_id}:copy-ready', 'state': 'applied', 'delivery_mode': 'content_only'}}
+        with patch('content_factory.vibe_marketing_views._call_content_factory_run_action', return_value=acknowledgement) as remote:
             first = channel_switch.switch_to_copy_ready(run=run, reason='strategy', now=self.now)
             second = channel_switch.switch_to_copy_ready(run=run, reason='strategy', now=self.now)
         self.assertEqual(first, second)
@@ -182,6 +184,15 @@ class PolicyTests(TransactionTestCase):
         self.assertEqual(run.run_request, old_request)
         self.assertEqual(run.updated_at, old_at)
         self.assertTrue(run.result['channel_v1']['waiting_to_publish'])
+
+    def test_live_or_legacy_worker_without_exact_switch_ack_remains_pending(self):
+        run = self.run_for('PUBLISHING_ADAPTER_REQUIRED')
+        with patch('content_factory.vibe_marketing_views._call_content_factory_run_action', side_effect=[
+                {'status': 'pending', 'reason': 'article_worker_active'}, {'status': 'queued'}]) as remote:
+            for _ in range(2):
+                receipt = channel_switch.switch_to_copy_ready(run=run, reason='strategy', now=self.now)
+                self.assertEqual(receipt['dispatch_state'], 'pending')
+        self.assertEqual(remote.call_count, 2)
 
     def test_channel_switch_and_start_are_cohort_gated(self):
         for flag in [False, True]:
@@ -298,3 +309,15 @@ class PolicyTests(TransactionTestCase):
         with fake_provider('content_factory.hosted_auto_register', hosted_rung_ready=lambda org: False):
             next_goal = strategy.advance(goal, source='a' * 40, now=self.now, reason='strategy_exhausted', organization=self.org)
         self.assertEqual(next_goal['strategy_pin']['rung'], 'deterministic')
+
+    def test_publish_only_recovery_cannot_enter_generic_article_orchestration(self):
+        from content_factory.self_heal_testing import fake_provider
+        run = self.run_for(result={'publish_reviewed_v1': {'source_run_id': 'saved-source'},
+            'article_approval_v1': {'source': 'publish_reviewed', 'approved_body_sha256': 'a' * 64}})
+        self.seed(run, first_failed_at=(self.now - timedelta(minutes=1)).isoformat())
+        specialized = []
+        with fake_provider('content_factory.publish_reviewed_draft', retry_publish=lambda value: specialized.append(value.run_id) or {'status': 'queued'}), \
+                patch('content_factory.vibe_marketing_views._call_content_factory_run_action') as generic:
+            engine.apply(run, engine.decide(run, now=self.now), now=self.now)
+        self.assertEqual(specialized, [run.run_id])
+        generic.assert_not_called()
