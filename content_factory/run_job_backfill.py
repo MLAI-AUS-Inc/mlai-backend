@@ -221,6 +221,10 @@ def _backfill_job(job, report, *, at, create, create_since):
     from workflow_runs.models import ContentFactoryRun
     runs = ContentFactoryRun.objects.select_for_update() if report.apply else ContentFactoryRun.objects.all()
     match = match_run_for_job(job, runs=runs)
+    from .run_ownership import owns_backend_facts
+    if owns_backend_facts(match.run):
+        report.counts["owned_runs_excluded"] += 1
+        return
     if match.how == "ambiguous":
         report.counts["ambiguous_token_jobs"] += 1
         return
@@ -324,6 +328,10 @@ def undo_backfill(*, apply=False, batch_size=DEFAULT_BATCH_SIZE):
                 current = ContentFactoryRun.objects.select_for_update().filter(pk=run.pk).first() if apply else run
                 if current is None:
                     continue
+                from .run_ownership import owns_backend_facts
+                if owns_backend_facts(current):
+                    counts["owned_runs_excluded"] += 1
+                    continue
                 if at is None or current.updated_at != at:
                     counts["created_runs_kept_updated"] += 1
                     continue
@@ -335,16 +343,25 @@ def undo_backfill(*, apply=False, batch_size=DEFAULT_BATCH_SIZE):
 
     last_pk = 0
     while True:
-        pks = list(ContentFactoryRun.objects.filter(_filled_runs(), pk__gt=last_pk).exclude(pk__in=deleted)
+        legacy = (Q(result__run_owner_v1__authority__backend_facts__isnull=True)
+                  | ~Q(result__run_owner_v1__authority__backend_facts=True))
+        pks = list(ContentFactoryRun.objects.filter(_filled_runs(), legacy, pk__gt=last_pk).exclude(pk__in=deleted)
                    .order_by("pk").values_list("pk", flat=True)[:batch_size])
         if not pks:
             break
         counts["runs_blanked"] += len(pks)
         if apply:
             with transaction.atomic():
-                ContentFactoryRun.objects.filter(pk__in=pks).update(**_blank_values())
+                # Recheck after locking: no undo can regain authority over a
+                # newly admitted owner between selection and persistence.
+                locked = ContentFactoryRun.objects.select_for_update().filter(pk__in=pks)
+                from .run_ownership import owns_backend_facts
+                allowed = [run.pk for run in locked if not owns_backend_facts(run)]
+                ContentFactoryRun.objects.filter(pk__in=allowed).update(**_blank_values())
         last_pk = pks[-1]
-    linked = WrittenArticle.objects.filter(run__isnull=False)
+    linked = WrittenArticle.objects.filter(run__isnull=False).filter(
+        Q(run__result__run_owner_v1__authority__backend_facts__isnull=True)
+        | ~Q(run__result__run_owner_v1__authority__backend_facts=True))
     counts["articles_unlinked"] = linked.update(run=None) if apply else linked.count()
     return counts
 
