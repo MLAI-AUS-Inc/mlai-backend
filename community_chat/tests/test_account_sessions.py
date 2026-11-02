@@ -176,6 +176,27 @@ class CommunityChatAccountSessionTests(TestCase):
         self.assertEqual(response["Access-Control-Allow-Origin"], ORIGIN)
         self.assertIn("x-mlai-public-key", response["Access-Control-Allow-Headers"])
 
+    def test_foreign_cookie_logout_cannot_revoke_or_erase_another_session(self):
+        challenge, credentials, client = self.web_session()
+        client.cookies["mlai_chat_refresh"] = credentials.refresh_token
+        rejected = client.post(
+            reverse("community_chat_session_logout"), {}, format="json",
+            HTTP_ORIGIN=ORIGIN, HTTP_X_MLAI_PUBLIC_KEY=public_key(52),
+        )
+        self.assertEqual(rejected.status_code, status.HTTP_401_UNAUTHORIZED)
+        self.assertEqual(rejected.data["error"], "account_identity_mismatch")
+        self.assertNotIn("mlai_chat_access", rejected.cookies)
+        self.assertNotIn("mlai_chat_refresh", rejected.cookies)
+        credentials.session.refresh_from_db()
+        self.assertIsNone(credentials.session.revoked_at)
+        accepted = client.post(
+            reverse("community_chat_session_logout"), {}, format="json",
+            HTTP_ORIGIN=ORIGIN, HTTP_X_MLAI_PUBLIC_KEY=challenge.public_key,
+        )
+        self.assertEqual(accepted.status_code, status.HTTP_200_OK)
+        credentials.session.refresh_from_db()
+        self.assertIsNotNone(credentials.session.revoked_at)
+
     def test_public_profile_batch_resolves_current_and_historical_verified_devices(self):
         user_model = get_user_model()
         verified_user = user_model.objects.create_user(
