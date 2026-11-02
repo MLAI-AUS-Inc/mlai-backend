@@ -342,4 +342,3 @@ class ActivitySourceTests(SimpleTestCase):
             result = self.collect()
         self.assertEqual(result["coverage"]["slack"]["status"], "stale")
         self.assertTrue(result["coverage"]["slack"]["row_limit_reached"])
-
