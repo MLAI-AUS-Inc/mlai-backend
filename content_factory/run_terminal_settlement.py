@@ -61,7 +61,9 @@ def validate_terminal_receipt(run, payload):
     fixes immutable bytes; it is not a signature or independent authorization.
     A positive receipt alone does not authorize any financial effect.
     """
-    if (not isinstance(payload, dict) or set(payload) != _RECEIPT_KEYS
+    topic = _topic_obligation(run)
+    if (not isinstance(payload, dict) or set(payload) != _RECEIPT_KEYS | ({'kind'} if topic else set())
+            or topic and payload.get('kind') != 'topic_selection_v1'
             or type(payload.get('schema_version')) is not int or payload['schema_version'] != 1
             or payload.get('run_id') != run.run_id or payload.get('status') != 'closed_no_effects'
             or type(payload.get('event_cursor')) is not int or not 1 <= payload['event_cursor'] < 2**53
@@ -82,7 +84,7 @@ def validate_terminal_receipt(run, payload):
 def _meta(run):
     result = getattr(run, 'result', None)
     value = result.get(RECONCILIATION_RESULT_KEY) if isinstance(result, dict) else None
-    if value is not None and not isinstance(value, dict):
+    if isinstance(result, dict) and RECONCILIATION_RESULT_KEY in result and not isinstance(value, dict):
         raise TerminalSettlementPending('terminal_reconciliation_metadata_invalid')
     return deepcopy(value) if isinstance(value, dict) else {}
 
@@ -189,18 +191,53 @@ def _locked(run):
     return current
 
 
+def _topic_obligation(run):
+    """Identify the actual original research charge, never an article absence."""
+    from .billing_lineage import TOPIC_CHARGE_PREFIX
+    from .first_article_entitlement import TOPIC_ACTIONS
+    from .run_dispatch_settlement import _spend
+    from .run_topic_delivery import topic_kind
+    saved = run.run_request or {}
+    if topic_kind(run) is None or saved.get('roo_points_action') not in TOPIC_ACTIONS:
+        return False
+    spend = _spend(run)
+    return spend is None or spend.idempotency_key.startswith(TOPIC_CHARGE_PREFIX)
+
+
+def _benefit(run):
+    """Historical topic choices and unresolved saved value cannot become credit."""
+    from .no_delivery_refunds import _direct_delivery
+    if _direct_delivery(run):
+        return True
+    if not _topic_obligation(run):
+        return False
+    from .run_topic_delivery import has_verified_topic_delivery
+    return has_verified_topic_delivery(run)
+
+
+def _topic_uncertainty(run):
+    if not _topic_obligation(run):
+        return False
+    from .run_topic_delivery import has_verified_topic_delivery
+    from .run_article_charge import article_charge_receipt
+    selection = getattr(run, 'selection_data', None)
+    selection = selection if isinstance(selection, dict) else {}
+    result = run.result or {}
+    return bool(not has_verified_topic_delivery(run) and (selection.get('options') or selection.get('suggested_islands')
+        or result.get('suggested_islands') or article_charge_receipt(run)))
+
+
 def _obligation(run):
-    from .billing_lineage import ARTICLE_CHARGE_PREFIX
+    from .billing_lineage import ARTICLE_CHARGE_PREFIX, TOPIC_CHARGE_PREFIX
     from .first_article_entitlement import TOPIC_ACTIONS, entitled_request
     from .run_dispatch_settlement import _spend, _free_obligation_state
     spend = _spend(run)
     if spend is not None:
-        # A completed topic batch is not an undelivered article. A research
-        # carrier's independently sealed article charge is checked separately.
-        return (spend, None) if spend.idempotency_key.startswith(ARTICLE_CHARGE_PREFIX) else (None, None)
+        return (spend, None) if (spend.idempotency_key.startswith(ARTICLE_CHARGE_PREFIX)
+            or _topic_obligation(run) and spend.idempotency_key.startswith(TOPIC_CHARGE_PREFIX)) else (None, None)
     request = run.run_request or {}
     free = (_free_obligation_state(run) if entitled_request(request)
-            and request.get('roo_points_action') not in TOPIC_ACTIONS else None)
+            and (request.get('roo_points_action') not in TOPIC_ACTIONS or _topic_obligation(run)) else None)
     return None, free
 
 
@@ -211,8 +248,17 @@ def _research_carrier(run, ledger_id):
     if charge is None or charge['ledger_id'] != ledger_id:
         return False
     initial = original_spend_for_run(run)
-    return (initial is not None and initial.pk != ledger_id
-            and (run.run_request or {}).get('roo_points_action') == 'content_island_topic_generation')
+    from .first_article_entitlement import TOPIC_ACTIONS, entitled_request
+    if (run.run_request or {}).get('roo_points_action') not in TOPIC_ACTIONS:
+        return False
+    if initial is not None:
+        return initial.pk != ledger_id
+    # An original zero-point topic grant is also a distinct obligation. Its
+    # exact company/key/ledger proof must remain reserved; it is never the
+    # subsequently approved ARTICLE spend being settled by this family.
+    from .run_dispatch_settlement import _free_obligation_state
+    return (entitled_request(run.run_request) and str(run.run_request.get('roo_points_ledger_id')) != str(ledger_id)
+        and _free_obligation_state(run) == 'reserved')
 
 
 def _terminal_projection(run):
@@ -300,7 +346,7 @@ def terminal_closed_without_effects(run):
     try:
         closed = _closed(run)
         if (not authoritative_run(run) or not _original_request_intact(run) or closed is None
-                or _direct_delivery(run) or points_receipt(run).get('state') in {'captured', 'kept'}
+                or _benefit(run) or _topic_uncertainty(run) or points_receipt(run).get('state') in {'captured', 'kept'}
                 or publication_state(run) != 'none'):
             return False
         _journal(run, closed)
@@ -334,7 +380,7 @@ def _family_proof(run, family, stamp):
         actual = spend.pk if spend is not None else (_free_original(other).run_request or {}).get('roo_points_ledger_id') if free is not None else None
         if str(actual) != str(stamp):
             raise TerminalSettlementPending('terminal_original_family_charge_changed')
-        if (_direct_delivery(other) or points_receipt(other).get('state') in {'captured', 'kept'}
+        if (_benefit(other) or _topic_uncertainty(other) or points_receipt(other).get('state') in {'captured', 'kept'}
                 or publication_state(other) != 'none'):
             raise TerminalSettlementPending('terminal_original_family_benefit_or_uncertainty')
         # An unstarted sibling may already have its separate immutable dispatch
@@ -354,10 +400,11 @@ def _close_remote(run):
     base, headers = _remote_base_url(), _remote_headers()
     if not base or not headers.get('X-API-KEY'):
         raise TerminalSettlementPending('terminal_remote_unavailable')
-    expected = expected_article_cancellation(run)
     body = {WIRE_REQUEST_KEY: wire_identity(owner_receipt(run)), WIRE_EXECUTION_KEY: current_execution_ticket(run),
-        'cancellation_reason': 'system_stop', 'cancelled_by': 'system',
-        'expected_cancellation_v1': expected}
+        'cancellation_reason': 'system_stop', 'cancelled_by': 'system'}
+    topic = _topic_obligation(run)
+    if not topic:
+        body['expected_cancellation_v1'] = expected_article_cancellation(run)
     deadline = monotonic() + MAX_TERMINAL_SECONDS
     response = requests.post(base + '/api/runs/' + quote(run.run_id, safe='') + '/cancel', json=body,
         headers=headers, timeout=(3, 10), stream=True, allow_redirects=False)
@@ -370,7 +417,8 @@ def _close_remote(run):
                 raise TerminalSettlementPending('terminal_closure_read_unbounded')
             data.extend(chunk)
         value = json.loads(data)
-        return validate_terminal_receipt(run, value.get('terminal_settlement_v1') if isinstance(value, dict) else None)
+        key = 'terminal_topic_settlement_v1' if topic else 'terminal_settlement_v1'
+        return validate_terminal_receipt(run, value.get(key) if isinstance(value, dict) else None)
     finally:
         response.close()
 
@@ -384,7 +432,7 @@ def _claim(run, now):
             return run, None
         spend, free = _obligation(run)
         if spend is None and free is None or spend is not None and _research_carrier(run, spend.pk):
-            raise TerminalSettlementPending('terminal_no_article_obligation')
+            raise TerminalSettlementPending('terminal_no_original_obligation')
         if not _due(run, now):
             raise TerminalSettlementPending('terminal_not_due')
         from .no_delivery_refunds import _direct_delivery, points_receipt
@@ -403,10 +451,10 @@ def _claim(run, now):
             actual = other_spend.pk if other_spend is not None else (_free_original(other).run_request or {}).get('roo_points_ledger_id') if other_free is not None else None
             if str(actual) != str(stamp):
                 raise TerminalSettlementPending('terminal_original_family_charge_changed')
-            if _direct_delivery(other) or points_receipt(other).get('state') in {'captured', 'kept'}:
+            if _benefit(other) or points_receipt(other).get('state') in {'captured', 'kept'}:
                 _record_retained(run, stamp, now)
                 return run, None
-            if publication_state(other) != 'none':
+            if _topic_uncertainty(other) or publication_state(other) != 'none':
                 raise TerminalSettlementPending('terminal_original_family_benefit_or_uncertainty')
         until = _timestamp((meta.get('terminal_claim') or {}).get('until'))
         if until is not None and until > now:
@@ -482,7 +530,7 @@ def _defer_unclaimed(run, now, reason):
 
 @contextmanager
 def _refund_scope(run, family, stamp, *, spend):
-    from .billing_lineage import ARTICLE_CHARGE_PREFIX
+    from .billing_lineage import ARTICLE_CHARGE_PREFIX, TOPIC_CHARGE_PREFIX
     from .run_dispatch_settlement import _free_original
     if not connection.in_atomic_block:
         raise TerminalSettlementPending('terminal_refund_scope_requires_lock')
@@ -490,7 +538,8 @@ def _refund_scope(run, family, stamp, *, spend):
     saved = _free_original(run).run_request if spend is None else run.run_request
     scope = {'pk': run.pk, 'organization_id': run.organization_id, 'domain': run.domain,
         'execution_id': current_execution_ticket(run)['execution_id'], 'closure_sha256': _closed(run)['receipt_sha256'],
-        'original_key': spend.idempotency_key.removeprefix(ARTICLE_CHARGE_PREFIX) if spend is not None else saved['client_request_id'],
+        'original_key': spend.idempotency_key.removeprefix(TOPIC_CHARGE_PREFIX if _topic_obligation(run) else ARTICLE_CHARGE_PREFIX)
+            if spend is not None else saved['client_request_id'],
         'ledger_id': str(stamp), 'user_id': spend.user_id if spend is not None else None, 'free': spend is None}
     token = _terminal_authority.set(scope)
     try:
@@ -529,7 +578,8 @@ def _settle(run, claim, now):
     from .models import ContentFactoryJob
     from roo.models import Ledger
     from .website_contract import evidence_digest
-    from integrations.services.article_generation import refund_content_factory_request_for_user
+    from integrations.services.article_generation import (refund_content_factory_request_for_user,
+        refund_content_factory_topic_generation_for_user)
     from workflow_runs.models import ContentFactoryRun
     with transaction.atomic():
         run = _locked(run)
@@ -539,6 +589,7 @@ def _settle(run, claim, now):
         if meta.get('terminal_claim') != claim or current_execution_ticket(run)['execution_id'] != claim['execution_id']:
             raise TerminalSettlementPending('terminal_claim_superseded')
         spend, free = _obligation(run)
+        controller = refund_content_factory_topic_generation_for_user if _topic_obligation(run) else refund_content_factory_request_for_user
         stamp = spend.pk if spend is not None else int((_free_original(run).run_request or {}).get('roo_points_ledger_id')) if free is not None else None
         if stamp is None:
             raise TerminalSettlementPending('terminal_original_obligation_missing')
@@ -561,7 +612,7 @@ def _settle(run, claim, now):
                     # This minimal proved request cannot invoke its old defer path.
                     request = {'domain': run.domain, 'client_request_id': scope['original_key'],
                         'roo_points_ledger_id': str(spend.pk), 'roo_points_billing_user_id': spend.user_id}
-                    effect = refund_content_factory_request_for_user(user=spend.user, actor_id='system', article_request=request,
+                    effect = controller(user=spend.user, actor_id='system', article_request=request,
                         resolved_domain=run.domain, reason='Exact original execution permanently closed without delivered value')
             if (effect is None or effect.kind != 'REFUND' or effect.refund_of_id != spend.pk or effect.user_id != spend.user_id
                     or effect.source != spend.source or effect.delta_microroo != -spend.delta_microroo):
@@ -573,7 +624,7 @@ def _settle(run, claim, now):
             request = deepcopy(_free_original(run).run_request)
             request.pop('first_article_goal_operation_id', None)
             with _refund_scope(run, family, stamp, spend=None):
-                refund_content_factory_request_for_user(user=None, actor_id='system', article_request=request,
+                controller(user=None, actor_id='system', article_request=request,
                     resolved_domain=run.domain, reason='Exact original execution permanently closed without delivered value')
             if _free_obligation_state(run) != 'released':
                 raise TerminalSettlementPending('terminal_original_release_unconfirmed')

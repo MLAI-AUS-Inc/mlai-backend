@@ -241,11 +241,11 @@ def _free_original(run):
 
 
 def _free_obligation_state(run):
-    from .first_article_entitlement import _reference, _rows, entitled_request, entitlement_payload
+    from .first_article_entitlement import TOPIC_ACTIONS, _reference, _rows, entitled_request, entitlement_payload
     saved = run.run_request or {}
     if not entitled_request(saved):
         return None
-    if saved.get("roo_points_action") == "content_island_topic_generation":
+    if saved.get("roo_points_action") in TOPIC_ACTIONS:
         saved = _free_original(run).run_request
         rows = _rows(run.organization_id)
         if (rows.topics is not None and str(rows.topics.pk) == str(saved.get("roo_points_ledger_id"))
@@ -460,8 +460,9 @@ def _settle(run, now):
             if not entitled_request(saved):
                 raise DispatchSettlementPending("withdrawal_entitlement_unverified")
             with original_dispatch_refund_authority(run, closed_receipt=_closed(run), original_spend=None):
+                from .first_article_entitlement import TOPIC_ACTIONS
                 controller = (refund_content_factory_topic_generation_for_user
-                    if saved.get("roo_points_action") == "content_island_topic_generation"
+                    if saved.get("roo_points_action") in TOPIC_ACTIONS
                     else refund_content_factory_request_for_user)
                 controller(user=None, actor_id="system", article_request=deepcopy(_free_original(run).run_request),
                     resolved_domain=run.domain, reason="Exact original dispatch durably withdrawn before enqueue")

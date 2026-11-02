@@ -132,6 +132,7 @@ def _copy(event, state, organization):
         return value
     if event == "blog_live":return "Your blog page is live", f"New articles can now go live on {host}.", "View your blog"
     if event == "article_live":return "Your article is live!", f"{title} is now on {host}.", "View article"
+    if event == "research_ready":return "Your research is ready", "Choose a topic for your next article.", "View your articles"
     if event == "article_stopped":
         outcome = projection.optional("content_factory.no_delivery_refunds", "points_outcome", run)
         line = projection.line("stopped", run=run, outcome=outcome)
@@ -161,6 +162,10 @@ def _reserve(config, item, event, state, *, now, only_user=None):
         else:
             recipients = [user for user in recipients if user.pk == only_user.pk]
     link = projection.destination(organization, company.pk, run_id=state.get("run_id"), ask=ask, item=item)
+    if link and event == "research_ready":
+        from urllib.parse import urlsplit, urlunsplit
+        target = urlsplit(link)
+        link = urlunsplit((target.scheme, target.netloc, "/my-startup/articles", target.query, ""))
     if not link:
         return 0
     strategy = deepcopy(mapping(config.pillar_strategy))
@@ -270,6 +275,19 @@ def _current(config, notice, *, now):
         user = candidate if projection.optional("founder_tools.startup_team", "viewer_role", candidate, organization) == "member" else None
     if notice["event"] in {"ladder_exhausted", "member_joined"} and notice["user_id"] != _owner(organization):return None
     if user is None:return None
+    if notice["event"] == "research_ready":
+        from workflow_runs.models import ContentFactoryRun
+        from .run_topic_delivery import verified_topic_delivery
+        from .run_execution_control import require_current_principal
+        run = ContentFactoryRun.objects.filter(run_id=notice.get("run_id"), organization=organization).first()
+        if run is None or not str(notice.get("state", "")).startswith("ready:"):
+            return None
+        try:
+            require_current_principal(run)
+        except ValueError:
+            return None
+        if verified_topic_delivery(run, evidence_id=notice["state"][6:], current=True) is None:
+            return None
     if notice["event"] in {"your_turn", "your_turn_reminder_24h", "your_turn_reminder_72h"}:
         from workflow_runs.models import ContentFactoryRun
         if notice["item"].startswith("website:"):
@@ -450,6 +468,29 @@ def notify_team_resolved(organization, item, *, by_user):
     """Staff's audited resolution queues one private message per current recipient."""
     if not getattr(by_user, "is_active", False) or not getattr(by_user, "is_staff", False):return 0
     return _notify(organization, item, "team_resolved")
+
+
+def notify_verified_research_ready(run, *, evidence_id):
+    """Reserve the existing durable outbox only for current verified choices."""
+    from organizations.models import Organization
+    from workflow_runs.models import ContentFactoryRun
+    from .run_topic_delivery import verified_topic_delivery
+    from .run_execution_control import require_current_principal
+    if not owns_notifications(run.organization):
+        return 0
+    with transaction.atomic():
+        Organization.objects.select_for_update().get(pk=run.organization_id)
+        current = ContentFactoryRun.objects.select_for_update().get(pk=run.pk)
+        require_current_principal(current)
+        proof = verified_topic_delivery(current, evidence_id=evidence_id, current=True)
+        if proof is None:
+            return 0
+        config = OrganizationContentConfig.objects.select_for_update().filter(organization_id=current.organization_id).first()
+        if config is None:
+            return 0
+        config.organization = current.organization
+        return _reserve(config, "research:" + current.run_id, "research_ready",
+            {"state": "ready:" + evidence_id, "run_id": current.run_id}, now=timezone.now())
 
 
 def notify_join_approved(organization, *, member_user):

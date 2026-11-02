@@ -789,7 +789,7 @@ class ContentConfirmView(APIView):
     permission_classes = [HasStrictRooApiKey]
 
     def post(self, request):
-        from content_factory.run_backend_facts import update_or_create_job_facts
+        from content_factory.run_backend_facts import logical_client_request_id, update_or_create_job_facts
         from content_factory.models import ContentFactoryJob
 
         validation_error = _validate_roo_content_request(request)
@@ -885,7 +885,7 @@ class ContentConfirmView(APIView):
                                 or source_job.slack_thread_ts
                             ),
                             "progress_message_ts": progress_message_ts or source_job.progress_message_ts,
-                            "client_request_id": source_job.client_request_id,
+                            "client_request_id": logical_client_request_id(new_job_id) or source_job.client_request_id,
                             "billing_source_job_id": source_job.billing_source_job_id or source_job.job_id,
                             "billing_amount": source_job.billing_amount,
                             "billing_status": "reused",
@@ -955,7 +955,7 @@ class ContentJobConfirmView(APIView):
     permission_classes = [HasStrictRooApiKey]
 
     def post(self, request, job_id):
-        from content_factory.run_backend_facts import save_job_facts, update_or_create_job_facts
+        from content_factory.run_backend_facts import logical_client_request_id, save_job_facts, update_or_create_job_facts
         from content_factory.models import ContentFactoryJob
         from integrations.services.article_generation import confirm_topic, ArticleGenerationError
 
@@ -1105,7 +1105,7 @@ class ContentJobConfirmView(APIView):
                         "slack_root_message_ts": job.slack_root_message_ts or job.slack_thread_ts,
                         "slack_thread_ts": job.slack_thread_ts,
                         "progress_message_ts": job.progress_message_ts,
-                        "client_request_id": job.client_request_id,
+                        "client_request_id": logical_client_request_id(new_job_id) or job.client_request_id,
                         "billing_source_job_id": job.billing_source_job_id or job.job_id,
                         "billing_amount": job.billing_amount,
                         "billing_status": "reused",

@@ -16,7 +16,7 @@ from .run_ownership import (
     WIRE_EXECUTION_KEY, WIRE_REQUEST_KEY, require_event_execution, require_event_identity,
 )
 
-KINDS = frozenset({"article_body_v1", "draft_ready_v1", "publish_pr_v1", "article_preview_quality_v1"})
+KINDS = frozenset({"article_body_v1", "draft_ready_v1", "publish_pr_v1", "article_preview_quality_v1", "topic_selection_v1", "island_proposals_v1"})
 MAX_BYTES = 4_000_000
 HASH = re.compile(r"[a-f0-9]{64}\Z")
 
@@ -58,6 +58,9 @@ def _timestamp(value):
 def _payload(kind, payload):
     if not isinstance(payload, dict):
         return False
+    if kind in {"topic_selection_v1", "island_proposals_v1"}:
+        from .run_topic_delivery import valid_topic_payload
+        return valid_topic_payload(kind, payload)
     if kind == "article_body_v1":
         return (set(payload) == {"format", "body", "revision", "article_sha256"}
             and payload["format"] == "markdown" and _text(payload["body"], 2_000_000)

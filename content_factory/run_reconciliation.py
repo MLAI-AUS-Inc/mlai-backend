@@ -418,6 +418,17 @@ def _process_claim(claim, base_url, headers, now):
     if outcome == "dispatch_no_effect_proven":
         from .run_dispatch_settlement import settle_authoritative_dispatch
         settle_authoritative_dispatch(claim["run_id"], now=now)
+    if outcome == "history_received":
+        from workflow_runs.models import ContentFactoryRun
+        from .run_topic_delivery import topic_kind, project_verified_topics
+        run = ContentFactoryRun.objects.get(pk=claim["pk"])
+        if topic_kind(run) and run.status in {"awaiting_confirmation", "completed"}:
+            try:
+                project_verified_topics(run.run_id)
+            except (ValueError, TypeError, KeyError, requests.RequestException):
+                # History remains committed. Missing independent choice proof
+                # never resurrects snapshot authority or proves no benefit.
+                pass
     return outcome
 
 

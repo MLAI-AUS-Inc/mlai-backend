@@ -20,7 +20,8 @@ def refresh_owned_run(run):
     if not connection.in_atomic_block:
         reconcile_authoritative_run(run.run_id, refresh=True)
         try:
-            project_verified_delivery(run.run_id)
+            from .run_topic_delivery import topic_kind, project_verified_topics
+            (project_verified_topics if topic_kind(run) else project_verified_delivery)(run.run_id)
         except (ValueError, TypeError, KeyError, requests.RequestException, WebsiteAuthorityError):
             # Typed lifecycle remains visible when independent artifact proof
             # is pending; an old snapshot never supplies that missing proof.
@@ -79,7 +80,8 @@ def maybe_receive_owned_observation(payload, *, run_id=None, expected_kind=None)
             run = prepare_owned_callback(normalized, identifier or run.run_id)
             if not authoritative_run(run):
                 raise RunOwnershipConflict("The existing owner is unavailable.")
-        outcome = project_verified_delivery(run.run_id)
+        from .run_topic_delivery import topic_kind, project_verified_topics
+        outcome = (project_verified_topics if topic_kind(run) else project_verified_delivery)(run.run_id)
     except (RunOwnershipConflict, DeliveryContractError, TypeError, KeyError, ValueError):
         return Response({"error": "run_observation_pending", "retryable": True, "run_id": run.run_id}, status=409)
     except Exception as exc:

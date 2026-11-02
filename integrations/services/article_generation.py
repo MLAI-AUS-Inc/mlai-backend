@@ -816,7 +816,8 @@ def quote_content_factory_article(*, actor_id, domain=None, client_request_id=No
     if job:
         if normalize_domain(job.domain) != domain:
             raise PermissionError("The article request does not belong to this startup.")
-        if _job_uses_deferred_billing(job) or (job.request_meta or {}).get("roo_points_action") == CONTENT_FACTORY_ACTION_CONTENT_ISLAND_TOPIC_GENERATION:
+        from content_factory.first_article_entitlement import TOPIC_ACTIONS
+        if _job_uses_deferred_billing(job) or (job.request_meta or {}).get("roo_points_action") in TOPIC_ACTIONS:
             return current_cost  # Research consent covers research only.
         if client_request_id and job.client_request_id != client_request_id:
             raise PermissionError("The article request does not match the original payment key.")
@@ -1725,33 +1726,63 @@ def _charge_deferred_discovery_job_if_needed(
     expected_cost_points=None,
     client_request_id=None,
     requested_by_slack_user_id=None,
+    delivery_mode=None,
+    delivery_mode_confirmed=None,
 ):
     kwargs = dict(slack_user_id=slack_user_id, domain=domain, confirmed_keyword=confirmed_keyword,
         custom_title=custom_title, billing_user=billing_user, expected_cost_points=expected_cost_points,
-        client_request_id=client_request_id, requested_by_slack_user_id=requested_by_slack_user_id)
-    research = (source_job.request_meta or {}).get("roo_points_action") == CONTENT_FACTORY_ACTION_CONTENT_ISLAND_TOPIC_GENERATION
+        client_request_id=client_request_id, requested_by_slack_user_id=requested_by_slack_user_id,
+        delivery_mode=delivery_mode, delivery_mode_confirmed=delivery_mode_confirmed)
+    from content_factory.first_article_entitlement import TOPIC_ACTIONS
+    research = (source_job.request_meta or {}).get("roo_points_action") in TOPIC_ACTIONS
     if not _job_uses_deferred_billing(source_job) and not research:
         return _charge_discovery_article_locked(source_job=source_job, **kwargs)
     # Provider admission must finish before taking SQL locks. Then serialize
     # the source decision, spend and saved lineage, so competing new keys
     # cannot debit the same research confirmation twice.
     snapshot = dict(source_job.request_meta or {})
+    prospective = dict(snapshot)
+    if delivery_mode is not None:
+        prospective["delivery_mode"] = delivery_mode
+    if delivery_mode_confirmed is not None:
+        prospective["delivery_mode_confirmed"] = delivery_mode_confirmed
+    from content_factory.run_backend_facts import fact_run_for_job, owned_job_transaction
+    from content_factory.run_ownership import current_execution_ticket
+    from content_factory.run_execution_control import require_current_principal
+    def require_source(source):
+        from content_factory.run_dispatch_settlement import _original_request_intact
+        try:
+            if source is None or not _original_request_intact(source):
+                raise ValueError("The research admission is unavailable.")
+            require_current_principal(source)
+        except (ValueError, TypeError, KeyError, AttributeError) as exc:
+            error = ArticleGenerationError("The research request or startup permission changed. Refresh before confirming.")
+            error.code = "content_factory_billing_key_conflict"
+            raise error from exc
+    owned_source = fact_run_for_job(source_job)
+    expected_ticket = current_execution_ticket(owned_source) if owned_source is not None else None
+    if owned_source is not None:
+        require_source(owned_source)
     actor = requested_by_slack_user_id or _resolve_requested_by_slack_user_id(slack_user_id, snapshot)
     require_article_activation(domain=domain, actor_id=actor, user=billing_user,
-        article_request={**snapshot, "topic": custom_title or confirmed_keyword, "target_keyword": confirmed_keyword})
+        article_request={**prospective, "topic": custom_title or confirmed_keyword, "target_keyword": confirmed_keyword})
     from content_factory.models import ContentFactoryJob
-    from content_factory.run_backend_facts import fact_run_for_job, owned_job_transaction
-    if fact_run_for_job(source_job) is not None:
-        with owned_job_transaction(source_job) as locked:
-            still_research = (locked.request_meta or {}).get("roo_points_action") == CONTENT_FACTORY_ACTION_CONTENT_ISLAND_TOPIC_GENERATION
-            if (still_research or _job_uses_deferred_billing(locked)) and locked.request_meta != snapshot:
-                error = ArticleGenerationError("The source research changed before article confirmation.")
-                error.code = "content_factory_billing_key_conflict"
-                raise error
-            return _charge_discovery_article_locked(source_job=locked, prevalidated_admission=True, **kwargs)
+    if owned_source is not None:
+        with transaction.atomic():
+            Organization.objects.select_for_update().get(pk=owned_source.organization_id)
+            with owned_job_transaction(source_job) as locked:
+                current = fact_run_for_job(locked, lock=True)
+                require_source(current)
+                still_research = (locked.request_meta or {}).get("roo_points_action") in TOPIC_ACTIONS
+                if (current_execution_ticket(current) != expected_ticket
+                        or (still_research or _job_uses_deferred_billing(locked)) and locked.request_meta != snapshot):
+                    error = ArticleGenerationError("The source research changed before article confirmation.")
+                    error.code = "content_factory_billing_key_conflict"
+                    raise error
+                return _charge_discovery_article_locked(source_job=locked, prevalidated_admission=True, **kwargs)
     with transaction.atomic():
         locked = ContentFactoryJob.objects.select_for_update().get(pk=source_job.pk)
-        still_research = (locked.request_meta or {}).get("roo_points_action") == CONTENT_FACTORY_ACTION_CONTENT_ISLAND_TOPIC_GENERATION
+        still_research = (locked.request_meta or {}).get("roo_points_action") in TOPIC_ACTIONS
         if (still_research or _job_uses_deferred_billing(locked)) and locked.request_meta != snapshot:
             error = ArticleGenerationError("The source research changed before article confirmation.")
             error.code = "content_factory_billing_key_conflict"
@@ -1761,18 +1792,23 @@ def _charge_deferred_discovery_job_if_needed(
 
 def _charge_discovery_article_locked(*, source_job, slack_user_id, domain, confirmed_keyword,
         custom_title=None, billing_user=None, expected_cost_points=None, client_request_id=None,
-        requested_by_slack_user_id=None, prevalidated_admission=False):
+        requested_by_slack_user_id=None, prevalidated_admission=False,
+        delivery_mode=None, delivery_mode_confirmed=None):
     from content_factory.run_backend_facts import save_job_facts
     if normalize_domain(source_job.domain) != normalize_domain(domain):
         error = ArticleGenerationError("The source article belongs to a different company.")
         error.code = "content_factory_billing_key_conflict"
         raise error
-    research_paid = (getattr(source_job, "request_meta", {}) or {}).get("roo_points_action") == CONTENT_FACTORY_ACTION_CONTENT_ISLAND_TOPIC_GENERATION
+    from content_factory.first_article_entitlement import TOPIC_ACTIONS
+    research_paid = (getattr(source_job, "request_meta", {}) or {}).get("roo_points_action") in TOPIC_ACTIONS
     from content_factory.run_backend_facts import fact_run_for_job
     from content_factory.run_article_charge import require_article_charge_choice
     owned_source = fact_run_for_job(source_job)
     current_article_charge = require_article_charge_choice(source_job, keyword=confirmed_keyword,
         custom_title=custom_title, request_key=client_request_id) if owned_source is not None else None
+    if current_article_charge is not None and any(value is not None and current_article_charge["request"].get(key) != value
+            for key, value in (("delivery_mode", delivery_mode), ("delivery_mode_confirmed", delivery_mode_confirmed))):
+        raise ArticleGenerationError("The article confirmation changed its original delivery consent.")
     if not _job_uses_deferred_billing(source_job) and not research_paid:
         original_article_key = current_article_charge["article_request_key"] if current_article_charge else source_job.client_request_id
         if client_request_id and client_request_id != original_article_key:
@@ -1796,6 +1832,10 @@ def _charge_discovery_article_locked(*, source_job, slack_user_id, domain, confi
         raise error
 
     request_meta = dict(getattr(source_job, "request_meta", {}) or {})
+    if delivery_mode is not None:
+        request_meta["delivery_mode"] = delivery_mode
+    if delivery_mode_confirmed is not None:
+        request_meta["delivery_mode_confirmed"] = delivery_mode_confirmed
     if requested_by_slack_user_id:
         request_meta["requested_by_slack_user_id"] = requested_by_slack_user_id
     # A research quote belongs to its earlier debit, not this separate action.
@@ -3506,6 +3546,8 @@ def confirm_topic(
             expected_cost_points=expected_cost_points,
             client_request_id=client_request_id,
             requested_by_slack_user_id=requested_by_slack_user_id or slack_user_id,
+            delivery_mode=delivery_mode,
+            delivery_mode_confirmed=delivery_mode_confirmed,
         )
         deferred_charge_started = bool(getattr(source_job, "_article_confirmation_charge_created", False))
         progress_message_ts = source_job.progress_message_ts or progress_message_ts
