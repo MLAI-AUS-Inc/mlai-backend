@@ -13,7 +13,7 @@ from django.utils.dateparse import parse_datetime
 
 from workflow_runs.models import ContentFactoryRun
 from . import staff_signals
-from .founder_journey_alerts import queue_founder_journey_alert, ack_due_at, _safe_details, is_scheduler_run
+from .founder_journey_alerts import queue_founder_journey_alert, queue_founder_journey_alerts_batch, ack_due_at, _safe_details, is_scheduler_run
 from .models import OrganizationContentConfig
 from .registry_policy import is_registered
 
@@ -153,6 +153,7 @@ def run_alert_rule_sweep(now=None, limit=None):
     runs = list(ContentFactoryRun.objects.filter(organization_id__in=by_org).filter(
         Q(status__in=TERMINAL | {"queued", "pending", "starting"}) | Q(created_at__gte=day_start)).order_by("organization_id", "pk"))
     queued = 0
+    incidents = []
     setup = {}
     current_day = now.astimezone(LOCAL).date()
     for run in runs:
@@ -164,7 +165,7 @@ def run_alert_rule_sweep(now=None, limit=None):
             from .founder_journey_alerts import founder_journey_alert_id
             key = founder_journey_alert_id(organization_id=run.organization_id, alert_reason=reason, run_id=run.run_id)
             if key not in receipts:
-                queue_founder_journey_alert(organization=row.organization, alert_reason=reason, run=run)
+                incidents.append({"organization": row.organization, "alert_reason": reason, "run": run})
                 receipts[key] = {"run_id": run.run_id}
                 queued += 1
         if run.workflow == "article_system_setup" and run.created_at.astimezone(LOCAL).date() == current_day:
@@ -178,8 +179,10 @@ def run_alert_rule_sweep(now=None, limit=None):
             from .founder_journey_alerts import founder_journey_alert_id
             key = founder_journey_alert_id(organization_id=row.organization_id, alert_reason=reason, slot=slot)
             if fires and key not in receipts:
-                queue_founder_journey_alert(organization=row.organization, alert_reason=reason, slot=slot)
+                incidents.append({"organization": row.organization, "alert_reason": reason, "slot": slot})
                 queued += 1
+    if incidents:
+        queue_founder_journey_alerts_batch(incidents, now=now)
     # Rate rules are global, independent of the rotating organization batch.
     provider_filter = Q(result__error_code__icontains="PROVIDER") | Q(result__error_code__icontains="TEMPORARILY_UNAVAILABLE") | Q(result__error_code__icontains="RATE_LIMIT") | Q(result__error_code__icontains="GATEWAY")
     counts = ContentFactoryRun.objects.filter(updated_at__gte=now-timedelta(minutes=10)).exclude(workflow="island_refresh").aggregate(

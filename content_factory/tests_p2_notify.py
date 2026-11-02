@@ -4,14 +4,16 @@ from copy import deepcopy
 from datetime import timedelta
 import json
 import time
+import threading
 from concurrent.futures import ThreadPoolExecutor
 from types import SimpleNamespace
 from unittest.mock import patch
 
 from django.core.cache import cache
 from django.db import close_old_connections, connection, transaction
-from django.test import TransactionTestCase, override_settings
+from django.test import TransactionTestCase, override_settings, tag
 from django.utils import timezone
+from django.test.utils import CaptureQueriesContext
 
 from core.models import User
 from . import founder_journey as journeys, founder_journey_p2 as projection, founder_transitions as transitions
@@ -158,6 +160,20 @@ class NotificationTests(TransactionTestCase):
             self.assertEqual(transitions.drain(self.now + timedelta(minutes=3))["sent"], 1)
         self.assertEqual(events[0], events[1])
 
+    def test_dm_claim_lost_during_open_prevents_publish_and_keeps_notice_recoverable(self):
+        from agent_runtime import native_crypto
+        from uuid import uuid4
+        self.reserve(self.ready())
+        key = native_crypto.signing_key("01" * 32)
+        device = native_crypto.public_key(native_crypto.signing_key("02" * 32))
+        def open_dm(*args):
+            ContentFactoryCallbackEvent.objects.filter(event_type=transitions.EVENT_TYPE, event_id__endswith=":dm").update(claimed_at=self.now + timedelta(seconds=1))
+            return str(uuid4())
+        with patch.object(drafts, "_devices", return_value=[device]), patch.object(transport, "notifier_key", return_value=key), patch.object(transport, "open_dm", side_effect=open_dm), patch.object(transport, "post_event") as post:
+            self.assertEqual(transitions.drain(self.now)["retry"], 1)
+            post.assert_not_called()
+        self.assertEqual(ContentFactoryCallbackEvent.objects.filter(event_type=transitions.EVENT_TYPE, processed_at__isnull=True).count(), 1)
+
     def test_exact_provider_key_bounded_representations_and_frozen_email_change(self):
         full = transitions.logical_key(10**19, "article:" + "r" * 100, "your_turn_reminder_72h", "approve_on_github", 10**19, "email")
         self.assertGreater(len(full), 100)
@@ -275,6 +291,106 @@ class NotificationTests(TransactionTestCase):
             REAL_POST_EMAIL({"to": [self.owner.email]}, "founder-transition:exact", exact_key=True)
         self.assertEqual(post.call_args.args[2]["Idempotency-Key"], "founder-transition:exact")
 
+    def test_staff_batch_matches_single_receipts_due_times_redaction_and_replay(self):
+        from . import founder_journey_alerts as alerts
+        run = self.make_run({"error_code": "UNKNOWN_SYNTHETIC_FAILURE", "last_transitions": [{"at": self.now.isoformat(), "from": "queued", "to": "blocked"}]})
+        detail = {"email": "private@synthetic.example", "run_id": run.run_id}
+        with patch.object(alerts.timezone, "now", return_value=self.now):
+            identifier = alerts.queue_founder_journey_alert(organization=self.org, alert_reason="unregistered_failure_code", run=run, details=detail)
+        config = OrganizationContentConfig.objects.get(organization=self.org)
+        expected = config.pillar_strategy["ops_alerts"][identifier]
+        strategy = {key: value for key, value in config.pillar_strategy.items() if key != "ops_alerts"}
+        OrganizationContentConfig.objects.filter(pk=config.pk).update(pillar_strategy=strategy)
+        run.result.pop("ops_alerts")
+        run.save(update_fields=["result"])
+        before = run.updated_at
+        specs = [{"organization": self.org, "alert_reason": "unregistered_failure_code", "run": run, "details": detail}]
+        self.assertEqual(alerts.queue_founder_journey_alerts_batch(specs, now=self.now), {"ids": [identifier], "created": 1})
+        config.refresh_from_db();run.refresh_from_db()
+        self.assertEqual(config.pillar_strategy["ops_alerts"][identifier], expected)
+        self.assertEqual(run.result["ops_alerts"]["unregistered_failure_code"], expected)
+        self.assertEqual(run.updated_at, before)
+        self.assertNotIn("private@", json.dumps(expected))
+        self.assertEqual(alerts.queue_founder_journey_alerts_batch(specs, now=self.now + timedelta(days=1))["created"], 0)
+        config.refresh_from_db()
+        self.assertEqual(config.pillar_strategy["ops_alerts"][identifier], expected)
+
+    def test_staff_batch_adopts_a_settled_orphan_mirror_and_preserves_callback_fields(self):
+        from . import founder_journey_alerts as alerts
+        run = self.make_run({"error_code": "UNKNOWN_SYNTHETIC_FAILURE"})
+        specs = [{"organization": self.org, "alert_reason": "unregistered_failure_code", "run": run}]
+        result = alerts.queue_founder_journey_alerts_batch(specs, now=self.now)
+        identifier = result["ids"][0]
+        settled = {**run.result["ops_alerts"]["unregistered_failure_code"], "state": "sent", "attempts": 1}
+        run.result["ops_alerts"]["unregistered_failure_code"] = settled
+        run.save(update_fields=["result"])
+        config = OrganizationContentConfig.objects.get(organization=self.org)
+        config.pillar_strategy.pop("ops_alerts")
+        config.save(update_fields=["pillar_strategy"])
+        alerts.queue_founder_journey_alerts_batch(specs, now=self.now + timedelta(hours=1))
+        config.refresh_from_db()
+        self.assertEqual(config.pillar_strategy["ops_alerts"][identifier], settled)
+
+    def test_staff_batch_real_callback_race_cannot_lose_new_status_result_or_clock(self):
+        from . import founder_journey_alerts as alerts
+        run = self.make_run({"error_code": "UNKNOWN_SYNTHETIC_FAILURE"})
+        ready, done = threading.Event(), threading.Event()
+        moved_at = self.now + timedelta(seconds=1)
+        def callback():
+            close_old_connections()
+            try:
+                if not ready.wait(5):raise RuntimeError("Batch never reserved config")
+                from workflow_runs.models import ContentFactoryRun
+                ContentFactoryRun.objects.filter(pk=run.pk).update(status="running", updated_at=moved_at,
+                    result={"callback_nonce": "new-cf-state"})
+            finally:
+                done.set();close_old_connections()
+        manager = OrganizationContentConfig.objects
+        original = manager.bulk_update
+        def reserve(*args, **kwargs):
+            value = original(*args, **kwargs)
+            ready.set()
+            self.assertTrue(done.wait(5))
+            return value
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            future = pool.submit(callback)
+            with patch.object(manager, "bulk_update", side_effect=reserve):
+                alerts.queue_founder_journey_alerts_batch([{"organization": self.org, "alert_reason": "unregistered_failure_code", "run": run}], now=self.now)
+            future.result()
+        run.refresh_from_db()
+        self.assertEqual((run.status, run.updated_at), ("running", moved_at))
+        self.assertEqual(run.result["callback_nonce"], "new-cf-state")
+        self.assertIn("unregistered_failure_code", run.result["ops_alerts"])
+
+    def test_staff_batch_five_hundred_reservations_have_bounded_queries_and_all_receipts(self):
+        from organizations.models import Organization
+        from workflow_runs.models import ContentFactoryRun
+        from . import founder_journey_alerts as alerts
+        orgs = Organization.objects.bulk_create([Organization(name="Synthetic alerts", domain=f"alerts-{index}.synthetic.test") for index in range(500)])
+        OrganizationContentConfig.objects.bulk_create([OrganizationContentConfig(organization=org) for org in orgs])
+        runs = ContentFactoryRun.objects.bulk_create([ContentFactoryRun(organization=org, run_id=f"alerts-{org.pk}", workflow="article_generation", status="blocked") for org in orgs])
+        specs = [{"organization": org, "run": run, "alert_reason": "unregistered_failure_code"} for org, run in zip(orgs, runs)]
+        with CaptureQueriesContext(connection) as queries:
+            result = alerts.queue_founder_journey_alerts_batch(specs, now=self.now)
+        self.assertLessEqual(len(queries), 16)
+        self.assertEqual((len(result["ids"]), result["created"]), (500, 500))
+        self.assertEqual(OrganizationContentConfig.objects.filter(pillar_strategy__has_key="ops_alerts").count(), 500)
+
+    def test_staff_batch_actual_concurrent_replay_reserves_one_unchanged_receipt(self):
+        from . import founder_journey_alerts as alerts
+        run = self.make_run({"error_code": "UNKNOWN_SYNTHETIC_FAILURE"})
+        specs = [{"organization": self.org, "run": run, "alert_reason": "unregistered_failure_code"}]
+        def reserve():
+            close_old_connections()
+            try:return alerts.queue_founder_journey_alerts_batch(specs, now=self.now)
+            finally:close_old_connections()
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            results = list(pool.map(lambda _: reserve(), range(2)))
+        self.assertEqual(sum(result["created"] for result in results), 1)
+        self.assertEqual(results[0]["ids"], results[1]["ids"])
+        config = OrganizationContentConfig.objects.get(organization=self.org)
+        self.assertEqual(len(config.pillar_strategy["ops_alerts"]), 1)
+
     def test_reviewed_child_live_projection_keeps_original_article_identity(self):
         source = self.ready()
         digest = "a" * 64
@@ -339,14 +455,16 @@ class NotificationTests(TransactionTestCase):
         self.assertNotIn("error", combined.values())
         self.assertLess(elapsed, 2.0)
 
+    @tag("p2_performance")
     def test_full_tick_at_five_hundred_pending_items_is_bounded(self):
         from organizations.models import Organization
         from workflow_runs.models import ContentFactoryRun
         from .self_heal_sweeps import run_self_heal_sweeps
-        orgs = Organization.objects.bulk_create([Organization(name="Synthetic pending", domain=f"pending-{index}.synthetic.test") for index in range(500)])
+        additional = Organization.objects.bulk_create([Organization(name="Synthetic pending", domain=f"pending-{index}.synthetic.test") for index in range(499)])
+        orgs = [self.org, *additional]
         self.fixture.config.refresh_from_db()
         OrganizationContentConfig.objects.bulk_create([OrganizationContentConfig(organization=org,
-            pillar_strategy=deepcopy(self.fixture.config.pillar_strategy)) for org in orgs])
+            pillar_strategy=deepcopy(self.fixture.config.pillar_strategy)) for org in additional])
         ContentFactoryRun.objects.bulk_create([ContentFactoryRun(organization=org, domain=org.domain,
             run_id=f"pending-{org.pk}", workflow="article_generation", status="blocked",
             run_request={"self_heal_policy_v1": {"version": 1, "cohort": "p2", "failure_policy": "v2"}},
@@ -371,6 +489,8 @@ class NotificationTests(TransactionTestCase):
         self.assertNotIn("missing", result.values())
         self.assertNotIn("error", result.values())
         self.assertLess(elapsed, 2.0, timings)
+        self.assertEqual(result["staff_alert_rules"]["organizations"], 500)
+        self.assertEqual(OrganizationContentConfig.objects.filter(organization_id__in=[org.pk for org in orgs], pillar_strategy__has_key="ops_alerts").count(), 500)
 
     @override_settings(MY_STARTUP_TEAM_DOMAIN_AUTO_JOIN_ENABLED=False)
     def test_real_team_request_identity_approval_and_removed_recipient_composition(self):

@@ -193,6 +193,91 @@ def queue_founder_journey_alert(*, organization, alert_reason: str, company_id=N
     return alert_id
 
 
+def queue_founder_journey_alerts_batch(items, *, now=None) -> dict:
+    """Reserve the same incident receipts in bounded SQL, preserving callback writes.
+
+    Only reservation is batched. Delivery still reads the authoritative config
+    index and uses its existing claims, redaction and provider identities.
+    Config locks are released before acquiring run locks, as in the single-item
+    path, and run results are re-read under those locks before any mirror write.
+    """
+    from .models import OrganizationContentConfig
+    queued_at = now or timezone.now()
+    prepared, sources = [], {}
+    for item in items:
+        organization, reason = item["organization"], item["alert_reason"]
+        run = item.get("run")
+        if reason not in ALERT_REASONS or organization is None or getattr(organization, "pk", None) is None:
+            raise ValueError("An incident batch needs saved organizations and registered alert reasons.")
+        if run is not None and run.organization_id != organization.pk:
+            raise ValueError("An incident run must belong to its organization.")
+        details = _safe_details(item.get("details"))
+        company = item.get("company_id")
+        identifier = founder_journey_alert_id(organization_id=organization.pk, alert_reason=reason,
+            run_id=getattr(run, "run_id", None), company_id=company,
+            claimant_user_id=details.get("claimant_user_id"), slot=item.get("slot"))
+        receipt = {"alert_id": identifier, "alert_reason": reason, "state": "pending", "attempts": 0,
+            "sent_at": None, "queued_at": queued_at.isoformat(), "company_id": str(company) if company else None,
+            "run_id": str(run.run_id) if run is not None else None, "run_pk": run.pk if run is not None else None,
+            "details": details}
+        receipt["details"] = _p2_details(receipt, organization=organization, run=run, queued_at=queued_at)
+        prepared.append((organization.pk, run, reason, identifier, receipt))
+        if run is not None:
+            sources[run.pk] = run
+    if not prepared:
+        return {"ids": [], "created": 0}
+    # A settled mirror whose config entry was lost is adopted, never re-sent.
+    mirrors = dict(ContentFactoryRun.objects.filter(pk__in=sources).values_list("pk", "result")) if sources else {}
+    organizations = {item[0] for item in prepared}
+    stored, created = [], 0
+    with transaction.atomic():
+        rows = {row.organization_id: row for row in OrganizationContentConfig.objects.select_for_update()
+                .filter(organization_id__in=organizations).order_by("pk")}
+        missing = organizations - rows.keys()
+        if missing:
+            OrganizationContentConfig.objects.bulk_create(
+                [OrganizationContentConfig(organization_id=identifier) for identifier in sorted(missing)], ignore_conflicts=True)
+            rows.update({row.organization_id: row for row in OrganizationContentConfig.objects.select_for_update()
+                         .filter(organization_id__in=missing).order_by("pk")})
+        changed = {}
+        for organization_id, run, reason, identifier, candidate in prepared:
+            row = rows[organization_id]
+            strategy = dict(row.pillar_strategy) if isinstance(row.pillar_strategy, dict) else {}
+            receipts = dict(_receipts_in(strategy))
+            receipt = receipts.get(identifier)
+            if not isinstance(receipt, dict):
+                mirrored = _receipts_in(mirrors.get(run.pk)).get(reason) if run is not None else None
+                receipt = {**candidate, **mirrored} if isinstance(mirrored, dict) and mirrored.get("alert_id") == identifier else candidate
+                receipts[identifier] = receipt
+                row.pillar_strategy = {**strategy, RECEIPTS_KEY: receipts}
+                changed[row.pk] = row
+                created += 1
+            stored.append((run, reason, identifier, receipt))
+        if changed:
+            OrganizationContentConfig.objects.bulk_update(list(changed.values()), ["pillar_strategy"], batch_size=200)
+    # Keep a concurrent CF result/status update. Only result.ops_alerts changes.
+    if sources:
+        with transaction.atomic():
+            current = {row.pk: row for row in ContentFactoryRun.objects.select_for_update()
+                       .filter(pk__in=sources).order_by("pk")}
+            changed = {}
+            for run, reason, _identifier, receipt in stored:
+                if run is None or run.pk not in current:
+                    continue
+                row = current[run.pk]
+                result = dict(row.result) if isinstance(row.result, dict) else {}
+                receipts = dict(_receipts_in(result))
+                if receipts.get(reason) != receipt:
+                    receipts[reason] = receipt
+                    row.result = {**result, RECEIPTS_KEY: receipts}
+                    changed[row.pk] = row
+                original = run.result if isinstance(run.result, dict) else {}
+                run.result = {**original, RECEIPTS_KEY: {**_receipts_in(original), reason: receipt}}
+            if changed:
+                ContentFactoryRun.objects.bulk_update(list(changed.values()), ["result"], batch_size=200)
+    return {"ids": [item[2] for item in stored], "created": created}
+
+
 # --- P2: acknowledgement, due time and enrichment (IF-P2-19) -----------------
 
 @lru_cache(maxsize=None)

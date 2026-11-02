@@ -26,6 +26,16 @@ OWNER_ASKS = {"approve_setup", "authorize_github", "approve_join_request", "agre
 mapping = projection.mapping
 
 
+class NoticeFenced(RuntimeError):
+    """A lost/expired delivery claim has no authority to send or checkpoint."""
+
+
+def _assert_claim(row):
+    if (row.claimed_at is None or timezone.now() - row.claimed_at >= LEASE
+            or not ContentFactoryCallbackEvent.objects.filter(pk=row.pk, claimed_at=row.claimed_at, processed_at__isnull=True).exists()):
+        raise NoticeFenced()
+
+
 def owns_notifications(organization):
     """True only while this module owns the P2 startup's transition sends."""
     return bool(getattr(settings, "MY_STARTUP_TRANSITION_NOTIFICATIONS_ENABLED", False)
@@ -283,8 +293,7 @@ def _checkpoint(config, row, notice):
     with transaction.atomic():
         Organization.objects.select_for_update().get(pk=config.organization_id)
         current = OrganizationContentConfig.objects.select_for_update().get(pk=config.pk)
-        if not ContentFactoryCallbackEvent.objects.filter(pk=row.pk, claimed_at=row.claimed_at, processed_at__isnull=True).exists():
-            raise RuntimeError("Notification claim changed")
+        _assert_claim(row)
         strategy = deepcopy(mapping(current.pillar_strategy))
         strategy.setdefault("founder_notices", {}).setdefault("outbox", {})[row.event_id] = deepcopy(notice)
         OrganizationContentConfig.objects.filter(pk=current.pk).update(pillar_strategy=strategy)
@@ -292,7 +301,8 @@ def _checkpoint(config, row, notice):
 
 def _deliver(row, config, notice, *, now):
     from . import website_notification_transport as transport
-    from .founder_notification_outbox import _devices, dm_event, _sender
+    from .founder_notification_outbox import _devices, _sender
+    _assert_claim(row)
     user = _current(config, notice, now=now)
     if user is None:return "skipped"
     if notice["channel"] == "email":
@@ -304,6 +314,7 @@ def _deliver(row, config, notice, *, now):
         # A changed email may not borrow a frozen message or idempotency key.
         user = _current(config, notice, now=timezone.now())
         if not projection.verified_email(user) or notice["payload"].get("to") != [user.email]:return "skipped"
+        _assert_claim(row)
         transport.post_email(notice["payload"], bounded_key(notice["key"], 256), exact_key=True)
         return "sent"
     devices = _devices(user)
@@ -312,6 +323,7 @@ def _deliver(row, config, notice, *, now):
     if not notice.get("channel_id"):
         notice["devices"] = devices
         _checkpoint(config, row, notice)
+        _assert_claim(row)
         notice["channel_id"] = transport.open_dm(devices, row.event_id)
     if not notice.get("event_payload"):
         from agent_runtime import native_crypto
@@ -321,6 +333,7 @@ def _deliver(row, config, notice, *, now):
         _checkpoint(config, row, notice)
     user = _current(config, notice, now=timezone.now())
     if user is None or _devices(user) != devices:return "skipped"
+    _assert_claim(row)
     transport.post_event(notice["event_payload"])
     return "sent"
 
@@ -348,6 +361,10 @@ def drain(now=None, *, limit=25, clock=time.monotonic):
                 outcome = "skipped"
             else:
                 outcome = _deliver(row, config, notice, now=now)
+        except NoticeFenced:
+            ContentFactoryCallbackEvent.objects.filter(pk=row.pk, claimed_at=now, processed_at__isnull=True).update(claimed_at=None)
+            counts["retry"] += 1
+            continue
         except Exception as exc:
             from .website_notification_transport import NotificationTransportError
             if isinstance(exc, NotificationTransportError) and not exc.retryable:
@@ -357,7 +374,10 @@ def drain(now=None, *, limit=25, clock=time.monotonic):
             logger.warning("founder_transition_retry event_id=%s error_type=%s", row.event_id, type(exc).__name__)
             if config and notice:
                 notice["next_at"] = (now + timedelta(minutes=2)).isoformat()
-                _checkpoint(config, row, notice)
+                try:
+                    _checkpoint(config, row, notice)
+                except NoticeFenced:
+                    pass
             ContentFactoryCallbackEvent.objects.filter(pk=row.pk, claimed_at=now).update(claimed_at=None)
             counts["retry"] += 1
             continue
