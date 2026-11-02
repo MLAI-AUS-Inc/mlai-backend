@@ -86,6 +86,9 @@ class RefundTests(TestCase):
         refunds.carry_charge(source_run=source, new_run=child)
         self.assertEqual(refunds.apply_refund_decision(child, {})["state"], "captured")
         self.assertFalse(spend.service_refunds.exists())
+        child.refresh_from_db()
+        self.assertFalse(refunds._direct_delivery(child))
+        self.assertTrue(refunds._delivery(child))
 
     def test_unrelated_delivered_run_cannot_claim_another_original_charge_delivery(self):
         source, spend = self.paid()
