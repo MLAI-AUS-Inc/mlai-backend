@@ -48,6 +48,8 @@ def _budget(run_id):
             if len(raw) > 131_072:
                 raise ExecutionControlDenied("execution_budget_unavailable")
         return json.loads(raw)
+    except ExecutionControlDenied:
+        raise
     except (ValueError, UnicodeError, RecursionError) as exc:
         raise ExecutionControlDenied("execution_budget_unavailable") from exc
     finally:
@@ -90,7 +92,7 @@ def grant_automatic_execution(run_id, payload):
         with transaction.atomic():
             from organizations.models import Organization
             Organization.objects.select_for_update().get(pk=run.organization_id)
-            run = ContentFactoryRun.objects.select_for_update().select_related("organization").get(pk=run.pk)
+            run = ContentFactoryRun.objects.select_for_update(of=("self",)).select_related("organization").get(pk=run.pk)
             _require_active(run)
             require_current_principal(run)
             require_admission_identity(run, payload)
@@ -118,7 +120,7 @@ def grant_automatic_execution(run_id, payload):
             # Keep membership lock order aligned with the original controllers.
             from organizations.models import Organization
             Organization.objects.select_for_update().get(pk=run.organization_id)
-            run = ContentFactoryRun.objects.select_for_update().select_related("organization").get(pk=run.pk)
+            run = ContentFactoryRun.objects.select_for_update(of=("self",)).select_related("organization").get(pk=run.pk)
             require_admission_identity(run, payload)
             require_event_execution(run, payload, current=True)
             _require_active(run)

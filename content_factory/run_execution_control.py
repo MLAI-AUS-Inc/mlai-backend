@@ -21,6 +21,7 @@ CONTROL_KEY = "run_owner_control_v1"
 BUDGET_KEY = "backend_run_budget_v1"
 MAX_TICKETS = 1024
 AUTOMATIC_REASONS = frozenset({"quality_repair", "orphan_resume"})
+CURRENT_CONTEXT_FIELDS = frozenset({"configuration_revision", "github_installation_id"})
 _KEY = re.compile(r"[a-f0-9]{64}\Z")
 
 
@@ -72,6 +73,12 @@ def current_execution_request(run):
     request = deepcopy(run.run_request or {})
     if owner_receipt(run) is not None:
         ticket = current_execution_ticket(run)
+        execution = (run.result or {}).get(OWNER_EXECUTION_KEY, {})
+        contexts = execution.get("contexts", {})
+        context = contexts.get(ticket["execution_id"], {}) if isinstance(contexts, dict) else None
+        if not isinstance(context, dict) or not set(context) <= CURRENT_CONTEXT_FIELDS:
+            raise ExecutionControlDenied()
+        request.update(deepcopy(context))
         for field, value in ticket["scope"].items():
             if value is None:
                 request.pop(field, None)
@@ -115,7 +122,7 @@ def require_current_principal(run):
 
 
 def append_execution_ticket(run, *, control_key, reason, scope=None, increment_generation=True,
-                            expected_execution_id=None):
+                            expected_execution_id=None, context=None):
     """Append inside a caller's locked, authorized backend transaction.
 
     ``scope`` is backend-derived proof from the existing source/operation
@@ -123,7 +130,7 @@ def append_execution_ticket(run, *, control_key, reason, scope=None, increment_g
     Same-key retry returns its exact ticket without advancing any generation.
     """
     if (not transaction.get_connection().in_atomic_block or type(control_key) is not str or not _KEY.fullmatch(control_key)
-            or type(reason) is not str or reason not in AUTOMATIC_REASONS | {"source_repin", "user_resume", "operation_resume"}
+            or type(reason) is not str or reason not in AUTOMATIC_REASONS | {"source_repin", "user_resume", "operation_resume", "connection_rebind"}
             or type(increment_generation) is not bool):
         raise ExecutionControlDenied()
     receipt = owner_receipt(run)
@@ -135,11 +142,19 @@ def append_execution_ticket(run, *, control_key, reason, scope=None, increment_g
         raise ExecutionControlDenied()
     execution = deepcopy(run.result[OWNER_EXECUTION_KEY])
     old = current_execution_ticket(run)
+    contexts = execution.setdefault("contexts", {})
+    if not isinstance(contexts, dict):
+        raise ExecutionControlDenied()
+    new_context = deepcopy(contexts.get(old["execution_id"], {}) if context is None else context)
+    if (not isinstance(new_context, dict) or not set(new_context) <= CURRENT_CONTEXT_FIELDS
+            or any(type(value) not in {str, int} or isinstance(value, bool) for value in new_context.values())):
+        raise ExecutionControlDenied()
     prior = control["grants"].get(control_key)
     if prior is not None:
         command = prior.get("command", {})
         if (command.get("reason") != reason or command.get("increment_generation") is not increment_generation
                 or scope is not None and evidence_digest(command.get("scope")) != evidence_digest(scope)
+                or context is not None and evidence_digest(command.get("context", {})) != evidence_digest(context)
                 or expected_execution_id is not None and expected_execution_id not in {
                     prior.get("previous_execution_id"), prior.get("execution_id")}):
             raise ExecutionControlDenied("execution_control_key_conflict")
@@ -150,6 +165,7 @@ def append_execution_ticket(run, *, control_key, reason, scope=None, increment_g
     if expected_execution_id is not None and expected_execution_id != old["execution_id"]:
         raise ExecutionControlDenied("execution_ticket_changed")
     current_request = current_execution_request(run)
+    current_request.update(new_context)
     new_scope = deepcopy(old["scope"] if scope is None else scope)
     if set(new_scope) != set(SCOPE_FIELDS):
         raise ExecutionControlDenied()
@@ -163,14 +179,17 @@ def append_execution_ticket(run, *, control_key, reason, scope=None, increment_g
             current_request[field] = deepcopy(value)
     digest = _request_digest(current_request)
     command = {"reason": reason, "scope": new_scope, "request_digest": digest,
-               "increment_generation": increment_generation}
+               "increment_generation": increment_generation, "context": new_context}
     if type(increment_generation) is not bool or len(execution["tickets"]) >= MAX_TICKETS:
         raise ExecutionControlDenied("execution_control_limit")
     ticket = {"schema_version": 1, "execution_id": "control:" + control_key,
         "generation": old["generation"] + int(increment_generation),
         "admission_digest": evidence_digest(wire_identity(receipt)), "request_digest": digest, "scope": new_scope}
     execution["tickets"][ticket["execution_id"]] = ticket
+    contexts[ticket["execution_id"]] = new_context
     execution["current_execution_id"] = ticket["execution_id"]
+    # Query projection only; every effect rechecks the immutable current ticket.
+    execution["current_scope"] = deepcopy(new_scope)
     control["grants"][control_key] = {"command": command, "previous_execution_id": old["execution_id"],
                                      "execution_id": ticket["execution_id"]}
     from workflow_runs.models import ContentFactoryRun
@@ -185,6 +204,9 @@ def validate_budget_observation(run, payload):
     expected = {"schema_version", "run_id", WIRE_REQUEST_KEY, WIRE_EXECUTION_KEY, BUDGET_KEY,
                 "event_cursor", "used_model_usd_upper_bound", "used_model_tokens", "uncertain_calls"}
     budget = (run.run_request or {}).get(BUDGET_KEY)
+    receipt = owner_receipt(run)
+    if receipt is None or _request_digest(run.run_request or {}) != receipt["identity"]["request_digest"]:
+        raise ExecutionControlDenied("execution_budget_unavailable")
     if (not valid_control_budget(budget) or not isinstance(payload, dict) or set(payload) != expected
             or type(payload.get("schema_version")) is not int or payload["schema_version"] != 1
             or payload.get("run_id") != run.run_id or not valid_control_budget(payload.get(BUDGET_KEY))
