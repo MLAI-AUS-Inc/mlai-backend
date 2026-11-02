@@ -3917,9 +3917,11 @@ class ContentFactoryCallbackView(APIView):
             return Response({"error": "owned_callback_requires_observation_boundary", "retryable": True}, status=409)
         from .run_ownership import RunOwnershipConflict, prepare_owned_callback
         try:
-            prepare_owned_callback(data, run_id)
+            owned = prepare_owned_callback(data, run_id)
         except RunOwnershipConflict:
             return Response({"error": "run_admission_mismatch", "retryable": True}, status=409)
+        if authoritative_run(owned):
+            return Response({"error": "owned_callback_requires_observation_boundary", "retryable": True}, status=409)
         bind_dispatch_token_run(client_request_id=data.get("client_request_id"), remote_run_id=run_id)
         try:
             version = execution_version(data)
@@ -9356,6 +9358,9 @@ def _apply_cancellation_receipt(run_id, payload):
     from .run_observations import _observations
     from .snapshot_meaning import final_refusal
     from .website_operations import observe_workflow_status
+    from .run_reconciliation import authoritative_run
+    if authoritative_run(ContentFactoryRun.objects.filter(run_id=run_id).first()):
+        return Response({"error": "owned_cancellation_requires_typed_events", "retryable": True, "run_id": run_id}, status=409)
     with transaction.atomic():
         run = ContentFactoryRun.objects.select_for_update().filter(run_id=run_id).first()
         if run is None:
