@@ -321,7 +321,7 @@ def _persist_prepare(op, *, now):
         from .founder_transitions import owns_notifications
     except (ImportError, AttributeError):
         owns_notifications = None
-    if owns_notifications is not None and owns_notifications(op.connection.organization):
+    if owns_notifications is not None and owns_notifications(getattr(op.connection, "organization", None)):
         notify = False
     refund = op.state in REFUND_TERMINAL and bool(op.receipt.get("first_article_billing"))
     accounting = bool(pending_for(op))
@@ -345,7 +345,7 @@ def _persist_prepare_state(op, *, now):
     # Registry-derived actions on prepare receipts retain today's wire ids
     # until the canonical-id rollout; legacy/P2-off receipts stay identical.
     from .p2_foundation import policy_v2_applies
-    if policy_v2_applies(op.connection.organization):
+    if policy_v2_applies(getattr(op.connection, "organization", None)):
         from .registry_policy import effective_entry, wire_action_id
         code = op.receipt.get("reason_code") or op.receipt.get("error_code")
         entry = effective_entry(code, op.connection.organization)
