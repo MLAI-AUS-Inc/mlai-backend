@@ -200,6 +200,10 @@ def activate(site):
             return False
         if current.worker_url != site.worker_url or current.organization_id != site.organization_id or not _unclaimed(site.organization, site.domain):
             return False
+        try:
+            hosted.require_current_publish_rights(site.organization, click.get("approved_by_user_id"))
+        except hosted.HostedPublishError:
+            return False
         current.state = HostedArticleSite.State.ACTIVE
         current.proxy_verified_at = timezone.now()
         current.save(update_fields=["state", "proxy_verified_at", "updated_at"])

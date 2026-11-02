@@ -201,23 +201,78 @@ def register_site(*, organization, profile, update_existing=True):
     return site, created
 
 
-def request_publication(*, site: HostedArticleSite, run, user, allow_continuation=False) -> HostedArticlePublication:
-    """Queue (or re-queue) one finished article for this site; the caller dispatches the render."""
-    if site.state != HostedArticleSite.State.ACTIVE:
-        raise HostedPublishError("hosted_site_not_active", "Hosted publishing is not switched on for this website.")
-    if run.organization_id != site.organization_id:
-        raise HostedPublishError("hosted_site_mismatch", "This article belongs to another website.", status=404)
+def require_current_publish_rights(organization, actor_id):
+    """Resolve the approving actor's current owner/member grant, including frozen teams."""
+    from django.contrib.auth import get_user_model
+    from founder_tools.startup_team import member_may_publish
+
+    user = get_user_model().objects.filter(pk=actor_id, is_active=True).first() if type(actor_id) is int else None
+    if user is None or member_may_publish(user, organization) is not True:
+        raise HostedPublishError("hosted_publish_not_allowed", "Publishing permission changed. Open the article again.", status=403)
+    return user
+
+
+def _locked_publication_site(*, site_id=None, domain=None):
+    from organizations.models import Organization
+    query = HostedArticleSite.objects.filter(pk=site_id) if site_id else HostedArticleSite.objects.filter(domain=normalized_domain(domain))
+    identity = query.values('pk', 'organization_id').first()
+    if identity is None:
+        raise HostedPublishError("hosted_site_not_found", "No hosted site for this domain.", status=404)
+    # Team grants and owner offboarding take this same first lock. Do not acquire
+    # it after a site/publication lock or keep a cached membership decision.
+    organization = Organization.objects.select_for_update().get(pk=identity['organization_id'])
+    site = HostedArticleSite.objects.select_for_update().filter(pk=identity['pk'], organization=organization).first()
+    if site is None or normalized_domain(organization.domain) != site.domain:
+        raise HostedPublishError("hosted_site_mismatch", "This website changed after publishing was approved.", status=403)
+    return organization, site
+
+
+def _publication_run(site, run_id):
+    from workflow_runs.models import ContentFactoryRun
+    run = ContentFactoryRun.objects.select_for_update().filter(run_id=run_id, organization_id=site.organization_id).first()
+    if run is None or normalized_domain(run.domain) != site.domain:
+        raise HostedPublishError("hosted_site_mismatch", "This article belongs to another website.", status=403)
+    request = run.run_request if isinstance(run.run_request, dict) else {}
+    if request.get('hosted_site_id') not in (None, '', str(site.pk)):
+        raise HostedPublishError("hosted_site_mismatch", "This publication belongs to another hosted website.", status=403)
+    return run
+
+
+def _require_approval_actor(run, actor_id):
     result = run.result if isinstance(run.result, dict) else {}
-    continuation = (allow_continuation and run.workflow == "direct_generate" and
-                    isinstance(result.get("article_approval_v1"), dict) and
-                    result["article_approval_v1"].get("source") == "publish_reviewed" and
-                    isinstance(result.get("publish_reviewed_v1"), dict))
-    if str(run.status) != "completed" and not continuation:
-        raise HostedPublishError("article_not_ready", "Finish the article before publishing it.")
+    approval = result.get('article_approval_v1')
+    if isinstance(approval, dict) and approval.get('source') == 'publish_reviewed':
+        if type(approval.get('approved_by_user_id')) is not int or approval['approved_by_user_id'] != actor_id:
+            raise HostedPublishError("hosted_publish_not_allowed", "This publication needs a new review.", status=403)
+
+
+def _require_publication_active(site, run):
+    if not enabled() or site.state != HostedArticleSite.State.ACTIVE:
+        raise HostedPublishError("hosted_site_not_active", "Hosted publishing is not switched on for this website.")
+    if run.status in {'cancelled', 'denied', 'stopped'}:
+        raise HostedPublishError("hosted_publish_not_allowed", "This publishing request was stopped.", status=403)
+
+
+def request_publication(*, site: HostedArticleSite, run, user, allow_continuation=False) -> HostedArticlePublication:
+    """Queue the exact reviewed run only while its approver still has publish rights."""
     with transaction.atomic():
+        organization, site = _locked_publication_site(site_id=site.pk)
+        run = _publication_run(site, run.run_id)
+        _require_publication_active(site, run)
+        user = require_current_publish_rights(organization, getattr(user, 'pk', None))
+        _require_approval_actor(run, user.pk)
+        result = run.result if isinstance(run.result, dict) else {}
+        continuation = (allow_continuation and run.workflow == "direct_generate" and
+                        isinstance(result.get("article_approval_v1"), dict) and
+                        result["article_approval_v1"].get("source") == "publish_reviewed" and
+                        isinstance(result.get("publish_reviewed_v1"), dict))
+        if str(run.status) != "completed" and not continuation:
+            raise HostedPublishError("article_not_ready", "Finish the article before publishing it.")
         publication, created = HostedArticlePublication.objects.select_for_update().get_or_create(
             site=site, run_id=run.run_id, defaults={"requested_by": user})
         if not created and publication.status in {Status.PENDING, Status.RENDERING}:
+            if publication.requested_by_id != user.pk:
+                raise HostedPublishError("hosted_publish_not_allowed", "This publication needs a new review.", status=403)
             return publication
         if publication.status == Status.WITHDRAWN:
             raise HostedPublishError("hosted_publication_withdrawn", "This article was taken down. Publish a new revision instead.")
@@ -268,6 +323,27 @@ def _mark_written_article_live(publication: HostedArticlePublication, now):
     return article
 
 
+def _already_applied_live(publication, site, target, data):
+    """A terminal callback may acknowledge exactly owned history without rewriting it."""
+    if target != Status.LIVE or publication.status != Status.LIVE or not publication.revision_digest:
+        return False
+    if data.get('verified_digest') != publication.revision_digest:
+        return False
+    if 'article' in data and (_clean_article(data['article']) != publication.article
+            or data.get('revision_digest') != publication.revision_digest):
+        return False
+    if data.get('revision_digest', publication.revision_digest) != publication.revision_digest:
+        return False
+    deployment = data.get('deployment')
+    if deployment is not None:
+        if not isinstance(deployment, dict):
+            return False
+        expected = {'worker_name': site.worker_name, 'url': site.worker_url, 'manifest_digest': site.manifest_digest}
+        if any(key in deployment and str(deployment[key]) != expected[key] for key in expected):
+            return False
+    return True
+
+
 def record_progress(*, domain: str, run_id: str, data: dict) -> HostedArticlePublication:
     """Apply one Content Factory report for a publication; stale reports are refused."""
     try:
@@ -276,12 +352,25 @@ def record_progress(*, domain: str, run_id: str, data: dict) -> HostedArticlePub
         raise HostedPublishError("hosted_status_invalid", "Unknown publication status.", status=400) from None
     now = timezone.now()
     with transaction.atomic():
-        site = HostedArticleSite.objects.select_for_update().filter(domain=normalized_domain(domain)).first()
-        if site is None:
-            raise HostedPublishError("hosted_site_not_found", "No hosted site for this domain.", status=404)
+        organization, site = _locked_publication_site(domain=domain)
         publication = HostedArticlePublication.objects.select_for_update().filter(site=site, run_id=run_id).first()
         if publication is None:
             raise HostedPublishError("hosted_publication_not_found", "This article was not queued for publishing.", status=404)
+        run = _publication_run(site, run_id)
+        _require_approval_actor(run, publication.requested_by_id)
+        if _already_applied_live(publication, site, target, data):
+            # A lost terminal callback acknowledgement is history, not consent
+            # for another build. Preserve all clocks and cancelled run history.
+            return publication
+        _require_publication_active(site, run)
+        require_current_publish_rights(organization, publication.requested_by_id)
+        if target == Status.RENDERING and 'article' not in data and 'revision_digest' in data:
+            # The finished build asks for fresh upload admission, not another
+            # rendering transition. It cannot replace a body, rotate revision,
+            # demote a live publication or reopen a completed/stopped intent.
+            if publication.status != Status.RENDERING or not publication.revision_digest or data['revision_digest'] != publication.revision_digest:
+                raise HostedPublishError("hosted_review_changed", "This publication has a different reviewed revision.")
+            return publication
         if target not in TRANSITIONS[Status(publication.status)]:
             raise HostedPublishError("hosted_status_stale", f"A {publication.status} publication cannot become {target}.")
         fields = {"status", "updated_at"}
@@ -290,6 +379,9 @@ def record_progress(*, domain: str, run_id: str, data: dict) -> HostedArticlePub
             digest = str(data.get("revision_digest") or "")
             if not SHA256.match(digest):
                 raise HostedPublishError("hosted_article_invalid", "The rendered article has no revision digest.", status=400)
+            if publication.article and publication.status != Status.PENDING and (
+                    article != publication.article or digest != publication.revision_digest):
+                raise HostedPublishError("hosted_review_changed", "This publication has a different reviewed revision.")
             clash = site.publications.filter(slug=article["slug"]).exclude(pk=publication.pk).first()
             if clash is not None:
                 raise HostedPublishError("hosted_slug_taken", f"{site.base_path}{article['slug']}/ is already used by another article.")
@@ -328,8 +420,7 @@ def record_progress(*, domain: str, run_id: str, data: dict) -> HostedArticlePub
         # P2 approved-body continuations have no repository merge callback. The
         # authenticated hosted progress record owns their real live outcome.
         from workflow_runs.models import ContentFactoryRun
-        run = ContentFactoryRun.objects.select_for_update().filter(run_id=run_id, organization_id=site.organization_id).first()
-        result = run.result if run is not None and isinstance(run.result, dict) else {}
+        result = run.result if isinstance(run.result, dict) else {}
         if (run is not None and isinstance(result.get("article_approval_v1"), dict)
                 and result["article_approval_v1"].get("source") == "publish_reviewed"):
             if target == Status.LIVE:
