@@ -13,7 +13,7 @@ from rest_framework.views import APIView
 from core.authentication import CustomJWTAuthentication
 from roo.models import RewardsCatalog, Task, TaskAssignment
 from roo.services import PointsService
-from roo.event_discounts import feature_enabled as event_discounts_enabled
+from roo.event_discounts import account_perks_enabled as event_discounts_enabled
 from integrations.services.community_bridge.coworking import coworking_booking_available
 from integrations.services.slack_roo import public_roo_target
 
@@ -152,7 +152,7 @@ class CommunityHomeView(APIView):
                     for reward in rewards
                 ],
                 "feature_flags": {
-                    "event_discounts": event_discounts_enabled() and bool(slack_roo),
+                    "event_discounts": event_discounts_enabled(),
                     "coworking_booking": coworking_booking_available(request.user),
                     "link_love": False,
                     "meeting_rooms": bool(

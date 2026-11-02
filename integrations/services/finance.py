@@ -229,6 +229,8 @@ def publish_financial_metric_observations(*, organization: Organization, run: Op
         organization=organization, provider=ExternalServiceProvider.STRIPE,
         record_type=STRIPE_RECORD_INVOICE, status="paid",
     ).exclude(connection__status=ExternalServiceConnectionStatus.DISCONNECTED)
+    if run and run.run_request.get("source_connection_pins") is not None:
+        records = records.filter(connection_id=(run.run_request.get("source_connection_pins") or {}).get("stripe") or 0)
     scope_connection_ids = sorted(set(records.values_list("connection_id", flat=True)))
     buckets = {}
     for record in records:

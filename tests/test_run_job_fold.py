@@ -5,19 +5,23 @@ backfill fills older runs, and Job reads can be shadowed or served from the
 run. Every switch defaults off, and the flag-off tests pin today's behaviour.
 """
 import ast
+from concurrent.futures import ThreadPoolExecutor
 from datetime import timedelta
 from io import StringIO
 from pathlib import Path
+from threading import Event, current_thread
+from unittest import skipUnless
 from unittest.mock import patch
 
 from django.contrib.auth import get_user_model
 from django.core.management import call_command
-from django.test import SimpleTestCase, TestCase, override_settings
+from django.db import close_old_connections, connection
+from django.test import SimpleTestCase, TestCase, TransactionTestCase, override_settings
 from django.utils import timezone
 
 from content_factory.dispatch_binding import bind_dispatch_token_run
-from content_factory.job_mirror import RUN_JOB_COLUMN_DEFAULTS, RUN_JOB_COLUMNS, mirror_jobs_to_runs
-from content_factory.job_view import RunJobView, job_field_mismatches, job_view
+from content_factory.job_mirror import RUN_JOB_COLUMN_DEFAULTS, RUN_JOB_COLUMNS, mirror_job_to_run, mirror_jobs_to_runs
+from content_factory.job_view import IncompleteRunJobIdentity, RunJobView, job_field_mismatches, job_view
 from content_factory.models import ContentFactoryJob, WrittenArticle
 from content_factory.run_job_backfill import (
     BACKFILL_RESULT_KEY, backfill_run_job_fields, compare_run_job_fields, infer_workflow, undo_backfill,
@@ -135,6 +139,45 @@ class DualWriteMirrorTest(TestCase):
         after = ContentFactoryRun.objects.filter(pk=run.pk).values("status", "updated_at", "run_request", "error",
                                                                      "result", "slack_user_id", "domain").get()
         self.assertEqual(after, before)
+
+    def test_job_identity_is_distinct_from_run_authority_and_empty_strings_are_preserved(self):
+        run = _run("run-identity", domain="authority.example", slack_user_id="U_AUTHORITY")
+        authority = (run.domain, run.slack_user_id, run.organization_id, run.created_at, run.updated_at)
+        job = _job("run-identity", domain="", slack_user_id="")
+        run.refresh_from_db()
+        self.assertEqual((run.job_domain, run.job_slack_user_id), ("", ""))
+        self.assertEqual((run.job_created_at, run.job_updated_at), (job.created_at, job.updated_at))
+        self.assertEqual((run.domain, run.slack_user_id, run.organization_id, run.created_at, run.updated_at), authority)
+        self.assertEqual(job_field_mismatches(job, job_view(run)), [])
+
+    def test_partial_save_copies_exact_job_timestamp_without_advancing_run_recency(self):
+        run = _run("run-identity-partial")
+        job = _job("run-identity-partial")
+        before = run.updated_at
+        job.status = "blocked"
+        job.save(update_fields=["status", "updated_at"])
+        run.refresh_from_db()
+        self.assertEqual(run.job_updated_at, job.updated_at)
+        self.assertEqual(run.updated_at, before)
+        copied_time = run.job_updated_at
+        job.progress_message_ts = "new.progress"
+        job.save(update_fields=["progress_message_ts"])
+        run.refresh_from_db()
+        self.assertEqual(run.progress_message_ts, "new.progress")
+        self.assertEqual(run.job_updated_at, copied_time)  # auto_now was not saved
+        self.assertEqual(job_field_mismatches(job, job_view(run)), [])
+
+    def test_delayed_full_mirror_rereads_newer_partial_save_even_when_time_is_unchanged(self):
+        run = _run("run-identity-stale")
+        stale = _job("run-identity-stale")
+        fresh = ContentFactoryJob.objects.get(pk=stale.pk)
+        fresh.progress_message_ts = "new.progress"
+        fresh.save(update_fields=["progress_message_ts"])
+        self.assertEqual(fresh.updated_at, stale.updated_at)
+        self.assertTrue(mirror_job_to_run(stale))
+        run.refresh_from_db()
+        self.assertEqual(run.progress_message_ts, "new.progress")
+        self.assertEqual(job_field_mismatches(fresh, job_view(run)), [])
 
     def test_partial_save_update_or_create_and_full_save_keep_parity(self):
         _run("run-dw-2")
@@ -265,6 +308,71 @@ class DualWriteMirrorTest(TestCase):
         orphan.billing_status = "refunded"
         orphan.save(update_fields=["billing_status"])
         self.assertEqual(ContentFactoryRun.objects.get(run_id="cf-real-orphan").billing_status, "reused")
+
+
+@DUAL_WRITE
+@skipUnless(connection.vendor == "postgresql", "Requires PostgreSQL row locks and independent connections")
+class JobMirrorConcurrencyTest(TransactionTestCase):
+    def test_delayed_full_mirror_cannot_overwrite_a_newer_partial_progress_save(self):
+        from content_factory import job_mirror
+
+        run = _run("run-concurrent-mirror")
+        stale = _job("run-concurrent-mirror")
+        run_locked = Event()
+        newer_written = Event()
+        copied_progress = []
+        original_resolve = job_mirror.run_for_job_id
+        original_values = job_mirror.run_values_for_job
+
+        def resolve(*args, **kwargs):
+            if current_thread().name.startswith("old-mirror"):
+                locked = original_resolve(*args, **kwargs)
+                run_locked.set()
+                if not newer_written.wait(5):
+                    raise AssertionError("Newer partial Job write never reached its mirror")
+                return locked
+            newer_written.set()  # post_save: the autocommit Job UPDATE is visible
+            return original_resolve(*args, **kwargs)
+
+        def values(job, **kwargs):
+            if current_thread().name.startswith("old-mirror"):
+                copied_progress.append(job.progress_message_ts)
+            return original_values(job, **kwargs)
+
+        def old_mirror():
+            close_old_connections()
+            try:
+                return job_mirror.mirror_job_to_run(stale)
+            finally:
+                close_old_connections()
+
+        def newer_partial():
+            close_old_connections()
+            try:
+                if not run_locked.wait(5):
+                    raise AssertionError("Old mirror never acquired the Run lock")
+                with connection.cursor() as cursor:
+                    cursor.execute("SET lock_timeout = '5s'")
+                job = ContentFactoryJob.objects.get(pk=stale.pk)
+                job.progress_message_ts = "new.concurrent.progress"
+                job.save(update_fields=["progress_message_ts"])
+            finally:
+                close_old_connections()
+
+        with patch.object(job_mirror, "run_for_job_id", side_effect=resolve), \
+                patch.object(job_mirror, "run_values_for_job", side_effect=values), \
+                ThreadPoolExecutor(max_workers=1, thread_name_prefix="old-mirror") as old_pool, \
+                ThreadPoolExecutor(max_workers=1, thread_name_prefix="newer-partial") as new_pool:
+            old = old_pool.submit(old_mirror)
+            new = new_pool.submit(newer_partial)
+            self.assertTrue(old.result(timeout=15))
+            new.result(timeout=15)
+        run.refresh_from_db()
+        fresh = ContentFactoryJob.objects.get(pk=stale.pk)
+        self.assertEqual(copied_progress, ["new.concurrent.progress"])
+        self.assertEqual(run.progress_message_ts, "new.concurrent.progress")
+        self.assertEqual(fresh.updated_at, stale.updated_at)
+        self.assertEqual(job_field_mismatches(fresh, job_view(run)), [])
 
 
 class JobUpdateCallSiteGuardTest(SimpleTestCase):
@@ -438,6 +546,34 @@ class BackfillTest(TestCase):
         self.assertEqual(self.matched_run.delivery_phase, "generating")  # empty columns are still filled
         self.assertFalse(ContentFactoryRun.objects.filter(run_id="legacy-slack-job").exists())
 
+    def test_identity_backfill_preserves_run_authority_and_does_not_overwrite_copied_empty_strings(self):
+        run = self.matched_run
+        ContentFactoryRun.objects.filter(pk=run.pk).update(domain="run.authority", slack_user_id="U_AUTHORITY")
+        run.refresh_from_db()
+        before = (run.domain, run.slack_user_id, run.created_at, run.updated_at, run.status)
+        backfill_run_job_fields(apply=True)
+        run.refresh_from_db()
+        self.assertEqual((run.domain, run.slack_user_id, run.created_at, run.updated_at, run.status), before)
+        self.assertEqual((run.job_domain, run.job_slack_user_id), (self.matched_job.domain, self.matched_job.slack_user_id))
+        self.assertEqual((run.job_created_at, run.job_updated_at),
+                         (self.matched_job.created_at, self.matched_job.updated_at))
+        self.assertEqual(job_field_mismatches(self.matched_job, job_view(run)), [])
+        ContentFactoryRun.objects.filter(pk=run.pk).update(job_domain="", job_slack_user_id="")
+        report = backfill_run_job_fields(apply=True)
+        run.refresh_from_db()
+        self.assertEqual((run.job_domain, run.job_slack_user_id), ("", ""))
+        self.assertEqual((report.conflicts["job_domain"], report.conflicts["job_slack_user_id"]), (1, 1))
+
+    def test_uncopied_identity_blocks_compare_and_view_without_falling_back_to_run_identity(self):
+        backfill_run_job_fields(apply=True)
+        ContentFactoryRun.objects.filter(pk=self.matched_run.pk).update(job_domain=None, job_created_at=None)
+        report = compare_run_job_fields()
+        self.assertEqual(report.counts["incomplete_identity"], 1)
+        self.assertEqual(report.mismatches, {"job_domain": 1, "job_created_at": 1})
+        self.assertEqual(report.read_cutover_blockers()["incomplete_identity"], 1)
+        with self.assertRaises(IncompleteRunJobIdentity):
+            job_view(self.matched_job.job_id)
+
     def test_creates_only_for_jobs_without_a_run_and_honours_the_cutoff(self):
         report = backfill_run_job_fields(apply=True, create=True, create_since=timezone.now() - timedelta(days=30))
         self.assertEqual(report.counts["create_skipped"], 1)
@@ -526,7 +662,7 @@ class BackfillTest(TestCase):
 class JobViewAndShadowReadTest(TestCase):
     def setUp(self):
         now = timezone.now()
-        # Run timestamps run opposite to the Jobs', so only the rank decides.
+        # Run timestamps run opposite to the Jobs', proving view recency is separate.
         specs = (
             ("run-tr-source", "generating", {}, now - timedelta(minutes=5)),
             ("run-tr-child-blocked", "blocked", {"source_run_id": "run-tr-source"}, now - timedelta(minutes=4)),
@@ -539,6 +675,7 @@ class JobViewAndShadowReadTest(TestCase):
             _job(job_id, status=status, request_meta={**meta, "requested_by_slack_user_id": "U_FOUNDER"},
                  slack_thread_ts="200.1", slack_root_message_ts="200.0")
             ContentFactoryJob.objects.filter(job_id=job_id).update(created_at=stamp, updated_at=stamp)
+            mirror_jobs_to_runs(ContentFactoryJob.objects.filter(job_id=job_id), fields=["created_at", "updated_at"])
             ContentFactoryRun.objects.filter(pk=run.pk).update(created_at=now - (stamp - now),
                                                                updated_at=now - (stamp - now))
 
@@ -574,6 +711,51 @@ class JobViewAndShadowReadTest(TestCase):
                 self.assertEqual(self._confirm(**dict(kwargs)), baseline, kwargs)
         self.assertEqual(self._confirm()["job_id"], "run-tr-child-mode")  # child first, then the status rank
         self.assertEqual(self._confirm(source_job_id="run-tr-other")["job_id"], "run-tr-other")
+
+    def test_timestamp_ties_use_job_recency_even_when_run_recency_is_reversed(self):
+        now = timezone.now()
+        for suffix, job_stamp, run_stamp in (("older", now - timedelta(days=2), now),
+                                              ("newer", now - timedelta(days=1), now - timedelta(days=3))):
+            run_id = f"run-tie-{suffix}"
+            run = _run(run_id, domain="other.authority", slack_user_id="U_AUTHORITY")
+            job = _job(run_id, status="awaiting_delivery_mode", slack_thread_ts="tie.thread",
+                       request_meta={"requested_by_slack_user_id": "U_FOUNDER"})
+            ContentFactoryJob.objects.filter(pk=job.pk).update(created_at=job_stamp, updated_at=job_stamp)
+            mirror_jobs_to_runs(ContentFactoryJob.objects.filter(pk=job.pk))
+            ContentFactoryRun.objects.filter(pk=run.pk).update(created_at=run_stamp, updated_at=run_stamp)
+        baseline = self._confirm(thread="tie.thread", domain=DOMAIN)
+        self.assertEqual(baseline["job_id"], "run-tie-newer")
+        with SHADOW, self.assertNoLogs("content_factory.job_view", level="WARNING"):
+            self.assertEqual(self._confirm(thread="tie.thread", domain=DOMAIN), baseline)
+        with READ:
+            self.assertEqual(self._confirm(thread="tie.thread", domain=DOMAIN), baseline)
+
+    def test_same_second_routing_ties_preserve_job_queryset_order_in_every_mode(self):
+        from content_factory.content_views import _resolve_publishable_job_for_thread
+
+        second = timezone.now().replace(microsecond=0)
+        for suffix, micros, run_days in (("older", 100000, 2), ("newer", 800000, 1)):
+            run_id = f"run-subsecond-{suffix}"
+            run = _run(run_id)
+            job = _job(run_id, status="awaiting_delivery_mode", slack_thread_ts="subsecond.thread",
+                       request_meta={"requested_by_slack_user_id": "U_FOUNDER", "publish_stage": "content_ready"})
+            job_stamp = second + timedelta(microseconds=micros)
+            ContentFactoryJob.objects.filter(pk=job.pk).update(created_at=job_stamp, updated_at=job_stamp)
+            mirror_jobs_to_runs(ContentFactoryJob.objects.filter(pk=job.pk))
+            ContentFactoryRun.objects.filter(pk=run.pk).update(updated_at=second + timedelta(days=run_days))
+
+        resolvers = (
+            lambda: self._confirm(thread="subsecond.thread", domain=DOMAIN),
+            lambda: _resolve_publishable_job_for_thread(slack_user_id="U_FOUNDER", slack_channel_id="C_SYNTH",
+                                                       slack_thread_ts="subsecond.thread", domain=DOMAIN),
+        )
+        for resolve in resolvers:
+            baseline = resolve()
+            self.assertEqual(baseline["job_id"], "run-subsecond-newer")
+            with SHADOW, self.assertNoLogs("content_factory.job_view", level="WARNING"):
+                self.assertEqual(resolve(), baseline)
+            with READ:
+                self.assertEqual(resolve(), baseline)
 
     def test_publishable_thread_routing_matches_in_every_mode(self):
         from content_factory.content_views import _resolve_publishable_job_for_thread
@@ -646,6 +828,55 @@ class JobViewAndShadowReadTest(TestCase):
                 article_generation._charge_content_factory_user(
                     user=user, created_by_slack_id="U_FOUNDER", article_request=dict(request),
                     resolved_domain=DOMAIN, prevalidated_admission=True)
+
+
+@DUAL_WRITE
+class JobIdentityBillingReadTest(TestCase):
+    def test_same_company_charge_uses_job_domain_without_changing_run_authority(self):
+        from content_factory.billing_lineage import _same_company_charge
+        from roo.services import PointsService
+        user = User.objects.create_user(email="identity-billing@example.com", password="password")
+        PointsService.credit_purchased_topup(user=user, delta=10, description="Synthetic funding",
+                                             idempotency_key="identity-billing-funding")
+        ledger, _ = PointsService.spend(user=user, delta=6, source="CONTENT_FACTORY", description="Synthetic article",
+                                        created_by_slack_id="U_FOUNDER", idempotency_key="identity-billing-spend",
+                                        reference_type="CONTENT_FACTORY", reference_id="identity-billing")
+        org = Organization.objects.create(domain=DOMAIN, name="Synthetic")
+        run = _run("run-billing-identity", domain="run.authority", slack_user_id="U_AUTHORITY")
+        _job(run.run_id, billing_ledger=ledger, client_request_id="identity-billing")
+
+        def same_company():
+            return _same_company_charge(ledger, organization_id=org.pk, domain=DOMAIN, key="identity-billing")
+
+        self.assertTrue(same_company())
+        with SHADOW, self.assertNoLogs("content_factory.job_view", level="WARNING"):
+            self.assertTrue(same_company())
+        with READ:
+            self.assertTrue(same_company())
+        run.refresh_from_db()
+        self.assertEqual((run.domain, run.slack_user_id), ("run.authority", "U_AUTHORITY"))
+
+    def test_entitlement_uses_job_domain_and_job_order_for_its_fifty_row_window(self):
+        from content_factory.first_article_entitlement import is_established_publisher
+        org = Organization.objects.create(domain=DOMAIN, name="Synthetic")
+        now = timezone.now()
+        for index in range(51):
+            run = _run(f"run-entitlement-{index}", domain="run.authority", slack_user_id="U_AUTHORITY")
+            job = _job(run.run_id, request_meta={"roo_points_action": "article_generation" if index == 0
+                                                else "content_island_topic_generation"})
+            ContentFactoryJob.objects.filter(pk=job.pk).update(created_at=now + timedelta(minutes=index))
+            mirror_jobs_to_runs(ContentFactoryJob.objects.filter(pk=job.pk))
+            ContentFactoryRun.objects.filter(pk=run.pk).update(created_at=now - timedelta(minutes=index))
+        self.assertFalse(is_established_publisher(org))  # the article is outside Job's newest 50
+        with SHADOW, self.assertNoLogs("content_factory.job_view", level="WARNING"):
+            self.assertFalse(is_established_publisher(org))
+        with READ:
+            self.assertFalse(is_established_publisher(org))
+        ContentFactoryJob.objects.filter(job_id="run-entitlement-0").update(created_at=now + timedelta(days=1))
+        mirror_jobs_to_runs(ContentFactoryJob.objects.filter(job_id="run-entitlement-0"))
+        self.assertTrue(is_established_publisher(org))
+        with READ:
+            self.assertTrue(is_established_publisher(org))
 
 
 class JobViewLogPrivacyTest(TestCase):
