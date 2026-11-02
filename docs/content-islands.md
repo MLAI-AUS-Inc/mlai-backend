@@ -1,5 +1,9 @@
 # Content islands
 
+Scheduled nightly refresh recovery is documented in
+[nightly refresh reconciliation](nightly-refresh-reconciliation.md). Its saved
+scheduler contract excludes the paid brief-led research described below.
+
 The founder dashboard has two actions beside Map/List: **Create an island** for
 exploring a new subject, and **Find more islands** for normal company discovery.
 The duplicate creation card, Learn more button and summary chips are removed.
