@@ -156,11 +156,22 @@ def _proxy(site, connection, config):
                "hosted_site_id": str(site.pk), "worker_url": site.worker_url,
                "github_repo": connection.github_repo, "merge_policy": "backend_worker"}
     stamp_run_request(request, organization=site.organization)
-    run, _ = ContentFactoryRun.objects.get_or_create(run_id=run_id, defaults={"organization": site.organization,
-        "domain": site.domain, "github_repo": connection.github_repo, "workflow": "article_system_setup",
-        "status": "queued", "run_request": request})
-    if run.organization_id != site.organization_id:
-        return False
+    from .run_ownership import (owner_receipt, reserve_admitted_run, scheduler_principal,
+                               seal_new_run_admission)
+    with transaction.atomic():
+        run, created = ContentFactoryRun.objects.get_or_create(run_id=run_id, defaults={"organization": site.organization,
+            "domain": site.domain, "github_repo": connection.github_repo, "workflow": "article_system_setup",
+            "status": "queued", "run_request": request})
+        if run.organization_id != site.organization_id:
+            return False
+        if created:
+            seal_new_run_admission(run, created=created, principal=scheduler_principal('hosted_auto_register'))
+        elif owner_receipt(run) is not None:
+            request['client_request_id'] = run.run_request['client_request_id']
+            reserve_admitted_run(organization=site.organization, principal=scheduler_principal('hosted_auto_register'),
+                workflow='article_system_setup', payload=request, reserved_run_id=run_id)
+        if owner_receipt(run) is not None:
+            request = dict(run.run_request)
     value = _remote(f"/api/hosted-sites/{site.pk}/proxy-setup", request)
     if value is None:
         return False

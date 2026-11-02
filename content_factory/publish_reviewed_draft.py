@@ -172,6 +172,11 @@ def _dispatch(source, run, *, retry=False):
 
 
 def _send_dispatch(source, run, *, retry=False):
+    from .run_ownership import owner_receipt, reserve_admitted_run
+    admitted = owner_receipt(run)
+    if admitted is not None:
+        reserve_admitted_run(organization=source.organization, principal=admitted['identity']['principal'],
+            workflow=run.workflow, payload=run.run_request, reserved_run_id=run.run_id)
     if _mapping(run.run_request).get("hosted_site_id"):
         from .hosted_auto_register import publish_via_hosted
         receipt = publish_via_hosted(run, retry=retry)
@@ -218,7 +223,11 @@ def start_publish(*, context, source_run, user):
         if run is None:
             raise PublishReviewedError('already_publishing', 'Publishing this draft is still being confirmed.')
         if not _mapping(run.result).get('publish_dispatch_v1'):
-            _dispatch(source_run, run)
+            from .run_ownership import owner_receipt
+            if owner_receipt(run) is not None:
+                retry_publish(run)
+            else:
+                _dispatch(source_run, run)
         return run, False
     if publish_offer(source_run) is None:
         raise PublishReviewedError('not_offered', 'This draft is not ready to publish to your website yet.')
@@ -279,6 +288,13 @@ def start_publish(*, context, source_run, user):
                 carry(source_run=locked, new_run=run)
             except ValueError:
                 raise PublishReviewedError('not_allowed', 'This draft has no eligible article charge to carry forward.') from None
+            from .run_ownership import RunOwnershipConflict, seal_new_run_admission, user_principal
+            from core.actor_ids import preferred_actor_id_for_user
+            try:
+                seal_new_run_admission(run, created=True,
+                    principal=user_principal(user.pk, preferred_actor_id_for_user(user)))
+            except RunOwnershipConflict:
+                raise PublishReviewedError('not_allowed', 'The saved publishing admission changed. Open the draft again.') from None
             ContentFactoryRun.objects.filter(pk=locked.pk).update(result={**_mapping(locked.result),
                 'publish_offer_v1': {'run_id': run_id, 'started_at': now, 'body_sha256': digest}})
             created = True
@@ -329,6 +345,12 @@ def retry_publish(run):
     source = ContentFactoryRun.objects.filter(run_id=source_id, organization_id=run.organization_id).first()
     if source is None:
         raise PublishReviewedError('not_found', 'Not found.', 404)
+    from .run_ownership import owner_receipt
+    if owner_receipt(run) is not None:
+        from types import SimpleNamespace
+        current_body, revision, _ = _read_draft(SimpleNamespace(organization=run.organization), source)
+        if current_body != body or revision != request.get('source_revision'):
+            raise PublishReviewedError('not_offered', 'The approved draft changed. Open its latest version before publishing.')
     destination = _destination(run.organization)
     if destination is None:
         raise PublishReviewedError('not_offered', 'Your publishing destination changed.')
