@@ -96,6 +96,13 @@ class SweepRunnerTests(SimpleTestCase):
         self.assertEqual(results, {"bad_import": "error", "next": {"ok": 1}})
         self.assertIn("self_heal_sweep_failed name=bad_import stage=import", logs.output[0])
 
+    def test_datetime_result_is_json_safe_and_does_not_break_scheduler(self):
+        now = datetime(2026, 11, 2, tzinfo=dt_timezone.utc)
+        sweeps = (("date", "content_factory.p2_fake_json", "run"),)
+        with fake_provider("content_factory.p2_fake_json", run=lambda now: {"next_at": now, "processed": 2}):
+            result = self_heal_sweeps.run_self_heal_sweeps(now=now, sweeps=sweeps)
+        self.assertEqual(json.loads(json.dumps(result)), {"date": {"next_at": str(now), "processed": 2}})
+
     def test_today_every_sweep_is_missing(self):
         result = self_heal_sweeps.scheduled_self_heal_sweeps()
         self.assertEqual(result["status"], "completed")

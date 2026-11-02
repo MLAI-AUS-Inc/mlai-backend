@@ -183,17 +183,57 @@ def fake_member_context(*, members=(), publishers=(), owner_ids=()):
         user_id = getattr(user, "pk", user)
         return user_id in owners or user_id in publisher_ids
 
-    def member_may_use_run(user, organization, run=None):
-        return viewer_role(user, organization) is not None
+    def member_may_use_run(user, run):
+        role = viewer_role(user, run.organization)
+        return role == "owner" or (role == "member" and run.workflow in {
+            "article_generation", "article_revision", "confirmed_topic", "content_factory_article", "direct_generate",
+        })
 
-    def notification_recipients(organization):
-        return []
+    def notification_recipients(organization, *, item, ask=None):
+        from core.models import User
+        from founder_tools.services import organization_owner_user_id
+        recipients = set(owners)
+        owner_id = organization_owner_user_id(organization)
+        if owner_id is not None:
+            recipients.add(owner_id)
+        article = item.startswith("article")
+        if article and ask == "approve_on_github":
+            recipients.update(member_ids & publisher_ids)
+        elif article and ask not in {"approve_setup", "authorize_github", "approve_join_request", "agree_terms"}:
+            recipients.update(member_ids)
+        return list(User.objects.filter(pk__in=recipients).order_by("pk"))
+
+    def member_context(user, company_id, *, need):
+        from types import SimpleNamespace
+        from founder_tools.models import VibeRaisingCompany
+        from founder_tools.services import get_or_create_founder_profile
+        company = VibeRaisingCompany.objects.select_related("profile", "organization").filter(pk=company_id).first()
+        if company is None or viewer_role(user, company.organization) != "member":
+            return None
+        rights = {"read", "write_articles"}
+        if getattr(user, "pk", user) in publisher_ids:
+            rights.add("publish")
+        if need not in rights:
+            return None
+        return SimpleNamespace(profile=get_or_create_founder_profile(user), company=company,
+                               organization=company.organization, role="member", rights=frozenset(rights))
+
+    references = {}
+
+    def issue_join_reference(*, user, organization):
+        if user is None or organization is None:
+            return None
+        key = (user.pk, organization.pk)
+        if key not in references:
+            references[key] = uuid4().hex
+        return references[key]
 
     def pending_request_count(organization):
         return 0
 
     with fake_provider(TEAM_MODULE, viewer_role=viewer_role, member_may_publish=member_may_publish,
                        member_may_use_run=member_may_use_run, notification_recipients=notification_recipients,
+                       member_context=member_context, issue_join_reference=issue_join_reference,
                        pending_request_count=pending_request_count) as fake:
         yield fake
 

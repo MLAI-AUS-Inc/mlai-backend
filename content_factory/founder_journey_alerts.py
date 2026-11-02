@@ -132,9 +132,13 @@ class FounderJourneyAlertConfigError(ValueError):
     """ARTICLES_FOUNDER_JOURNEY_ALERTS_SINCE is not an ISO date."""
 
 
-def founder_journey_alert_id(*, organization_id, alert_reason, run_id=None, company_id=None, claimant_user_id=None) -> str:
+def founder_journey_alert_id(*, organization_id, alert_reason, run_id=None, company_id=None, claimant_user_id=None, slot=None) -> str:
     """Return the stable alert id for one (org, slot, reason); it is also the Slack client_msg_id."""
-    if run_id:
+    if slot is not None:
+        if alert_reason not in P2_ALERT_REASONS or not isinstance(slot, str) or not SAFE_TOKEN.fullmatch(slot):
+            raise ValueError("An alert slot must be a safe token for a P2 reason.")
+        slot = f"p2-slot-{slot}"
+    elif run_id:
         slot = str(run_id)
     elif company_id:
         slot = str(company_id)
@@ -145,7 +149,7 @@ def founder_journey_alert_id(*, organization_id, alert_reason, run_id=None, comp
     return str(uuid5(NAMESPACE_URL, f"mlai:founder-journey:{organization_id}:{slot}:{alert_reason}"))
 
 
-def queue_founder_journey_alert(*, organization, alert_reason: str, company_id=None, run=None, details: dict | None = None) -> str:
+def queue_founder_journey_alert(*, organization, alert_reason: str, company_id=None, run=None, details: dict | None = None, slot=None) -> str:
     """Record one pending founder-journey alert idempotently and return its alert id.
 
     The sweep delivers it. The receipt is stored in the org's content config
@@ -153,7 +157,9 @@ def queue_founder_journey_alert(*, organization, alert_reason: str, company_id=N
     this outside any transaction that is about to roll back, or the receipt
     rolls back with it.
     For ``domain_claim_disputed`` pass ``details={"claimant_user_id": user.pk}``
-    so each claimant gets their own alert.
+    so each claimant gets their own alert. P2 owners may pass a stable
+    ``slot`` (for example ``day-2026-11-02`` in Melbourne time) for recurring
+    org-level alerts; leave it absent to retain the original lifetime dedupe.
     """
     if alert_reason not in ALERT_REASONS:
         raise ValueError(f"Unknown founder-journey alert_reason: {alert_reason!r}")
@@ -163,7 +169,7 @@ def queue_founder_journey_alert(*, organization, alert_reason: str, company_id=N
     alert_id = founder_journey_alert_id(
         organization_id=organization.pk, alert_reason=alert_reason,
         run_id=getattr(run, "run_id", None), company_id=company_id,
-        claimant_user_id=safe_details.get("claimant_user_id"),
+        claimant_user_id=safe_details.get("claimant_user_id"), slot=slot,
     )
     queued_at = timezone.now()
     receipt = {

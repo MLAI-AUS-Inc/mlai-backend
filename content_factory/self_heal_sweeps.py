@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import importlib
 import importlib.util
+import json
 import logging
 import sys
 
@@ -74,11 +75,13 @@ def run_self_heal_sweeps(now=None, sweeps=SWEEPS) -> dict[str, dict | str]:
             continue
         try:
             result = function(now=now)
+            summary = result if isinstance(result, dict) else {"result": str(type(result).__name__)}
+            summary = json.loads(json.dumps(summary, default=str, allow_nan=False))
         except Exception:  # noqa: BLE001 - one sweep must never stop the next
             logger.warning("self_heal_sweep_failed name=%s", name, exc_info=True)
             results[name] = ERROR
             continue
-        results[name] = result if isinstance(result, dict) else {"result": str(type(result).__name__)}
+        results[name] = summary
     return results
 
 

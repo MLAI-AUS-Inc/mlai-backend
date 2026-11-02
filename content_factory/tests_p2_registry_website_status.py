@@ -128,6 +128,49 @@ class WebsiteStatusP2Tests(TestCase):
         self.assertNotIn("copyId", result)
 
     @override_settings(**ALL_FLAGS_ON)
+    def test_lossy_legacy_action_never_overrides_registered_code(self):
+        from . import registry_policy
+        org = make_p2_org().organization
+        from .website_failure_contract import load_registry
+        codes = {entry["code"] for entry in load_registry()["by_code"].values()
+                 if entry.get("action_id") == "review_setup"}
+        codes.update({"COMPANY_CONTEXT_INCOMPLETE", "CONNECTION_READ_ONLY", "github_revocation_review_required",
+                      "VALIDATION_ERROR", "MISSING_CONFIG", "BRANCH_PROTECTION_APPROVAL_REQUIRED", "SITE_TEST_CHANGE_REQUIRED"})
+        for code in codes:
+            for canonical in (False, True):
+                with self.subTest(code=code, canonical=canonical), \
+                        override_settings(MY_STARTUP_CANONICAL_ACTION_IDS_ENABLED=canonical):
+                    _, result = self._status("needs_user", {"reason_code": code, "user_action": {"id": "review_setup"}}, org)
+                    expected_ask = registry_policy.founder_ask_for_code(code, org)
+                    self.assertEqual(result["copyId"], registry_policy.copy_id_for(
+                        code, organization=org, terminal=False, self_heal=None))
+                    if expected_ask:
+                        self.assertEqual(result["action"]["id"], registry_policy.wire_action_id(expected_ask))
+                    else:
+                        self.assertIsNone(result["action"])
+                        self.assertNotEqual(result["state"], "needs_you")
+
+    @override_settings(**ALL_FLAGS_ON)
+    def test_stored_canonical_ids_remain_owner_actions_for_both_cohorts(self):
+        orgs = (make_p2_org().organization, make_named_legacy_org("vyavos").organization)
+        cases = (("approve_setup", "ARTICLE_SYSTEM_SETUP_REQUIRED", "review_setup"),
+                 ("approve_on_github", "BRANCH_PROTECTION_APPROVAL_REQUIRED", "merge_pr"),
+                 ("describe_customer", "COMPANY_CONTEXT_INCOMPLETE", "review_setup"),
+                 ("agree_terms", "TERMS_NOT_ACCEPTED", "review_setup"))
+        for org in orgs:
+            for canonical in (False, True):
+                for stored, code, legacy_id in cases:
+                    with self.subTest(org=org.pk, canonical=canonical, stored=stored), \
+                            override_settings(MY_STARTUP_CANONICAL_ACTION_IDS_ENABLED=canonical):
+                        today, result = self._status("needs_user", {"reason_code": code, "user_action": {"id": stored}}, org)
+                        self.assertEqual(today["state"], "needs_you")
+                        self.assertEqual(today["action"]["id"], legacy_id)
+                        if "copyId" not in result or not canonical:
+                            self.assertEqual(result["action"]["id"], legacy_id)
+                        else:
+                            self.assertEqual(result["action"]["id"], stored)
+
+    @override_settings(**ALL_FLAGS_ON)
     def test_status_for_context_applies_the_p2_fields_with_the_connection_org(self):
         legacy = make_named_legacy_org("talathrive")
         p2 = make_p2_org()

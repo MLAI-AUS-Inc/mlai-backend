@@ -21,8 +21,7 @@ from . import website_failure_contract as contract
 from .self_heal_testing import ALL_FLAGS_ON, make_named_legacy_org, make_p2_org
 
 ROOT = Path(__file__).resolve().parents[1]
-# cf-registry's final bytes (S/wt/cf-registry at 3dd35fd0), checked with cmp when vendored.
-CF_REGISTRY_REVISION = "3dd35fd0591b1af2eca4c0fc583192525e57c7e8"
+# cf-registry's bytes, checked with cmp when vendored. Merge provenance is checked remotely.
 VENDORED_SHA256 = {
     "contracts/failure-codes.json": "f0dd5b24c2a34b94e8517ab5cb0e791ee996cc6a298886331b057f287d94a8b7",
     "contracts/failure-envelope-v1.schema.json": "1fa188a6cac3732108a4d59c15f3107fc02dd4d1890c5ec6bceef4c908322971",
@@ -64,7 +63,7 @@ class VendoredRegistryTests(SimpleTestCase):
     def test_lock_digests_verify_and_vendor_check_passes(self):
         from scripts.check_failure_contract import ARTIFACTS, verify_vendor
         lock = json.loads((ROOT / "contracts/failure-codes.lock.json").read_text())
-        self.assertEqual(lock["source_revision"], CF_REGISTRY_REVISION)
+        self.assertRegex(lock["source_revision"], r"^[0-9a-f]{40}$")
         self.assertEqual(set(lock["files"]), set(ARTIFACTS))
         for name, digest in lock["files"].items():
             with self.subTest(name=name):

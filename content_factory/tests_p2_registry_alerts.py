@@ -132,6 +132,22 @@ class AlertStoreTests(TestCase):
         self.assertEqual((mirrored["acknowledged_at"], mirrored["acknowledged_by_user_id"]),
                          (first["acknowledged_at"], self.built.owner.pk))
 
+    def test_daily_slots_dedupe_within_one_day_and_recur_next_day(self):
+        first = alerts.queue_founder_journey_alert(organization=self.org, alert_reason="pull_request_cap",
+                                                   slot="day-2026-11-02")
+        replay = alerts.queue_founder_journey_alert(organization=self.org, alert_reason="pull_request_cap",
+                                                    slot="day-2026-11-02")
+        tomorrow = alerts.queue_founder_journey_alert(organization=self.org, alert_reason="pull_request_cap",
+                                                      slot="day-2026-11-03")
+        self.assertEqual(first, replay)
+        self.assertNotEqual(first, tomorrow)
+        self.assertEqual(set(self._receipts()), {first, tomorrow})
+
+    def test_invalid_or_non_p2_slots_are_rejected(self):
+        for reason, slot in (("run_terminal", "day-2026-11-02"), ("pull_request_cap", "private detail@email.test")):
+            with self.subTest(reason=reason, slot=slot), self.assertRaises(ValueError):
+                alerts.queue_founder_journey_alert(organization=self.org, alert_reason=reason, slot=slot)
+
     def test_acknowledge_unknown_alert(self):
         self.assertIsNone(alerts.acknowledge_founder_journey_alert(self.org, "nope", by_user=self.built.owner))
         self.assertIsNone(alerts.acknowledge_founder_journey_alert(None, "nope", by_user=self.built.owner))

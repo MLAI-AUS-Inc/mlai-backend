@@ -129,8 +129,10 @@ class P2StampTests(TestCase):
     def test_an_existing_stamp_or_merge_policy_is_never_changed(self):
         p2 = make_p2_org().organization
         payload = {"self_heal_policy_v1": {"version": 1, "cohort": "legacy", "failure_policy": "pre_p2"}}
-        self.assertEqual(p2_foundation.stamp_run_request(payload, organization=p2),
-                         {"self_heal_policy_v1": {"version": 1, "cohort": "legacy", "failure_policy": "pre_p2"}})
+        before = dict(payload["self_heal_policy_v1"])
+        p2_foundation.stamp_run_request(payload, organization=p2)
+        self.assertEqual(payload["self_heal_policy_v1"], before)
+        self.assertEqual(payload["merge_policy"], "backend_worker")
         payload = {"merge_policy": "something_else"}
         p2_foundation.stamp_run_request(payload, organization=p2)
         self.assertEqual(payload["merge_policy"], "something_else")
@@ -191,8 +193,57 @@ class MergePolicyTests(TestCase):
 
         with fake_provider(p2_foundation.TEAM_MODULE, viewer_role=boom, member_may_publish=boom):
             with self.assertLogs("content_factory.p2_foundation", "WARNING") as logs:
-                self.assertIsNone(p2_foundation.merge_policy_for(built.organization, requester_user_id=user.pk))
+                self.assertEqual(p2_foundation.merge_policy_for(built.organization, requester_user_id=user.pk),
+                                 "backend_worker")
         self.assertIn("p2_merge_policy_member_check_failed", logs.output[0])
+
+    def test_broken_provider_preserves_owner_and_guards_member(self):
+        built = make_named_legacy_org("vyavos")
+        user = _user()
+
+        def boom(*args, **kwargs):
+            raise RuntimeError("rights unavailable")
+
+        with fake_provider(p2_foundation.TEAM_MODULE, viewer_role=boom, member_may_publish=boom):
+            self.assertIsNone(p2_foundation.merge_policy_for(built.organization, requester_user_id=built.owner.pk))
+            self.assertEqual(p2_foundation.merge_policy_for(built.organization, requester_user_id=user.pk),
+                             "backend_worker")
+        with fake_provider(p2_foundation.TEAM_MODULE, viewer_role=lambda *a: "member", member_may_publish=boom):
+            self.assertEqual(p2_foundation.merge_policy_for(built.organization, requester_user_id=user.pk),
+                             "backend_worker")
+
+    def test_later_requester_adds_guard_without_replacing_stamp(self):
+        built = make_named_legacy_org("vyavos")
+        member = _user()
+        payload = p2_foundation.stamp_run_request({}, organization=built.organization)
+        original_stamp = dict(payload["self_heal_policy_v1"])
+        self.assertNotIn("merge_policy", payload)
+        with fake_member_context(members={member.pk}, owner_ids={built.owner.pk}):
+            p2_foundation.stamp_run_request(payload, organization=built.organization, requester_user_id=member.pk)
+        self.assertEqual(payload["self_heal_policy_v1"], original_stamp)
+        self.assertEqual(payload["merge_policy"], "backend_worker")
+
+    def test_fake_member_provider_has_real_signatures_and_recipient_rules(self):
+        built = make_named_legacy_org("vyavos")
+        member, publisher = _user(), _user()
+        article = make_unstamped_run(built.organization, workflow="article_generation")
+        setup = make_unstamped_run(built.organization, workflow="article_system_setup")
+        with fake_member_context(members={member.pk, publisher.pk}, publishers={publisher.pk},
+                                 owner_ids={built.owner.pk}) as fake:
+            self.assertTrue(fake.member_may_use_run(member, article))
+            self.assertFalse(fake.member_may_use_run(member, setup))
+            context = fake.member_context(member, built.company.pk, need="write_articles")
+            self.assertIsNotNone(context)
+            self.assertEqual(context.profile.user_id, member.pk)
+            self.assertIsNone(fake.member_context(member, built.company.pk, need="publish"))
+            self.assertIsNotNone(fake.member_context(publisher, built.company.pk, need="publish"))
+            for ask, expected in ((None, {built.owner.pk, member.pk, publisher.pk}),
+                                  ("approve_on_github", {built.owner.pk, publisher.pk}),
+                                  ("approve_setup", {built.owner.pk})):
+                self.assertEqual({u.pk for u in fake.notification_recipients(built.organization, item="article:1", ask=ask)},
+                                 expected)
+            self.assertEqual(fake.notification_recipients(built.organization, item="website"), [built.owner])
+            self.assertRegex(fake.issue_join_reference(user=member, organization=built.organization), r"^[0-9a-f]{32}$")
 
 
 class RunMergePolicyTests(TestCase):

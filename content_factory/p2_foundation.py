@@ -121,11 +121,19 @@ def _member_without_publish_rights(organization, requester_user_id) -> bool:
     user = _requester(requester_user_id)
     if user is None:
         return False
+    role = None
     try:
-        return viewer_role(user, organization) == "member" and not may_publish(user, organization)
-    except Exception:  # noqa: BLE001 - a broken provider must never block dispatch
+        role = viewer_role(user, organization)
+        return role == "member" and not may_publish(user, organization)
+    except Exception:  # noqa: BLE001 - dispatch may continue, but uncertain consent cannot auto-merge
         logger.warning("p2_merge_policy_member_check_failed org=%s", getattr(organization, "pk", None), exc_info=True)
-        return False
+        if role == "member":
+            return True
+        from founder_tools.services import organization_owner_user_id
+        try:
+            return organization_owner_user_id(organization) != user.pk
+        except Exception:  # noqa: BLE001 - inability to verify ownership also retains the merge guard
+            return True
 
 
 def merge_policy_for(organization, *, requester_user_id) -> str | None:
@@ -147,16 +155,14 @@ def merge_policy_for(organization, *, requester_user_id) -> str | None:
 def stamp_run_request(payload: dict, *, organization, requester_user_id=None) -> dict:
     """Stamp ``payload`` in place with the P2 cohort and merge policy, and return it.
 
-    Idempotent: a payload that already carries ``self_heal_policy_v1`` is
-    returned unchanged, so a retry, a replay or a second caller never changes
-    an existing stamp. ``merge_policy`` is only set when one applies and is
-    never overwritten.
+    Existing cohort and merge-policy values are immutable. A later caller
+    that knows the requester may add a missing merge policy, so an early
+    outbox stamp cannot bypass the member permission guard.
     """
     if not isinstance(payload, dict):
         return payload
-    if STAMP_KEY in payload:
-        return payload
-    payload[STAMP_KEY] = policy_stamp(organization)
+    if STAMP_KEY not in payload:
+        payload[STAMP_KEY] = policy_stamp(organization)
     if MERGE_POLICY_KEY not in payload:
         policy = merge_policy_for(organization, requester_user_id=requester_user_id)
         if policy is not None:
