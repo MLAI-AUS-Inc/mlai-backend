@@ -30,6 +30,7 @@ subsystem-specific contracts and runbooks.
 
 - [Job to Run cutover](run-job-cutover.md) — parity, copied identity, historical coverage and rollback
 - [Topic discovery reconciliation](discovery-reconciliation.md) — bounded cohort preview, saved scope and activation boundary
+- [Nightly island refresh reconciliation](nightly-refresh-reconciliation.md) — new scheduler contract, bounded preview and separate rollout
 
 - [19 October backend consolidation audit](articles-backend-rollup-audit-2026-10-19.md) — retained reliability fixes, deferred prototypes, exact component heads and release boundaries
 

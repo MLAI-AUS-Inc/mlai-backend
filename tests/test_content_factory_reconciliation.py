@@ -67,6 +67,144 @@ class _FakeResponse:
 
 
 @override_settings(CONTENT_FACTORY_URL="http://cf.test", CONTENT_FACTORY_API_KEY="test-key")
+class NightlyRefreshReconciliationTests(TestCase):
+    def make_nightly(self, identifier="nightly", **changes):
+        run = _make_run(identifier, workflow="island_refresh")
+        request = {"run_id": identifier, "workflow": "island_refresh", "domain": "example.com",
+                   "request_source": "mlai_backend_scheduler", "include_expansion": True,
+                   "island_refresh_recovery_version": 1, "client_request_id": "island-refresh:original"}
+        request.update(changes)
+        ContentFactoryRun.objects.filter(pk=run.pk).update(run_request=request)
+        run.refresh_from_db()
+        return run
+
+    def activation(self):
+        return override_settings(CONTENT_FACTORY_NIGHTLY_REFRESH_RECONCILIATION_SINCE=
+                                 (timezone.now() - timedelta(hours=2)).isoformat())
+
+    def test_default_disabled_and_invalid_boundaries_do_not_admit_nightly_runs(self):
+        run = self.make_nightly()
+        before = ContentFactoryRun.objects.values().get(pk=run.pk)
+        for boundary in ("", "disabled", "bad", None, "2026-11-02", "2026-11-02T10:00:00"):
+            with self.subTest(boundary=boundary), override_settings(CONTENT_FACTORY_NIGHTLY_REFRESH_RECONCILIATION_SINCE=boundary), \
+                    patch("content_factory.reconciliation.requests.get") as get:
+                self.assertEqual(run_content_factory_reconciliation_sweep()["checked"], 0)
+                get.assert_not_called()
+        self.assertEqual(ContentFactoryRun.objects.values().get(pk=run.pk), before)
+
+    def test_only_new_versioned_scope_is_polled_and_original_request_survives(self):
+        since = timezone.now() - timedelta(hours=2)
+        history = self.make_nightly("history")
+        ContentFactoryRun.objects.filter(pk=history.pk).update(created_at=since - timedelta(seconds=1))
+        self.make_nightly("unmarked", island_refresh_recovery_version=None)
+        self.make_nightly("paid", request_source="roo_slackbot", island_research_brief={"subject": "paid"})
+        eligible = self.make_nightly("admitted")
+        ContentFactoryRun.objects.filter(pk=eligible.pk).update(created_at=since)
+        before_others = list(ContentFactoryRun.objects.exclude(pk=eligible.pk).order_by("pk").values())
+        identity = (eligible.organization_id, eligible.domain, eligible.github_repo, eligible.slack_user_id, eligible.run_request)
+        response = _FakeResponse(200, {"run_id": eligible.run_id, "workflow": "island_refresh", "status": "completed"})
+        with override_settings(CONTENT_FACTORY_NIGHTLY_REFRESH_RECONCILIATION_SINCE=since.isoformat()), \
+                patch("content_factory.reconciliation.requests.get", return_value=response) as get, \
+                patch("content_factory.reconciliation.requests.post", side_effect=AssertionError("Worker control")):
+            summary = run_content_factory_reconciliation_sweep()
+        self.assertEqual(summary["checked"], 1)
+        self.assertEqual(summary["adopted"], 1)
+        get.assert_called_once()
+        self.assertIn(eligible.run_id, get.call_args.args[0])
+        self.assertEqual(list(ContentFactoryRun.objects.exclude(pk=eligible.pk).order_by("pk").values()), before_others)
+        eligible.refresh_from_db()
+        self.assertEqual(eligible.status, "completed")
+        self.assertEqual((eligible.organization_id, eligible.domain, eligible.github_repo, eligible.slack_user_id, eligible.run_request), identity)
+
+    def test_malformed_or_authority_bearing_saved_requests_are_unchanged(self):
+        from content_factory.nightly_refresh_reconciliation import admitted_nightly_refresh
+        cases = [{"island_refresh_recovery_version": True}, {"include_expansion": "true"},
+                 {"run_id": "foreign"}, {"domain": "../invalid"}, {"workflow": "auto_discovery"},
+                 {"island_research_brief": None}, {"github_repo": None}, {"connection_generation": None},
+                 {"expected_source_sha": "a" * 40}, {"goal_budget": {}}, {"roo_points_authorized": True}]
+        for index, changes in enumerate(cases):
+            run = self.make_nightly(f"refused-{index}", **changes)
+            self.assertFalse(admitted_nightly_refresh(run), changes)
+        removed_owner = self.make_nightly("removed-owner")
+        ContentFactoryRun.objects.filter(pk=removed_owner.pk).update(organization=None)
+        removed_owner.refresh_from_db()
+        self.assertFalse(admitted_nightly_refresh(removed_owner))
+        before = list(ContentFactoryRun.objects.order_by("pk").values())
+        with self.activation(), patch("content_factory.reconciliation.requests.get") as get:
+            self.assertEqual(run_content_factory_reconciliation_sweep(limit=100)["checked"], 0)
+        get.assert_not_called()
+        self.assertEqual(list(ContentFactoryRun.objects.order_by("pk").values()), before)
+
+    def test_stale_remote_heartbeat_never_uses_article_worker_control(self):
+        run = self.make_nightly()
+        response = _FakeResponse(200, {"run_id": run.run_id, "status": "running",
+                                      "last_progress_at": (timezone.now() - timedelta(hours=3)).isoformat()})
+        with self.activation(), patch("content_factory.reconciliation.requests.get", return_value=response), \
+                patch("content_factory.reconciliation.requests.post", side_effect=AssertionError("Worker control")):
+            summary = run_content_factory_reconciliation_sweep()
+        self.assertEqual(summary["remote_active"], 1)
+        self.assertEqual(summary["recovery_requested"], 0)
+
+    def test_foreign_remote_identity_and_changed_local_scope_cannot_be_adopted(self):
+        from content_factory.reconciliation import _adopt_remote_payload
+        run = self.make_nightly()
+        for changes in ({"run_id": "foreign"}, {"workflow": "auto_discovery"}, {"domain": "foreign.test"},
+                        {"run_request": {"domain": "foreign.test"}}, {"github_repo": "foreign/site"}):
+            before = ContentFactoryRun.objects.values().get(pk=run.pk)
+            with self.subTest(changes=changes), self.assertRaises(ValueError):
+                _adopt_remote_payload(run, {"status": "completed", **changes})
+            self.assertEqual(ContentFactoryRun.objects.values().get(pk=run.pk), before)
+        ContentFactoryRun.objects.filter(pk=run.pk).update(run_request={**run.run_request, "island_research_brief": {}})
+        with self.assertRaises(ValueError):
+            _adopt_remote_payload(run, {"status": "completed"})
+        self.assertFalse(_finalize_run_failure(run.run_id, error="gone", outcome="missing_on_remote", now=timezone.now()))
+
+    def test_owner_cancellation_wins_remote_status_race(self):
+        run = self.make_nightly()
+        def remote(*args, **kwargs):
+            ContentFactoryRun.objects.filter(pk=run.pk).update(status="cancelled")
+            return _FakeResponse(200, {"run_id": run.run_id, "status": "completed"})
+        with self.activation(), patch("content_factory.reconciliation.requests.get", side_effect=remote):
+            run_content_factory_reconciliation_sweep()
+        run.refresh_from_db()
+        self.assertEqual(run.status, "cancelled")
+
+    def test_confirmed_missing_free_refresh_fails_without_refund_path(self):
+        run = self.make_nightly()
+        with self.activation(), patch("content_factory.reconciliation.requests.get", return_value=_FakeResponse(404)), \
+                patch("content_factory.reconciliation._refund_failed_run", side_effect=AssertionError("Free refresh refund")):
+            summary = run_content_factory_reconciliation_sweep()
+        run.refresh_from_db()
+        self.assertEqual(summary["failed_missing"], 1)
+        self.assertEqual(run.status, "failed")
+        self.assertFalse(run.result["reconciliation_refund_pending"])
+
+    def test_preview_is_bounded_read_only_and_discloses_refused_scope(self):
+        from content_factory.nightly_refresh_reconciliation import preview_nightly_refresh_reconciliation
+        for index in range(3):
+            self.make_nightly(f"preview-{index}")
+        self.make_nightly("bad-scope", github_repo=None)
+        before = list(ContentFactoryRun.objects.order_by("pk").values())
+        since = (timezone.now() - timedelta(hours=2)).isoformat()
+        with patch("requests.sessions.Session.request", side_effect=AssertionError("Network")), \
+                patch("content_factory.reconciliation.run_content_factory_reconciliation_sweep", side_effect=AssertionError("Mutation")):
+            result = preview_nightly_refresh_reconciliation(created_since=since, limit=2)
+            out = StringIO()
+            call_command("preview_nightly_refresh_reconciliation", "--created-since", since, "--limit", "100", stdout=out)
+        self.assertEqual(result["candidate_rows"], 4)
+        self.assertEqual(result["inspected"], 2)
+        self.assertEqual(result["selected"], 2)
+        all_rows = json.loads(out.getvalue())
+        self.assertEqual(all_rows["selected"], 3)
+        self.assertEqual(all_rows["refused_scope"], 1)
+        self.assertNotIn("example.com", out.getvalue())
+        self.assertEqual(list(ContentFactoryRun.objects.order_by("pk").values()), before)
+        for boundary, limit in (("bad", 10), ("2026-11-02T10:00:00", 10), (since, 0), (since, 101)):
+            with self.subTest(boundary=boundary, limit=limit), self.assertNumQueries(0), self.assertRaises(CommandError):
+                call_command("preview_nightly_refresh_reconciliation", "--created-since", boundary, "--limit", str(limit))
+
+
+@override_settings(CONTENT_FACTORY_URL="http://cf.test", CONTENT_FACTORY_API_KEY="test-key")
 class ReconciliationSweepTests(TestCase):
     def test_placeholder_run_fails_without_probing_content_factory(self):
         _make_run("vibe-marketing-direct_generate-abc123", status=ContentFactoryRunStatus.QUEUED)

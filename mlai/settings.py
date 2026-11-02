@@ -1153,6 +1153,8 @@ CONTENT_FACTORY_SETUP_DELIVERY_RECONCILIATION_ENABLED = os.getenv('CONTENT_FACTO
 # Explicit discovery admission boundary. Empty/invalid/naive stays disabled;
 # use the approved activation timestamp so historical stalled runs stay out.
 CONTENT_FACTORY_DISCOVERY_RECONCILIATION_SINCE = os.getenv('CONTENT_FACTORY_DISCOVERY_RECONCILIATION_SINCE', '').strip()
+# Nightly refresh additionally requires the original versioned scheduler request.
+CONTENT_FACTORY_NIGHTLY_REFRESH_RECONCILIATION_SINCE = os.getenv('CONTENT_FACTORY_NIGHTLY_REFRESH_RECONCILIATION_SINCE', '').strip()
 CONTENT_FACTORY_SETUP_DELIVERY_ENROLLED_ORGANIZATIONS = tuple(
     identifier.strip() for identifier in os.getenv('CONTENT_FACTORY_SETUP_DELIVERY_ENROLLED_ORGANIZATIONS', '').split(',')
     if identifier.strip()
