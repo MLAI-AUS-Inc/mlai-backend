@@ -5,6 +5,9 @@ from core.permissions import HasRooApiKey
 from workflow_runs.models import ContentFactoryRun
 from .source_repin import repin_source
 from .website_contract import WebsiteAuthorityError
+from .run_execution_control import ExecutionControlDenied
+from .run_ownership import RunOwnershipConflict
+import requests
 
 
 class SourceRepinView(APIView):
@@ -21,3 +24,9 @@ class SourceRepinView(APIView):
             return Response({"detail": "Not found.", "reason": "not_found"}, status=404)
         except WebsiteAuthorityError as exc:
             return Response(exc.as_dict(), status=exc.status)
+        except ExecutionControlDenied as exc:
+            return Response({"reason": exc.reason, "retryable": exc.pending}, status=409)
+        except RunOwnershipConflict:
+            return Response({"reason": "execution_control_refused", "retryable": False}, status=409)
+        except requests.RequestException:
+            return Response({"reason": "execution_history_pending", "retryable": True}, status=503)

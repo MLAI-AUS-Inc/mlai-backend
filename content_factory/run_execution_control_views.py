@@ -12,7 +12,7 @@ from workflow_runs.models import ContentFactoryRun
 from .run_execution_control import (
     AUTOMATIC_REASONS, CONTROL_KEY, ExecutionControlDenied, _KEY,
     append_execution_ticket, current_execution_request, require_current_principal, record_budget_observation,
-    validate_budget_observation,
+    validate_budget_observation, require_control_budget,
 )
 from .run_ownership import (
     WIRE_REQUEST_KEY, WIRE_EXECUTION_KEY, RunOwnershipConflict, current_execution_ticket,
@@ -103,6 +103,7 @@ def grant_automatic_execution(run_id, payload):
     require_event_execution(run, payload, current=True)
     _require_active(run)
     require_current_principal(run)
+    require_control_budget(run)
     budget = _budget(run_id)
     from .run_reconciliation import reconcile_authoritative_run
     reconciliation = reconcile_authoritative_run(run_id, refresh=True)

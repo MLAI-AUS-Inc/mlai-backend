@@ -504,7 +504,13 @@ def authority_guard(data, *, action="read", domain="", github_repo="", require_s
 
 def scoped_run_contract(run):
     """Never retrofit old run consent from today's selected connection."""
-    payload = _payload_with_context(getattr(run, "run_request", None) or {})
+    from .run_ownership import owner_receipt
+    if owner_receipt(run) is not None:
+        from .run_execution_control import current_execution_request
+        saved = current_execution_request(run)
+    else:
+        saved = getattr(run, "run_request", None) or {}
+    payload = _payload_with_context(saved)
     payload.setdefault("domain", getattr(run, "domain", ""))
     payload.setdefault("github_repo", getattr(run, "github_repo", ""))
     return payload
@@ -1251,6 +1257,16 @@ def setup_kit_check_failed(run):
         for item in (result, setup))
 
 
+def _current_run_scope_filter(connection):
+    """Query projection for current scope; effect guards still verify the ticket."""
+    from django.db.models import Q
+    current = Q(result__run_owner_execution_v1__current_scope__website_connection_id=str(connection.pk),
+                result__run_owner_execution_v1__current_scope__connection_generation=connection.generation)
+    initial = (Q(result__run_owner_execution_v1__current_scope__isnull=True)
+        & Q(run_request__website_connection_id=str(connection.pk), run_request__connection_generation=connection.generation))
+    return current | initial
+
+
 def open_setup_pr_run(connection, *, source_sha):
     """The current generation's newest open setup pull request, if built on source_sha.
 
@@ -1260,12 +1276,12 @@ def open_setup_pr_run(connection, *, source_sha):
     from workflow_runs.models import ContentFactoryRun
     if not source_sha:
         return None
-    rows = ContentFactoryRun.objects.filter(organization_id=connection.organization_id, workflow="article_system_setup",
-        status="completed", approval_state="approved", run_request__website_connection_id=str(connection.pk),
-        run_request__connection_generation=connection.generation).order_by("-updated_at")[:10]
+    rows = ContentFactoryRun.objects.filter(_current_run_scope_filter(connection),
+        organization_id=connection.organization_id, workflow="article_system_setup",
+        status="completed", approval_state="approved").order_by("-updated_at")[:10]
     run = next((row for row in rows if setup_pr_open(row)
         and str(row.github_repo or "").casefold() == str(connection.github_repo or "").casefold()), None)
-    if run is None or str((run.run_request or {}).get("expected_source_sha") or "") != source_sha:
+    if run is None or str(scoped_run_contract(run).get("expected_source_sha") or "") != source_sha:
         return None
     return run
 
@@ -1281,7 +1297,7 @@ def setup_settled_at(run, source_sha):
         return source_sha in {result.get("merge_sha"), response.get("sha")}
     return bool(result.get("adopted") is True and not (result.get("pr_number") or result.get("pr_url")
         or setup.get("pr_number") or setup.get("pr_url"))
-        and str((run.run_request or {}).get("expected_source_sha") or "") == source_sha)
+        and str(scoped_run_contract(run).get("expected_source_sha") or "") == source_sha)
 
 
 def setup_installed_kit(run):
@@ -1302,9 +1318,9 @@ def settled_setup_run(connection, *, source_sha):
     from workflow_runs.models import ContentFactoryRun
     if not source_sha:
         return None
-    rows = ContentFactoryRun.objects.filter(organization_id=connection.organization_id, workflow="article_system_setup",
-        status="completed", run_request__website_connection_id=str(connection.pk),
-        run_request__connection_generation=connection.generation).order_by("-updated_at")[:10]
+    rows = ContentFactoryRun.objects.filter(_current_run_scope_filter(connection),
+        organization_id=connection.organization_id, workflow="article_system_setup",
+        status="completed").order_by("-updated_at")[:10]
     return next((row for row in rows if setup_settled_at(row, source_sha) and setup_installed_kit(row)
         and str(row.github_repo or "").casefold() == str(connection.github_repo or "").casefold()), None)
 
@@ -1442,7 +1458,7 @@ def record_publish_merge_intent(run, pull, pr_number, *, action="merge", source_
     """Save the approved PR identity before GitHub can emit its merge webhook."""
     from workflow_runs.models import ContentFactoryRun
     binding = scoped_run_contract(run)
-    if source_sha is not None and source_sha!=(run.run_request or {}).get("expected_source_sha"):
+    if source_sha is not None and source_sha != binding.get("expected_source_sha"):
         raise WebsiteAuthorityError("publish_commit_unverified","The original publication source changed.")
     head, base = pull.get("head") or {}, pull.get("base") or {}
     with authority_guard(binding, action=action) as website:

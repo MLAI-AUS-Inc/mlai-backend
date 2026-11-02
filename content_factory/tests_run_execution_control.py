@@ -152,3 +152,22 @@ class ExecutionTicketTests(TestCase):
         self.assertEqual(response.status_code, 403)
         budget.assert_not_called()
         self.assertEqual(ContentFactoryRun.objects.values().get(pk=self.run.pk), self.original)
+
+    @override_settings(INTERNAL_API_KEY="synthetic-control-service-key")
+    def test_unbudgeted_original_refuses_without_http_even_if_later_caps_are_enabled(self):
+        with override_settings(ARTICLES_RUN_CONTROL_MODEL_USD="0", ARTICLES_RUN_CONTROL_MODEL_TOKENS=0):
+            raw = {"domain": self.org.domain, "client_request_id": "unbudgeted-original"}
+            run = reserve_admitted_run(organization=self.org, workflow="article_generation", payload=raw,
+                principal=user_principal(self.user.pk, f"mlai_user:{self.user.pk}"))
+        from .run_execution_control_views import RunExecutionTicketView
+        request = APIRequestFactory().post("/", {"schema_version": 1, "control_key": "c" * 64,
+            "reason": "quality_repair", WIRE_REQUEST_KEY: wire_identity(owner_receipt(run)),
+            WIRE_EXECUTION_KEY: current_execution_ticket(run)}, format="json",
+            HTTP_X_API_KEY="synthetic-control-service-key")
+        before = ContentFactoryRun.objects.values().get(pk=run.pk)
+        with patch("requests.get") as get:
+            response = RunExecutionTicketView.as_view()(request, run_id=run.run_id)
+        self.assertEqual(response.status_code, 409)
+        self.assertEqual(response.data, {"reason": "execution_budget_unavailable", "retryable": False})
+        get.assert_not_called()
+        self.assertEqual(ContentFactoryRun.objects.values().get(pk=run.pk), before)

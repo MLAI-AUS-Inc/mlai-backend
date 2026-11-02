@@ -229,6 +229,14 @@ def validate_budget_observation(run, payload):
     return cursor
 
 
+def require_control_budget(run):
+    """Refuse unbudgeted original admission before asking the worker anything."""
+    receipt = owner_receipt(run)
+    if (receipt is None or not valid_control_budget((run.run_request or {}).get(BUDGET_KEY))
+            or _request_digest(run.run_request or {}) != receipt["identity"]["request_digest"]):
+        raise ExecutionControlDenied("execution_budget_unavailable")
+
+
 def record_budget_observation(run, payload):
     """Retain conservative peaks in the same transaction as an accepted grant."""
     if not transaction.get_connection().in_atomic_block:

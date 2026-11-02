@@ -92,7 +92,12 @@ def validate_operation(connection, payload, *, worker_cleanup=False, restoration
         run = ContentFactoryRun.objects.filter(run_id=run_id).first()
         if run and (run.organization_id != connection.organization_id or run.status in {"cancelled", "denied"}):
             raise WebsiteAuthorityError("website_operation_cancelled", "This operation was cancelled or belongs to another company.")
-        saved = (run.run_request or {}) if run else {}
+        from .run_ownership import owner_receipt
+        if run and owner_receipt(run) is not None:
+            from .run_execution_control import current_execution_request
+            saved = current_execution_request(run)
+        else:
+            saved = (run.run_request or {}) if run else {}
         for key in OPERATION_FIELDS:
             if key in saved and key in payload and str(saved[key]) != str(payload[key]):
                 raise WebsiteAuthorityError("website_operation_changed", "The operation identity changed.")
@@ -475,7 +480,17 @@ def advance_workflow_attempt(run, *, preserve_run_clock=False):
     """Fence a resumed attempt; policy commands keep the original activity clock."""
     from .website_connections import authority_guard, scoped_run_contract, contract_for, extend_owner_operation_contract
     binding = scoped_run_contract(run)
+    from .run_ownership import owner_receipt
+    owned = (owner_receipt(run) or {}).get("authority", {}).get("event_protocol") == 1
+    original_run = run
     with authority_guard(binding, action="read") as website:
+        if owned:
+            from workflow_runs.models import ContentFactoryRun
+            from .run_ownership import current_execution_ticket, RunOwnershipConflict
+            expected_ticket = current_execution_ticket(run)
+            run = ContentFactoryRun.objects.select_for_update().get(pk=run.pk)
+            if current_execution_ticket(run) != expected_ticket:
+                raise RunOwnershipConflict("The authorized execution changed before resume.")
         identifier = binding.get("operation_id")
         if not identifier:
             # Older saved runs have consent identity but predate the operation
@@ -501,7 +516,7 @@ def advance_workflow_attempt(run, *, preserve_run_clock=False):
             raise WebsiteAuthorityError("website_operation_cancelled", "This operation cannot be resumed.")
         previous_attempt = int(op.payload.get("attempt", 1))
         # Retransmission of an ambiguous resume uses the same reserved attempt.
-        request_attempt = int((run.run_request or {}).get("operation_attempt", 1))
+        request_attempt = int(binding.get("operation_attempt", 1))
         if not (op.payload.get("resume_pending") and op.state in {"pending", "running"} and request_attempt == previous_attempt):
             from .run_state import execution_version
             op.payload = {**op.payload, "attempt": previous_attempt + 1, "resume_pending": True,
@@ -509,6 +524,17 @@ def advance_workflow_attempt(run, *, preserve_run_clock=False):
         op.state = "running"
         op.save(update_fields=["payload", "state", "updated_at"])
         fields = {"operation_id": str(op.pk), "operation_attempt": op.payload["attempt"], "deletion_epoch": deletion_epoch(website)}
+        if owned:
+            from .run_execution_control import append_execution_ticket, require_current_principal
+            from .run_ownership import current_execution_ticket, WIRE_REQUEST_KEY, WIRE_EXECUTION_KEY, wire_identity
+            require_current_principal(run)
+            scope = {**current_execution_ticket(run)["scope"], **fields}
+            key = evidence_digest({"reason": "operation_resume", "run_pk": run.pk,
+                                   "operation_id": str(op.pk), "attempt": fields["operation_attempt"]})
+            ticket = append_execution_ticket(run, control_key=key, reason="operation_resume", scope=scope)
+            original_run.result = run.result
+            extend_owner_operation_contract(fields)
+            return {**fields, WIRE_REQUEST_KEY: wire_identity(owner_receipt(run)), WIRE_EXECUTION_KEY: ticket}
         # The consent guard verified the saved scope. Advancing an execution
         # must not add absent target/root fields or change its original payment.
         run.run_request = {**(run.run_request or {}), **fields}
