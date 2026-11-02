@@ -451,12 +451,14 @@ def _established(organization, config, *, count_website: bool) -> bool:
         return True
     from .job_view import job_runs, read_job_flag
 
-    def paid_article(rows, meta_field):
-        paid_jobs = rows.filter(domain__iexact=organization.domain, billing_status__in=["charged", "reused"])
+    def paid_article(rows, meta_field, domain_field="domain"):
+        paid_jobs = rows.filter(**{f"{domain_field}__iexact": organization.domain}, billing_status__in=["charged", "reused"])
+        if domain_field == "job_domain":
+            paid_jobs = paid_jobs.order_by("-job_created_at")
         return any(_mapping(meta).get("roo_points_action") not in TOPIC_ACTIONS
             for meta in paid_jobs.values_list(meta_field, flat=True)[:50])
     return read_job_flag("established_paid_job", from_job=lambda: paid_article(ContentFactoryJob.objects, "request_meta"),
-        from_run=lambda: paid_article(job_runs(), "job_meta"))
+        from_run=lambda: paid_article(job_runs(), "job_meta", "job_domain"))
 
 
 def _topic_batch_free(organization, user, rows: _Rows, *, now, established: bool) -> bool:

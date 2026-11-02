@@ -31,8 +31,15 @@ from django.dispatch import receiver
 logger = logging.getLogger(__name__)
 
 # ContentFactoryJob attribute -> ContentFactoryRun column (design 4.1). The
-# Run's own slack_user_id and domain are reused; job_id becomes run_id, or
-# legacy_job_id when the two differ.
+# Job's identity and ordering use dedicated columns; job_id becomes run_id,
+# or legacy_job_id when the two differ. The Run's authority is never rewritten.
+JOB_IDENTITY_FIELDS = {
+    "domain": "job_domain",
+    "slack_user_id": "job_slack_user_id",
+    "created_at": "job_created_at",
+    "updated_at": "job_updated_at",
+}
+JOB_IDENTITY_COLUMNS = tuple(JOB_IDENTITY_FIELDS.values())
 JOB_TO_RUN_FIELDS = {
     "status": "delivery_phase",
     "request_meta": "job_meta",
@@ -56,6 +63,7 @@ JOB_TO_RUN_FIELDS = {
     "article_url": "article_url",
     "pr_url": "pr_url",
     "error_message": "job_error_message",
+    **JOB_IDENTITY_FIELDS,
 }
 RUN_JOB_COLUMNS = (*JOB_TO_RUN_FIELDS.values(), "legacy_job_id")
 _JSON_DEFAULTS = {"job_meta": dict, "selection_data": dict, "posted_progress_ids": list}
@@ -139,6 +147,11 @@ def run_values_for_job(job, *, run_id, job_fields=None):
     return values
 
 
+def missing_job_identity_fields(run) -> tuple[str, ...]:
+    """Uncopied Job identity columns; empty strings are copied values."""
+    return tuple(column for column in JOB_IDENTITY_COLUMNS if getattr(run, column, None) is None)
+
+
 def run_for_job_id(job_id, *, queryset=None):
     """The run carrying a Job's facts: ``run_id == job_id``, then ``legacy_job_id``."""
     from workflow_runs.models import ContentFactoryRun
@@ -163,13 +176,32 @@ def mirror_job_to_run(job, fields=None) -> bool:
     from workflow_runs.models import ContentFactoryRun
     try:
         with transaction.atomic():
-            run = run_for_job_id(job.job_id, queryset=ContentFactoryRun.objects.only("pk", "run_id", "delivery_phase"))
+            # Resolve the current Job id, then serialize mirrors on the Run
+            # before rereading Job facts. Do not lock the Job here: callbacks
+            # may already hold the Run before writing a Job. Trusting a stale
+            # signal/bulk instance would let an old full mirror overwrite a
+            # newer partial progress save, even if updated_at did not change.
+            current = type(job).objects.only("job_id").filter(pk=job.pk).first()
+            if current is None:
+                return False
+            expected_job_id = current.job_id
+            run = run_for_job_id(expected_job_id, queryset=ContentFactoryRun.objects.select_for_update().only(
+                "pk", "run_id", "delivery_phase"))
             if run is None:
+                return False
+            job = type(job).objects.filter(pk=job.pk).first()
+            if job is None or job.job_id != expected_job_id:
+                # A concurrent dispatch-token rename owns the new mapping and
+                # mirrors it explicitly; never copy onto the previous target.
                 return False
             job_fields = _job_fields_for(fields)
             if job_fields is not None and not run.delivery_phase:
                 job_fields = None
-                job = type(job).objects.filter(pk=job.pk).first() or job
+            elif job_fields is not None:
+                # The committed Job is authoritative for all four facts. A
+                # partial save must also repair previously uncopied identity
+                # and copy the actual auto_now value, not synthesize a time.
+                job_fields.update(JOB_IDENTITY_FIELDS)
             values = run_values_for_job(job, run_id=run.run_id, job_fields=job_fields)
             if not values:
                 return False

@@ -32,7 +32,7 @@ class DraftDisclosureContractTests(SimpleTestCase):
         )
         self.run = SimpleNamespace(
             run_id="synthetic-disclosure-run", save=MagicMock(),
-            run_request={"evidence_snapshots": {"2026-10-01": {"snapshot_id": 52, "expected_revision": None}}},
+            run_request={"draft_months": ["2026-10-01"], "evidence_snapshots": {"2026-10-01": {"snapshot_id": 52, "expected_revision": None}}},
         )
 
     def item(self, **overrides):
@@ -41,7 +41,7 @@ class DraftDisclosureContractTests(SimpleTestCase):
             "structured_memo": copy.deepcopy(self.memo), **overrides}
 
     def submit(self, item):
-        request = SimpleNamespace(data={"drafts": [item]})
+        request = SimpleNamespace(data={"drafts": [item]}, headers={})
         return StartupUpdateDraftResultsView.post.__wrapped__(
             StartupUpdateDraftResultsView(), request, self.run.run_id,
         )

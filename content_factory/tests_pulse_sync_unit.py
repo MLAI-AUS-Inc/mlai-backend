@@ -32,4 +32,21 @@ class PulseSyncAckTests(SimpleTestCase):
             with self.subTest(headers=headers), patch.object(views, "_apply_run_snapshot") as apply:
                 request = SimpleNamespace(data={"workflow": "startup_monthly_update"}, headers=headers)
                 method(views.ContentFactoryRunView(), request, run_id="ack")
-                apply.assert_called_once_with("ack", request.data, ack=expected)
+                apply.assert_called_once_with(
+                    "ack", {**request.data, "pulse_execution_token": None}, ack=expected
+                )
+
+    def test_execution_fence_comes_only_from_the_trusted_header(self):
+        method = views.ContentFactoryRunView._put_legacy.__wrapped__
+        for token in (None, "current-worker-epoch"):
+            with self.subTest(token=token), patch.object(views, "_apply_run_snapshot") as apply:
+                headers = {"X-Pulse-Execution-Token": token} if token else {}
+                request = SimpleNamespace(
+                    data={"workflow": "startup_monthly_update", "pulse_execution_token": "forged-body-token"},
+                    headers=headers,
+                )
+                method(views.ContentFactoryRunView(), request, run_id="fenced")
+                apply.assert_called_once_with(
+                    "fenced", {"workflow": "startup_monthly_update", "pulse_execution_token": token}, ack=False
+                )
+                self.assertEqual(request.data["pulse_execution_token"], "forged-body-token")

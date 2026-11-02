@@ -1,6 +1,13 @@
 # Community event ticket: 32 Roo Points
 
-The approved EVENT_TICKET price is 32 Roo Points for one fully covered ticket whose regular price is strictly below A$100. Tickets at A$100 or above are excluded. Already-free tickets do not need points. The catalogue model remains the single source for the Home API, rewards API, affordability and redemption charge.
+The approved EVENT_TICKET price is 32 Roo Points for one fully covered ticket whose regular price is strictly below A$100. Tickets at A$100 or above are excluded. Already-free tickets do not need points. The server catalogue and ticket policy determine displayed prices, affordability and the charged quote.
+
+The account-authenticated **Member perks** modal also derives a 16-point, 50%
+ticket discount from that same configured full-ticket offer. Both tiers use the
+same live ticket, stock and one-per-member event limit. The backend freezes the
+chosen tier and exact points cost in the quote and charges that saved cost only
+after explicit confirmation and successful coupon issuance. No separate half-price
+catalogue entry or schema change is required.
 
 After deploying the command, preview against the intended environment:
 

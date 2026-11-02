@@ -1254,14 +1254,13 @@ class VibeRaisingApiTests(TestCase):
         self.assertIsNone(run.run_request["google_connection_id"])
         self.assertEqual(run.run_request["manual_document_ids"], [str(document.id)])
         self.assertEqual(run.run_request["manual_summary"], "Founder-added investor memo.")
-        manual_context = run.run_request["external_context"]["manual_documents"]
-        self.assertEqual(manual_context["summary"], "Founder-added investor memo.")
-        self.assertEqual(manual_context["documents"][0]["filename"], "memo.txt")
-        self.assertIn("Pilot conversion improved", manual_context["documents"][0]["text_excerpt"])
+        self.assertNotIn("external_context", run.run_request)
+        self.assertEqual(run.run_request["source_preflight_version"], 1)
+        self.assertFalse(run.run_request.get("source_preflight_complete", False))
         mock_notify.assert_called_once_with(run.run_id)
 
     @patch("vibe_raising.views.notify_valley_run_created")
-    def test_email_draft_start_skips_gmail_when_scope_missing_and_other_sources_selected(self, mock_notify):
+    def test_email_draft_start_preserves_gmail_for_complete_source_checks(self, mock_notify):
         self.client.force_authenticate(user=self.user)
         _profile, company = self._create_founder_company(domain="acme.com", registered=True)
         document = self._create_manual_document(company=company)
@@ -1293,33 +1292,29 @@ class VibeRaisingApiTests(TestCase):
         self.assertFalse(response.data["hasGmailScope"])
         self.assertTrue(response.data["needsGmailReconnect"])
         run = ContentFactoryRun.objects.get(run_id=response.data["runId"])
-        self.assertEqual(run.run_request["input_sources"], ["xero", "manual_documents"])
-        self.assertIsNone(run.run_request["google_connection_id"])
-        self.assertIn("xero", run.run_request["external_context"])
-        self.assertIn("manual_documents", run.run_request["external_context"])
-        self.assertEqual(
-            run.run_request["external_context"]["gmail"]["warnings"],
-            ["Reconnect Gmail to grant read access."],
-        )
+        self.assertEqual(run.run_request["input_sources"], ["gmail", "xero", "manual_documents"])
+        self.assertIsNotNone(run.run_request["google_connection_id"])
+        self.assertNotIn("external_context", run.run_request)
+        self.assertEqual(run.run_request["source_preflight_version"], 1)
         mock_notify.assert_called_once_with(run.run_id)
 
-    def test_email_draft_start_requires_reconnect_when_gmail_only_scope_missing(self):
+    @patch("vibe_raising.views.notify_valley_run_created")
+    def test_email_draft_start_defers_missing_gmail_scope_to_source_checks(self, notify):
         self.client.force_authenticate(user=self.user)
         self._create_founder_company(domain="acme.com", registered=True)
         self._create_google_connection(scope="openid https://www.googleapis.com/auth/userinfo.email")
-
-        response = self.client.post(
-            "/api/v1/vibe-raising/email-draft/start/",
-            {"inputSources": ["gmail"], "targetMonth": "2026-03-01"},
-            format="json",
-        )
-
-        self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.data["state"], "auth_required")
+        response = self.client.post("/api/v1/vibe-raising/email-draft/start/",
+            {"inputSources": ["gmail"], "targetMonth": "2026-03-01"}, format="json")
+        self.assertEqual(response.status_code, 201, response.data)
+        self.assertEqual(response.data["state"], "queued")
         self.assertTrue(response.data["gmailConnected"])
         self.assertFalse(response.data["hasGmailScope"])
         self.assertTrue(response.data["needsGmailReconnect"])
-        self.assertFalse(ContentFactoryRun.objects.filter(workflow="startup_monthly_update").exists())
+        run = ContentFactoryRun.objects.get(run_id=response.data["runId"])
+        self.assertEqual(run.run_request["input_sources"], ["gmail"])
+        self.assertEqual(run.run_request["source_preflight_version"], 1)
+        notify.assert_called_once_with(run.run_id)
+
 
     @patch("vibe_raising.views.MAX_VIBE_RAISING_VIDEO_SIZE_BYTES", 1024)
     def test_signed_video_upload_session_rejects_oversized_video(self):
@@ -1854,21 +1849,17 @@ class VibeRaisingApiTests(TestCase):
         self.assertEqual(company.domain, "")
         self.assertEqual(company.organization.domain, f"startup-{company.pk}.invalid")
 
-    def test_startup_update_run_returns_needs_google_auth_until_connected(self):
+    @patch("vibe_raising.views.notify_valley_run_created")
+    def test_startup_update_run_queues_source_checks_without_google(self, notify):
         self.client.force_authenticate(user=self.user)
         self._create_founder_company()
-
-        response = self.client.post(
-            "/api/v1/vibe-raising/startup-update/run/",
-            {},
-            format="json",
-        )
-
-        self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.data["state"], "needs_google_auth")
+        response = self.client.post("/api/v1/vibe-raising/startup-update/run/", {}, format="json")
+        self.assertEqual(response.status_code, 201, response.data)
+        self.assertEqual(response.data["state"], "processing")
         self.assertFalse(response.data["googleConnected"])
-        self.assertIsNone(response.data["run"])
         self.assertEqual(UserStartupBinding.objects.count(), 1)
+        notify.assert_called_once_with(response.data["run"]["runId"])
+
 
     def test_startup_update_run_creates_or_reuses_open_run(self):
         self.client.force_authenticate(user=self.user)
@@ -1928,31 +1919,19 @@ class VibeRaisingApiTests(TestCase):
         run = ContentFactoryRun.objects.get(run_id=response.data["runId"])
         self.assertEqual(run.result["_valley_meta"]["dispatch_status"], "failed")
 
-    def test_startup_update_run_reconciles_active_run_when_slack_is_added(self):
+    def test_startup_update_run_rejects_changing_sources_on_an_active_run(self):
         self.client.force_authenticate(user=self.user)
         _organization, _binding, run = self._create_active_gmail_run_with_slack_selection()
-
-        with patch("vibe_raising.views.notify_valley_run_created") as mock_notify:
-            response = self.client.post(
-                "/api/v1/vibe-raising/startup-update/run/",
-                {"inputSources": ["gmail", "xero", "slack"]},
-                format="json",
-            )
-
-        self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.data["run"]["runId"], run.run_id)
-        mock_notify.assert_not_called()
-
+        original = dict(run.run_request)
+        with patch("vibe_raising.views.notify_valley_run_created") as notify:
+            response = self.client.post("/api/v1/vibe-raising/startup-update/run/",
+                {"inputSources": ["gmail", "xero", "slack"]}, format="json")
+        self.assertEqual(response.status_code, 409, response.data)
         run.refresh_from_db()
-        self.assertEqual(run.run_request["input_sources"], ["gmail", "xero", "slack"])
-        self.assertIn("slack_backfill", run.step_order)
-        self.assertLess(run.step_order.index("slack_relevance_classification"), run.step_order.index("slack_event_extraction"))
-        self.assertLess(run.step_order.index("slack_event_extraction"), run.step_order.index("timeline_merge"))
-        self.assertNotIn("xero", run.step_order)
-        self.assertEqual(run.current_step, "slack_backfill")
-        self.assertEqual(run.run_request["slack_channel_ids"], ["C123"])
-        self.assertEqual(run.run_request["external_context"]["slack"]["selected_channel_ids"], ["C123"])
-        self.assertIn("xero", run.run_request["external_context"])
+        self.assertEqual(run.run_request, original)
+        self.assertEqual(run.current_step, "timeline_merge")
+        notify.assert_not_called()
+
 
     def test_startup_update_run_maps_create_authority_error_to_connector_auth_response(self):
         self.client.force_authenticate(user=self.user)
@@ -1972,22 +1951,18 @@ class VibeRaisingApiTests(TestCase):
         self.assertEqual(response.status_code, 401)
         self.assertEqual(response.data, {"detail": "Slack authority was revoked"})
 
-    def test_startup_update_run_maps_refresh_authority_error_to_connector_auth_response(self):
+    def test_startup_update_run_keeps_active_authority_frozen(self):
         self.client.force_authenticate(user=self.user)
-        self._create_active_gmail_run_with_slack_selection()
+        _organization, _binding, run = self._create_active_gmail_run_with_slack_selection()
+        with patch("vibe_raising.views.refresh_startup_update_run_source_context",
+                side_effect=ConnectorOAuthError("Synthetic revoked authority")) as refresh, patch(
+                "vibe_raising.views.notify_valley_run_created") as notify:
+            response = self.client.post("/api/v1/vibe-raising/startup-update/run/",
+                {"inputSources": ["gmail"]}, format="json")
+        self.assertEqual(response.status_code, 200, response.data)
+        refresh.assert_not_called()
+        notify.assert_not_called()
 
-        with patch(
-            "vibe_raising.views.refresh_startup_update_run_source_context",
-            side_effect=ConnectorOAuthError("Slack authority changed"),
-        ):
-            response = self.client.post(
-                "/api/v1/vibe-raising/startup-update/run/",
-                {"inputSources": ["gmail", "xero", "slack"]},
-                format="json",
-            )
-
-        self.assertEqual(response.status_code, 401)
-        self.assertEqual(response.data, {"detail": "Slack authority changed"})
 
     def test_startup_update_status_returns_ready_with_form_shaped_draft(self):
         self.client.force_authenticate(user=self.user)
@@ -2066,21 +2041,19 @@ class VibeRaisingApiTests(TestCase):
         self.assertEqual(len(response.data["draft"]["pastMonths"]), 2)
         self.assertEqual(response.data["draft"]["pastMonths"][0]["month"], "February 2026")
 
-    def test_email_draft_start_returns_auth_required_until_gmail_connected(self):
+    @patch("vibe_raising.views.notify_valley_run_created")
+    def test_email_draft_start_queues_source_checks_without_google(self, notify):
         self.client.force_authenticate(user=self.user)
         self._create_founder_company()
-
-        response = self.client.post(
-            "/api/v1/vibe-raising/email-draft/start/",
-            {"targetMonth": "2026-03-01"},
-            format="json",
-        )
-
-        self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.data["state"], "auth_required")
+        response = self.client.post("/api/v1/vibe-raising/email-draft/start/",
+            {"targetMonth": "2026-03-01"}, format="json")
+        self.assertEqual(response.status_code, 201, response.data)
+        self.assertEqual(response.data["state"], "queued")
         self.assertFalse(response.data["gmailConnected"])
         self.assertIn("/integrations/connect/google?next=", response.data["authUrl"])
         self.assertEqual(UserStartupBinding.objects.count(), 1)
+        notify.assert_called_once_with(response.data["runId"])
+
 
     def test_email_draft_status_returns_auth_required_until_gmail_connected(self):
         self.client.force_authenticate(user=self.user)
@@ -2094,6 +2067,36 @@ class VibeRaisingApiTests(TestCase):
         self.assertIn("/integrations/connect/google?next=", response.data["authUrl"])
         self.assertIsNone(response.data["runId"])
         self.assertEqual(response.data["pastMonths"], [])
+
+    @patch("vibe_raising.views.notify_valley_run_created")
+    def test_status_keeps_all_failed_source_checks_when_gmail_is_disconnected(self, notify):
+        self.client.force_authenticate(user=self.user)
+        self._create_founder_company()
+        started = self.client.post(
+            "/api/v1/vibe-raising/email-draft/start/",
+            {"inputSources": ["gmail", "slack"]},
+            format="json",
+        )
+        self.assertEqual(started.status_code, 201, started.data)
+        run = ContentFactoryRun.objects.get(run_id=started.data["runId"])
+        checks = [
+            {"source": "gmail", "status": "failed", "code": "not_connected"},
+            {"source": "slack", "status": "failed", "code": "not_connected"},
+        ]
+        run.status = ContentFactoryRunStatus.FAILED
+        run.error = "Connect Gmail and Slack before continuing."
+        run.result = {"source_preflight": {"checks": checks}}
+        run.save(update_fields=["status", "error", "result", "updated_at"])
+
+        for route in ("email-draft/status/", "startup-update/status/"):
+            with self.subTest(route=route):
+                response = self.client.get(f"/api/v1/vibe-raising/{route}")
+                self.assertEqual(response.status_code, 200, response.data)
+                self.assertEqual(response.data["state"], "failed")
+                self.assertEqual(response.data["error"], run.error)
+                self.assertFalse(response.data["hasGmailScope"])
+                payload = response.data.get("run") or response.data
+                self.assertEqual(payload["sourceChecks"], checks)
 
     def test_email_draft_start_creates_or_reuses_open_run(self):
         self.client.force_authenticate(user=self.user)
@@ -2163,7 +2166,7 @@ class VibeRaisingApiTests(TestCase):
         )
 
         self.assertEqual(response.status_code, 201)
-        mock_refresh_linear_scope.assert_called_once_with(linear_connection)
+        mock_refresh_linear_scope.assert_not_called()
         mock_sync_sources.assert_not_called()
         mock_notify.assert_called_once_with(response.data["runId"])
         run = ContentFactoryRun.objects.get(run_id=response.data["runId"])
@@ -2372,55 +2375,19 @@ class VibeRaisingApiTests(TestCase):
         self.assertNotEqual(regenerated_run.run_id, original_run.run_id)
         mock_notify.assert_called_once_with(regenerated_run.run_id)
 
-    def test_email_draft_start_reconciles_active_run_when_slack_is_added(self):
+    def test_email_draft_start_rejects_changing_sources_on_an_active_run(self):
         self.client.force_authenticate(user=self.user)
         _organization, _binding, run = self._create_active_gmail_run_with_slack_selection()
-
-        with patch("vibe_raising.views.notify_valley_run_created") as mock_notify:
-            response = self.client.post(
-                "/api/v1/vibe-raising/email-draft/start/",
-                {"inputSources": ["gmail", "xero", "slack"]},
-                format="json",
-            )
-
-        self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.data['updateId'], run.run_request['update_id'])
-        self.assertEqual(response.data["runId"], run.run_id)
-        mock_notify.assert_not_called()
-
+        original = dict(run.run_request)
+        with patch("vibe_raising.views.notify_valley_run_created") as notify:
+            response = self.client.post("/api/v1/vibe-raising/email-draft/start/",
+                {"inputSources": ["gmail", "xero", "slack"]}, format="json")
+        self.assertEqual(response.status_code, 409, response.data)
         run.refresh_from_db()
-        expected_step_order = [
-            "profile_resolution",
-            "gmail_backfill",
-            "relevance_classification",
-            "thread_hydration",
-            "event_extraction",
-            "slack_backfill",
-            "slack_relevance_classification",
-            "slack_event_extraction",
-            "source_evidence_refresh",
-            "timeline_merge",
-            "reconciliation_enrichment",
-            "candidate_curation",
-            "founder_review",
-            "draft_generation",
-            "groundedness_review",
-        ]
-        self.assertEqual(run.run_request["input_sources"], ["gmail", "xero", "slack"])
-        self.assertEqual(run.step_order, expected_step_order)
-        self.assertNotIn("xero", run.step_order)
-        self.assertEqual(run.current_step, "slack_backfill")
-        self.assertEqual(run.run_request["slack_channel_ids"], ["C123"])
-        self.assertEqual(run.run_request["external_context"]["slack"]["selected_channel_ids"], ["C123"])
-        self.assertIn("xero", run.run_request["external_context"])
+        self.assertEqual(run.run_request, original)
+        self.assertEqual(run.current_step, "timeline_merge")
+        notify.assert_not_called()
 
-        steps_by_key = {step.step_key: step for step in run.steps.all()}
-        self.assertEqual(steps_by_key["slack_backfill"].status, ContentFactoryStepStatus.PENDING)
-        self.assertEqual(steps_by_key["slack_relevance_classification"].status, ContentFactoryStepStatus.PENDING)
-        self.assertEqual(steps_by_key["slack_event_extraction"].status, ContentFactoryStepStatus.PENDING)
-        for step_key in ["timeline_merge", "draft_generation", "groundedness_review"]:
-            self.assertEqual(steps_by_key[step_key].status, ContentFactoryStepStatus.PENDING)
-            self.assertEqual(steps_by_key[step_key].attempts, 0)
 
     def test_email_draft_start_maps_create_authority_error_to_connector_auth_response(self):
         self.client.force_authenticate(user=self.user)
@@ -2440,50 +2407,35 @@ class VibeRaisingApiTests(TestCase):
         self.assertEqual(response.status_code, 401)
         self.assertEqual(response.data, {"detail": "Slack authority was revoked"})
 
-    def test_email_draft_start_maps_redispatch_refresh_authority_error_to_connector_auth_response(self):
+    def test_email_draft_start_redispatches_without_replacing_frozen_authority(self):
         self.client.force_authenticate(user=self.user)
         _organization, _binding, run = self._create_active_gmail_run_with_slack_selection()
         run.status = ContentFactoryRunStatus.QUEUED
         run.save(update_fields=["status", "updated_at"])
-        ContentFactoryRun.objects.filter(pk=run.pk).update(
-            updated_at=timezone.now() - timedelta(minutes=1)
-        )
+        ContentFactoryRun.objects.filter(pk=run.pk).update(updated_at=timezone.now()-timedelta(minutes=1))
+        with patch("vibe_raising.views.refresh_startup_update_run_source_context",
+                side_effect=ConnectorOAuthError("Synthetic revoked authority")) as refresh, patch(
+                "vibe_raising.views.notify_valley_run_created") as notify:
+            response = self.client.post("/api/v1/vibe-raising/email-draft/start/",
+                {"inputSources": ["gmail"]}, format="json")
+        self.assertEqual(response.status_code, 200, response.data)
+        self.assertEqual(response.data["runId"], run.run_id)
+        refresh.assert_not_called()
+        notify.assert_called_once_with(run.run_id)
 
-        with patch(
-            "vibe_raising.views.refresh_startup_update_run_source_context",
-            side_effect=ConnectorOAuthError("Slack redispatch authority changed"),
-        ):
-            response = self.client.post(
-                "/api/v1/vibe-raising/email-draft/start/",
-                {"inputSources": ["gmail", "xero", "slack"]},
-                format="json",
-            )
 
-        self.assertEqual(response.status_code, 401)
-        self.assertEqual(
-            response.data,
-            {"detail": "Slack redispatch authority changed"},
-        )
-
-    def test_email_draft_start_maps_active_refresh_authority_error_to_connector_auth_response(self):
+    def test_email_draft_start_keeps_active_authority_frozen(self):
         self.client.force_authenticate(user=self.user)
-        self._create_active_gmail_run_with_slack_selection()
+        _organization, _binding, run = self._create_active_gmail_run_with_slack_selection()
+        with patch("vibe_raising.views.refresh_startup_update_run_source_context",
+                side_effect=ConnectorOAuthError("Synthetic revoked authority")) as refresh, patch(
+                "vibe_raising.views.notify_valley_run_created") as notify:
+            response = self.client.post("/api/v1/vibe-raising/email-draft/start/",
+                {"inputSources": ["gmail"]}, format="json")
+        self.assertEqual(response.status_code, 200, response.data)
+        refresh.assert_not_called()
+        notify.assert_not_called()
 
-        with patch(
-            "vibe_raising.views.refresh_startup_update_run_source_context",
-            side_effect=ConnectorOAuthError("Slack active-run authority changed"),
-        ):
-            response = self.client.post(
-                "/api/v1/vibe-raising/email-draft/start/",
-                {"inputSources": ["gmail", "xero", "slack"]},
-                format="json",
-            )
-
-        self.assertEqual(response.status_code, 401)
-        self.assertEqual(
-            response.data,
-            {"detail": "Slack active-run authority changed"},
-        )
 
     def test_email_draft_start_redispatches_stale_queued_run(self):
         self.client.force_authenticate(user=self.user)
@@ -3295,11 +3247,13 @@ class VibeRaisingApiTests(TestCase):
         self.assertNotEqual(response.data["runId"], run.run_id)
         notify.assert_called_once_with(response.data["runId"])
         self.assertEqual(ContentFactoryRun.objects.filter(workflow="startup_monthly_update").count(), 2)
-        mock_publish.assert_called_once()
-        self.assertEqual(mock_publish.call_args.kwargs["organization"], organization)
-        self.assertEqual(mock_publish.call_args.kwargs["run"].run_id, response.data["runId"])
+        mock_publish.assert_not_called()
+        queued = ContentFactoryRun.objects.get(run_id=response.data["runId"])
+        self.assertEqual(queued.run_request["source_preflight_version"], 1)
+        self.assertFalse(queued.run_request.get("source_preflight_complete", False))
 
-    def test_email_draft_start_merges_existing_startup_profile_context(self):
+    @patch("vibe_raising.views.notify_valley_run_created")
+    def test_email_draft_start_merges_existing_startup_profile_context(self, notify):
         self.client.force_authenticate(user=self.user)
         _profile, _company = self._create_founder_company()
         organization = _company.organization
@@ -3327,8 +3281,8 @@ class VibeRaisingApiTests(TestCase):
             format="json",
         )
 
-        self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.data["state"], "auth_required")
+        self.assertEqual(response.status_code, 201, response.data)
+        self.assertEqual(response.data["state"], "queued")
         profile = StartupProfile.objects.get(organization=organization)
         organization.refresh_from_db()
         self.assertEqual(organization.name, "Acme Inc.")

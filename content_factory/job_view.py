@@ -23,8 +23,7 @@ from django.db.models import Q
 
 logger = logging.getLogger(__name__)
 
-# Job attributes a view carries. created_at and updated_at are the run's own
-# (the approved schema has no copy of the Job's), so parity checks skip them.
+# Job attributes a view carries, including its dedicated identity/timestamps.
 JOB_VIEW_FIELDS = (
     "job_id", "slack_user_id", "domain", "status", "request_meta", "client_request_id",
     "billing_source_job_id", "billing_amount", "billing_status", "billing_ledger_id",
@@ -33,8 +32,11 @@ JOB_VIEW_FIELDS = (
     "last_progress_milestone_index", "last_progress_milestone_key", "last_progress_updated_at",
     "still_working_pinged_at", "article_url", "pr_url", "error_message", "created_at", "updated_at",
 )
-TIMESTAMP_FIELDS = frozenset({"created_at", "updated_at"})
-COMPARED_FIELDS = tuple(field for field in JOB_VIEW_FIELDS if field not in TIMESTAMP_FIELDS)
+COMPARED_FIELDS = JOB_VIEW_FIELDS
+
+
+class IncompleteRunJobIdentity(ValueError):
+    """A mirrored Run cannot yet reproduce the Job's identity and ordering."""
 
 
 def shadow_read_enabled() -> bool:
@@ -53,10 +55,10 @@ class RunJobView:
     __slots__ = ("run", *JOB_VIEW_FIELDS)
 
     def __init__(self, run):
-        from .job_mirror import JOB_TO_RUN_FIELDS
-        values = {"run": run, "job_id": run.legacy_job_id or run.run_id,
-                  "slack_user_id": run.slack_user_id, "domain": run.domain,
-                  "created_at": run.created_at, "updated_at": run.updated_at}
+        from .job_mirror import JOB_TO_RUN_FIELDS, missing_job_identity_fields
+        if missing_job_identity_fields(run):
+            raise IncompleteRunJobIdentity("Job identity has not been completely copied to the Run")
+        values = {"run": run, "job_id": run.legacy_job_id or run.run_id}
         for job_field, column in JOB_TO_RUN_FIELDS.items():
             values[job_field] = getattr(run, column)
         for name, value in values.items():
@@ -111,7 +113,7 @@ def job_views(runs):
 def thread_runs(channel_id, thread_ts):
     """Runs whose Job was posted in a Slack thread (root or reply ts)."""
     return job_runs().filter(slack_channel_id=channel_id).filter(
-        Q(slack_thread_ts=thread_ts) | Q(slack_root_message_ts=thread_ts))
+        Q(slack_thread_ts=thread_ts) | Q(slack_root_message_ts=thread_ts)).order_by("-job_created_at")
 
 
 def _job_value(job, field):

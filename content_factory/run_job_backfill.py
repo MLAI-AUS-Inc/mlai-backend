@@ -21,7 +21,10 @@ from django.db import IntegrityError, transaction
 from django.db.models import Q
 from django.utils import timezone
 
-from .job_mirror import JOB_TO_RUN_FIELDS, RUN_JOB_COLUMN_DEFAULTS, RUN_JOB_COLUMNS, run_values_for_job
+from .job_mirror import (
+    JOB_IDENTITY_COLUMNS, JOB_TO_RUN_FIELDS, RUN_JOB_COLUMN_DEFAULTS, RUN_JOB_COLUMNS,
+    missing_job_identity_fields, run_values_for_job,
+)
 from .run_status_contract import is_terminal
 
 BACKFILL_RESULT_KEY = "backfilled_from_job"
@@ -79,6 +82,8 @@ def is_token_job(job) -> bool:
 
 
 def _empty(column, value) -> bool:
+    if column in JOB_IDENTITY_COLUMNS:
+        return value is None
     return value in (None, "") or value == RUN_JOB_COLUMN_DEFAULTS[column]
 
 
@@ -359,10 +364,36 @@ class CompareReport:
 
     def lines(self):
         lines = [f"{key}: {self.counts[key]}" for key in (
-            "jobs_compared", "matched", "missing_run", "unfilled_run", "orphan_token_jobs",
+            "jobs_compared", "matched", "missing_run", "unfilled_run", "incomplete_identity", "orphan_token_jobs",
             "ambiguous_token_jobs", "jobs_with_mismatch")]
         lines.append(f"Mismatches by field: {_counter_text(self.mismatches)}")
         return lines
+
+    def read_cutover_blockers(self) -> dict[str, int]:
+        """Counts that prevent a parity pass for the selected Job population.
+
+        No compared Jobs is not evidence of parity. Every compared Job must
+        have one filled, matching run; missing, ambiguous and orphan token
+        Jobs need an explicit resolution before reads can be switched. This
+        only proves data parity for the command's selected population, not
+        dual-write configuration, routing behavior or production traffic.
+        """
+        blockers = {
+            key: self.counts[key]
+            for key in ("missing_run", "unfilled_run", "incomplete_identity", "orphan_token_jobs",
+                        "ambiguous_token_jobs", "jobs_with_mismatch")
+            if self.counts[key]
+        }
+        if not self.counts["jobs_compared"]:
+            blockers["empty_population"] = 1
+        if self.mismatches:
+            blockers["field_mismatches"] = sum(self.mismatches.values())
+        classified = sum(self.counts[key] for key in (
+            "matched", "missing_run", "unfilled_run", "incomplete_identity", "orphan_token_jobs", "ambiguous_token_jobs"))
+        unaccounted = abs(self.counts["jobs_compared"] - classified)
+        if unaccounted:
+            blockers["unaccounted_jobs"] = unaccounted
+        return blockers
 
 
 def compare_run_job_fields(*, batch_size=DEFAULT_BATCH_SIZE, updated_since=None):
@@ -390,6 +421,9 @@ def compare_run_job_fields(*, batch_size=DEFAULT_BATCH_SIZE, updated_since=None)
                 report.counts["missing_run"] += 1
             elif not match.run.delivery_phase:
                 report.counts["unfilled_run"] += 1
+            elif missing_job_identity_fields(match.run):
+                report.counts["incomplete_identity"] += 1
+                report.mismatches.update(missing_job_identity_fields(match.run))
             else:
                 report.counts["matched"] += 1
                 fields = job_field_mismatches(job, RunJobView(match.run))

@@ -30,6 +30,7 @@ class ContentFactoryRunStepSerializer(serializers.Serializer):
 
 
 class ContentFactoryRunSyncSerializer(serializers.Serializer):
+    pulse_execution_token = serializers.IntegerField(required=False, allow_null=True, min_value=1)
     website_connection_id = serializers.UUIDField(required=False)
     connection_generation = serializers.IntegerField(required=False, min_value=1)
     connection_target_id = serializers.CharField(required=False)

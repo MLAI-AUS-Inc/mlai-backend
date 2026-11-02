@@ -147,6 +147,12 @@ class ContentFactoryRun(models.Model):
     job_error_message = models.TextField(blank=True, null=True)
     # The mirrored Job's job_id, only when it differs from run_id (dispatch tokens).
     legacy_job_id = models.CharField(max_length=100, blank=True, default="", db_default="", db_index=True)
+    # Original Job identity and ordering facts, distinct from execution authority
+    # and recency above. Null means not copied; an empty identity is meaningful.
+    job_domain = models.CharField(max_length=255, null=True, blank=True)
+    job_slack_user_id = models.CharField(max_length=50, null=True, blank=True)
+    job_created_at = models.DateTimeField(null=True, blank=True)
+    job_updated_at = models.DateTimeField(null=True, blank=True)
 
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)

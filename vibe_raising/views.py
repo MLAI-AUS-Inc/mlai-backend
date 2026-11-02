@@ -492,6 +492,7 @@ def _serialize_run_summary(run):
         "stepStates": step_states,
         "targetMonth": target_month.isoformat() if target_month else None,
         "inputSources": startup_update_run_input_sources(run),
+        "sourceChecks": ((run.result or {}).get("source_preflight") or {}).get("checks", []),
         "sourceWarnings": merge_source_warnings(
             {key: value.get("warnings", []) for key, value in ((run.run_request or {}).get("external_context") or {}).items() if isinstance(value, dict)},
             (run.result or {}).get("source_warnings") or {},
@@ -659,9 +660,15 @@ def _normalize_input_source_list(value):
 
 
 def _get_requested_input_sources(request):
-    return _normalize_input_source_list(
-        request.data.get("inputSources") or request.data.get("input_sources")
-    )
+    from startup_updates.preflight import selected_sources
+    if "inputSources" in request.data:
+        raw = request.data["inputSources"]
+    elif "input_sources" in request.data:
+        raw = request.data["input_sources"]
+    else:
+        raw = ["gmail"]  # Compatibility for pre-selection legacy clients only.
+    return selected_sources(raw, manual=bool(_get_requested_manual_document_ids(request)
+        or _get_requested_manual_summary(request)))
 
 
 def _get_requested_manual_document_ids(request):
@@ -1918,7 +1925,11 @@ def _build_status_payload(*, user, company, domain):
     )
 
     error = None
-    if latest_run_requires_gmail and not google_scope_status["hasGmailScope"]:
+    if (
+        latest_run_requires_gmail
+        and not google_scope_status["hasGmailScope"]
+        and not (latest_run and (latest_run.run_request or {}).get("source_preflight_version"))
+    ):
         state = "needs_google_auth"
     elif open_run is not None:
         state = "processing"
@@ -2042,7 +2053,11 @@ def _build_email_draft_payload(
     )
 
     error = None
-    if latest_run_requires_gmail and not google_scope_status["hasGmailScope"]:
+    if (
+        latest_run_requires_gmail
+        and not google_scope_status["hasGmailScope"]
+        and not (latest_run and (latest_run.run_request or {}).get("source_preflight_version"))
+    ):
         state = "auth_required"
     elif latest_run is not None and latest_run.status == ContentFactoryRunStatus.QUEUED:
         state = "queued"
@@ -2094,11 +2109,13 @@ def _build_email_draft_payload(
         "currentStep": run_payload["currentStep"] if run_payload else None,
         "stepStates": (run_payload or {}).get("stepStates", {}),
         "inputSources": (run_payload or {}).get("inputSources", []),
+        "sourceChecks": (run_payload or {}).get("sourceChecks", []),
+        "reviewRequired": bool(latest_run and (latest_run.result or {}).get("review_required")),
         "completedSteps": progress_payload["completedSteps"] if progress_payload else 0,
         "totalSteps": progress_payload["totalSteps"] if progress_payload else len(RUN_STEP_ORDER),
         "displayStage": progress_payload["displayStage"] if progress_payload else _get_email_draft_display_stage(None),
         "lastHeartbeatAt": progress_payload["lastHeartbeatAt"] if progress_payload else None,
-        "canRetry": progress_payload["canRetry"] if progress_payload else False,
+        "canRetry": bool(progress_payload and progress_payload["canRetry"] and not (latest_run.result or {}).get("review_required")),
         "terminalState": progress_payload["terminalState"] if progress_payload else None,
         "generatedDraftMonths": progress_payload["generatedDraftMonths"] if progress_payload else [],
         "targetMonth": resolved_target_month.isoformat() if resolved_target_month else None,
@@ -2991,21 +3008,7 @@ class VibeRaisingStartupUpdateRunView(APIView):
         except ValueError as exc:
             return Response({"error": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
         google_connection = google_connection_for_org(request.user, organization)
-        input_sources, google_connection, gmail_scope_warnings = coerce_startup_update_sources_for_gmail_scope(
-            input_sources,
-            google_connection,
-        )
-        source_warnings = merge_source_warnings(
-            _sync_selected_connector_sources_for_draft(request.user, input_sources, organization=organization, automatic_scope=bool(getattr(self, "automatic_source_scope", False))),
-            gmail_scope_warnings,
-        )
-        if gmail_required_for_sources(input_sources) and (
-            google_connection is None or not has_gmail_read_scope(google_connection)
-        ):
-            return Response(
-                _build_status_payload(user=request.user, company=company, domain=domain),
-                status=status.HTTP_200_OK,
-            )
+        source_warnings = {}
 
         existing_run = get_open_startup_update_run(
             organization=organization,
@@ -3049,22 +3052,13 @@ class VibeRaisingStartupUpdateRunView(APIView):
                 return Response(payload, status=status.HTTP_503_SERVICE_UNAVAILABLE)
         else:
             run = existing_run
-            # Refreshing source context writes updated_at. Decide whether the
-            # queued delivery is stale before that unrelated bookkeeping write.
-            redispatch_existing = _should_dispatch_existing_run(run)
-            set_startup_update_run_target_month(run, target_month)
-            if input_sources:
-                windows = build_startup_update_target_windows(target_month)
-                refresh_startup_update_run_source_context(
-                    run=run,
-                    organization=organization,
-                    input_sources=input_sources,
-                    start_date=windows["financial_start_date"],
-                    end_date=windows["financial_end_date"],
-                    source_warnings=source_warnings,
-                    manual_document_ids=manual_document_ids,
-                    manual_summary=manual_summary,
-                )
+            redispatch_existing = _should_dispatch_existing_run(existing_run)
+            from startup_updates.revisions import RevisionConflict
+            original = existing_run.run_request or {}
+            if (set(original.get("input_sources", [])) != set(input_sources)
+                or original.get("manual_summary", "") != manual_summary
+                or sorted(original.get("manual_document_ids", [])) != sorted(manual_document_ids)):
+                raise RevisionConflict("Inputs changed. Finish or cancel this generation first.")
             if redispatch_existing:
                 logger.info(
                     "Re-dispatching queued startup update run to Valley",
@@ -3165,29 +3159,8 @@ class VibeRaisingEmailDraftStartView(APIView):
         except ValueError as exc:
             return Response({"error": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
         google_connection = google_connection_for_org(request.user, organization)
-        input_sources, google_connection, gmail_scope_warnings = coerce_startup_update_sources_for_gmail_scope(
-            input_sources,
-            google_connection,
-        )
-        source_warnings = merge_source_warnings(
-            _sync_selected_connector_sources_for_draft(request.user, input_sources, organization=organization, automatic_scope=bool(getattr(self, "automatic_source_scope", False))),
-            gmail_scope_warnings,
-        )
-        if gmail_required_for_sources(input_sources) and (
-            google_connection is None or not has_gmail_read_scope(google_connection)
-        ):
-            return Response(
-                _build_email_draft_payload(
-                    request=request,
-                    user=request.user,
-                    company=company,
-                    domain=domain,
-                    target_month=target_month,
-                ),
-                status=status.HTTP_200_OK,
-            )
-
-        if google_connection is not None and binding.google_connection_id != google_connection.id:
+        source_warnings = {}
+        if "gmail" in input_sources and google_connection is not None and binding.google_connection_id != google_connection.id:
             binding.google_connection = google_connection
             binding.save(update_fields=["google_connection", "updated_at"])
 
@@ -3251,17 +3224,12 @@ class VibeRaisingEmailDraftStartView(APIView):
                 # Refreshing source context advances updated_at; retain the
                 # stale-queue decision from before that write on this attempt.
                 redispatch_existing = _should_dispatch_existing_run(existing_run)
-                windows = build_startup_update_target_windows(run_month)
-                refresh_startup_update_run_source_context(
-                    run=existing_run,
-                    organization=organization,
-                    input_sources=input_sources,
-                    start_date=windows["financial_start_date"],
-                    end_date=windows["financial_end_date"],
-                    source_warnings=source_warnings,
-                    manual_document_ids=manual_document_ids,
-                    manual_summary=manual_summary,
-                )
+                original = existing_run.run_request or {}
+                if (set(original.get("input_sources", [])) != set(input_sources)
+                    or sorted(original.get("manual_document_ids", [])) != sorted(manual_document_ids)
+                    or original.get("manual_summary", "") != manual_summary
+                    or original.get("audience_visibility", ["just_me"]) != requested_audience):
+                    raise RevisionConflict("The selected sources or input changed. Finish or cancel this generation first.")
             if not existing_run:
                 draft.update_date = update_date
                 draft.save(update_fields=["update_date"])
@@ -3286,6 +3254,7 @@ class VibeRaisingEmailDraftStartView(APIView):
             domain=domain, run_id=run.run_id, target_month=target_month)
         payload.update(identity_payload(draft))
         payload["narrativePeriod"] = (run.run_request or {}).get("narrative_period")
+        payload["sourceChecks"] = []
         return Response(payload, status=200 if existing_run else 201)
 
 
