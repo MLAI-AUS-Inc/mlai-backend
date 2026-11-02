@@ -8875,6 +8875,18 @@ def _merge_django_owned_run_request(existing_request, incoming_request, *, drift
     incoming = incoming_request if isinstance(incoming_request, dict) else {}
     incoming = {key: value for key, value in incoming.items() if key not in P2_BACKEND_REQUEST_KEYS}
     existing = deepcopy(existing)
+    saved_result = backend_result if isinstance(backend_result, dict) else {}
+    publish_approval = saved_result.get("article_approval_v1")
+    publish_owned = set()
+    if isinstance(publish_approval, dict) and publish_approval.get("source") == "publish_reviewed":
+        publish_owned = {"approved_body", "approved_body_sha256", "body_format", "approval", "new_run_id", "run_id",
+            "source_run_id", "source_revision", "hosted_site_id", "original_billing_source_run_id"}
+        for field in publish_owned:
+            if field in existing and field in incoming and incoming[field] != existing[field]:
+                conflict = EditorialRunConflict("Worker snapshots cannot change the approved publish body or destination")
+                conflict.guard_field = field
+                raise conflict
+        incoming = {key: value for key, value in incoming.items() if key not in publish_owned}
     receipt = (backend_result if isinstance(backend_result, dict) else {}).get("re_pin_v1")
     if receipt and "expected_source_sha" in existing:
         try:
@@ -8909,7 +8921,7 @@ def _merge_django_owned_run_request(existing_request, incoming_request, *, drift
                 raise conflict
             merged[key] = deepcopy(value)
             continue
-        if key in {"setup_delivery_v1","article_delivery_v1","workflow_order_v1"} | P2_BACKEND_REQUEST_KEYS:
+        if key in {"setup_delivery_v1","article_delivery_v1","workflow_order_v1"} | P2_BACKEND_REQUEST_KEYS | publish_owned:
             merged[key] = deepcopy(value)
             continue
         if not (key.startswith("roo_points_") or key in {"article_publish_approval_receipt", "article_publish_approval_revoked", "website_access_lost", "first_article_goal_operation_id", "first_article_goal_id"}):
