@@ -19,7 +19,7 @@ from . import no_delivery_refunds as refunds, dispatch_outbox, service_views
 from .dispatch_models import ContentFactoryDispatchOutbox
 from .editorial_run_state import EditorialRunConflict
 from .first_article_entitlement import reserve_entitlement, ENTITLEMENT
-from .self_heal_testing import make_p2_org, fake_member_context, fake_provider, missing_provider
+from .self_heal_testing import ALL_FLAGS_ON, make_p2_org, fake_member_context, fake_provider, missing_provider
 
 
 @override_settings(ARTICLES_REGISTRY_REFUNDS_ENABLED=True)
@@ -342,6 +342,27 @@ class ProfileIdempotencyTests(TestCase):
 
 class ConcurrencyTests(TransactionTestCase):
     """PostgreSQL proves row locking and actual duplicate request exclusion."""
+    @override_settings(**ALL_FLAGS_ON)
+    def test_actual_repin_accepts_before_and_after_snapshots_and_refuses_foreign_sha(self):
+        from .tests.test_p2_authority_repin import SourceRepinTests
+        fixture = SourceRepinTests("test_success_and_replay_leave_timestamp_content_and_ledger_unchanged")
+        fixture.setUp()
+        self.addCleanup(fixture.doCleanups)
+        self.assertEqual(fixture.apply()["status"], "repinned")
+        fixture.run.refresh_from_db()
+        for sha in ("a"*40, "b"*40):
+            run, _ = service_views._sync_content_factory_run_snapshot(run_id=fixture.run.run_id,
+                data={"workflow": fixture.run.workflow, "domain": fixture.run.domain,
+                      "github_repo": fixture.run.github_repo, "status": "running",
+                      "run_request": {**fixture.request, "expected_source_sha": sha}, "result": {}}, step_states={})
+            self.assertEqual(run.run_request["expected_source_sha"], "b"*40)
+            self.assertEqual(run.result["re_pin_v1"]["last_to_sha"], "b"*40)
+        with self.assertRaises(EditorialRunConflict):
+            service_views._sync_content_factory_run_snapshot(run_id=fixture.run.run_id,
+                data={"workflow": fixture.run.workflow, "domain": fixture.run.domain,
+                      "github_repo": fixture.run.github_repo, "status": "running",
+                      "run_request": {**fixture.request, "expected_source_sha": "c"*40}, "result": {}}, step_states={})
+
     @override_settings(ARTICLES_REGISTRY_REFUNDS_ENABLED=True)
     def test_two_terminal_threads_refund_one_original_charge(self):
         from django.db import connection, close_old_connections
