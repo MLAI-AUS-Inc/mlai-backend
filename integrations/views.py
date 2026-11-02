@@ -535,7 +535,8 @@ def github_callback(request):
     # missing or non-chat state, a valid legacy Chat state), which keeps
     # today's responses below byte for byte.
     from integrations.services import github_callback_reasons
-    flow = github_callback_reasons.begin_callback(request)
+    from content_factory.staff_alert_rules import begin_github_callback
+    flow = begin_github_callback(github_callback_reasons, request)
     if flow is not None and flow.response is not None:
         return flow.response
 
