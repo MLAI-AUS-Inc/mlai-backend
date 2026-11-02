@@ -3754,6 +3754,8 @@ class ContentFactoryCallbackView(APIView):
     parser_classes = DELIVERY_PARSERS
 
     def post(self, request):
+        if isinstance(request.data, dict) and request.data.get("event") == "run_events_v2":
+            return self._post_admitted_events(request.data)
         from .setup_delivery_receiver import is_setup_delivery, receive_setup_delivery
         if not isinstance(request.data, dict) or is_setup_delivery(request.data):
             return receive_setup_delivery(request.data, expected_kind="setup_callback")
@@ -3764,6 +3766,42 @@ class ContentFactoryCallbackView(APIView):
             # checks the run's saved binding instead of the config-write fence.
             return receive_run_events(request.data)
         return self._post_legacy(request)
+
+    def _post_admitted_events(self, data):
+        """Validate the complete batch before binding its existing admission."""
+        from .run_event_authority import (
+            RunEventInvalid, receive_authoritative_run_events, validate_authoritative_envelope,
+        )
+        from .run_ownership import (
+            RunOwnershipConflict, admitted_run_for_key, bind_admitted_run,
+            current_execution_ticket, require_event_execution, require_event_identity,
+        )
+        try:
+            batch = validate_authoritative_envelope(data)
+        except RunEventInvalid:
+            return Response({"error": "run_event_invalid", "retryable": False}, status=400)
+        try:
+            with transaction.atomic():
+                run = admitted_run_for_key(batch.admission["dispatch_key"], lock=True)
+                if run is None:
+                    return Response({"error": "run_admission_unavailable", "retryable": True}, status=409)
+                require_event_identity(run, data)
+                require_event_execution(run, data, generation=batch.execution["generation"])
+                current = current_execution_ticket(run)
+                if batch.execution["execution_id"] == current["execution_id"]:
+                    bind_admitted_run(run, batch.run_id)
+                elif run.run_id != batch.run_id:
+                    # A retained old ticket may append history only to its
+                    # already bound canonical Run; it cannot claim an alias.
+                    raise RunOwnershipConflict("A retained execution cannot bind a worker identity.")
+                response = receive_authoritative_run_events(data)
+                if not 200 <= response.status_code < 300:
+                    # A digest/ledger conflict must also roll back the earlier
+                    # callback-first binding and provisional transport release.
+                    transaction.set_rollback(True)
+                return response
+        except RunOwnershipConflict:
+            return Response({"error": "run_admission_mismatch", "retryable": False}, status=409)
 
     @guarded_service_write("config_write", only_repository=True, portable=True)
     def _post_legacy(self, request):
