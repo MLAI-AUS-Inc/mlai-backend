@@ -317,6 +317,12 @@ def _persist_prepare(op, *, now):
     from .website_operational_alerts import budget_alert, stall_alert
     from .website_operational_alert_delivery import reserve as reserve_operational_alert
     notify = enabled(op.connection) and owns_goal(op)
+    try:
+        from .founder_transitions import owns_notifications
+    except (ImportError, AttributeError):
+        owns_notifications = None
+    if owns_notifications is not None and owns_notifications(getattr(op.connection, "organization", None)):
+        notify = False
     refund = op.state in REFUND_TERMINAL and bool(op.receipt.get("first_article_billing"))
     accounting = bool(pending_for(op))
     incidents = [item for item in (budget_alert(op, now=now), stall_alert(op, now=now)) if item is not None]
@@ -336,6 +342,16 @@ def _persist_prepare(op, *, now):
 
 
 def _persist_prepare_state(op, *, now):
+    # Registry-derived actions on prepare receipts retain today's wire ids
+    # until the canonical-id rollout; legacy/P2-off receipts stay identical.
+    from .p2_foundation import policy_v2_applies
+    if policy_v2_applies(getattr(op.connection, "organization", None)):
+        from .registry_policy import effective_entry, wire_action_id
+        code = op.receipt.get("reason_code") or op.receipt.get("error_code")
+        entry = effective_entry(code, op.connection.organization)
+        action = op.receipt.get("user_action")
+        if entry and isinstance(action, dict) and entry.get("action_id"):
+            op.receipt = {**op.receipt, "user_action": {**action, "id": wire_action_id(entry["action_id"])}}
     from .website_goal_audit import enabled, preserve_during_prepare_write
     if enabled(op.connection.organization_id):
         return preserve_during_prepare_write(op, lambda: _persist_prepare_claim(op, now=now))
@@ -1302,6 +1318,9 @@ def maybe_merge_prepared_setup(run, context, config, *, user, goal=None):
             return {"status": "needs_user", "message": "Your change is waiting on GitHub. Approve it on GitHub when you're ready.",
                 "user_action": action}
         return publish
+    from .p2_foundation import run_merge_policy, BACKEND_WORKER
+    if run_merge_policy(run) == BACKEND_WORKER:
+        return {"status": "pending"}
     outcome = _attempt_setup_publish_merge(run=run, context=context, automatic=True)
     kind = outcome.get("outcome")
     if kind in {"merged", "waiting", "auto_merge_pending"}:

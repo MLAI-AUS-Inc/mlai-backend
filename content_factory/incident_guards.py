@@ -106,6 +106,9 @@ def safe_template_seed(body):
 def delivered_content(run):
     """Conservatively detect persisted delivery before granting no-value refunds."""
     result = getattr(run, "result", None) or {}
+    from django.conf import settings
+    if getattr(settings, "ARTICLES_REGISTRY_REFUNDS_ENABLED", False) and result.get("draft_ready_v1"):
+        return True
     acceptance = getattr(run, "acceptance_summary", None) or {}
     package = result.get("content_package") or result.get("contentPackage") or {}
     package = package if isinstance(package, dict) else {}

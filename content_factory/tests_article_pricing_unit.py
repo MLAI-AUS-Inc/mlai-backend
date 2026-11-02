@@ -366,6 +366,12 @@ class ArticleAdmissionQuoteTests(SimpleTestCase):
                 self.assertIsNone(self.charge_request({name: 12})[3])
         self.ledgers.assert_not_called()
 
+    def test_cheaper_current_price_is_accepted_within_confirmed_ceiling(self):
+        for name in ("expectedCostPoints", "expected_cost_points"):
+            with self.subTest(name=name):
+                self.assertIsNone(self.charge_request({name: 18})[3])
+        self.charge.assert_called()
+
     def test_research_keeps_omitted_quote_compatibility(self):
         self.assertIsNone(views._quoted_price_response(Obj(data={}), cost_points=3))
 

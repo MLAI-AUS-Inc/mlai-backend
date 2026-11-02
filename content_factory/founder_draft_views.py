@@ -203,7 +203,8 @@ def founder_draft_review(*, context, run, user):
     if organization is None or not cohort.is_new_journey(organization):
         return {}, None
     config = _config(organization)
-    copy_while_pending = copy_without_preview_enabled() and is_content_only(run)
+    from .founder_journey_p2 import ready_before_preview
+    copy_while_pending = copy_without_preview_enabled() and (is_content_only(run) or ready_before_preview(run, organization))
     record = posted_record(config, run.run_id)
     profile = _site_profile(config)
     blog_url = public_export_url(profile.get("blogUrl")) or None
@@ -317,6 +318,11 @@ class FounderDraftCopiedView(_FounderDraftToolView):
         at = timezone.now().isoformat()
         record = _store(context.organization, run.run_id, {"copiedAt": at, "copiedRevision": revision})
         logger.info("founder_draft_copied org=%s run=%s", context.organization.pk, run.run_id)
+        from .founder_funnel import emit_event
+        from .founder_funnel_events import after_commit
+        after_commit(lambda: emit_event('copied', user_id=request.user.pk, organization_id=context.organization.pk,
+                   run_id=run.run_id, at=at, signed_up_at=request.user.date_joined,
+                   source='article.copy_receipt'), using='default')
         return Response({"copied": _copied(record)}, headers={"Cache-Control": "private, no-store"})
 
 

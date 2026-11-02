@@ -22,6 +22,8 @@ The Run's domain and slack_user_id can differ from the old Job's. Preserve legac
 
 Do not create live or awaiting Runs from old Jobs. A newly runnable record can be picked up by reconciliation or shown to a founder. For finished Jobs, establish canonical execution identity, current ownership, purge history, billing settlement and article references before allowing creation. A current organisation alone does not prove that its old marketing data was not purged.
 
+Historical `--create` accepts only the explicit phases `pr_opened`, `needs_review`, `confirmed`, `cancelled`, `completed`, `error`, `failed` and `denied`. It excludes `blocked`, `auth_required`, all awaiting phases and unreviewed wire aliases. The shared lifecycle contract still classifies blocked work as stopped; that does not grant permission to recreate it. `create_skipped_live` includes all phases outside this history allowlist. Filling facts on an existing blocked Run remains supported and does not change its lifecycle.
+
 Preserve ledger and article references. Never delete a charged Job or recreate purged content just to make the parity check pass. The current creation command lacks an organisation allowlist/purge exclusion, so it is not suitable for blanket repair of a mixed historical population.
 
 ## Rollback

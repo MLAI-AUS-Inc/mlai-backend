@@ -804,7 +804,9 @@ def _quoted_price_response(request, *, cost_points, require_quote=False):
     expected = _request_value(request.data, "expectedCostPoints", "expected_cost_points", default=None)
     if expected is None and not require_quote:
         return None  # Research and verified original-paid retries retain compatibility.
-    if isinstance(expected, bool) or not isinstance(expected, int) or expected != cost_points:
+    # A confirmed quote is a spending ceiling. A cheaper current price needs
+    # no second confirmation; a higher one must be reviewed before admission.
+    if isinstance(expected, bool) or not isinstance(expected, int) or expected < cost_points:
         return Response({"detail": "The Roo point price changed. Review the updated price before continuing.",
                          "code": "roo_points_quote_changed", "costPoints": cost_points}, status=409)
     return None
@@ -7046,6 +7048,9 @@ def _setup_pr_changes_outcome(*, run, context, config, pull, pr_number, checks, 
 
 
 def _attempt_setup_publish_merge(*, run, context, automatic=False):
+    from .p2_foundation import run_merge_policy, BACKEND_WORKER
+    if run_merge_policy(run) == BACKEND_WORKER:
+        return {"outcome": "waiting", "detail": "Waiting for the publication worker.", "run": run, "checks": {}}
     outcome = _attempt_setup_publish_merge_authorized(run=run, context=context, automatic=automatic)
     if outcome.get("outcome") == "merged":
         outcome["run"] = _maybe_verify_merged_setup_for_blocked_articles(run=outcome["run"], context=context)
@@ -7573,6 +7578,9 @@ def _check_and_merge_publish_pr(*, run, context):
     {"outcome": "merged" | "already_merged" | "pending" | "no_repo" | "no_pr"
     | "error", "detail": str, "checks": dict}.
     """
+    from .p2_foundation import run_merge_policy, BACKEND_WORKER
+    if run_merge_policy(run) == BACKEND_WORKER:
+        return {"outcome": "pending", "detail": "Waiting for the publication worker.", "checks": {"state": "pending"}}
     config = _get_config(context.organization)
     blocked = _setup_blocked_response_for_generation(context, config, run=run, publishing=True)
     if blocked is not None:
@@ -8845,9 +8853,10 @@ DJANGO_OWNED_ARTICLE_RESULT_PREFIXES = (
 
 def _merge_django_owned_article_result(local_result, remote_result):
     from content_factory.article_publication_evidence import SETTLEMENT_RESULT_KEYS
+    from .p2_foundation import P2_BACKEND_RESULT_KEYS
     local = _run_mapping(local_result)
     # A status poll of a failed run must not erase, or invent, its refund work.
-    backend_merge_keys = {"publish_merge_intent", "merge_response", "merge_status", "merge_sha", "merged_at", *SETTLEMENT_RESULT_KEYS}
+    backend_merge_keys = {"publish_merge_intent", "merge_response", "merge_status", "merge_sha", "merged_at", *SETTLEMENT_RESULT_KEYS, *P2_BACKEND_RESULT_KEYS}
     merged = {key: value for key, value in _run_mapping(remote_result).items()
         if key not in backend_merge_keys or key in local}
     remote_quality = _run_mapping(merged.get("article_preview_quality"))
@@ -9036,6 +9045,16 @@ def _hide_kept_draft_sibling(sibling, *, now):
 def _run_delivery_mode(run):
     run_request = _run_mapping(run.run_request)
     result = _run_mapping(run.result)
+    channel = _run_mapping(result.get("channel_v1"))
+    converted = _run_mapping(result.get("channel_switch_cf_v1"))
+    package = _run_mapping(result.get("content_package") or result.get("delivery_package"))
+    if (channel.get("version") == 1 and channel.get("channel") == "copy_ready"
+            and channel.get("dispatch_state") == "accepted"
+            and converted.get("version") == 1 and converted.get("run_id") == run.run_id
+            and converted.get("key") == run.run_id + ":copy-ready"
+            and converted.get("state") == "completed" and converted.get("delivery_mode") == "content_only"
+            and (package.get("article_markdown") or package.get("article_html") or result.get("delivery_package_path"))):
+        return "content_only"
     return str(
         run_request.get("resolved_delivery_mode")
         or run_request.get("delivery_mode")
@@ -9629,6 +9648,9 @@ def _maybe_auto_merge_publish_child(*, child, viewed_run, context):
     Throttled via the cache so concurrent tabs and fast polls don't hammer the
     GitHub API. A blocked state (failed checks, closed PR, or timeout) halts
     automatic attempts until the manual merge action clears it."""
+    from .p2_foundation import run_merge_policy, BACKEND_WORKER
+    if child is not None and run_merge_policy(child) == BACKEND_WORKER:
+        return None
     if not child or child.workflow not in ARTICLE_WORKFLOWS:
         return None
     child_result = _run_mapping(child.result)
@@ -11912,6 +11934,8 @@ def _serialize_run(
     from content_factory.run_state import reliability_presentation
     from content_factory.run_queue_position import queue_position_payload
     result = _run_mapping(run.result)
+    from .publish_merge_worker import run_fields
+    p2_fields = run_fields(run, organization=getattr(context, "organization", None) or getattr(run, "organization", None))
     section_issues = public_section_issues(_nested_run_result_value(result, "section_issues", "sectionIssues"))
     raw_quality = _nested_run_result_value(result, "article_preview_quality", "articlePreviewQuality")
     needs_hosted_issues = _run_mapping(raw_quality).get("status") == "blocking_findings"
@@ -11971,6 +11995,7 @@ def _serialize_run(
     if compact:
         return {
             "runId": run.run_id,
+            **p2_fields,
             **billing_receipt,
             **connection_contract(run.run_request or {}),
             "editorialSnapshot": editorial_snapshot,
@@ -12049,6 +12074,7 @@ def _serialize_run(
     ) if run.workflow in ARTICLE_WORKFLOWS else result
     return {
         "runId": run.run_id,
+        **p2_fields,
         **billing_receipt,
             **connection_contract(run.run_request or {}),
             "editorialSnapshot": editorial_snapshot,
@@ -12554,6 +12580,13 @@ def _bootstrap_workflow_run_ref(serialized_run):
     return {key: serialized_run.get(key) for key in _BOOTSTRAP_WORKFLOW_RUN_FIELDS}
 
 
+def _article_improvements_payload(context, request=None):
+    """The optional checklist is a safe projection, never an admission decision."""
+    from .founder_improvements import summary
+    receipt = summary(context.organization, user=getattr(request, "user", None))
+    return {"articleImprovements": receipt} if receipt is not None else {}
+
+
 def _compute_bootstrap_payload(context, request=None, *, view="summary", config=None, latest_runs=None, defer_workflow_progress=False):
     compact = view == "summary"
     if config is None:
@@ -12683,6 +12716,7 @@ def _compute_bootstrap_payload(context, request=None, *, view="summary", config=
             "articleVoice": article_voice_payload(getattr(config, "pillar_strategy", None)),
         },
         "startupProfile": _serialize_startup_profile(context.organization),
+        **_article_improvements_payload(context, request),
         "websiteBaseline": _serialize_baseline_snapshot(baseline_snapshot, config, compact=compact),
         "googleBaselineConnection": google_status,
         "checks": checks,
@@ -14706,6 +14740,9 @@ def _resolve_dispatch_token_run(run):
 
 
 def _queue_content_factory_run(*, endpoint, workflow, context, config, payload, billing_refund_context=None):
+    from .p2_foundation import stamp_run_request
+    stamp_run_request(payload, organization=context.organization,
+        requester_user_id=getattr(getattr(getattr(context, "profile", None), "user", None), "pk", None))
     if payload.get("delivery_mode") == "content_only":
         # Portable editorial work has no repository authority, even when the
         # company retains a disconnected repository in its settings.
@@ -14757,6 +14794,7 @@ def _queue_content_factory_run_authorized(*, endpoint, workflow, context, config
         payload["client_request_id"] = dispatch_key
     keyed_dispatch = endpoint in CONTENT_FACTORY_KEYED_DISPATCH_ENDPOINTS
     dispatch_unresolved = False
+    confirmed_dispatch_outcome = None
     portable_reservation = None
     editorial_rejection = None
     requires_remote = workflow == "startup_autofill" or _remote_required_for_workflow(workflow)
@@ -14874,7 +14912,14 @@ def _queue_content_factory_run_authorized(*, endpoint, workflow, context, config
                 dispatch_key,
             )
         elif response is not None and response.status_code in (200, 202):
-            remote_data = response.json() if response.content else {}
+            try:
+                accepted_payload = response.json() if response.content else {}
+            except (TypeError, ValueError):
+                if not (requires_remote and keyed_dispatch):
+                    raise
+                accepted_payload = {}
+            remote_data = (accepted_payload if isinstance(accepted_payload, dict)
+                or not (requires_remote and keyed_dispatch) else {})
             run_id = str(remote_data.get("run_id") or remote_data.get("job_id") or remote_data.get("task_id") or "").strip()
             remote_run_id = run_id
             logger.info(
@@ -14886,15 +14931,71 @@ def _queue_content_factory_run_authorized(*, endpoint, workflow, context, config
                 bool(remote_data.get("idempotent")) if isinstance(remote_data, dict) else False,
             )
             if requires_remote and not run_id:
-                remote_data = _blocked_worker_payload(
-                    workflow=workflow,
-                    detail="Content Factory did not return a run id.",
-                    technical_error="Content Factory queue response did not include run_id, job_id, or task_id.",
-                    status_code=response.status_code,
-                    response_payload=remote_data,
-                    diagnostics=_content_factory_diagnostics(remote_config, workflow=workflow, endpoint=endpoint),
-                    retryable=True,
-                )
+                # An accepted response without its identity is still an uncertain
+                # dispatch. Resolve the original key; never manufacture a child
+                # or treat a missing field as proof that no work was accepted.
+                outcome, lookup_payload = ("unknown", {})
+                if keyed_dispatch:
+                    outcome, lookup_payload = _lookup_content_factory_dispatch_by_key(remote_config, dispatch_key)
+                    expected_receipt = {"client_request_id": dispatch_key, "domain": context.organization.domain,
+                        "workflow": workflow, "endpoint": endpoint}
+                    if any(lookup_payload.get(field) is not None and lookup_payload[field] != expected
+                            for field, expected in expected_receipt.items()):
+                        outcome = "unknown"
+                if outcome == "started":
+                    observed_id = str(lookup_payload["run_id"]).strip()
+                    provisional = ContentFactoryRun.objects.filter(run_id=dispatch_key).first()
+                    observed = ContentFactoryRun.objects.filter(run_id=observed_id).first()
+                    local_rows = [row for row in (provisional, observed) if row is not None]
+                    if any((row.organization_id is not None and row.organization_id != context.organization.pk)
+                            or (row.domain and row.domain != context.organization.domain)
+                            or (row.workflow and row.workflow != workflow)
+                            or (isinstance(row.run_request, dict) and row.run_request.get("client_request_id")
+                                and row.run_request["client_request_id"] != dispatch_key) for row in local_rows):
+                        outcome = "unknown"
+                    else:
+                        bound = bind_dispatch_token_run(client_request_id=dispatch_key, remote_run_id=observed_id)
+                        if provisional is not None and observed_id != dispatch_key and bound is None:
+                            # A concurrent authenticated callback can win the bind.
+                            bound = ContentFactoryRun.objects.filter(run_id=observed_id,
+                                organization=context.organization, domain=context.organization.domain,
+                                workflow=workflow, run_request__client_request_id=dispatch_key).first()
+                            if bound is None:
+                                outcome = "unknown"
+                        if outcome == "started":
+                            acknowledged = bound or observed
+                            if acknowledged is not None:
+                                with transaction.atomic():
+                                    acknowledged = ContentFactoryRun.objects.select_for_update().get(pk=acknowledged.pk)
+                                    request = dict(acknowledged.run_request or {})
+                                    if request.get("client_request_id") == dispatch_key:
+                                        request.pop("dispatch_pending_resolution", None)
+                                        ContentFactoryRun.objects.filter(pk=acknowledged.pk).update(run_request=request)
+                if outcome == "started":
+                    remote_run_id = str(lookup_payload["run_id"]).strip()
+                    remote_data = {"run_id": remote_run_id,
+                        "status": lookup_payload.get("run_status") or lookup_payload.get("status") or "queued",
+                        "client_request_id": dispatch_key, "dispatch_recovered_by_key": True}
+                    payload.pop("dispatch_pending_resolution", None)
+                else:
+                    remote_data = _blocked_worker_payload(
+                        workflow=workflow,
+                        detail="Content Factory did not return a run id.",
+                        technical_error="Content Factory queue response did not include run_id, job_id, or task_id.",
+                        status_code=response.status_code,
+                        response_payload=remote_data,
+                        diagnostics=_content_factory_diagnostics(remote_config, workflow=workflow, endpoint=endpoint),
+                        retryable=True,
+                    )
+                    if outcome in {"received_not_started", "rejected"}:
+                        # Keep legacy receipt vocabulary in its existing audited
+                        # writer, after the ordinary local/refund transaction.
+                        confirmed_dispatch_outcome = (outcome, lookup_payload)
+                        payload["dispatch_pending_resolution"] = False
+                    else:
+                        # Immediate absence can race an in-flight accepted POST;
+                        # the existing keyed grace resolver owns later no-work proof.
+                        dispatch_unresolved = keyed_dispatch
         elif response is not None:
             try:
                 response_payload = response.json()
@@ -15065,7 +15166,10 @@ def _queue_content_factory_run_authorized(*, endpoint, workflow, context, config
                 run.result = {**(run.result or {}), "reconciliation_refund_pending": True}
                 run.save(update_fields=["result", "updated_at"])
                 logger.warning("content_factory_late_dispatch_refund_pending run_id=%s", run.run_id)
-        return run
+    if confirmed_dispatch_outcome is not None:
+        outcome, lookup_payload = confirmed_dispatch_outcome
+        return _fail_unconfirmed_dispatch_run(run, outcome=outcome, lookup_payload=lookup_payload)
+    return run
 
 
 def _run_start_payload(run):
@@ -15136,6 +15240,7 @@ def _call_content_factory_run_action(
     workflow="article_generation",
     timeout=(3, 15),
     transport_errors_are_pending=False,
+    preserve_run_clock=False,
 ):
     require_unlocked_remote_call()
     if action not in {"cancel", "deny"}:
@@ -15147,7 +15252,8 @@ def _call_content_factory_run_action(
                 saved = scoped_run_contract(scoped_run)
                 if action == "resume":
                     from .website_operations import advance_workflow_attempt
-                    payload.update(advance_workflow_attempt(scoped_run))
+                    payload.update(advance_workflow_attempt(scoped_run, preserve_run_clock=True)
+                        if preserve_run_clock else advance_workflow_attempt(scoped_run))
                     saved = scoped_run_contract(scoped_run)
                 from .website_connections import run_action_authority
                 operation = run_action_authority(scoped_run, action)
@@ -15930,16 +16036,23 @@ class VibeMarketingCompanyAvatarView(APIView):
 
 
 class VibeMarketingAuthorPhotoPreviewView(APIView):
-    """Preview a pasted author photo link as a ``data:`` URL; saving the profile stores the copy."""
+    """Preview a pasted photo or store a scoped image upload for a Founder profile."""
 
     def post(self, request):
         from content_factory.author_photos import AuthorPhotoError, needs_copy, preview_photo
 
         if not _company_id_from_request(request):
             return Response({"detail": "Choose a startup.", "field": "companyId"}, status=400)
-        _profile, _company, error = _resolve_profile_company_or_response(request)
+        _profile, company, error = _resolve_profile_company_or_response(request)
         if error:
             return error
+        uploaded = getattr(request, "FILES", {}).get("photo")
+        if uploaded is not None:
+            from content_factory.author_photos import upload_photo
+            try:
+                return Response({"photoUrl": upload_photo(uploaded, company_id=company.pk)}, status=200)
+            except AuthorPhotoError as exc:
+                return Response({"detail": str(exc), "code": exc.code}, status=exc.status)
         url = str(request.data.get("url") or "").strip()
         if len(url) > 2048 or not needs_copy(url):
             return Response({"detail": "Use a full https:// link to the photo.",
@@ -16528,7 +16641,17 @@ def _domain_claimed_response(request, exc):
     domain_claim_disputed alert is kept. The body never names the owner.
     """
     queue_domain_claim_alert(organization=exc.organization, claimant_user_id=request.user.id)
-    return exc.response()
+    response = exc.response()
+    if str(getattr(request, "path", "")).startswith("/api/v1/my-startup/"):
+        try:
+            from founder_tools.startup_team import issue_join_reference
+        except (ImportError, AttributeError):
+            issue_join_reference = None
+        if issue_join_reference is not None:
+            reference = issue_join_reference(user=request.user, organization=exc.organization)
+            if reference:
+                response.data = {**response.data, "joinReference": reference}
+    return response
 
 
 class VibeMarketingAutofillView(APIView):
@@ -16845,50 +16968,79 @@ def _baseline_published_articles(organization, *, limit=8):
     return articles
 
 
+def _website_baseline_payload(*, context, config, user):
+    """Build the same scoped, free-check inputs for manual and scheduled starts."""
+    return {
+        "domain": context.organization.domain,
+        "company_name": context.company.name,
+        "brand_name": config.brand_name or context.organization.name,
+        "seed_keywords": list(context.organization.seed_keywords or []),
+        "competitors": list(context.organization.competitors or []),
+        "published_articles": _baseline_published_articles(context.organization),
+        "slack_user_id": founder_actor_id_for_user(user),
+        "requested_by_slack_user_id": founder_actor_id_for_user(user),
+        "request_source": CONTENT_FACTORY_REQUEST_SOURCE,
+    }
+
+
+def _start_website_baseline(*, context, config, user, payload=None, background_reserved=False):
+    """Start one check; only the internal scheduler may supply a reserved free envelope.
+
+    The manual path retains its funds-floor/free-cap behavior. Background work
+    requires the live free action and a durable scheduler reservation, never a
+    paid fallback or a body-supplied bypass.
+    """
+    free_reservation = None
+    if background_reserved:
+        from content_factory.billing import free_setup_actions
+        if 'website_baseline' not in free_setup_actions() or not isinstance(payload, dict):
+            raise ValueError('A free website check reservation is required.')
+        if (payload.get('domain') != context.organization.domain
+                or payload.get('slack_user_id') != founder_actor_id_for_user(user)
+                or not payload.get('client_request_id')):
+            raise ValueError('The website check owner or domain changed.')
+        gate_balance = None
+        payload = copy.deepcopy(payload)
+    else:
+        gate_response, gate_balance = _require_roo_points_for_ai_agent(user,
+            domain=context.organization.domain, action='website_baseline')
+        if gate_response is not None:
+            return None, gate_response
+        payload = _website_baseline_payload(context=context, config=config, user=user)
+        payload['client_request_id'] = _mint_dispatch_client_request_id('website_baseline')
+        from content_factory.billing import free_setup_actions, reserve_free_setup_use
+        if (gate_balance is None and 'website_baseline' in free_setup_actions()
+                and get_content_factory_ai_agent_required_points(context.organization.domain) > 0):
+            free_reservation = reserve_free_setup_use(user, 'website_baseline', payload['client_request_id'])
+        config.baseline_skipped_at = None
+        config.baseline_skip_reason = ''
+        config.save(update_fields=['baseline_skipped_at', 'baseline_skip_reason', 'updated_at'])
+        _mark_roo_points_gate_authorized(payload, domain=context.organization.domain,
+            action='website_baseline', current_balance=gate_balance)
+    run = _queue_content_factory_run(endpoint='baseline', workflow='website_baseline',
+        context=context, config=config, payload=payload)
+    run_request = getattr(run, 'run_request', None)
+    if (free_reservation is not None and run.status in FAILED_RUN_STATUSES
+            and not (run_request if isinstance(run_request, dict) else {}).get('dispatch_pending_resolution')):
+        from content_factory.billing import release_free_setup_use
+        release_free_setup_use(user, 'website_baseline', free_reservation)
+    elif not background_reserved and free_reservation is None:
+        _record_free_setup_research(user, action='website_baseline', gate_balance=gate_balance, run=run)
+    if run.status == ContentFactoryRunStatus.COMPLETED:
+        _persist_baseline_snapshot_from_payload(organization=context.organization, run=run)
+    return run, None
+
+
 class VibeMarketingBaselineView(APIView):
     def post(self, request):
         context, error_response = _resolve_context_or_response(request)
         if error_response:
             return error_response
-        config = _get_config(context.organization)
-        gate_response, gate_balance = _require_roo_points_for_ai_agent(
-            request.user,
-            domain=context.organization.domain,
-            action="website_baseline",
-        )
-        if gate_response is not None:
-            return gate_response
-        config.baseline_skipped_at = None
-        config.baseline_skip_reason = ""
-        config.save(update_fields=["baseline_skipped_at", "baseline_skip_reason", "updated_at"])
-        payload = {
-            "domain": context.organization.domain,
-            "company_name": context.company.name,
-            "brand_name": config.brand_name or context.organization.name,
-            "seed_keywords": list(context.organization.seed_keywords or []),
-            "competitors": list(context.organization.competitors or []),
-            "published_articles": _baseline_published_articles(context.organization),
-            "slack_user_id": founder_actor_id_for_user(request.user),
-            "requested_by_slack_user_id": founder_actor_id_for_user(request.user),
-            "request_source": CONTENT_FACTORY_REQUEST_SOURCE,
-        }
-        _mark_roo_points_gate_authorized(
-            payload,
-            domain=context.organization.domain,
-            action="website_baseline",
-            current_balance=gate_balance,
-        )
-        run = _queue_content_factory_run(
-            endpoint="baseline",
-            workflow="website_baseline",
-            context=context,
-            config=config,
-            payload=payload,
-        )
-        _record_free_setup_research(request.user, action="website_baseline", gate_balance=gate_balance, run=run)
-        if run.status == ContentFactoryRunStatus.COMPLETED:
-            _persist_baseline_snapshot_from_payload(organization=context.organization, run=run)
-        return Response({"run_id": run.run_id, "runId": run.run_id, "status": run.status}, status=status.HTTP_202_ACCEPTED)
+        run, error_response = _start_website_baseline(context=context,
+            config=_get_config(context.organization), user=request.user)
+        if error_response is not None:
+            return error_response
+        return Response({'run_id': run.run_id, 'runId': run.run_id, 'status': run.status}, status=status.HTTP_202_ACCEPTED)
 
 
 class VibeMarketingBaselineSkipView(APIView):
@@ -17937,6 +18089,12 @@ def start_article_generation(*, user, context, data, request_hash=None, website_
     command = ContentCommand(user=user, data=data)
     config = _get_config(context.organization)
     from .portable_drafts import copy_ready_request, has_connected_website, keeps_copy_ready_start, requests_content_only
+    try:
+        from .channel_switch import article_start_delivery_mode
+    except (ImportError, AttributeError):
+        article_start_delivery_mode = None
+    if article_start_delivery_mode is not None and article_start_delivery_mode(organization=context.organization, request=dict(command.data)) == "content_only":
+        command = ContentCommand(user=command.user, data=copy_ready_request(command.data))
     if requests_content_only(command.data) and has_connected_website(config):
         # P1.8 (IF-P1-10): a new-journey article started before the website
         # verifies (or before the owner chose "Publish automatically") stays
@@ -19564,6 +19722,21 @@ def control_article_run(*, user, context, run, action, data, run_id=None, goal_o
             return Response(exc.as_dict(),status=exc.status)
     command = ContentCommand(user=user, data=data)
     run_id = run_id or run.run_id
+    from .p2_foundation import run_merge_policy, BACKEND_WORKER
+    owned_kind = _run_mapping(_run_mapping(getattr(run, "result", None)).get("publish_pr_v1")).get("kind") if action == "approve" else None
+    if action == "approve" and owned_kind in {"proxy", "scaffold"} and run_merge_policy(run) == BACKEND_WORKER:
+        # A completed proxy/scaffold has no article approval pipeline. This
+        # owner click records consent; the sweep owns its only merge path.
+        from founder_tools.services import user_may_use_organization
+        if not user_may_use_organization(command.user, context.organization):
+            return Response({"detail": "Only your startup's owner can add this to your website.", "reason": "owner_required"}, status=403)
+        from .publish_merge_worker import record_owner_approval
+        choice = "manual" if command.data.get("merge") == "manual" else "auto"
+        if not record_owner_approval(run=run, organization=context.organization, user=command.user, choice=choice):
+            return Response({"detail": "The website setup changed. Review its current preview.", "reason": "publish_receipt_changed"}, status=409)
+        from .website_setup_owner_approval import on_owner_setup_approve
+        on_owner_setup_approve(organization=context.organization, user=command.user, run=run, data=command.data)
+        return Response(_serialize_run(run, context=context), status=202)
     gated_actions = {"restart", "resume", "revise", "regenerate-image", "regenerate-images", "retry-preview-quality", "promote-bundle", "publish-pr", "approve", "merge-publish-pr"}
     if action in gated_actions and run.workflow in ARTICLE_WORKFLOWS | {"article_publish", "publish_article"}:
         blocked = _setup_blocked_response_for_generation(context, _get_config(context.organization), run=run,

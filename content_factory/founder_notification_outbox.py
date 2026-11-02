@@ -84,6 +84,9 @@ def can_notify(organization, user) -> bool:
     The flag is on, the organisation is new-journey, Resend is configured and
     the user has an email. be-journey reports it as ``draftReadyNotifications``.
     """
+    from .founder_journey_p2 import recipient_checks_enabled, verified_email
+    if recipient_checks_enabled(organization) and not verified_email(user):
+        return False
     return bool(enabled() and organization is not None and cohort.is_new_journey(organization)
                 and str(getattr(settings, "RESEND_API_KEY", "") or "")
                 and str(getattr(user, "email", "") or "").strip())
@@ -145,7 +148,8 @@ def _draft_deleted(run) -> bool:
 
 
 def _announceable(run, now) -> bool:
-    return (run.workflow in ANNOUNCED_WORKFLOWS and run.status in READY_STATUSES
+    from .founder_journey_p2 import ready_before_preview
+    return (run.workflow in ANNOUNCED_WORKFLOWS and (run.status in READY_STATUSES or ready_before_preview(run))
             and run.created_at is not None and run.created_at >= now - READY_WINDOW and not _draft_deleted(run))
 
 
@@ -176,7 +180,8 @@ def enqueue_ready_drafts(now=None) -> dict:
         return {"status": "disabled"}
     now = now or timezone.now()
     runs = list(ContentFactoryRun.objects.select_related("organization")
-                .filter(workflow__in=ANNOUNCED_WORKFLOWS, status__in=READY_STATUSES,
+                .filter(Q(status__in=READY_STATUSES) | Q(result__draft_ready_v1__version=1))
+                .filter(workflow__in=ANNOUNCED_WORKFLOWS,
                         created_at__gte=now - READY_WINDOW, organization__isnull=False)
                 .order_by("-created_at")[:ENQUEUE_LIMIT])
     configs, wanted = {}, []
@@ -227,6 +232,12 @@ def recipient(run, organization):
     if isinstance(requested, int) and not isinstance(requested, bool) or str(requested or "").isdigit():
         candidates.append(int(requested))
     owner_id = organization_owner_user_id(organization)
+    from .founder_journey_p2 import recipient_checks_enabled
+    if recipient_checks_enabled(organization):
+        from .founder_transitions import resolve_recipients, _company
+        wanted = int(requested) if str(requested or "").isdigit() and not isinstance(requested, bool) else owner_id
+        current = next((user for user in resolve_recipients(organization, item="article:" + run.run_id, ask="review_draft") if user.pk == wanted), None)
+        return (current, _company(organization)) if current else (None, None)
     if owner_id is not None:
         candidates.append(owner_id)
     for user_id in dict.fromkeys(candidates):
@@ -309,16 +320,29 @@ def _send(row, run, organization, user, company):
     from . import website_notification_transport as transport
     link = draft_link(run.run_id, company.pk)
     if _channel_of(row) == "email":
+        from .founder_journey_p2 import recipient_checks_enabled, verified_email
+        if recipient_checks_enabled(organization) and not verified_email(user):
+            return "skipped"
         email = str(getattr(user, "email", "") or "").strip()
         if not email:
             return "skipped"
-        post_email(email_payload(email, link), run.run_id)
+        payload = email_payload(email, link)
+        if recipient_checks_enabled(organization):
+            current, _company = recipient(run, organization)
+            if current is None or current.pk != user.pk or not verified_email(current) or current.email != email:
+                return "skipped"
+        post_email(payload, run.run_id)
         return "sent"
     devices = _devices(user)
     if not devices or len(devices) > MAX_DM_RECIPIENTS:
         return "skipped"
     notice_id = hashlib.sha256(row.event_id.encode()).hexdigest()
     channel_id = transport.open_dm(devices, notice_id)
+    from .founder_journey_p2 import recipient_checks_enabled
+    if recipient_checks_enabled(organization):
+        current, _company = recipient(run, organization)
+        if current is None or current.pk != user.pk or _devices(current) != devices:
+            return "skipped"
     transport.post_event(dm_event(channel_id, devices, notice_id, link, int(row.created_at.timestamp())))
     return "sent"
 

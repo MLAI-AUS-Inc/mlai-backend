@@ -7,7 +7,7 @@ gate. The management commands ``backfill_run_job_fields`` and
 The backfill only fills empty run columns. It never overwrites a non-empty
 value (a differing one is counted as a conflict) and never deletes a Job.
 Creating runs is opt in (``create=True``, ``--create``): only for a Job that has
-none, only when the Job's phase maps to a terminal run status, and tagged in
+none, only for an explicitly supported finished Job phase, and tagged in
 ``result`` so ``--undo`` can find it. A created queued, running, blocked or
 awaiting run would be probed and failed by the reconciliation sweep or shown
 to the founder as work to do, so a live Job is left for CF's own callback.
@@ -25,12 +25,19 @@ from .job_mirror import (
     JOB_IDENTITY_COLUMNS, JOB_TO_RUN_FIELDS, RUN_JOB_COLUMN_DEFAULTS, RUN_JOB_COLUMNS,
     missing_job_identity_fields, run_values_for_job,
 )
-from .run_status_contract import is_terminal
 
 BACKFILL_RESULT_KEY = "backfilled_from_job"
 DISPATCH_TOKEN_PREFIX = "vibe-dispatch:"
 DEFAULT_BATCH_SIZE = 500
 RESEARCH_ACTION = "content_island_topic_generation"
+
+# Historical creation is a separate policy from the live lifecycle contract:
+# blocked is terminal there but can still need owner action or recovery. Keep
+# this explicit so a new wire alias cannot silently permit history creation.
+HISTORY_CREATE_PHASES = frozenset({
+    "pr_opened", "needs_review", "confirmed", "cancelled", "completed", "error",
+    "failed", "denied",
+})
 
 # Design 3.3: the run status a created run gets for its Job's phase.
 PHASE_TO_RUN_STATUS = {
@@ -226,10 +233,10 @@ def _backfill_job(job, report, *, at, create, create_since):
         if not create or (create_since is not None and job.created_at < create_since):
             report.counts["create_skipped"] += 1
             return
-        kwargs = _created_run_kwargs(job, at=at)
-        if not is_terminal(kwargs["status"]):
+        if str(job.status or "").strip().lower() not in HISTORY_CREATE_PHASES:
             report.counts["create_skipped_live"] += 1
             return
+        kwargs = _created_run_kwargs(job, at=at)
         report.create_workflows[kwargs["workflow"]] += 1
         report.create_statuses[kwargs["status"]] += 1
         if not report.apply:

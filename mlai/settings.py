@@ -1150,6 +1150,11 @@ ARTICLES_FAILURE_TAXONOMY_ENROLLED_ORGANIZATIONS = tuple(
 CONTENT_FACTORY_WORKFLOW_ORDER_FORMATTING_ADMISSION_ENABLED = os.getenv('CONTENT_FACTORY_WORKFLOW_ORDER_FORMATTING_ADMISSION_ENABLED', 'false').lower() == 'true'
 CONTENT_FACTORY_SETUP_DELIVERY_V1_APPLY_ENABLED = os.getenv('CONTENT_FACTORY_SETUP_DELIVERY_V1_APPLY_ENABLED', 'false').lower() == 'true'
 CONTENT_FACTORY_SETUP_DELIVERY_RECONCILIATION_ENABLED = os.getenv('CONTENT_FACTORY_SETUP_DELIVERY_RECONCILIATION_ENABLED', 'false').lower() == 'true'
+# Explicit discovery admission boundary. Empty/invalid/naive stays disabled;
+# use the approved activation timestamp so historical stalled runs stay out.
+CONTENT_FACTORY_DISCOVERY_RECONCILIATION_SINCE = os.getenv('CONTENT_FACTORY_DISCOVERY_RECONCILIATION_SINCE', '').strip()
+# Nightly refresh additionally requires the original versioned scheduler request.
+CONTENT_FACTORY_NIGHTLY_REFRESH_RECONCILIATION_SINCE = os.getenv('CONTENT_FACTORY_NIGHTLY_REFRESH_RECONCILIATION_SINCE', '').strip()
 CONTENT_FACTORY_SETUP_DELIVERY_ENROLLED_ORGANIZATIONS = tuple(
     identifier.strip() for identifier in os.getenv('CONTENT_FACTORY_SETUP_DELIVERY_ENROLLED_ORGANIZATIONS', '').split(',')
     if identifier.strip()
@@ -2582,3 +2587,52 @@ COMMUNITY_CHAT_INVITE_TOKEN_MAX_TTL_HOURS = int(os.getenv("COMMUNITY_CHAT_INVITE
 COMMUNITY_CHAT_INVITE_RESOLVE_RATE = os.getenv("COMMUNITY_CHAT_INVITE_RESOLVE_RATE", "30/minute")
 COMMUNITY_CHAT_DEVICE_AUTH_MAX_LIFETIME_SECONDS = int(os.getenv("COMMUNITY_CHAT_DEVICE_AUTH_MAX_LIFETIME_SECONDS", "3600"))
 REST_FRAMEWORK["DEFAULT_THROTTLE_RATES"]["community_chat_invite_resolve"] = COMMUNITY_CHAT_INVITE_RESOLVE_RATE
+
+# P3 founder journey (optional improvements). These switches are separate from
+# the P2 rollout and never participate in drafting or publication admission.
+MY_STARTUP_ARTICLE_IMPROVEMENTS_ENABLED = _env_is_true("MY_STARTUP_ARTICLE_IMPROVEMENTS_ENABLED", False)
+MY_STARTUP_WEBSITE_CHECKS_BACKGROUND_ENABLED = _env_is_true("MY_STARTUP_WEBSITE_CHECKS_BACKGROUND_ENABLED", False)
+
+# P2 founder journey ("self-healing"). Every switch defaults off, so a deploy
+# alone changes nothing. New behaviour applies only to the P2 cohort
+# (content_factory.p2_foundation.p2_applies) unless the P2 contract names an
+# item as for everyone. Turn-on order is in the P2 contract section 5.3.
+# The P2 registry view in backend decisions, for the P2 cohort only.
+ARTICLES_FAILURE_POLICY_V2_ENABLED = _env_is_true("ARTICLES_FAILURE_POLICY_V2_ENABLED", False)
+# Canonical ask ids on legacy wire shapes. Only once the desktop release that reads them is the oldest supported.
+MY_STARTUP_CANONICAL_ACTION_IDS_ENABLED = _env_is_true("MY_STARTUP_CANONICAL_ACTION_IDS_ENABLED", False)
+# Comma-separated organisation ids of legacy startups opted in to the P2 cohort, one at a time.
+ARTICLES_SELF_HEAL_LEGACY_ORGANIZATIONS = os.getenv("ARTICLES_SELF_HEAL_LEGACY_ORGANIZATIONS", "").strip()
+ARTICLES_SELF_HEAL_POLICY_ENABLED = _env_is_true("ARTICLES_SELF_HEAL_POLICY_ENABLED", False)
+ARTICLES_SELF_HEAL_REPORT_ENABLED = _env_is_true("ARTICLES_SELF_HEAL_REPORT_ENABLED", False)
+ARTICLES_SELF_HEAL_SWEEP_LIMIT = int(os.getenv("ARTICLES_SELF_HEAL_SWEEP_LIMIT", "50"))
+ARTICLES_CHANNEL_SWITCH_ENABLED = _env_is_true("ARTICLES_CHANNEL_SWITCH_ENABLED", False)
+ARTICLES_SOURCE_REPIN_ENABLED = _env_is_true("ARTICLES_SOURCE_REPIN_ENABLED", False)
+ARTICLES_CONNECTION_REFUSAL_CODES_ENABLED = _env_is_true("ARTICLES_CONNECTION_REFUSAL_CODES_ENABLED", False)
+ARTICLES_DISPATCH_RELIABILITY_ENABLED = _env_is_true("ARTICLES_DISPATCH_RELIABILITY_ENABLED", False)
+ARTICLES_NO_CODELESS_TERMINAL_ENABLED = _env_is_true("ARTICLES_NO_CODELESS_TERMINAL_ENABLED", False)
+ARTICLES_REGISTRY_REFUNDS_ENABLED = _env_is_true("ARTICLES_REGISTRY_REFUNDS_ENABLED", False)
+MY_STARTUP_IDEMPOTENT_PROFILE_SAVE_ENABLED = _env_is_true("MY_STARTUP_IDEMPOTENT_PROFILE_SAVE_ENABLED", False)
+MY_STARTUP_STAFF_CONSOLE_ENABLED = _env_is_true("MY_STARTUP_STAFF_CONSOLE_ENABLED", False)
+ARTICLES_STAFF_ALERT_RULES_ENABLED = _env_is_true("ARTICLES_STAFF_ALERT_RULES_ENABLED", False)
+ARTICLES_MERGE_WORKER_ENABLED = _env_is_true("ARTICLES_MERGE_WORKER_ENABLED", False)
+ARTICLES_MERGE_WORKER_LIMIT = int(os.getenv("ARTICLES_MERGE_WORKER_LIMIT", "20"))
+ARTICLES_DEPLOYMENT_WATCH_SWEEP_ENABLED = _env_is_true("ARTICLES_DEPLOYMENT_WATCH_SWEEP_ENABLED", False)
+ARTICLES_GITHUB_INSTALLATION_WAKES_ENABLED = _env_is_true("ARTICLES_GITHUB_INSTALLATION_WAKES_ENABLED", False)
+ARTICLES_SETUP_EXAMPLE_AUTO_REMOVE_ENABLED = _env_is_true("ARTICLES_SETUP_EXAMPLE_AUTO_REMOVE_ENABLED", False)
+MY_STARTUP_TRANSITION_NOTIFICATIONS_ENABLED = _env_is_true("MY_STARTUP_TRANSITION_NOTIFICATIONS_ENABLED", False)
+MY_STARTUP_TURN_REMINDERS_ENABLED = _env_is_true("MY_STARTUP_TURN_REMINDERS_ENABLED", False)
+ARTICLES_HOSTED_AUTO_REGISTER_ENABLED = _env_is_true("ARTICLES_HOSTED_AUTO_REGISTER_ENABLED", False)
+# Comma-separated organisation ids, or * for every P2-cohort organisation.
+ARTICLES_HOSTED_RUNG_ORGANIZATIONS = os.getenv("ARTICLES_HOSTED_RUNG_ORGANIZATIONS", "").strip()
+ARTICLES_PUBLISH_REVIEWED_DRAFT_ENABLED = _env_is_true("ARTICLES_PUBLISH_REVIEWED_DRAFT_ENABLED", False)
+# Startup team (held until its security sign-off; declared here so the block is complete).
+MY_STARTUP_TEAM_ENABLED = _env_is_true("MY_STARTUP_TEAM_ENABLED", False)
+MY_STARTUP_TEAM_DOMAIN_AUTO_JOIN_ENABLED = _env_is_true("MY_STARTUP_TEAM_DOMAIN_AUTO_JOIN_ENABLED", False)
+# Extra denied registrable domains for team domain auto-join, comma-separated.
+MY_STARTUP_TEAM_DOMAIN_DENYLIST = os.getenv("MY_STARTUP_TEAM_DOMAIN_DENYLIST", "").strip()
+# Counts founder 429s and sign-in refresh failures in 10-minute cache buckets
+# for the staff alert rules; it does nothing while those rules are off.
+MIDDLEWARE.append("content_factory.staff_signals.ThrottleSignalMiddleware")
+if "idempotency-key" not in CORS_ALLOW_HEADERS:
+    CORS_ALLOW_HEADERS = (*CORS_ALLOW_HEADERS, "idempotency-key")

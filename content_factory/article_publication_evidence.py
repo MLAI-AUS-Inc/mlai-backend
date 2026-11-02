@@ -400,3 +400,11 @@ def refund_reconciliation_reason(run):
         # The worker's key record proves this run never reached its queue.
         return None
     return "stop_required"
+
+
+def registry_refund_outcome(run):
+    """Settle through P2 while preserving the pre-P2 readers for flag-off callers."""
+    from .no_delivery_refunds import enabled, refund_decision, apply_refund_decision
+    if not enabled():
+        return None
+    return apply_refund_decision(run, refund_decision(run))

@@ -230,6 +230,13 @@ def finish_goal(op, *, now=None):
             if reason:
                 stop_goal(op, goal, reason=reason, now=now)
                 return
+            from .failure_policy_engine import policy_mode, decide, apply
+            if policy_mode(getattr(op.connection, 'organization', None)) == 'policy':
+                op.receipt = {**op.receipt, 'goal': goal}
+                subject = {**op.receipt, '_organization': op.connection.organization,
+                           '_operation': op, '_controller': True, 'run_request': op.payload}
+                apply(subject, decide(subject, now=now), now=now)
+                return
             from .website_article_recovery import schedule as schedule_article_recovery
             if schedule_article_recovery(op,goal,classification=effective,fresh=fresh,occurrence=occurrence,now=now):
                 return
@@ -299,6 +306,23 @@ def wake_goal_for_source(config, *, company_id, user, now):
 
 def wait_for_channel(op, goal):
     """Keep unavailable hosted fallback explicit until E5 supplies its handler."""
+    from .channel_switch import _enabled, ladder_exhausted, switch_to_copy_ready
+    if _enabled(getattr(op.connection, 'organization', None)):
+        from django.db import transaction
+        from workflow_runs.models import ContentFactoryRun
+        candidates = [op.receipt.get(key) for key in ('first_article_run_id', 'first_article_publish_run_id', 'child_run_id')]
+        run = ContentFactoryRun.objects.filter(organization_id=op.connection.organization_id,
+            run_id__in=[value for value in candidates if value], workflow__in=['article_generation', 'confirmed_topic', 'direct_generate', 'article_revision']).order_by('-created_at').first()
+        op.state, op.next_attempt_at = 'needs_attention', None
+        op.receipt = {**op.receipt, 'goal': goal, 'status': 'working', 'user_action': None,
+            'channel_v1': {'version': 1, 'channel': 'copy_ready', 'waiting_to_publish': True},
+            'message': 'Your article can be saved as a draft while we check website publishing.'}
+        op.receipt.pop('channel_options', None)
+        organization, connection = op.connection.organization, op.connection
+        transaction.on_commit(lambda: ladder_exhausted(organization=organization, connection=connection))
+        if run:
+            transaction.on_commit(lambda: switch_to_copy_ready(run=run, reason='ladder_exhausted'))
+        return
     op.state, op.next_attempt_at = "needs_user", None
     op.receipt = {**op.receipt, "goal": goal, "status": "needs_you", "channel_options": ["hosted", "portable"],
         "message": "The repository strategies are exhausted. Choose an articles channel.",

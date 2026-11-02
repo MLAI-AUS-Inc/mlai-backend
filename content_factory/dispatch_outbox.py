@@ -3,6 +3,7 @@ from datetime import timedelta
 from types import SimpleNamespace
 
 from django.db import transaction
+from django.conf import settings
 from django.db.models import Q
 from django.utils import timezone
 
@@ -59,8 +60,10 @@ def reserve_dispatch(*, organization, payload, endpoint="article", workflow="art
     key = str(payload.get("client_request_id") or "")
     if not key or len(key) > 255:
         raise ValueError("A bounded article request identity is required.")
+    from .p2_foundation import stamp_run_request, P2_BACKEND_REQUEST_KEYS
+    stamp_run_request(payload, organization=organization, requester_user_id=payload.get("roo_points_requested_by_user_id"))
     saved = sanitized_evidence(payload)
-    identity = {key: value for key, value in saved.items() if not key.startswith("roo_points_") and key not in {"dispatch_outbox_reserved", "roo_points_gate"}}
+    identity = {key: value for key, value in saved.items() if not key.startswith("roo_points_") and key not in {"dispatch_outbox_reserved", "roo_points_gate", *P2_BACKEND_REQUEST_KEYS}}
     envelope = {"request": saved, "endpoint": endpoint, "workflow": workflow,
         "billing_user_id": str(billing_user_id or ""), "actor_id": actor_id,
         "request_digest": evidence_digest(identity)}
@@ -248,7 +251,7 @@ def process_dispatch_outbox(*, limit=20, now=None):
             row.state = "delivering" if not refund_only else "refund_pending"
             if not refund_only and not resolution_only:
                 row.attempts += 1
-            row.next_attempt_at = now + timedelta(minutes=5)
+            row.next_attempt_at = now + timedelta(seconds=120 if getattr(settings, "ARTICLES_DISPATCH_RELIABILITY_ENABLED", False) else 300)
             row.save(update_fields=["state", "attempts", "next_attempt_at", "updated_at"])
             claimed_at = row.updated_at
         result["processed"] += 1

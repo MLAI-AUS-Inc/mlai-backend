@@ -2355,6 +2355,14 @@ def _sync_generation_callback_to_run(*, data: dict, run_status: str, step_status
     if isinstance(diagnostics, dict):
         result["diagnostics"] = diagnostics
 
+    if getattr(settings, "ARTICLES_NO_CODELESS_TERMINAL_ENABLED", False):
+        if not data.get("error_code") and not failure.get("code"):
+            result.pop("error_code", None)
+            result.pop("failure", None)
+        guarded = {"run_id": run_id, "status": run_status, "result": result}
+        _guard_p2_terminal_snapshot(guarded)
+        result = guarded["result"]
+
     step_order = list((existing_run.step_order if existing_run else None) or [])
     if step_key and step_key not in step_order:
         step_order.append(step_key)
@@ -2397,6 +2405,7 @@ def _sync_generation_callback_to_run(*, data: dict, run_status: str, step_status
                 "artifacts": data.get("failure_artifacts") or [],
             },
         )
+    _settle_p2_run(run)
     return run
 
 
@@ -4461,14 +4470,13 @@ class ContentFactoryCallbackView(APIView):
         except (TypeError, ValueError):
             milestone_count = 0
 
-        job = self._update_content_factory_job(
-            job_id=job_id,
-            domain=domain,
-            slack_user_id=slack_user_id,
-            status_value=status_value,
-        )
-
-        posted_progress_ids = list(job.posted_progress_ids or [])
+        # Decide whether this observation is new before writing Job facts. The
+        # execution dispatcher holds the existing Run lock around this handler.
+        # Updating first would let an ignored replay reopen a cancelled Job,
+        # replace its owner and refresh its timestamps (including the mirror).
+        from content_factory.models import ContentFactoryJob
+        job = ContentFactoryJob.objects.filter(job_id=job_id).first()
+        posted_progress_ids = list(job.posted_progress_ids or []) if job else []
         if progress_id in posted_progress_ids:
             logger.info("Ignoring duplicate %s callback for %s (%s)", event_name, job_id, progress_id)
             return Response(
@@ -4481,7 +4489,7 @@ class ContentFactoryCallbackView(APIView):
                 status=status.HTTP_200_OK,
             )
 
-        if milestone_index and milestone_index <= int(job.last_progress_milestone_index or 0):
+        if job and milestone_index and milestone_index <= int(job.last_progress_milestone_index or 0):
             logger.info(
                 "Ignoring stale %s callback for %s (%s <= %s)",
                 event_name,
@@ -4498,6 +4506,13 @@ class ContentFactoryCallbackView(APIView):
                 },
                 status=status.HTTP_200_OK,
             )
+
+        job = self._update_content_factory_job(
+            job_id=job_id,
+            domain=domain,
+            slack_user_id=slack_user_id,
+            status_value=status_value,
+        )
 
         channel_id, _root_message_ts, thread_ts = self._resolve_job_thread_context(job=job, data=data)
         if not channel_id or not thread_ts:
@@ -6149,7 +6164,14 @@ class ContentFactoryCallbackView(APIView):
             failed=True,
         )
 
-        if workflow in {'auto_discovery', 'direct_generate', 'confirmed_topic'} and not auto_refunded:
+        if getattr(settings, "ARTICLES_REGISTRY_REFUNDS_ENABLED", False):
+            from .no_delivery_refunds import refund_decision, apply_refund_decision
+            local_run = ContentFactoryRun.objects.filter(run_id=run_id, domain__iexact=domain).first()
+            if local_run is not None:
+                points = apply_refund_decision(local_run, refund_decision(local_run))
+                auto_refunded = points.get("state") == "refunded"
+                refund_points = points.get("points", 0) if auto_refunded else 0
+        elif workflow in {'auto_discovery', 'direct_generate', 'confirmed_topic'} and not auto_refunded:
             auto_refunded, refund_points = maybe_auto_refund_terminal_failure(
                 job,
                 error_code=error_code,
@@ -8776,13 +8798,17 @@ def _merge_django_owned_run_result(existing_result, incoming_result):
     Approval and billing receipts remain authoritative even when reflected back.
     """
 
+    from django.conf import settings
     from content_factory.article_publication_evidence import SETTLEMENT_RESULT_KEYS
+    from .p2_foundation import P2_BACKEND_RESULT_KEYS
     existing = existing_result if isinstance(existing_result, dict) else {}
     incoming = incoming_result if isinstance(incoming_result, dict) else {}
     backend_merge_keys = {"publish_merge_intent", "merge_response", "merge_status", "merged_at", "article_review_updates", "delivery_v1",
-        "article_cancellation_v1", *SETTLEMENT_RESULT_KEYS,
+        "article_cancellation_v1", *SETTLEMENT_RESULT_KEYS, *P2_BACKEND_RESULT_KEYS,
         # R7 backend records (snapshot drift counter, run event log).
         "snapshot_drift_v1", "run_events_v1"}
+    if getattr(settings, "ARTICLES_NO_CODELESS_TERMINAL_ENABLED", False):
+        backend_merge_keys.update({"cancellation_reason", "cancelled_by"})
     # Backend-authored receipts a worker snapshot never replaces: a non-empty local
     # value always wins (founder-journey alert receipts, cancellation reason/actor).
     local_wins_keys = {"ops_alerts", "cancellation_reason", "cancelled_by"}
@@ -8836,7 +8862,7 @@ def _merge_django_owned_run_result(existing_result, incoming_result):
     return merged
 
 
-def _merge_django_owned_run_request(existing_request, incoming_request, *, drift=None):
+def _merge_django_owned_run_request(existing_request, incoming_request, *, drift=None, backend_result=None):
     """Retain backend billing and approval history across worker snapshots.
 
     Mirrors cannot replace a recorded charge or introduce new authorisation.
@@ -8849,9 +8875,38 @@ def _merge_django_owned_run_request(existing_request, incoming_request, *, drift
     from .article_publication_evidence import SCOPE_FIELDS
     from .website_failure_contract import canonical_bytes
     from .snapshot_meaning import refuses
+    from .p2_foundation import P2_BACKEND_REQUEST_KEYS
     immutable = set(SCOPE_FIELDS) | {"strategy_goal_id", "goal_budget", "delivery_mode", "requested_delivery_mode", "delivery_mode_confirmed"}
     existing = existing_request if isinstance(existing_request, dict) else {}
     incoming = incoming_request if isinstance(incoming_request, dict) else {}
+    incoming = {key: value for key, value in incoming.items() if key not in P2_BACKEND_REQUEST_KEYS}
+    existing = deepcopy(existing)
+    saved_result = backend_result if isinstance(backend_result, dict) else {}
+    publish_approval = saved_result.get("article_approval_v1")
+    publish_owned = set()
+    if isinstance(publish_approval, dict) and publish_approval.get("source") == "publish_reviewed":
+        publish_owned = {"approved_body", "approved_body_sha256", "body_format", "approval", "new_run_id", "run_id",
+            "source_run_id", "source_revision", "hosted_site_id", "original_billing_source_run_id"}
+        for field in publish_owned:
+            if field in existing and field in incoming and incoming[field] != existing[field]:
+                conflict = EditorialRunConflict("Worker snapshots cannot change the approved publish body or destination")
+                conflict.guard_field = field
+                raise conflict
+        incoming = {key: value for key, value in incoming.items() if key not in publish_owned}
+    receipt = (backend_result if isinstance(backend_result, dict) else {}).get("re_pin_v1")
+    if receipt and "expected_source_sha" in existing:
+        try:
+            from .source_repin import validated_history
+        except ImportError:
+            validated_history = lambda value: None
+        history = validated_history(receipt)
+        if history:
+            allowed = {item[field] for item in history["history"] for field in ("from_sha", "to_sha")}
+            proposed = incoming.get("expected_source_sha", existing["expected_source_sha"])
+            if proposed not in allowed or existing["expected_source_sha"] not in allowed:
+                raise EditorialRunConflict("Worker snapshots cannot leave the approved source chain")
+            existing["expected_source_sha"] = history["last_to_sha"]
+            incoming["expected_source_sha"] = history["last_to_sha"]
     merged = {key: deepcopy(value) for key, value in incoming.items()
               if (not existing or key not in immutable or key in existing)
               and (key not in {"setup_delivery_v1","article_delivery_v1","workflow_order_v1"} or key in existing)}
@@ -8872,7 +8927,7 @@ def _merge_django_owned_run_request(existing_request, incoming_request, *, drift
                 raise conflict
             merged[key] = deepcopy(value)
             continue
-        if key in {"setup_delivery_v1","article_delivery_v1","workflow_order_v1"}:
+        if key in {"setup_delivery_v1","article_delivery_v1","workflow_order_v1"} | P2_BACKEND_REQUEST_KEYS | publish_owned:
             merged[key] = deepcopy(value)
             continue
         if not (key.startswith("roo_points_") or key in {"article_publish_approval_receipt", "article_publish_approval_revoked", "website_access_lost", "first_article_goal_operation_id", "first_article_goal_id"}):
@@ -8986,7 +9041,9 @@ def _content_factory_run_snapshot_unchanged(run: ContentFactoryRun, *, data: dic
 
 
 def _sync_content_factory_run_snapshot(*, run_id: str, data: dict, step_states: dict):
+    from django.conf import settings
     data = sanitize_json_for_postgres(data if isinstance(data, dict) else {})
+    data["run_id"] = run_id
     step_states = sanitize_json_for_postgres(step_states if isinstance(step_states, dict) else {})
     with transaction.atomic():
         locked_runs = (
@@ -9021,6 +9078,7 @@ def _sync_content_factory_run_snapshot(*, run_id: str, data: dict, step_states: 
             if isinstance(data.get("result"), dict) and "_pulse_execution" in (existing_run.result or {}):
                 data["result"]["_pulse_execution"] = existing_run.result["_pulse_execution"]
         original_request = existing_run.run_request if isinstance(existing_run.run_request, dict) else {}
+        previous_pr_url = (existing_run.result if isinstance(existing_run.result, dict) else {}).get("pr_url")
         from .portable_drafts import portable_run_update_allowed
         from .website_contract import connection_contract
         if original_request.get("delivery_mode") == "content_only" and not connection_contract(original_request):
@@ -9045,7 +9103,7 @@ def _sync_content_factory_run_snapshot(*, run_id: str, data: dict, step_states: 
             data,
             drift=drift,
         )
-        data["run_request"] = _merge_django_owned_run_request(original_request, data.get("run_request"), drift=drift)
+        data["run_request"] = _merge_django_owned_run_request(original_request, data.get("run_request"), drift=drift, backend_result=existing_run.result)
         if existing_run and stale_execution_event(existing_run.result, data, saved_status=existing_run.status):
             existing_run._content_factory_sync_unchanged = True
             return existing_run, False
@@ -9080,10 +9138,15 @@ def _sync_content_factory_run_snapshot(*, run_id: str, data: dict, step_states: 
         data["result"] = merge_reliability_fields(data.get("result"), data)
         if drift:
             data["result"] = record_drift(data.get("result"), drift, run_id=run_id)
+        if getattr(settings, "ARTICLES_NO_CODELESS_TERMINAL_ENABLED", False):
+            _guard_p2_terminal_snapshot(data)
         if not created and _content_factory_run_snapshot_unchanged(existing_run, data=data, step_states=step_states):
             existing_run._content_factory_sync_unchanged = True
             from .island_research import refund_empty_or_failed_research
             refund_empty_or_failed_research(existing_run)
+            if (getattr(settings, "ARTICLES_REGISTRY_REFUNDS_ENABLED", False)
+                    or getattr(settings, "ARTICLES_NO_CODELESS_TERMINAL_ENABLED", False)):
+                _settle_p2_run(existing_run)
             return existing_run, False
 
         defaults = _run_fields(data)
@@ -9133,7 +9196,41 @@ def _sync_content_factory_run_snapshot(*, run_id: str, data: dict, step_states: 
 
     from .island_research import refund_empty_or_failed_research
     refund_empty_or_failed_research(run)
+    if (getattr(settings, "ARTICLES_SELF_HEAL_POLICY_ENABLED", False)
+            or getattr(settings, "ARTICLES_SELF_HEAL_REPORT_ENABLED", False)):
+        _record_p2_pull_request(run, previous_pr_url)
+    if (getattr(settings, "ARTICLES_REGISTRY_REFUNDS_ENABLED", False)
+            or getattr(settings, "ARTICLES_NO_CODELESS_TERMINAL_ENABLED", False)):
+        _settle_p2_run(run)
     return run, created
+
+
+def _settle_p2_run(run):
+    from .article_publication_evidence import registry_refund_outcome
+    if _mapping(run.result).get("error_code") == "TERMINAL_CODE_MISSING" and run.organization_id:
+        from .founder_journey_alerts import queue_founder_journey_alert
+        queue_founder_journey_alert(organization=run.organization, alert_reason="codeless_terminal", run=run)
+    registry_refund_outcome(run)
+
+
+def _guard_p2_terminal_snapshot(data):
+    from . import registry_policy
+    if not getattr(settings, "ARTICLES_NO_CODELESS_TERMINAL_ENABLED", False):
+        return
+    if data.get("status") not in {"failed", "blocked", "stopped", "denied", "cancelled"}:
+        return
+    result = dict(data.get("result") or {})
+    if (data.get("status") == "cancelled"
+            and result.get("cancellation_reason") in {"owner_cancelled", "draft_deleted", "article_discarded"}):
+        return
+    cause = _mapping(result.get("failure")).get("code") or result.get("error_code")
+    if registry_policy.is_registered(cause):
+        return
+    from .website_failure_contract import classify_failure
+    result["error_code"] = "TERMINAL_CODE_MISSING"
+    result["failure"] = classify_failure("TERMINAL_CODE_MISSING", "failure")
+    data["result"] = result
+    logger.warning("terminal_code_missing run=%s status=%s", data.get("run_id"), data.get("status"))
 
 
 class ContentFactoryRunView(APIView):
@@ -9215,6 +9312,40 @@ def _apply_cancellation_receipt(run_id, payload):
         return Response(response, status=200)
 
 
+def _attach_p2_editorial_conflict(run, data, *, ack=False):
+    if (not getattr(settings, "ARTICLES_DISPATCH_RELIABILITY_ENABLED", False) or run is None
+            or run.status not in DURABLE_ACTIVE_RUN_STATUSES or not run.organization_id
+            or _normalize_content_factory_domain(data.get("domain")) != _normalize_content_factory_domain(run.domain)):
+        return None
+    from core.models import User
+    from founder_tools.services import user_may_use_organization
+    requester_id = _mapping(run.run_request).get("roo_points_requested_by_user_id")
+    user = User.objects.filter(pk=requester_id).first() if requester_id else None
+    allowed = user is not None and user_may_use_organization(user, run.organization)
+    if not allowed and user is not None:
+        try:
+            from founder_tools.startup_team import member_may_use_run
+        except ImportError:
+            member_may_use_run = None
+        if member_may_use_run is not None:
+            allowed = bool(member_may_use_run(user, run))
+    if not allowed:
+        return None
+    payload = _serialize_content_factory_run_ack(run) if ack else _serialize_content_factory_run(run)
+    return Response({**payload, "sync_status": "attached_existing"}, status=status.HTTP_200_OK)
+
+
+def _record_p2_pull_request(run, previous_url):
+    current = _mapping(run.result).get("pr_url")
+    if not current or current == previous_url or not run.organization_id:
+        return
+    try:
+        from .failure_policy_engine import record_pull_request
+    except ImportError:
+        return
+    record_pull_request(run.organization, pr_url=current, run=run)
+
+
 def _apply_run_snapshot(run_id, payload, *, ack=False):
     from .snapshot_meaning import final_refusal
     existing_run = ContentFactoryRun.objects.filter(run_id=run_id).first()
@@ -9294,6 +9425,11 @@ def _apply_run_snapshot(run_id, payload, *, ack=False):
             logger.warning("content_factory_editorial_run_conflict run_id=%s workflow=%s guard=%s field=%s",
                 run_id, str(data.get("workflow") or "")[:80], str(exc)[:200],
                 str(getattr(exc, "guard_field", "") or "-")[:80])
+            from django.conf import settings
+            if getattr(settings, "ARTICLES_DISPATCH_RELIABILITY_ENABLED", False):
+                attached = _attach_p2_editorial_conflict(existing_run, data, ack=ack)
+                if attached is not None:
+                    return attached
             return Response(
                 {"error": "editorial_run_conflict", "code": "editorial_run_conflict", "detail": str(exc), "run_id": run_id,
                  **final_refusal()},

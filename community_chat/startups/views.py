@@ -70,12 +70,16 @@ class BootstrapView(ChatStartupAccess, APIView):
 
     def get(self, request):
         profile = get_or_create_founder_profile(request.user)
+        capabilities = {"manual": True, "generation": True, "community": True, "public": True,
+                        "delete": True, "draftReadyPush": False}
+        if getattr(settings, 'MY_STARTUP_TEAM_ENABLED', False):
+            from founder_tools.startup_team import member_companies
+            capabilities['hasStartupWorkspace'] = bool(profile.companies.exists() or member_companies(request.user))
         return Response({
             "enabled": True, "accountId": str(request.user.community_chat_profile_id),
             "relayUrl": settings.COMMUNITY_CHAT_RELAY_URL,
             "profile": FounderProfileSerializer(profile).data,
-            "capabilities": {"manual": True, "generation": True, "community": True, "public": True,
-                "delete": True, "draftReadyPush": False},
+            "capabilities": capabilities,
         })
 
 

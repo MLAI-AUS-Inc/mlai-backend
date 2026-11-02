@@ -589,7 +589,13 @@ def project_founder_journey(organization, *, user, company, now=None) -> dict:
     """
     company_id = str(getattr(company, "pk", "") or "")
     if organization is None or not cohorts.is_new_journey(organization):
-        return legacy_payload(company_id)
+        from .p2_foundation import p2_applies
+        if organization is None or not p2_applies(organization):
+            payload = legacy_payload(company_id)
+            if getattr(user, "is_staff", False) and getattr(settings, "MY_STARTUP_STAFF_CONSOLE_ENABLED", False):
+                payload["staffConsole"] = True
+                return _with_etag(payload)
+            return payload
     config = cohorts._config_for(organization) or cohorts._EmptyConfig
     now = now or timezone.now()
     from .activation import first_article_capability
@@ -606,7 +612,25 @@ def project_founder_journey(organization, *, user, company, now=None) -> dict:
     decision = None
     facts = {"etaSeconds": None, "queuePosition": None, "switchTopicAvailable": False}
 
-    if terms_out_of_date(user):
+    from . import founder_journey_p2 as p2
+    from .p2_foundation import policy_v2_applies, p2_applies
+    p2_active = p2_applies(organization)
+    if policy_v2_applies(organization):
+        queue = writing_facts(run, now=now) if run is not None and run.status == "queued" else None
+        decision = p2.run_decision(organization, run, config=config, user=user, now=now, queue=queue)
+        if decision is None:
+            decision = p2.run_decision(organization, setup_run, config=config, user=user, now=now)
+        if decision is None and getattr(connection, "state", None) == "revoked":
+            decision = p2.line("ask_authorize_github_revoked")
+        if decision is not None and queue:
+            facts["queuePosition"], facts["etaSeconds"] = queue["queuePosition"], queue["etaSeconds"]
+        if decision is None and getattr(settings, "MY_STARTUP_TEAM_ENABLED", False):
+            role = p2.optional("founder_tools.startup_team", "viewer_role", user, organization)
+            pending = p2.optional("founder_tools.startup_team", "pending_request_count", organization, default=0)
+            if role == "owner" and pending:
+                decision = p2.line("ask_approve_join_request")
+
+    if decision is None and terms_out_of_date(user):
         decision = _decide("first_article", "your_turn", "agree_terms", action="agree_terms")
 
     if decision is None and run is not None and failure_class(run) == "needs_user" \
@@ -688,10 +712,25 @@ def project_founder_journey(organization, *, user, company, now=None) -> dict:
         decision = _first_article_decision(organization=organization, company=company, config=config, user=user,
                                            first_article=first_article)
 
+    if policy_v2_applies(organization) and not decision.get("copyId"):
+        ask = _mapping(decision.get("action")).get("id")
+        if ask in FOUNDER_ASKS:
+            if ask == "buy_points":
+                decision["copyId"] = "ask_buy_points"
+            else:
+                updated = p2.line("ask_" + ask, run=run if decision.get("runId") == getattr(run, "run_id", None) else setup_run)
+                updated["runId"] = decision.get("runId")
+                if updated.get("action") and decision.get("action"):
+                    updated["action"]["url"] = decision["action"].get("url")
+                decision = updated
+        elif decision["state"] == "working":
+            copy_id = "working_website_update" if decision["stage"] == "publishing" else "working_slow" if decision.get("holdingReason") == "slow" else "working"
+            decision = p2.line(copy_id, run=run, notify=p2.emailable(organization, user))
+
     payload = {
         "version": VERSION, "companyId": company_id, "cohort": cohorts.NEW_JOURNEY,
         "stage": decision["stage"], "state": decision["state"], "headline": decision["headline"],
-        "body": decision["body"], "holdingReason": decision["holdingReason"], "action": decision["action"],
+        "body": decision["body"], "holdingReason": decision.get("holdingReason"), "action": decision["action"],
         "next": decision["next"], "runId": decision["runId"], "etaSeconds": facts["etaSeconds"],
         "queuePosition": facts["queuePosition"], "draftReadyNotifications": notify,
         "switchTopicAvailable": facts["switchTopicAvailable"], "githubReturn": _github_return(marker, now),
@@ -707,6 +746,41 @@ def project_founder_journey(organization, *, user, company, now=None) -> dict:
         "pollAfterMs": _poll_after(decision),
         "supportCode": decision["supportCode"],
     }
+    if p2_active:
+        payload["emailable"] = p2.emailable(organization, user)
+        if decision.get("copyId"):
+            payload["copyId"] = decision["copyId"]
+            payload.pop("holdingReason", None)
+        if run is not None:
+            count = p2.claims_count(run)
+            if count:
+                payload["claims"] = {"count": count}
+            outcome = p2.optional("content_factory.no_delivery_refunds", "points_outcome", run)
+            if outcome is not None:
+                payload["pointsOutcome"] = outcome
+            offer = p2.optional("content_factory.publish_reviewed_draft", "publish_offer", run)
+            if offer:
+                payload["publishOffer"] = offer
+        current = run if run is not None and run.run_id == payload.get("runId") else setup_run
+        if decision.get("copyId") in {"ask_approve_on_github_site_test", "done_copy_ready_ladder_exhausted"}:
+            payload["developerNote"] = p2.developer_note(organization, current)
+        if payload.get("action") and payload["action"]["id"] == "review_draft":
+            payload["action"]["url"] = p2.destination(organization, company_id, run_id=payload.get("runId"), ask="review_draft")
+        if getattr(settings, "MY_STARTUP_TEAM_ENABLED", False):
+            role = p2.optional("founder_tools.startup_team", "viewer_role", user, organization)
+            if role == "member":
+                payload["viewerRole"] = "member"
+            elif role == "owner":
+                count = p2.optional("founder_tools.startup_team", "pending_request_count", organization)
+                if type(count) is int:
+                    payload["team"] = {"pendingRequests": count}
+            bound = getattr(config, "website_connection", None)
+            if bound and bound.organization_id == organization.pk and bound.state == "connected":
+                name = str(getattr(bound.authorized_by, "first_name", "") or "").strip().split()
+                if name and "@" not in name[0]:
+                    payload["website"]["connectedBy"] = {"firstName": name[0][:100]}
+    if getattr(user, "is_staff", False) and getattr(settings, "MY_STARTUP_STAFF_CONSOLE_ENABLED", False):
+        payload["staffConsole"] = True
     action_id = (payload["action"] or {}).get("id")
     logger.info("founder_journey_projection org=%s stage=%s state=%s action=%s", organization.pk,
                 payload["stage"], payload["state"], action_id or "")

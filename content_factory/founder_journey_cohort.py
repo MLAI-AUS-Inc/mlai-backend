@@ -36,6 +36,8 @@ from django.db.models import F, Q
 from django.utils import timezone
 from django.utils.dateparse import parse_datetime
 
+from .p2_foundation import P2_PRIVATE_STRATEGY_KEYS
+
 logger = logging.getLogger(__name__)
 
 MARKER_KEY = "founder_journey"
@@ -43,7 +45,9 @@ FIRST_PROFILE_KEY = "founder_first_profile"
 POSTED_ARTICLES_KEY = "founder_posted_articles"
 # pillar_strategy keys owned by the founder journey. A Content Factory
 # strategy sync must never drop them and workers must never see them.
-PRIVATE_STRATEGY_KEYS = (MARKER_KEY, FIRST_PROFILE_KEY, POSTED_ARTICLES_KEY)
+# P2 adds its own bookkeeping keys (self-heal counters, the startup team, founder
+# notices; IF-P2-28), which are stripped the same way.
+PRIVATE_STRATEGY_KEYS = (MARKER_KEY, FIRST_PROFILE_KEY, POSTED_ARTICLES_KEY, *P2_PRIVATE_STRATEGY_KEYS)
 
 
 

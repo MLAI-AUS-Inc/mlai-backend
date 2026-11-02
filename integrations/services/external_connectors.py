@@ -324,8 +324,8 @@ def _known_frontend_origins() -> set[str]:
 
 
 def normalize_connector_next(next_url: Optional[str]) -> str:
-    from integrations.services.chat_oauth_return import native_chat_connection_return_url
-    native_return = native_chat_connection_return_url(next_url)
+    from integrations.services.chat_oauth_return import native_chat_connection_return_url, native_chat_startup_return_url
+    native_return = native_chat_connection_return_url(next_url) or native_chat_startup_return_url(next_url)
     if native_return:
         return native_return
     frontend_base = _frontend_base_url()

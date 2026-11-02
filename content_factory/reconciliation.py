@@ -52,6 +52,7 @@ from django.utils.dateparse import parse_datetime
 from workflow_runs.models import ContentFactoryRun, ContentFactoryRunStatus
 
 from .run_status_contract import ACTIVE
+from .nightly_refresh_reconciliation import admitted_nightly_refresh, nightly_refresh_candidates
 
 logger = logging.getLogger(__name__)
 
@@ -60,10 +61,10 @@ logger = logging.getLogger(__name__)
 # lost its terminal callback, or never existed remotely at all.
 ACTIVE_RUN_STATUSES = tuple(sorted(ACTIVE))
 
-# content-factory's GET /api/runs/{run_id} reads the durable store for these
-# workflows only (main.py _load_durable_run). A 404 for any other workflow is
-# inconclusive — the run may exist but be invisible to that endpoint — so the
-# sweep never probes them.
+# Workflows admitted to the existing reconciliation population. CF also reads
+# discovery from its workflow-independent artifact paths, but admitting it
+# requires an explicit creation-time boundary to avoid replaying old history.
+# Keep other workflows out until their status/recovery contracts are verified.
 DURABLY_READABLE_WORKFLOWS = frozenset(
     {
         "repo_scan",
@@ -118,6 +119,50 @@ def _probe_interval() -> timedelta:
 
 def _batch_limit() -> int:
     return _setting_int("CONTENT_FACTORY_RECONCILIATION_BATCH_LIMIT", 10)
+
+
+def discovery_reconciliation_since(value):
+    """Parse an explicit aware admission boundary; absent/invalid disables it."""
+    if not isinstance(value, str) or not value.strip():
+        return None
+    try:
+        parsed = parse_datetime(value.strip())
+    except ValueError:
+        return None
+    return parsed if parsed is not None and timezone.is_aware(parsed) else None
+
+
+def _stale_run_candidates(now):
+    return ContentFactoryRun.objects.filter(
+        status__in=ACTIVE_RUN_STATUSES,
+        updated_at__lt=now - _stale_after(),
+    ).filter(
+        Q(reconciled_at__isnull=True) | Q(reconciled_at__lt=now - _probe_interval())
+    ).filter(_legacy_delivery_rows("run_request")).order_by("updated_at", "pk")
+
+
+def preview_discovery_reconciliation(*, created_since, limit=10, now=None):
+    """Count a bounded discovery cohort without providers, repairs or writes.
+
+    This previews candidate selection only. Remote status and eventual actions
+    remain unknown. The broader reconciliation sweep is never called here.
+    """
+    since = discovery_reconciliation_since(created_since)
+    if since is None or type(limit) is not int or not 1 <= limit <= 100:
+        raise ValueError("An aware ISO creation boundary and a limit from 1 to 100 are required.")
+    candidates = _stale_run_candidates(now or timezone.now()).filter(
+        workflow="auto_discovery", created_at__gte=since,
+    )
+    selected = list(candidates.values_list("status", flat=True)[:limit])
+    return {
+        "mode": "read_only_candidate_preview",
+        "created_since": since.isoformat(),
+        "limit": limit,
+        "eligible": candidates.count(),
+        "selected": len(selected),
+        "selected_by_status": {status: selected.count(status) for status in sorted(set(selected))},
+        "remote_actions": "not_probed",
+    }
 
 
 def _remote_base_url() -> str:
@@ -187,6 +232,9 @@ def _finalize_run_failure(run_id: str, *, error: str, outcome: str, now) -> bool
         run = ContentFactoryRun.objects.select_for_update().filter(run_id=run_id).first()
         if run is None or run.status not in ACTIVE_RUN_STATUSES or run.organization_id != original["organization_id"]:
             return False
+        nightly_refresh = run.workflow == "island_refresh"
+        if nightly_refresh and (not admitted_nightly_refresh(run) or run.run_request != request):
+            return False
         try:
             current_binding = connection_contract(run.run_request or {})
         except WebsiteAuthorityError:
@@ -196,7 +244,7 @@ def _finalize_run_failure(run_id: str, *, error: str, outcome: str, now) -> bool
             return False
         result = dict(run.result or {})
         result["reconciliation"] = {"outcome": outcome, "checked_at": now.isoformat()}
-        result["reconciliation_refund_pending"] = True
+        result["reconciliation_refund_pending"] = not nightly_refresh
         run.status = ContentFactoryRunStatus.FAILED
         run.error = error
         run.resume_available = False
@@ -216,6 +264,8 @@ def _finalize_run_failure(run_id: str, *, error: str, outcome: str, now) -> bool
             operation.state = "cancelled"
             operation.receipt = {**(operation.receipt or {}), "status": "failed", "reason_code": outcome, "run_id": run.run_id}
             operation.save(update_fields=["state", "receipt", "updated_at"])
+    if nightly_refresh:
+        return True
     try:
         _refund_failed_run(run, reason=outcome)
     except Exception:
@@ -238,6 +288,36 @@ def _adopt_remote_payload(run: ContentFactoryRun, payload: dict) -> str:
     step_states = payload.get("step_states") or payload.get("steps") or {}
     if not isinstance(step_states, dict):
         step_states = {}
+    if run.workflow in {"auto_discovery", "island_refresh"}:
+        # Status polling does not return the admitted request or identity.
+        # Preserve those from the current row, not the pre-network snapshot,
+        # and let a callback/cancellation that already finished it win.
+        with transaction.atomic():
+            current = ContentFactoryRun.objects.select_for_update().filter(pk=run.pk).first()
+            if current is None:
+                return run.status
+            if current.workflow != run.workflow or current.status not in ACTIVE_RUN_STATUSES:
+                return current.status
+            if current.workflow == "island_refresh" and not admitted_nightly_refresh(current):
+                raise ValueError("Nightly refresh has no admitted saved recovery scope.")
+            if sync_payload["workflow"] != current.workflow:
+                raise ValueError("Research status belongs to another workflow.")
+            for key in ("run_id", "job_id", "task_id"):
+                if payload.get(key) not in (None, "", current.run_id):
+                    raise ValueError("Research status belongs to another execution.")
+            remote_request = payload.get("run_request")
+            for key in ("domain", "github_repo", "slack_user_id"):
+                saved = getattr(current, key) or ""
+                for observation in (payload, remote_request if isinstance(remote_request, dict) else {}):
+                    observed = observation.get(key)
+                    if observed not in (None, "") and observed != saved:
+                        raise ValueError("Research status changes the saved identity.")
+                sync_payload[key] = saved
+            sync_payload["run_request"] = deepcopy(current.run_request or {})
+            observed, _ = _sync_content_factory_run_snapshot(
+                run_id=current.run_id, data=sync_payload, step_states=step_states,
+            )
+            return observed.status
     from .website_connections import authority_guard, needs_repository_authority, scoped_run_contract
     from .website_contract import WebsiteAuthorityError, connection_contract
     from .portable_drafts import portable_run_update_allowed
@@ -300,22 +380,18 @@ def run_content_factory_reconciliation_sweep(*, limit: Optional[int] = None, now
     """
     now = now or timezone.now()
     limit = limit if isinstance(limit, int) and limit > 0 else _batch_limit()
-    stale_cutoff = now - _stale_after()
-    probe_cutoff = now - _probe_interval()
-
-    candidates = list(
-        ContentFactoryRun.objects.filter(
-            status__in=ACTIVE_RUN_STATUSES,
-            updated_at__lt=stale_cutoff,
-        )
-        .filter(Q(reconciled_at__isnull=True) | Q(reconciled_at__lt=probe_cutoff))
-        .filter(
-            Q(run_id__startswith=PLACEHOLDER_RUN_ID_PREFIX)
-            | Q(workflow__in=DURABLY_READABLE_WORKFLOWS)
-        )
-        .filter(_legacy_delivery_rows("run_request"))
-        .order_by("updated_at")[:limit]
+    covered = Q(run_id__startswith=PLACEHOLDER_RUN_ID_PREFIX) | Q(workflow__in=DURABLY_READABLE_WORKFLOWS)
+    discovery_since = discovery_reconciliation_since(
+        getattr(settings, "CONTENT_FACTORY_DISCOVERY_RECONCILIATION_SINCE", ""),
     )
+    if discovery_since is not None:
+        covered |= Q(workflow="auto_discovery", created_at__gte=discovery_since)
+    nightly_since = discovery_reconciliation_since(
+        getattr(settings, "CONTENT_FACTORY_NIGHTLY_REFRESH_RECONCILIATION_SINCE", ""),
+    )
+    if nightly_since is not None:
+        covered |= nightly_refresh_candidates(nightly_since)
+    candidates = list(_stale_run_candidates(now).filter(covered)[:limit])
 
     summary = {
         "status": "completed",
@@ -348,6 +424,8 @@ def run_content_factory_reconciliation_sweep(*, limit: Optional[int] = None, now
     recovery_supported = None
 
     for run in candidates:
+        if run.workflow == "island_refresh" and not admitted_nightly_refresh(run):
+            continue
         summary["checked"] += 1
 
         from .dispatch_binding import run_is_dispatch_token_keyed
@@ -420,7 +498,14 @@ def run_content_factory_reconciliation_sweep(*, limit: Optional[int] = None, now
             try:
                 from workflow_runs.status import normalize_run_status
                 remote_status = normalize_run_status(payload.get("status"))
-                if remote_status in ACTIVE_RUN_STATUSES and remote_heartbeat_stale(payload, now=now):
+                # CF's lease-aware orphan sweeper owns research worker recovery.
+                # CF's /recover endpoint currently supports article orchestration
+                # only; do not start its cancel/refund ladder for research.
+                if (
+                    run.workflow not in {"auto_discovery", "island_refresh"}
+                    and remote_status in ACTIVE_RUN_STATUSES
+                    and remote_heartbeat_stale(payload, now=now)
+                ):
                     if recovery_supported is None:
                         recovery_supported = worker_recovery_supported(base_url=base_url, headers=headers)
                     if not recovery_supported:
@@ -639,6 +724,9 @@ def _stop_stalled_article(run, *, base_url, headers, now):
 
 
 def _refund_failed_run(run, *, reason):
+    from .no_delivery_refunds import enabled, refund_decision, apply_refund_decision
+    if enabled():
+        return apply_refund_decision(run, refund_decision(run))
     from .billing_lineage import ARTICLE_CHARGE_PREFIX, original_article_spend_for_run, paid_article_request
     from .article_publication_evidence import refund_reconciliation_reason
     from integrations.services.article_generation import refund_content_factory_request_for_user
@@ -759,6 +847,10 @@ def _queue_unrecoverable_article_refunds(*, limit, now):
         updated_at__lt=now - _stale_after(), result__article_terminal_refund__isnull=True).filter(
         _legacy_delivery_rows("run_request")).order_by("updated_at")[:limit]
     for candidate in candidates:
+        from .no_delivery_refunds import enabled, refund_decision, apply_refund_decision
+        if enabled():
+            apply_refund_decision(candidate, refund_decision(candidate, now=now), now=now)
+            continue
         code = unrecoverable_refund_code(candidate)
         if not code:
             continue
@@ -863,6 +955,15 @@ def _settle_exhausted_article_runs(*, limit, now):
         updated_at__lt=now - _stale_after()).filter(
         Q(reconciled_at__isnull=True) | Q(reconciled_at__lt=now - _probe_interval())).order_by("updated_at")[:limit]
     for run in candidates:
+        from .no_delivery_refunds import enabled, refund_decision, apply_refund_decision
+        if enabled():
+            decision = refund_decision(run, now=now)
+            if decision.get('why') in {'retry_pending', 'policy_pending', 'goal_settlement_owned'}:
+                continue
+            apply_refund_decision(run, decision, now=now)
+            # Publication-unknown still needs the original bound stop protocol.
+            if decision.get('why') != 'publication_unresolved':
+                continue
         if not exhausted_article_candidate(run):
             continue
         original_result = deepcopy(run.result)
@@ -1101,6 +1202,8 @@ def _redrive_fixed_runs(*, limit, now):
         return 0
     candidates = list(ContentFactoryRun.objects.filter(status="blocked", updated_at__lt=now - timedelta(minutes=10),
         workflow__in=DURABLY_READABLE_WORKFLOWS).filter(_legacy_delivery_rows("run_request")).filter(Q(result__sweep_redrive_attempted__isnull=True) | Q(result__sweep_redrive_attempted=False))[:limit])
+    from .failure_policy_engine import owns_recovery
+    candidates = [run for run in candidates if not owns_recovery(run, now=now)]
     if not candidates:
         return 0
     try:
